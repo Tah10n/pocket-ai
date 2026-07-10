@@ -3,7 +3,18 @@ import { normalizeDownloadResumeData } from './downloadResumeData';
 
 export type ProjectorRuntimeIdentityOptions = {
   activeVariantId?: string | null;
+  activeVariantIds?: Iterable<string | null | undefined>;
 };
+
+function getNormalizedActiveVariantIds(options: ProjectorRuntimeIdentityOptions): Set<string> {
+  return new Set([
+    options.activeVariantId,
+    ...(options.activeVariantIds ?? []),
+  ].flatMap((value) => {
+    const normalized = normalizeComparableString(value ?? undefined);
+    return normalized ? [normalized] : [];
+  }));
+}
 
 function normalizeComparableString(value: string | undefined): string | undefined {
   if (typeof value !== 'string') {
@@ -57,12 +68,12 @@ function projectorsShareRuntimeVariantScope(
   }
 
   if (runtimeVariantId && nextVariantId) {
-    return false;
+    const activeVariantIds = getNormalizedActiveVariantIds(options);
+    return activeVariantIds.has(runtimeVariantId) && activeVariantIds.has(nextVariantId);
   }
 
   const scopedVariantId = runtimeVariantId ?? nextVariantId;
-  const activeVariantId = normalizeComparableString(options.activeVariantId ?? undefined);
-  return Boolean(scopedVariantId && activeVariantId === scopedVariantId);
+  return Boolean(scopedVariantId && getNormalizedActiveVariantIds(options).has(scopedVariantId));
 }
 
 function runtimeProjectorAppliesToActiveVariant(
@@ -70,8 +81,8 @@ function runtimeProjectorAppliesToActiveVariant(
   options: ProjectorRuntimeIdentityOptions = {},
 ): boolean {
   const runtimeVariantId = normalizeComparableString(runtimeProjector.ownerVariantId);
-  const activeVariantId = normalizeComparableString(options.activeVariantId ?? undefined);
-  return !runtimeVariantId || !activeVariantId || runtimeVariantId === activeVariantId;
+  const activeVariantIds = getNormalizedActiveVariantIds(options);
+  return !runtimeVariantId || activeVariantIds.size === 0 || activeVariantIds.has(runtimeVariantId);
 }
 
 function valuesConflict<T>(first: T | undefined, second: T | undefined): boolean {

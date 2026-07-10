@@ -162,6 +162,109 @@ describe('modelArtifacts', () => {
     ]);
   });
 
+  it('keeps projector-specific required inputs when legacy model metadata is mixed', () => {
+    const projector = (id: string, fileName: string) => ({
+      id,
+      ownerModelId: 'test-org/model',
+      repoId: 'test-org/model',
+      fileName,
+      downloadUrl: `https://huggingface.co/test-org/model/resolve/main/${fileName}`,
+      size: 500,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    });
+    const persistedArtifact = (
+      id: string,
+      fileName: string,
+      requiredFor: ModelArtifactMetadata['requiredFor'],
+    ): ModelArtifactMetadata => ({
+      id,
+      kind: 'multimodal_projector',
+      requiredFor,
+      remoteFileName: fileName,
+      downloadUrl: `https://huggingface.co/test-org/model/resolve/main/${fileName}`,
+      sizeBytes: 500,
+      installState: 'remote',
+    });
+    const visionProjector = projector('projector-vision', 'mmproj-vision-f16.gguf');
+    const audioProjector = projector('projector-audio', 'mmproj-audio-f16.gguf');
+
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: {
+          image: 'supported',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [],
+      },
+      projectorCandidates: [visionProjector, audioProjector],
+      artifacts: [
+        persistedArtifact(visionProjector.id, visionProjector.fileName, ['image']),
+        persistedArtifact(audioProjector.id, audioProjector.fileName, ['audio']),
+      ],
+    }), { preferLegacyRuntimeState: true });
+
+    expect(artifacts).toEqual([
+      expect.objectContaining({ id: visionProjector.id, requiredFor: ['image'] }),
+      expect.objectContaining({ id: audioProjector.id, requiredFor: ['audio'] }),
+    ]);
+  });
+
+  it.each([
+    ['filename', { remoteFileName: 'mmproj-old-f16.gguf' }],
+    ['revision', { hfRevision: 'refs/pr/1' }],
+    ['sha256', { sha256: 'b'.repeat(64) }],
+    ['size', { sizeBytes: 501 }],
+    ['download URL', { downloadUrl: 'https://mirror.example/mmproj-model-f16.gguf' }],
+  ] as const)('does not preserve projector requirements across a conflicting stable %s identity', (
+    _label,
+    persistedOverrides,
+  ) => {
+    const fileName = 'mmproj-model-f16.gguf';
+    const downloadUrl = `https://huggingface.co/test-org/model/resolve/main/${fileName}`;
+    const projector = {
+      id: 'projector-shared-id',
+      ownerModelId: 'test-org/model',
+      repoId: 'test-org/model',
+      fileName,
+      downloadUrl,
+      hfRevision: 'main',
+      sha256: 'a'.repeat(64),
+      size: 500,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const persistedArtifact: ModelArtifactMetadata = {
+      id: projector.id,
+      kind: 'multimodal_projector',
+      requiredFor: ['audio'],
+      hfRevision: projector.hfRevision,
+      remoteFileName: projector.fileName,
+      downloadUrl: projector.downloadUrl,
+      sizeBytes: projector.size,
+      sha256: projector.sha256,
+      installState: 'remote',
+      ...persistedOverrides,
+    };
+
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [projector],
+      artifacts: [persistedArtifact],
+    }), { preferLegacyRuntimeState: true });
+
+    expect(artifacts).toEqual([
+      expect.objectContaining({
+        id: projector.id,
+        remoteFileName: projector.fileName,
+        requiredFor: ['image'],
+      }),
+    ]);
+  });
+
   it('prefers legacy main download runtime state over stale persisted artifact state', () => {
     const resolvedFileName = 'model.Q4_K_M.gguf';
     const mainArtifactId = buildMainModelArtifactId({

@@ -1,6 +1,7 @@
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 import {
   canSendAttachments,
+  getInputCapabilityEvidenceModalities,
   inferDeclaredInputCapabilities,
   mergeInputCapabilitySnapshots,
   normalizePersistedInputCapabilitySnapshot,
@@ -8,6 +9,16 @@ import {
 } from '../../src/utils/modelInputCapabilities';
 
 describe('modelInputCapabilities', () => {
+  it.each([
+    ['pipeline audio', { source: 'pipeline_tag', value: 'automatic-speech-recognition' }, ['audio']],
+    ['tag image', { source: 'tag', value: 'Qwen2.5-VL' }, ['image']],
+    ['runtime audio', { source: 'runtime', value: 'audio' }, ['audio']],
+    ['catalog video', { source: 'repository_tree', value: 'video adapter' }, ['video']],
+    ['passive projector', { source: 'projector', value: 'mmproj-audio.gguf' }, []],
+  ] as const)('classifies %s evidence with the catalog inference rules', (_label, evidence, expected) => {
+    expect(getInputCapabilityEvidenceModalities(evidence)).toEqual(expected);
+  });
+
   it('infers separate declared image, audio, and video capabilities from catalog signals', () => {
     const snapshot = inferDeclaredInputCapabilities({
       id: 'test-org/video-audio-vision-model',

@@ -1,7 +1,10 @@
 import { getHuggingFaceModelUrl } from '@/services/ModelCatalogService';
 import type { MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { ModelAccessState, LifecycleStatus, type ModelMetadata } from '@/types/models';
-import { getModelVisionCapabilityStatusLabelKey, resolveModelNativeMultimodalSupport } from '@/utils/modelCapabilities';
+import {
+  getModelVisionCapabilityStatusLabelKey,
+  resolveEffectiveActiveVariantNativeSupport,
+} from '@/utils/modelCapabilities';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import {
   formatModelFileSize,
@@ -236,7 +239,7 @@ export function buildModelDetailsMetadataMetrics(
       }
     : model;
   const visionStatusLabelKey = getModelVisionCapabilityStatusLabelKey(capabilityPresentationModel);
-  const nativeSupport = resolveModelNativeMultimodalSupport(capabilityPresentationModel);
+  const nativeSupport = resolveEffectiveActiveVariantNativeSupport(capabilityPresentationModel);
   const shouldShowProjectorCandidates = (
     (nativeSupport.vision || nativeSupport.audio)
     && (projectorCandidates?.length ?? 0) > 0

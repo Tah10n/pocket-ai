@@ -52,8 +52,9 @@ import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState
 import {
   resolveModelCapabilitySnapshot,
   resolveModelLayerCountFromGgufMetadata,
-  resolveModelNativeMultimodalSupport,
+  resolveEffectiveActiveVariantNativeSupport,
 } from '../utils/modelCapabilities';
+import { isMultimodalReadinessReusableForModel } from '../utils/multimodalReadiness';
 import { resolveKvCacheTypes } from '../utils/kvCache';
 import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
@@ -3519,7 +3520,7 @@ class LLMEngineService {
   }
 
   private resolveRequestedNativeMultimodalSupport(model: ModelMetadata): { vision: boolean; audio: boolean } {
-    return resolveModelNativeMultimodalSupport(model);
+    return resolveEffectiveActiveVariantNativeSupport(model);
   }
 
   private hasRequestedNativeMultimodalSupport(model: ModelMetadata): boolean {
@@ -3620,13 +3621,31 @@ class LLMEngineService {
       return readiness;
     }
 
-    if (currentModel.multimodalReadiness !== undefined) {
-      return currentModel.multimodalReadiness;
+    const candidateReadiness = currentModel.multimodalReadiness
+      ?? (options.requirePersistedReadinessForExpectedModel && expectedModelId ? undefined : readiness);
+    if (!candidateReadiness) {
+      return undefined;
     }
 
-    return options.requirePersistedReadinessForExpectedModel && expectedModelId
-      ? undefined
-      : readiness;
+    const requestedNativeSupport = this.resolveRequestedNativeMultimodalSupport(currentModel);
+    const requestedSupport = [
+      ...(requestedNativeSupport.vision ? ['vision' as const] : []),
+      ...(requestedNativeSupport.audio ? ['audio' as const] : []),
+    ];
+    const resolution = projectorArtifactService.resolveProjectorForModel(currentModel);
+    const projectorId = requestedSupport.length > 0
+      ? resolution.selectedProjector?.id
+      : undefined;
+
+    return isMultimodalReadinessReusableForModel({
+      model: currentModel,
+      readiness: candidateReadiness,
+      projectorId,
+      requestedSupport,
+      projectorCandidates: resolution.candidates,
+    })
+      ? candidateReadiness
+      : undefined;
   }
 
   private buildMultimodalReadinessState(
@@ -3705,21 +3724,6 @@ class LLMEngineService {
       (modality === 'vision' && requestedSupport.vision)
       || (modality === 'audio' && requestedSupport.audio)
     ));
-  }
-
-  private hasReadinessCheckedRequestedMultimodalSupport(
-    readiness: MultimodalReadinessState | undefined,
-    requestedSupport: { vision: boolean; audio: boolean },
-  ): boolean {
-    const requested = this.resolveRequestedMultimodalSupportList(requestedSupport);
-    if (requested.length === 0) {
-      return true;
-    }
-
-    const checkedSupport = readiness?.requestedSupport ?? readiness?.support ?? [];
-    return checkedSupport.length === requested.length
-      && requested.every((modality) => checkedSupport.includes(modality))
-      && readiness?.support.every((modality) => requested.includes(modality)) === true;
   }
 
   private buildMissingRequestedMultimodalSupportReason(requestedSupport: { vision: boolean; audio: boolean }): string {
@@ -3970,7 +3974,13 @@ class LLMEngineService {
     if (hasActiveMatchingProjectorArtifact) {
       if (
         model.multimodalReadiness?.status === 'ready'
-        && this.hasReadinessCheckedRequestedMultimodalSupport(model.multimodalReadiness, requestedNativeModalities)
+        && isMultimodalReadinessReusableForModel({
+          model,
+          readiness: model.multimodalReadiness,
+          projectorId: projector.id,
+          requestedSupport: requestedNativeSupportList,
+          projectorCandidates: resolution.candidates,
+        })
       ) {
         return;
       }

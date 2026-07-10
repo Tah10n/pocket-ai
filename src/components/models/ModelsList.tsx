@@ -31,8 +31,19 @@ import {
   type ModelSortPreference,
 } from '@/store/modelsStore';
 import { useDownloadStore } from '@/store/downloadStore';
-import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '@/types/models';
+import {
+  EngineStatus,
+  LifecycleStatus,
+  ModelAccessState,
+  type ModelMetadata,
+  type ModelVariant,
+} from '@/types/models';
 import { mergeModelWithRuntimeState } from '@/utils/modelRuntimeState';
+import {
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+} from '@/utils/modelCapabilities';
+import { applyEffectiveProjectorState } from '@/utils/effectiveProjectorState';
 import {
   applyDefaultCatalogModelVariantSelection,
   applyModelVariantSelection,
@@ -44,6 +55,7 @@ import {
   getCatalogFilterModelForVariantState,
 } from '@/utils/catalogVariantFiltering';
 import { DECIMAL_GIGABYTE } from '@/utils/modelSize';
+import { resolveActiveModelVariant } from '@/utils/activeModelVariant';
 import { screenLayoutMetrics } from '@/utils/themeTokens';
 import { uniqueByKey } from '@/utils/uniqueBy';
 import { ModelsFilter } from './ModelsFilter';
@@ -78,6 +90,56 @@ interface ModelCardWithRuntimeStateProps {
   onDelete: (id: string) => void;
   onCancel: (id: string) => void;
   onChat: () => void;
+}
+
+function modelVariantsShareIdentity(left: ModelVariant, right: ModelVariant): boolean {
+  return left.variantId === right.variantId || left.fileName === right.fileName;
+}
+
+function mergeSanitizedProjectorSelectionVariants(
+  selectionModel: ModelMetadata,
+  persistedModel: ModelMetadata,
+): ModelMetadata['variants'] {
+  if (!selectionModel.variants?.length) {
+    return persistedModel.variants;
+  }
+
+  const activeSelectionVariant = resolveActiveModelVariant(selectionModel);
+  const mergedVariants = selectionModel.variants.map((selectionVariant) => {
+    const persistedVariant = persistedModel.variants?.find((candidate) => (
+      modelVariantsShareIdentity(selectionVariant, candidate)
+    ));
+    if (!persistedVariant) {
+      return selectionVariant;
+    }
+
+    const isActiveSelectionVariant = activeSelectionVariant !== undefined
+      && modelVariantsShareIdentity(selectionVariant, activeSelectionVariant);
+
+    return {
+      ...persistedVariant,
+      ...selectionVariant,
+      // ProjectorArtifactService already cleared false active-variant vision
+      // provenance. Keep that sanitized semantic state authoritative while
+      // retaining the persisted ownership layer until applyEffectiveProjectorState
+      // writes the fresh selection back to its correct scope.
+      visionSource: selectionVariant.visionSource,
+      visionConfidence: selectionVariant.visionConfidence,
+      projectorCandidates: isActiveSelectionVariant
+        ? persistedVariant.projectorCandidates
+        : persistedVariant.projectorCandidates ?? selectionVariant.projectorCandidates,
+      selectedProjectorId: isActiveSelectionVariant
+        ? persistedVariant.selectedProjectorId
+        : persistedVariant.selectedProjectorId ?? selectionVariant.selectedProjectorId,
+    };
+  });
+  const unmatchedPersistedVariants = (persistedModel.variants ?? []).filter((persistedVariant) => (
+    !selectionModel.variants?.some((selectionVariant) => (
+      modelVariantsShareIdentity(selectionVariant, persistedVariant)
+    ))
+  ));
+
+  return [...mergedVariants, ...unmatchedPersistedVariants];
 }
 
 const ModelCardWithRuntimeState = React.memo(({
@@ -614,20 +676,39 @@ export const ModelsList = ({
     if (persistedModel) {
       const persistedSelection = projectorArtifactService.selectProjector(projectorChoiceModel.id, projectorId);
       const persistedAfterSelection = registry.getModel(projectorChoiceModel.id);
-      if (persistedSelection.status !== 'failed' && persistedAfterSelection?.selectedProjectorId === projectorId) {
+      const persistedAfterCandidates = persistedAfterSelection
+        ? getEffectiveActiveVariantProjectorCandidates(persistedAfterSelection)
+        : [];
+      if (
+        persistedSelection.status !== 'failed'
+        && persistedAfterSelection
+        && getEffectiveActiveVariantSelectedProjectorId(
+          persistedAfterSelection,
+          persistedAfterCandidates,
+        ) === projectorId
+      ) {
         nextModel = persistedAfterSelection;
       } else {
-        const mergedPersistedModel: ModelMetadata = {
+        const selectionCandidates = getEffectiveActiveVariantProjectorCandidates(selection.model);
+        const selectionProjectorId = getEffectiveActiveVariantSelectedProjectorId(
+          selection.model,
+          selectionCandidates,
+        );
+        const mergedPersistedModel = applyEffectiveProjectorState({
           ...selection.model,
           ...persistedModel,
+          activeVariantId: selection.model.activeVariantId ?? persistedModel.activeVariantId,
+          resolvedFileName: selection.model.resolvedFileName ?? persistedModel.resolvedFileName,
+          variants: mergeSanitizedProjectorSelectionVariants(selection.model, persistedModel),
           artifactRole: selection.model.artifactRole,
           chatModalities: selection.model.chatModalities,
-          selectedProjectorId: selection.model.selectedProjectorId,
           visionSource: selection.model.visionSource,
           visionConfidence: selection.model.visionConfidence,
-          projectorCandidates: selection.model.projectorCandidates,
           multimodalReadiness: selection.model.multimodalReadiness,
-        };
+        }, {
+          projectorCandidates: selectionCandidates,
+          selectedProjectorId: selectionProjectorId,
+        });
         registry.updateModel(mergedPersistedModel);
         nextModel = registry.getModel(projectorChoiceModel.id) ?? mergedPersistedModel;
       }

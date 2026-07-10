@@ -92,6 +92,56 @@ describe('modelDetailsPresentation', () => {
     }));
   });
 
+  it('shows a compatible selected model-wide projector beside active-variant metadata', () => {
+    const variantProjector = createProjectorArtifact({
+      id: 'projector-variant-q4',
+      ownerVariantId: 'q4',
+      fileName: 'mmproj-variant-q4.gguf',
+      size: 200_000_000,
+    });
+    const modelWideProjector = createProjectorArtifact({
+      id: 'projector-model-wide',
+      fileName: 'mmproj-model-wide.gguf',
+      size: 500_000_000,
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'user_selected',
+      localPath: 'mmproj-model-wide.gguf',
+    });
+    const model = createModel({
+      chatModalities: ['text', 'vision'],
+      activeVariantId: 'q4',
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      selectedProjectorId: modelWideProjector.id,
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 3_800_000_000,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [variantProjector],
+      }],
+      projectorCandidates: [modelWideProjector],
+      artifacts: [{
+        id: modelWideProjector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['image'],
+        remoteFileName: modelWideProjector.fileName,
+        downloadUrl: modelWideProjector.downloadUrl,
+        sizeBytes: modelWideProjector.size,
+        localPath: modelWideProjector.localPath,
+        installState: 'installed',
+      }],
+    });
+
+    expect(buildModelDetailsHeroMetrics(model, t)[0]).toEqual(expect.objectContaining({
+      value: '4.30 GB',
+    }));
+    expect(buildModelDetailsMetadataMetrics(model, t)).toContainEqual({
+      label: 'models.multimodal.projectorCandidates',
+      value: 'mmproj-variant-q4.gguf, mmproj-model-wide.gguf',
+    });
+  });
+
   it('uses only active-variant compatible projectors for stale selected projector details', () => {
     const model = {
       id: 'org/model',
@@ -263,6 +313,77 @@ describe('modelDetailsPresentation', () => {
     expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
       label: 'models.multimodal.projectorCandidates',
       value: expect.stringContaining('mmproj-audio-q8.gguf'),
+    }));
+  });
+
+  it('excludes vision-only projector metadata and bytes from active audio-only details', () => {
+    const audioProjector = createProjectorArtifact({
+      id: 'projector-audio',
+      ownerVariantId: 'audio-q4',
+      fileName: 'mmproj-audio.gguf',
+      hfRevision: 'main',
+      size: 200_000_000,
+    });
+    const visionProjector = createProjectorArtifact({
+      id: 'projector-vision',
+      ownerVariantId: 'audio-q4',
+      fileName: 'mmproj-vision.gguf',
+      hfRevision: 'main',
+      size: 500_000_000,
+      matchStatus: 'user_selected',
+    });
+    const model = createModel({
+      size: 3_800_000_000,
+      chatModalities: ['text', 'vision'],
+      activeVariantId: 'audio-q4',
+      resolvedFileName: 'audio.Q4.gguf',
+      selectedProjectorId: visionProjector.id,
+      variants: [{
+        variantId: 'audio-q4',
+        fileName: 'audio.Q4.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 3_800_000_000,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector, visionProjector],
+      }],
+      projectorCandidates: [audioProjector, visionProjector],
+      artifacts: [
+        {
+          id: audioProjector.id,
+          kind: 'multimodal_projector',
+          requiredFor: ['audio'],
+          hfRevision: 'main',
+          remoteFileName: audioProjector.fileName,
+          downloadUrl: audioProjector.downloadUrl,
+          sizeBytes: audioProjector.size,
+          installState: 'remote',
+        },
+        {
+          id: visionProjector.id,
+          kind: 'multimodal_projector',
+          requiredFor: ['image'],
+          hfRevision: 'main',
+          remoteFileName: visionProjector.fileName,
+          downloadUrl: visionProjector.downloadUrl,
+          sizeBytes: visionProjector.size,
+          installState: 'remote',
+        },
+      ],
+    });
+
+    const heroMetrics = buildModelDetailsHeroMetrics(model, t);
+    const metadataMetrics = buildModelDetailsMetadataMetrics(model, t);
+
+    expect(heroMetrics[0]).toEqual(expect.objectContaining({ value: '4.00 GB' }));
+    expect(metadataMetrics).toContainEqual({
+      label: 'models.multimodal.projectorCandidates',
+      value: 'mmproj-audio.gguf',
+    });
+    expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
+      value: expect.stringContaining('mmproj-vision.gguf'),
+    }));
+    expect(metadataMetrics).not.toContainEqual(expect.objectContaining({
+      label: 'models.vision.capabilityLabel',
     }));
   });
 });

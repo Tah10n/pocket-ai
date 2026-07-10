@@ -245,6 +245,179 @@ describe('downloadStore', () => {
     expect(entry?.multimodalReadiness?.projectorId).toBe('vision/model:mmproj-v2');
   });
 
+  it('preserves and remaps variant-only projector retry state through variant aliases', () => {
+    const runtimeProjector = buildProjector({
+      id: 'vision/model:mmproj-runtime',
+      ownerVariantId: 'model-audio.gguf',
+      localPath: 'partial-mmproj-audio.gguf',
+      resumeData: JSON.stringify({ resumeData: 'variant-projector-resume' }),
+      lifecycleStatus: 'paused',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    });
+    useDownloadStore.setState({
+      queue: [{
+        ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+        resolvedFileName: 'model-audio.gguf',
+        activeVariantId: 'model-audio.gguf',
+        variants: [{
+          variantId: 'audio-q4',
+          fileName: 'model-audio.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1024,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [runtimeProjector],
+          selectedProjectorId: runtimeProjector.id,
+        }],
+        multimodalReadiness: {
+          modelId: 'vision/model',
+          variantId: 'model-audio.gguf',
+          status: 'ready',
+          projectorId: runtimeProjector.id,
+          support: ['audio'],
+          checkedAt: 123,
+        },
+      }],
+      activeDownloadId: null,
+    });
+    const catalogProjector = buildProjector({
+      id: 'vision/model:mmproj-catalog',
+      ownerVariantId: 'audio-q4',
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      resolvedFileName: 'model-audio.gguf',
+      activeVariantId: 'audio-q4',
+      variants: [{
+        variantId: 'audio-q4',
+        fileName: 'model-audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1024,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [catalogProjector],
+        selectedProjectorId: catalogProjector.id,
+      }],
+    });
+
+    const entry = useDownloadStore.getState().queue[0];
+    expect(entry.projectorCandidates).toBeUndefined();
+    expect(entry.selectedProjectorId).toBeUndefined();
+    expect(entry.variants?.[0]).toEqual(expect.objectContaining({
+      selectedProjectorId: catalogProjector.id,
+      projectorCandidates: [expect.objectContaining({
+        id: catalogProjector.id,
+        localPath: 'partial-mmproj-audio.gguf',
+        resumeData: 'variant-projector-resume',
+        lifecycleStatus: 'paused',
+        matchStatus: 'user_selected',
+      })],
+    }));
+    expect(entry.multimodalReadiness).toEqual(expect.objectContaining({
+      projectorId: catalogProjector.id,
+      support: ['audio'],
+    }));
+  });
+
+  it('does not union projector runtime scope when the incoming active variant changes', () => {
+    const runtimeProjector = buildProjector({
+      id: 'vision/model:mmproj-q4',
+      ownerVariantId: 'q4',
+      localPath: 'partial-q4.gguf',
+      resumeData: 'q4-resume',
+      lifecycleStatus: 'paused',
+    });
+    useDownloadStore.setState({
+      queue: [{
+        ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+        activeVariantId: 'q4',
+        resolvedFileName: undefined,
+        variants: [{
+          variantId: 'q4',
+          fileName: 'model-q4.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1024,
+          chatModalities: ['text', 'vision'],
+          projectorCandidates: [runtimeProjector],
+        }],
+      }],
+      activeDownloadId: null,
+    });
+    const incomingProjector = buildProjector({
+      id: 'vision/model:mmproj-q8',
+      ownerVariantId: 'q8',
+      fileName: 'mmproj-q8.gguf',
+      downloadUrl: 'https://example.com/mmproj-q8.gguf',
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      activeVariantId: 'q8',
+      resolvedFileName: undefined,
+      variants: [{
+        variantId: 'q8',
+        fileName: 'model-q8.gguf',
+        quantizationLabel: 'Q8_0',
+        size: 1024,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [incomingProjector],
+      }],
+    });
+
+    const entry = useDownloadStore.getState().queue[0];
+    expect(entry.variants?.[0].projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: incomingProjector.id,
+        lifecycleStatus: 'available',
+      }),
+    ]);
+    expect(entry.variants?.[0].projectorCandidates?.[0].localPath).toBeUndefined();
+    expect(entry.variants?.[0].projectorCandidates?.[0].resumeData).toBeUndefined();
+  });
+
+  it('treats an unresolved incoming active id as authoritative over a stale resolved file alias', () => {
+    const runtimeProjector = buildProjector({
+      id: 'vision/model:mmproj-runtime',
+      ownerVariantId: 'q4',
+      localPath: 'partial-q4.gguf',
+      resumeData: 'q4-resume',
+      lifecycleStatus: 'paused',
+    });
+    useDownloadStore.setState({
+      queue: [{
+        ...buildQueuedModel('vision/model', LifecycleStatus.PAUSED),
+        activeVariantId: 'q4',
+        resolvedFileName: 'model-q4.gguf',
+        projectorCandidates: [runtimeProjector],
+      }],
+      activeDownloadId: null,
+    });
+    const incomingProjector = buildProjector({
+      id: 'vision/model:mmproj-catalog',
+      ownerVariantId: 'q8',
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      activeVariantId: 'q8',
+      // Deliberately stale. Without an actual variant record it is not proven
+      // to be an alias for the explicit incoming active id.
+      resolvedFileName: 'model-q4.gguf',
+      projectorCandidates: [incomingProjector],
+    });
+
+    const entry = useDownloadStore.getState().queue[0];
+    expect(entry.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: incomingProjector.id,
+        ownerVariantId: 'q8',
+        lifecycleStatus: 'available',
+      }),
+    ]);
+    expect(entry.projectorCandidates?.[0].localPath).toBeUndefined();
+    expect(entry.projectorCandidates?.[0].resumeData).toBeUndefined();
+  });
+
   it('normalizes re-queued projector resume state from queued to paused', () => {
     useDownloadStore.setState({
       queue: [
@@ -961,6 +1134,28 @@ describe('downloadStore', () => {
             },
           ],
         },
+        {
+          ...buildQueuedModel('audio/model', LifecycleStatus.QUEUED),
+          activeVariantId: 'audio-q4',
+          resolvedFileName: 'audio-model.gguf',
+          variants: [{
+            variantId: 'audio-q4',
+            fileName: 'audio-model.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text', 'audio'],
+            projectorCandidates: [buildProjector({
+              id: 'audio/model:projector',
+              ownerModelId: 'audio/model',
+              ownerVariantId: 'audio-q4',
+              repoId: 'audio/model',
+              fileName: 'mmproj-audio.gguf',
+              downloadUrl: 'https://example.com/mmproj-audio.gguf',
+              localPath: 'queued-mmproj-audio.gguf',
+              lifecycleStatus: 'queued',
+            })],
+          }],
+        },
       ],
       activeDownloadId: null,
     });
@@ -972,6 +1167,8 @@ describe('downloadStore', () => {
       queuedFileNames.some((fileName) => /^model-mmproj-model-main-[a-z0-9]+\.gguf$/.test(fileName)),
     ).toBe(true);
     expect(queuedFileNames).toContain('queued-mmproj-model.gguf');
+    expect(queuedFileNames).toContain('mmproj-audio.gguf');
+    expect(queuedFileNames).toContain('queued-mmproj-audio.gguf');
     expect(queuedFileNames).not.toContain('../bad-mmproj.gguf');
     expect(queuedFileNames).not.toContain('../bad-local-mmproj.gguf');
   });

@@ -93,6 +93,8 @@ function canUseFallbackVisionMetadata(preferred: ModelVariant, fallback: ModelVa
 function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVariant): ModelVariant {
   const shouldUseFallbackProjectorMetadata = canUseFallbackProjectorMetadata(preferred, fallback);
   const shouldUseFallbackVisionMetadata = canUseFallbackVisionMetadata(preferred, fallback);
+  const chatModalities = mergeVariantChatModalities(preferred.chatModalities, fallback.chatModalities);
+  const permitsVisionMetadata = !Array.isArray(chatModalities) || chatModalities.includes('vision');
 
   return {
     ...preferred,
@@ -101,10 +103,14 @@ function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVari
     ramFit: preferred.ramFit ?? fallback.ramFit,
     ramFitConfidence: preferred.ramFitConfidence ?? fallback.ramFitConfidence,
     isLocal: preferred.isLocal ?? fallback.isLocal,
-    chatModalities: mergeVariantChatModalities(preferred.chatModalities, fallback.chatModalities),
+    chatModalities,
     artifactRole: preferred.artifactRole ?? fallback.artifactRole,
-    visionSource: preferred.visionSource ?? (shouldUseFallbackVisionMetadata ? fallback.visionSource : undefined),
-    visionConfidence: preferred.visionConfidence ?? (shouldUseFallbackVisionMetadata ? fallback.visionConfidence : undefined),
+    visionSource: permitsVisionMetadata
+      ? preferred.visionSource ?? (shouldUseFallbackVisionMetadata ? fallback.visionSource : undefined)
+      : undefined,
+    visionConfidence: permitsVisionMetadata
+      ? preferred.visionConfidence ?? (shouldUseFallbackVisionMetadata ? fallback.visionConfidence : undefined)
+      : undefined,
     projectorCandidates: preferred.projectorCandidates ?? (
       shouldUseFallbackProjectorMetadata ? fallback.projectorCandidates : undefined
     ),

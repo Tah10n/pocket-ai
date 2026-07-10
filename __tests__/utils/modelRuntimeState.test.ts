@@ -868,6 +868,124 @@ describe('modelRuntimeState', () => {
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
+  it('hydrates variant-only projector runtime state and remaps its stable artifact id', () => {
+    const catalogProjector = makeProjector({
+      id: 'org/model:mmproj-catalog',
+      ownerVariantId: 'audio-q4',
+    });
+    const runtimeProjector = makeProjector({
+      id: 'org/model:mmproj-runtime',
+      ownerVariantId: 'model-audio.gguf',
+      localPath: 'partial-mmproj-audio.gguf',
+      resumeData: JSON.stringify({ resumeData: 'runtime-audio-resume' }),
+      downloadProgress: 0.6,
+      lifecycleStatus: 'paused',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 1024,
+        resolvedFileName: 'model-audio.gguf',
+        activeVariantId: 'audio-q4',
+        variants: [{
+          variantId: 'audio-q4',
+          fileName: 'model-audio.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1024,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [catalogProjector],
+          selectedProjectorId: catalogProjector.id,
+        }],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 1024,
+          resolvedFileName: 'model-audio.gguf',
+          activeVariantId: 'model-audio.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          variants: [{
+            variantId: 'audio-q4',
+            fileName: 'model-audio.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text', 'audio'],
+            projectorCandidates: [runtimeProjector],
+            selectedProjectorId: runtimeProjector.id,
+          }],
+          multimodalReadiness: {
+            modelId: 'org/model',
+            variantId: 'model-audio.gguf',
+            status: 'ready',
+            projectorId: runtimeProjector.id,
+            support: ['audio'],
+            checkedAt: 123,
+          },
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.variants?.[0]).toEqual(expect.objectContaining({
+      selectedProjectorId: catalogProjector.id,
+      projectorCandidates: [expect.objectContaining({
+        id: catalogProjector.id,
+        localPath: 'partial-mmproj-audio.gguf',
+        resumeData: 'runtime-audio-resume',
+        downloadProgress: 0.6,
+        lifecycleStatus: 'paused',
+        matchStatus: 'user_selected',
+      })],
+    }));
+    expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
+      projectorId: catalogProjector.id,
+      support: ['audio'],
+    }));
+  });
+
+  it('does not hydrate Q4 projector state through a stale resolved alias when Q8 is explicitly active', () => {
+    const incomingProjector = makeProjector({
+      id: 'org/model:mmproj-q8',
+      ownerVariantId: 'q8',
+    });
+    const runtimeProjector = makeProjector({
+      id: 'org/model:mmproj-q4',
+      ownerVariantId: 'q4',
+      localPath: 'partial-mmproj-q4.gguf',
+      resumeData: 'q4-resume',
+      lifecycleStatus: 'paused',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 1024,
+        activeVariantId: 'q8',
+        resolvedFileName: 'model-q4.gguf',
+        projectorCandidates: [incomingProjector],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 1024,
+          activeVariantId: 'q4',
+          resolvedFileName: 'model-q4.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          projectorCandidates: [runtimeProjector],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: incomingProjector.id,
+        ownerVariantId: 'q8',
+        lifecycleStatus: 'available',
+      }),
+    ]);
+    expect(merged.projectorCandidates?.[0].localPath).toBeUndefined();
+    expect(merged.projectorCandidates?.[0].resumeData).toBeUndefined();
+  });
+
   it('does not preserve variant-scoped projector runtime state for a different active variant without catalog candidates', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({

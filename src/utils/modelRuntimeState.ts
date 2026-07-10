@@ -3,6 +3,12 @@ import { resolveVerifiedLocalShaCompatibility } from '../services/ModelIntegrity
 import { applyModelVariantSelectionIfAvailable } from './modelVariants';
 import { clearProjectorScopedMemoryFit, shouldClearProjectorScopedMemoryFit } from './projectorMemoryFitInvalidation';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
+import {
+  getEffectiveActiveVariantKeys,
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+} from './modelCapabilities';
+import { applyEffectiveProjectorState } from './effectiveProjectorState';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
@@ -179,7 +185,13 @@ function resolveMergedMultimodalReadiness(
 function mergeProjectorRuntimeFields(
   model: ModelMetadata,
   runtimeModel: ModelMetadata,
-): Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId' | 'multimodalReadiness'> {
+): ModelMetadata {
+  const nextProjectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+  const runtimeProjectorCandidates = getEffectiveActiveVariantProjectorCandidates(runtimeModel);
+  const incomingActiveVariantIds = getEffectiveActiveVariantKeys(model);
+  const activeVariantIds = incomingActiveVariantIds.size > 0
+    ? incomingActiveVariantIds
+    : getEffectiveActiveVariantKeys(runtimeModel);
   const {
     projectorCandidates,
     runtimeToNextProjectorIds,
@@ -187,16 +199,13 @@ function mergeProjectorRuntimeFields(
     blockedNextProjectorIds,
     blockedRuntimeReadinessProjectorIds: mergeBlockedRuntimeReadinessProjectorIds,
     blockedNextReadinessProjectorIds: mergeBlockedNextReadinessProjectorIds,
-  } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, runtimeModel.projectorCandidates, {
-    activeVariantId: model.activeVariantId
-      ?? model.resolvedFileName
-      ?? runtimeModel.activeVariantId
-      ?? runtimeModel.resolvedFileName,
+  } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(nextProjectorCandidates, runtimeProjectorCandidates, {
+    activeVariantIds,
   });
   const candidateIds = getProjectorCandidateIds({ projectorCandidates });
   const selectedProjectorId = resolveMergedSelectedProjectorId(
-    model.selectedProjectorId,
-    runtimeModel.selectedProjectorId,
+    getEffectiveActiveVariantSelectedProjectorId(model, nextProjectorCandidates),
+    getEffectiveActiveVariantSelectedProjectorId(runtimeModel, runtimeProjectorCandidates),
     candidateIds,
     runtimeToNextProjectorIds,
     blockedRuntimeProjectorIds,
@@ -212,16 +221,13 @@ function mergeProjectorRuntimeFields(
   ]);
   const blockedRuntimeResolvedReadinessProjectorIds = new Set(mergeBlockedNextReadinessProjectorIds);
   const shouldSuppressMultimodalReadiness = shouldSuppressReadinessForBlockedIncomingProjector(
-    model.selectedProjectorId,
+    getEffectiveActiveVariantSelectedProjectorId(model, nextProjectorCandidates),
     selectedProjectorId,
     candidateIds,
     blockedNextProjectorIds,
   );
 
-  return {
-    projectorCandidates,
-    selectedProjectorId,
-    multimodalReadiness: shouldSuppressMultimodalReadiness
+  const multimodalReadiness = shouldSuppressMultimodalReadiness
       ? undefined
       : resolveMergedMultimodalReadiness(
         model.id,
@@ -233,8 +239,15 @@ function mergeProjectorRuntimeFields(
         blockedNextReadinessProjectorIds,
         blockedRuntimeReadinessProjectorIds,
         blockedRuntimeResolvedReadinessProjectorIds,
-      ),
-  };
+      );
+
+  return applyEffectiveProjectorState({
+    ...model,
+    multimodalReadiness,
+  }, {
+    projectorCandidates,
+    selectedProjectorId,
+  });
 }
 
 export function mergeModelWithRuntimeState(
@@ -258,17 +271,9 @@ export function mergeModelWithRuntimeState(
     });
     const canUseLocalRuntimeState = !localCompatibility.shouldResetLocalDownloadState;
     const canUseLocalMetadataFallback = canUseLocalRuntimeState;
-    const projectorRuntimeFields = canUseLocalRuntimeState
+    const modelWithProjectorRuntimeFields = canUseLocalRuntimeState
       ? mergeProjectorRuntimeFields(mergedModel, localModel)
-      : {
-        projectorCandidates: mergedModel.projectorCandidates,
-        selectedProjectorId: mergedModel.selectedProjectorId,
-        multimodalReadiness: mergedModel.multimodalReadiness,
-      };
-    const modelWithProjectorRuntimeFields = {
-      ...mergedModel,
-      ...projectorRuntimeFields,
-    };
+      : mergedModel;
     const shouldClearLocalProjectorMemoryFit = canUseLocalMetadataFallback && (
       shouldClearProjectorScopedMemoryFit(mergedModel, modelWithProjectorRuntimeFields)
       || shouldClearProjectorScopedMemoryFit(localModel, modelWithProjectorRuntimeFields)
@@ -323,9 +328,12 @@ export function mergeModelWithRuntimeState(
       likes: mergedModel.likes ?? (canUseLocalMetadataFallback ? localModel.likes : undefined),
       tags: mergedModel.tags ?? (canUseLocalMetadataFallback ? localModel.tags : undefined),
       description: mergedModel.description ?? (canUseLocalMetadataFallback ? localModel.description : undefined),
-      variants: mergedModel.variants ?? (canUseLocalMetadataFallback ? localModel.variants : undefined),
+      variants: modelWithProjectorRuntimeFields.variants
+        ?? (canUseLocalMetadataFallback ? localModel.variants : undefined),
       activeVariantId: mergedModel.activeVariantId ?? (canUseLocalMetadataFallback ? localModel.activeVariantId : undefined),
-      ...projectorRuntimeFields,
+      projectorCandidates: modelWithProjectorRuntimeFields.projectorCandidates,
+      selectedProjectorId: modelWithProjectorRuntimeFields.selectedProjectorId,
+      multimodalReadiness: modelWithProjectorRuntimeFields.multimodalReadiness,
     };
     if (shouldClearLocalProjectorMemoryFit) {
       mergedModel = clearProjectorScopedMemoryFit(mergedModel);
@@ -351,17 +359,9 @@ export function mergeModelWithRuntimeState(
     const canUseQueuedRuntimeState = !queuedCompatibility.shouldResetLocalDownloadState
       && !hasResolvedFileNameConflict(queuedItem.resolvedFileName, mergedModel.resolvedFileName)
       && !hasSizeConflict(queuedItem.size, mergedModel.size);
-    const projectorRuntimeFields = canUseQueuedRuntimeState
+    const modelWithProjectorRuntimeFields = canUseQueuedRuntimeState
       ? mergeProjectorRuntimeFields(mergedModel, queuedItem)
-      : {
-        projectorCandidates: mergedModel.projectorCandidates,
-        selectedProjectorId: mergedModel.selectedProjectorId,
-        multimodalReadiness: mergedModel.multimodalReadiness,
-      };
-    const modelWithProjectorRuntimeFields = {
-      ...mergedModel,
-      ...projectorRuntimeFields,
-    };
+      : mergedModel;
     const shouldClearQueuedProjectorMemoryFit = canUseQueuedRuntimeState && (
       shouldClearProjectorScopedMemoryFit(mergedModel, modelWithProjectorRuntimeFields)
       || shouldClearProjectorScopedMemoryFit(queuedItem, modelWithProjectorRuntimeFields)
@@ -399,9 +399,12 @@ export function mergeModelWithRuntimeState(
       downloadErrorAt: canUseQueuedRuntimeState ? queuedItem.downloadErrorAt : mergedModel.downloadErrorAt,
       downloadErrorCode: canUseQueuedRuntimeState ? queuedItem.downloadErrorCode : mergedModel.downloadErrorCode,
       downloadErrorMessage: canUseQueuedRuntimeState ? queuedItem.downloadErrorMessage : mergedModel.downloadErrorMessage,
-      variants: mergedModel.variants ?? (canUseQueuedRuntimeState ? queuedItem.variants : undefined),
+      variants: modelWithProjectorRuntimeFields.variants
+        ?? (canUseQueuedRuntimeState ? queuedItem.variants : undefined),
       activeVariantId: mergedModel.activeVariantId ?? (canUseQueuedRuntimeState ? queuedItem.activeVariantId : undefined),
-      ...projectorRuntimeFields,
+      projectorCandidates: modelWithProjectorRuntimeFields.projectorCandidates,
+      selectedProjectorId: modelWithProjectorRuntimeFields.selectedProjectorId,
+      multimodalReadiness: modelWithProjectorRuntimeFields.multimodalReadiness,
     };
     if (shouldClearQueuedProjectorMemoryFit) {
       mergedModel = clearProjectorScopedMemoryFit(mergedModel);

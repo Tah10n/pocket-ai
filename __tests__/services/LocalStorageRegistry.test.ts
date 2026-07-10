@@ -1,5 +1,10 @@
 import { LocalStorageRegistry, registry } from '../../src/services/LocalStorageRegistry';
-import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
+import {
+  LifecycleStatus,
+  ModelAccessState,
+  ModelMetadata,
+  type ModelArtifactMetadata,
+} from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -92,6 +97,22 @@ function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorA
     lifecycleStatus: 'downloaded',
     matchStatus: 'matched',
     localPath: 'mmproj-model.gguf',
+    ...overrides,
+  };
+}
+
+function createProjectorArtifact(
+  overrides: Partial<ModelArtifactMetadata> = {},
+): ModelArtifactMetadata {
+  return {
+    id: 'projector-test-model-main-mmproj-model.gguf',
+    kind: 'multimodal_projector',
+    requiredFor: ['image'],
+    remoteFileName: 'mmproj-model.gguf',
+    downloadUrl: 'http://example.com/mmproj-model.gguf',
+    sizeBytes: 1000,
+    localPath: 'mmproj-model.gguf',
+    installState: 'installed',
     ...overrides,
   };
 }
@@ -203,6 +224,110 @@ describe('LocalStorageRegistry', () => {
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model.gguf');
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-partial.gguf');
+  });
+
+  it('removes variant-only and artifact-only projector files exactly once with the owning model', async () => {
+    const variantProjector = createProjector({
+      id: 'test/model:q4-projector',
+      ownerVariantId: 'q4',
+      fileName: 'variant-mmproj.gguf',
+      localPath: 'variant-mmproj.gguf',
+    });
+    const model = createMockModel({
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model-q4.gguf',
+        quantizationLabel: 'Q4',
+        size: 1000,
+        projectorCandidates: [variantProjector],
+      }],
+      artifacts: [
+        createProjectorArtifact({
+          id: variantProjector.id,
+          remoteFileName: variantProjector.fileName,
+          localPath: variantProjector.localPath,
+        }),
+        createProjectorArtifact({
+          id: 'test/model:artifact-only-projector',
+          remoteFileName: 'artifact-only-mmproj.gguf',
+          localPath: 'artifact-only-mmproj.gguf',
+        }),
+      ],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/variant-mmproj.gguf');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/artifact-only-mmproj.gguf');
+    expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
+      ([uri]) => uri === 'test-dir/models/variant-mmproj.gguf',
+    )).toHaveLength(1);
+  });
+
+  it('protects projector files referenced only by a remaining variant or artifact', async () => {
+    const model = createMockModel({
+      projectorCandidates: [
+        createProjector({ localPath: 'variant-shared-mmproj.gguf' }),
+        createProjector({
+          id: 'test/model:artifact-shared-projector',
+          fileName: 'artifact-shared-mmproj.gguf',
+          localPath: 'artifact-shared-mmproj.gguf',
+        }),
+      ],
+    });
+    const otherModel = createMockModel({
+      id: 'test/other-model',
+      localPath: 'other-model.gguf',
+      variants: [{
+        variantId: 'q4',
+        fileName: 'other-model-q4.gguf',
+        quantizationLabel: 'Q4',
+        size: 1000,
+        projectorCandidates: [createProjector({
+          id: 'test/other-model:q4-projector',
+          ownerModelId: 'test/other-model',
+          ownerVariantId: 'q4',
+          fileName: 'variant-shared-mmproj.gguf',
+          localPath: 'variant-shared-mmproj.gguf',
+        })],
+      }],
+      artifacts: [createProjectorArtifact({
+        id: 'test/other-model:artifact-projector',
+        remoteFileName: 'artifact-shared-mmproj.gguf',
+        localPath: 'artifact-shared-mmproj.gguf',
+      })],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id, otherModel.id]);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+
+      if (key === 'models-registry:model-v1:test%2Fother-model') {
+        return JSON.stringify(otherModel);
+      }
+
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/variant-shared-mmproj.gguf');
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/artifact-shared-mmproj.gguf');
   });
 
   it('keeps a downloaded projector file when another model association still references it', async () => {
@@ -542,6 +667,124 @@ describe('LocalStorageRegistry', () => {
       lifecycleStatus: 'available',
       localPath: undefined,
       matchStatus: 'matched',
+    }));
+  });
+
+  it('resets missing variant-only and artifact-only projector runtime state together', async () => {
+    const variantProjector = createProjector({
+      id: 'test/model:q4-projector',
+      ownerVariantId: 'q4',
+      fileName: 'variant-missing-mmproj.gguf',
+      localPath: 'variant-missing-mmproj.gguf',
+      lifecycleStatus: 'failed',
+      matchStatus: 'failed',
+      matchReason: 'stale failure',
+    });
+    const model = createMockModel({
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model-q4.gguf',
+        quantizationLabel: 'Q4',
+        size: 1000,
+        projectorCandidates: [variantProjector],
+      }],
+      artifacts: [
+        createProjectorArtifact({
+          id: variantProjector.id,
+          remoteFileName: variantProjector.fileName,
+          localPath: variantProjector.localPath,
+        }),
+        createProjectorArtifact({
+          id: 'test/model:artifact-only-projector',
+          remoteFileName: 'artifact-only-missing-mmproj.gguf',
+          localPath: 'artifact-only-missing-mmproj.gguf',
+          errorCode: 'STALE_ERROR',
+          errorMessage: 'stale artifact failure',
+          updatedAt: 123,
+        }),
+      ],
+      multimodalReadiness: {
+        modelId: mockModel.id,
+        status: 'ready',
+        support: ['vision'],
+        projectorId: variantProjector.id,
+        projectorSize: 1000,
+        checkedAt: 1,
+      },
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.endsWith('/model.gguf')
+        ? { exists: true, size: 1000 }
+        : { exists: false }
+    ));
+
+    await registry.validateRegistry();
+
+    const updatedModel = (registry.saveModels as jest.Mock).mock.calls[0][0][0] as ModelMetadata;
+    expect(updatedModel.variants?.[0].projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      matchStatus: 'matched',
+      matchReason: undefined,
+    }));
+    expect(updatedModel.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: variantProjector.id, installState: 'missing', localPath: undefined }),
+      expect.objectContaining({
+        id: 'test/model:artifact-only-projector',
+        installState: 'missing',
+        localPath: undefined,
+        errorCode: undefined,
+        errorMessage: undefined,
+        updatedAt: undefined,
+      }),
+    ]));
+    expect(updatedModel.multimodalReadiness).toBeUndefined();
+  });
+
+  it('does not reset a conflicting same-id artifact without the same physical path', async () => {
+    const variantProjector = createProjector({
+      id: 'test/model:q4-projector',
+      ownerVariantId: 'q4',
+      fileName: 'variant-missing-mmproj.gguf',
+      localPath: undefined,
+    });
+    const conflictingArtifact = createProjectorArtifact({
+      id: variantProjector.id,
+      remoteFileName: 'different-mmproj.gguf',
+      downloadUrl: 'http://example.com/different-mmproj.gguf',
+      localPath: 'different-mmproj.gguf',
+    });
+    const model = createMockModel({
+      variants: [{
+        variantId: 'q4',
+        fileName: 'model-q4.gguf',
+        quantizationLabel: 'Q4',
+        size: 1000,
+        projectorCandidates: [variantProjector],
+      }],
+      artifacts: [conflictingArtifact],
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.endsWith('/different-mmproj.gguf') || uri.endsWith('/model.gguf')
+        ? { exists: true, size: 1000 }
+        : { exists: false }
+    ));
+
+    await registry.validateRegistry();
+
+    const updatedModel = (registry.saveModels as jest.Mock).mock.calls[0]?.[0]?.[0] ?? model;
+    expect(updatedModel.variants?.[0].projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      lifecycleStatus: 'available',
+      localPath: undefined,
+    }));
+    expect(updatedModel.artifacts?.[0]).toEqual(expect.objectContaining({
+      id: conflictingArtifact.id,
+      installState: 'installed',
+      localPath: 'different-mmproj.gguf',
     }));
   });
 
@@ -1384,11 +1627,19 @@ describe('LocalStorageRegistry', () => {
         fitsInRam: true,
         memoryFitDecision: 'fits_high_confidence',
         memoryFitConfidence: 'high',
-        projectorCandidates: [createProjector({
-          size: 1_600_000_000,
-          localPath: 'mmproj-model.gguf',
-          lifecycleStatus: 'downloaded',
-        })],
+        activeVariantId: 'q4',
+        variants: [{
+          variantId: 'q4',
+          fileName: 'model-q4.gguf',
+          quantizationLabel: 'Q4',
+          size: 100_000_000,
+          projectorCandidates: [createProjector({
+            ownerVariantId: 'q4',
+            size: 1_600_000_000,
+            localPath: 'mmproj-model.gguf',
+            lifecycleStatus: 'downloaded',
+          })],
+        }],
         downloadIntegrity: {
           kind: 'size',
           sizeBytes: 100_000_000,
@@ -1412,7 +1663,7 @@ describe('LocalStorageRegistry', () => {
     await registry.validateRegistry();
 
     const updatedModels = (registry.saveModels as jest.Mock).mock.calls[0][0];
-    expect(updatedModels[0].projectorCandidates[0].size).toBe(1_600_000_000);
+    expect(updatedModels[0].variants[0].projectorCandidates[0].size).toBe(1_600_000_000);
     expect(updatedModels[0].fitsInRam).toBe(false);
     expect(updatedModels[0].memoryFitDecision).toBe('likely_oom');
   });
@@ -2443,6 +2694,25 @@ describe('LocalStorageRegistry', () => {
             resumeData: 'projector-resume-data',
           }),
         ],
+        variants: [{
+          variantId: 'q4',
+          fileName: 'model-q4.gguf',
+          quantizationLabel: 'Q4',
+          size: 1000,
+          projectorCandidates: [createProjector({
+            id: 'projector-test-model-q4-private-reset',
+            ownerVariantId: 'q4',
+            fileName: 'variant-private-reset-mmproj.gguf',
+            localPath: 'variant-private-reset-mmproj.gguf',
+            lifecycleStatus: 'downloaded',
+          })],
+        }],
+        artifacts: [createProjectorArtifact({
+          id: 'projector-test-model-artifact-private-reset',
+          remoteFileName: 'artifact-private-reset-mmproj.gguf',
+          localPath: 'artifact-private-reset-mmproj.gguf',
+          installState: 'installed',
+        })],
       }),
       createMockModel({
         id: 'test/partial',
@@ -2462,6 +2732,8 @@ describe('LocalStorageRegistry', () => {
       .mockResolvedValueOnce([
         'verified-model.gguf',
         'verified-mmproj.gguf',
+        'variant-private-reset-mmproj.gguf',
+        'artifact-private-reset-mmproj.gguf',
         'partial-model.gguf',
         'partial-mmproj.gguf',
         'limited-verification-model.gguf',
@@ -2471,6 +2743,8 @@ describe('LocalStorageRegistry', () => {
       if (
         uri.endsWith('/verified-model.gguf')
         || uri.endsWith('/verified-mmproj.gguf')
+        || uri.endsWith('/variant-private-reset-mmproj.gguf')
+        || uri.endsWith('/artifact-private-reset-mmproj.gguf')
         || uri.endsWith('/partial-model.gguf')
         || uri.endsWith('/partial-mmproj.gguf')
         || uri.endsWith('/limited-verification-model.gguf')
@@ -2488,6 +2762,8 @@ describe('LocalStorageRegistry', () => {
     )?.[1];
     expect(preservationPayload).toEqual(expect.stringContaining('verified-model.gguf'));
     expect(preservationPayload).toEqual(expect.stringContaining('verified-mmproj.gguf'));
+    expect(preservationPayload).toEqual(expect.stringContaining('variant-private-reset-mmproj.gguf'));
+    expect(preservationPayload).toEqual(expect.stringContaining('artifact-private-reset-mmproj.gguf'));
     expect(preservationPayload).toEqual(expect.stringContaining('limited-verification-model.gguf'));
     expect(preservationPayload).not.toEqual(expect.stringContaining('partial-model.gguf'));
     expect(preservationPayload).not.toEqual(expect.stringContaining('partial-mmproj.gguf'));

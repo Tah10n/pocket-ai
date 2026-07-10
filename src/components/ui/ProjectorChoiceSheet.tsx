@@ -5,6 +5,7 @@ import type { ProjectorArtifact, ProjectorLifecycleStatus } from '../../types/mu
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 import { formatModelFileSize } from '../../utils/modelSize';
 import { projectorArtifactService } from '../../services/ProjectorArtifactService';
+import { getEffectiveActiveVariantSelectedProjectorId } from '../../utils/modelCapabilities';
 import { ListPickerSheet, type ListPickerSheetBadge, type ListPickerSheetItem } from './ListPickerSheet';
 import type { MaterialSymbolsProps } from './MaterialSymbols';
 
@@ -89,10 +90,12 @@ export function ProjectorChoiceSheet({
     }
 
     const resolution = projectorArtifactService.resolveProjectorForModel(model);
+    const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, resolution.candidates);
     return resolution.candidates.map((projector) => {
       const sizeLabel = formatModelFileSize(projector.size, t('models.sizeUnknown'));
       const title = `${projector.fileName} - ${sizeLabel}`;
-      const selected = projector.id === model.selectedProjectorId || projector.matchStatus === 'user_selected';
+      const selected = projector.id === selectedProjectorId
+        || (selectedProjectorId === undefined && projector.matchStatus === 'user_selected');
       return {
         key: projector.id,
         title,

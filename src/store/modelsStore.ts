@@ -6,7 +6,8 @@ import { assertPrivateStorageWritable } from '../services/storage';
 import { projectorArtifactService, type ProjectorResolutionReason } from '../services/ProjectorArtifactService';
 import type { ModelMetadata } from '../types/models';
 import type { ProjectorArtifact, ProjectorLifecycleStatus } from '../types/multimodal';
-import { resolveModelNativeMultimodalSupport } from '../utils/modelCapabilities';
+import { resolveEffectiveActiveVariantNativeSupport } from '../utils/modelCapabilities';
+import { getAllModelProjectorCandidates, mapModelProjectorCandidates } from '../utils/effectiveProjectorState';
 
 export type ModelSizeRange = 'small' | 'medium' | 'large';
 export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads' | 'likes';
@@ -198,7 +199,7 @@ function resolvePersistedDiscoveryMode(
 }
 
 export function selectModelProjectorLifecycleState(model: ModelMetadata): ModelProjectorLifecycleState {
-  const nativeSupport = resolveModelNativeMultimodalSupport(model);
+  const nativeSupport = resolveEffectiveActiveVariantNativeSupport(model);
   if (!nativeSupport.vision && !nativeSupport.audio) {
     return {
       modelId: model.id,
@@ -240,23 +241,61 @@ export function selectModelProjectorLifecycleState(model: ModelMetadata): ModelP
 }
 
 export function clearModelProjectorLocalState(model: ModelMetadata): ModelMetadata {
-  if (!model.projectorCandidates?.length && !model.multimodalReadiness) {
+  const hasProjectorArtifactRuntimeState = model.artifacts?.some((artifact) => (
+    artifact.kind === 'multimodal_projector'
+    && (
+      artifact.installState !== 'remote'
+      || artifact.localPath !== undefined
+      || artifact.resumeData !== undefined
+      || artifact.downloadProgress !== undefined
+      || artifact.integrity !== undefined
+      || artifact.errorCode !== undefined
+      || artifact.errorMessage !== undefined
+      || artifact.updatedAt !== undefined
+    )
+  )) === true;
+  if (
+    getAllModelProjectorCandidates(model).length === 0
+    && !model.multimodalReadiness
+    && !hasProjectorArtifactRuntimeState
+  ) {
     return model;
   }
 
+  const modelWithoutProjectorLocalState = mapModelProjectorCandidates(model, (projector) => ({
+    ...projector,
+    localPath: undefined,
+    resumeData: undefined,
+    downloadProgress: undefined,
+    lifecycleStatus: 'available',
+    ...(projector.matchStatus === 'failed'
+      ? { matchStatus: 'matched' as const, matchReason: undefined }
+      : {}),
+  }));
+
   return {
-    ...model,
+    ...modelWithoutProjectorLocalState,
     multimodalReadiness: undefined,
-    projectorCandidates: model.projectorCandidates?.map((projector) => ({
-      ...projector,
-      localPath: undefined,
-      resumeData: undefined,
-      downloadProgress: undefined,
-      lifecycleStatus: 'available',
-      ...(projector.matchStatus === 'failed'
-        ? { matchStatus: 'matched' as const, matchReason: undefined }
-        : {}),
-    })),
+    artifacts: modelWithoutProjectorLocalState.artifacts?.map((artifact) => {
+      if (artifact.kind !== 'multimodal_projector') {
+        return artifact;
+      }
+
+      const {
+        localPath: _localPath,
+        resumeData: _resumeData,
+        downloadProgress: _downloadProgress,
+        integrity: _integrity,
+        errorCode: _errorCode,
+        errorMessage: _errorMessage,
+        updatedAt: _updatedAt,
+        ...stableArtifact
+      } = artifact;
+      return {
+        ...stableArtifact,
+        installState: 'remote' as const,
+      };
+    }),
   };
 }
 

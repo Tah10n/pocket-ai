@@ -71,7 +71,8 @@ import {
 } from '../../services/SettingsStore';
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
-import { resolveModelNativeMultimodalSupport } from '../../utils/modelCapabilities';
+import { resolveEffectiveActiveVariantNativeSupport } from '../../utils/modelCapabilities';
+import { isMultimodalReadinessReusableForModel } from '../../utils/multimodalReadiness';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
 
@@ -237,27 +238,6 @@ function resolveRetainedRegenerateAttachmentBlockedReason({
     return imageReadinessReason;
 }
 
-function canPreserveReadyOrUnsupportedReadiness(
-    readiness: MultimodalReadinessState | undefined,
-    selectedProjectorId: string | undefined,
-    lifecycleReadiness: MultimodalReadinessStatus | null,
-    requestedNativeModalities: { vision: boolean; audio: boolean },
-): boolean {
-    const requestedSupport = resolveRequestedSupportFromNativeModalities(requestedNativeModalities);
-    const checkedSupport = readiness?.requestedSupport ?? readiness?.support ?? [];
-    const checkedRequestedSupport = checkedSupport.length === requestedSupport.length
-        && requestedSupport.every((modality) => checkedSupport.includes(modality));
-    const supportMatchesCurrentRequest = readiness?.support.every((modality) => requestedSupport.includes(modality)) === true;
-
-    return (
-        (readiness?.status === 'ready' || readiness?.status === 'unsupported')
-        && readiness.projectorId === selectedProjectorId
-        && lifecycleReadiness === null
-        && checkedRequestedSupport
-        && supportMatchesCurrentRequest
-    );
-}
-
 function resolveRequestedSupportFromNativeModalities(
     requestedNativeModalities: { vision: boolean; audio: boolean },
 ): MultimodalSupportModality[] {
@@ -282,7 +262,7 @@ export function resolveFallbackMultimodalReadiness(
         };
     }
 
-    const requestedNativeModalities = resolveModelNativeMultimodalSupport(model);
+    const requestedNativeModalities = resolveEffectiveActiveVariantNativeSupport(model);
     if (!requestedNativeModalities.vision && !requestedNativeModalities.audio) {
         return {
             modelId: resolvedModelId,
@@ -331,18 +311,24 @@ export function resolveFallbackMultimodalReadiness(
         checkedAt: 0,
     };
 
-    if (persistedReadiness && canPreserveReadyOrUnsupportedReadiness(
-        persistedReadiness,
-        selectedProjector.id,
-        lifecycleReadiness,
-        requestedNativeModalities,
-    )) {
+    const canReusePersistedReadiness = isMultimodalReadinessReusableForModel({
+        model,
+        readiness: persistedReadiness,
+        projectorId: selectedProjector.id,
+        requestedSupport,
+        projectorCandidates: resolution.candidates,
+    });
+    if (
+        canReusePersistedReadiness
+        && lifecycleReadiness === null
+        && (persistedReadiness?.status === 'ready' || persistedReadiness?.status === 'unsupported')
+    ) {
         return persistedReadiness;
     }
 
     if (
         persistedReadiness?.status === 'failed'
-        && persistedReadiness.projectorId === selectedProjector.id
+        && canReusePersistedReadiness
         && status === 'initializing'
     ) {
         return persistedReadiness;

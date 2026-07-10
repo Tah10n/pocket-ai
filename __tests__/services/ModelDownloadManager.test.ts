@@ -161,6 +161,31 @@ const mockProjector: ProjectorArtifact = {
   matchReason: 'single_projector_candidate',
 };
 
+function buildVariantOnlyAudioModel(
+  projector: ProjectorArtifact = {
+    ...mockProjector,
+    ownerVariantId: 'audio-q4',
+  },
+): ModelMetadata {
+  return {
+    ...mockModel,
+    resolvedFileName: 'model-audio.gguf',
+    activeVariantId: 'audio-q4',
+    // Parent metadata deliberately remains vision-capable. Artifact requirements
+    // must still come from the effective active variant.
+    chatModalities: ['text', 'vision'],
+    variants: [{
+      variantId: 'audio-q4',
+      fileName: 'model-audio.gguf',
+      quantizationLabel: 'Q4_K_M',
+      size: 1000,
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [projector],
+      selectedProjectorId: projector.id,
+    }],
+  };
+}
+
 const mockedRegistry = registry as jest.Mocked<typeof registry>;
 
 describe('ModelDownloadManager Basic', () => {
@@ -594,6 +619,33 @@ describe('ModelDownloadManager Basic', () => {
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/model-partial.gguf', { idempotent: true });
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-partial.gguf', { idempotent: true });
+    expect(useDownloadStore.getState().queue).toEqual([]);
+  });
+
+  it('deletes a variant-only selected projector partial when cancelling its queued model', async () => {
+    const variantProjector = {
+      ...mockProjector,
+      ownerVariantId: 'audio-q4',
+      localPath: 'variant-mmproj-partial.gguf',
+      lifecycleStatus: 'downloading' as const,
+    };
+    const queuedModel = {
+      ...buildVariantOnlyAudioModel(variantProjector),
+      lifecycleStatus: LifecycleStatus.QUEUED,
+    };
+    useDownloadStore.setState({ queue: [queuedModel], activeDownloadId: null });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-dir/models/variant-mmproj-partial.gguf'
+        ? { exists: true, size: 1000 }
+        : { exists: false, size: 0 }
+    ));
+
+    await modelDownloadManager.cancelDownload(mockModel.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(
+      'test-dir/models/variant-mmproj-partial.gguf',
+      { idempotent: true },
+    );
     expect(useDownloadStore.getState().queue).toEqual([]);
   });
 
@@ -2548,6 +2600,156 @@ describe('ModelDownloadManager Basic', () => {
     expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
   });
 
+  it('completes a variant-only audio projector and derives its exact installed artifact', async () => {
+    const variantProjector = { ...mockProjector, ownerVariantId: 'audio-q4' };
+    const variantModel = buildVariantOnlyAudioModel(variantProjector);
+    let modelDownloaded = false;
+    let projectorDownloaded = false;
+    let projectorProgressState: ProjectorArtifact | undefined;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementation((url: string, localUri: string, _options: unknown, onProgress?: (progress: unknown) => void) => ({
+      downloadAsync: jest.fn().mockImplementation(async () => {
+        if (url === variantProjector.downloadUrl || localUri.includes('mmproj')) {
+          onProgress?.({ totalBytesWritten: 500, totalBytesExpectedToWrite: 1000 });
+          projectorProgressState = useDownloadStore.getState().queue[0]
+            ?.variants?.[0].projectorCandidates?.[0];
+          projectorDownloaded = true;
+        } else {
+          modelDownloaded = true;
+        }
+        return { status: 200 };
+      }),
+      pauseAsync: jest.fn().mockResolvedValue(undefined),
+      savable: jest.fn(),
+    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (!uri.startsWith('test-dir/models/')) {
+        return { exists: true, size: 1000 };
+      }
+      if (uri.includes('mmproj')) {
+        return projectorDownloaded ? { exists: true, size: 1000 } : { exists: false, size: 0 };
+      }
+      return modelDownloaded ? { exists: true, size: 1000 } : { exists: false, size: 0 };
+    });
+    useDownloadStore.setState({
+      queue: [{ ...variantModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: variantModel.id,
+    });
+
+    await expect(runDownloadModel(variantModel)).resolves.toBeUndefined();
+
+    expect(projectorProgressState).toEqual(expect.objectContaining({
+      id: variantProjector.id,
+      lifecycleStatus: 'downloading',
+      downloadProgress: 0.5,
+    }));
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completedModel.projectorCandidates).toBeUndefined();
+    expect(completedModel.selectedProjectorId).toBeUndefined();
+    expect(completedModel.variants?.[0]).toEqual(expect.objectContaining({
+      selectedProjectorId: variantProjector.id,
+      projectorCandidates: [expect.objectContaining({
+        id: variantProjector.id,
+        fileName: variantProjector.fileName,
+        lifecycleStatus: 'downloaded',
+        localPath: expect.stringMatching(/mmproj.*\.gguf$/),
+      })],
+    }));
+    const installedProjectorArtifact = completedModel.artifacts?.find((artifact) => artifact.id === variantProjector.id);
+    expect(installedProjectorArtifact).toEqual(expect.objectContaining({
+      id: variantProjector.id,
+      kind: 'multimodal_projector',
+      remoteFileName: variantProjector.fileName,
+      installState: 'installed',
+      requiredFor: ['audio'],
+      localPath: expect.stringMatching(/mmproj.*\.gguf$/),
+    }));
+    expect(installedProjectorArtifact?.requiredFor).not.toContain('image');
+  });
+
+  it('records a variant-only projector failure on the active variant after the base model is ready', async () => {
+    const variantProjector = { ...mockProjector, ownerVariantId: 'audio-q4' };
+    const variantModel = buildVariantOnlyAudioModel(variantProjector);
+    let modelDownloaded = false;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementation((url: string) => ({
+      downloadAsync: jest.fn().mockImplementation(async () => {
+        if (url === variantProjector.downloadUrl) {
+          throw new Error('variant projector transport failed');
+        }
+        modelDownloaded = true;
+        return { status: 200 };
+      }),
+      pauseAsync: jest.fn().mockResolvedValue(undefined),
+      savable: jest.fn(),
+    }));
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.includes('mmproj')
+        ? { exists: false, size: 0 }
+        : modelDownloaded ? { exists: true, size: 1000 } : { exists: false, size: 0 }
+    ));
+    useDownloadStore.setState({
+      queue: [{ ...variantModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: variantModel.id,
+    });
+
+    await expect(runDownloadModel(variantModel)).rejects.toThrow('variant projector transport failed');
+
+    const failedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(failedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(failedModel.projectorCandidates).toBeUndefined();
+    expect(failedModel.variants?.[0].projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: variantProjector.id,
+      lifecycleStatus: 'failed',
+      matchStatus: 'failed',
+    }));
+    expect(useDownloadStore.getState().queue).toEqual([]);
+  });
+
+  it('keeps separate persisted projector requirements within active mixed modalities', () => {
+    const imageProjector = { ...mockProjector, id: 'image-projector', fileName: 'mmproj-image.gguf' };
+    const audioProjector = {
+      ...mockProjector,
+      id: 'audio-projector',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'http://example.com/mmproj-audio.gguf',
+    };
+    const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+      ...mockModel,
+      activeVariantId: 'mixed-q4',
+      resolvedFileName: 'model-mixed.gguf',
+      variants: [{
+        variantId: 'mixed-q4',
+        fileName: 'model-mixed.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1000,
+        chatModalities: ['text', 'vision', 'audio'],
+        projectorCandidates: [imageProjector, audioProjector],
+      }],
+      artifacts: [
+        {
+          id: imageProjector.id,
+          kind: 'multimodal_projector',
+          requiredFor: ['image'],
+          remoteFileName: imageProjector.fileName,
+          downloadUrl: imageProjector.downloadUrl,
+          sizeBytes: imageProjector.size,
+          installState: 'remote',
+        },
+        {
+          id: audioProjector.id,
+          kind: 'multimodal_projector',
+          requiredFor: ['audio'],
+          remoteFileName: audioProjector.fileName,
+          downloadUrl: audioProjector.downloadUrl,
+          sizeBytes: audioProjector.size,
+          installState: 'remote',
+        },
+      ],
+    }) as ModelMetadata;
+
+    expect(synchronized.artifacts?.find((artifact) => artifact.id === imageProjector.id)?.requiredFor).toEqual(['image']);
+    expect(synchronized.artifacts?.find((artifact) => artifact.id === audioProjector.id)?.requiredFor).toEqual(['audio']);
+  });
+
   it('requests active multimodal readiness refresh after successful projector completion', async () => {
     let modelDownloaded = false;
     let projectorDownloaded = false;
@@ -2743,6 +2945,43 @@ describe('ModelDownloadManager Basic', () => {
       expect.any(Function),
       undefined,
     );
+  });
+
+  it('does not apply a stale projector progress callback to a conflicting same-id artifact', () => {
+    const replacementProjector: ProjectorArtifact = {
+      ...mockProjector,
+      fileName: 'mmproj-model-v2.gguf',
+      downloadUrl: 'http://example.com/mmproj-model-v2.gguf',
+    };
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        lifecycleStatus: LifecycleStatus.DOWNLOADING,
+        selectedProjectorId: replacementProjector.id,
+        projectorCandidates: [replacementProjector],
+      }],
+      activeDownloadId: mockModel.id,
+    });
+    const jobToken = 91;
+    (modelDownloadManager as any).activeJob = {
+      modelId: mockModel.id,
+      jobToken,
+      resumable: null,
+      activeArtifact: 'projector',
+      activeProjectorId: mockProjector.id,
+      activeProjector: mockProjector,
+      stopReason: null,
+    };
+
+    const onProgress = (modelDownloadManager as any).createProjectorProgressCallback(
+      { ...mockModel, projectorCandidates: [mockProjector] },
+      mockProjector,
+      jobToken,
+    );
+    onProgress({ totalBytesWritten: 500, totalBytesExpectedToWrite: 1000 });
+
+    expect(useDownloadStore.getState().queue[0].projectorCandidates).toEqual([replacementProjector]);
+    expect(useDownloadStore.getState().queue[0].projectorCandidates?.[0]).not.toHaveProperty('downloadProgress');
   });
 
   it('cancels promptly during projector verification and ignores stale verification completion', async () => {

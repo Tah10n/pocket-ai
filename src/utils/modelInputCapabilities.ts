@@ -76,6 +76,8 @@ const SIGNAL_PATTERNS: {
   },
 ];
 
+type CapabilityEvidenceIdentity = Pick<CapabilityEvidence, 'source' | 'value'>;
+
 function normalizeSignal(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -83,6 +85,35 @@ function normalizeSignal(value: unknown): string | null {
 
   const normalized = value.trim().toLowerCase();
   return normalized.length > 0 ? normalized : null;
+}
+
+/**
+ * Classifies normalized capability evidence using the same rules as catalog
+ * inference. Projector filenames are intentionally passive evidence: their
+ * modality is established by the catalog/runtime context that owns them.
+ */
+export function getInputCapabilityEvidenceModalities(
+  evidence: CapabilityEvidenceIdentity,
+): NativeInputModality[] {
+  const value = normalizeSignal(evidence.value);
+  if (!value || evidence.source === 'projector') {
+    return [];
+  }
+
+  if (evidence.source === 'pipeline_tag') {
+    return [...(PIPELINE_MODALITY_SIGNALS[value] ?? [])];
+  }
+
+  return SIGNAL_PATTERNS.flatMap((signal) => (
+    signal.pattern.test(value) ? [signal.modality] : []
+  ));
+}
+
+export function inputCapabilityEvidenceSupportsModality(
+  evidence: CapabilityEvidenceIdentity,
+  modality: NativeInputModality,
+): boolean {
+  return getInputCapabilityEvidenceModalities(evidence).includes(modality);
 }
 
 function normalizeDetectedAt(value: unknown): number {

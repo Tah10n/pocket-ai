@@ -437,6 +437,63 @@ describe('LLMEngineService', () => {
     expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
   });
 
+  it('rejects stale vision readiness after the active variant switches to audio-only', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    await llmEngineService.load('test/model');
+
+    const staleVisionReadiness = {
+      ...createReadyMultimodalReadiness(),
+      requestedSupport: ['vision' as const],
+      variantId: 'vision-variant',
+    };
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      chatModalities: ['text', 'vision', 'audio'],
+      activeVariantId: 'audio-variant',
+      resolvedFileName: 'model-audio.gguf',
+      variants: [
+        {
+          variantId: 'vision-variant',
+          fileName: 'model-vision.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'vision'],
+        },
+        {
+          variantId: 'audio-variant',
+          fileName: 'model-audio.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 1,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [downloadedProjector],
+          selectedProjectorId: downloadedProjector.id,
+        },
+      ],
+      multimodalReadiness: staleVisionReadiness,
+    });
+
+    const messages = [{
+      role: 'user' as const,
+      content: 'Describe this',
+      mediaPaths: ['test-dir/chat-attachments/image.jpg'],
+    }];
+
+    await expect(llmEngineService.chatCompletion({
+      messages,
+      multimodalReadiness: staleVisionReadiness,
+      params: { n_predict: 32 },
+    })).rejects.toMatchObject({ code: 'multimodal_not_ready' });
+
+    await expect(llmEngineService.countPromptTokens({
+      messages,
+      multimodalReadiness: staleVisionReadiness,
+      expectedModelId: 'test/model',
+    })).rejects.toMatchObject({ code: 'multimodal_not_ready' });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
+    expect(getTokenizeMock()).not.toHaveBeenCalled();
+  });
+
   it('forwards structured image content parts without duplicating them as legacy media paths', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 
@@ -2045,8 +2102,8 @@ describe('LLMEngineService', () => {
   });
 
   it('forwards structured audio content parts when runtime audio readiness is available', async () => {
-    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
-    getMultimodalSupportMock().mockResolvedValue({ vision: true, audio: true });
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedAudioModel());
+    getMultimodalSupportMock().mockResolvedValue({ vision: false, audio: true });
 
     await llmEngineService.load('test/model');
 
@@ -2063,6 +2120,7 @@ describe('LLMEngineService', () => {
         status: 'ready',
         projectorId: downloadedProjector.id,
         support: ['audio'],
+        requestedSupport: ['audio'],
         checkedAt: 1,
       },
       params: { n_predict: 32 },
@@ -2501,6 +2559,7 @@ describe('LLMEngineService', () => {
   });
 
   it('records sanitized multimodal diagnostics when readiness blocks image send', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     await llmEngineService.load('test/model');
     const failureReason = [
       'Projector failed at file:///private/mobile/Project Files/mmproj file.gguf',
@@ -2530,9 +2589,10 @@ describe('LLMEngineService', () => {
       multimodalReadiness: {
         modelId: 'test/model',
         status: 'failed',
-        projectorId: 'projector-1',
+        projectorId: downloadedProjector.id,
         projectorSize: 24_000_000,
         support: ['vision'],
+        requestedSupport: ['vision'],
         failureReason,
         checkedAt: 1,
       },
@@ -2595,6 +2655,7 @@ describe('LLMEngineService', () => {
   });
 
   it('passes formatted media paths into prompt tokenization', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     getFormattedChatMock().mockResolvedValueOnce({
       prompt: 'Formatted prompt',
       has_media: true,
@@ -2616,6 +2677,7 @@ describe('LLMEngineService', () => {
   });
 
   it('falls back to all retained message media paths for prompt tokenization', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     getFormattedChatMock().mockResolvedValueOnce({
       prompt: 'Formatted prompt',
       additional_stops: [],
@@ -3807,6 +3869,26 @@ describe('LLMEngineService', () => {
       support: ['audio'],
       requestedSupport: ['audio'],
     }));
+  });
+
+  it('does not initialize multimodal runtime for an active text-only variant', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      activeVariantId: 'text-variant',
+      resolvedFileName: 'model.gguf',
+      variants: [{
+        variantId: 'text-variant',
+        fileName: 'model.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text'],
+      }],
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(getInitMultimodalMock()).not.toHaveBeenCalled();
+    expect(getMultimodalSupportMock()).not.toHaveBeenCalled();
   });
 
   it('rechecks active projector readiness when requested modalities expand beyond a legacy cache', async () => {

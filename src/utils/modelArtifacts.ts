@@ -411,14 +411,74 @@ function getStableArtifactMetadata(artifact: ModelArtifactMetadata): StableModel
   };
 }
 
+function normalizeArtifactFileIdentity(value: string): string {
+  const normalizedPath = value.trim().replace(/\\/gu, '/');
+  return (normalizedPath.split('/').filter(Boolean).pop() ?? normalizedPath).trim().toLowerCase();
+}
+
+function normalizeArtifactRevision(value: string | undefined): string {
+  return normalizeOptionalString(value) ?? 'main';
+}
+
+function normalizeArtifactDownloadUrl(value: string): string {
+  const normalized = value.trim();
+  try {
+    const parsed = new URL(normalized);
+    parsed.hash = '';
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString();
+  } catch {
+    return normalized;
+  }
+}
+
+function artifactValuesConflict<T>(left: T | undefined, right: T | undefined): boolean {
+  return left !== undefined && right !== undefined && left !== right;
+}
+
+function artifactsShareStableIdentity(
+  derivedArtifact: ModelArtifactMetadata,
+  persistedArtifact: ModelArtifactMetadata,
+): boolean {
+  if (
+    derivedArtifact.id !== persistedArtifact.id
+    || derivedArtifact.kind !== persistedArtifact.kind
+    || normalizeArtifactFileIdentity(derivedArtifact.remoteFileName)
+      !== normalizeArtifactFileIdentity(persistedArtifact.remoteFileName)
+    || normalizeArtifactRevision(derivedArtifact.hfRevision)
+      !== normalizeArtifactRevision(persistedArtifact.hfRevision)
+  ) {
+    return false;
+  }
+
+  return !artifactValuesConflict(
+    normalizeSha256Digest(derivedArtifact.sha256),
+    normalizeSha256Digest(persistedArtifact.sha256),
+  ) && !artifactValuesConflict(
+    normalizePositiveSize(derivedArtifact.sizeBytes) ?? undefined,
+    normalizePositiveSize(persistedArtifact.sizeBytes) ?? undefined,
+  ) && !artifactValuesConflict(
+    normalizeArtifactDownloadUrl(derivedArtifact.downloadUrl),
+    normalizeArtifactDownloadUrl(persistedArtifact.downloadUrl),
+  );
+}
+
 function mergeArtifactWithDerivedRuntimeState(
   derivedArtifact: ModelArtifactMetadata,
   persistedArtifact: ModelArtifactMetadata,
 ): ModelArtifactMetadata {
   const persistedStable = getStableArtifactMetadata(persistedArtifact);
+  const requiredFor = artifactsShareStableIdentity(derivedArtifact, persistedArtifact)
+    ? persistedStable.requiredFor
+    : derivedArtifact.requiredFor;
   return {
     ...persistedStable,
     ...derivedArtifact,
+    // Explicit persisted requirements can be narrower than model-wide legacy
+    // modality fields (for example separate image and audio projectors). Keep
+    // that projector-specific boundary only across the same stable artifact.
+    requiredFor,
     sizeBytes: derivedArtifact.sizeBytes === null
       ? persistedStable.sizeBytes
       : derivedArtifact.sizeBytes,

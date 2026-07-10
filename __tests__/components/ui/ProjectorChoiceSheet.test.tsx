@@ -134,6 +134,79 @@ describe('ProjectorChoiceSheet', () => {
     expect(onSelectProjector).not.toHaveBeenCalled();
   });
 
+  it('marks a projector selected when selection is stored only on the active variant', () => {
+    const model = buildModel();
+    const variantProjectors = model.projectorCandidates!.map((projector) => ({ ...projector }));
+    model.projectorCandidates = undefined;
+    model.selectedProjectorId = undefined;
+    model.activeVariantId = 'audio-variant';
+    model.resolvedFileName = 'model-audio.gguf';
+    model.chatModalities = ['text', 'vision'];
+    model.variants = [{
+      variantId: 'audio-variant',
+      fileName: 'model-audio.gguf',
+      quantizationLabel: 'Q4_K_M',
+      size: model.size,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: variantProjectors,
+      selectedProjectorId: variantProjectors[1].id,
+    }];
+    const onSelectProjector = jest.fn();
+    const onClose = jest.fn();
+
+    render(
+      <ProjectorChoiceSheet
+        visible
+        model={model}
+        onSelectProjector={onSelectProjector}
+        onClose={onClose}
+      />,
+    );
+
+    expect(mockLastListPickerProps.items[1]).toEqual(expect.objectContaining({
+      key: variantProjectors[1].id,
+      selected: true,
+      accessibilityState: { selected: true },
+    }));
+
+    mockLastListPickerProps.items[1].onPress();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onSelectProjector).not.toHaveBeenCalled();
+  });
+
+  it('prefers the active variant selection over a stale user-selected marker', () => {
+    const model = buildModel();
+    const variantProjectors = model.projectorCandidates!.map((projector, index) => ({
+      ...projector,
+      matchStatus: index === 0 ? 'user_selected' as const : 'matched' as const,
+    }));
+    model.projectorCandidates = undefined;
+    model.selectedProjectorId = undefined;
+    model.activeVariantId = 'audio-variant';
+    model.resolvedFileName = 'model-audio.gguf';
+    model.variants = [{
+      variantId: 'audio-variant',
+      fileName: 'model-audio.gguf',
+      quantizationLabel: 'Q4_K_M',
+      size: model.size,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: variantProjectors,
+      selectedProjectorId: variantProjectors[1].id,
+    }];
+
+    render(
+      <ProjectorChoiceSheet
+        visible
+        model={model}
+        onSelectProjector={jest.fn()}
+        onClose={jest.fn()}
+      />,
+    );
+
+    expect(mockLastListPickerProps.items[0].selected).toBe(false);
+    expect(mockLastListPickerProps.items[1].selected).toBe(true);
+  });
+
   it('does not build picker rows while hidden', () => {
     render(
       <ProjectorChoiceSheet

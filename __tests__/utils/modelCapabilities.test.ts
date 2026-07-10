@@ -6,12 +6,16 @@ import {
 import {
   buildModelCapabilitySnapshot,
   getModelAudioCapabilityBadgePresentation,
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
   getModelVisionCapabilityBadgePresentation,
   getModelVisionCapabilityStatusLabelKey,
   modelSupportsAudio,
   modelSupportsVision,
   resolveModelChatModalities,
   resolveModelCapabilitySnapshot,
+  resolveEffectiveActiveVariantNativeSupport,
+  resolveModelNativeMultimodalSupport,
 } from '../../src/utils/modelCapabilities';
 
 const VALID_SHA256 = 'a'.repeat(64);
@@ -214,7 +218,7 @@ describe('modelCapabilities', () => {
   });
 
   it('treats requested audio readiness as audio support when catalog modalities are stale', () => {
-    expect(modelSupportsAudio({
+    expect(resolveModelNativeMultimodalSupport({
       artifactRole: 'primary_chat_model',
       multimodalReadiness: {
         modelId: 'author/model',
@@ -224,7 +228,7 @@ describe('modelCapabilities', () => {
         requestedSupport: ['audio'],
         checkedAt: 1,
       },
-    })).toBe(true);
+    }).audio).toBe(true);
     expect(resolveModelChatModalities({
       artifactRole: 'primary_chat_model',
       multimodalReadiness: {
@@ -290,19 +294,21 @@ describe('modelCapabilities', () => {
       artifactRole: 'primary_chat_model',
       projectorCandidates: [projector],
     })).toBe(true);
-    expect(modelSupportsVision({
+    expect(resolveModelNativeMultimodalSupport({
       artifactRole: 'primary_chat_model',
       selectedProjectorId: projector.id,
-    })).toBe(true);
-    expect(modelSupportsVision({
-      artifactRole: 'primary_chat_model',
+    }).vision).toBe(true);
+    const legacyReadinessOnlyModel = {
+      artifactRole: 'primary_chat_model' as const,
       multimodalReadiness: {
         modelId: 'author/model',
-        status: 'missing_projector',
+        status: 'missing_projector' as const,
         support: [],
         checkedAt: 1,
       },
-    })).toBe(true);
+    };
+    expect(resolveModelNativeMultimodalSupport(legacyReadinessOnlyModel).vision).toBe(true);
+    expect(modelSupportsVision(legacyReadinessOnlyModel)).toBe(false);
     expect(modelSupportsVision({
       artifactRole: 'primary_chat_model',
       chatModalities: ['text'],
@@ -326,7 +332,7 @@ describe('modelCapabilities', () => {
     })).toBe(false);
     expect(modelSupportsVision({
       artifactRole: 'primary_chat_model',
-      chatModalities: ['text', 'audio'],
+      chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
       selectedProjectorId: projector.id,
       multimodalReadiness: {
         modelId: 'author/model',
@@ -493,5 +499,579 @@ describe('modelCapabilities', () => {
         matchStatus: 'matched',
       }],
     })).toBe('models.vision.capabilityReady');
+  });
+
+  it('keeps catalog inference separate while active text-only modalities are authoritative', () => {
+    const model = {
+      id: 'author/model',
+      chatModalities: ['text', 'vision', 'audio'] as Array<'text' | 'vision' | 'audio'>,
+      activeVariantId: 'text',
+      resolvedFileName: 'text.gguf',
+      variants: [{
+        variantId: 'text',
+        fileName: 'text.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text'] as Array<'text'>,
+      }],
+    };
+
+    expect(resolveModelNativeMultimodalSupport(model)).toEqual({ vision: true, audio: true });
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+  });
+
+  it('uses explicit active audio modalities without inheriting parent vision evidence', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported' as const, audio: 'unknown' as const, video: 'unknown' as const },
+        evidence: [{ source: 'tag' as const, value: 'vision', confidence: 'high' as const }],
+      },
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      }],
+      projectorCandidates: [audioProjector],
+      artifacts: [{
+        id: audioProjector.id,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['audio'] as Array<'audio'>,
+        remoteFileName: audioProjector.fileName,
+        downloadUrl: audioProjector.downloadUrl,
+        sizeBytes: 1,
+        installState: 'remote' as const,
+      }],
+    };
+
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: true });
+  });
+
+  it('uses explicit active vision modalities without inheriting parent audio support', () => {
+    const model = {
+      id: 'author/model',
+      chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      activeVariantId: 'vision',
+      resolvedFileName: 'vision.gguf',
+      variants: [{
+        variantId: 'vision',
+        fileName: 'vision.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
+      }],
+    };
+
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: true, audio: false });
+    expect(getModelVisionCapabilityStatusLabelKey(model)).toBe('models.vision.projectorMissing');
+  });
+
+  it('falls back to model inference when the active variant has no explicit modalities', () => {
+    expect(resolveEffectiveActiveVariantNativeSupport({
+      id: 'author/model',
+      chatModalities: ['text', 'vision'],
+      activeVariantId: 'fallback',
+      resolvedFileName: 'fallback.gguf',
+      variants: [{
+        variantId: 'fallback',
+        fileName: 'fallback.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+      }],
+    })).toEqual({ vision: true, audio: false });
+  });
+
+  it.each([
+    {
+      label: 'readiness owned by another model',
+      readiness: {
+        modelId: 'other/model',
+        status: 'ready' as const,
+        projectorId: 'projector',
+        support: ['audio' as const],
+        requestedSupport: ['audio' as const],
+        checkedAt: 1,
+      },
+    },
+    {
+      label: 'support outside the checked request',
+      readiness: {
+        modelId: 'author/model',
+        status: 'ready' as const,
+        projectorId: 'projector',
+        support: ['audio' as const],
+        requestedSupport: ['vision' as const],
+        checkedAt: 1,
+      },
+    },
+    {
+      label: 'ready state with empty support',
+      readiness: {
+        modelId: 'author/model',
+        status: 'ready' as const,
+        projectorId: 'projector',
+        support: [],
+        requestedSupport: ['audio' as const],
+        checkedAt: 1,
+      },
+    },
+  ])('does not widen effective support from $label', ({ readiness }) => {
+    const projector = {
+      id: 'projector',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj.gguf',
+      downloadUrl: 'https://example.com/mmproj.gguf',
+      size: 1,
+      lifecycleStatus: 'downloaded' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      projectorCandidates: [projector],
+      selectedProjectorId: projector.id,
+      multimodalReadiness: readiness,
+    };
+
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({
+      vision: true,
+      audio: false,
+    });
+    expect(modelSupportsAudio(model)).toBe(false);
+  });
+
+  it('requires an audio-compatible projector path for an explicit active audio variant', () => {
+    const visionProjector = {
+      id: 'projector',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-shared.gguf',
+      downloadUrl: 'https://example.com/mmproj-shared.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const base = {
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      }],
+    };
+
+    expect(resolveEffectiveActiveVariantNativeSupport(base)).toEqual({ vision: false, audio: false });
+    expect(resolveEffectiveActiveVariantNativeSupport({
+      ...base,
+      projectorCandidates: [visionProjector],
+      artifacts: [{
+        id: visionProjector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['image'],
+        remoteFileName: visionProjector.fileName,
+        downloadUrl: visionProjector.downloadUrl,
+        sizeBytes: 1,
+        installState: 'remote',
+      }],
+    })).toEqual({ vision: false, audio: false });
+  });
+
+  it('uses only the resolved active variant aliases for projector compatibility', () => {
+    const staleProjector = {
+      id: 'stale-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'stale-active-id',
+      repoId: 'author/model',
+      fileName: 'mmproj-stale.gguf',
+      downloadUrl: 'https://example.com/mmproj-stale.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates({
+      id: 'author/model',
+      activeVariantId: 'stale-active-id',
+      resolvedFileName: 'vision.gguf',
+      variants: [{
+        variantId: 'vision',
+        fileName: 'vision.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'vision'],
+      }],
+      projectorCandidates: [staleProjector],
+    })).toEqual([]);
+  });
+
+  it('does not let an invalid duplicate suppress a later compatible candidate', () => {
+    const candidate = {
+      id: 'shared-projector',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const validCandidate = { ...candidate, ownerModelId: 'author/model', ownerVariantId: 'audio' };
+
+    expect(getEffectiveActiveVariantProjectorCandidates({
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'],
+      }],
+      projectorCandidates: [
+        { ...candidate, ownerModelId: 'other/model' },
+        validCandidate,
+      ],
+    })).toEqual([validCandidate]);
+  });
+
+  it.each([
+    {
+      modality: 'audio' as const,
+      requiredFor: 'audio' as const,
+      expectedSupport: { vision: false, audio: true },
+    },
+    {
+      modality: 'vision' as const,
+      requiredFor: 'image' as const,
+      expectedSupport: { vision: true, audio: false },
+    },
+  ])('filters model-wide projectors to explicit $modality support', ({
+    modality,
+    requiredFor,
+    expectedSupport,
+  }) => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const visionProjector = {
+      ...audioProjector,
+      id: 'vision-projector',
+      fileName: 'mmproj-vision.gguf',
+      downloadUrl: 'https://example.com/mmproj-vision.gguf',
+    };
+    const expectedProjector = modality === 'audio' ? audioProjector : visionProjector;
+    const incompatibleProjector = modality === 'audio' ? visionProjector : audioProjector;
+    const model = {
+      id: 'author/model',
+      chatModalities: ['text', modality] as Array<'text' | 'vision' | 'audio'>,
+      projectorCandidates: [audioProjector, visionProjector],
+      selectedProjectorId: incompatibleProjector.id,
+      artifacts: [
+        {
+          id: expectedProjector.id,
+          kind: 'multimodal_projector' as const,
+          requiredFor: [requiredFor],
+          remoteFileName: expectedProjector.fileName,
+          downloadUrl: expectedProjector.downloadUrl,
+          sizeBytes: expectedProjector.size,
+          installState: 'remote' as const,
+        },
+        {
+          id: incompatibleProjector.id,
+          kind: 'multimodal_projector' as const,
+          requiredFor: [requiredFor === 'audio' ? 'image' as const : 'audio' as const],
+          remoteFileName: incompatibleProjector.fileName,
+          downloadUrl: incompatibleProjector.downloadUrl,
+          sizeBytes: incompatibleProjector.size,
+          installState: 'remote' as const,
+        },
+      ],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([expectedProjector]);
+    expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBeUndefined();
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual(expectedSupport);
+  });
+
+  it('merges model-level runtime state into the active-variant projector and remaps selection', () => {
+    const activeVariantProjector = {
+      id: 'catalog-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'audio',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const runtimeProjector = {
+      ...activeVariantProjector,
+      id: 'runtime-projector',
+      localPath: 'models/mmproj-audio.gguf',
+      lifecycleStatus: 'downloaded' as const,
+      downloadProgress: 1,
+    };
+    const model = {
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+        projectorCandidates: [activeVariantProjector],
+      }],
+      projectorCandidates: [runtimeProjector],
+      selectedProjectorId: runtimeProjector.id,
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        id: activeVariantProjector.id,
+        localPath: runtimeProjector.localPath,
+        lifecycleStatus: 'downloaded',
+        downloadProgress: 1,
+      }),
+    ]);
+    expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBe(activeVariantProjector.id);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: true });
+  });
+
+  it('rejects conflicting model and active-variant projector identities with the same id', () => {
+    const activeVariantProjector = {
+      id: 'shared-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'audio',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+        projectorCandidates: [activeVariantProjector],
+      }],
+      projectorCandidates: [{
+        ...activeVariantProjector,
+        fileName: 'mmproj-conflicting.gguf',
+        downloadUrl: 'https://example.com/mmproj-conflicting.gguf',
+        localPath: 'models/mmproj-conflicting.gguf',
+        lifecycleStatus: 'downloaded' as const,
+      }],
+      selectedProjectorId: activeVariantProjector.id,
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBeUndefined();
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+  });
+
+  it('accepts projector artifact modality only for exact id, normalized filename, and revision identity', () => {
+    const candidate = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'audio',
+      repoId: 'author/model',
+      fileName: 'MMProj-Audio.GGUF',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-audio.gguf',
+      hfRevision: 'main',
+      sha256: `sha256:${'a'.repeat(64).toUpperCase()}`,
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+        projectorCandidates: [candidate],
+      }],
+      artifacts: [{
+        id: candidate.id,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['audio'] as Array<'audio'>,
+        hfRevision: ' main ',
+        remoteFileName: `nested/${candidate.fileName.toLowerCase()}`,
+        downloadUrl: candidate.downloadUrl,
+        sizeBytes: candidate.size,
+        sha256: 'a'.repeat(64),
+        installState: 'remote' as const,
+      }],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([candidate]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: true });
+  });
+
+  it.each([
+    {
+      label: 'same id with a different filename',
+      artifact: { remoteFileName: 'mmproj-other.gguf' },
+    },
+    {
+      label: 'same filename with a different id',
+      artifact: { id: 'different-projector' },
+    },
+    {
+      label: 'different revision',
+      artifact: { hfRevision: 'refs/pr/1' },
+    },
+    {
+      label: 'different hash',
+      artifact: { sha256: 'b'.repeat(64) },
+    },
+    {
+      label: 'different size',
+      artifact: { sizeBytes: 101 },
+    },
+    {
+      label: 'different download URL',
+      artifact: { downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-other.gguf' },
+    },
+  ])('rejects projector modality evidence with $label', ({ artifact: artifactOverrides }) => {
+    const candidate = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'audio',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-audio.gguf',
+      hfRevision: 'main',
+      sha256: 'a'.repeat(64),
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const artifact = {
+      id: candidate.id,
+      kind: 'multimodal_projector' as const,
+      requiredFor: ['audio'] as Array<'audio'>,
+      hfRevision: candidate.hfRevision,
+      remoteFileName: candidate.fileName,
+      downloadUrl: candidate.downloadUrl,
+      sizeBytes: candidate.size,
+      sha256: candidate.sha256,
+      installState: 'remote' as const,
+      ...artifactOverrides,
+    };
+    const model = {
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+        projectorCandidates: [candidate],
+      }],
+      artifacts: [artifact],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+  });
+
+  it.each([
+    { label: 'text', modalities: ['text'] as Array<'text'>, expected: { vision: false, audio: false } },
+    { label: 'vision', modalities: ['text', 'vision'] as Array<'text' | 'vision'>, expected: { vision: true, audio: false } },
+    { label: 'audio', modalities: ['text', 'audio'] as Array<'text' | 'audio'>, expected: { vision: false, audio: true } },
+    {
+      label: 'mixed',
+      modalities: ['text', 'vision', 'audio'] as Array<'text' | 'vision' | 'audio'>,
+      expected: { vision: true, audio: true },
+    },
+  ])('resolves explicit active $label variant support', ({ modalities, expected }) => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'active',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const visionProjector = {
+      ...audioProjector,
+      id: 'vision-projector',
+      fileName: 'mmproj-vision.gguf',
+      downloadUrl: 'https://example.com/mmproj-vision.gguf',
+    };
+    const projectorCandidates = modalities.includes('audio')
+      ? [audioProjector, ...(modalities.includes('vision') ? [visionProjector] : [])]
+      : [];
+
+    expect(resolveEffectiveActiveVariantNativeSupport({
+      id: 'author/model',
+      activeVariantId: 'active',
+      resolvedFileName: 'active.gguf',
+      variants: [{
+        variantId: 'active',
+        fileName: 'active.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: modalities,
+        projectorCandidates,
+      }],
+      projectorCandidates,
+      artifacts: projectorCandidates.map((candidate) => ({
+        id: candidate.id,
+        kind: 'multimodal_projector' as const,
+        requiredFor: [candidate.id === 'audio-projector' ? 'audio' as const : 'image' as const],
+        remoteFileName: candidate.fileName,
+        downloadUrl: candidate.downloadUrl,
+        sizeBytes: candidate.size,
+        installState: 'remote' as const,
+      })),
+    })).toEqual(expected);
   });
 });

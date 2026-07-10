@@ -6,7 +6,16 @@ import {
   type ModelMetadata,
   type ModelVariant,
 } from '../types/models';
+import type {
+  CapabilityEvidence,
+  ModelInputCapabilitySnapshot,
+  NativeInputModality,
+} from '../types/modelInputCapabilities';
 import type { ProjectorArtifact, ProjectorMatchStatus, VisionCapabilitySource } from '../types/multimodal';
+import {
+  getInputCapabilityEvidenceModalities,
+  mergeCapabilityEvidence,
+} from '../utils/modelInputCapabilities';
 import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
@@ -60,30 +69,28 @@ const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-const PERSISTED_CACHE_VERSION = 4;
-const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, PERSISTED_CACHE_VERSION]);
+const PERSISTED_CACHE_VERSION = 5;
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, PERSISTED_CACHE_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
 const CATALOG_SAFE_VISION_SOURCES = new Set<VisionCapabilitySource>(['catalog_metadata', 'tree_probe']);
-const CATALOG_SAFE_AUDIO_CAPABILITY_EVIDENCE_SOURCES = new Set<string>([
-  'pipeline_tag',
-  'tag',
-  'architecture',
-  'config',
-  'repository_tree',
-]);
-const CATALOG_SAFE_AUDIO_PIPELINE_TAGS = new Set([
-  'audio-text-to-text',
-  'automatic-speech-recognition',
-]);
-const CATALOG_SAFE_AUDIO_SIGNAL_PATTERN = /\b(?:audio|speech|asr|whisper|qwen2-audio)\b/u;
 const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput>(['text', 'image', 'audio']);
 
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
   'chatModalities' | 'projectorCandidates' | 'visionConfidence'
 >> & Partial<Pick<ModelMetadata, 'artifacts' | 'inputCapabilities'>>;
+
+export type CatalogSafeNativeCapabilityContext = {
+  vision: boolean;
+  audio: boolean;
+  projectorEvidenceFileNames: ReadonlySet<string>;
+};
+
+type JsonComparableValue = null | boolean | number | string | JsonComparableValue[] | {
+  [key: string]: JsonComparableValue;
+};
 
 function isPublicAnonymousModel(model: ModelMetadata): boolean {
   return model.accessState === ModelAccessState.PUBLIC
@@ -119,6 +126,20 @@ function modelHasCatalogSafeVisionSource(model: Pick<ModelMetadata, 'visionSourc
   return Boolean(model.visionSource && CATALOG_SAFE_VISION_SOURCES.has(model.visionSource));
 }
 
+function hasCatalogProjectorIdentity(
+  projector: ProjectorArtifact,
+  context: CatalogSafeNativeCapabilityContext,
+): boolean {
+  const fileName = getCatalogRemoteProjectorFileName(projector.fileName, projector.downloadUrl);
+  return Boolean(
+    fileName
+    && (
+      context.projectorEvidenceFileNames.has(fileName)
+      || sanitizeCatalogProjectorMatchReason(projector) !== undefined
+    ),
+  );
+}
+
 function modelArtifactsRequireAudioProjector(artifacts: ModelMetadata['artifacts']): boolean {
   return artifacts?.some((artifact) => (
     artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes('audio')
@@ -137,38 +158,160 @@ function modelHasCatalogSafeAudioCapabilityEvidence(
   model: Partial<Pick<ModelMetadata, 'inputCapabilities'>>,
 ): boolean {
   return model.inputCapabilities?.evidence.some((entry) => {
-    const value = entry.value.trim().toLowerCase();
-    if (
-      !value
-      || entry.source === 'runtime'
-      || entry.source === 'projector'
-      || !CATALOG_SAFE_AUDIO_CAPABILITY_EVIDENCE_SOURCES.has(entry.source)
-    ) {
+    if (entry.source === 'runtime' || entry.source === 'projector') {
       return false;
     }
 
-    return entry.source === 'pipeline_tag'
-      ? CATALOG_SAFE_AUDIO_PIPELINE_TAGS.has(value)
-      : CATALOG_SAFE_AUDIO_SIGNAL_PATTERN.test(value);
+    return getInputCapabilityEvidenceModalities(entry).includes('audio');
   }) === true;
 }
 
-function modelHasCatalogProjectorEvidence(
-  model: Partial<Pick<ModelMetadata, 'inputCapabilities'>>,
-): boolean {
-  return model.inputCapabilities?.evidence.some((entry) => entry.source === 'projector') === true;
+function normalizeCatalogProjectorFileName(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalizedPath = value.trim().replace(/\\/gu, '/').split(/[?#]/u)[0];
+  const encodedFileName = normalizedPath.split('/').filter(Boolean).pop();
+  if (!encodedFileName) {
+    return undefined;
+  }
+
+  try {
+    const decodedFileName = decodeURIComponent(encodedFileName).trim().toLowerCase();
+    return decodedFileName.length > 0 ? decodedFileName : undefined;
+  } catch {
+    const fallbackFileName = encodedFileName.trim().toLowerCase();
+    return fallbackFileName.length > 0 ? fallbackFileName : undefined;
+  }
 }
 
-function modelHasCatalogSafeAudioProjectorSource(
-  model: Partial<Pick<ModelMetadata, 'artifacts' | 'chatModalities' | 'inputCapabilities'>>,
-): boolean {
-  return modelHasCatalogAudioCapabilitySignal(model)
-    && modelHasCatalogSafeAudioCapabilityEvidence(model)
-    && modelHasCatalogProjectorEvidence(model);
+function getCatalogRemoteProjectorFileName(
+  fileName: unknown,
+  downloadUrl: unknown,
+): string | undefined {
+  if (typeof downloadUrl !== 'string') {
+    return undefined;
+  }
+
+  const normalizedFileName = normalizeCatalogProjectorFileName(fileName);
+  const normalizedUrlFileName = normalizeCatalogProjectorFileName(
+    getRemoteFileNameFromDownloadUrl(downloadUrl),
+  );
+  return normalizedFileName && normalizedFileName === normalizedUrlFileName
+    ? normalizedFileName
+    : undefined;
 }
 
-function modelHasCatalogSafeProjectorSource(model: CatalogVisionRuntimeSource): boolean {
-  return modelHasCatalogSafeVisionSource(model) || modelHasCatalogSafeAudioProjectorSource(model);
+function getCatalogRemoteProjectorCanonicalFileName(
+  fileName: unknown,
+  downloadUrl: unknown,
+): string | undefined {
+  if (typeof downloadUrl !== 'string') {
+    return undefined;
+  }
+
+  const remoteFileName = getRemoteFileNameFromDownloadUrl(downloadUrl);
+  return getCatalogRemoteProjectorFileName(fileName, downloadUrl)
+    ? remoteFileName
+    : undefined;
+}
+
+function getCatalogProjectorEvidenceFileNames(
+  inputCapabilities: ModelInputCapabilitySnapshot | undefined,
+): Set<string> {
+  return new Set(inputCapabilities?.evidence.flatMap((entry) => {
+    if (entry.source !== 'projector') {
+      return [];
+    }
+
+    const fileName = normalizeCatalogProjectorFileName(entry.value);
+    return fileName ? [fileName] : [];
+  }) ?? []);
+}
+
+function getCatalogProjectorRepresentationFileNames(model: CatalogVisionRuntimeSource): Set<string> {
+  const candidateFileNames = model.projectorCandidates?.flatMap((projector) => {
+    const fileName = getCatalogRemoteProjectorFileName(projector.fileName, projector.downloadUrl);
+    return fileName ? [fileName] : [];
+  }) ?? [];
+  const artifactFileNames = model.artifacts?.flatMap((artifact) => {
+    if (artifact.kind !== 'multimodal_projector') {
+      return [];
+    }
+
+    const fileName = getCatalogRemoteProjectorFileName(artifact.remoteFileName, artifact.downloadUrl);
+    return fileName ? [fileName] : [];
+  }) ?? [];
+
+  return new Set([...candidateFileNames, ...artifactFileNames]);
+}
+
+function catalogProjectorRepresentationSupportsInput(
+  model: CatalogVisionRuntimeSource,
+  fileName: string,
+  input: 'image' | 'audio',
+): boolean {
+  const matchingArtifacts = model.artifacts?.filter((artifact) => (
+    artifact.kind === 'multimodal_projector'
+    && getCatalogRemoteProjectorFileName(artifact.remoteFileName, artifact.downloadUrl) === fileName
+  )) ?? [];
+  if (matchingArtifacts.length > 0) {
+    return matchingArtifacts.some((artifact) => artifact.requiredFor.includes(input));
+  }
+
+  return model.projectorCandidates?.some((projector) => (
+    getCatalogRemoteProjectorFileName(projector.fileName, projector.downloadUrl) === fileName
+  )) === true;
+}
+
+function createCatalogSafeNativeCapabilityContext(
+  model: CatalogVisionRuntimeSource,
+): CatalogSafeNativeCapabilityContext {
+  const projectorEvidenceFileNames = getCatalogProjectorEvidenceFileNames(model.inputCapabilities);
+  const projectorRepresentationFileNames = getCatalogProjectorRepresentationFileNames(model);
+  const matchingProjectorEvidenceFileNames = new Set(
+    [...projectorEvidenceFileNames].filter((fileName) => projectorRepresentationFileNames.has(fileName)),
+  );
+  const hasExplicitChatModalities = Array.isArray(model.chatModalities);
+  const permitsVision = !hasExplicitChatModalities || model.chatModalities?.includes('vision') === true;
+  const permitsAudio = !hasExplicitChatModalities || model.chatModalities?.includes('audio') === true;
+  const vision = permitsVision && modelHasCatalogSafeVisionSource(model);
+  const hasCatalogSafeAudioSignal = permitsAudio
+    && modelHasCatalogAudioCapabilitySignal(model)
+    && modelHasCatalogSafeAudioCapabilityEvidence(model);
+  const visionProjectorEvidenceFileNames = vision
+    ? [...matchingProjectorEvidenceFileNames].filter((fileName) => (
+      catalogProjectorRepresentationSupportsInput(model, fileName, 'image')
+    ))
+    : [];
+  const audioProjectorEvidenceFileNames = hasCatalogSafeAudioSignal
+    ? [...matchingProjectorEvidenceFileNames].filter((fileName) => (
+      catalogProjectorRepresentationSupportsInput(model, fileName, 'audio')
+    ))
+    : [];
+  const audio = audioProjectorEvidenceFileNames.length > 0;
+
+  return {
+    vision,
+    audio,
+    projectorEvidenceFileNames: new Set([
+      ...visionProjectorEvidenceFileNames,
+      ...audioProjectorEvidenceFileNames,
+    ]),
+  };
+}
+
+function mergeCatalogSafeNativeCapabilityContexts(
+  contexts: readonly CatalogSafeNativeCapabilityContext[],
+): CatalogSafeNativeCapabilityContext {
+  return {
+    vision: contexts.some((context) => context.vision),
+    audio: contexts.some((context) => context.audio),
+    projectorEvidenceFileNames: new Set(
+      contexts.flatMap((context) => [...context.projectorEvidenceFileNames]),
+    ),
+  };
 }
 
 function getRemoteFileNameFromDownloadUrl(downloadUrl: string): string | undefined {
@@ -198,17 +341,64 @@ function normalizeArtifactRequiredFor(requiredFor: ModelArtifactMetadata['requir
 
 function sanitizeCatalogArtifactRemoteFileName(
   artifact: ModelArtifactMetadata,
-  model: Pick<ModelMetadata, 'resolvedFileName' | 'projectorCandidates'>,
+  model: Pick<ModelMetadata, 'resolvedFileName'>,
 ): string | undefined {
   if (artifact.kind === 'main_model') {
-    return model.resolvedFileName ?? getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
+    const remoteFileName = getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
+    return remoteFileName ? model.resolvedFileName ?? remoteFileName : undefined;
   }
 
-  return model.projectorCandidates?.find((projector) => (
-    projector.id === artifact.id
-    || projector.downloadUrl === artifact.downloadUrl
-    || projector.fileName === artifact.remoteFileName
-  ))?.fileName ?? getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
+  return getCatalogRemoteProjectorCanonicalFileName(
+    artifact.remoteFileName,
+    artifact.downloadUrl,
+  );
+}
+
+function projectorCandidateMatchesArtifact(
+  projector: ProjectorArtifact,
+  artifact: ModelArtifactMetadata,
+): boolean {
+  if (artifact.kind !== 'multimodal_projector') {
+    return false;
+  }
+
+  const projectorFileName = getCatalogRemoteProjectorFileName(
+    projector.fileName,
+    projector.downloadUrl,
+  );
+  const artifactFileName = getCatalogRemoteProjectorFileName(
+    artifact.remoteFileName,
+    artifact.downloadUrl,
+  );
+  return Boolean(
+    projectorFileName
+    && projectorFileName === artifactFileName
+    && (artifact.id === projector.id || artifact.downloadUrl === projector.downloadUrl),
+  );
+}
+
+function sanitizeCatalogArtifactRequiredFor(
+  artifact: ModelArtifactMetadata,
+  context: CatalogSafeNativeCapabilityContext,
+): ModelArtifactRequiredInput[] {
+  const projectorFileName = artifact.kind === 'multimodal_projector'
+    ? getCatalogRemoteProjectorFileName(artifact.remoteFileName, artifact.downloadUrl)
+    : undefined;
+
+  return normalizeArtifactRequiredFor(artifact.requiredFor).filter((requiredInput) => {
+    if (requiredInput === 'text') {
+      return artifact.kind === 'main_model';
+    }
+
+    if (requiredInput === 'image') {
+      return context.vision;
+    }
+
+    return context.audio && (
+      artifact.kind === 'main_model'
+      || Boolean(projectorFileName && context.projectorEvidenceFileNames.has(projectorFileName))
+    );
+  });
 }
 
 function sanitizeCatalogModelArtifacts(
@@ -222,23 +412,19 @@ function sanitizeCatalogModelArtifacts(
       | 'resolvedFileName'
       | 'visionSource'
   >,
+  context: CatalogSafeNativeCapabilityContext,
+  resolveContext: (
+    artifact: ModelArtifactMetadata,
+  ) => CatalogSafeNativeCapabilityContext = () => context,
 ): ModelMetadata['artifacts'] {
   if (!model.artifacts?.length) {
     return undefined;
   }
 
-  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
   const artifacts = model.artifacts.flatMap((artifact): ModelArtifactMetadata[] => {
-    if (artifact.kind === 'multimodal_projector' && !hasCatalogSafeProjectorSource) {
-      return [];
-    }
-
     const remoteFileName = sanitizeCatalogArtifactRemoteFileName(artifact, model);
-    const requiredFor = artifact.kind === 'multimodal_projector' && !hasCatalogSafeVisionSource
-      ? normalizeArtifactRequiredFor(artifact.requiredFor).filter((entry) => entry === 'audio')
-      : normalizeArtifactRequiredFor(artifact.requiredFor);
-    if (!remoteFileName || !getRemoteFileNameFromDownloadUrl(artifact.downloadUrl) || requiredFor.length === 0) {
+    const requiredFor = sanitizeCatalogArtifactRequiredFor(artifact, resolveContext(artifact));
+    if (!remoteFileName || requiredFor.length === 0) {
       return [];
     }
 
@@ -260,46 +446,103 @@ function sanitizeCatalogModelArtifacts(
   return artifacts.length > 0 ? artifacts : undefined;
 }
 
-function hasAnonymousArtifactRuntimeFields(model: ModelMetadata): boolean {
-  if (!model.artifacts?.length) {
-    return false;
+function isCatalogEvidenceModalitySafe(
+  modality: NativeInputModality,
+  context: CatalogSafeNativeCapabilityContext,
+): boolean {
+  return modality === 'video'
+    || (modality === 'image' && context.vision)
+    || (modality === 'audio' && context.audio);
+}
+
+function getCatalogSafeEvidenceValue(
+  source: CapabilityEvidence['source'],
+  modality: NativeInputModality,
+): string {
+  if (source === 'pipeline_tag') {
+    return modality === 'image'
+      ? 'image-text-to-text'
+      : modality === 'audio' ? 'audio-text-to-text' : 'video-text-to-text';
   }
 
-  const sanitizedArtifacts = sanitizeCatalogModelArtifacts(model);
-  return JSON.stringify(model.artifacts) !== JSON.stringify(sanitizedArtifacts ?? []);
+  return modality === 'image' ? 'vision' : modality;
 }
 
-function hasProjectorRuntimeFields(projectors: ModelMetadata['projectorCandidates']): boolean {
-  return projectors?.some((projector) => (
-    typeof projector.localPath === 'string'
-    || typeof projector.resumeData === 'string'
-    || projector.downloadProgress !== undefined
-    || projector.lifecycleStatus !== 'available'
-    || projector.matchStatus === 'failed'
-    || projector.matchStatus === 'user_selected'
-    || projector.matchReason === 'user_selected_projector'
-    || projector.matchReason === 'unselected_projector_candidate'
-  )) ?? false;
+function sanitizeCatalogCapabilityEvidence(
+  entry: CapabilityEvidence,
+  context: CatalogSafeNativeCapabilityContext,
+): CapabilityEvidence[] {
+  if (entry.source === 'runtime') {
+    return [];
+  }
+
+  if (entry.source === 'projector') {
+    const fileName = normalizeCatalogProjectorFileName(entry.value);
+    return Boolean(fileName && context.projectorEvidenceFileNames.has(fileName))
+      ? [{ ...entry, value: fileName as string }]
+      : [];
+  }
+
+  const modalities = getInputCapabilityEvidenceModalities(entry);
+  if (modalities.length === 0) {
+    return [entry];
+  }
+
+  const safeModalities = modalities.filter((modality) => (
+    isCatalogEvidenceModalitySafe(modality, context)
+  ));
+  if (safeModalities.length === 0) {
+    return [];
+  }
+
+  if (safeModalities.length === modalities.length) {
+    return [entry];
+  }
+
+  return safeModalities.map((modality) => ({
+    ...entry,
+    value: getCatalogSafeEvidenceValue(entry.source, modality),
+  }));
 }
 
-function hasUnsafeAnonymousVisionProvenance(model: CatalogVisionRuntimeSource): boolean {
-  const hasSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const hasSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
-  const hasVisionModality = Array.isArray(model.chatModalities) && model.chatModalities.includes('vision');
-  const hasUnsafeProjectorCandidates = Boolean(model.projectorCandidates?.length && !hasSafeProjectorSource);
-  const hasCatalogVisionEvidence = hasSafeVisionSource;
+export function sanitizeCatalogInputCapabilities(
+  snapshot: ModelInputCapabilitySnapshot | undefined,
+  context: CatalogSafeNativeCapabilityContext,
+): ModelInputCapabilitySnapshot | undefined {
+  if (!snapshot) {
+    return undefined;
+  }
 
-  return Boolean(
-    (model.visionSource && !hasSafeVisionSource)
-    || (model.visionConfidence && !hasSafeVisionSource)
-    || hasUnsafeProjectorCandidates
-    || (hasVisionModality && !hasCatalogVisionEvidence),
-  );
+  const evidence = mergeCapabilityEvidence(snapshot.evidence.flatMap((entry) => (
+    sanitizeCatalogCapabilityEvidence(entry, context)
+  )));
+  const hasCatalogVideoEvidence = evidence.some((entry) => (
+    entry.source !== 'runtime'
+    && getInputCapabilityEvidenceModalities(entry).includes('video')
+  ));
+  const declared: ModelInputCapabilitySnapshot['declared'] = {
+    ...snapshot.declared,
+    image: context.vision ? snapshot.declared.image : 'unknown',
+    audio: context.audio ? snapshot.declared.audio : 'unknown',
+    video: snapshot.declared.video === 'supported' && !hasCatalogVideoEvidence
+      ? 'unknown'
+      : snapshot.declared.video,
+  };
+  const hasUsefulDeclaration = Object.values(declared).some((state) => state !== 'unknown');
+  if (!hasUsefulDeclaration && evidence.length === 0) {
+    return undefined;
+  }
+
+  return {
+    detectedAt: snapshot.detectedAt,
+    declared,
+    evidence,
+  };
 }
 
 function sanitizeCatalogChatModalities(
   chatModalities: ModelMetadata['chatModalities'],
-  options: { hasSafeVision: boolean; hasSafeAudio: boolean },
+  context: CatalogSafeNativeCapabilityContext,
 ): ModelMetadata['chatModalities'] {
   if (!Array.isArray(chatModalities)) {
     return chatModalities;
@@ -307,52 +550,260 @@ function sanitizeCatalogChatModalities(
 
   const sanitized = chatModalities.filter((modality) => (
     modality === 'text'
-    || (modality === 'vision' && options.hasSafeVision)
-    || (modality === 'audio' && options.hasSafeAudio)
+    || (modality === 'vision' && context.vision)
+    || (modality === 'audio' && context.audio)
   ));
 
   return sanitized.length > 0 ? sanitized : undefined;
 }
 
-function hasAnonymousVariantRuntimeFields(variant: ModelVariant, model?: ModelMetadata): boolean {
-  return variant.isLocal === true
-    || typeof variant.selectedProjectorId === 'string'
-    || hasUnsafeAnonymousVisionProvenance({
-      ...variant,
-      chatModalities: variant.chatModalities ?? model?.chatModalities,
-      artifacts: model?.artifacts,
-      inputCapabilities: model?.inputCapabilities,
-    })
-    || hasProjectorRuntimeFields(variant.projectorCandidates);
-}
-
-export function sanitizeCatalogProjectorRuntimeState(projectors: ModelMetadata['projectorCandidates']): ModelMetadata['projectorCandidates'] {
+export function sanitizeCatalogProjectorRuntimeState(
+  projectors: ModelMetadata['projectorCandidates'],
+  context: CatalogSafeNativeCapabilityContext,
+  artifacts?: ModelMetadata['artifacts'],
+  resolveContext: (
+    projector: ProjectorArtifact,
+  ) => CatalogSafeNativeCapabilityContext = () => context,
+): ModelMetadata['projectorCandidates'] {
   if (!projectors?.length) {
-    return projectors;
+    return undefined;
   }
 
-  return projectors.map((projector) => ({
-    ...projector,
-    localPath: undefined,
-    resumeData: undefined,
-    downloadProgress: undefined,
-    lifecycleStatus: 'available' as const,
-    matchStatus: sanitizeCatalogProjectorMatchStatus(projector),
-    matchReason: sanitizeCatalogProjectorMatchReason(projector),
-  }));
+  const sanitized = projectors.flatMap((projector): ProjectorArtifact[] => {
+    const canonicalFileName = getCatalogRemoteProjectorCanonicalFileName(
+      projector.fileName,
+      projector.downloadUrl,
+    );
+    const normalizedFileName = normalizeCatalogProjectorFileName(canonicalFileName);
+    if (!canonicalFileName || !normalizedFileName) {
+      return [];
+    }
+
+    const projectorContext = resolveContext(projector);
+    const matchingArtifact = artifacts?.find((artifact) => (
+      projectorCandidateMatchesArtifact(projector, artifact)
+    ));
+    const hasMatchingProjectorEvidence = projectorContext.projectorEvidenceFileNames.has(normalizedFileName);
+    const hasIndependentCatalogIdentity = hasCatalogProjectorIdentity(projector, projectorContext);
+    const hasSafeVisionIdentity = projectorContext.vision
+      && hasIndependentCatalogIdentity
+      && (matchingArtifact?.requiredFor.includes('image') ?? true);
+    const hasSafeAudioIdentity = projectorContext.audio
+      && hasMatchingProjectorEvidence
+      && (matchingArtifact?.requiredFor.includes('audio') ?? true);
+    const isAllowed = hasSafeVisionIdentity || hasSafeAudioIdentity;
+    if (!isAllowed) {
+      return [];
+    }
+
+    return [{
+      ...projector,
+      fileName: canonicalFileName,
+      localPath: undefined,
+      resumeData: undefined,
+      downloadProgress: undefined,
+      lifecycleStatus: 'available' as const,
+      matchStatus: sanitizeCatalogProjectorMatchStatus(projector),
+      matchReason: sanitizeCatalogProjectorMatchReason(projector),
+    }];
+  });
+
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+type CatalogSafeVariantCapability = {
+  context: CatalogSafeNativeCapabilityContext;
+  projectorCandidates: readonly ProjectorArtifact[];
+};
+
+function getVariantIdentityKeys(variant: ModelVariant): ReadonlySet<string> {
+  return new Set([variant.variantId.trim(), variant.fileName.trim()].filter(Boolean));
+}
+
+function isProjectorCompatibleWithVariant(
+  projector: ProjectorArtifact,
+  variant: ModelVariant,
+): boolean {
+  const ownerVariantId = projector.ownerVariantId?.trim();
+  return !ownerVariantId || getVariantIdentityKeys(variant).has(ownerVariantId);
+}
+
+function projectorCandidatesShareIdentity(
+  left: ProjectorArtifact,
+  right: ProjectorArtifact,
+): boolean {
+  const leftFileName = getCatalogRemoteProjectorFileName(left.fileName, left.downloadUrl);
+  const rightFileName = getCatalogRemoteProjectorFileName(right.fileName, right.downloadUrl);
+  return Boolean(
+    leftFileName
+    && leftFileName === rightFileName
+    && (left.id === right.id || left.downloadUrl === right.downloadUrl),
+  );
+}
+
+function getVariantCompatibleProjectorCandidates(
+  variant: ModelVariant,
+  model: ModelMetadata,
+): ProjectorArtifact[] {
+  const candidates = [
+    ...(variant.projectorCandidates ?? []),
+    ...(model.projectorCandidates ?? []),
+  ].filter((projector) => isProjectorCompatibleWithVariant(projector, variant));
+  const uniqueCandidates: ProjectorArtifact[] = [];
+  for (const candidate of candidates) {
+    if (!uniqueCandidates.some((entry) => projectorCandidatesShareIdentity(entry, candidate))) {
+      uniqueCandidates.push(candidate);
+    }
+  }
+
+  return uniqueCandidates;
+}
+
+function createCatalogSafeVariantCapability(
+  variant: ModelVariant,
+  model: ModelMetadata,
+): CatalogSafeVariantCapability {
+  const projectorCandidates = getVariantCompatibleProjectorCandidates(variant, model);
+  const artifacts = model.artifacts?.filter((artifact) => (
+    artifact.kind !== 'multimodal_projector'
+    || projectorCandidates.some((projector) => projectorCandidateMatchesArtifact(projector, artifact))
+  ));
+
+  return {
+    context: createCatalogSafeNativeCapabilityContext({
+      ...variant,
+      visionSource: variant.visionSource ?? model.visionSource,
+      artifacts,
+      chatModalities: variant.chatModalities ?? model.chatModalities,
+      inputCapabilities: model.inputCapabilities,
+      projectorCandidates,
+    }),
+    projectorCandidates,
+  };
+}
+
+function resolveCatalogSafeProjectorContext(
+  projector: ProjectorArtifact,
+  modelContext: CatalogSafeNativeCapabilityContext,
+  variants: readonly CatalogSafeVariantCapability[],
+): CatalogSafeNativeCapabilityContext {
+  const contexts: CatalogSafeNativeCapabilityContext[] = [];
+  if (!projector.ownerVariantId?.trim()) {
+    contexts.push(modelContext);
+  }
+
+  for (const variant of variants) {
+    if (variant.projectorCandidates.some((candidate) => (
+      projectorCandidatesShareIdentity(candidate, projector)
+    ))) {
+      contexts.push(variant.context);
+    }
+  }
+
+  return mergeCatalogSafeNativeCapabilityContexts(contexts);
+}
+
+function resolveCatalogSafeArtifactContext(
+  artifact: ModelArtifactMetadata,
+  model: ModelMetadata,
+  modelContext: CatalogSafeNativeCapabilityContext,
+  variants: readonly CatalogSafeVariantCapability[],
+): CatalogSafeNativeCapabilityContext {
+  if (artifact.kind !== 'multimodal_projector') {
+    return modelContext;
+  }
+
+  const allMatchingModelCandidates = model.projectorCandidates?.filter((projector) => (
+    projectorCandidateMatchesArtifact(projector, artifact)
+  )) ?? [];
+  const allMatchingVariantCandidates = variants.flatMap((variant) => (
+    variant.projectorCandidates.filter((projector) => (
+      projectorCandidateMatchesArtifact(projector, artifact)
+    ))
+  ));
+  const matchingModelCandidates = allMatchingModelCandidates.filter((projector) => (
+    hasCatalogProjectorIdentity(
+      projector,
+      resolveCatalogSafeProjectorContext(projector, modelContext, variants),
+    )
+  ));
+  const contexts: CatalogSafeNativeCapabilityContext[] = [];
+  if (
+    matchingModelCandidates.some((projector) => !projector.ownerVariantId?.trim())
+    || (
+      allMatchingModelCandidates.length === 0
+      && allMatchingVariantCandidates.length === 0
+      && artifact.installState === 'remote'
+    )
+  ) {
+    contexts.push(modelContext);
+  }
+
+  for (const variant of variants) {
+    if (variant.projectorCandidates.some((projector) => (
+      projectorCandidateMatchesArtifact(projector, artifact)
+      && hasCatalogProjectorIdentity(projector, variant.context)
+    ))) {
+      contexts.push(variant.context);
+    }
+  }
+
+  return mergeCatalogSafeNativeCapabilityContexts(contexts);
+}
+
+function sanitizeCatalogVariantRuntimeState(
+  variant: ModelVariant,
+  context: CatalogSafeNativeCapabilityContext,
+  artifacts?: ModelMetadata['artifacts'],
+): ModelVariant {
+  return {
+    ...variant,
+    isLocal: undefined,
+    chatModalities: sanitizeCatalogChatModalities(variant.chatModalities, context),
+    visionSource: context.vision ? variant.visionSource : undefined,
+    visionConfidence: context.vision ? variant.visionConfidence : undefined,
+    selectedProjectorId: undefined,
+    projectorCandidates: sanitizeCatalogProjectorRuntimeState(
+      variant.projectorCandidates,
+      context,
+      artifacts,
+    ),
+  };
 }
 
 export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMetadata {
-  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource(model);
-  const hasCatalogSafeAudioProjectorSource = modelHasCatalogSafeAudioProjectorSource(model);
-  const projectorCandidates = hasCatalogSafeProjectorSource
-    ? sanitizeCatalogProjectorRuntimeState(model.projectorCandidates)
-    : undefined;
-  const chatModalities = sanitizeCatalogChatModalities(model.chatModalities, {
-    hasSafeVision: hasCatalogSafeVisionSource,
-    hasSafeAudio: hasCatalogSafeAudioProjectorSource,
-  });
+  const modelContext = createCatalogSafeNativeCapabilityContext(model);
+  const variantCapabilities = model.variants?.map((variant) => (
+    createCatalogSafeVariantCapability(variant, model)
+  )) ?? [];
+  const inputCapabilityContext = mergeCatalogSafeNativeCapabilityContexts([
+    modelContext,
+    ...variantCapabilities.map((variant) => variant.context),
+  ]);
+  const inputCapabilities = sanitizeCatalogInputCapabilities(
+    model.inputCapabilities,
+    inputCapabilityContext,
+  );
+  const projectorCandidates = sanitizeCatalogProjectorRuntimeState(
+    model.projectorCandidates,
+    modelContext,
+    model.artifacts,
+    (projector) => resolveCatalogSafeProjectorContext(
+      projector,
+      modelContext,
+      variantCapabilities,
+    ),
+  );
+  const chatModalities = sanitizeCatalogChatModalities(model.chatModalities, modelContext);
+  const variants = model.variants?.map((variant, index) => (
+    sanitizeCatalogVariantRuntimeState(
+      variant,
+      (variantCapabilities[index] as CatalogSafeVariantCapability).context,
+      model.artifacts,
+    )
+  ));
+  const shouldPreserveParentVisionSource = modelHasCatalogSafeVisionSource(model)
+    && (modelContext.vision || variantCapabilities.some((variant) => variant.context.vision));
 
   return normalizePersistedModelMetadata({
     ...model,
@@ -370,46 +821,25 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
       sha256: undefined,
       capabilitySnapshot: undefined,
     } : {}),
-    artifacts: sanitizeCatalogModelArtifacts(model),
+    artifacts: sanitizeCatalogModelArtifacts(
+      model,
+      modelContext,
+      (artifact) => resolveCatalogSafeArtifactContext(
+        artifact,
+        model,
+        modelContext,
+        variantCapabilities,
+      ),
+    ),
     chatModalities,
-    visionSource: hasCatalogSafeVisionSource ? model.visionSource : undefined,
-    visionConfidence: hasCatalogSafeVisionSource ? model.visionConfidence : undefined,
+    inputCapabilities,
+    visionSource: shouldPreserveParentVisionSource ? model.visionSource : undefined,
+    visionConfidence: shouldPreserveParentVisionSource ? model.visionConfidence : undefined,
     selectedProjectorId: undefined,
     multimodalReadiness: undefined,
     projectorCandidates,
+    variants,
   });
-}
-
-function sanitizeCatalogVariantRuntimeState(variant: ModelVariant, model?: ModelMetadata): ModelVariant {
-  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(variant);
-  const hasCatalogSafeProjectorSource = modelHasCatalogSafeProjectorSource({
-    ...variant,
-    chatModalities: variant.chatModalities ?? model?.chatModalities,
-    artifacts: model?.artifacts,
-    inputCapabilities: model?.inputCapabilities,
-  });
-  const hasCatalogSafeAudioProjectorSource = modelHasCatalogSafeAudioProjectorSource({
-    ...variant,
-    chatModalities: variant.chatModalities ?? model?.chatModalities,
-    artifacts: model?.artifacts,
-    inputCapabilities: model?.inputCapabilities,
-  });
-  const projectorCandidates = hasCatalogSafeProjectorSource
-    ? sanitizeCatalogProjectorRuntimeState(variant.projectorCandidates)
-    : undefined;
-  const chatModalities = sanitizeCatalogChatModalities(variant.chatModalities, {
-    hasSafeVision: hasCatalogSafeVisionSource,
-    hasSafeAudio: hasCatalogSafeAudioProjectorSource,
-  });
-
-  return {
-    ...variant,
-    chatModalities,
-    visionSource: hasCatalogSafeVisionSource ? variant.visionSource : undefined,
-    visionConfidence: hasCatalogSafeVisionSource ? variant.visionConfidence : undefined,
-    selectedProjectorId: undefined,
-    projectorCandidates,
-  };
 }
 
 export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetadata | null {
@@ -443,19 +873,14 @@ function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata
     includeFileNames: [model.resolvedFileName, model.activeVariantId],
     includeVariantIds: [model.activeVariantId],
   });
-  const hasLocalVariantMarker = variants?.some((variant) => variant.isLocal === true) ?? false;
-  const hasVariantRuntimeFields = variants?.some((variant) => hasAnonymousVariantRuntimeFields(variant, model)) ?? false;
-  const sanitizedVariants = variants?.map(({ isLocal: _isLocal, ...variant }) => (
-    sanitizeCatalogVariantRuntimeState(variant, model)
-  ));
 
-  if (variants === model.variants && !hasLocalVariantMarker && !hasVariantRuntimeFields) {
+  if (variants === model.variants) {
     return model;
   }
 
   return normalizePersistedModelMetadata({
     ...model,
-    variants: sanitizedVariants,
+    variants,
   });
 }
 
@@ -466,27 +891,9 @@ function sanitizeAnonymousPersistedModels(models: ModelMetadata[]): ModelMetadat
   });
 }
 
-function hasAnonymousRuntimeFields(model: ModelMetadata): boolean {
-  return typeof model.localPath === 'string'
-    || typeof model.downloadedAt === 'number'
-    || model.downloadIntegrity !== undefined
-    || typeof model.resumeData === 'string'
-    || typeof model.downloadErrorAt === 'number'
-    || typeof model.downloadErrorCode === 'string'
-    || typeof model.downloadErrorMessage === 'string'
-    || model.lifecycleStatus !== LifecycleStatus.AVAILABLE
-    || model.downloadProgress !== 0
-    || model.metadataTrust === 'verified_local'
-    || (model.variants?.some((variant) => hasAnonymousVariantRuntimeFields(variant, model)) ?? false)
-    || hasUnsafeAnonymousVisionProvenance(model)
-    || hasAnonymousArtifactRuntimeFields(model)
-    || typeof model.selectedProjectorId === 'string'
-    || model.multimodalReadiness !== undefined
-    || hasProjectorRuntimeFields(model.projectorCandidates);
-}
-
 function needsAnonymousPersistedModelSanitization(model: ModelMetadata): boolean {
-  return !isPublicAnonymousModel(model) || hasAnonymousRuntimeFields(model);
+  const sanitized = sanitizeAnonymousCatalogModel(model);
+  return sanitized === null || JSON.stringify(model) !== JSON.stringify(sanitized);
 }
 
 function needsAnonymousPersistedModelsSanitization(models: ModelMetadata[]): boolean {
@@ -524,6 +931,72 @@ function normalizeModels(models: unknown): ModelMetadata[] {
       && typeof (entry as { id?: unknown }).id === 'string'
     ))
     .map((entry) => normalizePersistedModelMetadata(entry));
+}
+
+function toJsonComparableValue(value: unknown): JsonComparableValue | undefined {
+  if (
+    value === null
+    || typeof value === 'boolean'
+    || typeof value === 'string'
+  ) {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => toJsonComparableValue(entry) ?? null);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const comparable: { [key: string]: JsonComparableValue } = {};
+  for (const key of Object.keys(value).sort()) {
+    const entry = toJsonComparableValue((value as Record<string, unknown>)[key]);
+    if (entry !== undefined) {
+      comparable[key] = entry;
+    }
+  }
+
+  return comparable;
+}
+
+function rawPersistedModelNeedsAnonymousRewrite(value: unknown): boolean {
+  const normalizedModel = normalizeModels([value])[0];
+  if (!normalizedModel) {
+    return true;
+  }
+
+  const sanitizedModel = sanitizeAnonymousCatalogModel(normalizedModel);
+  return sanitizedModel === null
+    || JSON.stringify(toJsonComparableValue(value))
+      !== JSON.stringify(toJsonComparableValue(sanitizedModel));
+}
+
+function rawSearchEntryNeedsAnonymousRewrite(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return true;
+  }
+
+  const result = (value as { result?: unknown }).result;
+  if (!result || typeof result !== 'object') {
+    return true;
+  }
+
+  const models = (result as { models?: unknown }).models;
+  return !Array.isArray(models) || models.some((model) => rawPersistedModelNeedsAnonymousRewrite(model));
+}
+
+function rawSnapshotEntryNeedsAnonymousRewrite(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return true;
+  }
+
+  return rawPersistedModelNeedsAnonymousRewrite((value as { model?: unknown }).model);
 }
 
 function inferSnapshotAuthScope(model: ModelMetadata): CatalogCacheAuthScope {
@@ -872,6 +1345,7 @@ export class ModelCatalogCacheStore {
     const searchPayloadResult = this.parsePayload<SearchCacheEntry>(
       this.storage.getString(SEARCH_CACHE_KEY),
       normalizeSearchEntry,
+      rawSearchEntryNeedsAnonymousRewrite,
     );
     shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
 
@@ -897,6 +1371,7 @@ export class ModelCatalogCacheStore {
     const snapshotPayloadResult = this.parsePayload<SnapshotCacheEntry>(
       this.storage.getString(SNAPSHOT_CACHE_KEY),
       normalizeSnapshotEntry,
+      rawSnapshotEntryNeedsAnonymousRewrite,
     );
     shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
 
@@ -947,6 +1422,7 @@ export class ModelCatalogCacheStore {
   private parsePayload<T>(
     rawValue: string | undefined,
     normalizeEntry: (value: unknown) => T | null,
+    rawEntryNeedsRewrite: (value: unknown) => boolean = () => false,
   ): ParsedPayload<T> {
     if (!rawValue) {
       return { status: 'empty', entries: [], needsRewrite: false };
@@ -964,14 +1440,15 @@ export class ModelCatalogCacheStore {
         return { status: 'invalid', entries: [], needsRewrite: false };
       }
 
-      const entries = parsed.entries
-        .map((entry) => normalizeEntry(entry))
-        .filter((entry): entry is T => entry !== null);
+      const normalizedEntries = parsed.entries.map((entry) => normalizeEntry(entry));
+      const entries = normalizedEntries.filter((entry): entry is T => entry !== null);
 
       return {
         status: 'ok',
         entries,
-        needsRewrite: parsed.version !== PERSISTED_CACHE_VERSION,
+        needsRewrite: parsed.version !== PERSISTED_CACHE_VERSION
+          || normalizedEntries.some((entry) => entry === null)
+          || parsed.entries.some((entry) => rawEntryNeedsRewrite(entry)),
       };
     } catch {
       return { status: 'invalid', entries: [], needsRewrite: false };

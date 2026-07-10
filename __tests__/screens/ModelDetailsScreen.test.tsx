@@ -1059,9 +1059,20 @@ describe('ModelDetailsScreen', () => {
   });
 
   it('renders an audio badge for native-audio model details', async () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
     const audioModel = createModel({
       chatModalities: ['text', 'audio'],
       artifactRole: 'primary_chat_model',
+      projectorCandidates: [audioProjector],
     });
     const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
     modelCatalogService.getCachedModel.mockReturnValue(audioModel);
@@ -1140,6 +1151,45 @@ describe('ModelDetailsScreen', () => {
     });
 
     expect(screen.queryByText('models.audio.badge')).toBeNull();
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+  });
+
+  it('does not show the parent vision badge for an active audio-only variant', async () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'audio-variant',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const activeAudioModel = createModel({
+      chatModalities: ['text', 'vision'],
+      activeVariantId: 'audio-variant',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio-variant',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+      }],
+      projectorCandidates: [audioProjector],
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(activeAudioModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(activeAudioModel);
+
+    const screen = render(<ModelDetailsScreen />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
     expect(screen.queryByText('models.vision.badge')).toBeNull();
   });
 

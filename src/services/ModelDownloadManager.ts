@@ -30,6 +30,16 @@ import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValida
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
+import { resolveActiveModelVariant } from '../utils/activeModelVariant';
+import {
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+} from '../utils/modelCapabilities';
+import {
+  getAllModelProjectorCandidates,
+  getProjectorStateUpdates,
+  updateEffectiveProjectorCandidate,
+} from '../utils/effectiveProjectorState';
 import { projectorArtifactService } from './ProjectorArtifactService';
 import { llmEngineService } from './LLMEngineService';
 
@@ -177,6 +187,7 @@ type ActiveDownloadJob = {
   resumable: ReturnType<typeof FileSystem.createDownloadResumable> | null;
   activeArtifact?: 'model' | 'projector';
   activeProjectorId?: string;
+  activeProjector?: ProjectorArtifact;
   stopReason: 'pause' | 'cancel' | null;
   deferredCancelCleanupFileNames?: string[];
 };
@@ -525,7 +536,7 @@ export class ModelDownloadManager {
         }
       }
 
-      for (const projector of model.projectorCandidates ?? []) {
+      for (const projector of getAllModelProjectorCandidates(model)) {
         if (model.id === options.excludeModelId) {
           continue;
         }
@@ -556,20 +567,13 @@ export class ModelDownloadManager {
     ]);
   }
 
-  private updateProjectorCandidates(
-    model: Pick<ModelMetadata, 'projectorCandidates'>,
-    projectorId: string,
+  private updateProjectorState(
+    model: ModelMetadata,
+    projector: ProjectorArtifact,
     updates: Partial<ProjectorArtifact>,
-  ): ProjectorArtifact[] | undefined {
-    if (!model.projectorCandidates?.length) {
-      return undefined;
-    }
-
-    return model.projectorCandidates.map((projector) => (
-      projector.id === projectorId
-        ? { ...projector, ...updates }
-        : projector
-    ));
+  ): Partial<ModelMetadata> {
+    const nextModel = updateEffectiveProjectorCandidate(model, projector.id, updates, projector);
+    return getProjectorStateUpdates(model, nextModel);
   }
 
   private getQueuedModel(modelId: string, fallbackModel: ModelMetadata): ModelMetadata {
@@ -769,13 +773,11 @@ export class ModelDownloadManager {
     projector: ProjectorArtifact,
     updates: Partial<ProjectorArtifact>,
   ): Partial<ModelMetadata> {
-    const projectorCandidates = this.updateProjectorCandidates(model, projector.id, {
+    return this.updateProjectorState(model, projector, {
       matchStatus: projector.matchStatus,
       matchReason: projector.matchReason,
       ...updates,
     });
-
-    return projectorCandidates ? { projectorCandidates } : {};
   }
 
   private updateQueuedProjector(
@@ -787,18 +789,18 @@ export class ModelDownloadManager {
     const { updateModelInQueue } = useDownloadStore.getState();
     const queuedModel = this.getQueuedModel(modelId, fallbackModel);
     const queueUpdates = this.buildProjectorQueueUpdates(queuedModel, projector, updates);
-    if (queueUpdates.projectorCandidates) {
+    if (Object.keys(queueUpdates).length > 0) {
       updateModelInQueue(modelId, queueUpdates);
     }
   }
 
   private getProjectorFailureUpdates(
     model: ModelMetadata,
-    projectorId: string | undefined,
+    projector: ProjectorArtifact | undefined,
     error: unknown,
     resumeData?: string,
   ): Partial<ModelMetadata> {
-    if (!projectorId) {
+    if (!projector) {
       return {};
     }
 
@@ -808,7 +810,7 @@ export class ModelDownloadManager {
     const normalizedResumeData = shouldDiscardResumeData ? undefined : resumeData;
     const shouldClearLocalPath = shouldDiscardResumeData
       || (appError.code === 'download_disk_space_low' && normalizedResumeData === undefined);
-    const projectorCandidates = this.updateProjectorCandidates(model, projectorId, {
+    return this.updateProjectorState(model, projector, {
       lifecycleStatus: 'failed',
       matchStatus: 'failed',
       matchReason: appError.code,
@@ -820,8 +822,6 @@ export class ModelDownloadManager {
           downloadProgress: undefined,
         }),
     });
-
-    return projectorCandidates ? { projectorCandidates } : {};
   }
 
   private buildTextReadyModelAfterProjectorFailure({
@@ -850,7 +850,54 @@ export class ModelDownloadManager {
   }
 
   private withSynchronizedArtifacts(model: ModelMetadata): ModelMetadata {
-    const artifacts = deriveArtifactsFromLegacyModel(model, { preferLegacyRuntimeState: true });
+    const activeVariant = resolveActiveModelVariant(model);
+    const projectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+    const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, projectorCandidates);
+    const hasExplicitActiveVariantModalities = Array.isArray(activeVariant?.chatModalities);
+    const artifactProjection: ModelMetadata = {
+      ...model,
+      chatModalities: activeVariant?.chatModalities ?? model.chatModalities,
+      ...(hasExplicitActiveVariantModalities
+        ? { inputCapabilities: undefined, multimodalReadiness: undefined }
+        : null),
+      projectorCandidates,
+      selectedProjectorId,
+    };
+    let artifacts = deriveArtifactsFromLegacyModel(artifactProjection, { preferLegacyRuntimeState: true });
+    if (hasExplicitActiveVariantModalities) {
+      const requiredFor = [
+        ...(activeVariant.chatModalities?.includes('vision') ? ['image' as const] : []),
+        ...(activeVariant.chatModalities?.includes('audio') ? ['audio' as const] : []),
+      ];
+      if (requiredFor.length > 0) {
+        const effectiveProjectorsById = new Map(
+          projectorCandidates.map((projector) => [projector.id, projector] as const),
+        );
+        artifacts = artifacts.map((artifact) => {
+          const projector = artifact.kind === 'multimodal_projector'
+            ? effectiveProjectorsById.get(artifact.id)
+            : undefined;
+          if (!projector || artifact.remoteFileName !== projector.fileName) {
+            return artifact;
+          }
+
+          const persistedRequiredFor = model.artifacts
+            ?.find((candidate) => (
+              candidate.kind === 'multimodal_projector'
+              && candidate.id === artifact.id
+              && candidate.remoteFileName === artifact.remoteFileName
+            ))
+            ?.requiredFor.filter((requiredInput) => (
+              requiredInput !== 'text' && requiredFor.includes(requiredInput)
+            ));
+
+          return {
+            ...artifact,
+            requiredFor: persistedRequiredFor?.length ? persistedRequiredFor : requiredFor,
+          };
+        });
+      }
+    }
     return artifacts.length > 0 ? { ...model, artifacts } : model;
   }
 
@@ -1258,22 +1305,28 @@ export class ModelDownloadManager {
           const failedProjectorId = preflightError.code === 'download_disk_space_low'
             ? selectedProjector?.id
             : undefined;
-          const failedProjector = failedProjectorId
-            ? currentModel.projectorCandidates?.find((projector) => projector.id === failedProjectorId)
+          const currentFailedProjector = failedProjectorId
+            ? getEffectiveActiveVariantProjectorCandidates(currentModel)
+              .find((projector) => projector.id === failedProjectorId)
             : undefined;
           const modelResumeDataForFailure = modelResumeDiskPlanning
             ? modelResumeDiskPlanning.resumeData
             : normalizeDownloadResumeData(currentModel.resumeData);
           const projectorResumeDataForFailure = projectorResumeDiskPlanning
             ? projectorResumeDiskPlanning.resumeData
-            : normalizeDownloadResumeData(failedProjector?.resumeData);
+            : normalizeDownloadResumeData(currentFailedProjector?.resumeData);
           const shouldClearInvalidModelPartialState = modelResumeDiskPlanning !== null
             && modelResumeDiskPlanning.resumeData === undefined
             && this.hasPartialResumeOrProgressState(currentModel);
           updateModelInQueue(model.id, {
             ...this.getDownloadFailureUpdates(e, modelResumeDataForFailure),
             ...(shouldClearInvalidModelPartialState ? { localPath: undefined, downloadProgress: 0 } : {}),
-            ...this.getProjectorFailureUpdates(currentModel, failedProjectorId, e, projectorResumeDataForFailure),
+            ...this.getProjectorFailureUpdates(
+              currentModel,
+              failedProjectorId ? selectedProjector ?? undefined : undefined,
+              e,
+              projectorResumeDataForFailure,
+            ),
           });
           setActiveDownload(null);
         } catch (storageError) {
@@ -1402,6 +1455,7 @@ export class ModelDownloadManager {
         this.activeJob.resumable = resumable;
         this.activeJob.activeArtifact = 'model';
         this.activeJob.activeProjectorId = undefined;
+        this.activeJob.activeProjector = undefined;
       }
     }
 
@@ -1616,18 +1670,18 @@ export class ModelDownloadManager {
 
       // Success
       const latestCompletedQueueModel = this.getQueuedModel(model.id, model);
-      const completedProjectorCandidates = projectorResult
-        ? this.updateProjectorCandidates(latestCompletedQueueModel, projectorResult.projector.id, projectorResult.projector)
-        : latestCompletedQueueModel.projectorCandidates;
+      const completedProjectorUpdates = projectorResult
+        ? this.updateProjectorState(latestCompletedQueueModel, projectorResult.projector, projectorResult.projector)
+        : {};
       const completedModel: ModelMetadata = this.withSynchronizedArtifacts({
         ...latestCompletedQueueModel,
+        ...completedProjectorUpdates,
         ...baseCheckpointUpdates,
         fitsInRam: memoryFit.fitsInRam,
         memoryFitDecision: memoryFit.decision,
         memoryFitConfidence: memoryFit.confidence,
         downloadedAt: Date.now(),
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
-        projectorCandidates: completedProjectorCandidates,
       });
 
       assertPrivateStorageWritableForDownloadMutation();
@@ -1683,7 +1737,8 @@ export class ModelDownloadManager {
         const currentModel = this.getQueuedModel(model.id, model);
         const failureProjectorId = failedProjectorId ?? (downloadStage === 'projector' ? selectedProjector?.id : undefined);
         const currentFailedProjector = failureProjectorId
-          ? currentModel.projectorCandidates?.find((projector) => projector.id === failureProjectorId)
+          ? getEffectiveActiveVariantProjectorCandidates(currentModel)
+            .find((projector) => projector.id === failureProjectorId)
           : undefined;
         const resumeDataForFailure = resumeData ?? normalizeDownloadResumeData(currentModel.resumeData);
         const projectorResumeDataForFailure = projectorResumeData
@@ -1693,7 +1748,9 @@ export class ModelDownloadManager {
           && baseModelMemoryFit !== null;
         const projectorFailureUpdates = this.getProjectorFailureUpdates(
           currentModel,
-          failedProjectorId ?? (projectorStageFailedAfterBaseVerified ? selectedProjector?.id : undefined),
+          failureProjectorId || projectorStageFailedAfterBaseVerified
+            ? this.activeJob?.activeProjector ?? selectedProjector ?? currentFailedProjector
+            : undefined,
           e,
           projectorResumeDataForFailure,
         );
@@ -1739,6 +1796,7 @@ export class ModelDownloadManager {
         this.activeJob.resumable = null;
         this.activeJob.activeArtifact = undefined;
         this.activeJob.activeProjectorId = undefined;
+        this.activeJob.activeProjector = undefined;
       }
     }
     }
@@ -1976,6 +2034,7 @@ export class ModelDownloadManager {
             this.activeJob.resumable = null;
             this.activeJob.activeArtifact = 'projector';
             this.activeJob.activeProjectorId = projector.id;
+            this.activeJob.activeProjector = projector;
           }
 
           const verification = await this.verifyChecksum(projector, reusableLocalUri, {
@@ -2065,6 +2124,7 @@ export class ModelDownloadManager {
       this.activeJob.resumable = projectorResumable;
       this.activeJob.activeArtifact = 'projector';
       this.activeJob.activeProjectorId = projector.id;
+      this.activeJob.activeProjector = projector;
     }
 
     const result = await projectorResumable.downloadAsync();
@@ -2111,6 +2171,7 @@ export class ModelDownloadManager {
       this.activeJob.resumable = null;
       this.activeJob.activeArtifact = 'projector';
       this.activeJob.activeProjectorId = projector.id;
+      this.activeJob.activeProjector = projector;
     }
 
     assertPrivateStorageWritableForDownloadMutation();
@@ -2305,6 +2366,7 @@ export class ModelDownloadManager {
     const jobToken = job.jobToken;
     const activeArtifact = job.activeArtifact;
     const activeProjectorId = job.activeProjectorId;
+    const activeProjector = job.activeProjector;
     let resumeSnapshot: unknown | null = null;
 
     try {
@@ -2332,23 +2394,23 @@ export class ModelDownloadManager {
         if (resumeData && activeArtifact !== 'projector') {
           updates.resumeData = resumeData;
         }
+        const currentActiveProjector = activeProjectorId && latestQueuedModel
+          ? getEffectiveActiveVariantProjectorCandidates(latestQueuedModel)
+            .find((projector) => projector.id === activeProjectorId)
+          : undefined;
         const fallbackQueuedProjector = !activeProjectorId && latestQueuedModel
           ? this.resolveProjectorForDownload(latestQueuedModel)
           : null;
-        const projectorIdToPause = activeProjectorId ?? (
-          fallbackQueuedProjector?.lifecycleStatus === 'queued'
-            ? fallbackQueuedProjector.id
-            : undefined
-        );
-        if (latestQueuedModel && projectorIdToPause) {
+        const projectorToPause = activeProjector
+          ?? currentActiveProjector
+          ?? (fallbackQueuedProjector?.lifecycleStatus === 'queued' ? fallbackQueuedProjector : undefined);
+        if (latestQueuedModel && projectorToPause) {
           const projectorResumeData = activeArtifact === 'projector' && activeProjectorId ? resumeData : undefined;
-          const projectorCandidates = this.updateProjectorCandidates(latestQueuedModel, projectorIdToPause, {
+          const projectorUpdates = this.updateProjectorState(latestQueuedModel, projectorToPause, {
             lifecycleStatus: 'paused',
             resumeData: projectorResumeData,
           });
-          if (projectorCandidates) {
-            updates.projectorCandidates = projectorCandidates;
-          }
+          Object.assign(updates, projectorUpdates);
         }
 
         await this.persistDownloadStoreMutation(() => {
@@ -2512,7 +2574,7 @@ export class ModelDownloadManager {
               ? [model.localPath]
               : []
           ),
-          ...(model.projectorCandidates ?? [])
+          ...getAllModelProjectorCandidates(model)
             .filter((projector) => isStoredProjectorArtifact(projector))
             .filter((projector) => !(
               options.excludeProjector

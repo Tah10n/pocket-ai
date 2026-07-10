@@ -1,7 +1,14 @@
-import type { ModelMetadata, ModelVariant } from '../types/models';
+import type { ModelMetadata } from '../types/models';
 import type { MultimodalReadinessStatus, ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
 import { clearProjectorScopedMemoryFit, shouldClearProjectorScopedMemoryFit } from '../utils/projectorMemoryFitInvalidation';
 import { resolveDeterministicProjectorCandidate } from '../utils/modelProjectors';
+import {
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+  resolveEffectiveActiveVariantNativeSupport,
+} from '../utils/modelCapabilities';
+import { isMultimodalReadinessReusableForModel } from '../utils/multimodalReadiness';
+import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { registry } from './LocalStorageRegistry';
 
 export type ProjectorResolutionReason =
@@ -50,61 +57,61 @@ function cloneProjector(projector: ProjectorArtifact): ProjectorArtifact {
   return { ...projector };
 }
 
-function resolveActiveVariant(model: ModelMetadata): ModelVariant | undefined {
-  const activeVariantId = model.activeVariantId;
-  if (!activeVariantId) {
-    return undefined;
-  }
-
-  return model.variants?.find((variant) => (
-    variant.variantId === activeVariantId
-    || variant.fileName === activeVariantId
-  ));
-}
-
 function getActiveModelFileName(model: ModelMetadata): string | undefined {
-  const activeVariant = resolveActiveVariant(model);
+  const activeVariant = resolveActiveModelVariant(model);
   return activeVariant?.fileName ?? model.resolvedFileName ?? model.activeVariantId;
 }
 
-function getActiveVariantKeys(model: ModelMetadata): Set<string> {
-  const activeVariant = resolveActiveVariant(model);
-  return new Set(
-    [
-      model.activeVariantId,
-      model.resolvedFileName,
-      activeVariant?.variantId,
-      activeVariant?.fileName,
-    ].filter((value): value is string => typeof value === 'string' && value.length > 0),
-  );
-}
-
 function getCompatibleProjectors(model: ModelMetadata): ProjectorArtifact[] {
-  const ownedProjectors = (model.projectorCandidates ?? [])
-    .filter((projector) => projector.ownerModelId === model.id);
-  const activeVariantKeys = getActiveVariantKeys(model);
-  const compatibleProjectors = ownedProjectors.filter((projector) => (
-    !projector.ownerVariantId
-    || activeVariantKeys.size === 0
-    || activeVariantKeys.has(projector.ownerVariantId)
-  ));
-
-  return compatibleProjectors.map(cloneProjector);
+  return getEffectiveActiveVariantProjectorCandidates(model).map(cloneProjector);
 }
 
 function shouldPreserveReadinessForSelectedProjector(model: ModelMetadata, projector: ProjectorArtifact): boolean {
-  const readiness = model.multimodalReadiness;
-  if (!readiness) {
-    return false;
-  }
+  const support = resolveEffectiveActiveVariantNativeSupport(model);
+  const requestedSupport = [
+    ...(support.vision ? ['vision' as const] : []),
+    ...(support.audio ? ['audio' as const] : []),
+  ];
 
-  return readiness.projectorId === projector.id;
+  return isMultimodalReadinessReusableForModel({
+    model,
+    readiness: model.multimodalReadiness,
+    projectorId: projector.id,
+    requestedSupport,
+    projectorCandidates: getCompatibleProjectors(model),
+  });
 }
 
 function clearMemoryFitForProjectorChange(model: ModelMetadata, selectedProjectorId: string): ModelMetadata {
   return shouldClearProjectorScopedMemoryFit(model, { ...model, selectedProjectorId })
     ? clearProjectorScopedMemoryFit(model)
     : model;
+}
+
+function markSelectedProjectorCandidates(
+  candidates: readonly ProjectorArtifact[] | undefined,
+  targetProjectorId: string,
+  compatibleIds: ReadonlySet<string>,
+): ProjectorArtifact[] | undefined {
+  return candidates?.map((projector) => {
+    if (projector.id === targetProjectorId) {
+      return {
+        ...projector,
+        matchStatus: 'user_selected',
+        matchReason: 'user_selected_projector',
+      };
+    }
+
+    if (compatibleIds.has(projector.id) && projector.matchStatus === 'user_selected') {
+      return {
+        ...projector,
+        matchStatus: 'ambiguous',
+        matchReason: 'unselected_projector_candidate',
+      };
+    }
+
+    return projector;
+  });
 }
 
 export class ProjectorArtifactService {
@@ -120,7 +127,8 @@ export class ProjectorArtifactService {
       };
     }
 
-    const selectedProjector = candidates.find((projector) => projector.id === model.selectedProjectorId);
+    const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, candidates);
+    const selectedProjector = candidates.find((projector) => projector.id === selectedProjectorId);
     if (selectedProjector) {
       return {
         status: 'user_selected',
@@ -185,33 +193,39 @@ export class ProjectorArtifactService {
     }
 
     const compatibleIds = new Set(compatibleProjectors.map((projector) => projector.id));
+    const nativeSupport = resolveEffectiveActiveVariantNativeSupport(model);
+    const activeVariant = resolveActiveModelVariant(model);
     const modelWithProjectorScopedMemoryFit = clearMemoryFitForProjectorChange(model, targetProjector.id);
     const updatedModel: ModelMetadata = {
       ...modelWithProjectorScopedMemoryFit,
       selectedProjectorId: targetProjector.id,
-      visionSource: 'user_selected_projector',
+      visionSource: nativeSupport.vision ? 'user_selected_projector' : undefined,
+      ...(!nativeSupport.vision ? { visionConfidence: undefined } : null),
       multimodalReadiness: shouldPreserveReadinessForSelectedProjector(model, targetProjector)
         ? model.multimodalReadiness
         : undefined,
-      projectorCandidates: (model.projectorCandidates ?? []).map((projector) => {
-        if (projector.id === targetProjector.id) {
-          return {
-            ...projector,
-            matchStatus: 'user_selected',
-            matchReason: 'user_selected_projector',
-          };
-        }
-
-        if (compatibleIds.has(projector.id) && projector.matchStatus === 'user_selected') {
-          return {
-            ...projector,
-            matchStatus: 'ambiguous',
-            matchReason: 'unselected_projector_candidate',
-          };
-        }
-
-        return projector;
-      }),
+      projectorCandidates: markSelectedProjectorCandidates(
+        model.projectorCandidates ?? [],
+        targetProjector.id,
+        compatibleIds,
+      ),
+      ...(activeVariant && modelWithProjectorScopedMemoryFit.variants ? {
+        variants: modelWithProjectorScopedMemoryFit.variants.map((variant) => (
+          variant.variantId === activeVariant.variantId || variant.fileName === activeVariant.fileName
+        )
+          ? {
+              ...variant,
+              selectedProjectorId: targetProjector.id,
+              visionSource: nativeSupport.vision ? 'user_selected_projector' as const : undefined,
+              ...(!nativeSupport.vision ? { visionConfidence: undefined } : null),
+              projectorCandidates: markSelectedProjectorCandidates(
+                variant.projectorCandidates,
+                targetProjector.id,
+                compatibleIds,
+              ),
+            }
+          : variant),
+      } : null),
     };
 
     return {

@@ -37,6 +37,8 @@ import { isValidLocalFileName } from '../utils/safeFilePath';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import { normalizeMultimodalReadinessState as normalizeReadinessSupport } from '../utils/multimodalReadiness';
+import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import {
   isProjectorFileName,
   isSupportedGgufFileName,
@@ -203,17 +205,17 @@ function normalizeMultimodalReadinessState(value: unknown): MultimodalReadinessS
     : undefined;
   const failureReason = sanitizeMultimodalFailureReason(normalizeNonEmptyString(record.failureReason));
 
-  return {
+  return normalizeReadinessSupport({
     modelId,
     ...(normalizeNonEmptyString(record.variantId) ? { variantId: normalizeNonEmptyString(record.variantId) } : {}),
     status,
     ...(normalizeNonEmptyString(record.projectorId) ? { projectorId: normalizeNonEmptyString(record.projectorId) } : {}),
     ...(projectorSize !== undefined ? { projectorSize } : {}),
     support: normalizeMultimodalSupport(record.support),
-    ...(requestedSupport && requestedSupport.length > 0 ? { requestedSupport } : {}),
+    ...(requestedSupport !== undefined ? { requestedSupport } : {}),
     ...(failureReason ? { failureReason } : {}),
     checkedAt,
-  };
+  });
 }
 
 function normalizeVisionCapabilitySource(value: unknown): VisionCapabilitySource | undefined {
@@ -451,8 +453,13 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
   const ramFitConfidence = normalizeMemoryFitConfidence(record.ramFitConfidence);
   const chatModalities = normalizeChatModalities(record.chatModalities);
   const artifactRole = normalizeModelArtifactRole(record.artifactRole);
-  const visionSource = normalizeVisionCapabilitySource(record.visionSource);
-  const visionConfidence = normalizeVisionCapabilityConfidence(record.visionConfidence);
+  const permitsVisionMetadata = chatModalities === undefined || chatModalities.includes('vision');
+  const visionSource = permitsVisionMetadata
+    ? normalizeVisionCapabilitySource(record.visionSource)
+    : undefined;
+  const visionConfidence = permitsVisionMetadata
+    ? normalizeVisionCapabilityConfidence(record.visionConfidence)
+    : undefined;
   const projectorCandidates = normalizeProjectorArtifacts(record.projectorCandidates);
   const selectedProjectorId = normalizeNonEmptyString(record.selectedProjectorId);
 
@@ -497,20 +504,14 @@ function resolveActiveVariantId(
       return activeVariantId;
     }
 
-    const activeVariant = variants.find((variant) => (
-      variant.variantId === activeVariantId
-      || variant.fileName === activeVariantId
-    ));
+    const activeVariant = resolveActiveModelVariant({ activeVariantId, variants });
     if (activeVariant) {
       return activeVariant.variantId;
     }
   }
 
   if (resolvedFileName) {
-    const resolvedVariant = variants?.find((variant) => (
-      variant.variantId === resolvedFileName
-      || variant.fileName === resolvedFileName
-    ));
+    const resolvedVariant = resolveActiveModelVariant({ resolvedFileName, variants });
     if (resolvedVariant) {
       return resolvedVariant.variantId;
     }

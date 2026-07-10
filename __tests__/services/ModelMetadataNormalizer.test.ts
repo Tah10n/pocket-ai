@@ -6,6 +6,24 @@ const VALID_SHA256 = 'a'.repeat(64);
 const OTHER_VALID_SHA256 = 'b'.repeat(64);
 
 describe('ModelMetadataNormalizer', () => {
+  it('removes persisted support outside the requested modality set', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'legacy/audio-model',
+      multimodalReadiness: {
+        modelId: 'legacy/audio-model',
+        status: 'ready',
+        support: ['vision', 'audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.multimodalReadiness).toEqual(expect.objectContaining({
+      support: ['audio'],
+      requestedSupport: ['audio'],
+    }));
+  });
+
   it('maps zero-size legacy metadata to unknown size and nullable RAM fit', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'legacy/model',
@@ -421,6 +439,81 @@ describe('ModelMetadataNormalizer', () => {
     });
 
     expect(opaqueWithoutVariants.activeVariantId).toBe('catalog-choice-q8');
+  });
+
+  it('keeps exact active variant ids authoritative over earlier filename aliases', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'org/variant-id-alias-collision',
+      resolvedFileName: 'audio-main.gguf',
+      activeVariantId: 'audio-q4.gguf',
+      variants: [
+        {
+          variantId: 'legacy-audio',
+          fileName: 'audio-q4.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'vision'],
+        },
+        {
+          variantId: 'audio-q4.gguf',
+          fileName: 'audio-main.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 2,
+          chatModalities: ['text', 'audio'],
+        },
+      ],
+    });
+
+    expect(normalized.activeVariantId).toBe('audio-q4.gguf');
+    expect(normalized.variants?.find((variant) => variant.variantId === normalized.activeVariantId)?.fileName)
+      .toBe('audio-main.gguf');
+  });
+
+  it('keeps exact resolved filenames authoritative over earlier variant-id aliases', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'org/resolved-file-alias-collision',
+      resolvedFileName: 'audio-q4.gguf',
+      variants: [
+        {
+          variantId: 'audio-q4.gguf',
+          fileName: 'audio-main.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 2,
+          chatModalities: ['text', 'audio'],
+        },
+        {
+          variantId: 'legacy-audio',
+          fileName: 'audio-q4.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'vision'],
+        },
+      ],
+    });
+
+    expect(normalized.activeVariantId).toBe('legacy-audio');
+    expect(normalized.variants?.find((variant) => variant.variantId === normalized.activeVariantId)?.fileName)
+      .toBe('audio-q4.gguf');
+  });
+
+  it('drops stale vision provenance from an explicit audio-only variant', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'org/audio-variant-stale-vision',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'],
+        visionSource: 'gguf_metadata',
+        visionConfidence: 'verified',
+      }],
+    });
+
+    expect(normalized.variants?.[0]?.visionSource).toBeUndefined();
+    expect(normalized.variants?.[0]?.visionConfidence).toBeUndefined();
   });
 
   it('preserves multimodal model and variant metadata with valid projector candidates', () => {

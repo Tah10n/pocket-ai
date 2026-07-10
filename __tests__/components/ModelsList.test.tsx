@@ -524,6 +524,85 @@ describe('ModelsList', () => {
     }));
   });
 
+  it('merges a variant-only projector selection into stale registry fallback state', async () => {
+    const handleLoadMore = jest.fn();
+    const firstProjector = {
+      ...createProjectorCandidate('projector-audio-a', 'mmproj-audio-a.gguf'),
+      ownerVariantId: 'model.Q4_K_M.gguf',
+    };
+    const secondProjector = {
+      ...createProjectorCandidate('projector-audio-b', 'mmproj-audio-b.gguf'),
+      ownerVariantId: 'model.Q4_K_M.gguf',
+    };
+    const activeVariant = {
+      ...createModel().variants![0],
+      chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+      projectorCandidates: [firstProjector, secondProjector],
+    };
+    const model = createModel({
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      variants: [activeVariant, createModel().variants![1]],
+    });
+    mockRegistryModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.Q4_K_M.gguf',
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      variants: [{
+        ...activeVariant,
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        projectorCandidates: [firstProjector],
+      }, createModel().variants![1]],
+    });
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [model],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="audio" />);
+    act(() => {
+      mockUseModelActionsInput.openProjectorChoice(model);
+    });
+    act(() => {
+      mockLastProjectorChoiceSheetProps.onSelectProjector(secondProjector.id);
+    });
+
+    expect(mockRegistryUpdateModel).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'models/model.Q4_K_M.gguf',
+      selectedProjectorId: undefined,
+      projectorCandidates: undefined,
+      variants: expect.arrayContaining([
+        expect.objectContaining({
+          variantId: activeVariant.variantId,
+          visionSource: undefined,
+          visionConfidence: undefined,
+          selectedProjectorId: secondProjector.id,
+          projectorCandidates: [
+            expect.objectContaining({ id: firstProjector.id }),
+            expect.objectContaining({
+              id: secondProjector.id,
+              matchStatus: 'user_selected',
+            }),
+          ],
+        }),
+      ]),
+    }));
+    expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      variants: expect.arrayContaining([
+        expect.objectContaining({
+          selectedProjectorId: secondProjector.id,
+          visionSource: undefined,
+          visionConfidence: undefined,
+        }),
+      ]),
+    }));
+  });
+
   it('preserves fresh vision metadata when merging projector selection into a stale registry model', async () => {
     const handleLoadMore = jest.fn();
     const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');

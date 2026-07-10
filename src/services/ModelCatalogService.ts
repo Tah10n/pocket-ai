@@ -64,6 +64,8 @@ import {
   HF_BASE_URL,
 } from '../utils/huggingFaceUrls';
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
+import { resolveActiveModelVariant } from '../utils/activeModelVariant';
+import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 import {
@@ -71,9 +73,19 @@ import {
   mergeInputCapabilitySnapshots,
 } from '../utils/modelInputCapabilities';
 import {
+  getEffectiveActiveVariantKeys,
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+  modelExplicitlySupportsActiveVariantModality,
+  projectorArtifactMatchesCandidate,
+  resolveEffectiveActiveVariantNativeSupport,
   resolveModelChatModalities,
   resolveModelNativeMultimodalSupport,
 } from '../utils/modelCapabilities';
+import {
+  isMultimodalReadinessReusableForModel,
+  normalizeMultimodalReadinessState,
+} from '../utils/multimodalReadiness';
 import { mergeProjectorRuntimeState as mergeCompatibleProjectorRuntimeState } from '../utils/projectorRuntimeState';
 import {
   getCompatibleLocalDownloadStatePatch,
@@ -156,6 +168,12 @@ type CatalogMemoryFitContext = {
 };
 
 type ProjectorMetadataMerge = Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId' | 'multimodalReadiness'>;
+
+type ProjectorMetadataFilterOptions = {
+  artifactRequirements?: ModelMetadata['artifacts'];
+  fallbackModel?: ModelMetadata;
+  fallbackProjectorIds?: ReadonlySet<string>;
+};
 
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>>> = new Map();
@@ -1323,19 +1341,7 @@ export class ModelCatalogService {
   private resolveActiveVariantKeys(
     model: Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName' | 'variants'>,
   ): Set<string> {
-    const activeVariantId = this.normalizeProjectorVariantId(model.activeVariantId);
-    const resolvedFileName = this.normalizeProjectorVariantId(model.resolvedFileName);
-    const activeVariant = model.variants?.find((variant) => (
-      (activeVariantId && (variant.variantId === activeVariantId || variant.fileName === activeVariantId))
-      || (resolvedFileName && (variant.variantId === resolvedFileName || variant.fileName === resolvedFileName))
-    ));
-
-    return new Set([
-      activeVariantId,
-      resolvedFileName,
-      this.normalizeProjectorVariantId(activeVariant?.variantId),
-      this.normalizeProjectorVariantId(activeVariant?.fileName),
-    ].filter((value): value is string => typeof value === 'string'));
+    return new Set(getEffectiveActiveVariantKeys(model));
   }
 
   private resolveActiveVariantProjectorMemoryFitSizeBytes(
@@ -1598,6 +1604,10 @@ export class ModelCatalogService {
         });
         const projectorCandidates = discoveredProjectorCandidates
           ?? (useFullTreeProbe && treeResponse.isComplete ? [] : undefined);
+        const hasAuthoritativeEmptyProjectorResult = treeResponse.isComplete
+          && useFullTreeProbe
+          && Array.isArray(projectorCandidates)
+          && projectorCandidates.length === 0;
         const inferredInputCapabilities = inferDeclaredInputCapabilities({
           id: model.id,
           modelId: model.id,
@@ -1617,12 +1627,18 @@ export class ModelCatalogService {
         const existingNativeChatModalities = model.chatModalities?.some((modality) => modality !== 'text') === true
           ? model.chatModalities
           : undefined;
-        const chatModalities = resolveModelChatModalities({
+        const inferredChatModalities = resolveModelChatModalities({
           ...model,
           chatModalities: existingNativeChatModalities,
           inputCapabilities,
           projectorCandidates: projectorCandidates ?? model.projectorCandidates,
         });
+        const chatModalities = hasAuthoritativeEmptyProjectorResult
+          ? inferredChatModalities.filter((modality) => modality !== 'audio')
+          : inferredChatModalities;
+        const artifacts = hasAuthoritativeEmptyProjectorResult
+          ? this.clearAudioProjectorArtifactsAfterAuthoritativeTreeMiss(model.artifacts)
+          : model.artifacts;
         const hasRefreshedVisionSupport = chatModalities.includes('vision');
         const hasFreshProjectorMetadata = projectorCandidates !== undefined;
         const shouldClearVisionMetadata = hasFreshProjectorMetadata && !hasRefreshedVisionSupport;
@@ -1680,15 +1696,40 @@ export class ModelCatalogService {
         const projectorMetadataPatch = this.mergeProjectorMetadataWithLocalState(
           {
             ...model,
+            resolvedFileName,
+            activeVariantId: resolvedFileName,
+            variants,
+            inputCapabilities,
+            artifacts,
+            chatModalities,
             projectorCandidates: projectorCandidatesForMerge,
           },
           model,
           shouldResetLocalDownloadState,
           projectorCandidates !== undefined && !treeResponse.isComplete && !shouldResetLocalDownloadState,
         );
+        const discoveredProjectorIds = new Set((projectorCandidates ?? []).map((projector) => projector.id));
+        const fallbackProjectorIds = projectorCandidates !== undefined && !treeResponse.isComplete
+          ? new Set((model.projectorCandidates ?? [])
+            .map((projector) => projector.id)
+            .filter((projectorId) => !discoveredProjectorIds.has(projectorId)))
+          : undefined;
         const filteredProjectorMetadataPatch = this.filterProjectorMetadataMergeForChatModalities(
           projectorMetadataPatch,
-          chatModalities,
+          {
+            ...model,
+            resolvedFileName,
+            activeVariantId: resolvedFileName,
+            variants,
+            artifacts,
+            chatModalities,
+            ...projectorMetadataPatch,
+          },
+          {
+            artifactRequirements: artifacts,
+            fallbackModel: model,
+            fallbackProjectorIds,
+          },
         );
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
@@ -1731,7 +1772,7 @@ export class ModelCatalogService {
         );
 
         if (shouldKeepTreeProbe) {
-          return normalizePersistedModelMetadata({
+          return this.preserveAuthoritativeEmptyProjectorResult(normalizePersistedModelMetadata({
             ...model,
             ...localDownloadStatePatch,
             size,
@@ -1749,15 +1790,16 @@ export class ModelCatalogService {
             variants: variantsWithResolvedActiveMemoryFit,
             activeVariantId: resolvedFileName,
             inputCapabilities,
+            artifacts,
             chatModalities,
             artifactRole: 'primary_chat_model',
             visionSource,
             visionConfidence,
             ...filteredProjectorMetadataPatch,
-          });
+          }), hasAuthoritativeEmptyProjectorResult);
         }
 
-        return normalizePersistedModelMetadata({
+        return this.preserveAuthoritativeEmptyProjectorResult(normalizePersistedModelMetadata({
           ...model,
           ...localDownloadStatePatch,
           size,
@@ -1775,12 +1817,13 @@ export class ModelCatalogService {
           variants: variantsWithResolvedActiveMemoryFit,
           activeVariantId: resolvedFileName,
           inputCapabilities,
+          artifacts,
           chatModalities,
           artifactRole: 'primary_chat_model',
           visionSource,
           visionConfidence,
           ...filteredProjectorMetadataPatch,
-        });
+        }), hasAuthoritativeEmptyProjectorResult);
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
           throw error;
@@ -2141,13 +2184,31 @@ export class ModelCatalogService {
     shouldResetLocalDownloadState: boolean,
     preserveUnmatchedLocalProjectors = false,
   ): ProjectorMetadataMerge {
-    const remoteCandidates = remoteModel.projectorCandidates;
-    const localCandidates = localModel.projectorCandidates ?? [];
+    const remoteActiveVariant = resolveActiveModelVariant(remoteModel);
+    const hasRemoteCandidateMetadata = remoteModel.projectorCandidates !== undefined
+      || remoteActiveVariant?.projectorCandidates !== undefined;
+    const remoteCandidates = hasRemoteCandidateMetadata
+      ? getEffectiveActiveVariantProjectorCandidates(remoteModel)
+      : undefined;
+    const localCandidates = getEffectiveActiveVariantProjectorCandidates(localModel);
+    const localActiveVariant = resolveActiveModelVariant(localModel);
+    const rawLocalCandidates = [
+      ...(localActiveVariant?.projectorCandidates ?? []),
+      ...(localModel.projectorCandidates ?? []),
+    ];
+    const remoteSelectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(
+      remoteModel,
+      remoteCandidates ?? [],
+    );
+    const localSelectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(
+      localModel,
+      localCandidates,
+    );
 
     if (shouldResetLocalDownloadState) {
       const remoteCandidateIds = new Set((remoteCandidates ?? []).map((projector) => projector.id));
       const selectedProjectorId = this.resolveMergedSelectedProjectorId(
-        remoteModel.selectedProjectorId,
+        remoteSelectedProjectorId,
         undefined,
         remoteCandidateIds,
         new Map(),
@@ -2168,12 +2229,12 @@ export class ModelCatalogService {
     }
 
     if (!remoteCandidates) {
-      const runtimeVariantId = this.resolveProjectorRuntimeVariantId(remoteModel, localModel);
+      const runtimeVariantKeys = this.resolveProjectorRuntimeVariantKeys(remoteModel, localModel);
       const blockedLocalProjectorIds = new Set<string>();
       const compatibleLocalCandidates = localCandidates.filter((localProjector) => {
         const canPreserveLocalProjector = this.projectorAppliesToRuntimeVariant(
           localProjector,
-          runtimeVariantId,
+          runtimeVariantKeys,
         );
         if (!canPreserveLocalProjector) {
           blockedLocalProjectorIds.add(localProjector.id);
@@ -2183,8 +2244,8 @@ export class ModelCatalogService {
       });
       const localCandidateIds = new Set(compatibleLocalCandidates.map((projector) => projector.id));
       const selectedProjectorId = this.resolveMergedSelectedProjectorId(
-        remoteModel.selectedProjectorId,
-        localModel.selectedProjectorId,
+        remoteSelectedProjectorId,
+        localSelectedProjectorId,
         localCandidateIds,
         new Map(),
         blockedLocalProjectorIds,
@@ -2213,17 +2274,15 @@ export class ModelCatalogService {
     const incompatibleRemoteReadinessProjectorIds = new Set<string>();
     const blockedLocalProjectorIds = new Set<string>();
     const blockedRemoteProjectorIds = new Set<string>();
-    const runtimeVariantId = this.resolveProjectorRuntimeVariantId(remoteModel, localModel);
+    const runtimeVariantKeys = this.resolveProjectorRuntimeVariantKeys(remoteModel, localModel);
     const mergedCandidates = remoteCandidates.map((remoteProjector) => {
-      const exactLocalProjector = localCandidates.find((localProjector) => (
-        !usedLocalProjectorIds.has(localProjector.id)
-        && localProjector.id === remoteProjector.id
+      const conflictingExactLocalProjector = rawLocalCandidates.find((localProjector) => (
+        localProjector.id === remoteProjector.id
+        && this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantKeys)
+        && !this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantKeys)
       ));
-      if (
-        exactLocalProjector
-        && !this.projectorsShareStableArtifact(remoteProjector, exactLocalProjector, runtimeVariantId)
-      ) {
-        blockedLocalProjectorIds.add(exactLocalProjector.id);
+      if (conflictingExactLocalProjector) {
+        blockedLocalProjectorIds.add(conflictingExactLocalProjector.id);
         blockedRemoteProjectorIds.add(remoteProjector.id);
       }
 
@@ -2231,7 +2290,7 @@ export class ModelCatalogService {
         remoteProjector,
         localCandidates,
         usedLocalProjectorIds,
-        runtimeVariantId,
+        runtimeVariantKeys,
       );
 
       if (!localProjector) {
@@ -2258,7 +2317,7 @@ export class ModelCatalogService {
           continue;
         }
 
-        if (!this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantId)) {
+        if (!this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantKeys)) {
           blockedLocalProjectorIds.add(localProjector.id);
           continue;
         }
@@ -2268,8 +2327,8 @@ export class ModelCatalogService {
     }
     const mergedCandidateIds = new Set(mergedCandidates.map((projector) => projector.id));
     const selectedProjectorId = this.resolveMergedSelectedProjectorId(
-      remoteModel.selectedProjectorId,
-      localModel.selectedProjectorId,
+      remoteSelectedProjectorId,
+      localSelectedProjectorId,
       mergedCandidateIds,
       localToRemoteProjectorIds,
       blockedLocalProjectorIds,
@@ -2287,8 +2346,8 @@ export class ModelCatalogService {
       ...incompatibleRemoteReadinessProjectorIds,
     ]);
     const shouldSuppressLocalReadinessFallback = (
-      typeof remoteModel.selectedProjectorId === 'string'
-      && blockedRemoteProjectorIds.has(remoteModel.selectedProjectorId)
+      typeof remoteSelectedProjectorId === 'string'
+      && blockedRemoteProjectorIds.has(remoteSelectedProjectorId)
       && selectedProjectorId === undefined
     );
 
@@ -2314,12 +2373,12 @@ export class ModelCatalogService {
     remoteProjector: ProjectorArtifact,
     localProjectors: ProjectorArtifact[],
     usedLocalProjectorIds: Set<string>,
-    runtimeVariantId?: string,
+    runtimeVariantKeys: ReadonlySet<string>,
   ): ProjectorArtifact | undefined {
     const exactMatch = localProjectors.find((localProjector) => (
       !usedLocalProjectorIds.has(localProjector.id)
       && localProjector.id === remoteProjector.id
-      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantId)
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantKeys)
     ));
     if (exactMatch) {
       return exactMatch;
@@ -2327,18 +2386,16 @@ export class ModelCatalogService {
 
     return localProjectors.find((localProjector) => (
       !usedLocalProjectorIds.has(localProjector.id)
-      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantId)
+      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantKeys)
     ));
   }
 
-  private resolveProjectorRuntimeVariantId(
+  private resolveProjectorRuntimeVariantKeys(
     remoteModel: ModelMetadata,
     localModel: ModelMetadata,
-  ): string | undefined {
-    return remoteModel.activeVariantId
-      ?? remoteModel.resolvedFileName
-      ?? localModel.activeVariantId
-      ?? localModel.resolvedFileName;
+  ): ReadonlySet<string> {
+    const remoteKeys = getEffectiveActiveVariantKeys(remoteModel);
+    return remoteKeys.size > 0 ? remoteKeys : getEffectiveActiveVariantKeys(localModel);
   }
 
   private normalizeProjectorVariantId(value: string | undefined): string | undefined {
@@ -2352,17 +2409,16 @@ export class ModelCatalogService {
 
   private projectorAppliesToRuntimeVariant(
     projector: ProjectorArtifact,
-    runtimeVariantId: string | undefined,
+    runtimeVariantKeys: ReadonlySet<string>,
   ): boolean {
     const projectorVariantId = this.normalizeProjectorVariantId(projector.ownerVariantId);
-    const activeVariantId = this.normalizeProjectorVariantId(runtimeVariantId);
-    return !projectorVariantId || !activeVariantId || projectorVariantId === activeVariantId;
+    return !projectorVariantId || runtimeVariantKeys.size === 0 || runtimeVariantKeys.has(projectorVariantId);
   }
 
   private projectorsShareRuntimeVariantScope(
     remoteProjector: ProjectorArtifact,
     localProjector: ProjectorArtifact,
-    runtimeVariantId: string | undefined,
+    runtimeVariantKeys: ReadonlySet<string>,
   ): boolean {
     const remoteVariantId = this.normalizeProjectorVariantId(remoteProjector.ownerVariantId);
     const localVariantId = this.normalizeProjectorVariantId(localProjector.ownerVariantId);
@@ -2371,20 +2427,20 @@ export class ModelCatalogService {
     }
 
     if (remoteVariantId && localVariantId) {
-      return false;
+      return runtimeVariantKeys.has(remoteVariantId) && runtimeVariantKeys.has(localVariantId);
     }
 
     const scopedVariantId = remoteVariantId ?? localVariantId;
     return Boolean(
       scopedVariantId
-      && this.normalizeProjectorVariantId(runtimeVariantId) === scopedVariantId,
+      && runtimeVariantKeys.has(scopedVariantId),
     );
   }
 
   private projectorsShareStableArtifact(
     remoteProjector: ProjectorArtifact,
     localProjector: ProjectorArtifact,
-    runtimeVariantId?: string,
+    runtimeVariantKeys: ReadonlySet<string> = new Set(),
   ): boolean {
     if (
       remoteProjector.ownerModelId !== localProjector.ownerModelId
@@ -2395,7 +2451,7 @@ export class ModelCatalogService {
       return false;
     }
 
-    return this.projectorsShareRuntimeVariantScope(remoteProjector, localProjector, runtimeVariantId);
+    return this.projectorsShareRuntimeVariantScope(remoteProjector, localProjector, runtimeVariantKeys);
   }
 
   private projectorsHaveCompatibleRuntimeMetadata(
@@ -2576,51 +2632,140 @@ export class ModelCatalogService {
     );
   }
 
-  private filterMultimodalReadinessForChatModalities(
-    readiness: MultimodalReadinessState | undefined,
-    chatModalities: ModelMetadata['chatModalities'],
-  ): MultimodalReadinessState | undefined {
-    if (!readiness) {
+  private resolveProjectorArtifactSupport(
+    projectorId: string,
+    artifacts: ModelMetadata['artifacts'],
+  ): MultimodalSupportModality[] | undefined {
+    const artifact = artifacts?.find((candidate) => (
+      candidate.kind === 'multimodal_projector' && candidate.id === projectorId
+    ));
+    if (!artifact) {
       return undefined;
     }
 
-    const allowedSupport = new Set<MultimodalSupportModality>();
-    if (chatModalities?.includes('vision') === true) {
-      allowedSupport.add('vision');
-    }
-    if (chatModalities?.includes('audio') === true) {
-      allowedSupport.add('audio');
-    }
+    return (['vision', 'audio'] as const).filter((modality) => (
+      artifact.requiredFor.includes(modality === 'vision' ? 'image' : 'audio')
+    ));
+  }
 
-    if (allowedSupport.size === 0) {
-      return undefined;
-    }
-
-    const support = readiness.support.filter((modality) => allowedSupport.has(modality));
-    if (readiness.status === 'ready' && support.length === 0) {
-      return undefined;
+  private fallbackProjectorMatchesActiveModalities(
+    projector: ProjectorArtifact,
+    metadata: ProjectorMetadataMerge,
+    fallbackModel: ModelMetadata | undefined,
+    allowedSupport: readonly MultimodalSupportModality[],
+  ): boolean {
+    if (!fallbackModel) {
+      return false;
     }
 
-    const requestedSupport = readiness.requestedSupport?.filter((modality) => allowedSupport.has(modality));
-    const { requestedSupport: _staleRequestedSupport, ...readinessWithoutRequestedSupport } = readiness;
+    const fallbackSupport = resolveEffectiveActiveVariantNativeSupport(fallbackModel);
+    const fallbackRequestedSupport = (['vision', 'audio'] as const).filter((modality) => (
+      fallbackSupport[modality]
+    ));
+    const readiness = metadata.multimodalReadiness
+      ? normalizeMultimodalReadinessState(metadata.multimodalReadiness)
+      : undefined;
+    const readinessSupportsProjector = readiness?.status === 'ready'
+      && readiness.projectorId === projector.id
+      && isMultimodalReadinessReusableForModel({
+        model: fallbackModel,
+        readiness,
+        projectorId: projector.id,
+        requestedSupport: fallbackRequestedSupport,
+        projectorCandidates: [projector],
+      });
+    if (
+      readinessSupportsProjector
+      && readiness.support.some((modality) => allowedSupport.includes(modality))
+    ) {
+      return true;
+    }
 
-    return {
-      ...readinessWithoutRequestedSupport,
-      support,
-      ...(requestedSupport && requestedSupport.length > 0 ? { requestedSupport } : {}),
-    };
+    const hasDownloadedPath = typeof projector.localPath === 'string'
+      && projector.localPath.trim().length > 0
+      && (projector.lifecycleStatus === 'downloaded' || projector.lifecycleStatus === 'active');
+    return metadata.selectedProjectorId === projector.id
+      && hasDownloadedPath
+      && fallbackRequestedSupport.some((modality) => allowedSupport.includes(modality));
   }
 
   private filterProjectorMetadataMergeForChatModalities(
     metadata: ProjectorMetadataMerge,
-    chatModalities: ModelMetadata['chatModalities'],
+    model: ModelMetadata,
+    options: ProjectorMetadataFilterOptions = {},
   ): ProjectorMetadataMerge {
+    const effectiveSupport = resolveEffectiveActiveVariantNativeSupport(model);
+    const activeVariant = resolveActiveModelVariant(model);
+    const hasExplicitEffectiveModalities = Array.isArray(activeVariant?.chatModalities)
+      || Array.isArray(model.chatModalities);
+    const requestedSupport = (['vision', 'audio'] as const).filter((modality) => (
+      hasExplicitEffectiveModalities
+        ? modelExplicitlySupportsActiveVariantModality(model, modality)
+        : effectiveSupport[modality]
+    ));
+    if (requestedSupport.length === 0) {
+      return {
+        projectorCandidates: undefined,
+        selectedProjectorId: undefined,
+        multimodalReadiness: undefined,
+      };
+    }
+
+    const projectorCandidates = metadata.projectorCandidates?.filter((projector) => {
+      const artifactSupport = this.resolveProjectorArtifactSupport(
+        projector.id,
+        options.artifactRequirements,
+      );
+      if (artifactSupport !== undefined) {
+        return artifactSupport.some((modality) => requestedSupport.includes(modality));
+      }
+
+      if (!options.fallbackProjectorIds?.has(projector.id)) {
+        return true;
+      }
+
+      return this.fallbackProjectorMatchesActiveModalities(
+        projector,
+        metadata,
+        options.fallbackModel,
+        requestedSupport,
+      );
+    });
+    const filteredProjectorCandidates = projectorCandidates && projectorCandidates.length > 0
+      ? projectorCandidates
+      : undefined;
+    const candidateIds = new Set((filteredProjectorCandidates ?? []).map((projector) => projector.id));
+    const selectedProjectorId = metadata.selectedProjectorId
+      && candidateIds.has(metadata.selectedProjectorId)
+      ? metadata.selectedProjectorId
+      : undefined;
+    const normalizedReadiness = metadata.multimodalReadiness
+      ? normalizeMultimodalReadinessState(metadata.multimodalReadiness)
+      : undefined;
+    const readinessProjectorId = selectedProjectorId
+      ?? (normalizedReadiness?.projectorId && candidateIds.has(normalizedReadiness.projectorId)
+        ? normalizedReadiness.projectorId
+        : undefined);
+    const readinessModel: ModelMetadata = {
+      ...model,
+      projectorCandidates: filteredProjectorCandidates,
+      selectedProjectorId,
+      multimodalReadiness: normalizedReadiness,
+    };
+    const multimodalReadiness = isMultimodalReadinessReusableForModel({
+      model: readinessModel,
+      readiness: normalizedReadiness,
+      projectorId: readinessProjectorId,
+      requestedSupport,
+      projectorCandidates: filteredProjectorCandidates,
+    })
+      ? normalizedReadiness
+      : undefined;
+
     return {
-      ...metadata,
-      multimodalReadiness: this.filterMultimodalReadinessForChatModalities(
-        metadata.multimodalReadiness,
-        chatModalities,
-      ),
+      projectorCandidates: filteredProjectorCandidates,
+      selectedProjectorId,
+      multimodalReadiness,
     };
   }
 
@@ -2683,9 +2828,10 @@ export class ModelCatalogService {
   }
 
   private hasAudioEvidence(model: ModelMetadata): boolean {
-    const hasExplicitAudioModality = model.chatModalities?.includes('audio') === true;
-    const hasProjectorPathEvidence = Boolean(model.projectorCandidates?.length)
-      || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0);
+    const hasExplicitAudioModality = modelExplicitlySupportsActiveVariantModality(model, 'audio');
+    const effectiveProjectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+    const hasProjectorPathEvidence = effectiveProjectorCandidates.length > 0
+      || getEffectiveActiveVariantSelectedProjectorId(model, effectiveProjectorCandidates) !== undefined;
     const hasAudioCapabilityWithRuntimePath = model.inputCapabilities?.declared.audio === 'supported'
       && hasProjectorPathEvidence;
 
@@ -2703,36 +2849,61 @@ export class ModelCatalogService {
       return false;
     }
 
-    if (this.readinessIncludesModality(projectorMetadataPatch.multimodalReadiness, 'audio')) {
-      return true;
+    const mergedProjectorCandidates = projectorMetadataPatch.projectorCandidates ?? [];
+    const mergedProjectorIds = new Set(mergedProjectorCandidates.map((projector) => projector.id));
+    const effectiveSupport = resolveEffectiveActiveVariantNativeSupport(localModel);
+    if (!effectiveSupport.audio) {
+      return false;
     }
 
-    const mergedProjectorIds = new Set((projectorMetadataPatch.projectorCandidates ?? []).map((projector) => projector.id));
-    const localProjectorIds = new Set((localModel.projectorCandidates ?? []).map((projector) => projector.id));
-    if (mergedProjectorIds.size === 0) {
-      return localModel.chatModalities?.includes('audio') === true
-        && localProjectorIds.size === 0
-        && !this.modelArtifactsRequireInput(localModel, 'audio');
-    }
-
-    if (localModel.artifacts?.some((artifact) => (
-      artifact.kind === 'multimodal_projector'
-      && artifact.requiredFor.includes('audio')
-      && mergedProjectorIds.has(artifact.id)
-    )) === true) {
-      return true;
-    }
-
+    const requestedSupport = (['vision', 'audio'] as const).filter((modality) => effectiveSupport[modality]);
+    const readiness = projectorMetadataPatch.multimodalReadiness
+      ? normalizeMultimodalReadinessState(projectorMetadataPatch.multimodalReadiness)
+      : undefined;
+    const expectedReadinessProjectorId = projectorMetadataPatch.selectedProjectorId
+      ?? readiness?.projectorId;
     if (
-      localModel.selectedProjectorId
-      && mergedProjectorIds.has(localModel.selectedProjectorId)
-      && localModel.chatModalities?.includes('audio') === true
+      readiness?.status === 'ready'
+      && readiness.support.includes('audio')
+      && typeof readiness.projectorId === 'string'
+      && mergedProjectorIds.has(readiness.projectorId)
+      && isMultimodalReadinessReusableForModel({
+        model: localModel,
+        readiness,
+        projectorId: expectedReadinessProjectorId,
+        requestedSupport,
+        projectorCandidates: mergedProjectorCandidates,
+      })
     ) {
       return true;
     }
 
-    return localModel.chatModalities?.includes('audio') === true
-      && Array.from(localProjectorIds).some((projectorId) => mergedProjectorIds.has(projectorId));
+    if (localModel.artifacts?.some((artifact) => {
+      const candidate = mergedProjectorCandidates.find((projector) => projector.id === artifact.id);
+      return artifact.kind === 'multimodal_projector'
+        && artifact.requiredFor.includes('audio')
+        && artifact.installState === 'installed'
+        && typeof artifact.localPath === 'string'
+        && artifact.localPath.trim().length > 0
+        && candidate !== undefined
+        && projectorArtifactMatchesCandidate(artifact, candidate);
+    }) === true) {
+      return true;
+    }
+
+    if (
+      !modelExplicitlySupportsActiveVariantModality(localModel, 'audio')
+      || !projectorMetadataPatch.selectedProjectorId
+    ) {
+      return false;
+    }
+
+    const selectedProjector = mergedProjectorCandidates.find((projector) => (
+      projector.id === projectorMetadataPatch.selectedProjectorId
+    ));
+    return typeof selectedProjector?.localPath === 'string'
+      && selectedProjector.localPath.trim().length > 0
+      && (selectedProjector.lifecycleStatus === 'downloaded' || selectedProjector.lifecycleStatus === 'active');
   }
 
   private mergeChatModalitiesPreservingLocalNative(
@@ -2753,6 +2924,9 @@ export class ModelCatalogService {
       modalities.add(modality);
     }
 
+    // Preserve repository-wide vision only when it belongs to the repository
+    // baseline. Explicit active-variant vision is merged into that variant
+    // separately so it cannot widen sibling variants through parent fallback.
     if (options.preserveLocalVision && localModel.chatModalities?.includes('vision') === true) {
       modalities.add('vision');
     }
@@ -2769,6 +2943,81 @@ export class ModelCatalogService {
       .filter((modality) => modalities.has(modality));
 
     return orderedModalities.length > 0 ? orderedModalities : undefined;
+  }
+
+  private mergeActiveLocalVariantMetadata(
+    remoteModel: ModelMetadata,
+    localModel: ModelMetadata,
+    canUseLocalFallback: boolean,
+  ): ModelMetadata['variants'] {
+    if (!canUseLocalFallback) {
+      return remoteModel.variants;
+    }
+
+    const localActiveVariant = resolveActiveModelVariant(localModel);
+    if (!localActiveVariant) {
+      return remoteModel.variants;
+    }
+
+    const remoteActiveVariantKeys = getEffectiveActiveVariantKeys(remoteModel);
+    const localActiveVariantKeys = new Set([
+      localActiveVariant.variantId,
+      localActiveVariant.fileName,
+    ]);
+    if (
+      remoteActiveVariantKeys.size === 0
+      || ![...remoteActiveVariantKeys].some((key) => localActiveVariantKeys.has(key))
+    ) {
+      return remoteModel.variants;
+    }
+
+    const remoteActiveVariant = resolveActiveModelVariant(remoteModel);
+    if (remoteActiveVariant && Array.isArray(remoteActiveVariant.chatModalities)) {
+      const remoteVariantSupportsVision = remoteActiveVariant.chatModalities.includes('vision');
+      const canReuseLocalVisionMetadata = remoteVariantSupportsVision
+        && (
+          !Array.isArray(localActiveVariant.chatModalities)
+          || localActiveVariant.chatModalities.includes('vision')
+        );
+      const mergedActiveVariant: ModelVariant = {
+        ...localActiveVariant,
+        ...remoteActiveVariant,
+        size: remoteActiveVariant.size ?? localActiveVariant.size,
+        sha256: remoteActiveVariant.sha256 ?? localActiveVariant.sha256,
+        ramFit: remoteActiveVariant.ramFit ?? localActiveVariant.ramFit,
+        ramFitConfidence: remoteActiveVariant.ramFitConfidence ?? localActiveVariant.ramFitConfidence,
+        isLocal: remoteActiveVariant.isLocal ?? localActiveVariant.isLocal,
+        // Fresh explicit catalog modalities own the native boundary. Projector
+        // runtime state is reconciled separately, so stale local native fields
+        // must not make the variant win dedupe and change modality scope.
+        chatModalities: remoteActiveVariant.chatModalities,
+        artifactRole: remoteActiveVariant.artifactRole,
+        visionSource: remoteVariantSupportsVision
+          ? remoteActiveVariant.visionSource ?? (
+            canReuseLocalVisionMetadata ? localActiveVariant.visionSource : undefined
+          )
+          : undefined,
+        visionConfidence: remoteVariantSupportsVision
+          ? remoteActiveVariant.visionConfidence ?? (
+            canReuseLocalVisionMetadata ? localActiveVariant.visionConfidence : undefined
+          )
+          : undefined,
+        projectorCandidates: remoteActiveVariant.projectorCandidates,
+        selectedProjectorId: remoteActiveVariant.selectedProjectorId,
+      };
+
+      return remoteModel.variants?.map((variant) => (
+        variant === remoteActiveVariant ? mergedActiveVariant : variant
+      ));
+    }
+
+    return dedupeModelVariantsByIdentity(
+      [...(remoteModel.variants ?? []), localActiveVariant],
+      {
+        activeVariantId: remoteModel.activeVariantId ?? localModel.activeVariantId,
+        resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
+      },
+    );
   }
 
   private mergeModelWithRegistry(
@@ -2870,8 +3119,7 @@ export class ModelCatalogService {
       localModel,
       shouldResetLocalDownloadState,
     );
-    const remoteHasVisionEvidence = remoteModel.chatModalities?.includes('vision') === true
-      || Boolean(remoteModel.projectorCandidates?.length)
+    const remoteHasVisionEvidence = resolveEffectiveActiveVariantNativeSupport(remoteModel).vision
       || this.modelArtifactsRequireInput(remoteModel, 'image')
       || this.readinessIncludesModality(remoteModel.multimodalReadiness, 'vision')
       || remoteModel.visionSource !== undefined;
@@ -2879,12 +3127,17 @@ export class ModelCatalogService {
     const remoteExplicitlyExcludesVision = Array.isArray(remoteModel.chatModalities)
       && remoteModel.chatModalities.some((modality) => modality !== 'text')
       && !remoteModel.chatModalities.includes('vision');
+    const remoteExplicitlyExcludesAudio = Array.isArray(remoteModel.chatModalities)
+      && remoteModel.chatModalities.some((modality) => modality !== 'text')
+      && !remoteModel.chatModalities.includes('audio');
+    const localEffectiveNativeSupport = resolveEffectiveActiveVariantNativeSupport(localModel);
     const shouldPreserveLocalVisionMetadata = !shouldResetLocalDownloadState
       && !remoteHasVisionEvidence
       && !remoteExplicitlyExcludesVision
-      && localModel.chatModalities?.includes('vision') === true;
+      && localEffectiveNativeSupport.vision;
     const shouldPreserveLocalAudioMetadata = !shouldResetLocalDownloadState
       && !remoteHasAudioEvidence
+      && !remoteExplicitlyExcludesAudio
       && this.hasLocalAudioRuntimeMetadata(localModel, projectorMetadataPatch);
     const canUseLocalNativeFallback = !shouldResetLocalDownloadState;
     const chatModalities = this.mergeChatModalitiesPreservingLocalNative(remoteModel, localModel, {
@@ -2892,21 +3145,61 @@ export class ModelCatalogService {
       preserveLocalVision: shouldPreserveLocalVisionMetadata,
       preserveLocalAudio: shouldPreserveLocalAudioMetadata,
     });
+    const nativeVariants = this.mergeActiveLocalVariantMetadata(
+      remoteModel,
+      localModel,
+      canUseLocalNativeFallback,
+    );
+    const remoteProjectorIds = new Set(
+      getEffectiveActiveVariantProjectorCandidates(remoteModel).map((projector) => projector.id),
+    );
+    const fallbackProjectorIds = new Set(getEffectiveActiveVariantProjectorCandidates(localModel)
+      .map((projector) => projector.id)
+      .filter((projectorId) => !remoteProjectorIds.has(projectorId)));
+    const artifactRequirements = [
+      ...(remoteModel.artifacts ?? []),
+      ...(localModel.artifacts ?? []),
+    ];
     const filteredProjectorMetadataPatch = this.filterProjectorMetadataMergeForChatModalities(
       projectorMetadataPatch,
-      chatModalities,
+      {
+        ...remoteModel,
+        artifacts: artifactRequirements.length > 0 ? artifactRequirements : undefined,
+        chatModalities,
+        variants: nativeVariants,
+        ...projectorMetadataPatch,
+      },
+      {
+        artifactRequirements,
+        fallbackModel: localModel,
+        fallbackProjectorIds,
+      },
     );
     const shouldPreserveLocalNativeMetadata = shouldPreserveLocalVisionMetadata || shouldPreserveLocalAudioMetadata;
     const artifactRole = shouldPreserveLocalNativeMetadata
       ? localModel.artifactRole ?? remoteModel.artifactRole
       : remoteModel.artifactRole ?? (canUseLocalNativeFallback ? localModel.artifactRole : undefined);
-    const canUseLocalVisionFallback = canUseLocalNativeFallback && !remoteExplicitlyExcludesVision;
-    const visionSource = shouldPreserveLocalVisionMetadata
+    const canUseLocalVisionFallback = canUseLocalNativeFallback
+      && !remoteExplicitlyExcludesVision
+      && localEffectiveNativeSupport.vision;
+    const candidateVisionSource = shouldPreserveLocalVisionMetadata
       ? localModel.visionSource ?? remoteModel.visionSource
       : remoteModel.visionSource ?? (canUseLocalVisionFallback ? localModel.visionSource : undefined);
-    const visionConfidence = shouldPreserveLocalVisionMetadata
+    const candidateVisionConfidence = shouldPreserveLocalVisionMetadata
       ? localModel.visionConfidence ?? remoteModel.visionConfidence
       : remoteModel.visionConfidence ?? (canUseLocalVisionFallback ? localModel.visionConfidence : undefined);
+    const mergedEffectiveNativeSupport = resolveEffectiveActiveVariantNativeSupport({
+      ...remoteModel,
+      chatModalities,
+      variants: nativeVariants,
+      ...filteredProjectorMetadataPatch,
+    });
+    const visionSource = mergedEffectiveNativeSupport.vision
+      ? candidateVisionSource
+      : undefined;
+    const visionConfidence = mergedEffectiveNativeSupport.vision
+      ? candidateVisionConfidence
+      : undefined;
     const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
       projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
         ...remoteModel,
@@ -2925,7 +3218,7 @@ export class ModelCatalogService {
       ?? remoteModel.memoryFitConfidence
       ?? (allowLocalVerifiedDerivedMetadata ? localModel.memoryFitConfidence : undefined);
     const variants = this.withActiveVariantResolvedMemoryFit(
-      remoteModel.variants,
+      nativeVariants,
       remoteModel.activeVariantId ?? remoteModel.resolvedFileName,
       resolvedMemoryFit,
     );
@@ -2977,6 +3270,34 @@ export class ModelCatalogService {
       visionConfidence,
       ...filteredProjectorMetadataPatch,
     });
+  }
+
+  private clearAudioProjectorArtifactsAfterAuthoritativeTreeMiss(
+    artifacts: ModelMetadata['artifacts'],
+  ): ModelMetadata['artifacts'] {
+    if (!artifacts) {
+      return undefined;
+    }
+
+    const sanitizedArtifacts = artifacts.flatMap((artifact) => {
+      if (artifact.kind !== 'multimodal_projector') {
+        return [artifact];
+      }
+
+      const requiredFor = artifact.requiredFor.filter((input) => input !== 'audio');
+      return requiredFor.length > 0 ? [{ ...artifact, requiredFor }] : [];
+    });
+
+    return sanitizedArtifacts.length > 0 ? sanitizedArtifacts : undefined;
+  }
+
+  private preserveAuthoritativeEmptyProjectorResult(
+    model: ModelMetadata,
+    isAuthoritativeEmpty: boolean,
+  ): ModelMetadata {
+    return isAuthoritativeEmpty
+      ? { ...model, projectorCandidates: [] }
+      : model;
   }
 
   private resolveMergedContextWindowMetadata(

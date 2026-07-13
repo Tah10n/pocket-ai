@@ -7,6 +7,8 @@ import {
 } from '../../src/types/models';
 import { createStorage } from '../../src/services/storage';
 import {
+  MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES,
+  MODEL_CATALOG_CACHE_PERSISTED_VERSION,
   ModelCatalogCacheStore,
   sanitizeCatalogModelRuntimeState,
 } from '../../src/services/ModelCatalogCacheStore';
@@ -446,6 +448,291 @@ describe('ModelCatalogCacheStore', () => {
     jest.useRealTimers();
   });
 
+  it('defers persisted JSON parsing until hydration is explicitly scheduled', () => {
+    const scope = { query: 'deferred', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [buildModel({ id: 'org/deferred-cache-model' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const parseSpy = jest.spyOn(JSON, 'parse');
+
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(deferredStore.getSearch(scope, 1000)).toBeNull();
+
+    deferredStore.hydrate();
+
+    expect(parseSpy).toHaveBeenCalled();
+    expect(deferredStore.getSearch(scope, 1000)?.models[0]?.id).toBe('org/deferred-cache-model');
+    parseSpy.mockRestore();
+  });
+
+  it('retries a failed hydration without retaining partially loaded entries', () => {
+    const scope = { query: 'retry', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [buildModel({ id: 'org/partial-cache-model' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storage = (deferredStore as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const originalGetString = storage.getString.bind(storage);
+    const getStringSpy = jest.spyOn(storage, 'getString')
+      .mockImplementationOnce((key) => originalGetString(key))
+      .mockImplementationOnce(() => {
+        throw new Error('transient storage read failure');
+      });
+
+    expect(() => deferredStore.hydrate()).toThrow('transient storage read failure');
+
+    storage.remove(SEARCH_CACHE_KEY);
+    getStringSpy.mockImplementation((key) => originalGetString(key));
+    deferredStore.hydrate();
+
+    expect(deferredStore.getSearch(scope, 1000)).toBeNull();
+    getStringSpy.mockRestore();
+  });
+
+  it('keeps deferred hydration and persistence available after a transient size probe failure', () => {
+    const scope = { query: 'size-probe', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const cachedModel = buildModel({
+      id: 'org/size-probe-cache-model',
+      description: 'Persisted before the metrics probe',
+    });
+    const seedStore = new ModelCatalogCacheStore();
+    seedStore.putSearch(scope, {
+      models: [cachedModel],
+      hasMore: false,
+      nextCursor: null,
+    });
+    seedStore.putModelSnapshots([cachedModel], 'anon');
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storage = (deferredStore as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const originalGetString = storage.getString.bind(storage);
+    const getStringSpy = jest.spyOn(storage, 'getString')
+      .mockImplementationOnce(() => {
+        throw new Error('transient metrics read failure');
+      })
+      .mockImplementation((key) => originalGetString(key));
+
+    expect(deferredStore.getPersistedSizeBytes()).toBe(0);
+    expect(() => deferredStore.hydrate()).not.toThrow();
+    expect(deferredStore.getSearch(scope, 1000)?.models[0]).toEqual(expect.objectContaining({
+      id: cachedModel.id,
+      description: cachedModel.description,
+    }));
+    expect(deferredStore.getModelSnapshot(cachedModel.id, 'anon', 1000)).toEqual(expect.objectContaining({
+      id: cachedModel.id,
+      description: cachedModel.description,
+    }));
+
+    const laterScope = { ...scope, query: 'size-probe-later' };
+    deferredStore.putSearch(laterScope, {
+      models: [buildModel({ id: 'org/persisted-after-size-probe' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SEARCH_CACHE_KEY))
+      .toContain('org/persisted-after-size-probe');
+    getStringSpy.mockRestore();
+  });
+
+  it('degrades to memory-only mutations when persistent hydration keeps failing', () => {
+    const scope = { query: 'memory-only', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({ id: 'org/memory-only-cache-model' });
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const getStringSpy = jest.spyOn(storage, 'getString').mockImplementation(() => {
+      throw new Error('persistent storage unavailable');
+    });
+
+    expect(() => store.hydrate()).toThrow('persistent storage unavailable');
+    expect(() => store.putSearch(scope, {
+      models: [model],
+      hasMore: false,
+      nextCursor: null,
+    })).not.toThrow();
+    expect(() => store.putModelSnapshots([model], 'anon')).not.toThrow();
+
+    expect(store.getSearch(scope, 1000)?.models[0]?.id).toBe(model.id);
+    expect(store.getModelSnapshot(model.id, 'anon', 1000)?.id).toBe(model.id);
+    expect(getStringSpy).toHaveBeenCalledTimes(2);
+    getStringSpy.mockRestore();
+  });
+
+  it('keeps cache writes in memory when persistence writes fail', () => {
+    const scope = { query: 'write-failure', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({ id: 'org/write-failure-cache-model' });
+    const store = new ModelCatalogCacheStore();
+    const storage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const setSpy = jest.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('persistent storage write failure');
+    });
+
+    expect(() => store.putSearch(scope, {
+      models: [model],
+      hasMore: false,
+      nextCursor: null,
+    })).not.toThrow();
+    expect(() => store.putSearch({ ...scope, query: 'second-write' }, {
+      models: [model],
+      hasMore: false,
+      nextCursor: null,
+    })).not.toThrow();
+
+    expect(store.getSearch(scope, 1000)?.models[0]?.id).toBe(model.id);
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    setSpy.mockRestore();
+  });
+
+  it('removes a stale anonymous payload when a reconciliation write fails', () => {
+    const scope = { query: 'visibility-write-failure', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const safeModel = buildModel({ id: 'org/still-public' });
+    const staleModel = buildModel({ id: 'org/became-private' });
+    const seedStore = new ModelCatalogCacheStore();
+    seedStore.putSearch(scope, {
+      models: [safeModel, staleModel],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const store = new ModelCatalogCacheStore();
+    const storage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const setSpy = jest.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('persistent storage write failure');
+    });
+    const removeSpy = jest.spyOn(storage, 'remove');
+
+    expect(() => store.reconcileAnonymousSearchModels([{
+      ...staleModel,
+      accessState: ModelAccessState.AUTHORIZED,
+      isPrivate: true,
+    }])).not.toThrow();
+
+    expect(store.getSearch(scope, 1000)?.models.map((model) => model.id)).toEqual([safeModel.id]);
+    expect(removeSpy).toHaveBeenCalledWith(SEARCH_CACHE_KEY);
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(new ModelCatalogCacheStore().getSearch(scope, 1000)).toBeNull();
+
+    removeSpy.mockRestore();
+    setSpy.mockRestore();
+  });
+
+  it('keeps reconciliation memory state fail-open when stale-payload invalidation also fails', () => {
+    const scope = { query: 'visibility-remove-failure', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const safeModel = buildModel({ id: 'org/still-public-after-remove-failure' });
+    const staleModel = buildModel({ id: 'org/private-after-remove-failure' });
+    const seedStore = new ModelCatalogCacheStore();
+    seedStore.putSearch(scope, {
+      models: [safeModel, staleModel],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const persistedBeforeFailure = createStorage(STORAGE_ID, { tier: 'cache' }).getString(SEARCH_CACHE_KEY);
+    const store = new ModelCatalogCacheStore();
+    const storage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const setSpy = jest.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('persistent storage write failure');
+    });
+    const removeSpy = jest.spyOn(storage, 'remove').mockImplementation(() => {
+      throw new Error('persistent storage remove failure');
+    });
+
+    expect(() => store.reconcileAnonymousSearchModels([{
+      ...staleModel,
+      accessState: ModelAccessState.AUTHORIZED,
+      isPrivate: true,
+    }])).not.toThrow();
+    expect(store.getSearch(scope, 1000)?.models.map((model) => model.id)).toEqual([safeModel.id]);
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SEARCH_CACHE_KEY)).toBe(persistedBeforeFailure);
+    expect(() => store.putSearch({ ...scope, query: 'later-memory-only-write' }, {
+      models: [safeModel],
+      hasMore: false,
+      nextCursor: null,
+    })).not.toThrow();
+    expect(setSpy).toHaveBeenCalledTimes(1);
+    expect(removeSpy).toHaveBeenCalledTimes(1);
+
+    removeSpy.mockRestore();
+    setSpy.mockRestore();
+  });
+
+  it('drops oversized persisted payloads before JSON parsing', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(
+      SEARCH_CACHE_KEY,
+      `{"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION},"entries":[],"padding":"${'x'.repeat(
+        MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES,
+      )}"}`,
+    );
+    const parseSpy = jest.spyOn(JSON, 'parse');
+
+    new ModelCatalogCacheStore();
+
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    parseSpy.mockRestore();
+  });
+
+  it('bounds persisted payload bytes without evicting smaller recent entries from memory', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const store = new ModelCatalogCacheStore();
+    const smallScope = { query: 'small', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const largeScope = { query: 'large', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    store.putSearch(smallScope, {
+      models: [buildModel({ id: 'org/small-cache-model' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    store.putSearch(largeScope, {
+      models: [buildModel({
+        id: 'org/oversized-cache-model',
+        description: 'x'.repeat(MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES),
+      })],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    const raw = storage.getString(SEARCH_CACHE_KEY) as string;
+    expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES);
+    expect(raw).toContain('org/small-cache-model');
+    expect(raw).not.toContain('org/oversized-cache-model');
+    expect(store.getSearch(largeScope, 1000)?.models[0]?.id).toBe('org/oversized-cache-model');
+  });
+
+  it('preserves an explicit empty projector result across search and snapshot cache round-trips', () => {
+    const model = buildModel({
+      id: 'org/authoritative-empty-projectors',
+      projectorCandidates: [],
+    });
+    const scope = { query: model.id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const store = new ModelCatalogCacheStore();
+    store.putSearch(scope, { models: [model], hasMore: false, nextCursor: null });
+    store.putModelSnapshots([model], 'anon');
+
+    const reloadedStore = new ModelCatalogCacheStore();
+
+    expect(reloadedStore.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toEqual([]);
+    expect(reloadedStore.getModelSnapshot(model.id, 'anon', 1000)?.projectorCandidates).toEqual([]);
+  });
+
   it.each(NATIVE_CACHE_MATRIX)(
     'enforces native cache state matrix: $name',
     ({ model: makeModel, expected }) => {
@@ -529,7 +816,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(sanitizeCatalogModelRuntimeState(sanitized)).toEqual(sanitized);
   });
 
-  it('migrates mixed safe/unsafe v4 search and snapshot payloads to sanitized v5 state', () => {
+  it('migrates mixed safe/unsafe v4 search and snapshot payloads to sanitized current state', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const scope = {
       query: 'migration/safe-vision',
@@ -614,8 +901,8 @@ describe('ModelCatalogCacheStore', () => {
 
     const persistedSearch = JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string) as any;
     const persistedSnapshot = JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string) as any;
-    expect(persistedSearch.version).toBe(5);
-    expect(persistedSnapshot.version).toBe(5);
+    expect(persistedSearch.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+    expect(persistedSnapshot.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
     for (const persistedModel of [
       persistedSearch.entries[0].result.models[0],
       persistedSnapshot.entries[0].model,
@@ -630,7 +917,7 @@ describe('ModelCatalogCacheStore', () => {
     }
   });
 
-  it('rewrites v5 payloads when inputCapabilities alone contain unsafe runtime evidence', () => {
+  it('rewrites legacy v5 payloads when inputCapabilities alone contain unsafe runtime evidence', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const scope = { query: 'rewrite', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
     const unsafeModel = buildModel({
@@ -694,7 +981,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(sanitizeCatalogModelRuntimeState(sanitized)).toEqual(sanitized);
   });
 
-  it('rewrites raw v5 search and snapshot models before duplicate normalization can hide private state', () => {
+  it('rewrites raw legacy v5 search and snapshot models before duplicate normalization can hide private state', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const id = 'rewrite/raw-duplicate-projector';
     const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
@@ -746,7 +1033,7 @@ describe('ModelCatalogCacheStore', () => {
 
     for (const key of [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY]) {
       const raw = storage.getString(key) as string;
-      expect(JSON.parse(raw).version).toBe(5);
+      expect(JSON.parse(raw).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
       expect(raw).toContain('mmproj-safe.gguf');
       expect(raw).not.toContain('file:///private');
       expect(raw).not.toContain('mmproj-private-duplicate.gguf');
@@ -758,6 +1045,64 @@ describe('ModelCatalogCacheStore', () => {
     new ModelCatalogCacheStore();
     expect(storage.getString(SEARCH_CACHE_KEY)).toBe(rewrittenSearch);
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBe(rewrittenSnapshot);
+  });
+
+  it('rewrites current v6 search and snapshot payloads after field-level sanitization', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'rewrite/current-version-runtime-state';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const unsafeModel = buildModel({
+      id,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 0.75,
+      localPath: 'private-current-version-model.gguf',
+      resumeData: 'private-current-version-resume-token',
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 91,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [{ source: 'runtime', value: 'audio', confidence: 'high' }],
+      },
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`,
+        timestamp: Date.now(),
+        scope,
+        result: { models: [unsafeModel], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      entries: [{
+        key: `${id}::anon`,
+        id,
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: unsafeModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    const cachedModels = [
+      store.getSearch(scope, 1000)?.models[0],
+      store.getModelSnapshot(id, 'anon', 1000),
+    ];
+    for (const model of cachedModels) {
+      expect(model?.localPath).toBeUndefined();
+      expect(model?.resumeData).toBeUndefined();
+      expect(model?.chatModalities).toEqual(['text']);
+      expect(model?.inputCapabilities).toBeUndefined();
+    }
+
+    for (const key of [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY]) {
+      const raw = storage.getString(key) as string;
+      expect(JSON.parse(raw).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+      expect(raw).not.toContain('private-current-version-model.gguf');
+      expect(raw).not.toContain('private-current-version-resume-token');
+      expect(raw).not.toContain('"source":"runtime"');
+    }
   });
 
   it('retains parent catalog audio evidence for a safe variant-only projector', () => {
@@ -1181,7 +1526,7 @@ describe('ModelCatalogCacheStore', () => {
 
     const raw = storage.getString(SEARCH_CACHE_KEY) as string;
     const persisted = JSON.parse(raw) as any;
-    expect(persisted.version).toBe(5);
+    expect(persisted.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
     expect(persisted.entries[0].result.models[0].variants).toHaveLength(12);
     expect(raw).toContain(activeVariant.fileName);
     expect(raw).not.toContain('isLocal');
@@ -2004,7 +2349,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(persistedSnapshot.entries[0].model.variants[0].projectorCandidates[0].downloadProgress).toBeUndefined();
   });
 
-  it('migrates version 3 search payloads to version 5 with variant limiting', () => {
+  it('migrates version 3 search payloads to the current version with variant limiting', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const scope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
     const variants = Array.from({ length: 14 }, (_value, index) => ({
@@ -2047,7 +2392,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(model?.variants?.some((variant) => variant.isLocal === true)).toBe(false);
 
     const persisted = JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string) as any;
-    expect(persisted.version).toBe(5);
+    expect(persisted.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
     expect(persisted.entries[0].result.models[0].variants).toHaveLength(12);
     expect(persisted.entries[0].result.models[0].variants.some(
       (variant: any) => variant.fileName === activeVariant.fileName,
@@ -2174,7 +2519,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
   });
 
-  it('migrates version 3 snapshot payloads to version 5 with anonymous sanitization', () => {
+  it('migrates version 3 snapshot payloads to the current version with anonymous sanitization', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
 
     storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
@@ -2224,7 +2569,7 @@ describe('ModelCatalogCacheStore', () => {
 
     const raw = storage.getString(SNAPSHOT_CACHE_KEY) as string;
     const persisted = JSON.parse(raw) as any;
-    expect(persisted.version).toBe(5);
+    expect(persisted.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
     expect(raw).toContain('legacy/gated-snapshot');
     expect(raw).not.toContain('secret.Q8_0.gguf');
     expect(raw).not.toContain('legacy/private-snapshot');
@@ -2286,7 +2631,7 @@ describe('ModelCatalogCacheStore', () => {
     store.deleteModelSnapshots(['stale/private'], 'anon');
 
     expect(store.getModelSnapshot('stale/private', 'anon', 1000)).toBeNull();
-    expect(storage.getString(SNAPSHOT_CACHE_KEY)).not.toContain('stale/private');
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
   });
 
   it('reconciles existing anonymous search entries when auth metadata changes visibility', () => {
@@ -2370,5 +2715,67 @@ describe('ModelCatalogCacheStore', () => {
     store.clearAll();
     expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
+  });
+
+  it('propagates clearSnapshots removal failures instead of reporting a successful clear', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const model = buildModel({ id: 'clear/snapshot-remove-failure' });
+    store.putModelSnapshots([model], 'anon');
+    const persistedSnapshot = storage.getString(SNAPSHOT_CACHE_KEY);
+    const removeError = new Error('snapshot remove failed');
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const originalRemove = storeStorage.remove.bind(storeStorage);
+    const removeSpy = jest.spyOn(storeStorage, 'remove').mockImplementation((key) => {
+      if (key === SNAPSHOT_CACHE_KEY) {
+        throw removeError;
+      }
+      return originalRemove(key);
+    });
+
+    try {
+      expect(() => store.clearSnapshots()).toThrow(removeError);
+      expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBe(persistedSnapshot);
+      expect(store.getModelSnapshot(model.id, 'anon', 1000)).toBeNull();
+    } finally {
+      removeSpy.mockRestore();
+    }
+  });
+
+  it('propagates clearAll removal failures after attempting every persisted cache key', () => {
+    const store = new ModelCatalogCacheStore();
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const scope = { query: 'clear-all', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    store.putSearch(scope, {
+      models: [buildModel({ id: 'clear/search-remove-failure' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    store.putModelSnapshots([buildModel({ id: 'clear/snapshot-after-search-failure' })], 'anon');
+    const persistedSearch = storage.getString(SEARCH_CACHE_KEY);
+    const removeError = new Error('search remove failed');
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const originalRemove = storeStorage.remove.bind(storeStorage);
+    const removeSpy = jest.spyOn(storeStorage, 'remove').mockImplementation((key) => {
+      if (key === SEARCH_CACHE_KEY) {
+        throw removeError;
+      }
+      return originalRemove(key);
+    });
+
+    try {
+      expect(() => store.clearAll()).toThrow(removeError);
+      expect(removeSpy).toHaveBeenCalledWith(SEARCH_CACHE_KEY);
+      expect(removeSpy).toHaveBeenCalledWith(SNAPSHOT_CACHE_KEY);
+      expect(storage.getString(SEARCH_CACHE_KEY)).toBe(persistedSearch);
+      expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
+      expect(store.getSearch(scope, 1000)).toBeNull();
+    } finally {
+      removeSpy.mockRestore();
+    }
   });
 });

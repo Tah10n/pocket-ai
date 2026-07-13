@@ -44,7 +44,11 @@ import {
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
-import { resolveModelArtifactRole } from '../utils/modelProjectors';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+  resolveModelArtifactRole,
+} from '../utils/modelProjectors';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
@@ -363,6 +367,10 @@ function normalizeProjectorArtifact(value: unknown): ProjectorArtifact | null {
 function normalizeProjectorArtifacts(value: unknown): ProjectorArtifact[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
+  }
+
+  if (value.length === 0) {
+    return [];
   }
 
   const seen = new Set<string>();
@@ -856,21 +864,74 @@ export function normalizePersistedModelMetadata(
     artifact.kind === 'multimodal_projector'
     && projectorCandidates?.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate)) === true
   )).length ?? 0;
+  const stableProjectorCandidateIds = new Set((projectorCandidates ?? []).map((candidate) => (
+    buildProjectorArtifactId({
+      repoId: candidate.repoId,
+      hfRevision: candidate.hfRevision,
+      ownerVariantId: candidate.ownerVariantId,
+      fileName: candidate.fileName,
+    })
+  )));
   // Multiple projectors can intentionally split image and audio requirements.
-  // Only rewrite a single stable legacy projector whose scope came from model-wide metadata.
-  const hasSingleStableLegacyProjector = projectorCandidates?.length === 1
-    && matchingPersistedProjectorCount === 1;
+  // Current and legacy IDs can coexist for one physical projector, so count
+  // canonical candidate identities instead of persisted artifact records.
+  const hasSingleStableLegacyProjector = stableProjectorCandidateIds.size === 1
+    && matchingPersistedProjectorCount > 0;
   const canRepairAudioOnlyLegacyProjector = hasSingleStableLegacyProjector
     && trustedProfileIsAudioOnly;
   const canRepairUnifiedLegacyProjector = hasSingleStableLegacyProjector
     && trustedProfileSupport.image
     && trustedProfileSupport.audio;
-  const reconciledPersistedArtifacts = hasTrustedAudioProfile && hasReconciledAudioModality
+  const hasExplicitAudioOnlyModelModalities = Array.isArray(chatModalities)
+    && chatModalities.includes('audio')
+    && !chatModalities.includes('vision');
+  const hasVariantVisionDeclaration = variants?.some((variant) => (
+    variant.chatModalities?.includes('vision') === true
+  )) === true;
+  const hasReadyAudioOnlyRuntime = multimodalReadiness?.status === 'ready'
+    && multimodalReadiness.support.includes('audio')
+    && !multimodalReadiness.support.includes('vision');
+  const hasStaleMixedRequestedSupport = multimodalReadiness?.requestedSupport?.includes('vision') === true
+    && multimodalReadiness.requestedSupport.includes('audio');
+  const canRepairPersistedAudioOnlyProjectorRequirement = hasSingleStableLegacyProjector
+    && hasExplicitAudioOnlyModelModalities
+    && hasReadyAudioOnlyRuntime
+    && hasStaleMixedRequestedSupport
+    && !trustedProfileSupport.image
+    && !hasVariantVisionDeclaration;
+  const shouldReconcilePersistedProjectorRequirements = (
+    hasTrustedAudioProfile && hasReconciledAudioModality
+  ) || canRepairPersistedAudioOnlyProjectorRequirement;
+  const readinessProjectorCandidate = projectorCandidates?.find((candidate) => (
+    candidate.id === multimodalReadiness?.projectorId
+    || buildLegacyProjectorArtifactId({
+      repoId: candidate.repoId,
+      hfRevision: candidate.hfRevision,
+      ownerVariantId: candidate.ownerVariantId,
+      fileName: candidate.fileName,
+    }) === multimodalReadiness?.projectorId
+  ));
+  const reconciledPersistedArtifacts = shouldReconcilePersistedProjectorRequirements
     ? persistedArtifacts?.map((artifact) => {
-        const matchesKnownProjector = artifact.kind === 'multimodal_projector'
-          && projectorCandidates?.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate)) === true;
-        if (!matchesKnownProjector) {
+        const matchingProjector = artifact.kind === 'multimodal_projector'
+          ? projectorCandidates?.find((candidate) => projectorArtifactMatchesCandidate(artifact, candidate))
+          : undefined;
+        if (!matchingProjector) {
           return artifact;
+        }
+
+        if (
+          canRepairPersistedAudioOnlyProjectorRequirement
+          && readinessProjectorCandidate !== undefined
+          && projectorArtifactMatchesCandidate(artifact, readinessProjectorCandidate)
+          && artifact.requiredFor.includes('image')
+          && artifact.requiredFor.includes('audio')
+        ) {
+          // Older normalization could derive an image requirement from a stale
+          // requestedSupport entry and then persist that derived artifact. Do
+          // not let the cached artifact become circular evidence that widens an
+          // explicitly audio-only model on every subsequent cold start.
+          return { ...artifact, requiredFor: ['audio' as const] };
         }
 
         if (canRepairAudioOnlyLegacyProjector && (

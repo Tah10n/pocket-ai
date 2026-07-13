@@ -199,6 +199,37 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj-model.gguf');
   });
 
+  it('removes case-distinct Android projector files independently', async () => {
+    const model = createMockModel({
+      projectorCandidates: [
+        createProjector({
+          id: 'test/model:upper-projector',
+          fileName: 'MMProj.gguf',
+          localPath: 'MMProj.gguf',
+        }),
+        createProjector({
+          id: 'test/model:lower-projector',
+          fileName: 'mmproj.gguf',
+          localPath: 'mmproj.gguf',
+        }),
+      ],
+    });
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') {
+        return JSON.stringify([model.id]);
+      }
+      if (key === 'models-registry:model-v1:test%2Fmodel') {
+        return JSON.stringify(model);
+      }
+      return null;
+    });
+
+    await registry.removeModel(model.id);
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/MMProj.gguf');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/mmproj.gguf');
+  });
+
   it('removes failed projector partial files with the owning model', async () => {
     const model = createMockModel({
       projectorCandidates: [createProjector({
@@ -670,6 +701,48 @@ describe('LocalStorageRegistry', () => {
     }));
   });
 
+  it('validates case-distinct Android projector paths independently', async () => {
+    const upperProjector = createProjector({
+      id: 'test/model:upper-projector',
+      fileName: 'MMProj.gguf',
+      localPath: 'MMProj.gguf',
+    });
+    const lowerProjector = createProjector({
+      id: 'test/model:lower-projector',
+      fileName: 'mmproj.gguf',
+      localPath: 'mmproj.gguf',
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([
+      createMockModel({ projectorCandidates: [upperProjector, lowerProjector] }),
+    ]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri.endsWith('/model.gguf') || uri.endsWith('/MMProj.gguf')) {
+        return { exists: true, size: 1000 };
+      }
+      if (uri.endsWith('/mmproj.gguf')) {
+        return { exists: false };
+      }
+      return { exists: false };
+    });
+
+    await registry.validateRegistry();
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(expect.stringMatching(/\/MMProj\.gguf$/));
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(expect.stringMatching(/\/mmproj\.gguf$/));
+    const updatedModel = (registry.saveModels as jest.Mock).mock.calls[0][0][0] as ModelMetadata;
+    expect(updatedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: upperProjector.id,
+      lifecycleStatus: 'downloaded',
+      localPath: 'MMProj.gguf',
+    }));
+    expect(updatedModel.projectorCandidates?.[1]).toEqual(expect.objectContaining({
+      id: lowerProjector.id,
+      lifecycleStatus: 'available',
+      localPath: undefined,
+    }));
+  });
+
   it('resets missing variant-only and artifact-only projector runtime state together', async () => {
     const variantProjector = createProjector({
       id: 'test/model:q4-projector',
@@ -740,6 +813,55 @@ describe('LocalStorageRegistry', () => {
         updatedAt: undefined,
       }),
     ]));
+    expect(updatedModel.multimodalReadiness).toBeUndefined();
+  });
+
+  it('clears readiness when a legacy artifact alias invalidates the current projector candidate', async () => {
+    const currentProjector = createProjector({
+      id: 'projector-test-model-main-mmproj-model+audio.gguf-exact',
+      fileName: 'mmproj-model+audio.gguf',
+      localPath: 'mmproj-model+audio.gguf',
+      size: 1000,
+    });
+    const legacyArtifact = createProjectorArtifact({
+      id: 'projector-test-model-main-mmproj-model-audio.gguf',
+      remoteFileName: currentProjector.fileName,
+      localPath: currentProjector.localPath,
+      sizeBytes: 2000,
+    });
+    const model = createMockModel({
+      projectorCandidates: [currentProjector],
+      artifacts: [legacyArtifact],
+      multimodalReadiness: {
+        modelId: mockModel.id,
+        status: 'ready',
+        support: ['vision'],
+        projectorId: currentProjector.id,
+        projectorSize: 1000,
+        checkedAt: 1,
+      },
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.endsWith('/model.gguf') || uri.endsWith(`/${currentProjector.localPath}`)
+        ? { exists: true, size: 1000 }
+        : { exists: false }
+    ));
+
+    await registry.validateRegistry();
+
+    const updatedModel = (registry.saveModels as jest.Mock).mock.calls[0][0][0] as ModelMetadata;
+    expect(updatedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: currentProjector.id,
+      lifecycleStatus: 'available',
+      localPath: undefined,
+    }));
+    expect(updatedModel.artifacts?.[0]).toEqual(expect.objectContaining({
+      id: legacyArtifact.id,
+      installState: 'missing',
+      localPath: undefined,
+    }));
     expect(updatedModel.multimodalReadiness).toBeUndefined();
   });
 

@@ -2,7 +2,10 @@ import React, { useEffect } from 'react';
 import { act, render, waitFor } from '@testing-library/react-native';
 import { useModelsCatalogData } from '../../src/hooks/useModelsCatalogData';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
-import { modelCatalogService } from '../../src/services/ModelCatalogService';
+import {
+  type ModelCatalogCacheInvalidationSource,
+  modelCatalogService,
+} from '../../src/services/ModelCatalogService';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 jest.mock('../../src/services/HuggingFaceTokenService', () => ({
@@ -111,6 +114,7 @@ describe('useModelsCatalogData', () => {
     mockTokenService.getCachedState.mockReturnValue({ hasToken: false, updatedAt: 0 });
     mockTokenService.refreshState.mockResolvedValue({ hasToken: false, updatedAt: 0 });
     mockTokenService.subscribe.mockReturnValue(jest.fn());
+    mockCatalogService.subscribeCacheInvalidations.mockImplementation(() => jest.fn());
     mockCatalogService.getLocalModels.mockResolvedValue([]);
     mockCatalogService.getCachedSearchResult.mockReturnValue({
       models: [createModel('org/first-model')],
@@ -137,6 +141,48 @@ describe('useModelsCatalogData', () => {
     expect(getCurrentValue()?.isTokenStateHydrated).toBe(true);
     expect(getCurrentValue()?.hasTokenConfigured).toBe(false);
     expect(syncDiscoveryTokenState).toHaveBeenCalledWith(false);
+  });
+
+  it('refreshes the active catalog session after late persistent-cache hydration', async () => {
+    let invalidationListener: ((
+      revision: number,
+      source: ModelCatalogCacheInvalidationSource,
+    ) => void) | undefined;
+    mockCatalogService.subscribeCacheInvalidations.mockImplementation((listener) => {
+      invalidationListener = listener;
+      listener(0, 'replay');
+      return jest.fn();
+    });
+    mockCatalogService.getCachedSearchResult
+      .mockReturnValueOnce({
+        models: [createModel('org/pre-hydration-model')],
+        hasMore: false,
+        nextCursor: null,
+      })
+      .mockReturnValue({
+        models: [createModel('org/persisted-hydration-model')],
+        hasMore: false,
+        nextCursor: null,
+      });
+
+    const { getCurrentValue } = renderHookHarness();
+    await flushMicrotasks();
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual([
+      'org/pre-hydration-model',
+    ]);
+    expect(invalidationListener).toBeDefined();
+
+    await act(async () => {
+      invalidationListener?.(1, 'hydrate');
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual([
+      'org/persisted-hydration-model',
+    ]);
+    expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(2);
+    expect(mockCatalogService.searchModels).not.toHaveBeenCalled();
   });
 
   it('requires fresh user drag input before auto-loading the next catalog page', async () => {

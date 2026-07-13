@@ -215,6 +215,7 @@
       "audioModelUnsupported": "Текущая модель не поддерживает аудиовложения.",
       "audioRuntimeUnavailable": "Модель поддерживает аудио, но оно пока не готово. Проверьте состояние проектора или перезагрузите модель.",
       "mediaRuntimeUnavailable": "Загрузите модель с нужной поддержкой медиа, чтобы повторно использовать эти вложения.",
+      "videoRegenerateUnsupported": "Сохранённые видеовложения нельзя использовать повторно, потому что ввод видео отключён.",
       "removeImageAccessibilityLabel": "Удалить прикрепленное изображение",
       "removeImageIndexedAccessibilityLabel": "Удалить прикрепленное изображение {{index}} из {{count}}",
       "removeDocumentIndexedAccessibilityLabel": "Удалить прикрепленный документ {{index}} из {{count}}",

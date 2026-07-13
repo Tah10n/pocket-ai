@@ -108,7 +108,7 @@ import {
 } from '../types/huggingFace';
 
 export type CatalogServerSort = 'downloads' | 'likes' | 'lastModified';
-export type ModelCatalogCacheInvalidationSource = 'replay' | 'manual' | 'token' | 'unknown';
+export type ModelCatalogCacheInvalidationSource = 'replay' | 'hydrate' | 'manual' | 'token' | 'unknown';
 export { ModelCatalogError, getModelCatalogErrorMessage, type ModelCatalogErrorCode } from './ModelCatalogHttpClient';
 
 type CacheInvalidationListener = (revision: number, source: ModelCatalogCacheInvalidationSource) => void;
@@ -130,6 +130,7 @@ const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
 const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
 const ACCESS_PROBE_CACHE_MAX_ENTRIES = 500;
+const PERSISTENT_CACHE_HYDRATION_WAIT_TIMEOUT_MS = 5000;
 
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
 export { getHuggingFaceModelUrl };
@@ -175,11 +176,15 @@ type ProjectorMetadataFilterOptions = {
   fallbackProjectorIds?: ReadonlySet<string>;
 };
 
+type ModelCatalogServiceOptions = {
+  hydratePersistentCacheOnCreate?: boolean;
+};
+
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>>> = new Map();
   private searchRequestCache: Map<string, Promise<ModelCatalogSearchResult>> = new Map();
   private modelSnapshotCache: Map<string, ModelMetadata> = new Map();
-  private persistentCache = new ModelCatalogCacheStore();
+  private persistentCache: ModelCatalogCacheStore;
   private authCacheVersion = 0;
   private bufferedCursorSequence = 0;
   private rateLimitUntilByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
@@ -191,9 +196,25 @@ export class ModelCatalogService {
   private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
   private resolvedFileProbeStateCache: Map<string, ResolvedFileProbeCacheEntry> = new Map();
   private lastMemoryFitContext: CatalogMemoryFitContext | null = null;
+  private persistentCacheHydrated: boolean;
+  private persistentCacheHydrationAttemptSettled: boolean;
+  private persistentCacheHydrationAttemptPromise: Promise<void>;
+  private resolvePersistentCacheHydrationAttempt: (() => void) | undefined;
+  private persistentCacheHydrationFailOpenTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly unsubscribeFromTokenService: () => void;
 
-  constructor() {
+  constructor(options: ModelCatalogServiceOptions = {}) {
+    const hydratePersistentCacheOnCreate = options.hydratePersistentCacheOnCreate !== false;
+    this.persistentCache = new ModelCatalogCacheStore({
+      hydrateOnCreate: hydratePersistentCacheOnCreate,
+    });
+    this.persistentCacheHydrated = hydratePersistentCacheOnCreate;
+    this.persistentCacheHydrationAttemptSettled = hydratePersistentCacheOnCreate;
+    this.persistentCacheHydrationAttemptPromise = hydratePersistentCacheOnCreate
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+        this.resolvePersistentCacheHydrationAttempt = resolve;
+      });
     this.unsubscribeFromTokenService = huggingFaceTokenService.subscribe((_state, source) => {
       if (source === 'replay') {
         return;
@@ -211,11 +232,71 @@ export class ModelCatalogService {
   }
 
   public dispose(): void {
+    this.completePersistentCacheHydrationAttempt();
     this.unsubscribeFromTokenService();
   }
 
   public getPersistentCacheBytes(): number {
     return this.persistentCache.getPersistedSizeBytes();
+  }
+
+  public hydratePersistentCache(): void {
+    if (this.persistentCacheHydrated) {
+      this.completePersistentCacheHydrationAttempt();
+      return;
+    }
+
+    // Normal deferred hydration completes before waiting catalog calls resume,
+    // so those calls observe the hydrated cache directly. Only a hydration
+    // that succeeds after the initial wait was already released (timeout or
+    // failure) needs to invalidate mounted consumers.
+    const shouldInvalidateConsumers = this.persistentCacheHydrationAttemptSettled;
+    const span = performanceMonitor.startSpan('catalog.hydratePersistentCache');
+    try {
+      this.persistentCache.hydrate();
+      this.persistentCacheHydrated = true;
+      this.completePersistentCacheHydrationAttempt();
+      span.end({ outcome: 'success' });
+      if (shouldInvalidateConsumers) {
+        this.emitCacheInvalidation('hydrate');
+      }
+    } catch (error) {
+      // Unblock callers so a transient cache-tier failure cannot stall catalog
+      // access indefinitely. A later explicit hydration call remains retryable.
+      this.completePersistentCacheHydrationAttempt();
+      span.end({ outcome: 'error' });
+      throw error;
+    }
+  }
+
+  private completePersistentCacheHydrationAttempt(): void {
+    if (this.persistentCacheHydrationFailOpenTimer !== undefined) {
+      clearTimeout(this.persistentCacheHydrationFailOpenTimer);
+      this.persistentCacheHydrationFailOpenTimer = undefined;
+    }
+
+    if (this.persistentCacheHydrationAttemptSettled) {
+      return;
+    }
+
+    this.persistentCacheHydrationAttemptSettled = true;
+    const resolve = this.resolvePersistentCacheHydrationAttempt;
+    this.resolvePersistentCacheHydrationAttempt = undefined;
+    resolve?.();
+  }
+
+  private async waitForPersistentCacheHydrationAttempt(): Promise<void> {
+    if (this.persistentCacheHydrationAttemptSettled) {
+      return;
+    }
+
+    if (this.persistentCacheHydrationFailOpenTimer === undefined) {
+      this.persistentCacheHydrationFailOpenTimer = setTimeout(() => {
+        this.completePersistentCacheHydrationAttempt();
+      }, PERSISTENT_CACHE_HYDRATION_WAIT_TIMEOUT_MS);
+    }
+
+    await this.persistentCacheHydrationAttemptPromise;
   }
 
   public subscribeCacheInvalidations(listener: CacheInvalidationListener): () => void {
@@ -226,20 +307,24 @@ export class ModelCatalogService {
     };
   }
 
-  public clearCache(source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'> = 'unknown'): void {
+  public clearCache(
+    source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
+  ): void {
     this.clearVolatileCache(source, { emit: false });
 
     if (source === 'token') {
       this.persistentCache.clearSnapshots();
     } else {
       this.persistentCache.clearAll();
+      this.persistentCacheHydrated = true;
+      this.completePersistentCacheHydrationAttempt();
     }
 
     this.emitCacheInvalidation(source);
   }
 
   private clearVolatileCache(
-    source: Exclude<ModelCatalogCacheInvalidationSource, 'replay'> = 'unknown',
+    source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
     options: { emit?: boolean } = {},
   ): void {
     this.bufferedCursorSequence = 0;
@@ -367,6 +452,7 @@ export class ModelCatalogService {
       gated?: boolean;
     },
   ): Promise<ModelCatalogSearchResult> {
+    await this.waitForPersistentCacheHydrationAttempt();
     return this.searchModelsInternal(query, options, 0);
   }
 
@@ -813,7 +899,7 @@ export class ModelCatalogService {
       sha256: undefined,
       requiresTreeProbe: false,
       artifacts: undefined,
-      chatModalities: model.chatModalities ? ['text'] : undefined,
+      chatModalities: ['text'],
       artifactRole: undefined,
       visionSource: undefined,
       visionConfidence: undefined,
@@ -1040,6 +1126,7 @@ export class ModelCatalogService {
   }
 
   public async getModelDetails(modelId: string): Promise<ModelMetadata> {
+    await this.waitForPersistentCacheHydrationAttempt();
     return this.getModelDetailsInternal(modelId, 0);
   }
 
@@ -1210,6 +1297,7 @@ export class ModelCatalogService {
     model: ModelMetadata,
     options?: RefreshModelMetadataOptions,
   ): Promise<ModelMetadata> {
+    await this.waitForPersistentCacheHydrationAttempt();
     return this.refreshModelMetadataInternal(model, 0, {
       includeDetails: options?.includeDetails !== false,
     });
@@ -1264,11 +1352,16 @@ export class ModelCatalogService {
   }
 
   public async getLocalModels(): Promise<ModelMetadata[]> {
+    await this.waitForPersistentCacheHydrationAttempt();
     await this.getCurrentMemoryFitContext();
     const localModels = registry.getModels().map((model) => (
       this.getCachedModel(model.id) ?? model
     ));
-    this.upsertModelSnapshots(localModels, 'anon');
+    // A timed-out or failed hydration must not turn this registry-only fallback
+    // into the mutation that hydrates and overwrites richer persisted snapshots.
+    if (this.persistentCacheHydrated) {
+      this.upsertModelSnapshots(localModels, 'anon');
+    }
     return localModels;
   }
 
@@ -1281,7 +1374,9 @@ export class ModelCatalogService {
       model.id.toLowerCase().includes(query.toLowerCase()),
     );
     const merged = filtered.map((model) => this.withResolvedMemoryFit(model, memoryFitContext));
-    this.upsertModelSnapshots(merged, 'anon');
+    if (this.persistentCacheHydrated) {
+      this.upsertModelSnapshots(merged, 'anon');
+    }
 
     return {
       models: merged,
@@ -1350,17 +1445,9 @@ export class ModelCatalogService {
       'id' | 'activeVariantId' | 'resolvedFileName' | 'variants' | 'projectorCandidates' | 'selectedProjectorId'
     >,
   ): number {
-    const activeVariantKeys = this.resolveActiveVariantKeys(model);
-    const compatibleCandidates = (model.projectorCandidates ?? []).filter((projector) => {
-      if (projector.ownerModelId !== model.id) {
-        return false;
-      }
-
-      const ownerVariantId = this.normalizeProjectorVariantId(projector.ownerVariantId);
-      return !ownerVariantId || activeVariantKeys.size === 0 || activeVariantKeys.has(ownerVariantId);
-    });
-
-    return getProjectorMemoryFitSizeBytes(compatibleCandidates, model.selectedProjectorId);
+    const compatibleCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+    const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, compatibleCandidates);
+    return getProjectorMemoryFitSizeBytes(compatibleCandidates, selectedProjectorId);
   }
 
   private withActiveVariantResolvedMemoryFit(
@@ -2696,6 +2783,8 @@ export class ModelCatalogService {
   ): ProjectorMetadataMerge {
     const effectiveSupport = resolveEffectiveActiveVariantNativeSupport(model);
     const activeVariant = resolveActiveModelVariant(model);
+    const hasAuthoritativeEmptyProjectorCandidates = Array.isArray(metadata.projectorCandidates)
+      && metadata.projectorCandidates.length === 0;
     const hasExplicitEffectiveModalities = Array.isArray(activeVariant?.chatModalities)
       || Array.isArray(model.chatModalities);
     const requestedSupport = (['vision', 'audio'] as const).filter((modality) => (
@@ -2705,7 +2794,7 @@ export class ModelCatalogService {
     ));
     if (requestedSupport.length === 0) {
       return {
-        projectorCandidates: undefined,
+        projectorCandidates: hasAuthoritativeEmptyProjectorCandidates ? [] : undefined,
         selectedProjectorId: undefined,
         multimodalReadiness: undefined,
       };
@@ -2733,7 +2822,9 @@ export class ModelCatalogService {
     });
     const filteredProjectorCandidates = projectorCandidates && projectorCandidates.length > 0
       ? projectorCandidates
-      : undefined;
+      : hasAuthoritativeEmptyProjectorCandidates
+        ? []
+        : undefined;
     const candidateIds = new Set((filteredProjectorCandidates ?? []).map((projector) => projector.id));
     const selectedProjectorId = metadata.selectedProjectorId
       && candidateIds.has(metadata.selectedProjectorId)
@@ -2972,6 +3063,32 @@ export class ModelCatalogService {
     }
 
     const remoteActiveVariant = resolveActiveModelVariant(remoteModel);
+    const remoteEffectiveProjectorCandidates = Array.isArray(remoteActiveVariant?.projectorCandidates)
+      ? remoteActiveVariant.projectorCandidates
+      : remoteModel.projectorCandidates;
+    const hasAuthoritativeEmptyProjectorCandidates = Array.isArray(remoteEffectiveProjectorCandidates)
+      && remoteEffectiveProjectorCandidates.length === 0;
+    if (remoteActiveVariant && hasAuthoritativeEmptyProjectorCandidates) {
+      const mergedActiveVariant: ModelVariant = {
+        ...localActiveVariant,
+        ...remoteActiveVariant,
+        size: remoteActiveVariant.size ?? localActiveVariant.size,
+        sha256: remoteActiveVariant.sha256 ?? localActiveVariant.sha256,
+        ramFit: remoteActiveVariant.ramFit ?? localActiveVariant.ramFit,
+        ramFitConfidence: remoteActiveVariant.ramFitConfidence ?? localActiveVariant.ramFitConfidence,
+        isLocal: remoteActiveVariant.isLocal ?? localActiveVariant.isLocal,
+        // A complete repository tree with no projector files owns projector
+        // identity for every variant, even when the fresh variant has no
+        // explicit modality metadata of its own.
+        projectorCandidates: [],
+        selectedProjectorId: undefined,
+      };
+
+      return remoteModel.variants?.map((variant) => (
+        variant === remoteActiveVariant ? mergedActiveVariant : variant
+      ));
+    }
+
     if (remoteActiveVariant && Array.isArray(remoteActiveVariant.chatModalities)) {
       const remoteVariantSupportsVision = remoteActiveVariant.chatModalities.includes('vision');
       const canReuseLocalVisionMetadata = remoteVariantSupportsVision
@@ -4088,4 +4205,8 @@ export class ModelCatalogService {
   }
 }
 
-export const modelCatalogService = new ModelCatalogService();
+// Persistent catalog hydration parses user-controlled cache volume. Keep it off
+// module evaluation and let AppBootstrap schedule it after the first painted frame.
+export const modelCatalogService = new ModelCatalogService({
+  hydratePersistentCacheOnCreate: process.env.NODE_ENV === 'test',
+});

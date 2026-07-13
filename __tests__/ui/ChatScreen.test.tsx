@@ -791,6 +791,51 @@ function setAudioOnlyRegenerateThread() {
   });
 }
 
+function setVideoOnlyRegenerateThread() {
+  useChatStore.setState({
+    threads: {
+      'thread-1': {
+        ...useChatStore.getState().threads['thread-1'],
+        messages: [
+          {
+            id: 'message-video-only',
+            role: 'user',
+            content: '',
+            attachments: [{
+              id: 'attachment-video-only',
+              kind: 'video',
+              state: 'ready',
+              threadId: 'thread-1',
+              messageId: 'message-video-only',
+              localUri: 'test-dir/chat-attachments/video-only.mp4',
+              pathCategory: 'chat_attachment',
+              fileName: 'video-only.mp4',
+              mimeType: 'video/mp4',
+              sizeBytes: 123_456,
+              source: 'photo_library',
+              createdAt: 1,
+              video: {
+                derivedAttachmentIds: [],
+                samplingVersion: 1,
+              },
+            }],
+            createdAt: 1,
+            state: 'complete',
+          },
+          {
+            id: 'message-2',
+            role: 'assistant',
+            content: 'Saved assistant reply',
+            createdAt: 2,
+            state: 'complete',
+          },
+        ],
+      },
+    },
+    activeThreadId: 'thread-1',
+  });
+}
+
 describe('ChatScreen', () => {
   const originalPlatformOS = Platform.OS;
   let alertSpy: jest.SpyInstance;
@@ -1034,6 +1079,37 @@ describe('ChatScreen', () => {
     expect(lastChatInputBarProps).toEqual(expect.objectContaining({
       imageAttachmentsEnabled: false,
       imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+      audioAttachmentsSupported: true,
+      audioAttachmentsEnabled: false,
+      audioAttachmentsDisabledReason: 'chat.attachments.audioRuntimeUnavailable',
+    }));
+  });
+
+  it('reports runtime unavailable when the displayed audio model differs from the engine model', () => {
+    const projector = createVisionProjector();
+    registry.saveModels([
+      createVisionModel({
+        chatModalities: ['text', 'audio'],
+        selectedProjectorId: projector.id,
+        projectorCandidates: [projector],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          projectorId: projector.id,
+          support: ['audio'],
+          requestedSupport: ['audio'],
+          checkedAt: 1,
+        },
+      }),
+    ]);
+    mockEngineState = {
+      activeModelId: 'other/model',
+      status: 'ready',
+    };
+
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
       audioAttachmentsSupported: true,
       audioAttachmentsEnabled: false,
       audioAttachmentsDisabledReason: 'chat.attachments.audioRuntimeUnavailable',
@@ -3238,6 +3314,34 @@ describe('ChatScreen', () => {
     expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
     expect(lastChatInputBarProps.sendDisabled).toBe(true);
     expect(getByText('blocked: Current model does not support audio')).toBeTruthy();
+  });
+
+  it('blocks legacy video regeneration even when vision runtime is ready', async () => {
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.retainedForRegenerateBlockedDescription',
+      'blocked: {{reason}}',
+    );
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.videoRegenerateUnsupported',
+      'Video input is disabled',
+    );
+    registry.saveModels([createReadyVisionModel()]);
+    setVideoOnlyRegenerateThread();
+
+    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('regenerate-message-message-video-only'));
+
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
+    expect(lastChatInputBarProps.sendDisabled).toBe(true);
+    expect(lastChatInputBarProps.attachmentsTray).toBeTruthy();
+    expect(getByText('blocked: Video input is disabled')).toBeTruthy();
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Edited video prompt');
+    });
+
+    expect(mockRegenerateFromUserMessage).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -92,12 +92,21 @@ export function updateEffectiveProjectorCandidate(
     return model;
   }
 
-  const updateCandidate = (projector: ProjectorArtifact): ProjectorArtifact => (
-    projector.id === projectorId
-      && hasCompatibleProjectorRuntimeIdentity(projector, targetProjector, { activeVariantIds })
-      ? { ...projector, ...updates }
-      : projector
-  );
+  const updateCandidate = (projector: ProjectorArtifact): ProjectorArtifact => {
+    if (!hasCompatibleProjectorRuntimeIdentity(projector, targetProjector, { activeVariantIds })) {
+      return projector;
+    }
+
+    return {
+      ...projector,
+      ...updates,
+      // A full download result is also accepted as `updates`. Keep each
+      // current/legacy representation addressable by its own id and retain its
+      // model-level versus variant-level ownership while synchronizing state.
+      id: projector.id,
+      ownerVariantId: projector.ownerVariantId,
+    };
+  };
   const projectorCandidates = mapProjectorCollection(model.projectorCandidates, updateCandidate);
   let variantsChanged = false;
   const variants = activeVariant

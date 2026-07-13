@@ -18,6 +18,12 @@ describe('modelInputCapabilities', () => {
     ['Qwen 2.5 Omni config', { source: 'config', value: 'qwen2_5_omni' }, ['image', 'audio']],
     ['Voxtral architecture', { source: 'architecture', value: 'VoxtralForConditionalGeneration' }, ['audio']],
     ['Qwen 3 VL architecture', { source: 'architecture', value: 'Qwen3VLForConditionalGeneration' }, ['image']],
+    ['Qwen 2.5 OCR lookalike', { source: 'config', value: 'qwen2_5_ocr' }, []],
+    ['Qwen 2.5 Open lookalike', { source: 'config', value: 'qwen2_5_open' }, []],
+    ['Voxtral prefix lookalike', { source: 'architecture', value: 'VoxtralizedTextModel' }, []],
+    ['MiniCPM versioned architecture', { source: 'architecture', value: 'MiniCPMV2ForConditionalGeneration' }, ['image']],
+    ['InternVL camel-case architecture', { source: 'architecture', value: 'InternVLChatModel' }, ['image']],
+    ['Pixtral compact size suffix', { source: 'architecture', value: 'pixtral12b' }, ['image']],
     ['image generation tag', { source: 'tag', value: 'text-to-image' }, []],
     ['catalog video', { source: 'repository_tree', value: 'video adapter' }, ['video']],
     ['passive projector', { source: 'projector', value: 'mmproj-audio.gguf' }, []],
@@ -219,6 +225,24 @@ describe('modelInputCapabilities', () => {
     ], { detectedAt: 0 });
 
     expect(snapshot.declared.audio).toBe('unknown');
+  });
+
+  it('does not classify a Qwen 2.5 OCR repository as Omni from a shared prefix', () => {
+    const snapshot = inferDeclaredInputCapabilities({
+      id: 'community/Qwen2.5-OCR-GGUF',
+    }, [
+      { path: 'Qwen2.5-OCR-Q4_K_M.gguf' },
+      { path: 'mmproj-Qwen2.5-OCR-f16.gguf' },
+    ], { detectedAt: 0 });
+
+    expect(snapshot.declared).toEqual({
+      image: 'unknown',
+      audio: 'unknown',
+      video: 'unknown',
+    });
+    expect(snapshot.evidence).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ value: 'qwen25-omni-vision-audio-profile' }),
+    ]));
   });
 
   it.each(['E2B', 'E4B', '12B'])('recognizes the Gemma 4 %s audio architecture profile', (size) => {

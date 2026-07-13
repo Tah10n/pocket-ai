@@ -207,14 +207,51 @@ function normalizeSignalForPatternMatching(value: string): string {
   return value.replace(/[_/]+/gu, '-');
 }
 
-function compactSignal(value: string): string {
-  return value.replace(/[^a-z0-9]/gu, '');
+const KNOWN_PROFILE_COMPACT_SUFFIXES = [
+  'audio',
+  'chat',
+  'encoder',
+  'for',
+  'instruct',
+  'model',
+  'vision',
+] as const;
+
+function signalMatchesKnownProfileAlias(value: string, alias: string): boolean {
+  const tokens = value
+    .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, '$1 $2')
+    .replace(/([A-Za-z])([0-9])/gu, '$1 $2')
+    .replace(/([0-9])([A-Za-z])/gu, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/gu)
+    .filter(Boolean);
+
+  for (let start = 0; start < tokens.length; start += 1) {
+    let joined = '';
+    for (let end = start; end < tokens.length; end += 1) {
+      joined += tokens[end];
+      const compactSuffix = joined.startsWith(alias)
+        ? joined.slice(alias.length)
+        : '';
+      if (
+        joined === alias
+        || KNOWN_PROFILE_COMPACT_SUFFIXES.some((suffix) => compactSuffix.startsWith(suffix))
+      ) {
+        return true;
+      }
+      if (joined.length > alias.length + 3) {
+        break;
+      }
+    }
+  }
+
+  return false;
 }
 
 function getKnownInputProfiles(value: string): KnownInputProfile[] {
-  const compact = compactSignal(value);
   return KNOWN_INPUT_PROFILES.filter((profile) => (
-    profile.aliases.some((alias) => compact.includes(alias))
+    profile.aliases.some((alias) => signalMatchesKnownProfileAlias(value, alias))
   ));
 }
 

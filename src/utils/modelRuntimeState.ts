@@ -7,6 +7,7 @@ import {
   getEffectiveActiveVariantKeys,
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
+  hasExplicitEffectiveActiveVariantProjectorCandidates,
 } from './modelCapabilities';
 import { applyEffectiveProjectorState } from './effectiveProjectorState';
 
@@ -201,6 +202,7 @@ function mergeProjectorRuntimeFields(
     blockedNextReadinessProjectorIds: mergeBlockedNextReadinessProjectorIds,
   } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(nextProjectorCandidates, runtimeProjectorCandidates, {
     activeVariantIds,
+    emptyNextProjectorsAreAuthoritative: hasExplicitEffectiveActiveVariantProjectorCandidates(model),
   });
   const candidateIds = getProjectorCandidateIds({ projectorCandidates });
   const selectedProjectorId = resolveMergedSelectedProjectorId(

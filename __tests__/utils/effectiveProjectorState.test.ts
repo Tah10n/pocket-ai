@@ -4,6 +4,7 @@ import {
   applyEffectiveProjectorState,
   updateEffectiveProjectorCandidate,
 } from '../../src/utils/effectiveProjectorState';
+import { getEffectiveActiveVariantProjectorCandidates } from '../../src/utils/modelCapabilities';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../../src/utils/projectorRuntimeState';
 
 function makeProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
@@ -73,6 +74,80 @@ describe('effectiveProjectorState', () => {
     }));
   });
 
+  it('updates compatible current and runtime-id representations before the effective merge', () => {
+    const currentProjector = makeProjector({
+      id: 'org/model:mmproj-current',
+      lifecycleStatus: 'available',
+      downloadProgress: 0,
+    });
+    const runtimeAlias = makeProjector({
+      id: 'org/model:mmproj-runtime-alias',
+      ownerVariantId: undefined,
+      lifecycleStatus: 'paused',
+      downloadProgress: 0.2,
+      resumeData: 'runtime-resume-data',
+    });
+    const inactiveAlias = makeProjector({
+      id: 'org/model:mmproj-inactive-alias',
+      ownerVariantId: 'vision-variant',
+      lifecycleStatus: 'paused',
+      downloadProgress: 0.1,
+    });
+    const model = makeModel({
+      projectorCandidates: [runtimeAlias],
+      variants: [
+        {
+          ...makeModel().variants![0],
+          projectorCandidates: [currentProjector],
+          selectedProjectorId: currentProjector.id,
+        },
+        {
+          variantId: 'vision-variant',
+          fileName: 'vision.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1024,
+          chatModalities: ['text', 'vision'],
+          projectorCandidates: [inactiveAlias],
+          selectedProjectorId: inactiveAlias.id,
+        },
+      ],
+    });
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)[0]).toEqual(expect.objectContaining({
+      id: currentProjector.id,
+      lifecycleStatus: 'paused',
+      downloadProgress: 0.2,
+    }));
+
+    const updated = updateEffectiveProjectorCandidate(model, currentProjector.id, {
+      ...currentProjector,
+      lifecycleStatus: 'downloading',
+      downloadProgress: 0.6,
+    }, currentProjector);
+
+    expect(updated.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: runtimeAlias.id,
+        ownerVariantId: undefined,
+        lifecycleStatus: 'downloading',
+        downloadProgress: 0.6,
+      }),
+    ]);
+    expect(updated.variants?.[0].projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: currentProjector.id,
+        lifecycleStatus: 'downloading',
+        downloadProgress: 0.6,
+      }),
+    ]);
+    expect(updated.variants?.[1].projectorCandidates).toEqual([inactiveAlias]);
+    expect(getEffectiveActiveVariantProjectorCandidates(updated)[0]).toEqual(expect.objectContaining({
+      id: currentProjector.id,
+      lifecycleStatus: 'downloading',
+      downloadProgress: 0.6,
+    }));
+  });
+
   it('rejects a stale async update when the current same-id artifact has another stable identity', () => {
     const originalProjector = makeProjector();
     const replacementProjector = makeProjector({
@@ -135,6 +210,36 @@ describe('effectiveProjectorState', () => {
     expect(merged.projectorCandidates?.[0]).not.toHaveProperty('localPath');
     expect(merged.projectorCandidates?.[0]).not.toHaveProperty('resumeData');
     expect(merged.projectorCandidates?.[0].lifecycleStatus).toBe('available');
+  });
+
+  it('distinguishes missing projector metadata from an authoritative empty candidate list', () => {
+    const runtimeProjector = makeProjector({
+      localPath: 'partial-mmproj-audio.gguf',
+      resumeData: 'audio-resume',
+      lifecycleStatus: 'paused',
+      matchStatus: 'user_selected',
+    });
+
+    const missingMetadataMerge = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+      undefined,
+      [runtimeProjector],
+      { activeVariantIds: ['audio-variant', 'audio.gguf'] },
+    );
+    const authoritativeEmptyMerge = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+      [],
+      [runtimeProjector],
+      {
+        activeVariantIds: ['audio-variant', 'audio.gguf'],
+        emptyNextProjectorsAreAuthoritative: true,
+      },
+    );
+
+    expect(missingMetadataMerge.projectorCandidates).toEqual([runtimeProjector]);
+    expect(missingMetadataMerge.runtimeToNextProjectorIds.get(runtimeProjector.id)).toBe(runtimeProjector.id);
+    expect(authoritativeEmptyMerge.projectorCandidates).toEqual([]);
+    expect(authoritativeEmptyMerge.runtimeToNextProjectorIds).toEqual(new Map());
+    expect(authoritativeEmptyMerge.blockedRuntimeProjectorIds).toEqual(new Set([runtimeProjector.id]));
+    expect(authoritativeEmptyMerge.blockedRuntimeReadinessProjectorIds).toEqual(new Set([runtimeProjector.id]));
   });
 
   it('remaps a stable variant-only artifact id and clears a stale model-level selection', () => {

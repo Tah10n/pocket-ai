@@ -257,6 +257,48 @@ describe('StorageManagerService', () => {
     );
   });
 
+  it('counts case-distinct Android projector files independently', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model:upper-projector',
+            fileName: 'MMProj.gguf',
+            localPath: 'MMProj.gguf',
+            size: 1024,
+          }),
+          createDownloadedProjector({
+            id: 'org/model:lower-projector',
+            fileName: 'mmproj.gguf',
+            localPath: 'mmproj.gguf',
+            size: 2048,
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+      if (uri === 'test-models/MMProj.gguf') {
+        return { exists: true, size: 1024 };
+      }
+      if (uri === 'test-models/mmproj.gguf') {
+        return { exists: true, size: 2048 };
+      }
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.modelsBytes).toBe(4096 + 1024 + 2048);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/MMProj.gguf');
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/mmproj.gguf');
+  });
+
   it('includes and deduplicates variant-only and artifact-only projector files in storage metrics', async () => {
     const variantProjector = createDownloadedProjector({
       id: 'org/model:q4-projector',

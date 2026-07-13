@@ -6,6 +6,12 @@ export type ProjectorRuntimeIdentityOptions = {
   activeVariantIds?: Iterable<string | null | undefined>;
 };
 
+export type ProjectorRuntimeMergeOptions = ProjectorRuntimeIdentityOptions & {
+  // Effective selectors normalize both missing metadata and an explicit empty
+  // list to []; callers must opt in only when the source model owned the list.
+  emptyNextProjectorsAreAuthoritative?: boolean;
+};
+
 function getNormalizedActiveVariantIds(options: ProjectorRuntimeIdentityOptions): Set<string> {
   return new Set([
     options.activeVariantId,
@@ -190,7 +196,7 @@ export function mergeProjectorRuntimeState(
 export function mergeProjectorCandidatesWithRuntimeState(
   nextProjectors: ProjectorArtifact[] | undefined,
   runtimeProjectors: ProjectorArtifact[] | undefined,
-  options: ProjectorRuntimeIdentityOptions = {},
+  options: ProjectorRuntimeMergeOptions = {},
 ): ProjectorArtifact[] | undefined {
   return mergeProjectorCandidatesWithRuntimeStateAndIdMap(
     nextProjectors,
@@ -202,7 +208,7 @@ export function mergeProjectorCandidatesWithRuntimeState(
 export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
   nextProjectors: ProjectorArtifact[] | undefined,
   runtimeProjectors: ProjectorArtifact[] | undefined,
-  options: ProjectorRuntimeIdentityOptions = {},
+  options: ProjectorRuntimeMergeOptions = {},
 ): ProjectorRuntimeStateMerge {
   const runtimeToNextProjectorIds = new Map<string, string>();
   const blockedRuntimeProjectorIds = new Set<string>();
@@ -217,6 +223,14 @@ export function mergeProjectorCandidatesWithRuntimeStateAndIdMap(
     blockedRuntimeReadinessProjectorIds,
     blockedNextReadinessProjectorIds,
   });
+
+  if (nextProjectors?.length === 0 && options.emptyNextProjectorsAreAuthoritative) {
+    runtimeProjectors?.forEach((runtimeProjector) => {
+      blockedRuntimeProjectorIds.add(runtimeProjector.id);
+      blockedRuntimeReadinessProjectorIds.add(runtimeProjector.id);
+    });
+    return buildResult(nextProjectors);
+  }
 
   if (!nextProjectors?.length) {
     if (!runtimeProjectors?.length) {

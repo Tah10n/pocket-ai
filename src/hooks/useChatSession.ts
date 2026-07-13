@@ -970,6 +970,17 @@ async function assertUserMessageAttachmentsReadyForRegeneration(
     return readiness;
   }
 
+  const unsupportedVideoCount = message.attachments?.filter((attachment) => (
+    isGenericChatAttachment(attachment) && attachment.kind === 'video'
+  )).length ?? 0;
+  if (unsupportedVideoCount > 0) {
+    throw new AppError(
+      'chat_attachment_unsupported_type',
+      'Video attachments cannot be regenerated because video input is disabled.',
+      { details: { attachmentKind: 'video', attachmentCount: unsupportedVideoCount } },
+    );
+  }
+
   assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
   assertAudioReadyForInferenceAttachments([message], readiness, expectedModelId);
   const attachments = message.attachments ?? [];

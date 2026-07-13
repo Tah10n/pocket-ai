@@ -198,11 +198,19 @@ function installStateFromProjectorLifecycle(projector: Pick<ProjectorArtifact, '
 
 function inferProjectorRequiredInputs(model: Pick<ModelMetadata, 'chatModalities' | 'inputCapabilities' | 'multimodalReadiness'>): ModelArtifactRequiredInput[] {
   const requiredFor = new Set<ModelArtifactRequiredInput>();
+  const hasExplicitChatModalities = Array.isArray(model.chatModalities);
+  const requestedSupportCanAddVision = !hasExplicitChatModalities
+    || model.chatModalities?.includes('vision') === true;
+  const requestedSupportCanAddAudio = !hasExplicitChatModalities
+    || model.chatModalities?.includes('audio') === true;
   if (
     model.chatModalities?.includes('vision') === true
     || model.inputCapabilities?.declared.image === 'supported'
     || model.multimodalReadiness?.support.includes('vision') === true
-    || model.multimodalReadiness?.requestedSupport?.includes('vision') === true
+    || (
+      requestedSupportCanAddVision
+      && model.multimodalReadiness?.requestedSupport?.includes('vision') === true
+    )
   ) {
     requiredFor.add('image');
   }
@@ -211,7 +219,10 @@ function inferProjectorRequiredInputs(model: Pick<ModelMetadata, 'chatModalities
     model.chatModalities?.includes('audio') === true
     || model.inputCapabilities?.declared.audio === 'supported'
     || model.multimodalReadiness?.support.includes('audio')
-    || model.multimodalReadiness?.requestedSupport?.includes('audio') === true
+    || (
+      requestedSupportCanAddAudio
+      && model.multimodalReadiness?.requestedSupport?.includes('audio') === true
+    )
   ) {
     requiredFor.add('audio');
   }

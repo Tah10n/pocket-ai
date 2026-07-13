@@ -1,5 +1,8 @@
 import DeviceInfo from 'react-native-device-info';
-import { ModelCatalogCacheStore } from '../../src/services/ModelCatalogCacheStore';
+import {
+  MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+  ModelCatalogCacheStore,
+} from '../../src/services/ModelCatalogCacheStore';
 import { ModelCatalogService } from '../../src/services/ModelCatalogService';
 import { huggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
@@ -314,7 +317,7 @@ type UnifiedNativeStateMatrixCase = {
   evidence: 'catalog-safe' | 'runtime-only' | 'stale-persisted' | 'absent';
   projector: 'absent' | 'remote-matching' | 'remote-mismatched' | 'installed-matching' | 'variant-incompatible';
   readiness: 'none' | 'ready-valid' | 'ready-empty' | 'unsupported' | 'failed' | 'wrong-variant' | 'wrong-requested-support';
-  persistence: 'direct' | 'anonymous-search' | 'anonymous-snapshot' | 'v4-to-v5' | 'local-catalog-merge';
+  persistence: 'direct' | 'anonymous-search' | 'anonymous-snapshot' | 'v4-to-current' | 'local-catalog-merge';
   build: () => {
     sourceModel: ModelMetadata;
     localModel?: ModelMetadata;
@@ -757,7 +760,7 @@ const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
     evidence: 'absent',
     projector: 'absent',
     readiness: 'none',
-    persistence: 'v4-to-v5',
+    persistence: 'v4-to-current',
     build: () => {
       const id = 'matrix/v4-active-audio';
       const variantId = 'audio-q4';
@@ -857,7 +860,7 @@ function materializeUnifiedNativeStateMatrixCase(
   }));
   const store = new ModelCatalogCacheStore();
   const persistedSnapshot = JSON.parse(storage.getString(MATRIX_SNAPSHOT_CACHE_KEY) as string) as { version: number };
-  expect(persistedSnapshot.version).toBe(5);
+  expect(persistedSnapshot.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
   const model = store.getModelSnapshot(sourceModel.id, 'anon', 1000);
   if (!model) {
     throw new Error(`Matrix case ${testCase.name} was not restored from v4 migration`);
@@ -989,7 +992,7 @@ describe('ModelCatalogService regressions', () => {
       'direct',
       'anonymous-search',
       'anonymous-snapshot',
-      'v4-to-v5',
+      'v4-to-current',
       'local-catalog-merge',
     ]));
   });
@@ -1523,6 +1526,37 @@ describe('ModelCatalogService regressions', () => {
     expect(nativeSupport).toEqual({ vision: false, audio: false });
   });
 
+  it('forces sparse legacy metadata to text-only after a final tree probe miss', () => {
+    const modelId = 'org/sparse-legacy-vision-miss';
+    const sparseModel: ModelMetadata = {
+      id: modelId,
+      name: 'Sparse Legacy Vision Miss',
+      author: 'org',
+      size: null,
+      downloadUrl: `https://huggingface.co/${modelId}`,
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      inputCapabilities: {
+        detectedAt: 1234,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [{ source: 'config', value: 'image input', confidence: 'high' }],
+      },
+    };
+    const createMiss = (service as unknown as {
+      createUnresolvedTreeProbeMissModel: (model: ModelMetadata) => ModelMetadata;
+    }).createUnresolvedTreeProbeMissModel.bind(service);
+
+    const unresolved = createMiss(sparseModel);
+
+    expect(unresolved.chatModalities).toEqual(['text']);
+    expect(unresolved.inputCapabilities?.declared.image).toBe('supported');
+    expect(resolveEffectiveActiveVariantNativeSupport(unresolved)).toEqual({ vision: false, audio: false });
+  });
+
   it('replaces stale local registry state after a final projector-only tree probe miss', async () => {
     const modelId = 'test-org/projector-only-local-registry';
     const { localModel } = makeDownloadedVisionModelWithProjector({ modelId });
@@ -1925,11 +1959,26 @@ describe('ModelCatalogService regressions', () => {
   it('clears stale projector state after a complete zero-projector tree probe', async () => {
     const modelId = 'org/complete-zero-projector-clear';
     const modelFileName = 'model.Q4_K_M.gguf';
-    const { localModel } = makeDownloadedVisionModelWithProjector({
+    const { localModel: baseLocalModel, localProjector } = makeDownloadedVisionModelWithProjector({
       modelId,
       modelFileName,
       projectorSha256: PROJECTOR_SHA256,
     });
+    const variantProjector = { ...localProjector, ownerVariantId: modelFileName };
+    const localModel: ModelMetadata = {
+      ...baseLocalModel,
+      activeVariantId: modelFileName,
+      variants: [{
+        variantId: modelFileName,
+        fileName: modelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: baseLocalModel.size,
+        isLocal: true,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [variantProjector],
+        selectedProjectorId: variantProjector.id,
+      }],
+    };
     const refreshTarget: ModelMetadata = {
       ...localModel,
       hasVerifiedContextWindow: true,
@@ -1955,10 +2004,25 @@ describe('ModelCatalogService regressions', () => {
 
     const refreshed = await service.refreshModelMetadata(refreshTarget, { includeDetails: true });
 
-    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.projectorCandidates).toEqual([]);
     expect(refreshed.selectedProjectorId).toBeUndefined();
     expect(refreshed.multimodalReadiness).toBeUndefined();
     expect(refreshed.requiresTreeProbe).toBe(false);
+
+    const cacheStorage = createStorage(MATRIX_CACHE_STORAGE_ID, { tier: 'cache' });
+    cacheStorage.clearAll();
+    const cache = new ModelCatalogCacheStore();
+    cache.putModelSnapshots([refreshed], 'anon');
+    const restored = new ModelCatalogCacheStore().getModelSnapshot(modelId, 'anon', 1000);
+    expect(restored?.projectorCandidates).toEqual([]);
+
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+    const mergedAfterRestart = restored ? mergeModelWithRegistryForTest(service, restored) : undefined;
+    expect(mergedAfterRestart?.projectorCandidates).toEqual([]);
+    expect(mergedAfterRestart?.selectedProjectorId).toBeUndefined();
+    expect(mergedAfterRestart?.multimodalReadiness).toBeUndefined();
+    expect(resolveActiveModelVariant(mergedAfterRestart as ModelMetadata)?.projectorCandidates).toEqual([]);
+    expect(getEffectiveActiveVariantProjectorCandidates(mergedAfterRestart as ModelMetadata)).toEqual([]);
   });
 
   it('clears effective audio and audio projector metadata after an authoritative empty tree result', async () => {
@@ -2014,7 +2078,7 @@ describe('ModelCatalogService regressions', () => {
 
     expect(refreshed.inputCapabilities?.declared.audio).toBe('supported');
     expect(refreshed.chatModalities).toEqual(['text', 'vision']);
-    expect(refreshed.projectorCandidates).toBeUndefined();
+    expect(refreshed.projectorCandidates).toEqual([]);
     expect(refreshed.selectedProjectorId).toBeUndefined();
     expect(refreshed.multimodalReadiness).toBeUndefined();
     expect(projectorArtifacts?.map((artifact) => artifact.requiredFor)).toEqual([['image']]);
@@ -3613,6 +3677,65 @@ describe('ModelCatalogService regressions', () => {
     });
   });
 
+  it('keeps an exact active-variant empty projector list authoritative without parent metadata', () => {
+    const modelId = 'org/active-variant-authoritative-empty';
+    const { localModel: baseModel, localProjector, modelFileName } =
+      makeDownloadedVisionModelWithProjector({ modelId });
+    const activeVariantId = 'vision-q4';
+    const scopedProjector = { ...localProjector, ownerVariantId: activeVariantId };
+    const localModel: ModelMetadata = {
+      ...baseModel,
+      activeVariantId,
+      resolvedFileName: modelFileName,
+      chatModalities: undefined,
+      artifacts: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+      variants: [{
+        variantId: activeVariantId,
+        fileName: modelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: baseModel.size,
+        isLocal: true,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [scopedProjector],
+        selectedProjectorId: scopedProjector.id,
+      }],
+    };
+    const remoteModel: ModelMetadata = {
+      ...localModel,
+      name: 'Remote authoritative empty active variant',
+      localPath: undefined,
+      downloadedAt: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: undefined,
+      artifacts: undefined,
+      projectorCandidates: undefined,
+      selectedProjectorId: undefined,
+      variants: [{
+        variantId: activeVariantId,
+        fileName: modelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: baseModel.size,
+        projectorCandidates: [],
+      }],
+    };
+    mockedRegistry.getModel.mockImplementation((id) => (id === modelId ? localModel : undefined));
+
+    const merged = mergeModelWithRegistryForTest(service, remoteModel);
+    const mergedActiveVariant = resolveActiveModelVariant(merged as ModelMetadata);
+
+    expect(merged).toBeDefined();
+    expect(mergedActiveVariant?.projectorCandidates).toEqual([]);
+    expect(mergedActiveVariant?.selectedProjectorId).toBeUndefined();
+    expect(merged?.projectorCandidates).toEqual([]);
+    expect(merged?.selectedProjectorId).toBeUndefined();
+    expect(getEffectiveActiveVariantProjectorCandidates(merged as ModelMetadata)).toEqual([]);
+    expect(getEffectiveActiveVariantSelectedProjectorId(merged as ModelMetadata)).toBeUndefined();
+  });
+
   it.each([
     { remoteModality: 'audio', localModality: 'vision' },
     { remoteModality: 'vision', localModality: 'audio' },
@@ -4196,6 +4319,69 @@ describe('ModelCatalogService regressions', () => {
     expect(merged?.memoryFitDecision).not.toBe('likely_oom');
     expect(merged?.variants?.find((variant) => variant.fileName === activeModelFileName)?.ramFit)
       .not.toBe('likely_oom');
+  });
+
+  it('includes a variant-only selected projector when recomputing memory fit', () => {
+    const modelId = 'org/variant-only-projector-memory-fit';
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-model-f16.gguf';
+    const projectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    });
+    const projector: ProjectorArtifact = {
+      id: projectorId,
+      ownerModelId: modelId,
+      ownerVariantId: modelFileName,
+      repoId: modelId,
+      fileName: projectorFileName,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
+      hfRevision: 'main',
+      size: 4 * 1024 * 1024 * 1024,
+      lifecycleStatus: 'available',
+      matchStatus: 'user_selected',
+    };
+    const model: ModelMetadata = {
+      id: modelId,
+      name: 'Variant-only Projector Memory Fit',
+      author: 'org',
+      size: 1 * 1024 * 1024 * 1024,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${modelFileName}`,
+      resolvedFileName: modelFileName,
+      activeVariantId: modelFileName,
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      chatModalities: ['text', 'vision'],
+      variants: [{
+        variantId: modelFileName,
+        fileName: modelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 1 * 1024 * 1024 * 1024,
+        selectedProjectorId: projectorId,
+        projectorCandidates: [projector],
+      }],
+    };
+    const withResolvedMemoryFit = (service as unknown as {
+      withResolvedMemoryFit: (
+        model: ModelMetadata,
+        memoryFitContext: { totalMemoryBytes: number; systemMemorySnapshot: null },
+      ) => ModelMetadata;
+    }).withResolvedMemoryFit.bind(service);
+
+    const resolved = withResolvedMemoryFit(model, {
+      totalMemoryBytes: 4 * 1024 * 1024 * 1024,
+      systemMemorySnapshot: null,
+    });
+
+    expect(resolved.fitsInRam).toBe(false);
+    expect(resolved.memoryFitDecision).toBe('likely_oom');
+    expect(resolved.variants?.[0]?.ramFit).toBe('likely_oom');
   });
 
   it('keeps size-known gated repos authorized when access validation temporarily fails with a non-auth error', async () => {

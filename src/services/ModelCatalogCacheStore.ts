@@ -58,9 +58,13 @@ type PersistedPayload<T> = {
 };
 
 type ParsedPayload<T> = {
-  status: 'empty' | 'invalid' | 'ok';
+  status: 'empty' | 'invalid' | 'oversized' | 'ok';
   entries: T[];
   needsRewrite: boolean;
+};
+
+export type ModelCatalogCacheStoreOptions = {
+  hydrateOnCreate?: boolean;
 };
 
 const STORAGE_ID = 'model-catalog-cache';
@@ -69,8 +73,9 @@ const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-const PERSISTED_CACHE_VERSION = 5;
-const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, PERSISTED_CACHE_VERSION]);
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 6;
+export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 1_500_000;
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
@@ -565,8 +570,12 @@ export function sanitizeCatalogProjectorRuntimeState(
     projector: ProjectorArtifact,
   ) => CatalogSafeNativeCapabilityContext = () => context,
 ): ModelMetadata['projectorCandidates'] {
-  if (!projectors?.length) {
+  if (!Array.isArray(projectors)) {
     return undefined;
+  }
+
+  if (projectors.length === 0) {
+    return [];
   }
 
   const sanitized = projectors.flatMap((projector): ProjectorArtifact[] => {
@@ -891,15 +900,6 @@ function sanitizeAnonymousPersistedModels(models: ModelMetadata[]): ModelMetadat
   });
 }
 
-function needsAnonymousPersistedModelSanitization(model: ModelMetadata): boolean {
-  const sanitized = sanitizeAnonymousCatalogModel(model);
-  return sanitized === null || JSON.stringify(model) !== JSON.stringify(sanitized);
-}
-
-function needsAnonymousPersistedModelsSanitization(models: ModelMetadata[]): boolean {
-  return models.some((model) => needsAnonymousPersistedModelSanitization(model));
-}
-
 function getTextByteLength(value: string | null | undefined) {
   if (!value) {
     return 0;
@@ -1124,12 +1124,37 @@ export class ModelCatalogCacheStore {
   private storage = createStorage(STORAGE_ID, { tier: 'cache' });
   private searchEntries = new Map<string, SearchCacheEntry>();
   private snapshotEntries = new Map<string, SnapshotCacheEntry>();
+  private isHydrated = false;
+  private isPersistenceDisabled = false;
 
-  constructor() {
-    this.loadPersistedEntries();
+  constructor(options: ModelCatalogCacheStoreOptions = {}) {
+    if (options.hydrateOnCreate !== false) {
+      this.hydrate();
+    }
+  }
+
+  public hydrate(): void {
+    if (this.isHydrated) {
+      return;
+    }
+
+    try {
+      this.loadPersistedEntries();
+      // Only commit the state after both payloads were read successfully. A
+      // transient storage failure must remain retryable on the next safe access.
+      this.isHydrated = true;
+    } catch (error) {
+      this.searchEntries.clear();
+      this.snapshotEntries.clear();
+      throw error;
+    }
   }
 
   public getSearch(scope: CatalogCacheScope, maxAgeMs: number): CatalogCacheResult | null {
+    if (!this.isHydrated) {
+      return null;
+    }
+
     const entry = this.searchEntries.get(this.buildSearchKey(scope));
     if (!entry) {
       return null;
@@ -1143,6 +1168,7 @@ export class ModelCatalogCacheStore {
   }
 
   public putSearch(scope: CatalogCacheScope, result: CatalogCacheResult): void {
+    this.hydrateForMutation();
     const key = this.buildSearchKey(scope);
     const clonedResult = this.cloneSearchResult(result);
     const entry: SearchCacheEntry = {
@@ -1173,6 +1199,10 @@ export class ModelCatalogCacheStore {
     authScope: CatalogCacheAuthScope,
     maxAgeMs: number,
   ): ModelMetadata | null {
+    if (!this.isHydrated) {
+      return null;
+    }
+
     const entry = this.snapshotEntries.get(buildSnapshotKey(modelId, authScope));
     if (!entry) {
       return null;
@@ -1186,6 +1216,7 @@ export class ModelCatalogCacheStore {
   }
 
   public putModelSnapshots(models: ModelMetadata[], authScope: CatalogCacheAuthScope): void {
+    this.hydrateForMutation();
     const timestamp = Date.now();
     const modelsToStore = authScope === 'anon'
       ? sanitizeAnonymousPersistedModels(models)
@@ -1215,6 +1246,8 @@ export class ModelCatalogCacheStore {
       return;
     }
 
+    this.hydrateForMutation();
+
     let didDelete = false;
     uniqueModelIds.forEach((modelId) => {
       didDelete = this.snapshotEntries.delete(buildSnapshotKey(modelId, authScope)) || didDelete;
@@ -1230,6 +1263,8 @@ export class ModelCatalogCacheStore {
     if (uniqueModelIds.size === 0) {
       return;
     }
+
+    this.hydrateForMutation();
 
     let didPersistedAnonChange = false;
     for (const [key, entry] of this.searchEntries.entries()) {
@@ -1267,6 +1302,8 @@ export class ModelCatalogCacheStore {
       return;
     }
 
+    this.hydrateForMutation();
+
     let didChange = false;
     for (const [key, entry] of this.searchEntries.entries()) {
       if (entry.scope.authScope !== 'anon') {
@@ -1302,41 +1339,75 @@ export class ModelCatalogCacheStore {
   }
 
   public getPersistedSizeBytes(): number {
-    return PERSISTED_CACHE_KEYS.reduce((sum, key) => {
-      const value = this.storage.getString(key);
-      if (!value) {
-        return sum;
-      }
+    if (this.isPersistenceDisabled) {
+      return 0;
+    }
 
-      return sum + getTextByteLength(key) + getTextByteLength(value);
-    }, 0);
+    try {
+      return PERSISTED_CACHE_KEYS.reduce((sum, key) => {
+        const value = this.storage.getString(key);
+        if (!value) {
+          return sum;
+        }
+
+        return sum + getTextByteLength(key) + getTextByteLength(value);
+      }, 0);
+    } catch {
+      // Metrics are advisory. A transient read failure here must not settle a
+      // deferred hydration attempt or disable later cache reads and writes.
+      return 0;
+    }
   }
 
   public clearAll(): void {
+    this.isHydrated = true;
     this.searchEntries.clear();
     this.snapshotEntries.clear();
-    this.storage.remove(SEARCH_CACHE_KEY);
-    this.storage.remove(SNAPSHOT_CACHE_KEY);
+
+    let firstError: unknown;
+    let didFail = false;
+    for (const key of PERSISTED_CACHE_KEYS) {
+      try {
+        this.removePersistedValue(key);
+      } catch (error) {
+        if (!didFail) {
+          firstError = error;
+          didFail = true;
+        }
+      }
+    }
+
+    if (didFail) {
+      throw firstError;
+    }
   }
 
   public clearSnapshots(): void {
     this.snapshotEntries.clear();
-    this.storage.remove(SNAPSHOT_CACHE_KEY);
+    this.removePersistedValue(SNAPSHOT_CACHE_KEY);
   }
 
   public clearSnapshotsForScope(authScope: CatalogCacheAuthScope): void {
-    let didDelete = false;
+    if (!this.isHydrated) {
+      if (authScope === 'anon') {
+        this.removePersistedValue(SNAPSHOT_CACHE_KEY);
+      }
+      return;
+    }
+
     for (const [key, entry] of this.snapshotEntries.entries()) {
       if (entry.authScope !== authScope) {
         continue;
       }
 
       this.snapshotEntries.delete(key);
-      didDelete = true;
     }
 
-    if (didDelete && authScope === 'anon') {
-      this.persistSnapshotEntries();
+    if (authScope === 'anon') {
+      // Anonymous snapshots are the only snapshot scope persisted to disk, so
+      // clearing that scope must remove the payload rather than report success
+      // after a failed optional persistence operation.
+      this.removePersistedValue(SNAPSHOT_CACHE_KEY);
     }
   }
 
@@ -1349,7 +1420,7 @@ export class ModelCatalogCacheStore {
     );
     shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
 
-    if (searchPayloadResult.status === 'invalid') {
+    if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
       this.storage.remove(SEARCH_CACHE_KEY);
     }
 
@@ -1359,11 +1430,12 @@ export class ModelCatalogCacheStore {
         return;
       }
 
-      if (needsAnonymousPersistedModelsSanitization(entry.result.models)) {
+      const sanitizedModels = sanitizeAnonymousPersistedModels(entry.result.models);
+      if (sanitizedModels.length !== entry.result.models.length) {
         shouldRewriteSearchPayload = true;
       }
 
-      entry.result.models = sanitizeAnonymousPersistedModels(entry.result.models);
+      entry.result.models = sanitizedModels;
       this.searchEntries.set(entry.key, entry);
     });
 
@@ -1375,7 +1447,7 @@ export class ModelCatalogCacheStore {
     );
     shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
 
-    if (snapshotPayloadResult.status === 'invalid') {
+    if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
       this.storage.remove(SNAPSHOT_CACHE_KEY);
     }
 
@@ -1383,10 +1455,6 @@ export class ModelCatalogCacheStore {
       if (entry.authScope !== 'anon') {
         shouldRewriteSnapshotPayload = true;
         return;
-      }
-
-      if (needsAnonymousPersistedModelSanitization(entry.model)) {
-        shouldRewriteSnapshotPayload = true;
       }
 
       const sanitizedModel = sanitizeAnonymousCatalogModel(entry.model);
@@ -1428,6 +1496,13 @@ export class ModelCatalogCacheStore {
       return { status: 'empty', entries: [], needsRewrite: false };
     }
 
+    if (
+      rawValue.length > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+      || getTextByteLength(rawValue) > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+    ) {
+      return { status: 'oversized', entries: [], needsRewrite: false };
+    }
+
     try {
       const parsed = JSON.parse(rawValue) as PersistedPayload<unknown>;
       if (
@@ -1446,7 +1521,7 @@ export class ModelCatalogCacheStore {
       return {
         status: 'ok',
         entries,
-        needsRewrite: parsed.version !== PERSISTED_CACHE_VERSION
+        needsRewrite: parsed.version !== MODEL_CATALOG_CACHE_PERSISTED_VERSION
           || normalizedEntries.some((entry) => entry === null)
           || parsed.entries.some((entry) => rawEntryNeedsRewrite(entry)),
       };
@@ -1456,19 +1531,16 @@ export class ModelCatalogCacheStore {
   }
 
   private persistSearchEntries(): void {
-    const payload: PersistedPayload<SearchCacheEntry> = {
-      version: PERSISTED_CACHE_VERSION,
-      entries: this.getSortedSearchEntries()
-        .filter((entry) => entry.scope.authScope === 'anon')
-        .map((entry) => ({
-          ...entry,
-          result: {
-            ...entry.result,
-            models: sanitizeAnonymousPersistedModels(entry.result.models),
-          },
-        })),
-    };
-    this.storage.set(SEARCH_CACHE_KEY, JSON.stringify(payload));
+    const entries = this.getSortedSearchEntries()
+      .filter((entry) => entry.scope.authScope === 'anon')
+      .map((entry) => ({
+        ...entry,
+        result: {
+          ...entry.result,
+          models: sanitizeAnonymousPersistedModels(entry.result.models),
+        },
+      }));
+    this.persistBoundedPayload(SEARCH_CACHE_KEY, entries);
   }
 
   private persistSnapshotEntries(): void {
@@ -1483,11 +1555,86 @@ export class ModelCatalogCacheStore {
           }]
           : [];
       });
-    const payload: PersistedPayload<SnapshotCacheEntry> = {
-      version: PERSISTED_CACHE_VERSION,
-      entries,
-    };
-    this.storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify(payload));
+    this.persistBoundedPayload(SNAPSHOT_CACHE_KEY, entries);
+  }
+
+  private persistBoundedPayload<T>(key: typeof PERSISTED_CACHE_KEYS[number], entries: T[]): void {
+    if (this.isPersistenceDisabled) {
+      return;
+    }
+
+    const prefix = `{"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION},"entries":[`;
+    const suffix = ']}';
+    const serializedEntries: string[] = [];
+    let serializedBytes = getTextByteLength(prefix) + getTextByteLength(suffix);
+
+    for (const entry of entries) {
+      const serializedEntry = JSON.stringify(entry);
+      if (!serializedEntry) {
+        continue;
+      }
+
+      const separatorBytes = serializedEntries.length > 0 ? 1 : 0;
+      const nextBytes = serializedBytes + separatorBytes + getTextByteLength(serializedEntry);
+      if (nextBytes > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES) {
+        // Preserve smaller recent entries even if one unusually large result cannot be cached.
+        continue;
+      }
+
+      serializedEntries.push(serializedEntry);
+      serializedBytes = nextBytes;
+    }
+
+    if (serializedEntries.length === 0) {
+      this.removePersistedValue(key, { failOpen: true });
+      return;
+    }
+
+    try {
+      this.storage.set(key, `${prefix}${serializedEntries.join(',')}${suffix}`);
+    } catch {
+      // The previous payload may now describe state that memory has already
+      // removed (for example, a model that became private). Best-effort
+      // invalidation prevents that stale value from returning after restart.
+      this.removePersistedValue(key, { failOpen: true });
+      this.disablePersistence();
+    }
+  }
+
+  private hydrateForMutation(): void {
+    if (this.isHydrated) {
+      return;
+    }
+
+    try {
+      this.hydrate();
+    } catch {
+      // The catalog cache is optional. If persistence is still unavailable when
+      // fresh network data arrives, keep serving that data from memory instead
+      // of turning a successful catalog request into an error.
+      this.searchEntries.clear();
+      this.snapshotEntries.clear();
+      this.disablePersistence();
+    }
+  }
+
+  private removePersistedValue(
+    key: typeof PERSISTED_CACHE_KEYS[number],
+    options: { failOpen?: boolean } = {},
+  ): void {
+    try {
+      this.storage.remove(key);
+    } catch (error) {
+      this.disablePersistence();
+      if (options.failOpen !== true) {
+        throw error;
+      }
+    }
+  }
+
+  private disablePersistence(): void {
+    this.isPersistenceDisabled = true;
+    this.isHydrated = true;
   }
 
   private getSortedSearchEntries(): SearchCacheEntry[] {

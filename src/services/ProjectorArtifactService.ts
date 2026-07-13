@@ -82,12 +82,6 @@ function shouldPreserveReadinessForSelectedProjector(model: ModelMetadata, proje
   });
 }
 
-function clearMemoryFitForProjectorChange(model: ModelMetadata, selectedProjectorId: string): ModelMetadata {
-  return shouldClearProjectorScopedMemoryFit(model, { ...model, selectedProjectorId })
-    ? clearProjectorScopedMemoryFit(model)
-    : model;
-}
-
 function markSelectedProjectorCandidates(
   candidates: readonly ProjectorArtifact[] | undefined,
   targetProjectorId: string,
@@ -195,9 +189,8 @@ export class ProjectorArtifactService {
     const compatibleIds = new Set(compatibleProjectors.map((projector) => projector.id));
     const nativeSupport = resolveEffectiveActiveVariantNativeSupport(model);
     const activeVariant = resolveActiveModelVariant(model);
-    const modelWithProjectorScopedMemoryFit = clearMemoryFitForProjectorChange(model, targetProjector.id);
-    const updatedModel: ModelMetadata = {
-      ...modelWithProjectorScopedMemoryFit,
+    const modelWithUpdatedSelection: ModelMetadata = {
+      ...model,
       selectedProjectorId: targetProjector.id,
       visionSource: nativeSupport.vision ? 'user_selected_projector' : undefined,
       ...(!nativeSupport.vision ? { visionConfidence: undefined } : null),
@@ -209,8 +202,8 @@ export class ProjectorArtifactService {
         targetProjector.id,
         compatibleIds,
       ),
-      ...(activeVariant && modelWithProjectorScopedMemoryFit.variants ? {
-        variants: modelWithProjectorScopedMemoryFit.variants.map((variant) => (
+      ...(activeVariant && model.variants ? {
+        variants: model.variants.map((variant) => (
           variant.variantId === activeVariant.variantId || variant.fileName === activeVariant.fileName
         )
           ? {
@@ -227,6 +220,9 @@ export class ProjectorArtifactService {
           : variant),
       } : null),
     };
+    const updatedModel = shouldClearProjectorScopedMemoryFit(model, modelWithUpdatedSelection)
+      ? clearProjectorScopedMemoryFit(modelWithUpdatedSelection)
+      : modelWithUpdatedSelection;
 
     return {
       model: updatedModel,

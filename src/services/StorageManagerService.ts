@@ -310,7 +310,8 @@ async function resolveStoredProjectorSize(
 }
 
 function getProjectorLocalPathKey(localPath: unknown): string | undefined {
-  return isValidLocalFileName(localPath) ? localPath.toLowerCase() : undefined;
+  // Android app storage is case-sensitive; physical file identity must preserve case.
+  return isValidLocalFileName(localPath) ? localPath : undefined;
 }
 
 async function resolveProjectorLocalFileSize(
@@ -668,7 +669,7 @@ function getDownloadedModelsStoredBytes(downloadedModels: ModelMetadata[]): numb
       }
 
       const projectorKey = projector.localPath && isValidLocalFileName(projector.localPath)
-        ? `path:${projector.localPath.toLowerCase()}`
+        ? `path:${projector.localPath}`
         : `id:${projector.id}`;
       if (countedProjectorKeys.has(projectorKey)) {
         return projectorSum;
@@ -696,7 +697,7 @@ function getDownloadedModelsStoredBytes(downloadedModels: ModelMetadata[]): numb
       }
 
       const projectorKey = artifact.localPath && isValidLocalFileName(artifact.localPath)
-        ? `path:${artifact.localPath.toLowerCase()}`
+        ? `path:${artifact.localPath}`
         : `id:${artifact.id}`;
       if (countedProjectorKeys.has(projectorKey)) {
         return projectorSum;

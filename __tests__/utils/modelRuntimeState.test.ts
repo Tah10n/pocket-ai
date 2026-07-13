@@ -553,6 +553,74 @@ describe('modelRuntimeState', () => {
     expect(merged.multimodalReadiness?.projectorId).toBe('org/model:mmproj-runtime');
   });
 
+  it('clears variant runtime projector state for an authoritative empty candidate list', () => {
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const runtimeProjector = makeProjector({
+      id: 'org/model:mmproj-runtime',
+      ownerVariantId: modelFileName,
+      localPath: 'mmproj-model.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: modelFileName,
+        activeVariantId: modelFileName,
+        variants: [{
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 3 * 1024 * 1024 * 1024,
+          projectorCandidates: [],
+        }],
+      }),
+      {
+        localModel: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: modelFileName,
+          activeVariantId: modelFileName,
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          fitsInRam: true,
+          memoryFitDecision: 'fits_high_confidence',
+          memoryFitConfidence: 'high',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            variantId: modelFileName,
+            status: 'ready',
+            projectorId: runtimeProjector.id,
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 456,
+          },
+          variants: [{
+            variantId: modelFileName,
+            fileName: modelFileName,
+            quantizationLabel: 'Q4_K_M',
+            size: 3 * 1024 * 1024 * 1024,
+            ramFit: 'fits_high_confidence',
+            ramFitConfidence: 'high',
+            selectedProjectorId: runtimeProjector.id,
+            projectorCandidates: [runtimeProjector],
+          }],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+    expect(merged.variants?.[0]?.projectorCandidates).toEqual([]);
+    expect(merged.variants?.[0]?.selectedProjectorId).toBeUndefined();
+    expect(merged.variants?.[0]?.ramFit).toBeUndefined();
+    expect(merged.variants?.[0]?.ramFitConfidence).toBeUndefined();
+    expect(merged.fitsInRam).toBeNull();
+    expect(merged.memoryFitDecision).toBeUndefined();
+    expect(merged.memoryFitConfidence).toBeUndefined();
+  });
+
   it('does not inherit projector resume state when projector identity conflicts', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({

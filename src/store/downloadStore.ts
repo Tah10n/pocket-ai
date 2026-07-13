@@ -11,6 +11,7 @@ import {
   getEffectiveActiveVariantKeys,
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
+  hasExplicitEffectiveActiveVariantProjectorCandidates,
 } from '../utils/modelCapabilities';
 import {
   applyEffectiveProjectorState,
@@ -194,6 +195,7 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
   const projectorRuntimeMerge = canPreserveResumeState
     ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(nextProjectorCandidates, existingProjectorCandidates, {
       activeVariantIds: activeProjectorVariantIds,
+      emptyNextProjectorsAreAuthoritative: hasExplicitEffectiveActiveVariantProjectorCandidates(model),
     })
     : {
       projectorCandidates: nextProjectorCandidates,

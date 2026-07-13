@@ -8,7 +8,12 @@ import type { ModelChatModality } from '../types/multimodal';
 import { getActiveModelVariantKeys, resolveActiveModelVariant } from './activeModelVariant';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from './modelLimits';
 import { inputCapabilityEvidenceSupportsModality } from './modelInputCapabilities';
-import { normalizeProjectorFileName } from './modelProjectors';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+  normalizeProjectorArtifactPath,
+  normalizeProjectorFileName,
+} from './modelProjectors';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
 import { getValidatedMultimodalReadinessForResolvedScope } from './multimodalReadinessCore';
 import { normalizeSha256Digest } from './sha256';
@@ -393,13 +398,21 @@ function hasAudioOnlyDeclaredCapabilityEvidence(model: ModelNativeCapabilityInpu
     && !hasImageSpecificCapabilityEvidence(model.inputCapabilities);
 }
 
-function modelArtifactsRequireInput(
-  artifacts: ModelNativeCapabilityInput['artifacts'],
+function hasCompatibleArtifactInputEvidence(
+  model: ModelNativeCapabilityInput,
   input: 'image' | 'audio',
 ): boolean {
-  return artifacts?.some((artifact) => (
+  const artifacts = model.artifacts?.filter((artifact) => (
     artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes(input)
-  )) === true;
+  )) ?? [];
+  if (artifacts.length === 0) {
+    return false;
+  }
+
+  const candidates = model.projectorCandidates ?? [];
+  return candidates.length === 0 || artifacts.some((artifact) => (
+    candidates.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate))
+  ));
 }
 
 function hasPersistedAudioReadinessEvidence(
@@ -407,6 +420,17 @@ function hasPersistedAudioReadinessEvidence(
 ): boolean {
   return readiness?.support.includes('audio') === true
     || readiness?.requestedSupport?.includes('audio') === true;
+}
+
+function hasAudioOnlyReadyProbeEvidence(
+  readiness: ModelNativeCapabilityInput['multimodalReadiness'],
+): boolean {
+  const requestedSupport = readiness?.requestedSupport;
+  return readiness?.status === 'ready'
+    && readiness.support.includes('audio')
+    && !readiness.support.includes('vision')
+    && requestedSupport?.includes('audio') === true
+    && !requestedSupport.includes('vision');
 }
 
 function hasProjectorPathEvidence(model: ModelNativeCapabilityInput): boolean {
@@ -426,9 +450,11 @@ export function resolveModelNativeMultimodalSupport(model: ModelNativeCapability
   const canUseNativeCapabilityEvidence = !hasExplicitChatModalities || hasExplicitNativeChatModalities;
   const canUseAudioReadinessEvidence = !hasExplicitChatModalities || chatSupportsAudio;
   const canUseLegacyVisionEvidence = (!hasExplicitChatModalities || chatSupportsVision)
-    && !hasAudioOnlyDeclaredCapabilityEvidence(model);
+    && !hasAudioOnlyDeclaredCapabilityEvidence(model)
+    && !hasAudioOnlyReadyProbeEvidence(model.multimodalReadiness);
   const hasExplicitNativeModalityExcludingVision = hasExplicitNativeChatModalities && !chatSupportsVision;
-  const hasAudioArtifactEvidence = modelArtifactsRequireInput(model.artifacts, 'audio');
+  const hasImageArtifactEvidence = hasCompatibleArtifactInputEvidence(model, 'image');
+  const hasAudioArtifactEvidence = hasCompatibleArtifactInputEvidence(model, 'audio');
   const hasAudioReadinessEvidence = canUseAudioReadinessEvidence
     && hasPersistedAudioReadinessEvidence(model.multimodalReadiness);
   const hasAudioCatalogDeclaration = chatSupportsAudio || model.inputCapabilities?.declared.audio === 'supported';
@@ -436,10 +462,10 @@ export function resolveModelNativeMultimodalSupport(model: ModelNativeCapability
     || (canUseNativeCapabilityEvidence && hasDeclaredImageInputSupport(model, {
       allowProjectorOnlyEvidence: !hasExplicitNativeModalityExcludingVision,
     }))
+    || (canUseNativeCapabilityEvidence && hasImageArtifactEvidence)
     || (canUseLegacyVisionEvidence && (
       Boolean(model.projectorCandidates?.length)
       || (typeof model.selectedProjectorId === 'string' && model.selectedProjectorId.trim().length > 0)
-      || modelArtifactsRequireInput(model.artifacts, 'image')
       || hasPersistedVisionReadinessEvidence(model.multimodalReadiness, {
         allowLegacyEvidence: canUseLegacyVisionEvidence,
       })
@@ -506,10 +532,33 @@ export function projectorArtifactMatchesCandidate(
   artifact: NonNullable<ModelMetadata['artifacts']>[number],
   candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
 ): boolean {
+  const candidateIdentity = {
+    repoId: candidate.repoId,
+    hfRevision: candidate.hfRevision,
+    fileName: candidate.fileName,
+    ownerVariantId: candidate.ownerVariantId,
+  };
+  const legacyCandidateId = buildLegacyProjectorArtifactId(candidateIdentity);
+  const hasExactCandidateId = artifact.id === candidate.id;
+  const hasLegacyAliasId = artifact.id !== candidate.id && artifact.id === legacyCandidateId;
+  const candidateArtifactPath = normalizeProjectorArtifactPath(candidate.fileName);
+  const artifactPath = normalizeProjectorArtifactPath(artifact.remoteFileName);
+  const hasExactArtifactPath = candidateArtifactPath !== null
+    && artifactPath === candidateArtifactPath;
+  const pathsDifferOnlyByCase = candidateArtifactPath !== null
+    && artifactPath !== null
+    && artifactPath !== candidateArtifactPath
+    && artifactPath.toLowerCase() === candidateArtifactPath.toLowerCase();
+  const hasCompatibleFileIdentity = hasLegacyAliasId
+    ? hasExactArtifactPath
+    : !pathsDifferOnlyByCase
+      && normalizeProjectorFileName(artifact.remoteFileName)
+        === normalizeProjectorFileName(candidate.fileName);
+
   if (
     artifact.kind !== 'multimodal_projector'
-    || artifact.id !== candidate.id
-    || normalizeProjectorFileName(artifact.remoteFileName) !== normalizeProjectorFileName(candidate.fileName)
+    || (!hasExactCandidateId && !hasLegacyAliasId)
+    || !hasCompatibleFileIdentity
     || (normalizeOptionalString(artifact.hfRevision) ?? 'main')
       !== (normalizeOptionalString(candidate.hfRevision) ?? 'main')
   ) {
@@ -528,6 +577,46 @@ export function projectorArtifactMatchesCandidate(
   );
 }
 
+function hasAmbiguousLegacyProjectorAlias(
+  model: ModelNativeCapabilityInput,
+  candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
+  legacyCandidateId: string,
+): boolean {
+  const candidatePath = normalizeProjectorArtifactPath(candidate.fileName);
+  if (candidatePath === null) {
+    return false;
+  }
+
+  const scopedCandidates = [
+    candidate,
+    ...(model.projectorCandidates ?? []),
+    ...(model.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ];
+  const currentIds = new Set<string>();
+
+  for (const scopedCandidate of scopedCandidates) {
+    const identity = {
+      repoId: scopedCandidate.repoId,
+      hfRevision: scopedCandidate.hfRevision,
+      fileName: scopedCandidate.fileName,
+      ownerVariantId: scopedCandidate.ownerVariantId,
+    };
+    if (
+      normalizeProjectorArtifactPath(scopedCandidate.fileName) !== candidatePath
+      || buildLegacyProjectorArtifactId(identity) !== legacyCandidateId
+    ) {
+      continue;
+    }
+
+    currentIds.add(buildProjectorArtifactId(identity));
+    if (currentIds.size > 1) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function getCandidateProjectorArtifactMatch(
   model: ModelNativeCapabilityInput,
   candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
@@ -535,24 +624,48 @@ function getCandidateProjectorArtifactMatch(
   artifacts: NonNullable<ModelMetadata['artifacts']>;
   hasIdentityConflict: boolean;
 } {
-  const candidateFileName = normalizeProjectorFileName(candidate.fileName);
+  const candidateArtifactPath = normalizeProjectorArtifactPath(candidate.fileName);
+  const legacyCandidateId = buildLegacyProjectorArtifactId({
+    repoId: candidate.repoId,
+    hfRevision: candidate.hfRevision,
+    fileName: candidate.fileName,
+    ownerVariantId: candidate.ownerVariantId,
+  });
+  const hasAmbiguousLegacyAlias = hasAmbiguousLegacyProjectorAlias(
+    model,
+    candidate,
+    legacyCandidateId,
+  );
   const relatedArtifacts = (model.artifacts ?? []).filter((artifact) => (
     artifact.kind === 'multimodal_projector'
     && (
       artifact.id === candidate.id
+      || artifact.id === legacyCandidateId
       || (
-        candidateFileName !== null
-        && normalizeProjectorFileName(artifact.remoteFileName) === candidateFileName
+        candidateArtifactPath !== null
+        && normalizeProjectorArtifactPath(artifact.remoteFileName) === candidateArtifactPath
       )
     )
   ));
-  const artifacts = relatedArtifacts.filter((artifact) => (
-    projectorArtifactMatchesCandidate(artifact, candidate)
+  const compatibleArtifacts = relatedArtifacts.filter((artifact) => (
+    !(hasAmbiguousLegacyAlias && artifact.id === legacyCandidateId)
+    && projectorArtifactMatchesCandidate(artifact, candidate)
   ));
+  const legacyArtifacts = compatibleArtifacts.filter((artifact) => artifact.id !== candidate.id);
+  // During ID migration the persisted artifact carries the established,
+  // projector-specific requirement boundary. A newly derived current-ID
+  // duplicate can be broader because it was synthesized from model-wide
+  // modalities, so prefer the compatible legacy artifact as evidence.
+  const artifacts = legacyArtifacts.length > 0 ? legacyArtifacts : compatibleArtifacts;
+  const hasUnambiguousCompatibleArtifact = compatibleArtifacts.length > 0;
 
   return {
     artifacts,
-    hasIdentityConflict: relatedArtifacts.some((artifact) => !artifacts.includes(artifact)),
+    hasIdentityConflict: relatedArtifacts.some((artifact) => (
+      hasAmbiguousLegacyAlias && artifact.id === legacyCandidateId
+        ? !hasUnambiguousCompatibleArtifact
+        : !compatibleArtifacts.includes(artifact)
+    )),
   };
 }
 
@@ -631,6 +744,16 @@ export function getEffectiveActiveVariantProjectorCandidates(
   return resolveEffectiveActiveVariantProjectorCandidates(model).candidates;
 }
 
+// Reports whether the effective scope supplied candidate metadata itself,
+// including an explicit [] that must clear stale runtime fallback state.
+export function hasExplicitEffectiveActiveVariantProjectorCandidates(
+  model: ModelNativeCapabilityInput,
+): boolean {
+  const activeVariant = resolveActiveModelVariant(model);
+  return Array.isArray(activeVariant?.projectorCandidates)
+    || Array.isArray(model.projectorCandidates);
+}
+
 function resolveEffectiveActiveVariantProjectorCandidates(
   model: ModelNativeCapabilityInput,
 ): {
@@ -640,7 +763,14 @@ function resolveEffectiveActiveVariantProjectorCandidates(
   const activeVariant = resolveActiveModelVariant(model);
   const activeVariantCandidates = activeVariant?.projectorCandidates;
   const modelCandidates = model.projectorCandidates;
-  if (!activeVariantCandidates?.length) {
+  if (Array.isArray(activeVariantCandidates) && activeVariantCandidates.length === 0) {
+    return {
+      candidates: [],
+      runtimeToEffectiveProjectorIds: new Map(),
+    };
+  }
+
+  if (!activeVariantCandidates) {
     return {
       candidates: filterProjectorCandidatesForEffectiveActiveVariant(model, modelCandidates ?? []),
       runtimeToEffectiveProjectorIds: new Map(),
@@ -752,6 +882,15 @@ export function resolveEffectiveActiveVariantNativeSupport(
   const projectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
   const effectiveSelectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, projectorCandidates);
   const readiness = resolveTrustedReadinessForEffectiveCapabilityInference(model, projectorCandidates);
+  const scopedCapabilityInput = {
+    ...model,
+    projectorCandidates,
+  };
+  const hasScopedImageArtifactEvidence = hasCompatibleArtifactInputEvidence(scopedCapabilityInput, 'image');
+  const hasScopedAudioArtifactEvidence = hasCompatibleArtifactInputEvidence(scopedCapabilityInput, 'audio');
+  const hasScopedProjectorArtifactEvidence = hasScopedImageArtifactEvidence || hasScopedAudioArtifactEvidence;
+  const hasSparseActiveVariantModalities = activeVariant !== undefined
+    && !Array.isArray(activeVariant.chatModalities);
 
   const support = resolveModelNativeMultimodalSupport({
     ...model,
@@ -761,10 +900,21 @@ export function resolveEffectiveActiveVariantNativeSupport(
     multimodalReadiness: readiness,
   });
   return {
-    vision: support.vision,
-    audio: support.audio && projectorCandidates.some((candidate) => (
-      candidateHasTrustedActiveVariantModality(model, candidate, 'audio')
-    )),
+    vision: support.vision && (
+      !hasSparseActiveVariantModalities
+      || !hasScopedProjectorArtifactEvidence
+      || hasScopedImageArtifactEvidence
+      || readiness?.support.includes('vision') === true
+    ),
+    audio: support.audio
+      && projectorCandidates.some((candidate) => (
+        candidateHasTrustedActiveVariantModality(model, candidate, 'audio')
+      ))
+      && (
+        !hasSparseActiveVariantModalities
+        || hasScopedAudioArtifactEvidence
+        || readiness?.support.includes('audio') === true
+      ),
   };
 }
 

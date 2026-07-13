@@ -503,7 +503,8 @@ function hasResumableProjectorStatus(projector: Pick<ProjectorArtifact, 'lifecyc
 }
 
 function getSafeLocalPathKey(localPath: unknown): string | undefined {
-  return isValidLocalFileName(localPath) ? localPath.toLowerCase() : undefined;
+  // Android app storage is case-sensitive; physical file identity must preserve case.
+  return isValidLocalFileName(localPath) ? localPath : undefined;
 }
 
 function getMultimodalProjectorArtifacts(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifact[] {
@@ -647,13 +648,28 @@ function clearMultimodalReadinessForProjector(
   model: ModelMetadata,
   projector: Pick<ProjectorArtifact, 'id'>,
 ): boolean {
+  return clearMultimodalReadinessForProjectorIds(model, [projector.id]);
+}
+
+function clearMultimodalReadinessForProjectorIds(
+  model: ModelMetadata,
+  projectorIds: Iterable<string>,
+): boolean {
   const readiness = model.multimodalReadiness;
-  if (!readiness || readiness.projectorId !== projector.id) {
+  if (!readiness) {
     return false;
   }
 
-  model.multimodalReadiness = undefined;
-  return true;
+  for (const projectorId of projectorIds) {
+    if (readiness.projectorId !== projectorId) {
+      continue;
+    }
+
+    model.multimodalReadiness = undefined;
+    return true;
+  }
+
+  return false;
 }
 
 function resetProjectorDownloadStateForModel(
@@ -683,17 +699,19 @@ function resetProjectorArtifactDownloadStateForModel(
   const previousLocalPath = artifact.localPath;
   const changed = resetProjectorArtifactDownloadState(artifact);
   let candidateChanged = false;
+  const affectedProjectorIds = new Set<string>([artifact.id]);
 
   if (changed) {
     for (const projector of getAllModelProjectorCandidates(model)) {
       if (projectorArtifactReferencesSamePhysicalFile({ ...artifact, localPath: previousLocalPath }, projector)) {
+        affectedProjectorIds.add(projector.id);
         candidateChanged = resetProjectorDownloadState(projector) || candidateChanged;
       }
     }
   }
 
   const readinessChanged = (changed || candidateChanged)
-    ? clearMultimodalReadinessForProjector(model, artifact)
+    ? clearMultimodalReadinessForProjectorIds(model, affectedProjectorIds)
     : false;
   return changed || candidateChanged || readinessChanged;
 }
@@ -894,7 +912,10 @@ function getModelAssetFilesForRemoval(
       return;
     }
 
-    const pathKey = fileName.toLowerCase();
+    const pathKey = getSafeLocalPathKey(fileName);
+    if (!pathKey) {
+      return;
+    }
     if (seen.has(pathKey) || protectedLocalPaths.has(pathKey)) {
       return;
     }

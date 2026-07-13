@@ -727,6 +727,44 @@ describe('downloadStore', () => {
     ]);
   });
 
+  it('clears runtime projector state when re-queuing an authoritative empty catalog result', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('vision/model', LifecycleStatus.FAILED),
+          selectedProjectorId: 'vision/model:mmproj',
+          multimodalReadiness: {
+            modelId: 'vision/model',
+            status: 'ready',
+            projectorId: 'vision/model:mmproj',
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 123,
+          },
+          projectorCandidates: [buildProjector({
+            localPath: 'partial-mmproj-model.gguf',
+            resumeData: 'projector-resume-data',
+            lifecycleStatus: 'paused',
+            matchStatus: 'user_selected',
+            matchReason: 'user_selected_projector',
+          })],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('vision/model', LifecycleStatus.AVAILABLE),
+      projectorCandidates: [],
+    });
+
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
+    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(entry?.projectorCandidates).toEqual([]);
+    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.multimodalReadiness).toBeUndefined();
+  });
+
   it('does not preserve variant-scoped projector candidates for another active variant when re-queuing without catalog candidates', () => {
     useDownloadStore.setState({
       queue: [

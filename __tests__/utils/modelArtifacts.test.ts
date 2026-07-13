@@ -162,6 +162,37 @@ describe('modelArtifacts', () => {
     ]);
   });
 
+  it('does not turn stale requested vision into a synthesized image requirement for an audio-only model', () => {
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'audio'],
+      multimodalReadiness: {
+        modelId: 'test-org/model',
+        status: 'ready',
+        projectorId: 'projector-audio',
+        support: ['audio'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+      projectorCandidates: [{
+        id: 'projector-audio',
+        ownerModelId: 'test-org/model',
+        repoId: 'test-org/model',
+        fileName: 'mmproj-audio-f16.gguf',
+        downloadUrl: 'https://example.com/mmproj-audio-f16.gguf',
+        size: 500,
+        lifecycleStatus: 'downloaded',
+        matchStatus: 'matched',
+      }],
+    }));
+
+    expect(artifacts).toEqual([
+      expect.objectContaining({
+        id: 'projector-audio',
+        requiredFor: ['audio'],
+      }),
+    ]);
+  });
+
   it('keeps projector-specific required inputs when legacy model metadata is mixed', () => {
     const projector = (id: string, fileName: string) => ({
       id,

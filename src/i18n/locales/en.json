@@ -213,6 +213,7 @@
       "audioModelUnsupported": "The current model does not support audio attachments.",
       "audioRuntimeUnavailable": "Audio is supported by this model, but is not ready. Check its projector state or reload the model.",
       "mediaRuntimeUnavailable": "Load a model with the required media runtime before reusing these attachments.",
+      "videoRegenerateUnsupported": "Saved video attachments cannot be reused because video input is disabled.",
       "removeImageAccessibilityLabel": "Remove attached image",
       "removeImageIndexedAccessibilityLabel": "Remove attached image {{index}} of {{count}}",
       "removeDocumentIndexedAccessibilityLabel": "Remove attached document {{index}} of {{count}}",

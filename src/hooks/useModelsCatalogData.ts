@@ -51,7 +51,7 @@ export function useModelsCatalogData({
   const [hasTokenConfigured, setHasTokenConfigured] = useState(
     () => huggingFaceTokenService.getCachedState().hasToken,
   );
-  const [manualRefreshRevision, setManualRefreshRevision] = useState(0);
+  const [cacheRefreshRevision, setCacheRefreshRevision] = useState(0);
   const [{ warningMessage, loadMoreError }, setFetchState] = useState<FetchState>({
     warningMessage: null,
     loadMoreError: null,
@@ -74,13 +74,13 @@ export function useModelsCatalogData({
     sizeRangesSessionKey,
     `${sort.field}:${sort.direction}`,
     `token:${tokenRevision}`,
-    `refresh:${manualRefreshRevision}`,
+    `refresh:${cacheRefreshRevision}`,
   ].join('::')), [
     activeTab,
     effectiveSearchSessionKey,
     filters.fitsInRamOnly,
     filters.noTokenRequiredOnly,
-    manualRefreshRevision,
+    cacheRefreshRevision,
     sizeRangesSessionKey,
     sort.direction,
     sort.field,
@@ -104,7 +104,7 @@ export function useModelsCatalogData({
   }, [activeTab]);
 
   const requestCatalogRefresh = useCallback(() => {
-    setManualRefreshRevision((current) => current + 1);
+    setCacheRefreshRevision((current) => current + 1);
   }, []);
 
   const fetchModels = useCallback(
@@ -225,11 +225,11 @@ export function useModelsCatalogData({
 
   useEffect(() => {
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
-      if (source !== 'manual') {
+      if (source !== 'manual' && source !== 'hydrate') {
         return;
       }
 
-      setManualRefreshRevision((current) => current + 1);
+      setCacheRefreshRevision((current) => current + 1);
     });
   }, []);
 

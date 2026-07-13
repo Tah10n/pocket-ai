@@ -1,4 +1,5 @@
 import {
+  buildLegacyProjectorArtifactId,
   buildProjectorArtifactId,
   isProjectorFileName,
   resolveDeterministicProjectorCandidate,
@@ -86,6 +87,60 @@ describe('modelProjectors', () => {
     });
 
     expect(nestedPathId).not.toBe(hyphenPathId);
+  });
+
+  it('keeps case-distinct projector paths and owner variants physically distinct', () => {
+    const upperIdentity = {
+      repoId: 'test-org/vision-chat-model',
+      hfRevision: 'main',
+      ownerVariantId: 'Model.Q4_K_M.gguf',
+      fileName: 'Projectors/MMProj.gguf',
+    };
+    const lowerIdentity = {
+      repoId: 'test-org/vision-chat-model',
+      hfRevision: 'main',
+      ownerVariantId: 'model.q4_k_m.gguf',
+      fileName: 'projectors/mmproj.gguf',
+    };
+    const upperPathId = buildProjectorArtifactId(upperIdentity);
+    const lowerPathId = buildProjectorArtifactId(lowerIdentity);
+
+    expect(upperPathId).not.toBe(lowerPathId);
+    expect(upperPathId).toContain('-exact-path-');
+    expect(buildLegacyProjectorArtifactId(upperIdentity)).toBe(lowerPathId);
+    expect(buildLegacyProjectorArtifactId(upperIdentity))
+      .toBe(buildLegacyProjectorArtifactId(lowerIdentity));
+  });
+
+  it('keeps punctuation-distinct projector basenames separate behind one lossy migration alias', () => {
+    const identities = ['+', '-', ' ', ':'].map((separator) => ({
+      repoId: 'test-org/vision-chat-model',
+      hfRevision: 'main',
+      fileName: `mmproj-model${separator}audio.gguf`,
+    }));
+    const currentIds = identities.map((identity) => buildProjectorArtifactId(identity));
+    const legacyIds = identities.map((identity) => buildLegacyProjectorArtifactId(identity));
+
+    expect(new Set(currentIds).size).toBe(identities.length);
+    expect(new Set(legacyIds).size).toBe(1);
+    expect(currentIds[1]).toBe(legacyIds[1]);
+    expect(currentIds[0]).not.toBe(legacyIds[0]);
+    expect(currentIds[2]).not.toBe(legacyIds[2]);
+    expect(currentIds[3]).not.toBe(legacyIds[3]);
+  });
+
+  it('keeps punctuation-distinct owner variants separate behind one ambiguous legacy alias', () => {
+    const identities = ['+', '-', ' ', ':'].map((separator) => ({
+      repoId: 'test-org/vision-chat-model',
+      hfRevision: 'main',
+      ownerVariantId: `model${separator}audio.gguf`,
+      fileName: 'mmproj-shared.gguf',
+    }));
+    const currentIds = identities.map((identity) => buildProjectorArtifactId(identity));
+    const legacyIds = identities.map((identity) => buildLegacyProjectorArtifactId(identity));
+
+    expect(new Set(currentIds).size).toBe(identities.length);
+    expect(new Set(legacyIds).size).toBe(1);
   });
 
   it('selects a deterministic projector only when one candidate has stronger model affinity', () => {

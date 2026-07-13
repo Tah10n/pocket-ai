@@ -21,6 +21,7 @@ const {
   findAnyNodeInSnapshot,
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
+  findResourceIdInSnapshot,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
@@ -512,6 +513,22 @@ describe('android-scenarios UI snapshot matching', () => {
       })
     );
     expect(match.node.text).toBe('Home');
+  });
+
+  it('matches a visible namespaced resource id and ignores offscreen duplicates', () => {
+    const resourceSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-list-viewport" text="" content-desc="" clickable="false" bounds="[20,2500][1060,3000]" />
+        <node resource-id="com.github.tah10n.pocketai:id/chat-list-viewport" text="" content-desc="" clickable="false" bounds="[20,300][1060,1800]" />
+      </hierarchy>
+    `);
+
+    const node = findResourceIdInSnapshot(resourceSnapshot, 'chat-list-viewport', {
+      visibleOnly: true,
+    });
+
+    expect(node?.resourceId).toBe('com.github.tah10n.pocketai:id/chat-list-viewport');
   });
 
   it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
@@ -1145,6 +1162,102 @@ describe('android-scenarios pack selection', () => {
       'bottom-tabs',
       'new-chat-cta',
     ]);
+  });
+
+  it('uses stable route anchors in core navigation scenarios without scanning Settings content', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const homeHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" clickable="false" bounds="[20,40][420,120]" />
+        <node text="Recent Conversations" content-desc="" clickable="false" bounds="[20,160][720,240]" />
+        <node text="Theme Mode" content-desc="" clickable="true" bounds="[40,400][1040,520]" />
+        <node text="Language" content-desc="" clickable="true" bounds="[40,600][1040,720]" />
+        <node text="Storage Manager" content-desc="" clickable="true" bounds="[40,800][1040,920]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('exec-out')) {
+          return { status: 0, stdout: homeHierarchyXml, stderr: '' };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const isolatedScenarios = isolatedBuildScenarios();
+      const events = [];
+      const newChatContext = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn(async (labels) => {
+          events.push(labels.includes('No messages yet') ? 'empty-copy' : 'text');
+        }),
+        expectResourceId: jest.fn(async () => {
+          events.push('chat-viewport');
+        }),
+        tapAnyText: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await isolatedScenarios.find((scenario) => scenario.id === 'new-chat-cta').run(newChatContext);
+
+      expect(newChatContext.expectResourceId).toHaveBeenCalledWith('chat-list-viewport', {
+        timeoutMs: 60_000,
+      });
+      expect(newChatContext.expectAnyText).toHaveBeenCalledWith(
+        expect.arrayContaining(['No messages yet']),
+        { timeoutMs: 60_000 }
+      );
+      expect(events.indexOf('chat-viewport')).toBeLessThan(events.indexOf('empty-copy'));
+
+      const dumpsBeforeBottomTabs = spawnSync.mock.calls.filter(([, args]) => args.includes('exec-out')).length;
+      const bottomTabsContext = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        swipeDown: jest.fn().mockResolvedValue(undefined),
+        swipeUp: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await isolatedScenarios.find((scenario) => scenario.id === 'bottom-tabs').run(bottomTabsContext);
+
+      const dumpsAfterBottomTabs = spawnSync.mock.calls.filter(([, args]) => args.includes('exec-out')).length;
+      expect(dumpsAfterBottomTabs - dumpsBeforeBottomTabs).toBe(1);
+      expect(bottomTabsContext.swipeDown).not.toHaveBeenCalled();
+      expect(bottomTabsContext.swipeUp).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
   });
 
   it('runs the variant picker smoke check from the catalog pack', () => {

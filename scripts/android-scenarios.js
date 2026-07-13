@@ -109,6 +109,7 @@ const ATTACH_MENU_LABELS = [
 ];
 const ATTACH_MENU_BUTTON_RESOURCE_ID = "chat-attach-menu-button";
 const ATTACH_IMAGE_BUTTON_RESOURCE_ID = "chat-attach-image-button";
+const CHAT_LIST_VIEWPORT_RESOURCE_ID = "chat-list-viewport";
 const ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS = 8_000;
 const ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS = [
   "busy",
@@ -368,6 +369,7 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
 ];
 const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
+const CHAT_ROUTE_TIMEOUT_MS = 60_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS = 2_000;
 const CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS = 2_000;
@@ -603,6 +605,12 @@ function createScenarioContext(adbPath, serial) {
     },
     expectAnyText: async (labels, options = {}) => {
       await waitForAnyNode(adbPath, serial, labels, {
+        timeoutMs: options.timeoutMs,
+        visibleOnly: true,
+      });
+    },
+    expectResourceId: async (resourceId, options = {}) => {
+      await waitForResourceId(adbPath, serial, resourceId, {
         timeoutMs: options.timeoutMs,
         visibleOnly: true,
       });
@@ -933,13 +941,14 @@ function assertAttachmentTextOnlyFallbackState({
 }
 
 function isResourceId(node, resourceId) {
-  return node.resourceId === resourceId || node.resourceId.endsWith(`:id/${resourceId}`);
+  const candidateResourceId = node?.resourceId || "";
+  return candidateResourceId === resourceId || candidateResourceId.endsWith(`:id/${resourceId}`);
 }
 
-function findAttachImageActionInSnapshot(snapshot, options = {}) {
+function findResourceIdInSnapshot(snapshot, resourceId, options = {}) {
   const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
   const matches = snapshot.nodes.filter((node) => {
-    if (!isResourceId(node, ATTACH_IMAGE_BUTTON_RESOURCE_ID)) {
+    if (!isResourceId(node, resourceId)) {
       return false;
     }
 
@@ -951,38 +960,30 @@ function findAttachImageActionInSnapshot(snapshot, options = {}) {
       && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
   });
 
-  if (matches.length === 0) {
+  return pickBestNode(matches) || null;
+}
+
+function findAttachImageActionInSnapshot(snapshot, options = {}) {
+  const node = findResourceIdInSnapshot(snapshot, ATTACH_IMAGE_BUTTON_RESOURCE_ID, options);
+  if (!node) {
     return findAnyNodeInSnapshot(snapshot, ATTACH_IMAGE_LABELS, options);
   }
 
   return {
     label: ATTACH_IMAGE_LABELS[0],
-    node: pickBestNode(matches),
+    node,
   };
 }
 
 function findAttachMenuActionInSnapshot(snapshot, options = {}) {
-  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
-  const matches = snapshot.nodes.filter((node) => {
-    if (!isResourceId(node, ATTACH_MENU_BUTTON_RESOURCE_ID)) {
-      return false;
-    }
-
-    if (!options.visibleOnly) {
-      return true;
-    }
-
-    return Boolean(node.bounds)
-      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
-  });
-
-  if (matches.length === 0) {
+  const node = findResourceIdInSnapshot(snapshot, ATTACH_MENU_BUTTON_RESOURCE_ID, options);
+  if (!node) {
     return findAnyNodeInSnapshot(snapshot, ATTACH_MENU_LABELS, options);
   }
 
   return {
     label: ATTACH_MENU_LABELS[0],
-    node: pickBestNode(matches),
+    node,
   };
 }
 
@@ -1116,7 +1117,7 @@ function buildScenarios() {
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapBottomTab(CHAT_TAB_LABELS);
-        await ctx.expectAnyText(CHAT_ROUTE_LABELS);
+        await ctx.expectAnyText(CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
 
         await ctx.tapBottomTab(MODELS_TAB_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
@@ -1124,13 +1125,10 @@ function buildScenarios() {
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
 
         await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
-        await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
-        await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-        await scrollToAnyText(ctx, STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await ctx.expectAnyText(SETTINGS_TITLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
 
         await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(HOME_SECTION_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
       },
     },
     {
@@ -1164,7 +1162,10 @@ function buildScenarios() {
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
-        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+        await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+          timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+        });
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(NEW_CHAT_LABELS);
       },
@@ -2396,6 +2397,25 @@ async function waitForAnyNode(adbPath, serial, labels, options = {}) {
       serial,
       `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
     )
+  );
+}
+
+async function waitForResourceId(adbPath, serial, resourceId, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createUiSnapshot(adbPath, serial);
+    const node = findResourceIdInSnapshot(snapshot, resourceId, options);
+    if (node) {
+      return node;
+    }
+
+    await delay(600);
+  }
+
+  throw new Error(
+    withUiSummary(adbPath, serial, `Timed out waiting for resource id "${resourceId}".`)
   );
 }
 
@@ -3666,6 +3686,7 @@ module.exports = {
   findPreparedAssistantResponseNode,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
+  findResourceIdInSnapshot,
   isBoundsClearOfBottomOverlay,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,

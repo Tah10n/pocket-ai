@@ -769,7 +769,12 @@ describe('modelCapabilities', () => {
     };
 
     expect(resolveModelNativeMultimodalSupport(model)).toEqual({ vision: true, audio: true });
-    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([visionProjector]);
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        id: buildProjectorArtifactId(visionProjector),
+        fileName: visionProjector.fileName,
+      }),
+    ]);
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: true, audio: false });
     expect(modelSupportsAudio(model)).toBe(false);
     expect(resolveEffectiveActiveVariantNativeSupport({
@@ -978,7 +983,12 @@ describe('modelCapabilities', () => {
         { ...candidate, ownerModelId: 'other/model' },
         validCandidate,
       ],
-    })).toEqual([validCandidate]);
+    })).toEqual([
+      expect.objectContaining({
+        id: buildProjectorArtifactId(validCandidate),
+        fileName: validCandidate.fileName,
+      }),
+    ]);
   });
 
   it.each([
@@ -1042,7 +1052,12 @@ describe('modelCapabilities', () => {
       ],
     };
 
-    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([expectedProjector]);
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        id: buildProjectorArtifactId(expectedProjector),
+        fileName: expectedProjector.fileName,
+      }),
+    ]);
     expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBeUndefined();
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual(expectedSupport);
   });
@@ -1081,16 +1096,17 @@ describe('modelCapabilities', () => {
       projectorCandidates: [runtimeProjector],
       selectedProjectorId: runtimeProjector.id,
     };
+    const canonicalProjectorId = buildProjectorArtifactId(activeVariantProjector);
 
     expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([
       expect.objectContaining({
-        id: activeVariantProjector.id,
+        id: canonicalProjectorId,
         localPath: runtimeProjector.localPath,
         lifecycleStatus: 'downloaded',
         downloadProgress: 1,
       }),
     ]);
-    expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBe(activeVariantProjector.id);
+    expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBe(canonicalProjectorId);
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: true });
   });
 
@@ -1172,8 +1188,16 @@ describe('modelCapabilities', () => {
       })),
     };
 
-    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual(candidates);
-    expect(getEffectiveActiveVariantSelectedProjectorId(model)).toBe(candidates[0].id);
+    const effectiveCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+    expect(effectiveCandidates).toHaveLength(2);
+    expect(effectiveCandidates).toEqual(expect.arrayContaining(candidates.map((candidate) => (
+      expect.objectContaining({
+        id: buildProjectorArtifactId(candidate),
+        fileName: candidate.fileName,
+      })
+    ))));
+    expect(getEffectiveActiveVariantSelectedProjectorId(model))
+      .toBe(buildProjectorArtifactId(candidates[0]));
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: true, audio: false });
   });
 
@@ -1442,7 +1466,7 @@ describe('modelCapabilities', () => {
   });
 
   it.each(['legacy-first', 'current-first'] as const)(
-    'prefers established legacy requirements when the candidate itself still has the legacy id (%s)',
+    'fails closed on conflicting current and legacy artifact requirements (%s)',
     (artifactOrder) => {
       const modelId = 'author/legacy-candidate-provenance';
       const variantId = 'Model.Q4_K_M.gguf';
@@ -1499,9 +1523,9 @@ describe('modelCapabilities', () => {
       };
 
       expect(getEffectiveActiveVariantProjectorCandidates(model).map(({ id }) => id))
-        .toEqual([legacyId]);
+        .toEqual([]);
       expect(resolveEffectiveActiveVariantNativeSupport(model))
-        .toEqual({ vision: false, audio: true });
+        .toEqual({ vision: false, audio: false });
     },
   );
 
@@ -1556,7 +1580,7 @@ describe('modelCapabilities', () => {
       .toEqual({ vision: false, audio: false });
   });
 
-  it('preserves legacy artifact provenance when normalization creates a current-id duplicate', () => {
+  it('collapses legacy artifact provenance into one canonical current-id artifact', () => {
     const modelId = 'author/legacy-projector-duplicate';
     const modelFileName = 'Model.Q4_K_M.gguf';
     const projectorFileName = 'Projectors/MMProj-Audio.GGUF';
@@ -1620,20 +1644,14 @@ describe('modelCapabilities', () => {
       artifact.kind === 'multimodal_projector'
     )) ?? [];
 
-    expect(projectorArtifacts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        id: legacyArtifact.id,
-        requiredFor: ['audio'],
-        localPath: legacyArtifact.localPath,
-        installState: 'installed',
-      }),
+    expect(projectorArtifacts).toEqual([
       expect.objectContaining({
         id: candidate.id,
-        requiredFor: ['image', 'audio'],
+        requiredFor: ['audio'],
         localPath: candidate.localPath,
         installState: 'installed',
       }),
-    ]));
+    ]);
     expect(getEffectiveActiveVariantProjectorCandidates(normalized)).toEqual([
       expect.objectContaining({
         id: candidate.id,
@@ -1689,7 +1707,13 @@ describe('modelCapabilities', () => {
       }],
     };
 
-    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([candidate]);
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        id: buildProjectorArtifactId(candidate),
+        fileName: candidate.fileName,
+        sha256: 'a'.repeat(64),
+      }),
+    ]);
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: true });
   });
 

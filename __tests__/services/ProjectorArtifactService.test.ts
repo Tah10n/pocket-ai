@@ -7,7 +7,10 @@ import {
   visionModelFileName,
   visionModelRepoId,
 } from '../fixtures/multimodalCatalogFixtures';
-import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../../src/utils/modelProjectors';
 import { resolveEffectiveActiveVariantNativeSupport } from '../../src/utils/modelCapabilities';
 
 function createProjector(fileName: string, overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
@@ -278,9 +281,10 @@ describe('ProjectorArtifactService', () => {
       }],
       projectorCandidates: [implicitProjector, explicitProjector],
     }), explicitProjector.id);
+    const canonicalProjectorId = buildProjectorArtifactId(explicitProjector);
 
     expect(selection.model).toEqual(expect.objectContaining({
-      selectedProjectorId: explicitProjector.id,
+      selectedProjectorId: canonicalProjectorId,
       fitsInRam: true,
       memoryFitDecision: 'fits_high_confidence',
       memoryFitConfidence: 'high',
@@ -329,6 +333,36 @@ describe('ProjectorArtifactService', () => {
       })],
     }));
   });
+
+  it.each(['current-first', 'legacy-first'] as const)(
+    'collapses current and legacy aliases before projector selection (%s)',
+    (order) => {
+      const currentProjector = createProjector(projectorFileName);
+      const legacyProjector = {
+        ...currentProjector,
+        id: buildLegacyProjectorArtifactId(currentProjector),
+        localPath: 'legacy-mmproj.gguf',
+        lifecycleStatus: 'downloaded' as const,
+      };
+      const projectorCandidates = order === 'current-first'
+        ? [currentProjector, legacyProjector]
+        : [legacyProjector, currentProjector];
+      const model = createVisionModel({ projectorCandidates });
+      const service = new ProjectorArtifactService();
+
+      expect(service.resolveProjectorForModel(model)).toEqual(expect.objectContaining({
+        status: 'matched',
+        reason: 'single_projector_candidate',
+        selectedProjector: expect.objectContaining({
+          id: currentProjector.id,
+          localPath: legacyProjector.localPath,
+          lifecycleStatus: 'downloaded',
+        }),
+      }));
+      expect(service.selectProjectorForModel(model, legacyProjector.id).model)
+        .toEqual(expect.objectContaining({ selectedProjectorId: currentProjector.id }));
+    },
+  );
 
   it('clears projector-scoped memory fit when the active variant owns the previous selection', () => {
     const firstProjector = createProjector(projectorFileName, {

@@ -66,7 +66,6 @@ import {
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
-import { normalizeSha256Digest } from '../utils/sha256';
 import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
 import {
   inferDeclaredInputCapabilities,
@@ -86,7 +85,8 @@ import {
   isMultimodalReadinessReusableForModel,
   normalizeMultimodalReadinessState,
 } from '../utils/multimodalReadiness';
-import { mergeProjectorRuntimeState as mergeCompatibleProjectorRuntimeState } from '../utils/projectorRuntimeState';
+import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
+import { canonicalizeProjectorCandidateAliases } from '../utils/projectorIdentity';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -1883,7 +1883,7 @@ export class ModelCatalogService {
             visionSource,
             visionConfidence,
             ...filteredProjectorMetadataPatch,
-          }), hasAuthoritativeEmptyProjectorResult);
+          }), hasAuthoritativeEmptyProjectorResult, chatModalities);
         }
 
         return this.preserveAuthoritativeEmptyProjectorResult(normalizePersistedModelMetadata({
@@ -1910,7 +1910,7 @@ export class ModelCatalogService {
           visionSource,
           visionConfidence,
           ...filteredProjectorMetadataPatch,
-        }), hasAuthoritativeEmptyProjectorResult);
+        }), hasAuthoritativeEmptyProjectorResult, chatModalities);
       } catch (error) {
         if (error instanceof StaleCatalogAuthError) {
           throw error;
@@ -2278,11 +2278,6 @@ export class ModelCatalogService {
       ? getEffectiveActiveVariantProjectorCandidates(remoteModel)
       : undefined;
     const localCandidates = getEffectiveActiveVariantProjectorCandidates(localModel);
-    const localActiveVariant = resolveActiveModelVariant(localModel);
-    const rawLocalCandidates = [
-      ...(localActiveVariant?.projectorCandidates ?? []),
-      ...(localModel.projectorCandidates ?? []),
-    ];
     const remoteSelectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(
       remoteModel,
       remoteCandidates ?? [],
@@ -2330,11 +2325,20 @@ export class ModelCatalogService {
         return canPreserveLocalProjector;
       });
       const localCandidateIds = new Set(compatibleLocalCandidates.map((projector) => projector.id));
+      const canonicalLocalProjectors = canonicalizeProjectorCandidateAliases([
+        ...(localModel.projectorCandidates ?? []),
+        ...(localModel.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+      ], localModel.artifacts, { activeVariantKeys: runtimeVariantKeys });
+      canonicalLocalProjectors.blockedIds.forEach((projectorId) => {
+        if (!localCandidateIds.has(projectorId)) {
+          blockedLocalProjectorIds.add(projectorId);
+        }
+      });
       const selectedProjectorId = this.resolveMergedSelectedProjectorId(
         remoteSelectedProjectorId,
         localSelectedProjectorId,
         localCandidateIds,
-        new Map(),
+        canonicalLocalProjectors.aliasToCanonicalId,
         blockedLocalProjectorIds,
         new Set(),
       );
@@ -2347,7 +2351,7 @@ export class ModelCatalogService {
           remoteModel.multimodalReadiness,
           localModel.multimodalReadiness,
           localCandidateIds,
-          new Map(),
+          canonicalLocalProjectors.aliasToCanonicalId,
           selectedProjectorId,
           new Set(),
           blockedLocalProjectorIds,
@@ -2355,62 +2359,39 @@ export class ModelCatalogService {
       };
     }
 
-    const usedLocalProjectorIds = new Set<string>();
-    const localToRemoteProjectorIds = new Map<string, string>();
-    const incompatibleLocalReadinessProjectorIds = new Set<string>();
-    const incompatibleRemoteReadinessProjectorIds = new Set<string>();
-    const blockedLocalProjectorIds = new Set<string>();
-    const blockedRemoteProjectorIds = new Set<string>();
     const runtimeVariantKeys = this.resolveProjectorRuntimeVariantKeys(remoteModel, localModel);
-    const mergedCandidates = remoteCandidates.map((remoteProjector) => {
-      const conflictingExactLocalProjector = rawLocalCandidates.find((localProjector) => (
-        localProjector.id === remoteProjector.id
-        && this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantKeys)
-        && !this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantKeys)
-      ));
-      if (conflictingExactLocalProjector) {
-        blockedLocalProjectorIds.add(conflictingExactLocalProjector.id);
-        blockedRemoteProjectorIds.add(remoteProjector.id);
-      }
-
-      const localProjector = this.findLocalProjectorForRemote(
-        remoteProjector,
-        localCandidates,
-        usedLocalProjectorIds,
-        runtimeVariantKeys,
-      );
-
-      if (!localProjector) {
-        return remoteProjector;
-      }
-
-      usedLocalProjectorIds.add(localProjector.id);
-      localToRemoteProjectorIds.set(localProjector.id, remoteProjector.id);
-
-      if (!this.projectorsHaveCompatibleRuntimeMetadata(remoteProjector, localProjector)) {
-        incompatibleLocalReadinessProjectorIds.add(localProjector.id);
-        incompatibleRemoteReadinessProjectorIds.add(remoteProjector.id);
-      }
-
-      return this.mergeProjectorRuntimeState(remoteProjector, localProjector);
-    });
+    const runtimeMerge = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+      remoteCandidates,
+      localCandidates,
+      {
+        activeVariantIds: runtimeVariantKeys,
+        emptyNextProjectorsAreAuthoritative: hasRemoteCandidateMetadata,
+        nextIdentityCandidates: [
+          ...(remoteModel.projectorCandidates ?? []),
+          ...(remoteModel.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+        ],
+        runtimeIdentityCandidates: [
+          ...(localModel.projectorCandidates ?? []),
+          ...(localModel.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+        ],
+      },
+    );
+    let mergedCandidates = runtimeMerge.projectorCandidates ?? [];
+    const localToRemoteProjectorIds = runtimeMerge.runtimeToNextProjectorIds;
+    const blockedLocalProjectorIds = runtimeMerge.blockedRuntimeProjectorIds;
+    const blockedRemoteProjectorIds = runtimeMerge.blockedNextProjectorIds;
+    const incompatibleLocalReadinessProjectorIds = runtimeMerge.blockedRuntimeReadinessProjectorIds;
+    const incompatibleRemoteReadinessProjectorIds = runtimeMerge.blockedNextReadinessProjectorIds;
     if (preserveUnmatchedLocalProjectors) {
-      for (const localProjector of localCandidates) {
-        if (
-          usedLocalProjectorIds.has(localProjector.id)
-          || blockedLocalProjectorIds.has(localProjector.id)
-          || mergedCandidates.some((candidate) => candidate.id === localProjector.id)
-        ) {
-          continue;
-        }
-
-        if (!this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantKeys)) {
-          blockedLocalProjectorIds.add(localProjector.id);
-          continue;
-        }
-
-        mergedCandidates.push(localProjector);
-      }
+      const unmatchedLocalProjectors = localCandidates.filter((localProjector) => (
+        !localToRemoteProjectorIds.has(localProjector.id)
+        && !blockedLocalProjectorIds.has(localProjector.id)
+        && this.projectorAppliesToRuntimeVariant(localProjector, runtimeVariantKeys)
+      ));
+      mergedCandidates = mergeProjectorCandidatesWithRuntimeStateAndIdMap(
+        [...mergedCandidates, ...unmatchedLocalProjectors],
+        undefined,
+      ).projectorCandidates ?? [];
     }
     const mergedCandidateIds = new Set(mergedCandidates.map((projector) => projector.id));
     const selectedProjectorId = this.resolveMergedSelectedProjectorId(
@@ -2456,27 +2437,6 @@ export class ModelCatalogService {
     };
   }
 
-  private findLocalProjectorForRemote(
-    remoteProjector: ProjectorArtifact,
-    localProjectors: ProjectorArtifact[],
-    usedLocalProjectorIds: Set<string>,
-    runtimeVariantKeys: ReadonlySet<string>,
-  ): ProjectorArtifact | undefined {
-    const exactMatch = localProjectors.find((localProjector) => (
-      !usedLocalProjectorIds.has(localProjector.id)
-      && localProjector.id === remoteProjector.id
-      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantKeys)
-    ));
-    if (exactMatch) {
-      return exactMatch;
-    }
-
-    return localProjectors.find((localProjector) => (
-      !usedLocalProjectorIds.has(localProjector.id)
-      && this.projectorsShareStableArtifact(remoteProjector, localProjector, runtimeVariantKeys)
-    ));
-  }
-
   private resolveProjectorRuntimeVariantKeys(
     remoteModel: ModelMetadata,
     localModel: ModelMetadata,
@@ -2502,133 +2462,6 @@ export class ModelCatalogService {
     return !projectorVariantId || runtimeVariantKeys.size === 0 || runtimeVariantKeys.has(projectorVariantId);
   }
 
-  private projectorsShareRuntimeVariantScope(
-    remoteProjector: ProjectorArtifact,
-    localProjector: ProjectorArtifact,
-    runtimeVariantKeys: ReadonlySet<string>,
-  ): boolean {
-    const remoteVariantId = this.normalizeProjectorVariantId(remoteProjector.ownerVariantId);
-    const localVariantId = this.normalizeProjectorVariantId(localProjector.ownerVariantId);
-    if (remoteVariantId === localVariantId) {
-      return true;
-    }
-
-    if (remoteVariantId && localVariantId) {
-      return runtimeVariantKeys.has(remoteVariantId) && runtimeVariantKeys.has(localVariantId);
-    }
-
-    const scopedVariantId = remoteVariantId ?? localVariantId;
-    return Boolean(
-      scopedVariantId
-      && runtimeVariantKeys.has(scopedVariantId),
-    );
-  }
-
-  private projectorsShareStableArtifact(
-    remoteProjector: ProjectorArtifact,
-    localProjector: ProjectorArtifact,
-    runtimeVariantKeys: ReadonlySet<string> = new Set(),
-  ): boolean {
-    if (
-      remoteProjector.ownerModelId !== localProjector.ownerModelId
-      || remoteProjector.repoId !== localProjector.repoId
-      || remoteProjector.fileName !== localProjector.fileName
-      || (remoteProjector.hfRevision ?? 'main') !== (localProjector.hfRevision ?? 'main')
-    ) {
-      return false;
-    }
-
-    return this.projectorsShareRuntimeVariantScope(remoteProjector, localProjector, runtimeVariantKeys);
-  }
-
-  private projectorsHaveCompatibleRuntimeMetadata(
-    remoteProjector: ProjectorArtifact,
-    localProjector: ProjectorArtifact,
-  ): boolean {
-    if (this.projectorComparableValuesConflict(
-      normalizeSha256Digest(remoteProjector.sha256),
-      normalizeSha256Digest(localProjector.sha256),
-    )) {
-      return false;
-    }
-
-    if (this.projectorComparableValuesConflict(
-      this.normalizeComparableProjectorSize(remoteProjector.size),
-      this.normalizeComparableProjectorSize(localProjector.size),
-    )) {
-      return false;
-    }
-
-    return !this.projectorComparableValuesConflict(
-      this.normalizeComparableProjectorDownloadUrl(remoteProjector.downloadUrl),
-      this.normalizeComparableProjectorDownloadUrl(localProjector.downloadUrl),
-    );
-  }
-
-  private projectorComparableValuesConflict<T>(
-    remoteValue: T | undefined,
-    localValue: T | undefined,
-  ): boolean {
-    return remoteValue !== undefined && localValue !== undefined && remoteValue !== localValue;
-  }
-
-  private normalizeComparableProjectorSize(size: number | null | undefined): number | undefined {
-    return typeof size === 'number' && Number.isFinite(size) && size >= 0
-      ? Math.round(size)
-      : undefined;
-  }
-
-  private normalizeComparableProjectorDownloadUrl(
-    downloadUrl: string | undefined,
-  ): string | undefined {
-    if (typeof downloadUrl !== 'string') {
-      return undefined;
-    }
-
-    const trimmed = downloadUrl.trim();
-    if (!trimmed) {
-      return undefined;
-    }
-
-    try {
-      const parsed = new URL(trimmed);
-      parsed.hash = '';
-      parsed.protocol = parsed.protocol.toLowerCase();
-      parsed.hostname = parsed.hostname.toLowerCase();
-      return parsed.toString();
-    } catch {
-      return trimmed;
-    }
-  }
-
-  private mergeProjectorRuntimeState(
-    remoteProjector: ProjectorArtifact,
-    localProjector: ProjectorArtifact,
-  ): ProjectorArtifact {
-    const hasLocalRuntimeState = (
-      typeof localProjector.localPath === 'string'
-      || typeof localProjector.resumeData === 'string'
-      || typeof localProjector.downloadProgress === 'number'
-      || localProjector.lifecycleStatus !== 'available'
-      || localProjector.matchStatus !== remoteProjector.matchStatus
-      || localProjector.matchReason !== remoteProjector.matchReason
-    );
-
-    if (
-      !hasLocalRuntimeState
-      || !this.projectorsHaveCompatibleRuntimeMetadata(remoteProjector, localProjector)
-    ) {
-      return remoteProjector;
-    }
-
-    const mergedProjector = mergeCompatibleProjectorRuntimeState(remoteProjector, localProjector);
-
-    return {
-      ...mergedProjector,
-      downloadProgress: localProjector.downloadProgress ?? mergedProjector.downloadProgress,
-    };
-  }
-
   private resolveMergedSelectedProjectorId(
     remoteSelectedProjectorId: string | undefined,
     localSelectedProjectorId: string | undefined,
@@ -2638,34 +2471,16 @@ export class ModelCatalogService {
     blockedRemoteProjectorIds: Set<string> = blockedLocalProjectorIds,
   ): string | undefined {
     const blockedRemoteSelectedProjectorId = remoteSelectedProjectorId
-      && candidateIds.has(remoteSelectedProjectorId)
       && blockedRemoteProjectorIds.has(remoteSelectedProjectorId)
       ? remoteSelectedProjectorId
       : undefined;
 
-    if (remoteSelectedProjectorId && candidateIds.has(remoteSelectedProjectorId)) {
-      if (candidateIds.has(remoteSelectedProjectorId) && !blockedRemoteSelectedProjectorId) {
-        return remoteSelectedProjectorId;
-      }
-
-      if (!localSelectedProjectorId || blockedLocalProjectorIds.has(localSelectedProjectorId)) {
-        return undefined;
-      }
-
-      const selectedProjectorId = localToRemoteProjectorIds.get(localSelectedProjectorId)
-        ?? localSelectedProjectorId;
-
-      if (blockedRemoteSelectedProjectorId) {
-        return selectedProjectorId === blockedRemoteSelectedProjectorId
-          && localSelectedProjectorId !== selectedProjectorId
-          && candidateIds.has(selectedProjectorId)
-          ? selectedProjectorId
-          : undefined;
-      }
-
-      return selectedProjectorId === remoteSelectedProjectorId && candidateIds.has(selectedProjectorId)
-        ? selectedProjectorId
-        : undefined;
+    if (
+      remoteSelectedProjectorId
+      && candidateIds.has(remoteSelectedProjectorId)
+      && !blockedRemoteSelectedProjectorId
+    ) {
+      return remoteSelectedProjectorId;
     }
 
     if (!localSelectedProjectorId) {
@@ -2678,6 +2493,18 @@ export class ModelCatalogService {
 
     const selectedProjectorId = localToRemoteProjectorIds.get(localSelectedProjectorId)
       ?? localSelectedProjectorId;
+
+    if (blockedRemoteSelectedProjectorId) {
+      return selectedProjectorId === blockedRemoteSelectedProjectorId
+        && localSelectedProjectorId !== selectedProjectorId
+        && candidateIds.has(selectedProjectorId)
+        ? selectedProjectorId
+        : undefined;
+    }
+
+    if (blockedRemoteProjectorIds.has(selectedProjectorId)) {
+      return undefined;
+    }
 
     return candidateIds.has(selectedProjectorId) ? selectedProjectorId : undefined;
   }
@@ -3411,10 +3238,35 @@ export class ModelCatalogService {
   private preserveAuthoritativeEmptyProjectorResult(
     model: ModelMetadata,
     isAuthoritativeEmpty: boolean,
+    authoritativeChatModalities?: ModelMetadata['chatModalities'],
   ): ModelMetadata {
-    return isAuthoritativeEmpty
-      ? { ...model, projectorCandidates: [] }
-      : model;
+    if (!isAuthoritativeEmpty) {
+      return model;
+    }
+
+    const activeVariant = resolveActiveModelVariant(model);
+    const variants = activeVariant
+      ? model.variants?.map((variant) => (
+          variant.variantId === activeVariant.variantId || variant.fileName === activeVariant.fileName
+            ? {
+                ...variant,
+                ...(authoritativeChatModalities ? { chatModalities: authoritativeChatModalities } : null),
+                projectorCandidates: [],
+                selectedProjectorId: undefined,
+              }
+            : variant
+        ))
+      : model.variants;
+
+    return {
+      ...model,
+      ...(authoritativeChatModalities ? { chatModalities: authoritativeChatModalities } : null),
+      variants,
+      artifacts: model.artifacts?.filter((artifact) => artifact.kind !== 'multimodal_projector'),
+      projectorCandidates: [],
+      selectedProjectorId: undefined,
+      multimodalReadiness: undefined,
+    };
   }
 
   private resolveMergedContextWindowMetadata(

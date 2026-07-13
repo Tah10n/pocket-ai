@@ -228,6 +228,7 @@ type LoadedModelArtifactIdentity = {
 type ActiveMultimodalContext = {
   modelId: string;
   projectorId: string;
+  projectorOwnerModelId: string | null;
   projectorRepoId: string | null;
   projectorOwnerVariantId: string | null;
   projectorFileName: string | null;
@@ -1105,6 +1106,7 @@ class LLMEngineService {
     return {
       modelId,
       projectorId: projector.id,
+      projectorOwnerModelId: this.normalizeArtifactString(projector.ownerModelId),
       projectorRepoId: this.normalizeArtifactString(projector.repoId),
       projectorOwnerVariantId: this.normalizeArtifactString(projector.ownerVariantId),
       projectorFileName: this.normalizeArtifactString(projector.fileName),
@@ -1156,6 +1158,13 @@ class LLMEngineService {
     const current = this.buildActiveMultimodalContext({ modelId, projector, resolvedProjector });
     return activeMultimodalContext.modelId === current.modelId
       && activeMultimodalContext.projectorId === current.projectorId
+      && activeMultimodalContext.projectorOwnerModelId === current.projectorOwnerModelId
+      && activeMultimodalContext.projectorRepoId === current.projectorRepoId
+      && activeMultimodalContext.projectorOwnerVariantId === current.projectorOwnerVariantId
+      && activeMultimodalContext.projectorFileName === current.projectorFileName
+      && activeMultimodalContext.projectorDownloadUrl === current.projectorDownloadUrl
+      && activeMultimodalContext.projectorHfRevision === current.projectorHfRevision
+      && activeMultimodalContext.projectorSha256 === current.projectorSha256
       && activeMultimodalContext.projectorLocalPath === current.projectorLocalPath
       && activeMultimodalContext.projectorResolvedPath === current.projectorResolvedPath
       && activeMultimodalContext.projectorSizeBytes === current.projectorSizeBytes

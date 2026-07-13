@@ -14,9 +14,11 @@ import type {
 import type { ProjectorArtifact, ProjectorMatchStatus, VisionCapabilitySource } from '../types/multimodal';
 import {
   buildHuggingFaceResolveUrl,
+  normalizeHuggingFaceRepoId,
   normalizeHuggingFaceFilePath,
   remoteProjectorIdentitiesEqual,
   remoteProjectorIdentityKey,
+  resolveCatalogProjectorEvidenceIdentity,
   resolveHuggingFaceRevision,
   resolveHuggingFaceResolveIdentity,
   resolveRemoteProjectorIdentity,
@@ -35,6 +37,10 @@ import {
   buildLegacyProjectorArtifactId,
   buildProjectorArtifactId,
 } from '../utils/modelProjectors';
+import {
+  canonicalizeProjectorCandidateAliases,
+  getExactProjectorScopeKey,
+} from '../utils/projectorIdentity';
 import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
@@ -122,13 +128,11 @@ type CatalogSanitizationOptions = {
 type CatalogProjectorIdentityAudit = {
   identitiesByKey: ReadonlyMap<string, RemoteProjectorIdentity>;
   candidateIdentityKeys: ReadonlySet<string>;
-  identityKeysByExactPath: ReadonlyMap<string, ReadonlySet<string>>;
   identityKeysByFoldedPath: ReadonlyMap<string, ReadonlySet<string>>;
   identityKeysByFoldedBasename: ReadonlyMap<string, ReadonlySet<string>>;
   candidateIdsByLegacyAlias: ReadonlyMap<string, ReadonlySet<string>>;
   candidateScopeIdsById: ReadonlyMap<string, ReadonlySet<string>>;
   poisonedCandidateScopeIds: ReadonlySet<string>;
-  poisonedExactPaths: ReadonlySet<string>;
   poisonedFoldedPaths: ReadonlySet<string>;
   poisonedFoldedBasenames: ReadonlySet<string>;
   evidenceIdentityKeys: ReadonlySet<string>;
@@ -219,13 +223,17 @@ function getFoldedProjectorBasename(filePath: string): string {
 function getCatalogProjectorCandidateScopeId(
   identity: RemoteProjectorIdentity,
   ownerVariantId: unknown,
+  ownerModelId: string,
 ): string {
-  return JSON.stringify([
-    identity.repoId,
-    identity.revision,
-    identity.filePath,
-    typeof ownerVariantId === 'string' ? ownerVariantId.trim() : '',
-  ]);
+  return getExactProjectorScopeKey({
+    ownerModelId,
+    ...(typeof ownerVariantId === 'string' && ownerVariantId.trim()
+      ? { ownerVariantId: ownerVariantId.trim() }
+      : {}),
+    repoId: identity.repoId,
+    revision: identity.revision,
+    filePath: identity.filePath,
+  });
 }
 
 function normalizeConservativePoisonedProjectorPath(value: unknown): string | null {
@@ -318,15 +326,15 @@ function buildCatalogProjectorIdentityAudit(
   options: CatalogSanitizationOptions,
 ): CatalogProjectorIdentityAudit {
   const rawModel = options.rawModel ?? model;
+  const owningRepoId = normalizeHuggingFaceRepoId(model.id);
+  const owningRevision = resolveHuggingFaceRevision(model.hfRevision);
   const identitiesByKey = new Map<string, RemoteProjectorIdentity>();
   const candidateIdentityKeys = new Set<string>();
-  const identityKeysByExactPath = new Map<string, Set<string>>();
   const identityKeysByFoldedPath = new Map<string, Set<string>>();
   const identityKeysByFoldedBasename = new Map<string, Set<string>>();
   const candidateIdsByLegacyAlias = new Map<string, Set<string>>();
   const candidateScopeIdsById = new Map<string, Set<string>>();
   const poisonedCandidateScopeIds = new Set<string>();
-  const poisonedExactPaths = new Set<string>();
   const poisonedFoldedPaths = new Set<string>();
   const poisonedFoldedBasenames = new Set<string>();
 
@@ -337,14 +345,12 @@ function buildCatalogProjectorIdentityAudit(
       return;
     }
 
-    poisonedExactPaths.add(filePath);
     poisonedFoldedPaths.add(filePath.toLowerCase());
     poisonedFoldedBasenames.add(getFoldedProjectorBasename(filePath));
   };
   const recordIdentity = (identity: RemoteProjectorIdentity): string => {
     const identityKey = remoteProjectorIdentityKey(identity);
     identitiesByKey.set(identityKey, identity);
-    addIdentityToIndex(identityKeysByExactPath, identity.filePath, identityKey);
     addIdentityToIndex(identityKeysByFoldedPath, identity.filePath.toLowerCase(), identityKey);
     addIdentityToIndex(
       identityKeysByFoldedBasename,
@@ -362,6 +368,14 @@ function buildCatalogProjectorIdentityAudit(
     legacyId: string;
   }[] = [];
   for (const projector of getRawProjectorCandidates(rawModel)) {
+    const candidateRepoId = normalizeHuggingFaceRepoId(projector.repoId);
+    const belongsToOwningRepository = projector.ownerModelId === model.id
+      && owningRepoId !== null
+      && candidateRepoId === owningRepoId;
+    if (!belongsToOwningRepository) {
+      continue;
+    }
+
     const identity = resolveCatalogProjectorCandidateIdentity(projector, model.id);
     if (!identity) {
       recordPoisonedPath(projector.fileName);
@@ -369,7 +383,9 @@ function buildCatalogProjectorIdentityAudit(
     }
 
     const identityKey = recordIdentity(identity);
-    candidateIdentityKeys.add(identityKey);
+    if (identity.revision === owningRevision) {
+      candidateIdentityKeys.add(identityKey);
+    }
     const idInput = {
       repoId: identity.repoId,
       hfRevision: identity.revision,
@@ -378,7 +394,11 @@ function buildCatalogProjectorIdentityAudit(
         ? { ownerVariantId: projector.ownerVariantId.trim() }
         : {}),
     };
-    const currentScopeId = getCatalogProjectorCandidateScopeId(identity, idInput.ownerVariantId);
+    const currentScopeId = getCatalogProjectorCandidateScopeId(
+      identity,
+      idInput.ownerVariantId,
+      model.id,
+    );
     const currentId = buildProjectorArtifactId(idInput);
     const legacyId = buildLegacyProjectorArtifactId(idInput);
     addIdentityToIndex(
@@ -392,6 +412,7 @@ function buildCatalogProjectorIdentityAudit(
         id: projector.id.trim(),
       } as ProjectorArtifact;
       addIdentityToIndex(candidateScopeIdsById, canonicalProjector.id, currentScopeId);
+      addIdentityToIndex(candidateScopeIdsById, currentId, currentScopeId);
       candidateRecords.push({
         projector: canonicalProjector,
         identity,
@@ -412,14 +433,6 @@ function buildCatalogProjectorIdentityAudit(
       identity: resolveCatalogProjectorArtifactIdentity(artifact),
     };
   });
-  for (const { artifact, identity } of artifactRecords) {
-    if (identity) {
-      recordIdentity(identity);
-    } else {
-      recordPoisonedPath(artifact.remoteFileName);
-    }
-  }
-
   for (const candidateRecord of candidateRecords) {
     const legacyAliasIsUnique = (candidateIdsByLegacyAlias.get(candidateRecord.legacyId)?.size ?? 0) === 1;
     let relatedRequiredForKey: string | undefined;
@@ -473,25 +486,30 @@ function buildCatalogProjectorIdentityAudit(
       continue;
     }
 
-    const normalizedPath = normalizeHuggingFaceFilePath(evidence.value);
-    if (!normalizedPath) {
+    const evidenceIdentity = resolveCatalogProjectorEvidenceIdentity(model, evidence.value);
+    if (!evidenceIdentity) {
       continue;
     }
 
+    if (!isLegacyPayload) {
+      const identityKey = remoteProjectorIdentityKey(evidenceIdentity);
+      if (candidateIdentityKeys.has(identityKey)) {
+        evidenceIdentityKeys.add(identityKey);
+      }
+      continue;
+    }
+
+    const normalizedPath = evidenceIdentity.filePath;
     const isFullPathEvidence = /[\\/]/u.test(evidence.value.trim());
-    const alias = isLegacyPayload
-      ? isFullPathEvidence ? normalizedPath.toLowerCase() : getFoldedProjectorBasename(normalizedPath)
-      : normalizedPath;
-    const identityKeys = isLegacyPayload
-      ? isFullPathEvidence
-        ? identityKeysByFoldedPath.get(alias)
-        : identityKeysByFoldedBasename.get(alias)
-      : identityKeysByExactPath.get(alias);
-    const isPoisoned = isLegacyPayload
-      ? isFullPathEvidence
-        ? poisonedFoldedPaths.has(alias)
-        : poisonedFoldedBasenames.has(alias)
-      : poisonedExactPaths.has(alias);
+    const alias = isFullPathEvidence
+      ? normalizedPath.toLowerCase()
+      : getFoldedProjectorBasename(normalizedPath);
+    const identityKeys = isFullPathEvidence
+      ? identityKeysByFoldedPath.get(alias)
+      : identityKeysByFoldedBasename.get(alias);
+    const isPoisoned = isFullPathEvidence
+      ? poisonedFoldedPaths.has(alias)
+      : poisonedFoldedBasenames.has(alias);
     if (!isPoisoned && identityKeys?.size === 1) {
       const identityKey = [...identityKeys][0] as string;
       if (candidateIdentityKeys.has(identityKey)) {
@@ -503,13 +521,11 @@ function buildCatalogProjectorIdentityAudit(
   return {
     identitiesByKey,
     candidateIdentityKeys,
-    identityKeysByExactPath,
     identityKeysByFoldedPath,
     identityKeysByFoldedBasename,
     candidateIdsByLegacyAlias,
     candidateScopeIdsById,
     poisonedCandidateScopeIds,
-    poisonedExactPaths,
     poisonedFoldedPaths,
     poisonedFoldedBasenames,
     evidenceIdentityKeys,
@@ -533,7 +549,7 @@ function canonicalizeCatalogProjectorCandidate(
   };
   return {
     ...projector,
-    id: projector.id,
+    id: projector.id.trim(),
     ownerModelId,
     ...(idInput.ownerVariantId ? { ownerVariantId: idInput.ownerVariantId } : { ownerVariantId: undefined }),
     repoId: identity.repoId,
@@ -587,10 +603,18 @@ function catalogProjectorRepresentationSupportsInput(
     fileName: identity.filePath,
     ownerVariantId: projector.ownerVariantId,
   });
+  const currentScopeId = getCatalogProjectorCandidateScopeId(
+    identity,
+    projector.ownerVariantId,
+    projector.ownerModelId,
+  );
   const legacyAliasIsUnique = (audit.candidateIdsByLegacyAlias.get(legacyId)?.size ?? 0) === 1;
   const allCompatible = relatedArtifacts.every((artifact) => (
     !(projectorArtifactUsesLegacyAlias(artifact, projector) && !legacyAliasIsUnique)
-    && projectorArtifactMatchesCandidate(artifact, projector)
+    && (
+      projectorArtifactMatchesCandidate(artifact, projector)
+      || audit.candidateScopeIdsById.get(artifact.id)?.has(currentScopeId) === true
+    )
   ));
   return allCompatible && relatedArtifacts.some((artifact) => artifact.requiredFor.includes(input));
 }
@@ -628,7 +652,11 @@ function createCatalogSafeNativeCapabilityContext(
     ) {
       continue;
     }
-    const currentScopeId = getCatalogProjectorCandidateScopeId(identity, projector.ownerVariantId);
+    const currentScopeId = getCatalogProjectorCandidateScopeId(
+      identity,
+      projector.ownerVariantId,
+      ownerModelId,
+    );
     if (audit.poisonedCandidateScopeIds.has(currentScopeId)) {
       continue;
     }
@@ -816,8 +844,16 @@ function sanitizeCatalogModelArtifacts(
         ownerVariantId: projector.ownerVariantId,
       });
       const legacyAliasIsUnique = (audit.candidateIdsByLegacyAlias.get(legacyId)?.size ?? 0) === 1;
+      const candidateScopeId = getCatalogProjectorCandidateScopeId(
+        projectorIdentity,
+        projector.ownerVariantId,
+        model.id,
+      );
       return (!projectorArtifactUsesLegacyAlias(artifact, projector) || legacyAliasIsUnique)
-        && projectorArtifactMatchesCandidate(artifact, projector);
+        && (
+          projectorArtifactMatchesCandidate(artifact, projector)
+          || audit.candidateScopeIdsById.get(artifact.id)?.has(candidateScopeId) === true
+        );
     });
     if (matchingCandidates.length !== 1) {
       continue;
@@ -969,6 +1005,7 @@ export function sanitizeCatalogProjectorRuntimeState(
   projectors: ModelMetadata['projectorCandidates'],
   context: CatalogSafeNativeCapabilityContext,
   ownerModelId: string,
+  artifacts: ModelMetadata['artifacts'],
   resolveContext: (
     projector: ProjectorArtifact,
   ) => CatalogSafeNativeCapabilityContext = () => context,
@@ -990,7 +1027,11 @@ export function sanitizeCatalogProjectorRuntimeState(
     const identity = resolveCatalogProjectorCandidateIdentity(canonicalProjector, ownerModelId);
     const projectorContext = resolveContext(canonicalProjector);
     const candidateScopeId = identity
-      ? getCatalogProjectorCandidateScopeId(identity, canonicalProjector.ownerVariantId)
+      ? getCatalogProjectorCandidateScopeId(
+          identity,
+          canonicalProjector.ownerVariantId,
+          ownerModelId,
+        )
       : null;
     if (
       !identity
@@ -1012,7 +1053,16 @@ export function sanitizeCatalogProjectorRuntimeState(
     }];
   });
 
-  return sanitized.length > 0 ? sanitized : undefined;
+  if (sanitized.length === 0) {
+    return undefined;
+  }
+
+  const canonical = canonicalizeProjectorCandidateAliases(
+    sanitized,
+    artifacts,
+    { preserveRuntimeState: false },
+  );
+  return canonical.candidates.length > 0 ? canonical.candidates : undefined;
 }
 
 type CatalogSafeVariantCapability = {
@@ -1121,6 +1171,7 @@ function sanitizeCatalogVariantRuntimeState(
   variant: ModelVariant,
   context: CatalogSafeNativeCapabilityContext,
   ownerModelId: string,
+  artifacts: ModelMetadata['artifacts'],
 ): ModelVariant {
   return {
     ...variant,
@@ -1133,6 +1184,7 @@ function sanitizeCatalogVariantRuntimeState(
       variant.projectorCandidates,
       context,
       ownerModelId,
+      artifacts,
     ),
   };
 }
@@ -1158,6 +1210,7 @@ export function sanitizeCatalogModelRuntimeState(
     model.projectorCandidates,
     modelContext,
     model.id,
+    model.artifacts,
     (projector) => resolveCatalogSafeProjectorContext(
       projector,
       modelContext,
@@ -1170,6 +1223,7 @@ export function sanitizeCatalogModelRuntimeState(
       variant,
       (variantCapabilities[index] as CatalogSafeVariantCapability).context,
       model.id,
+      model.artifacts,
     )
   ));
   const allProjectorCandidates = [

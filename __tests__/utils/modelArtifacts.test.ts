@@ -16,6 +16,7 @@ import {
   normalizePersistedModelArtifacts,
   syncLegacyMainArtifactFields,
 } from '../../src/utils/modelArtifacts';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 function makeModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   return {
@@ -64,7 +65,11 @@ describe('modelArtifacts', () => {
         sizeBytes: 1_000,
       }),
       expect.objectContaining({
-        id: 'projector-a',
+        id: buildProjectorArtifactId({
+          repoId: 'test-org/model',
+          hfRevision: 'abc123',
+          fileName: 'mmproj-model-f16.gguf',
+        }),
         kind: 'multimodal_projector',
         requiredFor: ['image'],
         remoteFileName: 'mmproj-model-f16.gguf',
@@ -116,8 +121,11 @@ describe('modelArtifacts', () => {
     expect(isMainArtifactReady(modelWithArtifacts)).toBe(true);
     expect(isMultimodalArtifactReady(modelWithArtifacts)).toBe(true);
     expect(getSelectedProjectorArtifact(modelWithArtifacts)).toEqual(expect.objectContaining({
-      id: 'projector-a',
-      requiredFor: ['image', 'audio'],
+      id: buildProjectorArtifactId({
+        repoId: 'test-org/model',
+        fileName: 'mmproj-model-f16.gguf',
+      }),
+      requiredFor: ['audio', 'image'],
       installState: 'installed',
     }));
     expect(getInstalledArtifactLocalPaths(modelWithArtifacts)).toEqual([
@@ -156,7 +164,10 @@ describe('modelArtifacts', () => {
 
     expect(artifacts).toEqual([
       expect.objectContaining({
-        id: 'projector-audio',
+        id: buildProjectorArtifactId({
+          repoId: 'test-org/model',
+          fileName: 'mmproj-audio-model-f16.gguf',
+        }),
         kind: 'multimodal_projector',
         requiredFor: ['audio'],
       }),
@@ -188,7 +199,10 @@ describe('modelArtifacts', () => {
 
     expect(artifacts).toEqual([
       expect.objectContaining({
-        id: 'projector-audio',
+        id: buildProjectorArtifactId({
+          repoId: 'test-org/model',
+          fileName: 'mmproj-audio-f16.gguf',
+        }),
         requiredFor: ['audio'],
       }),
     ]);
@@ -239,10 +253,17 @@ describe('modelArtifacts', () => {
       ],
     }), { preferLegacyRuntimeState: true });
 
-    expect(artifacts).toEqual([
-      expect.objectContaining({ id: visionProjector.id, requiredFor: ['image'] }),
-      expect.objectContaining({ id: audioProjector.id, requiredFor: ['audio'] }),
-    ]);
+    expect(artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: buildProjectorArtifactId(visionProjector),
+        requiredFor: ['image'],
+      }),
+      expect.objectContaining({
+        id: buildProjectorArtifactId(audioProjector),
+        requiredFor: ['audio'],
+      }),
+    ]));
+    expect(artifacts).toHaveLength(2);
   });
 
   it('preserves exact Hugging Face projector requirements across query and fragment URL metadata', () => {
@@ -275,7 +296,7 @@ describe('modelArtifacts', () => {
     }), { preferLegacyRuntimeState: true });
 
     expect(artifacts).toEqual([expect.objectContaining({
-      id: projector.id,
+      id: buildProjectorArtifactId(projector),
       requiredFor: ['audio'],
       downloadUrl,
     })]);
@@ -471,13 +492,7 @@ describe('modelArtifacts', () => {
       artifacts: [persistedArtifact],
     }), { preferLegacyRuntimeState: true });
 
-    expect(artifacts).toEqual([
-      expect.objectContaining({
-        id: projector.id,
-        remoteFileName: projector.fileName,
-        requiredFor: ['image'],
-      }),
-    ]);
+    expect(artifacts).toEqual([]);
   });
 
   it('prefers legacy main download runtime state over stale persisted artifact state', () => {

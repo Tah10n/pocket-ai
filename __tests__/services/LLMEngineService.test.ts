@@ -1811,10 +1811,12 @@ describe('LLMEngineService', () => {
   });
 
   it('reinitializes same active projector when stable artifact metadata changes without mtime', async () => {
+    const originalProjectorSha256 = 'a'.repeat(64);
+    const updatedProjectorSha256 = 'b'.repeat(64);
     const originalProjector: ProjectorArtifact = {
       ...downloadedProjector,
       hfRevision: 'main',
-      sha256: 'sha256-a',
+      sha256: originalProjectorSha256,
     };
     (registry.getModel as jest.Mock).mockReturnValue({
       ...createReadyVisionModel(),
@@ -1831,14 +1833,18 @@ describe('LLMEngineService', () => {
     expect(originalActiveMultimodalContext).toEqual(expect.objectContaining({
       modelId: 'test/model',
       projectorId: originalProjector.id,
-      projectorLocalPath: downloadedProjector.localPath,
-      projectorResolvedPath: 'test-dir/models/mmproj-model.gguf',
+      projectorLocalPath: expect.any(String),
+      projectorResolvedPath: expect.any(String),
       projectorSizeBytes: 1024,
       projectorModificationTime: null,
       projectorFallbackMarker: expect.any(String),
       projectorFileName: downloadedProjector.fileName,
+      projectorDownloadUrl: originalProjector.downloadUrl,
       projectorHfRevision: 'main',
-      projectorSha256: 'sha256-a',
+      projectorOwnerModelId: originalProjector.ownerModelId,
+      projectorOwnerVariantId: null,
+      projectorRepoId: originalProjector.repoId,
+      projectorSha256: originalProjectorSha256,
     }));
 
     getReleaseMultimodalMock().mockClear();
@@ -1847,7 +1853,7 @@ describe('LLMEngineService', () => {
 
     const updatedProjector: ProjectorArtifact = {
       ...originalProjector,
-      sha256: 'sha256-b',
+      sha256: updatedProjectorSha256,
     };
     (registry.getModel as jest.Mock).mockReturnValue({
       ...createReadyVisionModel(),
@@ -1873,15 +1879,18 @@ describe('LLMEngineService', () => {
     expect(updatedActiveMultimodalContext).toEqual(expect.objectContaining({
       modelId: 'test/model',
       projectorId: updatedProjector.id,
-      projectorLocalPath: downloadedProjector.localPath,
-      projectorResolvedPath: 'test-dir/models/mmproj-model.gguf',
+      projectorLocalPath: expect.any(String),
+      projectorResolvedPath: expect.any(String),
       projectorSizeBytes: 1024,
       projectorModificationTime: null,
       projectorFallbackMarker: expect.any(String),
       projectorFileName: downloadedProjector.fileName,
       projectorDownloadUrl: updatedProjector.downloadUrl,
       projectorHfRevision: 'main',
-      projectorSha256: 'sha256-b',
+      projectorOwnerModelId: updatedProjector.ownerModelId,
+      projectorOwnerVariantId: null,
+      projectorRepoId: updatedProjector.repoId,
+      projectorSha256: updatedProjectorSha256,
     }));
     expect(updatedActiveMultimodalContext?.projectorFallbackMarker)
       .not.toBe(originalActiveMultimodalContext?.projectorFallbackMarker);

@@ -9,6 +9,7 @@ import {
 import { dedupeModelVariantsByIdentity } from '../../src/utils/modelVariantIdentity';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { resolveEffectiveActiveVariantNativeSupport } from '../../src/utils/modelCapabilities';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   return {
@@ -269,12 +270,20 @@ describe('modelVariants', () => {
     expect(selected.selectedProjectorId).toBeUndefined();
     expect(selected.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'projector-q4',
+        id: buildProjectorArtifactId({
+          repoId: 'org/model',
+          hfRevision: 'main',
+          fileName: 'mmproj-q4.gguf',
+        }),
         matchStatus: 'ambiguous',
         matchReason: 'variant_selection_changed',
       }),
       expect.objectContaining({
-        id: 'projector-q8',
+        id: buildProjectorArtifactId({
+          repoId: 'org/model',
+          hfRevision: 'main',
+          fileName: 'mmproj-q8.gguf',
+        }),
         matchStatus: 'ambiguous',
       }),
     ]);

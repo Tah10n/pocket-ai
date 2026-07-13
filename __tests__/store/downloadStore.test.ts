@@ -6,6 +6,7 @@ import {
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { buildMainModelArtifactId } from '../../src/utils/modelArtifacts';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 function buildQueuedModel(
   id: string,
@@ -41,6 +42,18 @@ function buildProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorAr
   };
 }
 
+function getCanonicalProjectorId(
+  fileName = 'mmproj-model.gguf',
+  ownerVariantId?: string,
+): string {
+  return buildProjectorArtifactId({
+    repoId: 'vision/model',
+    hfRevision: 'main',
+    fileName,
+    ownerVariantId,
+  });
+}
+
 describe('downloadStore', () => {
   beforeEach(() => {
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
@@ -69,11 +82,13 @@ describe('downloadStore', () => {
         projectorCandidates: [
           buildProjector({
             id: 'vision/model:mmproj-no-resume',
+            fileName: 'mmproj-no-resume.gguf',
             lifecycleStatus: 'downloading',
             downloadProgress: 0.64,
           }),
           buildProjector({
             id: 'vision/model:mmproj-resumable',
+            fileName: 'mmproj-resumable.gguf',
             lifecycleStatus: 'downloading',
             downloadProgress: 0.42,
             resumeData: JSON.stringify({ resumeData: 'projector-resume-data' }),
@@ -87,11 +102,11 @@ describe('downloadStore', () => {
     }));
     expect(queued[0].projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'vision/model:mmproj-no-resume',
+        id: getCanonicalProjectorId('mmproj-no-resume.gguf'),
         lifecycleStatus: 'queued',
       }),
       expect.objectContaining({
-        id: 'vision/model:mmproj-resumable',
+        id: getCanonicalProjectorId('mmproj-resumable.gguf'),
         lifecycleStatus: 'paused',
         resumeData: 'projector-resume-data',
       }),
@@ -107,25 +122,30 @@ describe('downloadStore', () => {
         projectorCandidates: [
           buildProjector({
             id: 'vision/model:mmproj-queued-resumable',
+            fileName: 'mmproj-queued-resumable.gguf',
             lifecycleStatus: 'queued',
             downloadProgress: 0.37,
             resumeData: JSON.stringify({ resumeData: 'queued-projector-resume-data' }),
           }),
           buildProjector({
             id: 'vision/model:mmproj-queued-no-resume',
+            fileName: 'mmproj-queued-no-resume.gguf',
             lifecycleStatus: 'queued',
             downloadProgress: 0.12,
           }),
           buildProjector({
             id: 'vision/model:mmproj-failed-no-resume',
+            fileName: 'mmproj-failed-no-resume.gguf',
             lifecycleStatus: 'failed',
           }),
           buildProjector({
             id: 'vision/model:mmproj-downloaded-no-resume',
+            fileName: 'mmproj-downloaded-no-resume.gguf',
             lifecycleStatus: 'downloaded',
           }),
           buildProjector({
             id: 'vision/model:mmproj-available-no-resume',
+            fileName: 'mmproj-available-no-resume.gguf',
             lifecycleStatus: 'available',
           }),
         ],
@@ -134,29 +154,29 @@ describe('downloadStore', () => {
 
     expect(queued[0].projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'vision/model:mmproj-queued-resumable',
-        lifecycleStatus: 'paused',
-        resumeData: 'queued-projector-resume-data',
+        id: getCanonicalProjectorId('mmproj-available-no-resume.gguf'),
+        lifecycleStatus: 'available',
       }),
       expect.objectContaining({
-        id: 'vision/model:mmproj-queued-no-resume',
-        lifecycleStatus: 'queued',
-      }),
-      expect.objectContaining({
-        id: 'vision/model:mmproj-failed-no-resume',
-        lifecycleStatus: 'failed',
-      }),
-      expect.objectContaining({
-        id: 'vision/model:mmproj-downloaded-no-resume',
+        id: getCanonicalProjectorId('mmproj-downloaded-no-resume.gguf'),
         lifecycleStatus: 'downloaded',
       }),
       expect.objectContaining({
-        id: 'vision/model:mmproj-available-no-resume',
-        lifecycleStatus: 'available',
+        id: getCanonicalProjectorId('mmproj-failed-no-resume.gguf'),
+        lifecycleStatus: 'failed',
+      }),
+      expect.objectContaining({
+        id: getCanonicalProjectorId('mmproj-queued-no-resume.gguf'),
+        lifecycleStatus: 'queued',
+      }),
+      expect.objectContaining({
+        id: getCanonicalProjectorId('mmproj-queued-resumable.gguf'),
+        lifecycleStatus: 'paused',
+        resumeData: 'queued-projector-resume-data',
       }),
     ]);
-    expect(queued[0].projectorCandidates?.[0]).not.toHaveProperty('downloadProgress');
-    expect(queued[0].projectorCandidates?.[1]).not.toHaveProperty('downloadProgress');
+    expect(queued[0].projectorCandidates?.[3]).not.toHaveProperty('downloadProgress');
+    expect(queued[0].projectorCandidates?.[4]).not.toHaveProperty('downloadProgress');
   });
 
   it('re-queues paused downloads when the user taps download again', () => {
@@ -235,15 +255,15 @@ describe('downloadStore', () => {
     const projector = entry?.projectorCandidates?.[0];
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
     expect(projector).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj-v2',
+      id: getCanonicalProjectorId(),
       localPath: 'partial-mmproj-model.gguf',
       resumeData: 'projector-resume-data',
       lifecycleStatus: 'paused',
       matchStatus: 'user_selected',
       matchReason: 'user_selected_projector',
     }));
-    expect(entry?.selectedProjectorId).toBe('vision/model:mmproj-v2');
-    expect(entry?.multimodalReadiness?.projectorId).toBe('vision/model:mmproj-v2');
+    expect(entry?.selectedProjectorId).toBe(getCanonicalProjectorId());
+    expect(entry?.multimodalReadiness?.projectorId).toBe(getCanonicalProjectorId());
   });
 
   it('preserves and remaps variant-only projector retry state through variant aliases', () => {
@@ -302,12 +322,13 @@ describe('downloadStore', () => {
     });
 
     const entry = useDownloadStore.getState().queue[0];
+    const canonicalProjectorId = getCanonicalProjectorId('mmproj-model.gguf', 'audio-q4');
     expect(entry.projectorCandidates).toBeUndefined();
     expect(entry.selectedProjectorId).toBeUndefined();
     expect(entry.variants?.[0]).toEqual(expect.objectContaining({
-      selectedProjectorId: catalogProjector.id,
+      selectedProjectorId: canonicalProjectorId,
       projectorCandidates: [expect.objectContaining({
-        id: catalogProjector.id,
+        id: canonicalProjectorId,
         localPath: 'partial-mmproj-audio.gguf',
         resumeData: 'variant-projector-resume',
         lifecycleStatus: 'paused',
@@ -315,7 +336,7 @@ describe('downloadStore', () => {
       })],
     }));
     expect(entry.multimodalReadiness).toEqual(expect.objectContaining({
-      projectorId: catalogProjector.id,
+      projectorId: canonicalProjectorId,
       support: ['audio'],
     }));
   });
@@ -368,7 +389,7 @@ describe('downloadStore', () => {
     const entry = useDownloadStore.getState().queue[0];
     expect(entry.variants?.[0].projectorCandidates).toEqual([
       expect.objectContaining({
-        id: incomingProjector.id,
+        id: getCanonicalProjectorId('mmproj-q8.gguf', 'q8'),
         lifecycleStatus: 'available',
       }),
     ]);
@@ -410,7 +431,7 @@ describe('downloadStore', () => {
     const entry = useDownloadStore.getState().queue[0];
     expect(entry.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: incomingProjector.id,
+        id: getCanonicalProjectorId('mmproj-model.gguf', 'q8'),
         ownerVariantId: 'q8',
         lifecycleStatus: 'available',
       }),
@@ -446,7 +467,7 @@ describe('downloadStore', () => {
     const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
     const projector = entry?.projectorCandidates?.[0];
     expect(projector).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj',
+      id: getCanonicalProjectorId(),
       lifecycleStatus: 'paused',
       resumeData: 'queued-projector-resume-data',
     }));
@@ -494,7 +515,7 @@ describe('downloadStore', () => {
     const projector = entry?.projectorCandidates?.[0];
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
     expect(projector).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj',
+      id: getCanonicalProjectorId('fresh-mmproj.gguf'),
       fileName: 'fresh-mmproj.gguf',
       lifecycleStatus: 'available',
       matchStatus: 'matched',
@@ -505,7 +526,7 @@ describe('downloadStore', () => {
     expect(entry?.multimodalReadiness).toBeUndefined();
   });
 
-  it('does not keep an incoming selected projector id when its same-id runtime artifact is blocked', () => {
+  it('keeps the current incoming selection when a stale same-id runtime artifact has another exact scope', () => {
     useDownloadStore.setState({
       queue: [
         {
@@ -537,15 +558,15 @@ describe('downloadStore', () => {
 
     const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
     expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj',
+      id: getCanonicalProjectorId('fresh-mmproj.gguf'),
       fileName: 'fresh-mmproj.gguf',
       lifecycleStatus: 'available',
     }));
-    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.selectedProjectorId).toBe(getCanonicalProjectorId('fresh-mmproj.gguf'));
     expect(entry?.multimodalReadiness).toBeUndefined();
   });
 
-  it('preserves a compatible existing projector remapped to the blocked incoming selection', () => {
+  it('preserves compatible runtime state while the current incoming id owns its exact scope', () => {
     useDownloadStore.setState({
       queue: [
         {
@@ -608,21 +629,21 @@ describe('downloadStore', () => {
 
     const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
     expect(entry?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj',
+      id: getCanonicalProjectorId('fresh-mmproj.gguf'),
       fileName: 'fresh-mmproj.gguf',
       localPath: 'fresh-mmproj.gguf',
       lifecycleStatus: 'downloaded',
       matchStatus: 'user_selected',
     }));
-    expect(entry?.selectedProjectorId).toBe('vision/model:mmproj');
+    expect(entry?.selectedProjectorId).toBe(getCanonicalProjectorId('fresh-mmproj.gguf'));
     expect(entry?.multimodalReadiness).toEqual(expect.objectContaining({
       status: 'ready',
-      projectorId: 'vision/model:mmproj',
-      checkedAt: 123,
+      projectorId: getCanonicalProjectorId('fresh-mmproj.gguf'),
+      checkedAt: 456,
     }));
   });
 
-  it('does not fall back to a different existing projector when the incoming selection is blocked', () => {
+  it('keeps the current incoming selection instead of falling back to another exact scope', () => {
     useDownloadStore.setState({
       queue: [
         {
@@ -679,18 +700,20 @@ describe('downloadStore', () => {
     });
 
     const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
-    const projectorA = entry?.projectorCandidates?.find((projector) => projector.id === 'vision/model:mmproj-a');
-    const projectorB = entry?.projectorCandidates?.find((projector) => projector.id === 'vision/model:mmproj-b');
+    const projectorAId = getCanonicalProjectorId('mmproj-a.gguf');
+    const projectorBId = getCanonicalProjectorId('fresh-mmproj-b.gguf');
+    const projectorA = entry?.projectorCandidates?.find((projector) => projector.id === projectorAId);
+    const projectorB = entry?.projectorCandidates?.find((projector) => projector.id === projectorBId);
     expect(projectorA).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj-a',
+      id: projectorAId,
       localPath: 'partial-mmproj-a.gguf',
     }));
     expect(projectorB).toEqual(expect.objectContaining({
-      id: 'vision/model:mmproj-b',
+      id: projectorBId,
       fileName: 'fresh-mmproj-b.gguf',
     }));
     expect(projectorB?.localPath).toBeUndefined();
-    expect(entry?.selectedProjectorId).toBeUndefined();
+    expect(entry?.selectedProjectorId).toBe(projectorBId);
     expect(entry?.multimodalReadiness).toBeUndefined();
   });
 
@@ -716,10 +739,10 @@ describe('downloadStore', () => {
 
     const entry = useDownloadStore.getState().queue.find((model) => model.id === 'vision/model');
     expect(entry?.lifecycleStatus).toBe(LifecycleStatus.QUEUED);
-    expect(entry?.selectedProjectorId).toBe('vision/model:mmproj');
+    expect(entry?.selectedProjectorId).toBe(getCanonicalProjectorId());
     expect(entry?.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'vision/model:mmproj',
+        id: getCanonicalProjectorId(),
         localPath: 'partial-mmproj-model.gguf',
         resumeData: 'projector-resume-data',
         lifecycleStatus: 'paused',

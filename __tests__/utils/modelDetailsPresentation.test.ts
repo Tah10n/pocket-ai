@@ -138,7 +138,7 @@ describe('modelDetailsPresentation', () => {
     }));
     expect(buildModelDetailsMetadataMetrics(model, t)).toContainEqual({
       label: 'models.multimodal.projectorCandidates',
-      value: 'mmproj-variant-q4.gguf, mmproj-model-wide.gguf',
+      value: 'mmproj-model-wide.gguf, mmproj-variant-q4.gguf',
     });
   });
 

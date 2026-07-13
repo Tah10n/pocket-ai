@@ -8,6 +8,7 @@ import {
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
   hasExplicitEffectiveActiveVariantProjectorCandidates,
+  remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { applyEffectiveProjectorState } from './effectiveProjectorState';
 
@@ -50,6 +51,15 @@ function getProjectorCandidateIds(model: Pick<ModelMetadata, 'projectorCandidate
   return new Set((model.projectorCandidates ?? []).map((projector) => projector.id));
 }
 
+function getProjectorIdentityCandidates(
+  model: Pick<ModelMetadata, 'projectorCandidates' | 'variants'>,
+) {
+  return [
+    ...(model.projectorCandidates ?? []),
+    ...(model.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ];
+}
+
 function resolveMergedSelectedProjectorId(
   nextSelectedProjectorId: string | undefined,
   runtimeSelectedProjectorId: string | undefined,
@@ -59,7 +69,6 @@ function resolveMergedSelectedProjectorId(
   blockedNextProjectorIds: Set<string> = blockedRuntimeProjectorIds,
 ): string | undefined {
   const blockedIncomingSelectedProjectorId = nextSelectedProjectorId
-    && candidateIds.has(nextSelectedProjectorId)
     && blockedNextProjectorIds.has(nextSelectedProjectorId)
     ? nextSelectedProjectorId
     : undefined;
@@ -106,7 +115,6 @@ function shouldSuppressReadinessForBlockedIncomingProjector(
 ): boolean {
   return Boolean(
     nextSelectedProjectorId
-    && candidateIds.has(nextSelectedProjectorId)
     && blockedNextProjectorIds.has(nextSelectedProjectorId)
     && selectedProjectorId !== nextSelectedProjectorId,
   );
@@ -183,6 +191,25 @@ function resolveMergedMultimodalReadiness(
   );
 }
 
+function getEffectiveMultimodalReadiness(
+  model: ModelMetadata,
+  projectorCandidates: NonNullable<ModelMetadata['projectorCandidates']>,
+): ModelMetadata['multimodalReadiness'] {
+  const readiness = model.multimodalReadiness;
+  if (!readiness?.projectorId) {
+    return readiness;
+  }
+
+  const projectorId = remapProjectorIdToEffectiveCandidate(
+    model,
+    readiness.projectorId,
+    projectorCandidates,
+  );
+  return projectorId && projectorId !== readiness.projectorId
+    ? { ...readiness, projectorId }
+    : readiness;
+}
+
 function mergeProjectorRuntimeFields(
   model: ModelMetadata,
   runtimeModel: ModelMetadata,
@@ -203,6 +230,8 @@ function mergeProjectorRuntimeFields(
   } = mergeProjectorCandidatesWithRuntimeStateAndIdMap(nextProjectorCandidates, runtimeProjectorCandidates, {
     activeVariantIds,
     emptyNextProjectorsAreAuthoritative: hasExplicitEffectiveActiveVariantProjectorCandidates(model),
+    nextIdentityCandidates: getProjectorIdentityCandidates(model),
+    runtimeIdentityCandidates: getProjectorIdentityCandidates(runtimeModel),
   });
   const candidateIds = getProjectorCandidateIds({ projectorCandidates });
   const selectedProjectorId = resolveMergedSelectedProjectorId(
@@ -233,8 +262,8 @@ function mergeProjectorRuntimeFields(
       ? undefined
       : resolveMergedMultimodalReadiness(
         model.id,
-        model.multimodalReadiness,
-        runtimeModel.multimodalReadiness,
+        getEffectiveMultimodalReadiness(model, nextProjectorCandidates),
+        getEffectiveMultimodalReadiness(runtimeModel, runtimeProjectorCandidates),
         candidateIds,
         runtimeToNextProjectorIds,
         selectedProjectorId,

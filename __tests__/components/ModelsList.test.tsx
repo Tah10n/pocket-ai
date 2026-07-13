@@ -6,6 +6,7 @@ import { useModelsCatalogData } from '../../src/hooks/useModelsCatalogData';
 import { useModelsStore } from '../../src/store/modelsStore';
 import type { ModelFilterCriteria, ModelSortPreference } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 let mockLastFlashListProps: any = null;
 let mockModelCardPropsLog: any[] = [];
@@ -30,6 +31,15 @@ const defaultSort: ModelSortPreference = {
   field: 'downloads',
   direction: 'desc',
 };
+
+function getCanonicalProjectorId(projector: {
+  repoId: string;
+  hfRevision?: string;
+  ownerVariantId?: string;
+  fileName: string;
+}): string {
+  return buildProjectorArtifactId(projector);
+}
 
 jest.mock('@shopify/flash-list', () => ({
   FlashList: (props: any) => {
@@ -440,6 +450,8 @@ describe('ModelsList', () => {
     const handleLoadMore = jest.fn();
     const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');
     const secondProjector = createProjectorCandidate('projector-b', 'mmproj-b.gguf');
+    const firstProjectorId = getCanonicalProjectorId(firstProjector);
+    const secondProjectorId = getCanonicalProjectorId(secondProjector);
     const model = createModel({
       chatModalities: ['text', 'vision'],
       projectorCandidates: [firstProjector, secondProjector],
@@ -468,11 +480,11 @@ describe('ModelsList', () => {
 
     expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
       id: model.id,
-      selectedProjectorId: secondProjector.id,
+      selectedProjectorId: secondProjectorId,
       projectorCandidates: [
-        expect.objectContaining({ id: firstProjector.id }),
+        expect.objectContaining({ id: firstProjectorId }),
         expect.objectContaining({
-          id: secondProjector.id,
+          id: secondProjectorId,
           matchStatus: 'user_selected',
           matchReason: 'user_selected_projector',
         }),
@@ -485,6 +497,8 @@ describe('ModelsList', () => {
     const handleLoadMore = jest.fn();
     const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');
     const secondProjector = createProjectorCandidate('projector-b', 'mmproj-b.gguf');
+    const firstProjectorId = getCanonicalProjectorId(firstProjector);
+    const secondProjectorId = getCanonicalProjectorId(secondProjector);
     const model = createModel({
       chatModalities: ['text', 'vision'],
       projectorCandidates: [firstProjector, secondProjector],
@@ -512,15 +526,15 @@ describe('ModelsList', () => {
     expect(mockRegistryUpdateModel).toHaveBeenCalledWith(expect.objectContaining({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       localPath: 'models/model.Q4_K_M.gguf',
-      selectedProjectorId: secondProjector.id,
+      selectedProjectorId: secondProjectorId,
       projectorCandidates: [
-        expect.objectContaining({ id: firstProjector.id }),
-        expect.objectContaining({ id: secondProjector.id, matchStatus: 'user_selected' }),
+        expect.objectContaining({ id: firstProjectorId }),
+        expect.objectContaining({ id: secondProjectorId, matchStatus: 'user_selected' }),
       ],
     }));
     expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
-      selectedProjectorId: secondProjector.id,
+      selectedProjectorId: secondProjectorId,
     }));
   });
 
@@ -534,6 +548,8 @@ describe('ModelsList', () => {
       ...createProjectorCandidate('projector-audio-b', 'mmproj-audio-b.gguf'),
       ownerVariantId: 'model.Q4_K_M.gguf',
     };
+    const firstProjectorId = getCanonicalProjectorId(firstProjector);
+    const secondProjectorId = getCanonicalProjectorId(secondProjector);
     const activeVariant = {
       ...createModel().variants![0],
       chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
@@ -580,11 +596,11 @@ describe('ModelsList', () => {
           variantId: activeVariant.variantId,
           visionSource: undefined,
           visionConfidence: undefined,
-          selectedProjectorId: secondProjector.id,
+          selectedProjectorId: secondProjectorId,
           projectorCandidates: [
-            expect.objectContaining({ id: firstProjector.id }),
+            expect.objectContaining({ id: firstProjectorId }),
             expect.objectContaining({
-              id: secondProjector.id,
+              id: secondProjectorId,
               matchStatus: 'user_selected',
             }),
           ],
@@ -595,7 +611,7 @@ describe('ModelsList', () => {
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       variants: expect.arrayContaining([
         expect.objectContaining({
-          selectedProjectorId: secondProjector.id,
+          selectedProjectorId: secondProjectorId,
           visionSource: undefined,
           visionConfidence: undefined,
         }),
@@ -607,6 +623,8 @@ describe('ModelsList', () => {
     const handleLoadMore = jest.fn();
     const firstProjector = createProjectorCandidate('projector-a', 'mmproj-a.gguf');
     const secondProjector = createProjectorCandidate('projector-b', 'mmproj-b.gguf');
+    const firstProjectorId = getCanonicalProjectorId(firstProjector);
+    const secondProjectorId = getCanonicalProjectorId(secondProjector);
     const model = createModel({
       artifactRole: 'primary_chat_model',
       chatModalities: ['text', 'vision'],
@@ -642,17 +660,17 @@ describe('ModelsList', () => {
       chatModalities: ['text', 'vision'],
       visionSource: 'user_selected_projector',
       visionConfidence: 'trusted',
-      selectedProjectorId: secondProjector.id,
+      selectedProjectorId: secondProjectorId,
       projectorCandidates: [
-        expect.objectContaining({ id: firstProjector.id }),
-        expect.objectContaining({ id: secondProjector.id, matchStatus: 'user_selected' }),
+        expect.objectContaining({ id: firstProjectorId }),
+        expect.objectContaining({ id: secondProjectorId, matchStatus: 'user_selected' }),
       ],
     }));
     expect(mockHandleDownload).toHaveBeenCalledWith(expect.objectContaining({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       chatModalities: ['text', 'vision'],
       visionConfidence: 'trusted',
-      selectedProjectorId: secondProjector.id,
+      selectedProjectorId: secondProjectorId,
     }));
   });
 

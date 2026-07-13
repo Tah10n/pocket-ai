@@ -16,7 +16,15 @@ import {
   resolveHuggingFaceResolveIdentity,
   resolveRemoteFilePathFromDownloadUrl,
 } from './huggingFaceUrls';
-import { normalizeProjectorArtifactPath } from './modelProjectors';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+  normalizeProjectorArtifactPath,
+} from './modelProjectors';
+import {
+  canonicalizeProjectorCandidateAliases,
+  remapProjectorAliasId,
+} from './projectorIdentity';
 import { isValidLocalFileName } from './safeFilePath';
 import { normalizeSha256Digest } from './sha256';
 
@@ -317,6 +325,58 @@ function shouldSynthesizeMainArtifact(model: LegacyModelArtifactInput): boolean 
   );
 }
 
+function projectorArtifactIsBoundToCandidate(
+  artifact: ModelArtifactMetadata,
+  candidate: ProjectorArtifact,
+): boolean {
+  if (artifact.kind !== 'multimodal_projector') {
+    return false;
+  }
+
+  const identity = {
+    repoId: candidate.repoId,
+    hfRevision: candidate.hfRevision,
+    ownerVariantId: candidate.ownerVariantId,
+    fileName: candidate.fileName,
+  };
+  if (
+    artifact.id === candidate.id
+    || artifact.id === buildProjectorArtifactId(identity)
+    || artifact.id === buildLegacyProjectorArtifactId(identity)
+  ) {
+    return true;
+  }
+
+  const artifactPath = normalizeProjectorArtifactPath(artifact.remoteFileName);
+  const candidatePath = normalizeProjectorArtifactPath(candidate.fileName);
+  const artifactDownloadIdentity = normalizeArtifactDownloadUrl(artifact);
+  const candidateDownloadIdentity = normalizeArtifactDownloadUrl({
+    id: candidate.id,
+    kind: 'multimodal_projector',
+    requiredFor: ['image'],
+    hfRevision: candidate.hfRevision,
+    remoteFileName: candidate.fileName,
+    downloadUrl: candidate.downloadUrl,
+    sizeBytes: candidate.size,
+    installState: 'remote',
+  });
+  return artifactPath !== null
+    && artifactPath === candidatePath
+    && normalizeArtifactRevision(artifact.hfRevision) === normalizeArtifactRevision(candidate.hfRevision)
+    && artifactDownloadIdentity !== null
+    && artifactDownloadIdentity === candidateDownloadIdentity;
+}
+
+export function getUnboundProjectorArtifactsForBookkeeping(
+  artifacts: readonly ModelArtifactMetadata[] | undefined,
+  candidates: readonly ProjectorArtifact[],
+): ModelArtifactMetadata[] {
+  return (artifacts ?? []).filter((artifact) => (
+    artifact.kind === 'multimodal_projector'
+    && !candidates.some((candidate) => projectorArtifactIsBoundToCandidate(artifact, candidate))
+  ));
+}
+
 export function deriveArtifactsFromLegacyModel(
   model: LegacyModelArtifactInput,
   options: { includeRemoteMain?: boolean; preferLegacyRuntimeState?: boolean } = {},
@@ -326,14 +386,31 @@ export function deriveArtifactsFromLegacyModel(
     artifacts.push(deriveMainModelArtifact(model));
   }
 
-  for (const projector of model.projectorCandidates ?? []) {
+  const canonicalProjectors = canonicalizeProjectorCandidateAliases(
+    model.projectorCandidates ?? [],
+    model.artifacts,
+  );
+  for (const projector of canonicalProjectors.candidates) {
     const artifact = deriveProjectorArtifact(projector, model);
     if (artifact) {
       artifacts.push(artifact);
     }
   }
 
-  return mergeModelArtifacts(artifacts, model.artifacts, {
+  const canonicalPersistedArtifacts = model.artifacts === undefined
+    ? undefined
+    : [
+        ...model.artifacts.filter((artifact) => artifact.kind !== 'multimodal_projector'),
+        ...canonicalProjectors.artifacts,
+        // Artifact-only records remain necessary for safe local-file cleanup.
+        // Never retain an artifact that claimed a candidate scope and was
+        // rejected by exact canonicalization.
+        ...getUnboundProjectorArtifactsForBookkeeping(
+          model.artifacts,
+          model.projectorCandidates ?? [],
+        ),
+      ];
+  return mergeModelArtifacts(artifacts, canonicalPersistedArtifacts, {
     preferDerivedRuntimeState: options.preferLegacyRuntimeState === true,
   });
 }
@@ -358,7 +435,15 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
     const downloadUrl = normalizeOptionalString(record.downloadUrl);
     const installState = normalizeArtifactInstallState(record.installState);
     const requiredFor = normalizeRequiredInputs(record.requiredFor);
-    if (!id || !kind || !remoteFileName || !downloadUrl || !installState || requiredFor.length === 0 || seen.has(id)) {
+    if (
+      !id
+      || !kind
+      || !remoteFileName
+      || !downloadUrl
+      || !installState
+      || requiredFor.length === 0
+      || (kind !== 'multimodal_projector' && seen.has(id))
+    ) {
       return [];
     }
 
@@ -391,7 +476,9 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
       return [];
     }
 
-    seen.add(id);
+    if (kind !== 'multimodal_projector') {
+      seen.add(id);
+    }
     return [artifact];
   });
 
@@ -544,10 +631,11 @@ function mergeArtifactWithDerivedRuntimeState(
   persistedArtifact: ModelArtifactMetadata,
 ): ModelArtifactMetadata {
   const persistedStable = getStableArtifactMetadata(persistedArtifact);
-  const requiredFor = artifactsShareStableIdentity(derivedArtifact, persistedArtifact)
+  const sharesStableIdentity = artifactsShareStableIdentity(derivedArtifact, persistedArtifact);
+  const requiredFor = sharesStableIdentity
     ? persistedStable.requiredFor
     : derivedArtifact.requiredFor;
-  return {
+  const merged = {
     ...persistedStable,
     ...derivedArtifact,
     // Explicit persisted requirements can be narrower than model-wide legacy
@@ -558,6 +646,27 @@ function mergeArtifactWithDerivedRuntimeState(
       ? persistedStable.sizeBytes
       : derivedArtifact.sizeBytes,
   };
+
+  if (
+    sharesStableIdentity
+    && derivedArtifact.kind === 'multimodal_projector'
+    && persistedArtifact.installState === 'installed'
+    && persistedArtifact.localPath
+  ) {
+    return {
+      ...merged,
+      localPath: persistedArtifact.localPath,
+      installState: 'installed',
+      downloadProgress: persistedArtifact.downloadProgress ?? 1,
+      resumeData: persistedArtifact.resumeData,
+      integrity: persistedArtifact.integrity,
+      errorCode: persistedArtifact.errorCode,
+      errorMessage: persistedArtifact.errorMessage,
+      updatedAt: persistedArtifact.updatedAt,
+    };
+  }
+
+  return merged;
 }
 
 export function getMainModelArtifact(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifactMetadata | undefined {
@@ -568,20 +677,30 @@ export function getProjectorArtifacts(model: Pick<ModelMetadata, 'artifacts'>): 
   return model.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector') ?? [];
 }
 
+type ProjectorArtifactModelInput = Pick<ModelMetadata, 'artifacts' | 'selectedProjectorId'>
+  & Partial<Pick<ModelMetadata, 'projectorCandidates'>>;
+
 export function getSelectedProjectorArtifact(
-  model: Pick<ModelMetadata, 'artifacts' | 'selectedProjectorId'>,
+  model: ProjectorArtifactModelInput,
 ): ModelArtifactMetadata | undefined {
   const projectors = getProjectorArtifacts(model);
   const selectedProjectorId = normalizeOptionalString(model.selectedProjectorId);
   if (selectedProjectorId) {
-    return projectors.find((artifact) => artifact.id === selectedProjectorId);
+    const canonical = canonicalizeProjectorCandidateAliases(
+      model.projectorCandidates ?? [],
+      projectors,
+    );
+    const canonicalSelectedProjectorId = remapProjectorAliasId(selectedProjectorId, canonical)
+      ?? selectedProjectorId;
+    return canonical.artifacts.find((artifact) => artifact.id === canonicalSelectedProjectorId)
+      ?? projectors.find((artifact) => artifact.id === canonicalSelectedProjectorId);
   }
 
   return projectors.length === 1 ? projectors[0] : undefined;
 }
 
 export function getRequiredDownloadArtifacts(
-  model: Pick<ModelMetadata, 'artifacts' | 'selectedProjectorId'>,
+  model: ProjectorArtifactModelInput,
 ): ModelArtifactMetadata[] {
   const mainArtifact = getMainModelArtifact(model);
   const selectedProjector = getSelectedProjectorArtifact(model);
@@ -618,7 +737,7 @@ export function isMainArtifactReady(model: Pick<ModelMetadata, 'artifacts'>): bo
   return getMainModelArtifact(model)?.installState === 'installed';
 }
 
-export function isMultimodalArtifactReady(model: Pick<ModelMetadata, 'artifacts' | 'selectedProjectorId'>): boolean {
+export function isMultimodalArtifactReady(model: ProjectorArtifactModelInput): boolean {
   return getSelectedProjectorArtifact(model)?.installState === 'installed';
 }
 

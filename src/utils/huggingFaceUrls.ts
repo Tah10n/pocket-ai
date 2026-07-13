@@ -146,6 +146,25 @@ export function normalizeHuggingFaceFilePath(value: unknown): string | null {
   return normalizeRemotePath(value);
 }
 
+export function resolveCatalogProjectorEvidenceIdentity(
+  model: { id: string; hfRevision?: string | null },
+  evidenceValue: unknown,
+): RemoteProjectorIdentity | null {
+  const repoId = normalizeHuggingFaceRepoId(model.id);
+  const filePath = normalizeHuggingFaceFilePath(evidenceValue);
+  if (!repoId || !filePath) {
+    return null;
+  }
+
+  const revision = resolveHuggingFaceRevision(model.hfRevision);
+  return resolveRemoteProjectorIdentity({
+    repoId,
+    revision,
+    filePath,
+    downloadUrl: buildHuggingFaceResolveUrl(repoId, filePath, revision),
+  });
+}
+
 export function isHuggingFaceUrl(url: string): boolean {
   try {
     const parsed = new URL(url);

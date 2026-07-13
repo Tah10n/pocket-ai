@@ -5,10 +5,12 @@ import { resolveDeterministicProjectorCandidate } from '../utils/modelProjectors
 import {
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
+  remapProjectorIdToEffectiveCandidate,
   resolveEffectiveActiveVariantNativeSupport,
 } from '../utils/modelCapabilities';
 import { isMultimodalReadinessReusableForModel } from '../utils/multimodalReadiness';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
+import { canonicalizeProjectorCandidateAliases } from '../utils/projectorIdentity';
 import { registry } from './LocalStorageRegistry';
 
 export type ProjectorResolutionReason =
@@ -73,12 +75,20 @@ function shouldPreserveReadinessForSelectedProjector(model: ModelMetadata, proje
     ...(support.audio ? ['audio' as const] : []),
   ];
 
+  const candidates = getCompatibleProjectors(model);
+  const readinessProjectorId = remapProjectorIdToEffectiveCandidate(
+    model,
+    model.multimodalReadiness?.projectorId,
+    candidates,
+  );
   return isMultimodalReadinessReusableForModel({
     model,
-    readiness: model.multimodalReadiness,
+    readiness: model.multimodalReadiness && readinessProjectorId
+      ? { ...model.multimodalReadiness, projectorId: readinessProjectorId }
+      : undefined,
     projectorId: projector.id,
     requestedSupport,
-    projectorCandidates: getCompatibleProjectors(model),
+    projectorCandidates: candidates,
   });
 }
 
@@ -86,8 +96,13 @@ function markSelectedProjectorCandidates(
   candidates: readonly ProjectorArtifact[] | undefined,
   targetProjectorId: string,
   compatibleIds: ReadonlySet<string>,
+  artifacts: ModelMetadata['artifacts'],
 ): ProjectorArtifact[] | undefined {
-  return candidates?.map((projector) => {
+  if (!candidates) {
+    return undefined;
+  }
+
+  return canonicalizeProjectorCandidateAliases(candidates, artifacts).candidates.map((projector) => {
     if (projector.id === targetProjectorId) {
       return {
         ...projector,
@@ -175,7 +190,12 @@ export class ProjectorArtifactService {
 
   public selectProjectorForModel(model: ModelMetadata, projectorId: string): ProjectorSelection {
     const compatibleProjectors = getCompatibleProjectors(model);
-    const targetProjector = compatibleProjectors.find((projector) => projector.id === projectorId);
+    const canonicalProjectorId = remapProjectorIdToEffectiveCandidate(
+      model,
+      projectorId,
+      compatibleProjectors,
+    ) ?? projectorId;
+    const targetProjector = compatibleProjectors.find((projector) => projector.id === canonicalProjectorId);
     if (!targetProjector) {
       return {
         resolution: {
@@ -189,18 +209,21 @@ export class ProjectorArtifactService {
     const compatibleIds = new Set(compatibleProjectors.map((projector) => projector.id));
     const nativeSupport = resolveEffectiveActiveVariantNativeSupport(model);
     const activeVariant = resolveActiveModelVariant(model);
+    const preservedReadiness = shouldPreserveReadinessForSelectedProjector(model, targetProjector)
+      && model.multimodalReadiness
+      ? { ...model.multimodalReadiness, projectorId: targetProjector.id }
+      : undefined;
     const modelWithUpdatedSelection: ModelMetadata = {
       ...model,
       selectedProjectorId: targetProjector.id,
       visionSource: nativeSupport.vision ? 'user_selected_projector' : undefined,
       ...(!nativeSupport.vision ? { visionConfidence: undefined } : null),
-      multimodalReadiness: shouldPreserveReadinessForSelectedProjector(model, targetProjector)
-        ? model.multimodalReadiness
-        : undefined,
+      multimodalReadiness: preservedReadiness,
       projectorCandidates: markSelectedProjectorCandidates(
         model.projectorCandidates ?? [],
         targetProjector.id,
         compatibleIds,
+        model.artifacts,
       ),
       ...(activeVariant && model.variants ? {
         variants: model.variants.map((variant) => (
@@ -215,6 +238,7 @@ export class ProjectorArtifactService {
                 variant.projectorCandidates,
                 targetProjector.id,
                 compatibleIds,
+                model.artifacts,
               ),
             }
           : variant),

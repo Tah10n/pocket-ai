@@ -12,6 +12,7 @@ import {
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
   hasExplicitEffectiveActiveVariantProjectorCandidates,
+  remapProjectorIdToEffectiveCandidate,
 } from '../utils/modelCapabilities';
 import {
   applyEffectiveProjectorState,
@@ -184,6 +185,25 @@ function remapMultimodalReadiness(
     : { ...readiness, projectorId };
 }
 
+function getEffectiveMultimodalReadiness(
+  model: ModelMetadata,
+  projectorCandidates: ProjectorArtifact[],
+): ModelMetadata['multimodalReadiness'] {
+  const readiness = model.multimodalReadiness;
+  if (!readiness?.projectorId) {
+    return readiness;
+  }
+
+  const projectorId = remapProjectorIdToEffectiveCandidate(
+    model,
+    readiness.projectorId,
+    projectorCandidates,
+  );
+  return projectorId && projectorId !== readiness.projectorId
+    ? { ...readiness, projectorId }
+    : readiness;
+}
+
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
   const incomingActiveVariantIds = getEffectiveActiveVariantKeys(model);
@@ -242,7 +262,7 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       ? undefined
       : remapMultimodalReadiness(
         model.id,
-        model.multimodalReadiness,
+        getEffectiveMultimodalReadiness(model, nextProjectorCandidates),
         candidateIds,
         projectorRuntimeMerge.runtimeToNextProjectorIds,
         selectedProjectorId,
@@ -250,7 +270,7 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
         blockedNextReadinessProjectorIds,
       ) ?? remapMultimodalReadiness(
         model.id,
-        existing.multimodalReadiness,
+        getEffectiveMultimodalReadiness(existing, existingProjectorCandidates),
         candidateIds,
         projectorRuntimeMerge.runtimeToNextProjectorIds,
         selectedProjectorId,

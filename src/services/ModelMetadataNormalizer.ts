@@ -26,6 +26,7 @@ import type {
 import type { ModelInputCapabilitySnapshot } from '../types/modelInputCapabilities';
 import {
   deriveArtifactsFromLegacyModel,
+  getUnboundProjectorArtifactsForBookkeeping,
   normalizePersistedModelArtifacts,
 } from '../utils/modelArtifacts';
 import {
@@ -55,6 +56,11 @@ import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
 import { normalizeMultimodalReadinessState as normalizeReadinessSupport } from '../utils/multimodalReadiness';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
+import {
+  canonicalizeProjectorCandidateAliases,
+  getProjectorExactScopeKey,
+  remapProjectorAliasId,
+} from '../utils/projectorIdentity';
 import {
   isProjectorFileName,
   isSupportedGgufFileName,
@@ -373,18 +379,38 @@ function normalizeProjectorArtifacts(value: unknown): ProjectorArtifact[] | unde
     return [];
   }
 
-  const seen = new Set<string>();
   const artifacts = value.flatMap((entry) => {
     const artifact = normalizeProjectorArtifact(entry);
-    if (!artifact || seen.has(artifact.id)) {
+    if (!artifact) {
       return [];
     }
 
-    seen.add(artifact.id);
     return [artifact];
   });
 
   return artifacts.length > 0 ? artifacts : undefined;
+}
+
+function selectCanonicalProjectorsForSource(
+  sourceCandidates: ProjectorArtifact[] | undefined,
+  canonicalCandidates: readonly ProjectorArtifact[],
+): ProjectorArtifact[] | undefined {
+  if (!sourceCandidates) {
+    return undefined;
+  }
+  if (sourceCandidates.length === 0) {
+    return [];
+  }
+
+  const sourceScopeKeys = new Set(sourceCandidates.flatMap((candidate) => {
+    const scopeKey = getProjectorExactScopeKey(candidate);
+    return scopeKey ? [scopeKey] : [];
+  }));
+  const candidates = canonicalCandidates.filter((candidate) => {
+    const scopeKey = getProjectorExactScopeKey(candidate);
+    return scopeKey !== null && sourceScopeKeys.has(scopeKey);
+  });
+  return candidates.length > 0 ? candidates : undefined;
 }
 
 function fitsInRamForMemoryFitDecision(decision: ModelMemoryFitDecision): boolean | null {
@@ -663,7 +689,7 @@ export function normalizePersistedModelMetadata(
   );
   const normalizedActiveVariantId = normalizeNonEmptyString(model.activeVariantId);
   const normalizedResolvedFileName = normalizeNonEmptyString(model.resolvedFileName);
-  const normalizedVariants = normalizeModelVariants(
+  const normalizedVariantsBeforeProjectorCanonicalization = normalizeModelVariants(
     (model as PersistedModelMetadata & { variants?: unknown }).variants,
     {
       activeVariantId: normalizedActiveVariantId,
@@ -678,14 +704,92 @@ export function normalizePersistedModelMetadata(
     ?? (normalizedResolvedFileName ? resolveModelArtifactRole(normalizedResolvedFileName) : undefined);
   const visionSource = normalizeVisionCapabilitySource(model.visionSource);
   const visionConfidence = normalizeVisionCapabilityConfidence(model.visionConfidence);
-  const projectorCandidates = normalizeProjectorArtifacts(model.projectorCandidates);
-  const selectedProjectorId = normalizeNonEmptyString(model.selectedProjectorId);
-  const persistedArtifacts = normalizePersistedModelArtifacts(
+  const normalizedModelProjectorCandidates = normalizeProjectorArtifacts(model.projectorCandidates);
+  const normalizedPersistedArtifacts = normalizePersistedModelArtifacts(
     (model as PersistedModelMetadata & { artifacts?: unknown }).artifacts,
   );
-  const multimodalReadiness = normalizeMultimodalReadinessState(
+  const normalizedAllProjectorCandidates = [
+    ...(normalizedModelProjectorCandidates ?? []),
+    ...(normalizedVariantsBeforeProjectorCanonicalization ?? []).flatMap((variant) => (
+      variant.projectorCandidates ?? []
+    )),
+  ];
+  const canonicalProjectors = canonicalizeProjectorCandidateAliases(
+    normalizedAllProjectorCandidates,
+    normalizedPersistedArtifacts,
+  );
+  const projectorCandidates = selectCanonicalProjectorsForSource(
+    normalizedModelProjectorCandidates,
+    canonicalProjectors.candidates,
+  );
+  const normalizedVariants = normalizedVariantsBeforeProjectorCanonicalization?.map((variant) => {
+    const variantProjectorCandidates = selectCanonicalProjectorsForSource(
+      variant.projectorCandidates,
+      canonicalProjectors.candidates,
+    );
+    const remappedSelectedProjectorId = remapProjectorAliasId(
+      variant.selectedProjectorId,
+      canonicalProjectors,
+    );
+    const selectedProjectorId = remappedSelectedProjectorId
+      && canonicalProjectors.candidates.some((candidate) => (
+        candidate.id === remappedSelectedProjectorId
+        && (
+          candidate.ownerVariantId === undefined
+          || candidate.ownerVariantId === variant.variantId
+          || candidate.ownerVariantId === variant.fileName
+        )
+      ))
+      ? remappedSelectedProjectorId
+      : undefined;
+    const normalizedVariant = { ...variant };
+    delete normalizedVariant.projectorCandidates;
+    delete normalizedVariant.selectedProjectorId;
+    return {
+      ...normalizedVariant,
+      ...(variantProjectorCandidates !== undefined
+        ? { projectorCandidates: variantProjectorCandidates }
+        : {}),
+      ...(selectedProjectorId ? { selectedProjectorId } : {}),
+    };
+  });
+  const remappedSelectedProjectorId = remapProjectorAliasId(
+    normalizeNonEmptyString(model.selectedProjectorId),
+    canonicalProjectors,
+  );
+  const selectedProjectorId = remappedSelectedProjectorId
+    && canonicalProjectors.candidates.some((candidate) => candidate.id === remappedSelectedProjectorId)
+    ? remappedSelectedProjectorId
+    : undefined;
+  const persistedArtifacts = normalizedPersistedArtifacts === undefined
+    ? undefined
+    : [
+        ...normalizedPersistedArtifacts.filter((artifact) => artifact.kind !== 'multimodal_projector'),
+        ...canonicalProjectors.artifacts,
+        ...getUnboundProjectorArtifactsForBookkeeping(
+          normalizedPersistedArtifacts,
+          normalizedAllProjectorCandidates,
+        ),
+      ];
+  const normalizedMultimodalReadiness = normalizeMultimodalReadinessState(
     (model as PersistedModelMetadata & { multimodalReadiness?: unknown }).multimodalReadiness,
   );
+  const remappedReadinessProjectorId = remapProjectorAliasId(
+    normalizedMultimodalReadiness?.projectorId,
+    canonicalProjectors,
+  );
+  const hasAnyProjectorEvidence = normalizedAllProjectorCandidates.length > 0
+    || normalizedPersistedArtifacts?.some((artifact) => artifact.kind === 'multimodal_projector') === true;
+  const multimodalReadiness = normalizedMultimodalReadiness?.projectorId === undefined
+    ? (!hasAnyProjectorEvidence ? normalizedMultimodalReadiness : undefined)
+    : normalizedMultimodalReadiness
+      && remappedReadinessProjectorId
+      && canonicalProjectors.candidates.some((candidate) => candidate.id === remappedReadinessProjectorId)
+      ? {
+          ...normalizedMultimodalReadiness,
+          projectorId: remappedReadinessProjectorId,
+        }
+      : undefined;
   const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );

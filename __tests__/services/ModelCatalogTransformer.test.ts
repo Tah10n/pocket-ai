@@ -227,7 +227,7 @@ describe('ModelCatalogTransformer', () => {
     expect(models[0].artifacts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: 'multimodal_projector',
-        requiredFor: ['image', 'audio'],
+        requiredFor: ['audio', 'image'],
       }),
     ]));
   });
@@ -271,7 +271,7 @@ describe('ModelCatalogTransformer', () => {
       expect.objectContaining({
         kind: 'multimodal_projector',
         remoteFileName: projectorFileName,
-        requiredFor: ['image', 'audio'],
+        requiredFor: ['audio', 'image'],
       }),
     ]));
     expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
@@ -304,7 +304,7 @@ describe('ModelCatalogTransformer', () => {
     expect(models[0].artifacts).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: 'multimodal_projector',
-        requiredFor: ['image', 'audio'],
+        requiredFor: ['audio', 'image'],
       }),
     ]));
   });

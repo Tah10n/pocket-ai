@@ -2907,7 +2907,7 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it.each(['current-first', 'legacy-first'] as const)(
-    'prefers a unique compatible legacy projector requirement independent of artifact order (%s)',
+    'blocks conflicting current and legacy projector requirements independent of artifact order (%s)',
     (artifactOrder) => {
       const projector = {
         ...mockProjector,
@@ -2955,16 +2955,13 @@ describe('ModelDownloadManager Basic', () => {
           : [legacyArtifact, currentArtifact],
       }) as ModelMetadata;
 
-      expect(synchronized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
-        .toEqual([expect.objectContaining({
-          id: projector.id,
-          requiredFor: ['audio'],
-        })]);
+      expect(synchronized.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector'))
+        .not.toBe(true);
     },
   );
 
   it.each(['legacy-first', 'current-first'] as const)(
-    'prefers legacy requirements when the active candidate still has the legacy id (%s)',
+    'blocks conflicting requirements when the active candidate still has the legacy id (%s)',
     (artifactOrder) => {
       const identity = {
         repoId: mockModel.id,
@@ -3014,11 +3011,8 @@ describe('ModelDownloadManager Basic', () => {
           : [currentArtifact, legacyArtifact],
       }) as ModelMetadata;
 
-      expect(synchronized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
-        .toEqual([expect.objectContaining({
-          id: legacyId,
-          requiredFor: ['audio'],
-        })]);
+      expect(synchronized.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector'))
+        .not.toBe(true);
     },
   );
 
@@ -3045,10 +3039,10 @@ describe('ModelDownloadManager Basic', () => {
         ...upperProjector,
         id: buildProjectorArtifactId({
           ...sharedIdentity,
-          fileName: 'Adapters/mmproj.gguf',
+          fileName: 'adapters/mmproj.gguf',
         }),
-        fileName: 'Adapters/mmproj.gguf',
-        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/Adapters/mmproj.gguf`,
+        fileName: 'adapters/mmproj.gguf',
+        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/adapters/mmproj.gguf`,
       };
       const currentArtifact = {
         id: upperProjector.id,
@@ -3755,6 +3749,76 @@ describe('ModelDownloadManager Basic', () => {
         }),
       ],
     }));
+  });
+
+  it('does not schedule a second projector download after a downloaded legacy id migrates to the current id', async () => {
+    const identity = {
+      repoId: mockProjector.repoId,
+      hfRevision: mockProjector.hfRevision,
+      fileName: 'Projectors/MMProj.GGUF',
+    };
+    const currentId = buildProjectorArtifactId(identity);
+    const legacyId = buildLegacyProjectorArtifactId(identity);
+    expect(currentId).not.toBe(legacyId);
+
+    const legacyDownloadedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      ...identity,
+      id: legacyId,
+      downloadUrl: 'http://example.com/Projectors/MMProj.GGUF',
+      lifecycleStatus: 'downloaded',
+      localPath: 'installed-mmproj.gguf',
+      sha256: VALID_SHA256,
+    };
+    const freshCurrentProjector: ProjectorArtifact = {
+      ...legacyDownloadedProjector,
+      id: currentId,
+      lifecycleStatus: 'available',
+      localPath: undefined,
+    };
+
+    (modelDownloadManager as any).isProcessing = true;
+    useDownloadStore.setState({
+      queue: [{
+        ...mockModel,
+        localPath: 'model.gguf',
+        downloadProgress: 1,
+        lifecycleStatus: LifecycleStatus.PAUSED,
+        projectorCandidates: [legacyDownloadedProjector],
+        selectedProjectorId: legacyId,
+        multimodalReadiness: {
+          modelId: mockModel.id,
+          status: 'ready',
+          projectorId: legacyId,
+          support: ['vision'],
+          checkedAt: 123,
+        },
+      }],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...mockModel,
+      projectorCandidates: [freshCurrentProjector],
+      selectedProjectorId: currentId,
+    });
+
+    const queued = useDownloadStore.getState().queue[0];
+    expect(queued.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: currentId,
+        lifecycleStatus: 'downloaded',
+        localPath: 'installed-mmproj.gguf',
+      }),
+    ]);
+    expect(queued.selectedProjectorId).toBe(currentId);
+    expect(queued.multimodalReadiness?.projectorId).toBe(currentId);
+
+    useDownloadStore.setState({ activeDownloadId: mockModel.id });
+    await expect(runDownloadModel(queued)).resolves.toBeUndefined();
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(RNFS.hash).toHaveBeenCalledWith('test-dir/models/installed-mmproj.gguf', 'sha256');
   });
 
   it('falls back to downloading when a reusable projector disappears after preflight', async () => {

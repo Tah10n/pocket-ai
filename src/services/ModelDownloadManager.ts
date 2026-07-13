@@ -30,18 +30,11 @@ import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValida
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
-import {
-  buildLegacyProjectorArtifactId,
-  buildProjectorArtifactId,
-} from '../utils/modelProjectors';
+import { canonicalizeProjectorCandidateAliases } from '../utils/projectorIdentity';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import {
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
-  hasAmbiguousCurrentProjectorId,
-  hasAmbiguousLegacyProjectorAlias,
-  projectorArtifactMatchesCandidate,
-  projectorArtifactUsesLegacyAlias,
 } from '../utils/modelCapabilities';
 import {
   getAllModelProjectorCandidates,
@@ -861,6 +854,15 @@ export class ModelDownloadManager {
     const activeVariant = resolveActiveModelVariant(model);
     const projectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
     const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, projectorCandidates);
+    const canonicalAllProjectors = canonicalizeProjectorCandidateAliases(
+      getAllModelProjectorCandidates(model),
+      model.artifacts,
+    );
+    const effectiveProjectorIds = new Set(projectorCandidates.map((candidate) => candidate.id));
+    const canonicalScopedArtifacts = [
+      ...(model.artifacts?.filter((artifact) => artifact.kind !== 'multimodal_projector') ?? []),
+      ...canonicalAllProjectors.artifacts.filter((artifact) => effectiveProjectorIds.has(artifact.id)),
+    ];
     const hasExplicitActiveVariantModalities = Array.isArray(activeVariant?.chatModalities);
     const artifactProjection: ModelMetadata = {
       ...model,
@@ -870,68 +872,29 @@ export class ModelDownloadManager {
         : null),
       projectorCandidates,
       selectedProjectorId,
+      artifacts: canonicalScopedArtifacts.length > 0 ? canonicalScopedArtifacts : undefined,
     };
     let artifacts = deriveArtifactsFromLegacyModel(artifactProjection, { preferLegacyRuntimeState: true });
     if (hasExplicitActiveVariantModalities) {
-      const allProjectorCandidates = getAllModelProjectorCandidates(model);
       const requiredFor = [
         ...(activeVariant.chatModalities?.includes('vision') ? ['image' as const] : []),
         ...(activeVariant.chatModalities?.includes('audio') ? ['audio' as const] : []),
       ];
-      const artifactMatchesCandidateInModelScope = (
-        artifact: NonNullable<ModelMetadata['artifacts']>[number],
-        candidate: ProjectorArtifact,
-      ): boolean => {
-        const identity = {
-          repoId: candidate.repoId,
-          hfRevision: candidate.hfRevision,
-          fileName: candidate.fileName,
-          ownerVariantId: candidate.ownerVariantId,
-        };
-        const currentId = buildProjectorArtifactId(identity);
-        const legacyId = buildLegacyProjectorArtifactId(identity);
-        return projectorArtifactMatchesCandidate(artifact, candidate) && (
-          (
-            artifact.id === currentId
-            && !hasAmbiguousCurrentProjectorId(model, candidate)
-          )
-          || (
-            artifact.id === legacyId
-            && !hasAmbiguousLegacyProjectorAlias(model, candidate)
-          )
-        );
-      };
       artifacts = artifacts.flatMap((artifact) => {
         if (artifact.kind !== 'multimodal_projector') {
           return [artifact];
         }
 
-        const projector = projectorCandidates.find((candidate) => (
-          artifactMatchesCandidateInModelScope(artifact, candidate)
-        ));
-        if (!projector) {
-          const outOfScopeProjector = allProjectorCandidates.find((candidate) => (
-            artifactMatchesCandidateInModelScope(artifact, candidate)
-          ));
-          return outOfScopeProjector ? [artifact] : [];
-        }
-        if (requiredFor.length === 0 || artifact.id !== projector.id) {
+        const projector = projectorCandidates.find((candidate) => artifact.id === candidate.id);
+        if (!projector || requiredFor.length === 0) {
           return [];
         }
 
-        const compatiblePersistedArtifacts = model.artifacts?.filter((candidate) => (
-          artifactMatchesCandidateInModelScope(candidate, projector)
-        )) ?? [];
-        const legacyPersistedArtifacts = compatiblePersistedArtifacts.filter((candidate) => (
-          projectorArtifactUsesLegacyAlias(candidate, projector)
+        const preferredPersistedArtifact = canonicalAllProjectors.artifacts.find((candidate) => (
+          candidate.id === projector.id
         ));
-        const preferredPersistedArtifact = legacyPersistedArtifacts.length === 1
-          ? legacyPersistedArtifacts[0]
-          : legacyPersistedArtifacts.length === 0
-            ? compatiblePersistedArtifacts.find((candidate) => candidate.id === projector.id)
-            : undefined;
         const persistedRequiredFor = preferredPersistedArtifact?.requiredFor.filter((requiredInput) => (
-            requiredInput !== 'text' && requiredFor.includes(requiredInput)
+          requiredInput !== 'text' && requiredFor.includes(requiredInput)
         ));
 
         return [{
@@ -940,6 +903,11 @@ export class ModelDownloadManager {
         }];
       });
     }
+    const artifactIds = new Set(artifacts.map((artifact) => artifact.id));
+    artifacts.push(...canonicalAllProjectors.artifacts.filter((artifact) => (
+      !artifactIds.has(artifact.id)
+      && !effectiveProjectorIds.has(artifact.id)
+    )));
     if (artifacts.length > 0) {
       return { ...model, artifacts };
     }

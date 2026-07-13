@@ -4,6 +4,7 @@ import { getActiveModelVariantKeys, resolveActiveModelVariant } from './activeMo
 import {
   filterProjectorCandidatesForEffectiveActiveVariant,
   getEffectiveActiveVariantProjectorCandidates,
+  remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
 
@@ -203,23 +204,32 @@ function resolveDisplaySelectedProjectorId(
   selectedProjectorId?: string,
   runtimeToDisplayProjectorIds: Map<string, string> = new Map(),
 ): string | undefined {
+  const effectiveCandidates = candidates ?? [];
+  const resolveCanonicalSelection = (projectorId: string): string => (
+    runtimeToDisplayProjectorIds.get(projectorId)
+    ?? remapProjectorIdToEffectiveCandidate(model, projectorId, effectiveCandidates)
+    ?? projectorId
+  );
   const activeVariant = resolveActiveModelVariant(model);
   if (!activeVariant) {
     const normalizedSelectedProjectorId = normalizeOptionalString(selectedProjectorId ?? model.selectedProjectorId);
     return normalizedSelectedProjectorId
-      ? runtimeToDisplayProjectorIds.get(normalizedSelectedProjectorId) ?? normalizedSelectedProjectorId
+      ? resolveCanonicalSelection(normalizedSelectedProjectorId)
       : undefined;
   }
 
   const activeVariantSelectedProjectorId = normalizeOptionalString(activeVariant.selectedProjectorId);
   const activeVariantKeys = getVariantIdentityKeys(model);
   if (activeVariantSelectedProjectorId !== null) {
-    const activeVariantSelectedProjector = candidates?.find((projector) => projector.id === activeVariantSelectedProjectorId);
+    const effectiveActiveVariantSelectedProjectorId = resolveCanonicalSelection(activeVariantSelectedProjectorId);
+    const activeVariantSelectedProjector = candidates?.find(
+      (projector) => projector.id === effectiveActiveVariantSelectedProjectorId,
+    );
     if (
       activeVariantSelectedProjector
       && isProjectorCompatibleWithVariant(activeVariantSelectedProjector, activeVariantKeys)
     ) {
-      return activeVariantSelectedProjectorId;
+      return effectiveActiveVariantSelectedProjectorId;
     }
   }
 
@@ -228,8 +238,7 @@ function resolveDisplaySelectedProjectorId(
     return undefined;
   }
 
-  const normalizedSelectedProjectorId = runtimeToDisplayProjectorIds.get(normalizedRuntimeSelectedProjectorId)
-    ?? normalizedRuntimeSelectedProjectorId;
+  const normalizedSelectedProjectorId = resolveCanonicalSelection(normalizedRuntimeSelectedProjectorId);
   const selectedProjector = candidates?.find((projector) => projector.id === normalizedSelectedProjectorId);
   return selectedProjector && isProjectorCompatibleWithVariant(selectedProjector, activeVariantKeys)
     ? normalizedSelectedProjectorId

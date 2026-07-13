@@ -445,9 +445,21 @@ const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
     },
     expected: {
       modelChatModalities: ['text', 'vision'],
-      rawProjectorIds: ['vision-projector'],
-      effectiveProjectorIds: ['vision-projector'],
-      selectedProjectorId: 'vision-projector',
+      rawProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/model-wide-unsupported',
+        hfRevision: 'main',
+        fileName: 'mmproj-vision.gguf',
+      })],
+      effectiveProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/model-wide-unsupported',
+        hfRevision: 'main',
+        fileName: 'mmproj-vision.gguf',
+      })],
+      selectedProjectorId: buildProjectorArtifactId({
+        repoId: 'matrix/model-wide-unsupported',
+        hfRevision: 'main',
+        fileName: 'mmproj-vision.gguf',
+      }),
       artifactRequiredFor: [['image']],
       support: { vision: true, audio: false },
       readinessDecision: 'reuse',
@@ -499,9 +511,14 @@ const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
     expected: {
       modelChatModalities: ['text', 'vision', 'audio'],
       activeVariantChatModalities: ['text'],
-      rawProjectorIds: ['stale-projector'],
+      rawProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-text',
+        hfRevision: 'main',
+        ownerVariantId: 'vision-old',
+        fileName: 'mmproj-stale.gguf',
+      })],
       effectiveProjectorIds: [],
-      artifactRequiredFor: [['image', 'audio']],
+      artifactRequiredFor: [['audio', 'image']],
       support: { vision: false, audio: false },
       readinessDecision: 'recheck',
       composer: { image: false, audio: false },
@@ -559,9 +576,24 @@ const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
     expected: {
       modelChatModalities: ['text', 'audio'],
       activeVariantChatModalities: ['text', 'vision'],
-      rawProjectorIds: ['vision-remote-projector'],
-      effectiveProjectorIds: ['vision-remote-projector'],
-      selectedProjectorId: 'vision-remote-projector',
+      rawProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-vision',
+        hfRevision: 'main',
+        ownerVariantId: 'vision-q4',
+        fileName: 'mmproj-vision-remote.gguf',
+      })],
+      effectiveProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-vision',
+        hfRevision: 'main',
+        ownerVariantId: 'vision-q4',
+        fileName: 'mmproj-vision-remote.gguf',
+      })],
+      selectedProjectorId: buildProjectorArtifactId({
+        repoId: 'matrix/active-vision',
+        hfRevision: 'main',
+        ownerVariantId: 'vision-q4',
+        fileName: 'mmproj-vision-remote.gguf',
+      }),
       artifactRequiredFor: [['image']],
       support: { vision: true, audio: false },
       readinessDecision: 'recheck',
@@ -630,9 +662,24 @@ const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
     expected: {
       modelChatModalities: ['text', 'audio'],
       activeVariantChatModalities: ['text', 'audio'],
-      rawProjectorIds: ['projector-matrix-active-audio-merge-main-mmproj-audio-model-f16.gguf'],
-      effectiveProjectorIds: ['projector-matrix-active-audio-merge-main-mmproj-audio-model-f16.gguf'],
-      selectedProjectorId: 'projector-matrix-active-audio-merge-main-mmproj-audio-model-f16.gguf',
+      rawProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-audio-merge',
+        hfRevision: 'main',
+        ownerVariantId: 'audio-q4',
+        fileName: 'mmproj-audio-model-f16.gguf',
+      })],
+      effectiveProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-audio-merge',
+        hfRevision: 'main',
+        ownerVariantId: 'audio-q4',
+        fileName: 'mmproj-audio-model-f16.gguf',
+      })],
+      selectedProjectorId: buildProjectorArtifactId({
+        repoId: 'matrix/active-audio-merge',
+        hfRevision: 'main',
+        ownerVariantId: 'audio-q4',
+        fileName: 'mmproj-audio-model-f16.gguf',
+      }),
       artifactRequiredFor: [['audio']],
       support: { vision: false, audio: true },
       readinessDecision: 'reuse',
@@ -697,9 +744,19 @@ const UNIFIED_NATIVE_STATE_MATRIX: UnifiedNativeStateMatrixCase[] = [
     expected: {
       modelChatModalities: ['text', 'vision', 'audio'],
       activeVariantChatModalities: ['text', 'vision', 'audio'],
-      rawProjectorIds: ['mixed-remote-projector'],
-      effectiveProjectorIds: ['mixed-remote-projector'],
-      artifactRequiredFor: [['image', 'audio']],
+      rawProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-mixed-cache',
+        hfRevision: 'main',
+        ownerVariantId: 'mixed-q4',
+        fileName: 'mmproj-mixed.gguf',
+      })],
+      effectiveProjectorIds: [buildProjectorArtifactId({
+        repoId: 'matrix/active-mixed-cache',
+        hfRevision: 'main',
+        ownerVariantId: 'mixed-q4',
+        fileName: 'mmproj-mixed.gguf',
+      })],
+      artifactRequiredFor: [['audio', 'image']],
       support: { vision: true, audio: true },
       readinessDecision: 'none',
       composer: { image: false, audio: false },
@@ -2081,7 +2138,7 @@ describe('ModelCatalogService regressions', () => {
     expect(refreshed.projectorCandidates).toEqual([]);
     expect(refreshed.selectedProjectorId).toBeUndefined();
     expect(refreshed.multimodalReadiness).toBeUndefined();
-    expect(projectorArtifacts?.map((artifact) => artifact.requiredFor)).toEqual([['image']]);
+    expect(projectorArtifacts ?? []).toEqual([]);
     expect(refreshed.visionSource).toBe('catalog_metadata');
     expect(refreshed.visionConfidence).toBe('trusted');
     expect(resolveEffectiveActiveVariantNativeSupport(refreshed)).toEqual({
@@ -2168,7 +2225,7 @@ describe('ModelCatalogService regressions', () => {
     expect(refreshed.visionConfidence).toBe('inferred');
   });
 
-  it('preserves downloaded projector state when catalog projector ids become repo-level', async () => {
+  it('does not move downloaded projector state from a variant scope into a repo-level scope', async () => {
     const modelId = 'org/vision-legacy';
     const modelFileName = 'model.Q4_K_M.gguf';
     const projectorFileName = 'mmproj-model-f16.gguf';
@@ -2242,17 +2299,13 @@ describe('ModelCatalogService regressions', () => {
 
     expect(projector?.ownerVariantId).toBeUndefined();
     expect(projector).toEqual(expect.objectContaining({
-      localPath: localProjector.localPath,
-      lifecycleStatus: 'downloaded',
-      sha256: localProjector.sha256,
+      lifecycleStatus: 'available',
       size: localProjector.size,
     }));
     expect(projector?.id).not.toBe(localProjector.id);
-    expect(model.selectedProjectorId).toBe(projector?.id);
-    expect(model.multimodalReadiness).toEqual(expect.objectContaining({
-      status: 'ready',
-      projectorId: projector?.id,
-    }));
+    expect(projector?.localPath).toBeUndefined();
+    expect(model.selectedProjectorId).toBeUndefined();
+    expect(model.multimodalReadiness).toBeUndefined();
   });
 
   it('does not preserve variant-scoped projector runtime state after switching to another active variant', async () => {
@@ -2510,9 +2563,12 @@ describe('ModelCatalogService regressions', () => {
       false,
     );
 
-    expect(directMerge.selectedProjectorId).toBeUndefined();
-    expect(directMerge.multimodalReadiness?.status).not.toBe('ready');
-    expect(directMerge.multimodalReadiness?.projectorId).not.toBe(conflictingProjector.id);
+    expect(directMerge.selectedProjectorId).toBe(remoteProjector.id);
+    expect(directMerge.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: remoteProjector.id,
+      checkedAt: 5678,
+    }));
 
     const legacyProjectorId = buildProjectorArtifactId({
       repoId: modelId,
@@ -2569,11 +2625,11 @@ describe('ModelCatalogService regressions', () => {
     expect(directMergeWithBlockedIncomingSelection.multimodalReadiness).toEqual(expect.objectContaining({
       status: 'ready',
       projectorId: remoteProjector.id,
-      checkedAt: 9012,
+      checkedAt: 3456,
     }));
   });
 
-  it('does not fall back to a different local ready projector when the incoming selected projector is blocked', () => {
+  it('keeps the exact incoming current selection instead of falling back to a different local projector', () => {
     const modelId = 'org/vision-blocked-selected-projector-local-fallback';
     const modelFileName = 'model.Q4_K_M.gguf';
     const selectedProjectorFileName = 'mmproj-selected-f16.gguf';
@@ -2679,8 +2735,13 @@ describe('ModelCatalogService regressions', () => {
       false,
     );
 
-    expect(directMerge.selectedProjectorId).toBeUndefined();
-    expect(directMerge.multimodalReadiness).toBeUndefined();
+    expect(directMerge.selectedProjectorId).toBe(selectedProjectorId);
+    expect(directMerge.selectedProjectorId).not.toBe(localReadyProjectorId);
+    expect(directMerge.multimodalReadiness).toEqual(expect.objectContaining({
+      status: 'ready',
+      projectorId: selectedProjectorId,
+      checkedAt: 3456,
+    }));
   });
 
   it('preserves local projector readiness when the catalog selected projector id is stale', () => {
@@ -2748,7 +2809,7 @@ describe('ModelCatalogService regressions', () => {
     ['failed', 0.67],
     ['downloading', 0.18],
   ] as const)(
-    'preserves %s compatible projector runtime state when catalog projector ids become repo-level',
+    'does not move %s projector runtime state from a variant scope into a repo-level scope',
     async (lifecycleStatus, downloadProgress) => {
       const modelId = `org/vision-${lifecycleStatus}-legacy`;
       const modelFileName = 'model.Q4_K_M.gguf';
@@ -2831,21 +2892,20 @@ describe('ModelCatalogService regressions', () => {
       expect(projector?.ownerVariantId).toBeUndefined();
       expect(projector?.id).not.toBe(localProjector.id);
       expect(projector).toEqual(expect.objectContaining({
-        localPath: localProjector.localPath,
-        resumeData: localProjector.resumeData,
-        downloadProgress,
-        lifecycleStatus,
-        matchStatus: localProjector.matchStatus,
-        matchReason: localProjector.matchReason,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
         sha256: localProjector.sha256,
         size: localProjector.size,
       }));
-      expect(model.selectedProjectorId).toBe(projector?.id);
-      expect(model.multimodalReadiness?.projectorId).toBe(projector?.id);
+      expect(projector?.localPath).toBeUndefined();
+      expect(projector?.resumeData).toBeUndefined();
+      expect(projector?.downloadProgress).toBeUndefined();
+      expect(model.selectedProjectorId).toBeUndefined();
+      expect(model.multimodalReadiness).toBeUndefined();
     },
   );
 
-  it('resets downloaded projector state when catalog projector sha256 changes', async () => {
+  it('blocks the projector scope when catalog projector sha256 conflicts', async () => {
     const modelId = 'org/vision-projector-sha-reset';
     const {
       localModel,
@@ -2869,18 +2929,12 @@ describe('ModelCatalogService regressions', () => {
     ) as jest.Mock;
 
     const result = await service.searchModels('vision projector sha reset');
-    const projector = result.models[0].projectorCandidates?.[0];
-
-    expect(projector).toEqual(expect.objectContaining({
-      lifecycleStatus: 'available',
-      size: localProjector.size,
-      sha256: DIFFERENT_PROJECTOR_SHA256,
-    }));
-    expect(projector?.localPath).toBeUndefined();
+    expect(result.models[0].projectorCandidates ?? []).toEqual([]);
+    expect(result.models[0].selectedProjectorId).toBeUndefined();
     expect(result.models[0].multimodalReadiness).toBeUndefined();
   });
 
-  it('resets downloaded projector state when catalog projector size changes', async () => {
+  it('blocks the projector scope when catalog projector size conflicts', async () => {
     const modelId = 'org/vision-projector-size-reset';
     const remoteProjectorSize = 1024;
     const {
@@ -2905,20 +2959,14 @@ describe('ModelCatalogService regressions', () => {
     ) as jest.Mock;
 
     const result = await service.searchModels('vision projector size reset');
-    const projector = result.models[0].projectorCandidates?.[0];
-
-    expect(projector).toEqual(expect.objectContaining({
-      lifecycleStatus: 'available',
-      size: remoteProjectorSize,
-      sha256: PROJECTOR_SHA256,
-    }));
-    expect(projector?.localPath).toBeUndefined();
+    expect(result.models[0].projectorCandidates ?? []).toEqual([]);
+    expect(result.models[0].selectedProjectorId).toBeUndefined();
     expect(result.models[0].multimodalReadiness).toBeUndefined();
   });
 
-  it('resets downloaded projector state when catalog projector download URL changes', async () => {
+  it('blocks the projector scope when catalog projector download URL identity conflicts', async () => {
     const modelId = 'org/vision-projector-url-reset';
-    const localProjectorDownloadUrl = `https://huggingface.co/${modelId}/resolve/main/mmproj-model-f16.gguf?download=true`;
+    const localProjectorDownloadUrl = 'https://projector-mirror.example/mmproj-model-f16.gguf';
     const {
       localModel,
       modelFileName,
@@ -2940,15 +2988,8 @@ describe('ModelCatalogService regressions', () => {
     ) as jest.Mock;
 
     const result = await service.searchModels('vision projector url reset');
-    const projector = result.models[0].projectorCandidates?.[0];
-
-    expect(projector).toEqual(expect.objectContaining({
-      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`,
-      lifecycleStatus: 'available',
-      size: 1024,
-      sha256: PROJECTOR_SHA256,
-    }));
-    expect(projector?.localPath).toBeUndefined();
+    expect(result.models[0].projectorCandidates ?? []).toEqual([]);
+    expect(result.models[0].selectedProjectorId).toBeUndefined();
     expect(result.models[0].multimodalReadiness).toBeUndefined();
   });
 
@@ -3106,6 +3147,12 @@ describe('ModelCatalogService regressions', () => {
       size: baseModel.size,
       chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
     };
+    const canonicalProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: variant.variantId,
+      fileName: baseProjector.fileName,
+    });
     const remoteModel: ModelMetadata = {
       ...baseModel,
       activeVariantId: variant.variantId,
@@ -3137,18 +3184,24 @@ describe('ModelCatalogService regressions', () => {
 
     expect(merged.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: remoteProjector.id,
+        id: canonicalProjectorId,
         localPath: localProjector.localPath,
         lifecycleStatus: 'downloaded',
       }),
     ]);
-    expect(merged.selectedProjectorId).toBe(remoteProjector.id);
+    expect(merged.selectedProjectorId).toBe(canonicalProjectorId);
   });
 
   it('preserves remote and local variant-only projector candidates and selections', () => {
     const modelId = 'org/variant-only-projector-merge';
     const { localModel: baseModel, localProjector: baseProjector, modelFileName } = makeDownloadedAudioModelWithProjector({ modelId });
     const projector = { ...baseProjector, ownerVariantId: 'audio-q4' };
+    const canonicalProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: 'audio-q4',
+      fileName: projector.fileName,
+    });
     const variantBase = {
       variantId: 'audio-q4',
       fileName: modelFileName,
@@ -3198,12 +3251,12 @@ describe('ModelCatalogService regressions', () => {
 
     for (const merged of [remoteVariantOnly, localVariantOnly]) {
       expect(merged.projectorCandidates).toEqual([
-        expect.objectContaining({ id: projector.id }),
+        expect.objectContaining({ id: canonicalProjectorId }),
       ]);
-      expect(merged.selectedProjectorId).toBe(projector.id);
+      expect(merged.selectedProjectorId).toBe(canonicalProjectorId);
     }
     expect(localVariantOnly.multimodalReadiness).toEqual(expect.objectContaining({
-      projectorId: projector.id,
+      projectorId: canonicalProjectorId,
       requestedSupport: ['audio'],
     }));
   });
@@ -3490,6 +3543,12 @@ describe('ModelCatalogService regressions', () => {
     const modelId = `org/active-audio-stale-top-${state}`;
     const { localModel: baseModel, localProjector, modelFileName } = makeDownloadedAudioModelWithProjector({ modelId });
     const scopedProjector = { ...localProjector, ownerVariantId: 'audio-q4' };
+    const canonicalScopedProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: 'audio-q4',
+      fileName: scopedProjector.fileName,
+    });
     const activeVariant = {
       variantId: 'audio-q4',
       fileName: modelFileName,
@@ -3534,7 +3593,7 @@ describe('ModelCatalogService regressions', () => {
 
     expect(merged).toBeDefined();
     expect(merged!.projectorCandidates ?? []).toHaveLength(keepsAudio ? 1 : 0);
-    expect(merged!.selectedProjectorId).toBe(keepsAudio ? scopedProjector.id : undefined);
+    expect(merged!.selectedProjectorId).toBe(keepsAudio ? canonicalScopedProjectorId : undefined);
     expect(merged!.visionSource).toBeUndefined();
     expect(merged!.visionConfidence).toBeUndefined();
     const mergedActiveVariant = merged!.variants?.find((variant) => (
@@ -3552,6 +3611,12 @@ describe('ModelCatalogService regressions', () => {
     const modelId = 'org/active-vision-stale-top';
     const { localModel: baseModel, localProjector, modelFileName } = makeDownloadedVisionModelWithProjector({ modelId });
     const scopedProjector = { ...localProjector, ownerVariantId: 'vision-q4' };
+    const canonicalScopedProjectorId = buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: 'vision-q4',
+      fileName: scopedProjector.fileName,
+    });
     const localModel: ModelMetadata = {
       ...baseModel,
       chatModalities: ['text'],
@@ -3604,7 +3669,7 @@ describe('ModelCatalogService regressions', () => {
       .toEqual(['text', 'vision']);
     expect(merged!.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: scopedProjector.id,
+        id: canonicalScopedProjectorId,
         localPath: scopedProjector.localPath,
       }),
     ]);

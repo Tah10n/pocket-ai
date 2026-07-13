@@ -51,16 +51,24 @@ function buildProjectorCandidate(
   modelId: string,
   id: string,
   fileName: string,
-  options: { localOnly?: boolean } = {},
+  options: {
+    localOnly?: boolean;
+    ownerModelId?: string;
+    repoId?: string;
+    revision?: string;
+  } = {},
 ): NonNullable<ModelMetadata['projectorCandidates']>[number] {
+  const repoId = options.repoId ?? modelId;
+  const revision = options.revision ?? 'main';
   return {
     id,
-    ownerModelId: modelId,
-    repoId: modelId,
+    ownerModelId: options.ownerModelId ?? modelId,
+    repoId,
     fileName,
     downloadUrl: options.localOnly
       ? `file:///private/${fileName}`
-      : buildHuggingFaceResolveUrl(modelId, fileName, 'main'),
+      : buildHuggingFaceResolveUrl(repoId, fileName, revision),
+    ...(options.revision ? { hfRevision: revision } : {}),
     size: 1024,
     localPath: `private-${fileName}`,
     lifecycleStatus: 'downloaded',
@@ -74,8 +82,10 @@ function buildProjectorArtifact(
   id: string,
   fileName: string,
   requiredFor: ModelArtifactRequiredInput[],
-  options: { localOnly?: boolean } = {},
+  options: { localOnly?: boolean; repoId?: string; revision?: string } = {},
 ): NonNullable<ModelMetadata['artifacts']>[number] {
+  const repoId = options.repoId ?? modelId;
+  const revision = options.revision ?? 'main';
   return {
     id,
     kind: 'multimodal_projector',
@@ -83,7 +93,8 @@ function buildProjectorArtifact(
     remoteFileName: fileName,
     downloadUrl: options.localOnly
       ? `file:///private/${fileName}`
-      : buildHuggingFaceResolveUrl(modelId, fileName, 'main'),
+      : buildHuggingFaceResolveUrl(repoId, fileName, revision),
+    ...(options.revision ? { hfRevision: revision } : {}),
     sizeBytes: 1024,
     localPath: `private-artifact-${fileName}`,
     installState: 'installed',
@@ -108,6 +119,56 @@ function roundTripAnonymousModel(model: ModelMetadata): [ModelMetadata, ModelMet
   expect(snapshotModel).toBeDefined();
   expect(snapshotModel).not.toBeNull();
   return [searchModel as ModelMetadata, snapshotModel as ModelMetadata];
+}
+
+function getCurrentProjectorId(
+  projector: NonNullable<ModelMetadata['projectorCandidates']>[number],
+): string {
+  return buildProjectorArtifactId({
+    repoId: projector.repoId,
+    hfRevision: projector.hfRevision,
+    fileName: projector.fileName,
+    ownerVariantId: projector.ownerVariantId,
+  });
+}
+
+function hydrateLegacyAnonymousModel(
+  model: ModelMetadata,
+  persistedVersion = MODEL_CATALOG_CACHE_PERSISTED_VERSION - 1,
+): [ModelMetadata | undefined, ModelMetadata | null] {
+  const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+  const scope = {
+    query: model.id,
+    cursor: null,
+    pageSize: 20,
+    sort: null,
+    authScope: 'anon' as const,
+  };
+  storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+    version: persistedVersion,
+    entries: [{
+      key: `${model.id}::__initial__::20::__default__::anon`,
+      timestamp: Date.now(),
+      scope,
+      result: { models: [model], hasMore: false, nextCursor: null },
+    }],
+  }));
+  storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+    version: persistedVersion,
+    entries: [{
+      key: `${model.id}::anon`,
+      id: model.id,
+      authScope: 'anon',
+      timestamp: Date.now(),
+      model,
+    }],
+  }));
+
+  const store = new ModelCatalogCacheStore();
+  return [
+    store.getSearch(scope, 1000)?.models[0],
+    store.getModelSnapshot(model.id, 'anon', 1000),
+  ];
 }
 
 type NativeCacheMatrixCase = {
@@ -292,7 +353,7 @@ const NATIVE_CACHE_MATRIX: NativeCacheMatrixCase[] = [
       declaredImage: 'supported',
       declaredAudio: 'supported',
       projectorFileNames: ['mmproj-mixed.gguf'],
-      artifactRequirements: [['image', 'audio']],
+      artifactRequirements: [['audio', 'image']],
       support: { vision: true, audio: true },
     },
   },
@@ -845,7 +906,10 @@ describe('ModelCatalogCacheStore', () => {
     for (const cached of roundTripAnonymousModel(model)) {
       expect(cached.projectorCandidates?.map((candidate) => candidate.fileName)).toEqual([audio.fileName]);
       expect(cached.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
-        .toEqual([expect.objectContaining({ id: audio.id, remoteFileName: audio.fileName })]);
+        .toEqual([expect.objectContaining({
+          id: getCurrentProjectorId(audio),
+          remoteFileName: audio.fileName,
+        })]);
     }
   });
 
@@ -1103,6 +1167,149 @@ describe('ModelCatalogCacheStore', () => {
   });
 
   it.each([
+    { label: 'another repository', repoId: 'other/projectors', revision: 'main' },
+    { label: 'another revision', repoId: 'identity/evidence-owner', revision: 'dev' },
+  ])('rejects internally consistent projector evidence from $label', ({ repoId, revision }) => {
+    const id = 'identity/evidence-owner';
+    const fileName = 'audio/mmproj.gguf';
+    const projector = buildProjectorCandidate(id, `projector-${revision}`, fileName, {
+      repoId,
+      revision,
+    });
+    const model = buildModel({
+      id,
+      hfRevision: 'main',
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, projector.id, fileName, ['audio'], {
+        repoId,
+        revision,
+      })],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.chatModalities).toEqual(['text']);
+      expect(cached.projectorCandidates).toBeUndefined();
+      expect(cached.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
+        .toBe(false);
+      expect(cached.inputCapabilities?.evidence.some((entry) => entry.source === 'projector') ?? false)
+        .toBe(false);
+    }
+  });
+
+  it('retains only exact owner-repository and owner-revision evidence with a current id', () => {
+    const id = 'identity/evidence-exact';
+    const fileName = 'Audio/MMProj.GGUF';
+    const projector = buildProjectorCandidate(id, 'catalog-projector', fileName, {
+      revision: 'refs/pr/7',
+    });
+    const currentId = getCurrentProjectorId(projector);
+    const model = buildModel({
+      id,
+      hfRevision: 'refs/pr/7',
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, projector.id, fileName, ['audio'], {
+        revision: 'refs/pr/7',
+      })],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.chatModalities).toEqual(['text', 'audio']);
+      expect(cached.projectorCandidates).toEqual([
+        expect.objectContaining({ id: currentId, fileName, hfRevision: 'refs/pr/7' }),
+      ]);
+      expect(cached.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({ id: currentId, remoteFileName: fileName })]);
+      expect(cached.inputCapabilities?.evidence).toContainEqual(
+        expect.objectContaining({ source: 'projector', value: fileName }),
+      );
+    }
+  });
+
+  it('fails closed when legacy basename evidence spans two revisions of the owning repository', () => {
+    const id = 'identity/legacy-revision-ambiguity';
+    const fileName = 'projectors/mmproj.gguf';
+    const main = buildProjectorCandidate(id, 'projector-main', fileName, { revision: 'main' });
+    const dev = buildProjectorCandidate(id, 'projector-dev', fileName, { revision: 'dev' });
+    const model = buildModel({
+      id,
+      hfRevision: 'main',
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [main, dev],
+      artifacts: [
+        buildProjectorArtifact(id, main.id, fileName, ['audio'], { revision: 'main' }),
+        buildProjectorArtifact(id, dev.id, fileName, ['audio'], { revision: 'dev' }),
+      ],
+    });
+
+    for (const cached of hydrateLegacyAnonymousModel(model, 6)) {
+      expect(cached?.chatModalities).toEqual(['text']);
+      expect(cached?.projectorCandidates).toBeUndefined();
+      expect(cached?.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
+        .toBe(false);
+    }
+  });
+
+  it('does not let a cross-repository basename make unique legacy owner evidence ambiguous', () => {
+    const id = 'identity/legacy-cross-repo';
+    const fileName = 'nested/mmproj.gguf';
+    const owned = buildProjectorCandidate(id, 'owned-projector', fileName);
+    const foreign = buildProjectorCandidate(id, 'foreign-projector', fileName, {
+      repoId: 'other/projectors',
+    });
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [foreign, owned],
+      artifacts: [
+        buildProjectorArtifact(id, foreign.id, fileName, ['audio'], { repoId: 'other/projectors' }),
+        buildProjectorArtifact(id, owned.id, fileName, ['audio']),
+      ],
+    });
+
+    for (const cached of hydrateLegacyAnonymousModel(model, 6)) {
+      expect(cached?.projectorCandidates).toEqual([
+        expect.objectContaining({ id: getCurrentProjectorId(owned), fileName }),
+      ]);
+      expect(cached?.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({ id: getCurrentProjectorId(owned) })]);
+    }
+  });
+
+  it.each([
     {
       label: 'file path',
       mutate: (projector: NonNullable<ModelMetadata['projectorCandidates']>[number]) => {
@@ -1256,11 +1463,14 @@ describe('ModelCatalogCacheStore', () => {
 
     for (const cached of roundTripAnonymousModel(model)) {
       expect(cached.projectorCandidates).toEqual([
-        expect.objectContaining({ id: modelProjector.id, fileName }),
+        expect.objectContaining({ id: getCurrentProjectorId(modelProjector), fileName }),
       ]);
       expect(cached.variants?.[0]?.projectorCandidates).toBeUndefined();
       expect(cached.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
-        .toEqual([expect.objectContaining({ id: modelProjector.id, remoteFileName: fileName })]);
+        .toEqual([expect.objectContaining({
+          id: getCurrentProjectorId(modelProjector),
+          remoteFileName: fileName,
+        })]);
     }
   });
 
@@ -1483,7 +1693,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
   });
 
-  it('round-trips an exact nested projector identity unchanged', () => {
+  it('round-trips an exact nested projector identity under its current id', () => {
     const id = 'identity/nested-happy-path';
     const projector = buildProjectorCandidate(
       id,
@@ -1507,7 +1717,7 @@ describe('ModelCatalogCacheStore', () => {
 
     for (const cached of roundTripAnonymousModel(model)) {
       expect(cached.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-        id: projector.id,
+        id: getCurrentProjectorId(projector),
         repoId: id,
         fileName: projector.fileName,
         downloadUrl: buildHuggingFaceResolveUrl(id, projector.fileName, 'main'),
@@ -1792,7 +2002,10 @@ describe('ModelCatalogCacheStore', () => {
       store.getModelSnapshot(id, 'anon', 1000),
     ]) {
       expect(model?.projectorCandidates).toEqual([
-        expect.objectContaining({ id: safeProjector.id, fileName: safeProjector.fileName }),
+        expect.objectContaining({
+          id: getCurrentProjectorId(safeProjector),
+          fileName: safeProjector.fileName,
+        }),
       ]);
     }
 
@@ -1946,7 +2159,7 @@ describe('ModelCatalogCacheStore', () => {
       expect(audioVariant?.selectedProjectorId).toBeUndefined();
       expect(audioVariant?.projectorCandidates).toEqual([
         expect.objectContaining({
-          id: audioProjector.id,
+          id: getCurrentProjectorId(audioProjector),
           fileName: audioProjector.fileName,
           lifecycleStatus: 'available',
         }),
@@ -2013,10 +2226,16 @@ describe('ModelCatalogCacheStore', () => {
       expect(model?.chatModalities).toEqual(['text']);
       expect(model?.visionSource).toBe('catalog_metadata');
       expect(model?.projectorCandidates).toEqual([
-        expect.objectContaining({ id: projector.id, fileName: projector.fileName }),
+        expect.objectContaining({
+          id: getCurrentProjectorId(projector),
+          fileName: projector.fileName,
+        }),
       ]);
       expect(model?.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
-        .toEqual([expect.objectContaining({ id: projector.id, requiredFor: ['image'] })]);
+        .toEqual([expect.objectContaining({
+          id: getCurrentProjectorId(projector),
+          requiredFor: ['image'],
+        })]);
       expect(model?.variants?.[0]?.chatModalities).toEqual(['text', 'vision']);
       expect(resolveEffectiveActiveVariantNativeSupport(model as ModelMetadata))
         .toEqual({ vision: true, audio: false });
@@ -2072,11 +2291,14 @@ describe('ModelCatalogCacheStore', () => {
       reloadedStore.getModelSnapshot(id, 'anon', 1000),
     ]) {
       expect(model?.projectorCandidates).toEqual([
-        expect.objectContaining({ id: safeProjector.id, fileName: safeProjector.fileName }),
+        expect.objectContaining({
+          id: getCurrentProjectorId(safeProjector),
+          fileName: safeProjector.fileName,
+        }),
       ]);
       expect(model?.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
         .toEqual([expect.objectContaining({
-          id: safeProjector.id,
+          id: getCurrentProjectorId(safeProjector),
           remoteFileName: safeProjector.fileName,
           requiredFor: ['image'],
         })]);
@@ -2160,11 +2382,14 @@ describe('ModelCatalogCacheStore', () => {
         value: projector.fileName,
       }));
       expect(model?.projectorCandidates).toEqual([
-        expect.objectContaining({ id: projector.id, fileName: projector.fileName }),
+        expect.objectContaining({
+          id: getCurrentProjectorId(projector),
+          fileName: projector.fileName,
+        }),
       ]);
       expect(model?.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
         .toEqual([expect.objectContaining({
-          id: projector.id,
+          id: getCurrentProjectorId(projector),
           remoteFileName: projector.fileName,
           requiredFor: ['audio'],
         })]);
@@ -2413,7 +2638,11 @@ describe('ModelCatalogCacheStore', () => {
     expect(model?.selectedProjectorId).toBeUndefined();
     expect(model?.multimodalReadiness).toBeUndefined();
     expect(projector).toEqual(expect.objectContaining({
-      id: 'projector-a',
+      id: buildProjectorArtifactId({
+        repoId: 'public/vision-model',
+        hfRevision: 'main',
+        fileName: 'mmproj-model-f16.gguf',
+      }),
       lifecycleStatus: 'available',
       matchStatus: 'missing',
     }));
@@ -2523,7 +2752,11 @@ describe('ModelCatalogCacheStore', () => {
       expect(cachedModel?.multimodalReadiness).toBeUndefined();
       expect(cachedModel?.projectorCandidates).toHaveLength(1);
       expect(cachedModel?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-        id: 'projector-audio',
+        id: buildProjectorArtifactId({
+          repoId: 'public/audio-only-model',
+          hfRevision: 'main',
+          fileName: 'mmproj-audio-model-f16.gguf',
+        }),
         fileName: 'mmproj-audio-model-f16.gguf',
         lifecycleStatus: 'available',
         matchStatus: 'missing',
@@ -2535,7 +2768,11 @@ describe('ModelCatalogCacheStore', () => {
 
       const projectorArtifact = cachedModel?.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector');
       expect(projectorArtifact).toEqual(expect.objectContaining({
-        id: 'projector-audio',
+        id: buildProjectorArtifactId({
+          repoId: 'public/audio-only-model',
+          hfRevision: 'main',
+          fileName: 'mmproj-audio-model-f16.gguf',
+        }),
         remoteFileName: 'mmproj-audio-model-f16.gguf',
         requiredFor: ['audio'],
         installState: 'remote',
@@ -2712,10 +2949,19 @@ describe('ModelCatalogCacheStore', () => {
     });
     const expectSanitizedAffinityProjectors = (projectors: ModelMetadata['projectorCandidates']) => {
       expect(projectors).toHaveLength(2);
-      const selected = projectors?.find((projector) => projector.id === 'projector-selected');
-      const ambiguous = projectors?.find((projector) => projector.id === 'projector-ambiguous');
+      const selected = projectors?.find((projector) => (
+        projector.fileName === 'mmproj-selected-f16.gguf'
+      ));
+      const ambiguous = projectors?.find((projector) => (
+        projector.fileName === 'mmproj-ambiguous-f16.gguf'
+      ));
 
       expect(selected).toEqual(expect.objectContaining({
+        id: buildProjectorArtifactId({
+          repoId: 'public/vision-affinity-model',
+          hfRevision: 'main',
+          fileName: 'mmproj-selected-f16.gguf',
+        }),
         lifecycleStatus: 'available',
         matchStatus: 'matched',
         matchReason: 'deterministic_filename_affinity',
@@ -2723,6 +2969,11 @@ describe('ModelCatalogCacheStore', () => {
       expect(selected?.localPath).toBeUndefined();
       expect(selected?.resumeData).toBeUndefined();
       expect(ambiguous).toEqual(expect.objectContaining({
+        id: buildProjectorArtifactId({
+          repoId: 'public/vision-affinity-model',
+          hfRevision: 'main',
+          fileName: 'mmproj-ambiguous-f16.gguf',
+        }),
         lifecycleStatus: 'available',
         matchStatus: 'ambiguous',
         matchReason: 'deterministic_filename_affinity',
@@ -2795,7 +3046,12 @@ describe('ModelCatalogCacheStore', () => {
       expect(variant?.visionSource).toBe('catalog_metadata');
       expect(variant?.visionConfidence).toBe('trusted');
       expect(variant?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-        id: 'variant-projector',
+        id: buildProjectorArtifactId({
+          repoId: 'public/vision-variant-model',
+          hfRevision: 'main',
+          fileName: 'mmproj-model-q4.gguf',
+          ownerVariantId: 'q4',
+        }),
         lifecycleStatus: 'available',
         matchStatus: 'matched',
         matchReason: 'single_projector_candidate',
@@ -3046,13 +3302,22 @@ describe('ModelCatalogCacheStore', () => {
       ?.projectorCandidates?.[0];
 
     expect(searchProjector).toEqual(expect.objectContaining({
-      id: 'search-projector',
+      id: buildProjectorArtifactId({
+        repoId: 'public/legacy-search-projector-resume',
+        hfRevision: 'main',
+        fileName: 'mmproj-search-f16.gguf',
+      }),
       lifecycleStatus: 'available',
       matchStatus: 'matched',
     }));
     expect(searchProjector?.resumeData).toBeUndefined();
     expect(snapshotVariantProjector).toEqual(expect.objectContaining({
-      id: 'variant-projector',
+      id: buildProjectorArtifactId({
+        repoId: 'public/legacy-variant-projector-resume',
+        hfRevision: 'main',
+        fileName: 'mmproj-variant-f16.gguf',
+        ownerVariantId: 'q4',
+      }),
       lifecycleStatus: 'available',
       matchStatus: 'matched',
     }));

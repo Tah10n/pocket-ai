@@ -22,6 +22,10 @@ import {
   normalizeProjectorArtifactPath,
 } from './modelProjectors';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
+import {
+  canonicalizeProjectorCandidateAliases,
+  getProjectorExactScopeKey,
+} from './projectorIdentity';
 import { getValidatedMultimodalReadinessForResolvedScope } from './multimodalReadinessCore';
 import { normalizeSha256Digest } from './sha256';
 
@@ -711,56 +715,30 @@ function getCandidateProjectorArtifactMatch(
   artifacts: NonNullable<ModelMetadata['artifacts']>;
   hasIdentityConflict: boolean;
 } {
-  const candidateArtifactPath = normalizeProjectorArtifactPath(candidate.fileName);
-  const currentCandidateId = buildProjectorArtifactId({
-    repoId: candidate.repoId,
-    hfRevision: candidate.hfRevision,
-    fileName: candidate.fileName,
-    ownerVariantId: candidate.ownerVariantId,
-  });
-  const legacyCandidateId = buildLegacyProjectorArtifactId({
-    repoId: candidate.repoId,
-    hfRevision: candidate.hfRevision,
-    fileName: candidate.fileName,
-    ownerVariantId: candidate.ownerVariantId,
-  });
-  const hasAmbiguousLegacyAlias = hasAmbiguousLegacyProjectorAlias(
-    model,
+  const scopeKey = getProjectorExactScopeKey(candidate);
+  if (!scopeKey) {
+    return { artifacts: [], hasIdentityConflict: true };
+  }
+
+  const modelId = normalizeOptionalString(model.id);
+  const sourceCandidates = [
     candidate,
-  );
-  const relatedArtifacts = (model.artifacts ?? []).filter((artifact) => (
-    artifact.kind === 'multimodal_projector'
-    && (
-      artifact.id === candidate.id
-      || artifact.id === currentCandidateId
-      || artifact.id === legacyCandidateId
-      || (
-        candidateArtifactPath !== null
-        && normalizeProjectorArtifactPath(artifact.remoteFileName) === candidateArtifactPath
-      )
-    )
+    ...(model.projectorCandidates ?? []),
+    ...(model.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ].filter((entry) => (
+    modelId === null || normalizeOptionalString(entry.ownerModelId) === modelId
   ));
-  const compatibleArtifacts = relatedArtifacts.filter((artifact) => (
-    !(hasAmbiguousLegacyAlias && projectorArtifactUsesLegacyAlias(artifact, candidate))
-    && projectorArtifactMatchesCandidate(artifact, candidate)
+  const canonical = canonicalizeProjectorCandidateAliases(sourceCandidates, model.artifacts);
+  const canonicalCandidate = canonical.candidates.find((entry) => (
+    getProjectorExactScopeKey(entry) === scopeKey
   ));
-  const legacyArtifacts = compatibleArtifacts.filter((artifact) => (
-    projectorArtifactUsesLegacyAlias(artifact, candidate)
-  ));
-  // During ID migration the persisted artifact carries the established,
-  // projector-specific requirement boundary. A newly derived current-ID
-  // duplicate can be broader because it was synthesized from model-wide
-  // modalities, so prefer the compatible legacy artifact as evidence.
-  const artifacts = legacyArtifacts.length > 0 ? legacyArtifacts : compatibleArtifacts;
-  const hasUnambiguousCompatibleArtifact = compatibleArtifacts.length > 0;
+  if (!canonicalCandidate) {
+    return { artifacts: [], hasIdentityConflict: true };
+  }
 
   return {
-    artifacts,
-    hasIdentityConflict: relatedArtifacts.some((artifact) => (
-      hasAmbiguousLegacyAlias && projectorArtifactUsesLegacyAlias(artifact, candidate)
-        ? !hasUnambiguousCompatibleArtifact
-        : !compatibleArtifacts.includes(artifact)
-    )),
+    artifacts: canonical.artifacts.filter((artifact) => artifact.id === canonicalCandidate.id),
+    hasIdentityConflict: canonical.blockedScopeKeys.has(scopeKey),
   };
 }
 
@@ -805,6 +783,18 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
   const activeVariant = resolveActiveModelVariant(model);
   const activeVariantKeys = getEffectiveActiveVariantKeys(model);
   const modelId = normalizeOptionalString(model.id);
+  const sourceCandidates = [
+    ...candidates,
+    ...(model.projectorCandidates ?? []),
+    ...(model.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ].filter((candidate) => (
+    modelId === null || normalizeOptionalString(candidate.ownerModelId) === modelId
+  ));
+  const canonical = canonicalizeProjectorCandidateAliases(
+    sourceCandidates,
+    model.artifacts,
+    { activeVariantKeys },
+  );
   const eligibleCandidates = candidates.filter((candidate) => {
     if (modelId !== null && candidate.ownerModelId !== modelId) {
       return false;
@@ -816,10 +806,6 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
       filePath: candidate.fileName,
       downloadUrl: candidate.downloadUrl,
     })) {
-      return false;
-    }
-
-    if (hasAmbiguousCurrentProjectorId(model, candidate)) {
       return false;
     }
 
@@ -847,56 +833,14 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
 
     return true;
   });
-
-  const candidatesById = new Map<string, NonNullable<ModelMetadata['projectorCandidates']>[number]>();
-  const blockedLegacyIds = new Set<string>();
-  const blockedCurrentIds = new Set<string>();
-  for (const candidate of eligibleCandidates) {
-    const candidateUsesCurrentId = candidate.id === buildProjectorArtifactId({
-      repoId: candidate.repoId,
-      hfRevision: candidate.hfRevision,
-      fileName: candidate.fileName,
-      ownerVariantId: candidate.ownerVariantId,
-    });
-    if (blockedCurrentIds.has(candidate.id)) {
-      continue;
-    }
-    if (blockedLegacyIds.has(candidate.id)) {
-      if (candidateUsesCurrentId) {
-        blockedLegacyIds.delete(candidate.id);
-        candidatesById.set(candidate.id, candidate);
-      }
-      continue;
-    }
-
-    const existing = candidatesById.get(candidate.id);
-    if (!existing) {
-      candidatesById.set(candidate.id, candidate);
-      continue;
-    }
-
-    const existingUsesCurrentId = existing.id === buildProjectorArtifactId({
-      repoId: existing.repoId,
-      hfRevision: existing.hfRevision,
-      fileName: existing.fileName,
-      ownerVariantId: existing.ownerVariantId,
-    });
-    if (candidateUsesCurrentId && !existingUsesCurrentId) {
-      candidatesById.set(candidate.id, candidate);
-    } else if (
-      candidateUsesCurrentId
-      && existingUsesCurrentId
-      && getProjectorCandidateScopeKey(candidate) !== getProjectorCandidateScopeKey(existing)
-    ) {
-      candidatesById.delete(candidate.id);
-      blockedCurrentIds.add(candidate.id);
-    } else if (!candidateUsesCurrentId && !existingUsesCurrentId) {
-      candidatesById.delete(candidate.id);
-      blockedLegacyIds.add(candidate.id);
-    }
-  }
-
-  return [...candidatesById.values()];
+  const eligibleScopeKeys = new Set(eligibleCandidates.flatMap((candidate) => {
+    const scopeKey = getProjectorExactScopeKey(candidate);
+    return scopeKey ? [scopeKey] : [];
+  }));
+  return canonical.candidates.filter((candidate) => {
+    const scopeKey = getProjectorExactScopeKey(candidate);
+    return scopeKey !== null && eligibleScopeKeys.has(scopeKey);
+  });
 }
 
 export function getEffectiveActiveVariantProjectorCandidates(
@@ -978,10 +922,37 @@ export function getEffectiveActiveVariantSelectedProjectorId(
     ?? normalizeOptionalString(model.selectedProjectorId);
   const effectiveSelectedProjectorId = selectedProjectorId === null
     ? null
-    : resolution.runtimeToEffectiveProjectorIds.get(selectedProjectorId) ?? selectedProjectorId;
+    : resolution.runtimeToEffectiveProjectorIds.get(selectedProjectorId)
+      ?? remapProjectorIdToEffectiveCandidate(model, selectedProjectorId, effectiveCandidates)
+      ?? selectedProjectorId;
   return effectiveSelectedProjectorId !== null
     && effectiveCandidates.some((candidate) => candidate.id === effectiveSelectedProjectorId)
     ? effectiveSelectedProjectorId
+    : undefined;
+}
+
+export function remapProjectorIdToEffectiveCandidate(
+  model: ModelNativeCapabilityInput,
+  projectorId: string | null | undefined,
+  effectiveCandidates: NonNullable<ModelMetadata['projectorCandidates']>,
+): string | undefined {
+  const normalizedProjectorId = normalizeOptionalString(projectorId);
+  if (normalizedProjectorId === null) {
+    return undefined;
+  }
+
+  const activeVariant = resolveActiveModelVariant(model);
+  const sourceCandidates = [
+    ...(activeVariant?.projectorCandidates ?? []),
+    ...(model.projectorCandidates ?? []),
+  ];
+  const canonical = canonicalizeProjectorCandidateAliases(sourceCandidates, model.artifacts, {
+    activeVariantKeys: getEffectiveActiveVariantKeys(model),
+  });
+  const canonicalId = canonical.aliasToCanonicalId.get(normalizedProjectorId)
+    ?? normalizedProjectorId;
+  return effectiveCandidates.some((candidate) => candidate.id === canonicalId)
+    ? canonicalId
     : undefined;
 }
 
@@ -995,10 +966,21 @@ function resolveTrustedReadinessForEffectiveCapabilityInference(
   }
 
   const activeVariantKeys = getEffectiveActiveVariantKeys(model);
+  const readinessProjectorId = remapProjectorIdToEffectiveCandidate(
+    model,
+    readiness.projectorId,
+    projectorCandidates,
+  );
+  if (!readinessProjectorId) {
+    return undefined;
+  }
+  const canonicalReadiness = readiness.projectorId === readinessProjectorId
+    ? readiness
+    : { ...readiness, projectorId: readinessProjectorId };
   const validatedReadiness = getValidatedMultimodalReadinessForResolvedScope({
     modelId: normalizeOptionalString(model.id) ?? undefined,
-    readiness,
-    projectorId: readiness.projectorId,
+    readiness: canonicalReadiness,
+    projectorId: readinessProjectorId,
     activeVariantKeys,
     variantCount: model.variants?.length ?? 0,
     projectorCandidates,
@@ -1043,9 +1025,20 @@ export function resolveEffectiveActiveVariantNativeSupport(
   const projectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
   const effectiveSelectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, projectorCandidates);
   const readiness = resolveTrustedReadinessForEffectiveCapabilityInference(model, projectorCandidates);
+  const effectiveProjectorIds = new Set(projectorCandidates.map((candidate) => candidate.id));
+  const canonicalEvidence = canonicalizeProjectorCandidateAliases([
+    ...(model.projectorCandidates ?? []),
+    ...(model.variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ], model.artifacts, {
+    activeVariantKeys: getEffectiveActiveVariantKeys(model),
+  });
   const scopedCapabilityInput = {
     ...model,
     projectorCandidates,
+    artifacts: [
+      ...(model.artifacts?.filter((artifact) => artifact.kind !== 'multimodal_projector') ?? []),
+      ...canonicalEvidence.artifacts.filter((artifact) => effectiveProjectorIds.has(artifact.id)),
+    ],
   };
   const hasScopedImageArtifactEvidence = hasCompatibleArtifactInputEvidence(scopedCapabilityInput, 'image');
   const hasScopedAudioArtifactEvidence = hasCompatibleArtifactInputEvidence(scopedCapabilityInput, 'audio');
@@ -1054,9 +1047,8 @@ export function resolveEffectiveActiveVariantNativeSupport(
     && !Array.isArray(activeVariant.chatModalities);
 
   const support = resolveModelNativeMultimodalSupport({
-    ...model,
+    ...scopedCapabilityInput,
     artifactRole: effectiveArtifactRole,
-    projectorCandidates,
     selectedProjectorId: effectiveSelectedProjectorId,
     multimodalReadiness: readiness,
   });

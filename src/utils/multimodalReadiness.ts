@@ -7,6 +7,7 @@ import type {
 import {
   getEffectiveActiveVariantKeys,
   getEffectiveActiveVariantProjectorCandidates,
+  remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { getValidatedMultimodalReadinessForResolvedScope } from './multimodalReadinessCore';
 
@@ -31,13 +32,30 @@ export function isMultimodalReadinessReusableForModel({
   projectorCandidates?: readonly ProjectorArtifact[];
 }): boolean {
   const activeVariantKeys = getEffectiveActiveVariantKeys(model);
+  const effectiveCandidates = [...projectorCandidates];
+  const effectiveProjectorId = projectorId === undefined
+    ? undefined
+    : remapProjectorIdToEffectiveCandidate(model, projectorId, effectiveCandidates);
+  const readinessProjectorId = readiness?.projectorId === undefined
+    ? undefined
+    : remapProjectorIdToEffectiveCandidate(model, readiness.projectorId, effectiveCandidates);
+  if (
+    (projectorId !== undefined && effectiveProjectorId === undefined)
+    || (readiness?.projectorId !== undefined && readinessProjectorId === undefined)
+  ) {
+    return false;
+  }
+
+  const effectiveReadiness = readiness?.projectorId === undefined || readinessProjectorId === readiness.projectorId
+    ? readiness
+    : { ...readiness, projectorId: readinessProjectorId };
   return getValidatedMultimodalReadinessForResolvedScope({
     modelId: model.id,
-    readiness,
-    projectorId,
+    readiness: effectiveReadiness,
+    projectorId: effectiveProjectorId,
     expectedRequestedSupport: requestedSupport,
     activeVariantKeys,
     variantCount: model.variants?.length ?? 0,
-    projectorCandidates,
+    projectorCandidates: effectiveCandidates,
   }) !== undefined;
 }

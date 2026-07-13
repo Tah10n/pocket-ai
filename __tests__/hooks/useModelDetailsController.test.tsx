@@ -4,6 +4,10 @@ import { Alert, Linking } from 'react-native';
 import { useModelDetailsController } from '../../src/hooks/useModelDetailsController';
 import { AppError } from '../../src/services/AppError';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../../src/utils/modelProjectors';
 
 const mockRouter = {
   push: jest.fn(),
@@ -141,6 +145,15 @@ function buildModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
     downloadProgress: 1,
     ...overrides,
   };
+}
+
+function getCanonicalProjectorId(fileName: string, ownerVariantId?: string): string {
+  return buildProjectorArtifactId({
+    repoId: 'org/model',
+    hfRevision: 'main',
+    ...(ownerVariantId ? { ownerVariantId } : {}),
+    fileName,
+  });
 }
 
 function createDeferred<T>() {
@@ -607,6 +620,7 @@ describe('useModelDetailsController', () => {
   });
 
   it('continues a pending download after choosing a projector from the details choice sheet', async () => {
+    const selectedProjectorId = getCanonicalProjectorId('mmproj-b.gguf');
     const ambiguousVisionModel = buildModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
@@ -657,17 +671,17 @@ describe('useModelDetailsController', () => {
     expect(startModelDownloadFlow).toHaveBeenCalledTimes(1);
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('projector-b');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
     expect(startModelDownloadFlow).toHaveBeenCalledTimes(2);
     expect(startModelDownloadFlow).toHaveBeenLastCalledWith(expect.objectContaining({
       model: expect.objectContaining({
         id: 'org/model',
-        selectedProjectorId: 'projector-b',
+        selectedProjectorId,
         projectorCandidates: expect.arrayContaining([
           expect.objectContaining({
-            id: 'projector-b',
+            id: selectedProjectorId,
             matchStatus: 'user_selected',
             matchReason: 'user_selected_projector',
           }),
@@ -680,6 +694,7 @@ describe('useModelDetailsController', () => {
     const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
       startModelDownloadFlow: jest.Mock;
     };
+    const selectedProjectorId = getCanonicalProjectorId('fresh-mmproj-b.gguf');
     const freshVisionModel = buildModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
@@ -722,7 +737,7 @@ describe('useModelDetailsController', () => {
       visionSource: 'tree_probe',
       projectorCandidates: [
         {
-          id: 'projector-a',
+          id: 'stale-projector-a',
           ownerModelId: 'org/model',
           repoId: 'org/model',
           fileName: 'stale-mmproj-a.gguf',
@@ -732,7 +747,7 @@ describe('useModelDetailsController', () => {
           matchStatus: 'ambiguous',
         },
         {
-          id: 'projector-b',
+          id: 'stale-projector-b',
           ownerModelId: 'org/model',
           repoId: 'org/model',
           fileName: 'stale-mmproj-b.gguf',
@@ -762,24 +777,24 @@ describe('useModelDetailsController', () => {
     });
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('projector-b');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
     const selectedProjector = getCurrentValue()?.displayModel?.projectorCandidates?.find((projector) => (
-      projector.id === 'projector-b'
+      projector.id === selectedProjectorId
     ));
 
     expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       localPath: 'models/model.gguf',
-      selectedProjectorId: 'projector-b',
+      selectedProjectorId,
       fitsInRam: null,
       memoryFitDecision: undefined,
       memoryFitConfidence: undefined,
       visionSource: 'user_selected_projector',
     }));
     expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
-      selectedProjectorId: 'projector-b',
+      selectedProjectorId,
       fitsInRam: null,
       memoryFitDecision: undefined,
       memoryFitConfidence: undefined,
@@ -799,13 +814,13 @@ describe('useModelDetailsController', () => {
         id: 'org/model',
         lifecycleStatus: LifecycleStatus.DOWNLOADED,
         localPath: 'models/model.gguf',
-        selectedProjectorId: 'projector-b',
+        selectedProjectorId,
         fitsInRam: null,
         memoryFitDecision: undefined,
         memoryFitConfidence: undefined,
         projectorCandidates: expect.arrayContaining([
           expect.objectContaining({
-            id: 'projector-b',
+            id: selectedProjectorId,
             fileName: 'fresh-mmproj-b.gguf',
             downloadUrl: 'https://huggingface.co/org/model/resolve/main/fresh-mmproj-b.gguf',
             lifecycleStatus: 'available',
@@ -817,6 +832,9 @@ describe('useModelDetailsController', () => {
   });
 
   it('retains inactive variant projector runtime state when choosing from a scoped details model', async () => {
+    const selectedProjectorId = getCanonicalProjectorId('mmproj-q4-b.gguf', 'variant-q4');
+    const q4ProjectorAId = getCanonicalProjectorId('mmproj-q4-a.gguf', 'variant-q4');
+    const inactiveQ8ProjectorId = getCanonicalProjectorId('mmproj-q8.gguf', 'variant-q8');
     const q4ProjectorA = {
       id: 'projector-q4-a',
       ownerModelId: 'org/model',
@@ -893,7 +911,9 @@ describe('useModelDetailsController', () => {
 
     const scopedDetailsChoiceModel = {
       ...(getCurrentValue()?.displayModel as ModelMetadata),
-      projectorCandidates: [q4ProjectorA, q4ProjectorB],
+      projectorCandidates: getCurrentValue()?.displayModel?.projectorCandidates?.filter((projector) => (
+        projector.ownerVariantId === 'variant-q4'
+      )),
       selectedProjectorId: undefined,
     };
 
@@ -902,20 +922,20 @@ describe('useModelDetailsController', () => {
     });
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('projector-q4-b');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
     const lastPersistedModel = mockRegistryUpdateModel.mock.calls.at(-1)?.[0] as ModelMetadata;
     expect(lastPersistedModel).toEqual(expect.objectContaining({
-      selectedProjectorId: 'projector-q4-b',
+      selectedProjectorId,
       projectorCandidates: expect.arrayContaining([
         expect.objectContaining({
-          id: 'projector-q4-b',
+          id: selectedProjectorId,
           matchStatus: 'user_selected',
           matchReason: 'user_selected_projector',
         }),
         expect.objectContaining({
-          id: 'projector-q8-downloaded',
+          id: inactiveQ8ProjectorId,
           ownerVariantId: 'variant-q8',
           lifecycleStatus: 'downloaded',
           localPath: 'mmproj-q8.gguf',
@@ -924,9 +944,9 @@ describe('useModelDetailsController', () => {
       ]),
     }));
     expect(lastPersistedModel.projectorCandidates?.map((projector) => projector.id)).toEqual([
-      'projector-q4-a',
-      'projector-q4-b',
-      'projector-q8-downloaded',
+      q4ProjectorAId,
+      selectedProjectorId,
+      inactiveQ8ProjectorId,
     ]);
   });
 
@@ -934,6 +954,7 @@ describe('useModelDetailsController', () => {
     const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
       startModelDownloadFlow: jest.Mock;
     };
+    const selectedProjectorId = getCanonicalProjectorId('fresh-mmproj-b.gguf');
     const freshVisionModel = buildModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
@@ -992,18 +1013,18 @@ describe('useModelDetailsController', () => {
     });
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('fresh-projector-b');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
     expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
-      selectedProjectorId: 'fresh-projector-b',
+      selectedProjectorId,
       fitsInRam: null,
       memoryFitDecision: undefined,
       memoryFitConfidence: undefined,
     }));
     expect(startModelDownloadFlow).toHaveBeenCalledWith(expect.objectContaining({
       model: expect.objectContaining({
-        selectedProjectorId: 'fresh-projector-b',
+        selectedProjectorId,
         fitsInRam: null,
         memoryFitDecision: undefined,
         memoryFitConfidence: undefined,
@@ -1011,7 +1032,8 @@ describe('useModelDetailsController', () => {
     }));
   });
 
-  it('clears stale memory fit when the same selected projector id points to a changed artifact', async () => {
+  it('fails closed when the same selected projector scope has conflicting stable metadata', async () => {
+    const selectedProjectorId = getCanonicalProjectorId('mmproj-a.gguf');
     const freshVisionModel = buildModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       localPath: 'models/model.gguf',
@@ -1074,27 +1096,28 @@ describe('useModelDetailsController', () => {
     });
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('projector-a');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
-    expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
-      selectedProjectorId: 'projector-a',
-      fitsInRam: null,
-      memoryFitDecision: undefined,
-      memoryFitConfidence: undefined,
-    }));
+    expect(mockRegistryUpdateModel).not.toHaveBeenCalled();
     expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
-      selectedProjectorId: 'projector-a',
+      selectedProjectorId: undefined,
+      projectorCandidates: undefined,
       fitsInRam: null,
       memoryFitDecision: undefined,
       memoryFitConfidence: undefined,
     }));
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.actionFailedTitle',
+      'models.multimodal.projectorChoiceFailedMessage',
+    );
   });
 
   it('does not start projector download after choosing an already active projector', async () => {
     const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
       startModelDownloadFlow: jest.Mock;
     };
+    const selectedProjectorId = getCanonicalProjectorId('mmproj-a.gguf');
     const visionModel = buildModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       localPath: 'models/model.gguf',
@@ -1142,10 +1165,10 @@ describe('useModelDetailsController', () => {
     });
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('projector-a');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
-    expect(getCurrentValue()?.displayModel?.selectedProjectorId).toBe('projector-a');
+    expect(getCurrentValue()?.displayModel?.selectedProjectorId).toBe(selectedProjectorId);
     expect(getCurrentValue()?.displayModel).toEqual(expect.objectContaining({
       fitsInRam: false,
       memoryFitDecision: 'likely_oom',
@@ -1161,6 +1184,7 @@ describe('useModelDetailsController', () => {
     mockEngineState.status = EngineStatus.READY;
     mockEngineState.activeModelId = 'org/model';
 
+    const selectedProjectorId = getCanonicalProjectorId('mmproj-b.gguf');
     const visionModel = buildModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       localPath: 'models/model.gguf',
@@ -1221,21 +1245,21 @@ describe('useModelDetailsController', () => {
     });
 
     act(() => {
-      getCurrentValue()?.handleSelectProjector('projector-b');
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
     const selectedProjector = getCurrentValue()?.displayModel?.projectorCandidates?.find((projector) => (
-      projector.id === 'projector-b'
+      projector.id === selectedProjectorId
     ));
     const finalUpdateCallOrder = mockRegistryUpdateModel.mock.invocationCallOrder.at(-1);
     const refreshCallOrder = mockRequestActiveMultimodalReadinessRefresh.mock.invocationCallOrder[0];
 
     expect(mockRegistryUpdateModel).toHaveBeenLastCalledWith(expect.objectContaining({
-      selectedProjectorId: 'projector-b',
+      selectedProjectorId,
       multimodalReadiness: undefined,
     }));
     expect(selectedProjector).toEqual(expect.objectContaining({
-      id: 'projector-b',
+      id: selectedProjectorId,
       lifecycleStatus: 'downloaded',
       localPath: 'models/mmproj-b.gguf',
       downloadProgress: 1,
@@ -1271,6 +1295,7 @@ describe('useModelDetailsController', () => {
       localPath: 'models/mmproj-b.gguf',
       matchStatus: 'ambiguous' as const,
     };
+    const selectedProjectorId = getCanonicalProjectorId(projectorB.fileName, projectorB.ownerVariantId);
     const model = buildModel({
       activeVariantId: 'vision-q4',
       resolvedFileName: 'model.Q4.gguf',
@@ -1311,14 +1336,16 @@ describe('useModelDetailsController', () => {
 
     act(() => {
       getCurrentValue()?.openProjectorChoice();
-      getCurrentValue()?.handleSelectProjector(projectorB.id);
+    });
+    act(() => {
+      getCurrentValue()?.handleSelectProjector(selectedProjectorId);
     });
 
     expect(mockRequestActiveMultimodalReadinessRefresh).toHaveBeenCalledWith('org/model');
     expect(persistedModel.variants?.[0]).toEqual(expect.objectContaining({
-      selectedProjectorId: projectorB.id,
+      selectedProjectorId,
       projectorCandidates: expect.arrayContaining([
-        expect.objectContaining({ id: projectorB.id, matchStatus: 'user_selected' }),
+        expect.objectContaining({ id: selectedProjectorId, matchStatus: 'user_selected' }),
       ]),
     }));
   });
@@ -1327,9 +1354,14 @@ describe('useModelDetailsController', () => {
     const { startModelDownloadFlow } = jest.requireMock('../../src/utils/modelDownloadFlow') as {
       startModelDownloadFlow: jest.Mock;
     };
-    const freshProjectorId = 'projector-org-model-main-path-projectors-mmproj-b';
-    const legacyProjectorId = 'projector-org-model-main-mmproj-b.gguf';
     const projectorFileName = 'projectors/mmproj-b.gguf';
+    const projectorIdentity = {
+      repoId: 'org/model',
+      hfRevision: 'main',
+      fileName: projectorFileName,
+    };
+    const freshProjectorId = buildProjectorArtifactId(projectorIdentity);
+    const legacyProjectorId = buildLegacyProjectorArtifactId(projectorIdentity);
     const projectorDownloadUrl = `https://huggingface.co/org/model/resolve/main/${projectorFileName}`;
     const freshVisionModel = buildModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,

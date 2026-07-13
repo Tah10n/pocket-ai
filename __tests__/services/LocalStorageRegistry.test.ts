@@ -205,11 +205,13 @@ describe('LocalStorageRegistry', () => {
         createProjector({
           id: 'test/model:upper-projector',
           fileName: 'MMProj.gguf',
+          downloadUrl: 'http://example.com/MMProj.gguf',
           localPath: 'MMProj.gguf',
         }),
         createProjector({
           id: 'test/model:lower-projector',
           fileName: 'mmproj.gguf',
+          downloadUrl: 'http://example.com/mmproj.gguf',
           localPath: 'mmproj.gguf',
         }),
       ],
@@ -2172,7 +2174,7 @@ describe('LocalStorageRegistry', () => {
   it('persists and deep-clones projector associations on model records', () => {
     const projector = createProjector({ localPath: 'mmproj-model.gguf' });
     const projectorArtifact = {
-      id: 'projector-extra-artifact',
+      id: projector.id,
       kind: 'multimodal_projector' as const,
       requiredFor: ['image' as const],
       remoteFileName: projector.fileName,
@@ -2228,9 +2230,10 @@ describe('LocalStorageRegistry', () => {
     }
 
     const secondRead = freshRegistry.getModel(mockModel.id);
+    const canonicalProjectorId = secondRead?.projectorCandidates?.[0]?.id;
     const secondReadArtifact = secondRead?.artifacts?.find((
       artifact: NonNullable<ModelMetadata['artifacts']>[number],
-    ) => artifact.id === projectorArtifact.id);
+    ) => artifact.id === canonicalProjectorId);
     expect(secondRead?.projectorCandidates).toHaveLength(1);
     expect(secondRead?.projectorCandidates?.[0]).toEqual(expect.objectContaining({
       id: projector.id,
@@ -2238,7 +2241,7 @@ describe('LocalStorageRegistry', () => {
       lifecycleStatus: 'downloaded',
     }));
     expect(secondReadArtifact).toEqual(expect.objectContaining({
-      id: projectorArtifact.id,
+      id: projector.id,
       requiredFor: ['image'],
       integrity: {
         kind: 'size',

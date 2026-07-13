@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert, Platform } from 'react-native';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -627,6 +628,7 @@ const {
 const { registry } = require('../../src/services/LocalStorageRegistry');
 const { AppError } = require('../../src/services/AppError');
 const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
+const { buildProjectorArtifactId } = require('../../src/utils/modelProjectors');
 const VERIFIED_LOCAL_SHA256 = 'f'.repeat(64);
 const copiedDraftImageAttachment = {
   id: 'draft-image-1',
@@ -663,7 +665,7 @@ const failedDraftImageAttachment = {
   errorReason: 'copy_failed',
 };
 
-function createVisionProjector(overrides: Record<string, unknown> = {}) {
+function createVisionProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
   return {
     id: 'author/model-q4-mmproj',
     ownerModelId: 'author/model-q4',
@@ -676,6 +678,15 @@ function createVisionProjector(overrides: Record<string, unknown> = {}) {
     matchStatus: 'matched',
     ...overrides,
   };
+}
+
+function getCanonicalVisionProjectorId(projector = createVisionProjector()): string {
+  return buildProjectorArtifactId({
+    repoId: projector.repoId,
+    hfRevision: projector.hfRevision,
+    ownerVariantId: projector.ownerVariantId,
+    fileName: projector.fileName,
+  });
 }
 
 function createVisionModel(overrides: Record<string, unknown> = {}) {
@@ -1066,7 +1077,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: projector.id,
+        projectorId: getCanonicalVisionProjectorId(projector),
         support: [],
         requestedSupport: ['audio'],
       }),
@@ -1174,7 +1185,7 @@ describe('ChatScreen', () => {
     expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(expect.objectContaining({
       modelId: 'author/model-q4',
       status: 'initializing',
-      projectorId: projector.id,
+      projectorId: getCanonicalVisionProjectorId(projector),
       support: [],
       requestedSupport: ['vision'],
     }));
@@ -1293,7 +1304,7 @@ describe('ChatScreen', () => {
     expect(resolveFallbackMultimodalReadiness(registry.getModel('author/model-q4'), 'author/model-q4')).toEqual(
       expect.objectContaining({
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
         requestedSupport: ['vision'],
       }),
     );
@@ -1308,7 +1319,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
         requestedSupport: ['vision'],
       }),
     );
@@ -1334,7 +1345,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: projector.id,
+        projectorId: getCanonicalVisionProjectorId(projector),
         support: [],
         requestedSupport: ['audio'],
       }),
@@ -1388,7 +1399,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: projector.id,
+        projectorId: getCanonicalVisionProjectorId(projector),
         support: [],
         requestedSupport: ['vision', 'audio'],
       }),
@@ -1432,7 +1443,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
         requestedSupport: ['vision'],
       }),
     );
@@ -1453,7 +1464,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
         requestedSupport: ['vision'],
       }),
     );
@@ -1490,8 +1501,16 @@ describe('ChatScreen', () => {
         checkedAt: 1,
       },
       projectorCandidates: [
-        createVisionProjector({ id: 'author/model-q4-mmproj-a' }),
-        createVisionProjector({ id: 'author/model-q4-mmproj-b' }),
+        createVisionProjector({
+          id: 'author/model-q4-mmproj-a',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://example.com/mmproj-a.gguf',
+        }),
+        createVisionProjector({
+          id: 'author/model-q4-mmproj-b',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://example.com/mmproj-b.gguf',
+        }),
       ],
     });
 
@@ -1598,7 +1617,7 @@ describe('ChatScreen', () => {
         expect.objectContaining({
           modelId: 'author/model-q4',
           status: 'projector_downloading',
-          projectorId: 'author/model-q4-mmproj',
+          projectorId: getCanonicalVisionProjectorId(),
           requestedSupport: ['vision'],
         }),
       );
@@ -1619,7 +1638,7 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'failed',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
         failureReason: 'Checksum mismatch',
         requestedSupport: ['vision'],
       }),

@@ -1,7 +1,10 @@
 import type { ModelMetadata, ModelVariant } from '../types/models';
 import type { ProjectorArtifact } from '../types/multimodal';
 import { resolveActiveModelVariant } from './activeModelVariant';
-import { getEffectiveActiveVariantProjectorCandidates } from './modelCapabilities';
+import {
+  getEffectiveActiveVariantProjectorCandidates,
+  remapProjectorIdToEffectiveCandidate,
+} from './modelCapabilities';
 import { hasCompatibleProjectorRuntimeIdentity } from './projectorRuntimeState';
 
 export type ProjectorStateModelUpdates = Partial<Pick<
@@ -80,9 +83,15 @@ export function updateEffectiveProjectorCandidate(
   const activeVariantIds = activeVariant
     ? new Set([activeVariant.variantId, activeVariant.fileName])
     : undefined;
-  const targetProjector = getEffectiveActiveVariantProjectorCandidates(model)
+  const effectiveCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+  const effectiveProjectorId = remapProjectorIdToEffectiveCandidate(
+    model,
+    projectorId,
+    effectiveCandidates,
+  ) ?? projectorId;
+  const targetProjector = effectiveCandidates
     .find((projector) => (
-      projector.id === projectorId
+      projector.id === effectiveProjectorId
       && (
         expectedProjector === undefined
         || hasCompatibleProjectorRuntimeIdentity(projector, expectedProjector, { activeVariantIds })

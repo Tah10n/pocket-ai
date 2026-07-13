@@ -13,6 +13,7 @@ import {
   getStoredProjectorArtifactsSizeBytes,
   normalizePositiveByteSize,
 } from '../../src/utils/modelSize';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 describe('modelSize', () => {
   it('normalizes positive byte sizes and rejects invalid values', () => {
@@ -251,7 +252,18 @@ describe('modelSize', () => {
       ],
     };
 
-    expect(getModelDisplayProjectorCandidates(model)).toEqual([audioProjector]);
+    const canonicalAudioProjectorId = buildProjectorArtifactId({
+      repoId: audioProjector.repoId,
+      hfRevision: 'main',
+      ownerVariantId: audioProjector.ownerVariantId,
+      fileName: audioProjector.fileName,
+    });
+    expect(getModelDisplayProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        ...audioProjector,
+        id: canonicalAudioProjectorId,
+      }),
+    ]);
     expect(getModelDisplaySelectedProjectorId(model)).toBeUndefined();
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_200);
   });
@@ -282,8 +294,19 @@ describe('modelSize', () => {
       }],
     };
 
-    expect(getModelDisplayProjectorCandidates(model)).toEqual([projector]);
-    expect(getModelDisplaySelectedProjectorId(model)).toBe(projector.id);
+    const canonicalProjectorId = buildProjectorArtifactId({
+      repoId: projector.repoId,
+      hfRevision: 'main',
+      ownerVariantId: projector.ownerVariantId,
+      fileName: projector.fileName,
+    });
+    expect(getModelDisplayProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        ...projector,
+        id: canonicalProjectorId,
+      }),
+    ]);
+    expect(getModelDisplaySelectedProjectorId(model)).toBe(canonicalProjectorId);
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_250);
   });
 
@@ -332,12 +355,23 @@ describe('modelSize', () => {
       projectorCandidates: [staleProjector, freshProjector],
     };
 
-    expect(getModelDisplayProjectorCandidates(model)).toEqual([freshProjector]);
-    expect(getModelDisplaySelectedProjectorId(model)).toBe(freshProjector.id);
+    const canonicalFreshProjectorId = buildProjectorArtifactId({
+      repoId: freshProjector.repoId,
+      hfRevision: 'main',
+      ownerVariantId: freshProjector.ownerVariantId,
+      fileName: freshProjector.fileName,
+    });
+    expect(getModelDisplayProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        ...freshProjector,
+        id: canonicalFreshProjectorId,
+      }),
+    ]);
+    expect(getModelDisplaySelectedProjectorId(model)).toBe(canonicalFreshProjectorId);
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(2_500);
   });
 
-  it('enriches active variant projector candidates with matching top-level runtime state', () => {
+  it('keeps model-wide runtime and variant-owned catalog projectors in separate exact scopes', () => {
     const model: Parameters<typeof getModelDisplayArtifactSizeBytes>[0] = {
       size: 1_000,
       activeVariantId: 'model.Q4_K_M.gguf',
@@ -383,16 +417,32 @@ describe('modelSize', () => {
 
     const displayProjectorCandidates = getModelDisplayProjectorCandidates(model);
 
+    const modelWideProjectorId = buildProjectorArtifactId({
+      repoId: 'org/repo',
+      hfRevision: 'main',
+      fileName: 'mmproj-q4.gguf',
+    });
+    const variantProjectorId = buildProjectorArtifactId({
+      repoId: 'org/repo',
+      hfRevision: 'main',
+      ownerVariantId: 'model.Q4_K_M.gguf',
+      fileName: 'mmproj-q4.gguf',
+    });
     expect(displayProjectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'variant-projector-q4',
+        id: modelWideProjectorId,
         lifecycleStatus: 'downloaded',
         localPath: 'mmproj-q4.gguf',
         matchStatus: 'user_selected',
       }),
+      expect.objectContaining({
+        id: variantProjectorId,
+        lifecycleStatus: 'available',
+        ownerVariantId: 'model.Q4_K_M.gguf',
+      }),
     ]);
-    expect(getModelDisplaySelectedProjectorId(model)).toBe('variant-projector-q4');
-    expect(getModelDisplaySelectedProjectorId(model, displayProjectorCandidates)).toBe('variant-projector-q4');
+    expect(getModelDisplaySelectedProjectorId(model)).toBe(modelWideProjectorId);
+    expect(getModelDisplaySelectedProjectorId(model, displayProjectorCandidates)).toBe(modelWideProjectorId);
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_250);
   });
 
@@ -446,11 +496,28 @@ describe('modelSize', () => {
       }],
     };
 
+    const modelWideProjectorId = buildProjectorArtifactId({
+      repoId: modelWideProjector.repoId,
+      hfRevision: 'main',
+      fileName: modelWideProjector.fileName,
+    });
+    const variantProjectorId = buildProjectorArtifactId({
+      repoId: variantProjector.repoId,
+      hfRevision: 'main',
+      ownerVariantId: variantProjector.ownerVariantId,
+      fileName: variantProjector.fileName,
+    });
     expect(getModelDisplayProjectorCandidates(model)).toEqual([
-      variantProjector,
-      modelWideProjector,
+      expect.objectContaining({
+        ...modelWideProjector,
+        id: modelWideProjectorId,
+      }),
+      expect.objectContaining({
+        ...variantProjector,
+        id: variantProjectorId,
+      }),
     ]);
-    expect(getModelDisplaySelectedProjectorId(model)).toBe(modelWideProjector.id);
+    expect(getModelDisplaySelectedProjectorId(model)).toBe(modelWideProjectorId);
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_500);
   });
 
@@ -493,14 +560,20 @@ describe('modelSize', () => {
       }],
     };
 
+    const canonicalProjectorId = buildProjectorArtifactId({
+      repoId: 'org/repo',
+      hfRevision: 'main',
+      ownerVariantId: 'q4',
+      fileName: 'mmproj-q4.gguf',
+    });
     expect(getModelDisplayProjectorCandidates(model)).toEqual([
       expect.objectContaining({
-        id: 'variant-projector-q4',
+        id: canonicalProjectorId,
         lifecycleStatus: 'downloaded',
         localPath: 'mmproj-q4.gguf',
       }),
     ]);
-    expect(getModelDisplaySelectedProjectorId(model)).toBe('variant-projector-q4');
+    expect(getModelDisplaySelectedProjectorId(model)).toBe(canonicalProjectorId);
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_250);
   });
 

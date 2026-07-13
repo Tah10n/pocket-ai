@@ -41,12 +41,49 @@ function buildRemoteProjectorArtifact(
 }
 
 describe('ModelMetadataNormalizer', () => {
-  it('removes persisted support outside the requested modality set', () => {
+  it('preserves native multimodal readiness when no projector evidence exists', () => {
+    const modelId = 'author/native-vision-model';
     const normalized = normalizePersistedModelMetadata({
-      id: 'legacy/audio-model',
+      id: modelId,
+      chatModalities: ['text', 'vision'],
       multimodalReadiness: {
-        modelId: 'legacy/audio-model',
+        modelId,
         status: 'ready',
+        support: ['vision'],
+        requestedSupport: ['vision'],
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.multimodalReadiness).toEqual(expect.objectContaining({
+      modelId,
+      status: 'ready',
+      support: ['vision'],
+      requestedSupport: ['vision'],
+    }));
+  });
+
+  it('remaps a legacy-only readiness scope and removes support outside the requested modality set', () => {
+    const modelId = 'legacy/audio-model';
+    const projectorIdentity = {
+      repoId: modelId,
+      fileName: 'Projectors/MMProj-Audio.GGUF',
+    };
+    const legacyProjectorId = buildLegacyProjectorArtifactId(projectorIdentity);
+    const currentProjectorId = buildProjectorArtifactId(projectorIdentity);
+    const projector = buildAvailableProjectorCandidate(
+      modelId,
+      legacyProjectorId,
+      projectorIdentity.fileName,
+    );
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      projectorCandidates: [projector],
+      selectedProjectorId: legacyProjectorId,
+      multimodalReadiness: {
+        modelId,
+        status: 'ready',
+        projectorId: legacyProjectorId,
         support: ['vision', 'audio'],
         requestedSupport: ['audio'],
         checkedAt: 10,
@@ -56,7 +93,12 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.multimodalReadiness).toEqual(expect.objectContaining({
       support: ['audio'],
       requestedSupport: ['audio'],
+      projectorId: currentProjectorId,
     }));
+    expect(normalized.selectedProjectorId).toBe(currentProjectorId);
+    expect(normalized.projectorCandidates?.map((candidate) => candidate.id)).toEqual([
+      currentProjectorId,
+    ]);
   });
 
   it('maps zero-size legacy metadata to unknown size and nullable RAM fit', () => {
@@ -182,7 +224,12 @@ describe('ModelMetadataNormalizer', () => {
     expect(mainArtifact?.updatedAt).toBeUndefined();
   });
 
-  it('syncs projector artifact runtime state from normalized projector candidates', () => {
+  it('fails closed when persisted projector runtime points at a different exact path', () => {
+    const projectorIdentity = {
+      repoId: 'author/vision-model',
+      fileName: 'fresh-mmproj.gguf',
+    };
+    const projectorId = buildProjectorArtifactId(projectorIdentity);
     const normalized = normalizePersistedModelMetadata({
       id: 'author/vision-model',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -218,21 +265,17 @@ describe('ModelMetadataNormalizer', () => {
       ],
     });
 
-    const projectorArtifact = normalized.artifacts?.find((artifact) => artifact.id === 'projector-a');
-    expect(projectorArtifact).toEqual(expect.objectContaining({
-      id: 'projector-a',
-      remoteFileName: 'fresh-mmproj.gguf',
-      downloadUrl: 'https://example.com/fresh-mmproj.gguf',
-      sizeBytes: 200,
-      installState: 'failed',
-      errorMessage: 'projector download failed',
-    }));
-    expect(projectorArtifact?.localPath).toBeUndefined();
-    expect(projectorArtifact?.downloadProgress).toBeUndefined();
-    expect(projectorArtifact?.resumeData).toBeUndefined();
+    expect(projectorId).not.toBe('projector-a');
+    expect(normalized.projectorCandidates).toBeUndefined();
+    expect(normalized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+      .toEqual([]);
   });
 
   it('uses normalized audio chat modalities when deriving projector artifact requirements', () => {
+    const projectorId = buildProjectorArtifactId({
+      repoId: 'author/audio-model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+    });
     const normalized = normalizePersistedModelMetadata({
       id: 'author/audio-model',
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -254,7 +297,7 @@ describe('ModelMetadataNormalizer', () => {
       ],
     });
 
-    const projectorArtifact = normalized.artifacts?.find((artifact) => artifact.id === 'projector-audio');
+    const projectorArtifact = normalized.artifacts?.find((artifact) => artifact.id === projectorId);
     expect(projectorArtifact).toEqual(expect.objectContaining({
       kind: 'multimodal_projector',
       requiredFor: ['audio'],
@@ -269,6 +312,7 @@ describe('ModelMetadataNormalizer', () => {
       'mmproj-audio-model-f16.gguf',
     );
     const staleArtifact = buildRemoteProjectorArtifact(projector, ['image', 'audio']);
+    const canonicalProjectorId = buildProjectorArtifactId(projector);
     const baseModel = {
       id: modelId,
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -291,7 +335,7 @@ describe('ModelMetadataNormalizer', () => {
 
     const migrated = normalizePersistedModelMetadata(baseModel);
 
-    expect(migrated.artifacts?.find((artifact) => artifact.id === projector.id)?.requiredFor)
+    expect(migrated.artifacts?.find((artifact) => artifact.id === canonicalProjectorId)?.requiredFor)
       .toEqual(['audio']);
     expect(resolveEffectiveActiveVariantNativeSupport(migrated)).toEqual({
       vision: false,
@@ -311,8 +355,8 @@ describe('ModelMetadataNormalizer', () => {
       },
     });
     expect(withIndependentImageDeclaration.artifacts?.find(
-      (artifact) => artifact.id === projector.id,
-    )?.requiredFor).toEqual(['image', 'audio']);
+      (artifact) => artifact.id === canonicalProjectorId,
+    )?.requiredFor).toEqual(['audio', 'image']);
     expect(resolveEffectiveActiveVariantNativeSupport(withIndependentImageDeclaration)).toEqual({
       vision: true,
       audio: true,
@@ -355,8 +399,14 @@ describe('ModelMetadataNormalizer', () => {
     });
 
     expect(normalized.artifacts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: visionProjector.id, requiredFor: ['image'] }),
-      expect.objectContaining({ id: audioProjector.id, requiredFor: ['audio'] }),
+      expect.objectContaining({
+        id: buildProjectorArtifactId(visionProjector),
+        requiredFor: ['image'],
+      }),
+      expect.objectContaining({
+        id: buildProjectorArtifactId(audioProjector),
+        requiredFor: ['audio'],
+      }),
     ]));
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: false,
@@ -384,7 +434,18 @@ describe('ModelMetadataNormalizer', () => {
       ownerVariantId: projectorIdentity.ownerVariantId,
     };
     const currentArtifact = buildRemoteProjectorArtifact(projector, ['image', 'audio']);
-    const legacyArtifact = { ...currentArtifact, id: legacyProjectorId };
+    const legacyArtifact = {
+      ...currentArtifact,
+      id: legacyProjectorId,
+      localPath: 'MMProj-Audio.GGUF',
+      installState: 'installed' as const,
+      downloadProgress: 1,
+      integrity: {
+        kind: 'size' as const,
+        sizeBytes: projector.size,
+        checkedAt: 10,
+      },
+    };
     const normalized = normalizePersistedModelMetadata({
       id: modelId,
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -420,10 +481,16 @@ describe('ModelMetadataNormalizer', () => {
     ));
 
     expect(currentProjectorId).not.toBe(legacyProjectorId);
-    expect(projectorArtifacts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: legacyProjectorId, requiredFor: ['audio'] }),
-      expect.objectContaining({ id: currentProjectorId, requiredFor: ['audio'] }),
-    ]));
+    expect(projectorArtifacts).toEqual([
+      expect.objectContaining({
+        id: currentProjectorId,
+        requiredFor: ['audio'],
+        installState: 'installed',
+        localPath: 'MMProj-Audio.GGUF',
+      }),
+    ]);
+    expect(normalized.selectedProjectorId).toBe(currentProjectorId);
+    expect(normalized.multimodalReadiness?.projectorId).toBe(currentProjectorId);
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: false,
       audio: true,
@@ -737,11 +804,21 @@ describe('ModelMetadataNormalizer', () => {
       })),
     });
 
-    expect(normalized.projectorCandidates?.map((projector) => projector.fileName)).toEqual(fileNames);
+    expect(normalized.projectorCandidates?.map((projector) => projector.fileName)).toEqual(
+      expect.arrayContaining(fileNames),
+    );
+    expect(normalized.projectorCandidates).toHaveLength(2);
     expect(new Set(normalized.projectorCandidates?.map((projector) => projector.id)).size).toBe(2);
   });
 
   it('preserves multimodal model and variant metadata with valid projector candidates', () => {
+    const projectorIdentity = {
+      repoId: 'author/vision-model',
+      hfRevision: 'main',
+      ownerVariantId: 'vision-model.Q4_K_M.gguf',
+      fileName: 'mmproj-vision-model-f16.gguf',
+    };
+    const canonicalProjectorId = buildProjectorArtifactId(projectorIdentity);
     const normalized = normalizePersistedModelMetadata({
       id: 'author/vision-model',
       lifecycleStatus: LifecycleStatus.AVAILABLE,
@@ -811,11 +888,11 @@ describe('ModelMetadataNormalizer', () => {
           { source: 'pipeline_tag', value: 'image-text-to-text', confidence: 'high' },
         ],
       },
-      selectedProjectorId: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+      selectedProjectorId: canonicalProjectorId,
     }));
     expect(normalized.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+        id: canonicalProjectorId,
         sha256: VALID_SHA256,
         lifecycleStatus: 'downloaded',
         matchStatus: 'matched',
@@ -831,7 +908,7 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.artifacts).toEqual([
       expect.objectContaining({
         kind: 'multimodal_projector',
-        id: 'projector-author-vision-model-main-vision-model.Q4_K_M.gguf-mmproj-vision-model-f16.gguf',
+        id: canonicalProjectorId,
         requiredFor: ['image'],
         remoteFileName: 'mmproj-vision-model-f16.gguf',
         localPath: 'mmproj-vision-model-f16.gguf',
@@ -920,8 +997,13 @@ describe('ModelMetadataNormalizer', () => {
       ]),
     }));
     expect(normalized.variants?.[0]?.chatModalities).toEqual(['text', 'vision', 'audio']);
-    expect(normalized.artifacts?.find((artifact) => artifact.id === projectorId)?.requiredFor)
-      .toEqual(['image', 'audio']);
+    expect(normalized.artifacts?.find((artifact) => artifact.id === buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    }))?.requiredFor)
+      .toEqual(['audio', 'image']);
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: true,
       audio: true,
@@ -1024,7 +1106,12 @@ describe('ModelMetadataNormalizer', () => {
       visionSource: undefined,
       visionConfidence: undefined,
     }));
-    expect(normalized.artifacts?.find((artifact) => artifact.id === projectorId)?.requiredFor)
+    expect(normalized.artifacts?.find((artifact) => artifact.id === buildProjectorArtifactId({
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: modelFileName,
+      fileName: projectorFileName,
+    }))?.requiredFor)
       .toEqual(['audio']);
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: false,
@@ -1102,9 +1189,13 @@ describe('ModelMetadataNormalizer', () => {
       ],
     });
 
-    expect(normalized.artifacts?.find((artifact) => artifact.id === imageProjector.id)?.requiredFor)
+    expect(normalized.artifacts?.find(
+      (artifact) => artifact.id === buildProjectorArtifactId(imageProjector),
+    )?.requiredFor)
       .toEqual(['image']);
-    expect(normalized.artifacts?.find((artifact) => artifact.id === audioProjector.id)?.requiredFor)
+    expect(normalized.artifacts?.find(
+      (artifact) => artifact.id === buildProjectorArtifactId(audioProjector),
+    )?.requiredFor)
       .toEqual(['audio']);
   });
 
@@ -1133,9 +1224,13 @@ describe('ModelMetadataNormalizer', () => {
     });
 
     expect(normalized.chatModalities).toEqual(['text', 'audio']);
-    expect(normalized.artifacts?.find((artifact) => artifact.id === imageProjector.id)?.requiredFor)
+    expect(normalized.artifacts?.find(
+      (artifact) => artifact.id === buildProjectorArtifactId(imageProjector),
+    )?.requiredFor)
       .toEqual(['image']);
-    expect(normalized.artifacts?.find((artifact) => artifact.id === audioProjector.id)?.requiredFor)
+    expect(normalized.artifacts?.find(
+      (artifact) => artifact.id === buildProjectorArtifactId(audioProjector),
+    )?.requiredFor)
       .toEqual(['audio']);
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: false,
@@ -1436,7 +1531,7 @@ describe('ModelMetadataNormalizer', () => {
           ownerModelId: 'author/vision-model',
           repoId: 'author/vision-model',
           fileName: 'mmproj-model.gguf',
-          downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model.gguf',
+          downloadUrl: 'https://huggingface.co/author/vision-model/resolve/main/mmproj-model.gguf',
           size: null,
           lifecycleStatus: 'paused',
           matchStatus: 'matched',
@@ -1462,7 +1557,7 @@ describe('ModelMetadataNormalizer', () => {
           ownerModelId: 'author/vision-model',
           repoId: 'author/vision-model',
           fileName: 'mmproj-model.gguf',
-          downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-model.gguf',
+          downloadUrl: 'https://huggingface.co/author/vision-model/resolve/main/mmproj-model.gguf',
           size: null,
           lifecycleStatus: 'paused',
           matchStatus: 'matched',
@@ -1476,13 +1571,22 @@ describe('ModelMetadataNormalizer', () => {
   });
 
   it('sanitizes persisted multimodal readiness failure reasons', () => {
+    const modelId = 'author/vision-model';
+    const projector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-readiness-sanitization',
+      'mmproj-vision-model.gguf',
+    );
     const normalized = normalizePersistedModelMetadata({
-      id: 'author/vision-model',
+      id: modelId,
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
+      projectorCandidates: [projector],
+      selectedProjectorId: projector.id,
       multimodalReadiness: {
-        modelId: 'author/vision-model',
+        modelId,
         status: 'failed',
+        projectorId: projector.id,
         support: ['vision'],
         failureReason: 'Native init failed for C:\\Users\\tester\\Project for Client\\mmproj file.gguf after retry',
         checkedAt: 10,
@@ -1494,12 +1598,15 @@ describe('ModelMetadataNormalizer', () => {
     expect(JSON.stringify(normalized.multimodalReadiness)).not.toContain('C:\\Users\\tester');
 
     const extensionless = normalizePersistedModelMetadata({
-      id: 'author/vision-model',
+      id: modelId,
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
+      projectorCandidates: [projector],
+      selectedProjectorId: projector.id,
       multimodalReadiness: {
-        modelId: 'author/vision-model',
+        modelId,
         status: 'failed',
+        projectorId: projector.id,
         support: ['vision'],
         failureReason: 'Native init failed for C:\\Users\\tester\\Project for Client',
         checkedAt: 11,
@@ -1512,13 +1619,22 @@ describe('ModelMetadataNormalizer', () => {
   });
 
   it('normalizes requested multimodal support on persisted readiness snapshots', () => {
+    const modelId = 'author/vision-model';
+    const projector = buildAvailableProjectorCandidate(
+      modelId,
+      'projector-readiness-support',
+      'mmproj-vision-model.gguf',
+    );
     const normalized = normalizePersistedModelMetadata({
-      id: 'author/vision-model',
+      id: modelId,
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
       downloadProgress: 1,
+      projectorCandidates: [projector],
+      selectedProjectorId: projector.id,
       multimodalReadiness: {
-        modelId: 'author/vision-model',
+        modelId,
         status: 'ready',
+        projectorId: projector.id,
         support: ['vision', 'bogus' as never, 'vision'],
         requestedSupport: ['vision', 'audio', 'bogus' as never, 'audio'],
         checkedAt: 10,

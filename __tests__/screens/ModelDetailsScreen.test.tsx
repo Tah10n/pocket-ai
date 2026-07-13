@@ -5,6 +5,7 @@ import { ModelDetailsScreen } from '../../src/ui/screens/ModelDetailsScreen';
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { buildModelCapabilitySnapshot } from '../../src/utils/modelCapabilities';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 jest.mock('react-native-safe-area-context', () => ({
   SafeAreaProvider: ({ children }: any) => children,
@@ -985,6 +986,18 @@ describe('ModelDetailsScreen', () => {
   });
 
   it('uses active variant vision projector state for details badges and projector choice', async () => {
+    const variantProjectorBId = buildProjectorArtifactId({
+      repoId: 'org/model',
+      hfRevision: 'main',
+      ownerVariantId: 'model.Q4_K_M.gguf',
+      fileName: 'mmproj-variant-b.gguf',
+    });
+    const variantProjectorCId = buildProjectorArtifactId({
+      repoId: 'org/model',
+      hfRevision: 'main',
+      ownerVariantId: 'model.Q4_K_M.gguf',
+      fileName: 'mmproj-variant-c.gguf',
+    });
     const variantVisionModel = createModel({
       chatModalities: ['text'],
       selectedProjectorId: 'projector-a',
@@ -1051,8 +1064,8 @@ describe('ModelDetailsScreen', () => {
     expect(lastProjectorChoiceSheetProps?.visible).toBe(true);
     expect(lastProjectorChoiceSheetProps?.model?.selectedProjectorId).toBeUndefined();
     expect(lastProjectorChoiceSheetProps?.model?.projectorCandidates?.map((projector: any) => projector.id)).toEqual([
-      'projector-b',
-      'projector-c',
+      variantProjectorBId,
+      variantProjectorCId,
     ]);
     expect(screen.getByText('mmproj-variant-b.gguf')).toBeTruthy();
     expect(screen.queryByText('mmproj-stale-a.gguf')).toBeNull();
@@ -1090,7 +1103,10 @@ describe('ModelDetailsScreen', () => {
 
   it('renders vision and audio badges together for dual-capability model details', async () => {
     const dualProjector = {
-      id: 'dual-projector',
+      id: buildProjectorArtifactId({
+        repoId: 'org/model',
+        fileName: 'mmproj-vision-audio.gguf',
+      }),
       ownerModelId: 'org/model',
       repoId: 'org/model',
       fileName: 'mmproj-vision-audio.gguf',
@@ -1278,6 +1294,11 @@ describe('ModelDetailsScreen', () => {
   });
 
   it('continues the details download after choosing a projector for an ambiguous vision model', async () => {
+    const selectedProjectorId = buildProjectorArtifactId({
+      repoId: 'org/model',
+      hfRevision: 'main',
+      fileName: 'mmproj-b.gguf',
+    });
     const ambiguousVisionModel = createModel({
       chatModalities: ['text', 'vision'],
       projectorCandidates: [
@@ -1325,16 +1346,16 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('projector-choice-sheet')).toBeTruthy();
 
     await act(async () => {
-      lastProjectorChoiceSheetProps.onSelectProjector('projector-b');
+      lastProjectorChoiceSheetProps.onSelectProjector(selectedProjectorId);
       await Promise.resolve();
     });
 
     expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
       id: 'org/model',
-      selectedProjectorId: 'projector-b',
+      selectedProjectorId,
       projectorCandidates: expect.arrayContaining([
         expect.objectContaining({
-          id: 'projector-b',
+          id: selectedProjectorId,
           matchStatus: 'user_selected',
           matchReason: 'user_selected_projector',
         }),

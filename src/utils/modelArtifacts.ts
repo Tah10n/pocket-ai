@@ -8,6 +8,15 @@ import {
 } from '../types/models';
 import type { ProjectorArtifact } from '../types/multimodal';
 import { normalizeDownloadResumeData } from './downloadResumeData';
+import {
+  hasConsistentRemoteProjectorIdentity,
+  hasHuggingFaceHostname,
+  remoteProjectorIdentityKey,
+  resolveHuggingFaceRevision,
+  resolveHuggingFaceResolveIdentity,
+  resolveRemoteFilePathFromDownloadUrl,
+} from './huggingFaceUrls';
+import { normalizeProjectorArtifactPath } from './modelProjectors';
 import { isValidLocalFileName } from './safeFilePath';
 import { normalizeSha256Digest } from './sha256';
 
@@ -262,7 +271,16 @@ function deriveMainModelArtifact(model: LegacyModelArtifactInput): ModelArtifact
 function deriveProjectorArtifact(
   projector: ProjectorArtifact,
   model: Pick<ModelMetadata, 'chatModalities' | 'inputCapabilities' | 'multimodalReadiness'>,
-): ModelArtifactMetadata {
+): ModelArtifactMetadata | null {
+  if (!hasConsistentRemoteProjectorIdentity({
+    repoId: projector.repoId,
+    revision: projector.hfRevision,
+    filePath: projector.fileName,
+    downloadUrl: projector.downloadUrl,
+  })) {
+    return null;
+  }
+
   const localPath = normalizeLocalFileName(projector.localPath);
 
   return {
@@ -309,7 +327,10 @@ export function deriveArtifactsFromLegacyModel(
   }
 
   for (const projector of model.projectorCandidates ?? []) {
-    artifacts.push(deriveProjectorArtifact(projector, model));
+    const artifact = deriveProjectorArtifact(projector, model);
+    if (artifact) {
+      artifacts.push(artifact);
+    }
   }
 
   return mergeModelArtifacts(artifacts, model.artifacts, {
@@ -341,7 +362,6 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
       return [];
     }
 
-    seen.add(id);
     const sha256 = normalizeSha256Digest(typeof record.sha256 === 'string' ? record.sha256 : undefined);
     const localPath = normalizeLocalFileName(record.localPath);
     const downloadProgress = normalizeDownloadProgress(record.downloadProgress);
@@ -349,7 +369,7 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
     const integrity = normalizeIntegrityMarker(record.integrity);
     const updatedAt = normalizeNonNegativeTimestamp(record.updatedAt);
 
-    return [{
+    const artifact: ModelArtifactMetadata = {
       id,
       kind,
       requiredFor,
@@ -366,7 +386,13 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
       ...(normalizeOptionalString(record.errorCode) ? { errorCode: normalizeOptionalString(record.errorCode) } : {}),
       ...(normalizeOptionalString(record.errorMessage) ? { errorMessage: normalizeOptionalString(record.errorMessage) } : {}),
       ...(updatedAt !== undefined ? { updatedAt } : {}),
-    }];
+    };
+    if (!projectorArtifactHasConsistentRemoteIdentity(artifact)) {
+      return [];
+    }
+
+    seen.add(id);
+    return [artifact];
   });
 
   return artifacts.length > 0 ? artifacts : undefined;
@@ -381,6 +407,9 @@ export function mergeModelArtifacts(
   const orderedIds: string[] = [];
 
   for (const artifact of derivedArtifacts) {
+    if (!projectorArtifactHasConsistentRemoteIdentity(artifact)) {
+      continue;
+    }
     byId.set(artifact.id, artifact);
     orderedIds.push(artifact.id);
   }
@@ -391,6 +420,9 @@ export function mergeModelArtifacts(
 
   const persistedOrderedIds: string[] = [];
   for (const artifact of persistedArtifacts) {
+    if (!projectorArtifactHasConsistentRemoteIdentity(artifact)) {
+      continue;
+    }
     const derivedArtifact = byId.get(artifact.id);
     byId.set(artifact.id, {
       ...(options.preferDerivedRuntimeState === true && derivedArtifact
@@ -422,8 +454,12 @@ function getStableArtifactMetadata(artifact: ModelArtifactMetadata): StableModel
   };
 }
 
-function normalizeArtifactFileIdentity(value: string): string {
-  const normalizedPath = value.trim().replace(/\\/gu, '/');
+function normalizeArtifactFileIdentity(artifact: ModelArtifactMetadata): string | null {
+  if (artifact.kind === 'multimodal_projector') {
+    return normalizeProjectorArtifactPath(artifact.remoteFileName);
+  }
+
+  const normalizedPath = artifact.remoteFileName.trim().replace(/\\/gu, '/');
   return (normalizedPath.split('/').filter(Boolean).pop() ?? normalizedPath).trim().toLowerCase();
 }
 
@@ -431,8 +467,18 @@ function normalizeArtifactRevision(value: string | undefined): string {
   return normalizeOptionalString(value) ?? 'main';
 }
 
-function normalizeArtifactDownloadUrl(value: string): string {
-  const normalized = value.trim();
+function normalizeArtifactDownloadUrl(artifact: ModelArtifactMetadata): string | null {
+  const normalized = artifact.downloadUrl.trim();
+  if (artifact.kind === 'multimodal_projector' && hasHuggingFaceHostname(normalized)) {
+    const identity = resolveHuggingFaceResolveIdentity(normalized);
+    const filePath = normalizeProjectorArtifactPath(artifact.remoteFileName);
+    return identity
+      && filePath === identity.filePath
+      && resolveHuggingFaceRevision(artifact.hfRevision) === identity.revision
+      ? remoteProjectorIdentityKey(identity)
+      : null;
+  }
+
   try {
     const parsed = new URL(normalized);
     parsed.hash = '';
@@ -444,6 +490,17 @@ function normalizeArtifactDownloadUrl(value: string): string {
   }
 }
 
+function projectorArtifactHasConsistentRemoteIdentity(artifact: ModelArtifactMetadata): boolean {
+  if (artifact.kind !== 'multimodal_projector') {
+    return true;
+  }
+
+  const artifactPath = normalizeProjectorArtifactPath(artifact.remoteFileName);
+  return artifactPath !== null
+    && resolveRemoteFilePathFromDownloadUrl(artifact.downloadUrl) === artifactPath
+    && (!hasHuggingFaceHostname(artifact.downloadUrl) || normalizeArtifactDownloadUrl(artifact) !== null);
+}
+
 function artifactValuesConflict<T>(left: T | undefined, right: T | undefined): boolean {
   return left !== undefined && right !== undefined && left !== right;
 }
@@ -452,11 +509,18 @@ function artifactsShareStableIdentity(
   derivedArtifact: ModelArtifactMetadata,
   persistedArtifact: ModelArtifactMetadata,
 ): boolean {
+  const derivedFileIdentity = normalizeArtifactFileIdentity(derivedArtifact);
+  const persistedFileIdentity = normalizeArtifactFileIdentity(persistedArtifact);
+  const derivedDownloadUrl = normalizeArtifactDownloadUrl(derivedArtifact);
+  const persistedDownloadUrl = normalizeArtifactDownloadUrl(persistedArtifact);
   if (
     derivedArtifact.id !== persistedArtifact.id
     || derivedArtifact.kind !== persistedArtifact.kind
-    || normalizeArtifactFileIdentity(derivedArtifact.remoteFileName)
-      !== normalizeArtifactFileIdentity(persistedArtifact.remoteFileName)
+    || derivedFileIdentity === null
+    || persistedFileIdentity === null
+    || derivedFileIdentity !== persistedFileIdentity
+    || derivedDownloadUrl === null
+    || persistedDownloadUrl === null
     || normalizeArtifactRevision(derivedArtifact.hfRevision)
       !== normalizeArtifactRevision(persistedArtifact.hfRevision)
   ) {
@@ -470,8 +534,8 @@ function artifactsShareStableIdentity(
     normalizePositiveSize(derivedArtifact.sizeBytes) ?? undefined,
     normalizePositiveSize(persistedArtifact.sizeBytes) ?? undefined,
   ) && !artifactValuesConflict(
-    normalizeArtifactDownloadUrl(derivedArtifact.downloadUrl),
-    normalizeArtifactDownloadUrl(persistedArtifact.downloadUrl),
+    derivedDownloadUrl,
+    persistedDownloadUrl,
   );
 }
 

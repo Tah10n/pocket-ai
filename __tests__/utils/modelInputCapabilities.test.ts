@@ -288,7 +288,7 @@ describe('modelInputCapabilities', () => {
       },
       {
         source: 'projector',
-        value: 'mmproj-bf16.gguf',
+        value: 'mmproj-BF16.gguf',
         confidence: 'medium',
       },
     ]));
@@ -333,6 +333,34 @@ describe('modelInputCapabilities', () => {
         { source: 'projector', value: 'mmproj-model-f16.gguf', confidence: 'medium' },
       ]),
     });
+  });
+
+  it('preserves exact projector tree paths and keeps case-distinct evidence separate', () => {
+    const upper = inferDeclaredInputCapabilities(null, [
+      { path: 'Projectors/Audio/MMProj.GGUF', size: 50 },
+    ], { detectedAt: 100 });
+    const lower = inferDeclaredInputCapabilities(null, [
+      { path: 'Projectors\\Audio\\mmproj.gguf', size: 50 },
+    ], { detectedAt: 200 });
+
+    expect(mergeInputCapabilitySnapshots(upper, lower)?.evidence).toEqual(expect.arrayContaining([
+      { source: 'projector', value: 'Projectors/Audio/MMProj.GGUF', confidence: 'medium' },
+      { source: 'projector', value: 'Projectors/Audio/mmproj.gguf', confidence: 'medium' },
+    ]));
+  });
+
+  it('continues to normalize semantic and runtime evidence independently of projector paths', () => {
+    expect(normalizePersistedInputCapabilitySnapshot({
+      detectedAt: 1,
+      declared: { image: 'unknown', audio: 'unknown', video: 'unknown' },
+      evidence: [
+        { source: 'runtime', value: ' AUDIO ', confidence: 'high' },
+        { source: 'projector', value: 'Adapters\\MMProj-A.GGUF', confidence: 'medium' },
+      ],
+    })?.evidence).toEqual([
+      { source: 'runtime', value: 'audio', confidence: 'high' },
+      { source: 'projector', value: 'Adapters/MMProj-A.GGUF', confidence: 'medium' },
+    ]);
   });
 
   it('normalizes persisted snapshots and drops malformed evidence', () => {

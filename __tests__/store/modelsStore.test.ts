@@ -11,12 +11,15 @@ import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const repoId = overrides.repoId ?? 'org/model';
+  const fileName = overrides.fileName ?? 'mmproj-model.gguf';
+  const hfRevision = overrides.hfRevision ?? 'main';
   return {
     id: 'projector-org-model-main-mmproj-model.gguf',
     ownerModelId: 'org/model',
-    repoId: 'org/model',
-    fileName: 'mmproj-model.gguf',
-    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    repoId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/${hfRevision}/${fileName}`,
     size: 1024,
     lifecycleStatus: 'available',
     matchStatus: 'matched',

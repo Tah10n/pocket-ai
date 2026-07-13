@@ -21,12 +21,15 @@ jest.mock('../../../src/components/ui/ListPickerSheet', () => ({
 }));
 
 function buildProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const repoId = overrides.repoId ?? 'org/model';
+  const fileName = overrides.fileName ?? 'mmproj-a.gguf';
+  const hfRevision = overrides.hfRevision ?? 'main';
   return {
     id: 'projector-org-model-main-mmproj-a.gguf',
     ownerModelId: 'org/model',
-    repoId: 'org/model',
-    fileName: 'mmproj-a.gguf',
-    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+    repoId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/${hfRevision}/${fileName}`,
     size: 512_000_000,
     lifecycleStatus: 'available',
     matchStatus: 'ambiguous',

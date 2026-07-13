@@ -13,9 +13,28 @@ import type {
 } from '../types/modelInputCapabilities';
 import type { ProjectorArtifact, ProjectorMatchStatus, VisionCapabilitySource } from '../types/multimodal';
 import {
+  buildHuggingFaceResolveUrl,
+  normalizeHuggingFaceFilePath,
+  remoteProjectorIdentitiesEqual,
+  remoteProjectorIdentityKey,
+  resolveHuggingFaceRevision,
+  resolveHuggingFaceResolveIdentity,
+  resolveRemoteProjectorIdentity,
+  type RemoteProjectorIdentity,
+} from '../utils/huggingFaceUrls';
+import { buildMainModelArtifactId } from '../utils/modelArtifacts';
+import {
+  projectorArtifactMatchesCandidate,
+  projectorArtifactUsesLegacyAlias,
+} from '../utils/modelCapabilities';
+import {
   getInputCapabilityEvidenceModalities,
   mergeCapabilityEvidence,
 } from '../utils/modelInputCapabilities';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../utils/modelProjectors';
 import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
@@ -73,9 +92,9 @@ const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 6;
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 7;
 export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 1_500_000;
-const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
@@ -85,12 +104,34 @@ const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
   'chatModalities' | 'projectorCandidates' | 'visionConfidence'
->> & Partial<Pick<ModelMetadata, 'artifacts' | 'inputCapabilities'>>;
+>> & Partial<Pick<ModelMetadata, 'artifacts' | 'inputCapabilities' | 'id'>>;
 
 export type CatalogSafeNativeCapabilityContext = {
   vision: boolean;
   audio: boolean;
   projectorEvidenceFileNames: ReadonlySet<string>;
+  projectorEvidenceIdentityKeys: ReadonlySet<string>;
+  projectorCandidateScopeIds: ReadonlySet<string>;
+};
+
+type CatalogSanitizationOptions = {
+  persistedVersion?: number;
+  rawModel?: unknown;
+};
+
+type CatalogProjectorIdentityAudit = {
+  identitiesByKey: ReadonlyMap<string, RemoteProjectorIdentity>;
+  candidateIdentityKeys: ReadonlySet<string>;
+  identityKeysByExactPath: ReadonlyMap<string, ReadonlySet<string>>;
+  identityKeysByFoldedPath: ReadonlyMap<string, ReadonlySet<string>>;
+  identityKeysByFoldedBasename: ReadonlyMap<string, ReadonlySet<string>>;
+  candidateIdsByLegacyAlias: ReadonlyMap<string, ReadonlySet<string>>;
+  candidateScopeIdsById: ReadonlyMap<string, ReadonlySet<string>>;
+  poisonedCandidateScopeIds: ReadonlySet<string>;
+  poisonedExactPaths: ReadonlySet<string>;
+  poisonedFoldedPaths: ReadonlySet<string>;
+  poisonedFoldedBasenames: ReadonlySet<string>;
+  evidenceIdentityKeys: ReadonlySet<string>;
 };
 
 type JsonComparableValue = null | boolean | number | string | JsonComparableValue[] | {
@@ -131,20 +172,6 @@ function modelHasCatalogSafeVisionSource(model: Pick<ModelMetadata, 'visionSourc
   return Boolean(model.visionSource && CATALOG_SAFE_VISION_SOURCES.has(model.visionSource));
 }
 
-function hasCatalogProjectorIdentity(
-  projector: ProjectorArtifact,
-  context: CatalogSafeNativeCapabilityContext,
-): boolean {
-  const fileName = getCatalogRemoteProjectorFileName(projector.fileName, projector.downloadUrl);
-  return Boolean(
-    fileName
-    && (
-      context.projectorEvidenceFileNames.has(fileName)
-      || sanitizeCatalogProjectorMatchReason(projector) !== undefined
-    ),
-  );
-}
-
 function modelArtifactsRequireAudioProjector(artifacts: ModelMetadata['artifacts']): boolean {
   return artifacts?.some((artifact) => (
     artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes('audio')
@@ -171,113 +198,408 @@ function modelHasCatalogSafeAudioCapabilityEvidence(
   }) === true;
 }
 
-function normalizeCatalogProjectorFileName(value: unknown): string | undefined {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function addIdentityToIndex(
+  index: Map<string, Set<string>>,
+  alias: string,
+  identityKey: string,
+): void {
+  const keys = index.get(alias) ?? new Set<string>();
+  keys.add(identityKey);
+  index.set(alias, keys);
+}
+
+function getFoldedProjectorBasename(filePath: string): string {
+  return filePath.split('/').pop()?.toLowerCase() ?? filePath.toLowerCase();
+}
+
+function getCatalogProjectorCandidateScopeId(
+  identity: RemoteProjectorIdentity,
+  ownerVariantId: unknown,
+): string {
+  return JSON.stringify([
+    identity.repoId,
+    identity.revision,
+    identity.filePath,
+    typeof ownerVariantId === 'string' ? ownerVariantId.trim() : '',
+  ]);
+}
+
+function normalizeConservativePoisonedProjectorPath(value: unknown): string | null {
   if (typeof value !== 'string') {
-    return undefined;
+    return null;
   }
 
-  const normalizedPath = value.trim().replace(/\\/gu, '/').split(/[?#]/u)[0];
-  const encodedFileName = normalizedPath.split('/').filter(Boolean).pop();
-  if (!encodedFileName) {
-    return undefined;
-  }
-
-  try {
-    const decodedFileName = decodeURIComponent(encodedFileName).trim().toLowerCase();
-    return decodedFileName.length > 0 ? decodedFileName : undefined;
-  } catch {
-    const fallbackFileName = encodedFileName.trim().toLowerCase();
-    return fallbackFileName.length > 0 ? fallbackFileName : undefined;
-  }
+  const segments = value.trim()
+    .replace(/\\+/gu, '/')
+    .replace(/\/+/gu, '/')
+    .split('/')
+    .map((segment) => segment.replace(/[\u0000-\u001f\u007f]/gu, '').trim())
+    .filter((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+  return segments.length > 0 ? segments.join('/') : null;
 }
 
-function getCatalogRemoteProjectorFileName(
-  fileName: unknown,
-  downloadUrl: unknown,
-): string | undefined {
-  if (typeof downloadUrl !== 'string') {
-    return undefined;
+function resolveCatalogProjectorArtifactIdentity(
+  artifact: Partial<ModelArtifactMetadata>,
+): RemoteProjectorIdentity | null {
+  const identity = resolveHuggingFaceResolveIdentity(artifact.downloadUrl);
+  const remoteFileName = normalizeHuggingFaceFilePath(artifact.remoteFileName);
+  if (
+    artifact.kind !== 'multimodal_projector'
+    || !identity
+    || remoteFileName !== identity.filePath
+    || resolveHuggingFaceRevision(artifact.hfRevision) !== identity.revision
+  ) {
+    return null;
   }
 
-  const normalizedFileName = normalizeCatalogProjectorFileName(fileName);
-  const normalizedUrlFileName = normalizeCatalogProjectorFileName(
-    getRemoteFileNameFromDownloadUrl(downloadUrl),
-  );
-  return normalizedFileName && normalizedFileName === normalizedUrlFileName
-    ? normalizedFileName
-    : undefined;
+  return identity;
 }
 
-function getCatalogRemoteProjectorCanonicalFileName(
-  fileName: unknown,
-  downloadUrl: unknown,
-): string | undefined {
-  if (typeof downloadUrl !== 'string') {
-    return undefined;
+function resolveCatalogProjectorCandidateIdentity(
+  projector: Partial<ProjectorArtifact>,
+  ownerModelId: string,
+): RemoteProjectorIdentity | null {
+  if (projector.ownerModelId !== ownerModelId) {
+    return null;
   }
 
-  const remoteFileName = getRemoteFileNameFromDownloadUrl(downloadUrl);
-  return getCatalogRemoteProjectorFileName(fileName, downloadUrl)
-    ? remoteFileName
-    : undefined;
+  return resolveRemoteProjectorIdentity({
+    repoId: projector.repoId,
+    revision: projector.hfRevision,
+    filePath: projector.fileName,
+    downloadUrl: projector.downloadUrl,
+  });
 }
 
-function getCatalogProjectorEvidenceFileNames(
-  inputCapabilities: ModelInputCapabilitySnapshot | undefined,
-): Set<string> {
-  return new Set(inputCapabilities?.evidence.flatMap((entry) => {
-    if (entry.source !== 'projector') {
-      return [];
+function getRawProjectorCandidates(rawModel: unknown): Partial<ProjectorArtifact>[] {
+  if (!isRecord(rawModel)) {
+    return [];
+  }
+
+  const modelCandidates = Array.isArray(rawModel.projectorCandidates)
+    ? rawModel.projectorCandidates.filter(isRecord)
+    : [];
+  const variantCandidates = Array.isArray(rawModel.variants)
+    ? rawModel.variants.filter(isRecord).flatMap((variant) => (
+      Array.isArray(variant.projectorCandidates)
+        ? variant.projectorCandidates.filter(isRecord)
+        : []
+    ))
+    : [];
+  return [...modelCandidates, ...variantCandidates] as Partial<ProjectorArtifact>[];
+}
+
+function getRawProjectorArtifacts(rawModel: unknown): Partial<ModelArtifactMetadata>[] {
+  if (!isRecord(rawModel) || !Array.isArray(rawModel.artifacts)) {
+    return [];
+  }
+
+  return rawModel.artifacts.filter((artifact) => (
+    isRecord(artifact) && artifact.kind === 'multimodal_projector'
+  )) as Partial<ModelArtifactMetadata>[];
+}
+
+function getRawProjectorEvidence(rawModel: unknown): CapabilityEvidence[] {
+  if (!isRecord(rawModel) || !isRecord(rawModel.inputCapabilities)) {
+    return [];
+  }
+
+  return Array.isArray(rawModel.inputCapabilities.evidence)
+    ? rawModel.inputCapabilities.evidence.filter(isRecord) as unknown as CapabilityEvidence[]
+    : [];
+}
+
+function buildCatalogProjectorIdentityAudit(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions,
+): CatalogProjectorIdentityAudit {
+  const rawModel = options.rawModel ?? model;
+  const identitiesByKey = new Map<string, RemoteProjectorIdentity>();
+  const candidateIdentityKeys = new Set<string>();
+  const identityKeysByExactPath = new Map<string, Set<string>>();
+  const identityKeysByFoldedPath = new Map<string, Set<string>>();
+  const identityKeysByFoldedBasename = new Map<string, Set<string>>();
+  const candidateIdsByLegacyAlias = new Map<string, Set<string>>();
+  const candidateScopeIdsById = new Map<string, Set<string>>();
+  const poisonedCandidateScopeIds = new Set<string>();
+  const poisonedExactPaths = new Set<string>();
+  const poisonedFoldedPaths = new Set<string>();
+  const poisonedFoldedBasenames = new Set<string>();
+
+  const recordPoisonedPath = (value: unknown): void => {
+    const filePath = normalizeHuggingFaceFilePath(value)
+      ?? normalizeConservativePoisonedProjectorPath(value);
+    if (!filePath) {
+      return;
     }
 
-    const fileName = normalizeCatalogProjectorFileName(entry.value);
-    return fileName ? [fileName] : [];
-  }) ?? []);
-}
+    poisonedExactPaths.add(filePath);
+    poisonedFoldedPaths.add(filePath.toLowerCase());
+    poisonedFoldedBasenames.add(getFoldedProjectorBasename(filePath));
+  };
+  const recordIdentity = (identity: RemoteProjectorIdentity): string => {
+    const identityKey = remoteProjectorIdentityKey(identity);
+    identitiesByKey.set(identityKey, identity);
+    addIdentityToIndex(identityKeysByExactPath, identity.filePath, identityKey);
+    addIdentityToIndex(identityKeysByFoldedPath, identity.filePath.toLowerCase(), identityKey);
+    addIdentityToIndex(
+      identityKeysByFoldedBasename,
+      getFoldedProjectorBasename(identity.filePath),
+      identityKey,
+    );
+    return identityKey;
+  };
 
-function getCatalogProjectorRepresentationFileNames(model: CatalogVisionRuntimeSource): Set<string> {
-  const candidateFileNames = model.projectorCandidates?.flatMap((projector) => {
-    const fileName = getCatalogRemoteProjectorFileName(projector.fileName, projector.downloadUrl);
-    return fileName ? [fileName] : [];
-  }) ?? [];
-  const artifactFileNames = model.artifacts?.flatMap((artifact) => {
-    if (artifact.kind !== 'multimodal_projector') {
-      return [];
+  const candidateRecords: {
+    projector: ProjectorArtifact;
+    identity: RemoteProjectorIdentity;
+    currentScopeId: string;
+    currentId: string;
+    legacyId: string;
+  }[] = [];
+  for (const projector of getRawProjectorCandidates(rawModel)) {
+    const identity = resolveCatalogProjectorCandidateIdentity(projector, model.id);
+    if (!identity) {
+      recordPoisonedPath(projector.fileName);
+      continue;
     }
 
-    const fileName = getCatalogRemoteProjectorFileName(artifact.remoteFileName, artifact.downloadUrl);
-    return fileName ? [fileName] : [];
-  }) ?? [];
+    const identityKey = recordIdentity(identity);
+    candidateIdentityKeys.add(identityKey);
+    const idInput = {
+      repoId: identity.repoId,
+      hfRevision: identity.revision,
+      fileName: identity.filePath,
+      ...(typeof projector.ownerVariantId === 'string' && projector.ownerVariantId.trim()
+        ? { ownerVariantId: projector.ownerVariantId.trim() }
+        : {}),
+    };
+    const currentScopeId = getCatalogProjectorCandidateScopeId(identity, idInput.ownerVariantId);
+    const currentId = buildProjectorArtifactId(idInput);
+    const legacyId = buildLegacyProjectorArtifactId(idInput);
+    addIdentityToIndex(
+      candidateIdsByLegacyAlias,
+      legacyId,
+      currentScopeId,
+    );
+    if (typeof projector.id === 'string' && projector.id.trim()) {
+      const canonicalProjector = {
+        ...projector,
+        id: projector.id.trim(),
+      } as ProjectorArtifact;
+      addIdentityToIndex(candidateScopeIdsById, canonicalProjector.id, currentScopeId);
+      candidateRecords.push({
+        projector: canonicalProjector,
+        identity,
+        currentScopeId,
+        currentId,
+        legacyId,
+      });
+    }
+  }
 
-  return new Set([...candidateFileNames, ...artifactFileNames]);
+  const artifactRecords = getRawProjectorArtifacts(rawModel).map((rawArtifact) => {
+    const artifact = {
+      ...rawArtifact,
+      ...(typeof rawArtifact.id === 'string' ? { id: rawArtifact.id.trim() } : {}),
+    };
+    return {
+      artifact,
+      identity: resolveCatalogProjectorArtifactIdentity(artifact),
+    };
+  });
+  for (const { artifact, identity } of artifactRecords) {
+    if (identity) {
+      recordIdentity(identity);
+    } else {
+      recordPoisonedPath(artifact.remoteFileName);
+    }
+  }
+
+  for (const candidateRecord of candidateRecords) {
+    const legacyAliasIsUnique = (candidateIdsByLegacyAlias.get(candidateRecord.legacyId)?.size ?? 0) === 1;
+    let relatedRequiredForKey: string | undefined;
+    for (const artifactRecord of artifactRecords) {
+      const artifact = artifactRecord.artifact;
+      const isRelated = artifact.id === candidateRecord.projector.id
+        || artifact.id === candidateRecord.currentId
+        || artifact.id === candidateRecord.legacyId
+        || Boolean(
+          artifactRecord.identity
+          && remoteProjectorIdentitiesEqual(artifactRecord.identity, candidateRecord.identity),
+        );
+      if (!isRelated) {
+        continue;
+      }
+
+      const normalizedRequiredFor = Array.isArray(artifact.requiredFor)
+        ? [...new Set(artifact.requiredFor.filter((entry) => entry === 'image' || entry === 'audio'))]
+          .sort()
+        : [];
+      const requiredForKey = JSON.stringify(normalizedRequiredFor);
+      if (
+        normalizedRequiredFor.length === 0
+        || (relatedRequiredForKey !== undefined && relatedRequiredForKey !== requiredForKey)
+      ) {
+        poisonedCandidateScopeIds.add(candidateRecord.currentScopeId);
+      } else {
+        relatedRequiredForKey = requiredForKey;
+      }
+
+      if (
+        (projectorArtifactUsesLegacyAlias(
+          artifact as ModelArtifactMetadata,
+          candidateRecord.projector,
+        ) && !legacyAliasIsUnique)
+        || !projectorArtifactMatchesCandidate(
+          artifact as ModelArtifactMetadata,
+          candidateRecord.projector,
+        )
+      ) {
+        poisonedCandidateScopeIds.add(candidateRecord.currentScopeId);
+      }
+    }
+  }
+
+  const isLegacyPayload = typeof options.persistedVersion === 'number'
+    && options.persistedVersion < MODEL_CATALOG_CACHE_PERSISTED_VERSION;
+  const evidenceIdentityKeys = new Set<string>();
+  for (const evidence of getRawProjectorEvidence(rawModel)) {
+    if (evidence.source !== 'projector' || typeof evidence.value !== 'string') {
+      continue;
+    }
+
+    const normalizedPath = normalizeHuggingFaceFilePath(evidence.value);
+    if (!normalizedPath) {
+      continue;
+    }
+
+    const isFullPathEvidence = /[\\/]/u.test(evidence.value.trim());
+    const alias = isLegacyPayload
+      ? isFullPathEvidence ? normalizedPath.toLowerCase() : getFoldedProjectorBasename(normalizedPath)
+      : normalizedPath;
+    const identityKeys = isLegacyPayload
+      ? isFullPathEvidence
+        ? identityKeysByFoldedPath.get(alias)
+        : identityKeysByFoldedBasename.get(alias)
+      : identityKeysByExactPath.get(alias);
+    const isPoisoned = isLegacyPayload
+      ? isFullPathEvidence
+        ? poisonedFoldedPaths.has(alias)
+        : poisonedFoldedBasenames.has(alias)
+      : poisonedExactPaths.has(alias);
+    if (!isPoisoned && identityKeys?.size === 1) {
+      const identityKey = [...identityKeys][0] as string;
+      if (candidateIdentityKeys.has(identityKey)) {
+        evidenceIdentityKeys.add(identityKey);
+      }
+    }
+  }
+
+  return {
+    identitiesByKey,
+    candidateIdentityKeys,
+    identityKeysByExactPath,
+    identityKeysByFoldedPath,
+    identityKeysByFoldedBasename,
+    candidateIdsByLegacyAlias,
+    candidateScopeIdsById,
+    poisonedCandidateScopeIds,
+    poisonedExactPaths,
+    poisonedFoldedPaths,
+    poisonedFoldedBasenames,
+    evidenceIdentityKeys,
+  };
+}
+
+function canonicalizeCatalogProjectorCandidate(
+  projector: ProjectorArtifact,
+  ownerModelId: string,
+): ProjectorArtifact | null {
+  const identity = resolveCatalogProjectorCandidateIdentity(projector, ownerModelId);
+  if (!identity) {
+    return null;
+  }
+
+  const idInput = {
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    ...(projector.ownerVariantId?.trim() ? { ownerVariantId: projector.ownerVariantId.trim() } : {}),
+  };
+  return {
+    ...projector,
+    id: projector.id,
+    ownerModelId,
+    ...(idInput.ownerVariantId ? { ownerVariantId: idInput.ownerVariantId } : { ownerVariantId: undefined }),
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    downloadUrl: buildHuggingFaceResolveUrl(identity.repoId, identity.filePath, identity.revision),
+  };
+}
+
+function artifactIsRelatedToProjector(
+  artifact: ModelArtifactMetadata,
+  projector: ProjectorArtifact,
+  identity: RemoteProjectorIdentity,
+): boolean {
+  if (artifact.kind !== 'multimodal_projector') {
+    return false;
+  }
+
+  const artifactIdentity = resolveCatalogProjectorArtifactIdentity(artifact);
+  const idInput = {
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    ownerVariantId: projector.ownerVariantId,
+  };
+  const currentId = buildProjectorArtifactId(idInput);
+  const legacyId = buildLegacyProjectorArtifactId(idInput);
+  return artifact.id === projector.id
+    || artifact.id === currentId
+    || artifact.id === legacyId
+    || Boolean(artifactIdentity && remoteProjectorIdentitiesEqual(artifactIdentity, identity));
 }
 
 function catalogProjectorRepresentationSupportsInput(
   model: CatalogVisionRuntimeSource,
-  fileName: string,
+  projector: ProjectorArtifact,
+  identity: RemoteProjectorIdentity,
   input: 'image' | 'audio',
+  audit: CatalogProjectorIdentityAudit,
 ): boolean {
-  const matchingArtifacts = model.artifacts?.filter((artifact) => (
-    artifact.kind === 'multimodal_projector'
-    && getCatalogRemoteProjectorFileName(artifact.remoteFileName, artifact.downloadUrl) === fileName
+  const relatedArtifacts = model.artifacts?.filter((artifact) => (
+    artifactIsRelatedToProjector(artifact, projector, identity)
   )) ?? [];
-  if (matchingArtifacts.length > 0) {
-    return matchingArtifacts.some((artifact) => artifact.requiredFor.includes(input));
+  if (relatedArtifacts.length === 0) {
+    return true;
   }
 
-  return model.projectorCandidates?.some((projector) => (
-    getCatalogRemoteProjectorFileName(projector.fileName, projector.downloadUrl) === fileName
-  )) === true;
+  const legacyId = buildLegacyProjectorArtifactId({
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    ownerVariantId: projector.ownerVariantId,
+  });
+  const legacyAliasIsUnique = (audit.candidateIdsByLegacyAlias.get(legacyId)?.size ?? 0) === 1;
+  const allCompatible = relatedArtifacts.every((artifact) => (
+    !(projectorArtifactUsesLegacyAlias(artifact, projector) && !legacyAliasIsUnique)
+    && projectorArtifactMatchesCandidate(artifact, projector)
+  ));
+  return allCompatible && relatedArtifacts.some((artifact) => artifact.requiredFor.includes(input));
 }
 
 function createCatalogSafeNativeCapabilityContext(
   model: CatalogVisionRuntimeSource,
+  ownerModelId: string,
+  audit: CatalogProjectorIdentityAudit,
 ): CatalogSafeNativeCapabilityContext {
-  const projectorEvidenceFileNames = getCatalogProjectorEvidenceFileNames(model.inputCapabilities);
-  const projectorRepresentationFileNames = getCatalogProjectorRepresentationFileNames(model);
-  const matchingProjectorEvidenceFileNames = new Set(
-    [...projectorEvidenceFileNames].filter((fileName) => projectorRepresentationFileNames.has(fileName)),
-  );
   const hasExplicitChatModalities = Array.isArray(model.chatModalities);
   const permitsVision = !hasExplicitChatModalities || model.chatModalities?.includes('vision') === true;
   const permitsAudio = !hasExplicitChatModalities || model.chatModalities?.includes('audio') === true;
@@ -285,25 +607,62 @@ function createCatalogSafeNativeCapabilityContext(
   const hasCatalogSafeAudioSignal = permitsAudio
     && modelHasCatalogAudioCapabilitySignal(model)
     && modelHasCatalogSafeAudioCapabilityEvidence(model);
-  const visionProjectorEvidenceFileNames = vision
-    ? [...matchingProjectorEvidenceFileNames].filter((fileName) => (
-      catalogProjectorRepresentationSupportsInput(model, fileName, 'image')
-    ))
-    : [];
-  const audioProjectorEvidenceFileNames = hasCatalogSafeAudioSignal
-    ? [...matchingProjectorEvidenceFileNames].filter((fileName) => (
-      catalogProjectorRepresentationSupportsInput(model, fileName, 'audio')
-    ))
-    : [];
-  const audio = audioProjectorEvidenceFileNames.length > 0;
+  const candidates = model.projectorCandidates?.flatMap((projector) => {
+    const canonical = canonicalizeCatalogProjectorCandidate(projector, ownerModelId);
+    return canonical ? [canonical] : [];
+  }) ?? [];
+  const visionIdentityKeys = new Set<string>();
+  const audioIdentityKeys = new Set<string>();
+  const visionCandidateScopeIds = new Set<string>();
+  const audioCandidateScopeIds = new Set<string>();
+  for (const projector of candidates) {
+    const identity = resolveCatalogProjectorCandidateIdentity(projector, ownerModelId);
+    if (!identity) {
+      continue;
+    }
+
+    const identityKey = remoteProjectorIdentityKey(identity);
+    if (
+      !audit.evidenceIdentityKeys.has(identityKey)
+      || (audit.candidateScopeIdsById.get(projector.id)?.size ?? 0) !== 1
+    ) {
+      continue;
+    }
+    const currentScopeId = getCatalogProjectorCandidateScopeId(identity, projector.ownerVariantId);
+    if (audit.poisonedCandidateScopeIds.has(currentScopeId)) {
+      continue;
+    }
+    if (vision && catalogProjectorRepresentationSupportsInput(model, projector, identity, 'image', audit)) {
+      visionIdentityKeys.add(identityKey);
+      visionCandidateScopeIds.add(currentScopeId);
+    }
+    if (
+      hasCatalogSafeAudioSignal
+      && catalogProjectorRepresentationSupportsInput(model, projector, identity, 'audio', audit)
+    ) {
+      audioIdentityKeys.add(identityKey);
+      audioCandidateScopeIds.add(currentScopeId);
+    }
+  }
+  const projectorEvidenceIdentityKeys = new Set([...visionIdentityKeys, ...audioIdentityKeys]);
+  const projectorCandidateScopeIds = new Set([
+    ...visionCandidateScopeIds,
+    ...audioCandidateScopeIds,
+  ]);
+  const projectorEvidenceFileNames = new Set(
+    [...projectorEvidenceIdentityKeys].flatMap((identityKey) => {
+      const identity = audit.identitiesByKey.get(identityKey);
+      return identity ? [identity.filePath] : [];
+    }),
+  );
+  const audio = audioIdentityKeys.size > 0;
 
   return {
     vision,
     audio,
-    projectorEvidenceFileNames: new Set([
-      ...visionProjectorEvidenceFileNames,
-      ...audioProjectorEvidenceFileNames,
-    ]),
+    projectorEvidenceFileNames,
+    projectorEvidenceIdentityKeys,
+    projectorCandidateScopeIds,
   };
 }
 
@@ -316,26 +675,13 @@ function mergeCatalogSafeNativeCapabilityContexts(
     projectorEvidenceFileNames: new Set(
       contexts.flatMap((context) => [...context.projectorEvidenceFileNames]),
     ),
+    projectorEvidenceIdentityKeys: new Set(
+      contexts.flatMap((context) => [...context.projectorEvidenceIdentityKeys]),
+    ),
+    projectorCandidateScopeIds: new Set(
+      contexts.flatMap((context) => [...context.projectorCandidateScopeIds]),
+    ),
   };
-}
-
-function getRemoteFileNameFromDownloadUrl(downloadUrl: string): string | undefined {
-  try {
-    const url = new URL(downloadUrl);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-      return undefined;
-    }
-
-    const encodedName = url.pathname.split('/').filter(Boolean).pop();
-    if (!encodedName) {
-      return undefined;
-    }
-
-    const decodedName = decodeURIComponent(encodedName).trim();
-    return decodedName.length > 0 ? decodedName : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function normalizeArtifactRequiredFor(requiredFor: ModelArtifactMetadata['requiredFor']): ModelArtifactRequiredInput[] {
@@ -344,109 +690,166 @@ function normalizeArtifactRequiredFor(requiredFor: ModelArtifactMetadata['requir
   )))];
 }
 
-function sanitizeCatalogArtifactRemoteFileName(
-  artifact: ModelArtifactMetadata,
-  model: Pick<ModelMetadata, 'resolvedFileName'>,
-): string | undefined {
-  if (artifact.kind === 'main_model') {
-    const remoteFileName = getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
-    return remoteFileName ? model.resolvedFileName ?? remoteFileName : undefined;
-  }
-
-  return getCatalogRemoteProjectorCanonicalFileName(
-    artifact.remoteFileName,
-    artifact.downloadUrl,
-  );
-}
-
-function projectorCandidateMatchesArtifact(
-  projector: ProjectorArtifact,
-  artifact: ModelArtifactMetadata,
-): boolean {
-  if (artifact.kind !== 'multimodal_projector') {
-    return false;
-  }
-
-  const projectorFileName = getCatalogRemoteProjectorFileName(
-    projector.fileName,
-    projector.downloadUrl,
-  );
-  const artifactFileName = getCatalogRemoteProjectorFileName(
-    artifact.remoteFileName,
-    artifact.downloadUrl,
-  );
-  return Boolean(
-    projectorFileName
-    && projectorFileName === artifactFileName
-    && (artifact.id === projector.id || artifact.downloadUrl === projector.downloadUrl),
-  );
+function resolveCatalogMainModelIdentity(
+  model: Pick<ModelMetadata, 'downloadUrl' | 'hfRevision' | 'id' | 'resolvedFileName'>,
+): RemoteProjectorIdentity | null {
+  return resolveRemoteProjectorIdentity({
+    repoId: model.id,
+    revision: model.hfRevision,
+    filePath: model.resolvedFileName,
+    downloadUrl: model.downloadUrl,
+  });
 }
 
 function sanitizeCatalogArtifactRequiredFor(
   artifact: ModelArtifactMetadata,
   context: CatalogSafeNativeCapabilityContext,
+  projectorIdentity?: RemoteProjectorIdentity,
 ): ModelArtifactRequiredInput[] {
-  const projectorFileName = artifact.kind === 'multimodal_projector'
-    ? getCatalogRemoteProjectorFileName(artifact.remoteFileName, artifact.downloadUrl)
-    : undefined;
-
   return normalizeArtifactRequiredFor(artifact.requiredFor).filter((requiredInput) => {
     if (requiredInput === 'text') {
       return artifact.kind === 'main_model';
     }
 
     if (requiredInput === 'image') {
-      return context.vision;
+      return context.vision && (
+        artifact.kind === 'main_model'
+        || Boolean(
+          projectorIdentity
+          && context.projectorEvidenceIdentityKeys.has(remoteProjectorIdentityKey(projectorIdentity)),
+        )
+      );
     }
 
     return context.audio && (
       artifact.kind === 'main_model'
-      || Boolean(projectorFileName && context.projectorEvidenceFileNames.has(projectorFileName))
+      || Boolean(
+        projectorIdentity
+        && context.projectorEvidenceIdentityKeys.has(remoteProjectorIdentityKey(projectorIdentity)),
+      )
     );
   });
 }
 
 function sanitizeCatalogModelArtifacts(
-  model: Pick<
-    ModelMetadata,
-    'artifacts'
-      | 'chatModalities'
-      | 'inputCapabilities'
-      | 'metadataTrust'
-      | 'projectorCandidates'
-      | 'resolvedFileName'
-      | 'visionSource'
-  >,
+  model: ModelMetadata,
   context: CatalogSafeNativeCapabilityContext,
-  resolveContext: (
-    artifact: ModelArtifactMetadata,
-  ) => CatalogSafeNativeCapabilityContext = () => context,
+  projectorCandidates: readonly ProjectorArtifact[],
+  audit: CatalogProjectorIdentityAudit,
+  resolveProjectorContext: (projector: ProjectorArtifact) => CatalogSafeNativeCapabilityContext,
 ): ModelMetadata['artifacts'] {
-  if (!model.artifacts?.length) {
-    return undefined;
+  const artifacts: ModelArtifactMetadata[] = [];
+  const mainIdentity = resolveCatalogMainModelIdentity(model);
+  if (mainIdentity) {
+    const persistedMainArtifact = model.artifacts?.find((artifact) => artifact.kind === 'main_model');
+    const persistedMainIdentity = persistedMainArtifact
+      ? resolveRemoteProjectorIdentity({
+        repoId: model.id,
+        revision: persistedMainArtifact.hfRevision,
+        filePath: persistedMainArtifact.remoteFileName,
+        downloadUrl: persistedMainArtifact.downloadUrl,
+      })
+      : null;
+    const canonicalMainArtifact: ModelArtifactMetadata = {
+      id: buildMainModelArtifactId(model),
+      kind: 'main_model',
+      requiredFor: ['text'],
+      hfRevision: mainIdentity.revision,
+      remoteFileName: mainIdentity.filePath,
+      downloadUrl: buildHuggingFaceResolveUrl(
+        mainIdentity.repoId,
+        mainIdentity.filePath,
+        mainIdentity.revision,
+      ),
+      sizeBytes: model.size,
+      installState: 'remote',
+    };
+    const requiredForSource = persistedMainArtifact
+      && persistedMainIdentity
+      && remoteProjectorIdentitiesEqual(persistedMainIdentity, mainIdentity)
+      ? persistedMainArtifact
+      : canonicalMainArtifact;
+    const requiredFor = [
+      'text' as const,
+      ...sanitizeCatalogArtifactRequiredFor(requiredForSource, context)
+        .filter((requiredInput) => requiredInput !== 'text'),
+    ];
+    if (requiredFor.length > 0) {
+      artifacts.push({
+        id: buildMainModelArtifactId(model),
+        kind: 'main_model',
+        requiredFor,
+        hfRevision: mainIdentity.revision,
+        remoteFileName: mainIdentity.filePath,
+        downloadUrl: buildHuggingFaceResolveUrl(
+          mainIdentity.repoId,
+          mainIdentity.filePath,
+          mainIdentity.revision,
+        ),
+        sizeBytes: model.size,
+        ...(model.metadataTrust !== 'verified_local' && model.sha256 ? { sha256: model.sha256 } : {}),
+        installState: 'remote',
+      });
+    }
   }
 
-  const artifacts = model.artifacts.flatMap((artifact): ModelArtifactMetadata[] => {
-    const remoteFileName = sanitizeCatalogArtifactRemoteFileName(artifact, model);
-    const requiredFor = sanitizeCatalogArtifactRequiredFor(artifact, resolveContext(artifact));
-    if (!remoteFileName || requiredFor.length === 0) {
-      return [];
+  for (const artifact of model.artifacts ?? []) {
+    if (artifact.kind !== 'multimodal_projector') {
+      continue;
     }
 
-    return [{
-      id: artifact.id,
-      kind: artifact.kind,
+    const artifactIdentity = resolveCatalogProjectorArtifactIdentity(artifact);
+    if (!artifactIdentity) {
+      continue;
+    }
+
+    const matchingCandidates = projectorCandidates.filter((projector) => {
+      const projectorIdentity = resolveCatalogProjectorCandidateIdentity(projector, model.id);
+      if (!projectorIdentity || !remoteProjectorIdentitiesEqual(projectorIdentity, artifactIdentity)) {
+        return false;
+      }
+
+      const legacyId = buildLegacyProjectorArtifactId({
+        repoId: projectorIdentity.repoId,
+        hfRevision: projectorIdentity.revision,
+        fileName: projectorIdentity.filePath,
+        ownerVariantId: projector.ownerVariantId,
+      });
+      const legacyAliasIsUnique = (audit.candidateIdsByLegacyAlias.get(legacyId)?.size ?? 0) === 1;
+      return (!projectorArtifactUsesLegacyAlias(artifact, projector) || legacyAliasIsUnique)
+        && projectorArtifactMatchesCandidate(artifact, projector);
+    });
+    if (matchingCandidates.length !== 1) {
+      continue;
+    }
+
+    const projector = matchingCandidates[0] as ProjectorArtifact;
+    const projectorContext = resolveProjectorContext(projector);
+    const requiredFor = sanitizeCatalogArtifactRequiredFor(
+      artifact,
+      projectorContext,
+      artifactIdentity,
+    );
+    if (requiredFor.length === 0) {
+      continue;
+    }
+
+    artifacts.push({
+      id: projector.id,
+      kind: 'multimodal_projector',
       requiredFor,
-      ...(artifact.hfRevision ? { hfRevision: artifact.hfRevision } : {}),
-      remoteFileName,
-      downloadUrl: artifact.downloadUrl,
-      sizeBytes: artifact.sizeBytes,
-      ...(artifact.kind !== 'main_model' || model.metadataTrust !== 'verified_local'
-        ? { ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}) }
-        : {}),
+      hfRevision: artifactIdentity.revision,
+      remoteFileName: artifactIdentity.filePath,
+      downloadUrl: buildHuggingFaceResolveUrl(
+        artifactIdentity.repoId,
+        artifactIdentity.filePath,
+        artifactIdentity.revision,
+      ),
+      sizeBytes: projector.size,
+      ...(projector.sha256 ? { sha256: projector.sha256 } : {}),
       installState: 'remote',
-    }];
-  });
+    });
+  }
 
   return artifacts.length > 0 ? artifacts : undefined;
 }
@@ -482,10 +885,10 @@ function sanitizeCatalogCapabilityEvidence(
   }
 
   if (entry.source === 'projector') {
-    const fileName = normalizeCatalogProjectorFileName(entry.value);
-    return Boolean(fileName && context.projectorEvidenceFileNames.has(fileName))
-      ? [{ ...entry, value: fileName as string }]
-      : [];
+    return [...context.projectorEvidenceFileNames].map((fileName) => ({
+      ...entry,
+      value: fileName,
+    }));
   }
 
   const modalities = getInputCapabilityEvidenceModalities(entry);
@@ -565,7 +968,7 @@ function sanitizeCatalogChatModalities(
 export function sanitizeCatalogProjectorRuntimeState(
   projectors: ModelMetadata['projectorCandidates'],
   context: CatalogSafeNativeCapabilityContext,
-  artifacts?: ModelMetadata['artifacts'],
+  ownerModelId: string,
   resolveContext: (
     projector: ProjectorArtifact,
   ) => CatalogSafeNativeCapabilityContext = () => context,
@@ -579,41 +982,33 @@ export function sanitizeCatalogProjectorRuntimeState(
   }
 
   const sanitized = projectors.flatMap((projector): ProjectorArtifact[] => {
-    const canonicalFileName = getCatalogRemoteProjectorCanonicalFileName(
-      projector.fileName,
-      projector.downloadUrl,
-    );
-    const normalizedFileName = normalizeCatalogProjectorFileName(canonicalFileName);
-    if (!canonicalFileName || !normalizedFileName) {
+    const canonicalProjector = canonicalizeCatalogProjectorCandidate(projector, ownerModelId);
+    if (!canonicalProjector) {
       return [];
     }
 
-    const projectorContext = resolveContext(projector);
-    const matchingArtifact = artifacts?.find((artifact) => (
-      projectorCandidateMatchesArtifact(projector, artifact)
-    ));
-    const hasMatchingProjectorEvidence = projectorContext.projectorEvidenceFileNames.has(normalizedFileName);
-    const hasIndependentCatalogIdentity = hasCatalogProjectorIdentity(projector, projectorContext);
-    const hasSafeVisionIdentity = projectorContext.vision
-      && hasIndependentCatalogIdentity
-      && (matchingArtifact?.requiredFor.includes('image') ?? true);
-    const hasSafeAudioIdentity = projectorContext.audio
-      && hasMatchingProjectorEvidence
-      && (matchingArtifact?.requiredFor.includes('audio') ?? true);
-    const isAllowed = hasSafeVisionIdentity || hasSafeAudioIdentity;
-    if (!isAllowed) {
+    const identity = resolveCatalogProjectorCandidateIdentity(canonicalProjector, ownerModelId);
+    const projectorContext = resolveContext(canonicalProjector);
+    const candidateScopeId = identity
+      ? getCatalogProjectorCandidateScopeId(identity, canonicalProjector.ownerVariantId)
+      : null;
+    if (
+      !identity
+      || !candidateScopeId
+      || !projectorContext.projectorEvidenceIdentityKeys.has(remoteProjectorIdentityKey(identity))
+      || !projectorContext.projectorCandidateScopeIds.has(candidateScopeId)
+    ) {
       return [];
     }
 
     return [{
-      ...projector,
-      fileName: canonicalFileName,
+      ...canonicalProjector,
       localPath: undefined,
       resumeData: undefined,
       downloadProgress: undefined,
       lifecycleStatus: 'available' as const,
-      matchStatus: sanitizeCatalogProjectorMatchStatus(projector),
-      matchReason: sanitizeCatalogProjectorMatchReason(projector),
+      matchStatus: sanitizeCatalogProjectorMatchStatus(canonicalProjector),
+      matchReason: sanitizeCatalogProjectorMatchReason(canonicalProjector),
     }];
   });
 
@@ -641,12 +1036,24 @@ function projectorCandidatesShareIdentity(
   left: ProjectorArtifact,
   right: ProjectorArtifact,
 ): boolean {
-  const leftFileName = getCatalogRemoteProjectorFileName(left.fileName, left.downloadUrl);
-  const rightFileName = getCatalogRemoteProjectorFileName(right.fileName, right.downloadUrl);
+  const leftIdentity = resolveRemoteProjectorIdentity({
+    repoId: left.repoId,
+    revision: left.hfRevision,
+    filePath: left.fileName,
+    downloadUrl: left.downloadUrl,
+  });
+  const rightIdentity = resolveRemoteProjectorIdentity({
+    repoId: right.repoId,
+    revision: right.hfRevision,
+    filePath: right.fileName,
+    downloadUrl: right.downloadUrl,
+  });
   return Boolean(
-    leftFileName
-    && leftFileName === rightFileName
-    && (left.id === right.id || left.downloadUrl === right.downloadUrl),
+    leftIdentity
+    && rightIdentity
+    && left.ownerModelId === right.ownerModelId
+    && left.ownerVariantId === right.ownerVariantId
+    && remoteProjectorIdentitiesEqual(leftIdentity, rightIdentity),
   );
 }
 
@@ -671,22 +1078,20 @@ function getVariantCompatibleProjectorCandidates(
 function createCatalogSafeVariantCapability(
   variant: ModelVariant,
   model: ModelMetadata,
+  audit: CatalogProjectorIdentityAudit,
 ): CatalogSafeVariantCapability {
   const projectorCandidates = getVariantCompatibleProjectorCandidates(variant, model);
-  const artifacts = model.artifacts?.filter((artifact) => (
-    artifact.kind !== 'multimodal_projector'
-    || projectorCandidates.some((projector) => projectorCandidateMatchesArtifact(projector, artifact))
-  ));
 
   return {
     context: createCatalogSafeNativeCapabilityContext({
       ...variant,
+      id: model.id,
       visionSource: variant.visionSource ?? model.visionSource,
-      artifacts,
+      artifacts: model.artifacts,
       chatModalities: variant.chatModalities ?? model.chatModalities,
       inputCapabilities: model.inputCapabilities,
       projectorCandidates,
-    }),
+    }, model.id, audit),
     projectorCandidates,
   };
 }
@@ -712,58 +1117,10 @@ function resolveCatalogSafeProjectorContext(
   return mergeCatalogSafeNativeCapabilityContexts(contexts);
 }
 
-function resolveCatalogSafeArtifactContext(
-  artifact: ModelArtifactMetadata,
-  model: ModelMetadata,
-  modelContext: CatalogSafeNativeCapabilityContext,
-  variants: readonly CatalogSafeVariantCapability[],
-): CatalogSafeNativeCapabilityContext {
-  if (artifact.kind !== 'multimodal_projector') {
-    return modelContext;
-  }
-
-  const allMatchingModelCandidates = model.projectorCandidates?.filter((projector) => (
-    projectorCandidateMatchesArtifact(projector, artifact)
-  )) ?? [];
-  const allMatchingVariantCandidates = variants.flatMap((variant) => (
-    variant.projectorCandidates.filter((projector) => (
-      projectorCandidateMatchesArtifact(projector, artifact)
-    ))
-  ));
-  const matchingModelCandidates = allMatchingModelCandidates.filter((projector) => (
-    hasCatalogProjectorIdentity(
-      projector,
-      resolveCatalogSafeProjectorContext(projector, modelContext, variants),
-    )
-  ));
-  const contexts: CatalogSafeNativeCapabilityContext[] = [];
-  if (
-    matchingModelCandidates.some((projector) => !projector.ownerVariantId?.trim())
-    || (
-      allMatchingModelCandidates.length === 0
-      && allMatchingVariantCandidates.length === 0
-      && artifact.installState === 'remote'
-    )
-  ) {
-    contexts.push(modelContext);
-  }
-
-  for (const variant of variants) {
-    if (variant.projectorCandidates.some((projector) => (
-      projectorCandidateMatchesArtifact(projector, artifact)
-      && hasCatalogProjectorIdentity(projector, variant.context)
-    ))) {
-      contexts.push(variant.context);
-    }
-  }
-
-  return mergeCatalogSafeNativeCapabilityContexts(contexts);
-}
-
 function sanitizeCatalogVariantRuntimeState(
   variant: ModelVariant,
   context: CatalogSafeNativeCapabilityContext,
-  artifacts?: ModelMetadata['artifacts'],
+  ownerModelId: string,
 ): ModelVariant {
   return {
     ...variant,
@@ -775,15 +1132,19 @@ function sanitizeCatalogVariantRuntimeState(
     projectorCandidates: sanitizeCatalogProjectorRuntimeState(
       variant.projectorCandidates,
       context,
-      artifacts,
+      ownerModelId,
     ),
   };
 }
 
-export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMetadata {
-  const modelContext = createCatalogSafeNativeCapabilityContext(model);
+export function sanitizeCatalogModelRuntimeState(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions = {},
+): ModelMetadata {
+  const audit = buildCatalogProjectorIdentityAudit(model, options);
+  const modelContext = createCatalogSafeNativeCapabilityContext(model, model.id, audit);
   const variantCapabilities = model.variants?.map((variant) => (
-    createCatalogSafeVariantCapability(variant, model)
+    createCatalogSafeVariantCapability(variant, model, audit)
   )) ?? [];
   const inputCapabilityContext = mergeCatalogSafeNativeCapabilityContexts([
     modelContext,
@@ -796,7 +1157,7 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
   const projectorCandidates = sanitizeCatalogProjectorRuntimeState(
     model.projectorCandidates,
     modelContext,
-    model.artifacts,
+    model.id,
     (projector) => resolveCatalogSafeProjectorContext(
       projector,
       modelContext,
@@ -808,9 +1169,13 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
     sanitizeCatalogVariantRuntimeState(
       variant,
       (variantCapabilities[index] as CatalogSafeVariantCapability).context,
-      model.artifacts,
+      model.id,
     )
   ));
+  const allProjectorCandidates = [
+    ...(projectorCandidates ?? []),
+    ...(variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ];
   const shouldPreserveParentVisionSource = modelHasCatalogSafeVisionSource(model)
     && (modelContext.vision || variantCapabilities.some((variant) => variant.context.vision));
 
@@ -833,9 +1198,10 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
     artifacts: sanitizeCatalogModelArtifacts(
       model,
       modelContext,
-      (artifact) => resolveCatalogSafeArtifactContext(
-        artifact,
-        model,
+      allProjectorCandidates,
+      audit,
+      (projector) => resolveCatalogSafeProjectorContext(
+        projector,
         modelContext,
         variantCapabilities,
       ),
@@ -851,13 +1217,16 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
   });
 }
 
-export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetadata | null {
+export function sanitizeAnonymousCatalogModel(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions = {},
+): ModelMetadata | null {
   if (model.isPrivate) {
     return null;
   }
 
   if (isPublicAnonymousModel(model)) {
-    return limitAnonymousCatalogModelVariants(toAnonymousPublicCatalogModel(model));
+    return limitAnonymousCatalogModelVariants(toAnonymousPublicCatalogModel(model, options));
   }
 
   return normalizePersistedModelMetadata({
@@ -872,8 +1241,11 @@ export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetada
   });
 }
 
-function toAnonymousPublicCatalogModel(model: ModelMetadata): ModelMetadata {
-  return sanitizeCatalogModelRuntimeState(model);
+function toAnonymousPublicCatalogModel(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions,
+): ModelMetadata {
+  return sanitizeCatalogModelRuntimeState(model, options);
 }
 
 function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata {
@@ -893,9 +1265,12 @@ function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata
   });
 }
 
-function sanitizeAnonymousPersistedModels(models: ModelMetadata[]): ModelMetadata[] {
+function sanitizeAnonymousPersistedModels(
+  models: ModelMetadata[],
+  options: CatalogSanitizationOptions = {},
+): ModelMetadata[] {
   return models.flatMap((model) => {
-    const sanitized = sanitizeAnonymousCatalogModel(model);
+    const sanitized = sanitizeAnonymousCatalogModel(model, options);
     return sanitized ? [sanitized] : [];
   });
 }
@@ -919,7 +1294,7 @@ function isSort(value: unknown): value is CatalogCacheSort {
     || value === 'lastModified';
 }
 
-function normalizeModels(models: unknown): ModelMetadata[] {
+function normalizeModels(models: unknown, persistedVersion?: number): ModelMetadata[] {
   if (!Array.isArray(models)) {
     return [];
   }
@@ -930,7 +1305,18 @@ function normalizeModels(models: unknown): ModelMetadata[] {
       && typeof entry === 'object'
       && typeof (entry as { id?: unknown }).id === 'string'
     ))
-    .map((entry) => normalizePersistedModelMetadata(entry));
+    .flatMap((entry) => {
+      const normalized = normalizePersistedModelMetadata(entry);
+      if (typeof persistedVersion !== 'number') {
+        return [normalized];
+      }
+
+      const sanitized = sanitizeAnonymousCatalogModel(normalized, {
+        persistedVersion,
+        rawModel: entry,
+      });
+      return sanitized ? [sanitized] : [];
+    });
 }
 
 function toJsonComparableValue(value: unknown): JsonComparableValue | undefined {
@@ -1010,7 +1396,7 @@ function buildSnapshotKey(modelId: string, authScope: CatalogCacheAuthScope): st
   return `${modelId}::${authScope}`;
 }
 
-function normalizeSearchResult(value: unknown): CatalogCacheResult | null {
+function normalizeSearchResult(value: unknown, persistedVersion?: number): CatalogCacheResult | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -1020,7 +1406,7 @@ function normalizeSearchResult(value: unknown): CatalogCacheResult | null {
     hasMore?: unknown;
     nextCursor?: unknown;
   };
-  const models = normalizeModels(candidate.models);
+  const models = normalizeModels(candidate.models, persistedVersion);
   const hasMore = candidate.hasMore === true;
   const nextCursor = typeof candidate.nextCursor === 'string' ? candidate.nextCursor : null;
 
@@ -1052,7 +1438,7 @@ function normalizeSearchScope(value: unknown): CatalogCacheScope | null {
   };
 }
 
-function normalizeSearchEntry(value: unknown): SearchCacheEntry | null {
+function normalizeSearchEntry(value: unknown, persistedVersion?: number): SearchCacheEntry | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -1064,7 +1450,7 @@ function normalizeSearchEntry(value: unknown): SearchCacheEntry | null {
     result?: unknown;
   };
   const scope = normalizeSearchScope(candidate.scope);
-  const result = normalizeSearchResult(candidate.result);
+  const result = normalizeSearchResult(candidate.result, persistedVersion);
 
   if (!scope || !result || typeof candidate.key !== 'string') {
     return null;
@@ -1080,7 +1466,7 @@ function normalizeSearchEntry(value: unknown): SearchCacheEntry | null {
   };
 }
 
-function normalizeSnapshotEntry(value: unknown): SnapshotCacheEntry | null {
+function normalizeSnapshotEntry(value: unknown, persistedVersion?: number): SnapshotCacheEntry | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -1097,7 +1483,7 @@ function normalizeSnapshotEntry(value: unknown): SnapshotCacheEntry | null {
     return null;
   }
 
-  const models = normalizeModels(candidate.model ? [candidate.model] : []);
+  const models = normalizeModels(candidate.model ? [candidate.model] : [], persistedVersion);
   const model = models[0];
   if (!model) {
     return null;
@@ -1170,7 +1556,12 @@ export class ModelCatalogCacheStore {
   public putSearch(scope: CatalogCacheScope, result: CatalogCacheResult): void {
     this.hydrateForMutation();
     const key = this.buildSearchKey(scope);
-    const clonedResult = this.cloneSearchResult(result);
+    const clonedResult = scope.authScope === 'anon'
+      ? {
+        ...result,
+        models: sanitizeAnonymousPersistedModels(result.models),
+      }
+      : this.cloneSearchResult(result);
     const entry: SearchCacheEntry = {
       key,
       timestamp: Date.now(),
@@ -1178,12 +1569,7 @@ export class ModelCatalogCacheStore {
         ...scope,
         cursor: scope.cursor ?? null,
       },
-      result: scope.authScope === 'anon'
-        ? {
-          ...clonedResult,
-          models: sanitizeAnonymousPersistedModels(clonedResult.models),
-        }
-        : clonedResult,
+      result: clonedResult,
     };
 
     this.searchEntries.set(key, entry);
@@ -1489,7 +1875,7 @@ export class ModelCatalogCacheStore {
 
   private parsePayload<T>(
     rawValue: string | undefined,
-    normalizeEntry: (value: unknown) => T | null,
+    normalizeEntry: (value: unknown, persistedVersion: number) => T | null,
     rawEntryNeedsRewrite: (value: unknown) => boolean = () => false,
   ): ParsedPayload<T> {
     if (!rawValue) {
@@ -1515,7 +1901,7 @@ export class ModelCatalogCacheStore {
         return { status: 'invalid', entries: [], needsRewrite: false };
       }
 
-      const normalizedEntries = parsed.entries.map((entry) => normalizeEntry(entry));
+      const normalizedEntries = parsed.entries.map((entry) => normalizeEntry(entry, parsed.version));
       const entries = normalizedEntries.filter((entry): entry is T => entry !== null);
 
       return {

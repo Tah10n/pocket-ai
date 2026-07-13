@@ -1571,6 +1571,7 @@ describe('LLMEngineService', () => {
       ...downloadedProjector,
       id: 'projector-test-model-main-cancelled-mmproj-model.gguf',
       fileName: 'cancelled-mmproj-model.gguf',
+      downloadUrl: 'https://huggingface.co/test/model/resolve/main/cancelled-mmproj-model.gguf',
       localPath: 'cancelled-mmproj-model.gguf',
     };
     getInitMultimodalMock().mockClear();
@@ -1787,7 +1788,6 @@ describe('LLMEngineService', () => {
     const replacedProjector: ProjectorArtifact = {
       ...downloadedProjector,
       localPath: 'fresh-mmproj-model.gguf',
-      fileName: 'fresh-mmproj-model.gguf',
     };
     (registry.getModel as jest.Mock).mockReturnValue({
       ...createReadyVisionModel(),
@@ -1813,7 +1813,7 @@ describe('LLMEngineService', () => {
   it('reinitializes same active projector when stable artifact metadata changes without mtime', async () => {
     const originalProjector: ProjectorArtifact = {
       ...downloadedProjector,
-      hfRevision: 'revision-a',
+      hfRevision: 'main',
       sha256: 'sha256-a',
     };
     (registry.getModel as jest.Mock).mockReturnValue({
@@ -1837,7 +1837,7 @@ describe('LLMEngineService', () => {
       projectorModificationTime: null,
       projectorFallbackMarker: expect.any(String),
       projectorFileName: downloadedProjector.fileName,
-      projectorHfRevision: 'revision-a',
+      projectorHfRevision: 'main',
       projectorSha256: 'sha256-a',
     }));
 
@@ -1847,9 +1847,6 @@ describe('LLMEngineService', () => {
 
     const updatedProjector: ProjectorArtifact = {
       ...originalProjector,
-      fileName: 'renamed-mmproj-model.gguf',
-      downloadUrl: 'https://huggingface.co/test/model/resolve/revision-b/renamed-mmproj-model.gguf',
-      hfRevision: 'revision-b',
       sha256: 'sha256-b',
     };
     (registry.getModel as jest.Mock).mockReturnValue({
@@ -1881,9 +1878,9 @@ describe('LLMEngineService', () => {
       projectorSizeBytes: 1024,
       projectorModificationTime: null,
       projectorFallbackMarker: expect.any(String),
-      projectorFileName: 'renamed-mmproj-model.gguf',
+      projectorFileName: downloadedProjector.fileName,
       projectorDownloadUrl: updatedProjector.downloadUrl,
-      projectorHfRevision: 'revision-b',
+      projectorHfRevision: 'main',
       projectorSha256: 'sha256-b',
     }));
     expect(updatedActiveMultimodalContext?.projectorFallbackMarker)
@@ -1931,6 +1928,7 @@ describe('LLMEngineService', () => {
       ...downloadedProjector,
       id: 'projector-test-model-main-replacement-mmproj-model.gguf',
       fileName: 'replacement-mmproj-model.gguf',
+      downloadUrl: 'https://huggingface.co/test/model/resolve/main/replacement-mmproj-model.gguf',
       localPath: 'replacement-mmproj-model.gguf',
     };
     (llmEngineService as any).activeMultimodalContext = {

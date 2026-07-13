@@ -1191,7 +1191,7 @@ describe('modelCapabilities', () => {
       ...identity,
       id: buildProjectorArtifactId(identity),
       ownerModelId: modelId,
-      downloadUrl: 'https://example.com/shared-projector.gguf',
+      downloadUrl: `https://example.com/${projectorFileName}`,
       size: 100,
       localPath: 'stored-MMProj-Audio.GGUF',
       lifecycleStatus: 'downloaded' as const,
@@ -1227,7 +1227,86 @@ describe('modelCapabilities', () => {
     expect(projectorArtifactMatchesCandidate(legacyArtifact, candidate)).toBe(true);
     expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([candidate]);
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: true });
+    expect(projectorArtifactMatchesCandidate({
+      ...model.artifacts[0],
+      sha256: undefined,
+      sizeBytes: null,
+    }, candidate)).toBe(true);
+    expect(projectorArtifactMatchesCandidate(model.artifacts[0], {
+      ...candidate,
+      sha256: undefined,
+      size: null,
+    })).toBe(true);
+    const mirrorDownloadUrl = `http://example.com/${projectorFileName}`;
+    expect(projectorArtifactMatchesCandidate({
+      ...model.artifacts[0],
+      downloadUrl: mirrorDownloadUrl,
+    }, {
+      ...candidate,
+      downloadUrl: mirrorDownloadUrl,
+    })).toBe(true);
+    const mismatchedMirrorUrl = 'http://example.com/Adapters/Audio/MMProj-Audio.GGUF';
+    expect(projectorArtifactMatchesCandidate({
+      ...model.artifacts[0],
+      downloadUrl: mismatchedMirrorUrl,
+    }, {
+      ...candidate,
+      downloadUrl: mismatchedMirrorUrl,
+    })).toBe(false);
   });
+
+  it.each(['legacy-first', 'current-first'] as const)(
+    'prefers the candidate whose raw id is its current id over a colliding legacy alias (%s)',
+    (candidateOrder) => {
+      const modelId = 'author/current-before-legacy-candidate';
+      const ownerVariantId = 'mixed-q4';
+      const legacyIdentity = {
+        repoId: modelId,
+        hfRevision: 'main',
+        ownerVariantId,
+        fileName: 'Adapters/MMProj.GGUF',
+      };
+      const currentIdentity = {
+        ...legacyIdentity,
+        fileName: 'adapters/mmproj.gguf',
+      };
+      const sharedId = buildLegacyProjectorArtifactId(legacyIdentity);
+      expect(buildProjectorArtifactId(currentIdentity)).toBe(sharedId);
+      expect(buildProjectorArtifactId(legacyIdentity)).not.toBe(sharedId);
+      const makeCandidate = (identity: typeof legacyIdentity, id: string) => ({
+        ...identity,
+        id,
+        ownerModelId: modelId,
+        downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${identity.fileName}`,
+        size: 100,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      });
+      const legacyCandidate = makeCandidate(legacyIdentity, sharedId);
+      const currentCandidate = makeCandidate(currentIdentity, sharedId);
+      const projectorCandidates = candidateOrder === 'legacy-first'
+        ? [legacyCandidate, currentCandidate]
+        : [currentCandidate, legacyCandidate];
+      const model = {
+        id: modelId,
+        activeVariantId: ownerVariantId,
+        variants: [{
+          variantId: ownerVariantId,
+          fileName: 'model.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'audio'] as ('text' | 'audio')[],
+          projectorCandidates,
+        }],
+        projectorCandidates,
+      };
+
+      expect(getEffectiveActiveVariantProjectorCandidates(model).map(({ fileName }) => fileName))
+        .toEqual([currentCandidate.fileName]);
+      expect(resolveEffectiveActiveVariantNativeSupport(model))
+        .toEqual({ vision: false, audio: true });
+    },
+  );
 
   it('does not alias a legacy id collision across case-distinct remote paths', () => {
     const modelId = 'author/legacy-projector-collision';
@@ -1247,7 +1326,7 @@ describe('modelCapabilities', () => {
       ...lowerIdentity,
       id: buildProjectorArtifactId(lowerIdentity),
       ownerModelId: modelId,
-      downloadUrl: 'https://example.com/shared-projector.gguf',
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${lowerIdentity.fileName}`,
       size: 100,
       lifecycleStatus: 'available' as const,
       matchStatus: 'matched' as const,
@@ -1258,7 +1337,7 @@ describe('modelCapabilities', () => {
       requiredFor: ['image' as const],
       hfRevision: 'main',
       remoteFileName: upperIdentity.fileName,
-      downloadUrl: lowerCandidate.downloadUrl,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${upperIdentity.fileName}`,
       sizeBytes: lowerCandidate.size,
       installState: 'installed' as const,
     };
@@ -1282,7 +1361,7 @@ describe('modelCapabilities', () => {
     expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
   });
 
-  it('does not alias a legacy id collision across case-distinct owner variants', () => {
+  it('resolves a current id before a colliding legacy owner-variant alias', () => {
     const modelId = 'author/legacy-owner-variant-collision';
     const projectorFileName = 'projectors/mmproj-shared.gguf';
     const upperIdentity = {
@@ -1299,7 +1378,7 @@ describe('modelCapabilities', () => {
       ...identity,
       id: buildProjectorArtifactId(identity),
       ownerModelId: modelId,
-      downloadUrl: 'https://example.com/shared-projector.gguf',
+      downloadUrl: `https://example.com/${projectorFileName}`,
       size: 100,
       lifecycleStatus: 'available' as const,
       matchStatus: 'matched' as const,
@@ -1345,7 +1424,8 @@ describe('modelCapabilities', () => {
     expect(upperCandidate.id).not.toBe(lowerCandidate.id);
     expect(upperLegacyArtifact.id).toBe(lowerCandidate.id);
     expect(projectorArtifactMatchesCandidate(upperLegacyArtifact, lowerCandidate)).toBe(true);
-    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(getEffectiveActiveVariantProjectorCandidates(model).map(({ id }) => id))
+      .toEqual([lowerCandidate.id]);
 
     const upperCurrentArtifact = {
       ...upperLegacyArtifact,
@@ -1359,6 +1439,121 @@ describe('modelCapabilities', () => {
     };
     expect(getEffectiveActiveVariantProjectorCandidates(upperActiveModel).map(({ id }) => id))
       .toEqual([upperCandidate.id]);
+  });
+
+  it.each(['legacy-first', 'current-first'] as const)(
+    'prefers established legacy requirements when the candidate itself still has the legacy id (%s)',
+    (artifactOrder) => {
+      const modelId = 'author/legacy-candidate-provenance';
+      const variantId = 'Model.Q4_K_M.gguf';
+      const identity = {
+        repoId: modelId,
+        hfRevision: 'main',
+        ownerVariantId: variantId,
+        fileName: 'Projectors/MMProj-Audio.GGUF',
+      };
+      const currentId = buildProjectorArtifactId(identity);
+      const legacyId = buildLegacyProjectorArtifactId(identity);
+      expect(currentId).not.toBe(legacyId);
+      const candidate = {
+        ...identity,
+        id: legacyId,
+        ownerModelId: modelId,
+        downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${identity.fileName}`,
+        size: 100,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      };
+      const legacyArtifact = {
+        id: legacyId,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['audio' as const],
+        hfRevision: candidate.hfRevision,
+        remoteFileName: candidate.fileName,
+        downloadUrl: candidate.downloadUrl,
+        sizeBytes: candidate.size,
+        installState: 'remote' as const,
+      };
+      const currentArtifact = {
+        ...legacyArtifact,
+        id: currentId,
+        requiredFor: ['image' as const],
+      };
+      const artifacts = artifactOrder === 'legacy-first'
+        ? [legacyArtifact, currentArtifact]
+        : [currentArtifact, legacyArtifact];
+      const model = {
+        id: modelId,
+        activeVariantId: variantId,
+        resolvedFileName: variantId,
+        variants: [{
+          variantId,
+          fileName: variantId,
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'audio'] as ('text' | 'audio')[],
+          projectorCandidates: [candidate],
+        }],
+        projectorCandidates: [candidate],
+        artifacts,
+      };
+
+      expect(getEffectiveActiveVariantProjectorCandidates(model).map(({ id }) => id))
+        .toEqual([legacyId]);
+      expect(resolveEffectiveActiveVariantNativeSupport(model))
+        .toEqual({ vision: false, audio: true });
+    },
+  );
+
+  it('fails closed when a legacy-id candidate has a conflicting derived-current-id artifact', () => {
+    const modelId = 'author/legacy-current-artifact-conflict';
+    const variantId = 'Model.Q4_K_M.gguf';
+    const identity = {
+      repoId: modelId,
+      hfRevision: 'main',
+      ownerVariantId: variantId,
+      fileName: 'Audio/MMProj.GGUF',
+    };
+    const currentId = buildProjectorArtifactId(identity);
+    const legacyId = buildLegacyProjectorArtifactId(identity);
+    expect(currentId).not.toBe(legacyId);
+    const candidate = {
+      ...identity,
+      id: legacyId,
+      ownerModelId: modelId,
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/${identity.fileName}`,
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const conflictingArtifact = {
+      id: currentId,
+      kind: 'multimodal_projector' as const,
+      requiredFor: ['audio' as const],
+      hfRevision: candidate.hfRevision,
+      remoteFileName: 'Stale/MMProj.GGUF',
+      downloadUrl: `https://huggingface.co/${modelId}/resolve/main/Stale/MMProj.GGUF`,
+      sizeBytes: candidate.size,
+      installState: 'remote' as const,
+    };
+    const model = {
+      id: modelId,
+      activeVariantId: variantId,
+      variants: [{
+        variantId,
+        fileName: variantId,
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as ('text' | 'audio')[],
+        projectorCandidates: [candidate],
+      }],
+      projectorCandidates: [candidate],
+      artifacts: [conflictingArtifact],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model))
+      .toEqual({ vision: false, audio: false });
   });
 
   it('preserves legacy artifact provenance when normalization creates a current-id duplicate', () => {
@@ -1375,7 +1570,7 @@ describe('modelCapabilities', () => {
       ...identity,
       id: buildProjectorArtifactId(identity),
       ownerModelId: modelId,
-      downloadUrl: 'https://example.com/shared-projector.gguf',
+      downloadUrl: `https://example.com/${projectorFileName}`,
       size: 100,
       localPath: 'stored-MMProj-Audio.GGUF',
       downloadProgress: 1,
@@ -1461,8 +1656,8 @@ describe('modelCapabilities', () => {
       ownerModelId: 'author/model',
       ownerVariantId: 'audio',
       repoId: 'author/model',
-      fileName: 'MMProj-Audio.GGUF',
-      downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-audio.gguf',
+      fileName: 'Adapters/Audio/MMProj-Audio.GGUF',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/Adapters/Audio/MMProj-Audio.GGUF',
       hfRevision: 'main',
       sha256: `sha256:${'a'.repeat(64).toUpperCase()}`,
       size: 100,
@@ -1486,7 +1681,7 @@ describe('modelCapabilities', () => {
         kind: 'multimodal_projector' as const,
         requiredFor: ['audio'] as Array<'audio'>,
         hfRevision: ' main ',
-        remoteFileName: `nested/${candidate.fileName.toLowerCase()}`,
+        remoteFileName: candidate.fileName,
         downloadUrl: candidate.downloadUrl,
         sizeBytes: candidate.size,
         sha256: 'a'.repeat(64),
@@ -1523,7 +1718,49 @@ describe('modelCapabilities', () => {
       label: 'different download URL',
       artifact: { downloadUrl: 'https://huggingface.co/author/model/resolve/main/mmproj-other.gguf' },
     },
-  ])('rejects projector modality evidence with $label', ({ artifact: artifactOverrides }) => {
+    {
+      label: 'same id in a different directory',
+      artifact: {
+        remoteFileName: 'vision/mmproj-audio.gguf',
+        downloadUrl: 'https://huggingface.co/author/model/resolve/main/vision/mmproj-audio.gguf',
+      },
+    },
+    {
+      label: 'candidate path and URL disagreement',
+      candidate: { fileName: 'audio/mmproj-audio.gguf' },
+      artifact: {},
+    },
+    {
+      label: 'candidate repo and URL disagreement',
+      candidate: { repoId: 'other/model' },
+      artifact: {},
+    },
+    {
+      label: 'URL revision disagreement',
+      candidate: { hfRevision: 'refs/pr/1' },
+      artifact: {},
+    },
+    {
+      label: 'HTTP Hugging Face URL',
+      candidate: { downloadUrl: 'http://huggingface.co/author/model/resolve/main/mmproj-audio.gguf' },
+      artifact: { downloadUrl: 'http://huggingface.co/author/model/resolve/main/mmproj-audio.gguf' },
+    },
+    {
+      label: 'HTTP short Hugging Face URL',
+      candidate: { downloadUrl: 'http://hf.co/author/model/resolve/main/mmproj-audio.gguf' },
+      artifact: { downloadUrl: 'http://hf.co/author/model/resolve/main/mmproj-audio.gguf' },
+    },
+    {
+      label: 'root-dotted Hugging Face URL',
+      candidate: { downloadUrl: 'https://huggingface.co./author/model/resolve/main/mmproj-audio.gguf' },
+      artifact: { downloadUrl: 'https://huggingface.co./author/model/resolve/main/mmproj-audio.gguf' },
+    },
+    {
+      label: 'root-dotted short Hugging Face URL',
+      candidate: { downloadUrl: 'https://hf.co./author/model/resolve/main/mmproj-audio.gguf' },
+      artifact: { downloadUrl: 'https://hf.co./author/model/resolve/main/mmproj-audio.gguf' },
+    },
+  ])('rejects projector modality evidence with $label', ({ artifact: artifactOverrides, ...testCase }) => {
     const candidate = {
       id: 'audio-projector',
       ownerModelId: 'author/model',
@@ -1536,6 +1773,7 @@ describe('modelCapabilities', () => {
       size: 100,
       lifecycleStatus: 'available' as const,
       matchStatus: 'matched' as const,
+      ...('candidate' in testCase ? testCase.candidate : {}),
     };
     const artifact = {
       id: candidate.id,
@@ -1567,6 +1805,178 @@ describe('modelCapabilities', () => {
     expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
     expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
   });
+
+  it('rejects a no-artifact Hugging Face candidate whose file path disagrees with its URL', () => {
+    const candidate = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'audio',
+      repoId: 'author/model',
+      fileName: 'audio/mmproj-audio.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/vision/mmproj-audio.gguf',
+      hfRevision: 'main',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      activeVariantId: 'audio',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+        projectorCandidates: [candidate],
+      }],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+  });
+
+  it('rejects an inconsistent Hugging Face candidate from sparse legacy capability inference', () => {
+    const candidate = {
+      id: 'legacy-projector',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName: 'audio/mmproj.gguf',
+      downloadUrl: 'https://huggingface.co/author/model/resolve/main/vision/mmproj.gguf',
+      hfRevision: 'main',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      projectorCandidates: [candidate],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+  });
+
+  it.each([
+    {
+      label: 'malformed mirror URL',
+      fileName: 'audio/mmproj.gguf',
+      downloadUrl: 'not a url',
+    },
+    {
+      label: 'unsafe projector path',
+      fileName: '../mmproj.gguf',
+      downloadUrl: 'https://example.com/../mmproj.gguf',
+    },
+    {
+      label: 'mirror path mismatch',
+      fileName: 'audio/mmproj.gguf',
+      downloadUrl: 'https://example.com/vision/mmproj.gguf',
+    },
+  ])('rejects a no-artifact candidate with $label', ({ fileName, downloadUrl }) => {
+    const candidate = {
+      id: 'legacy-projector',
+      ownerModelId: 'author/model',
+      repoId: 'author/model',
+      fileName,
+      downloadUrl,
+      hfRevision: 'main',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      projectorCandidates: [candidate],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+  });
+
+  it.each(['upper-first', 'lower-first'] as const)(
+    'fails closed for revision-case identities behind one folded projector id (%s)',
+    (candidateOrder) => {
+      const makeCandidate = (revision: 'Main' | 'main') => ({
+        id: buildProjectorArtifactId({
+          repoId: 'author/model',
+          hfRevision: revision,
+          ownerVariantId: 'audio',
+          fileName: 'mmproj-audio.gguf',
+        }),
+        ownerModelId: 'author/model',
+        ownerVariantId: 'audio',
+        repoId: 'author/model',
+        fileName: 'mmproj-audio.gguf',
+        downloadUrl: `https://huggingface.co/author/model/resolve/${revision}/mmproj-audio.gguf`,
+        hfRevision: revision,
+        size: 100,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      });
+      const upper = makeCandidate('Main');
+      const lower = makeCandidate('main');
+      expect(upper.id).toBe(lower.id);
+      const candidates = candidateOrder === 'upper-first' ? [upper, lower] : [lower, upper];
+      const model = {
+        id: 'author/model',
+        activeVariantId: 'audio',
+        variants: [{
+          variantId: 'audio',
+          fileName: 'model.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+          projectorCandidates: candidates,
+        }],
+      };
+
+      expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+      expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+    },
+  );
+
+  it.each(['first-mirror-first', 'second-mirror-first'] as const)(
+    'fails closed for ordinary mirrors behind one current projector id (%s)',
+    (candidateOrder) => {
+      const identity = {
+        repoId: 'author/model',
+        hfRevision: 'main',
+        ownerVariantId: 'audio',
+        fileName: 'mmproj-audio.gguf',
+      };
+      const makeCandidate = (downloadUrl: string) => ({
+        id: buildProjectorArtifactId(identity),
+        ownerModelId: 'author/model',
+        ...identity,
+        downloadUrl,
+        size: 100,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      });
+      const first = makeCandidate('https://mirror-a.example/mmproj-audio.gguf#one');
+      const second = makeCandidate('https://mirror-b.example/mmproj-audio.gguf#two');
+      const candidates = candidateOrder === 'first-mirror-first'
+        ? [first, second]
+        : [second, first];
+      const model = {
+        id: 'author/model',
+        activeVariantId: 'audio',
+        variants: [{
+          variantId: 'audio',
+          fileName: 'model.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1,
+          chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+          projectorCandidates: candidates,
+        }],
+      };
+
+      expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([]);
+      expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual({ vision: false, audio: false });
+    },
+  );
 
   it.each([
     { label: 'text', modalities: ['text'] as Array<'text'>, expected: { vision: false, audio: false } },

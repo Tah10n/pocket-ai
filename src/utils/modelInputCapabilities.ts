@@ -18,6 +18,7 @@ import type {
   HuggingFaceTreeEntry,
 } from '../types/huggingFace';
 import type { ChatAttachmentKind, ChatAttachmentProcessingState } from '../types/attachments';
+import { normalizeHuggingFaceFilePath } from './huggingFaceUrls';
 import { isProjectorFileName } from './modelProjectors';
 
 export interface InputProcessorRegistrySnapshot {
@@ -198,6 +199,15 @@ function normalizeSignal(value: unknown): string | null {
 
   const normalized = value.trim().toLowerCase();
   return normalized.length > 0 ? normalized : null;
+}
+
+export function normalizeCapabilityEvidenceValue(
+  source: CapabilityEvidence['source'],
+  value: unknown,
+): string | null {
+  return source === 'projector'
+    ? normalizeHuggingFaceFilePath(value)
+    : normalizeSignal(value);
 }
 
 function normalizeSignalForPatternMatching(value: string): string {
@@ -387,6 +397,12 @@ function normalizeCapabilityEvidenceSource(value: unknown): CapabilityEvidence['
 
 function getTreeEntryFileName(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string | null {
   return normalizeSignal(entry.rfilename ?? entry.filename ?? ('path' in entry ? entry.path : undefined));
+}
+
+function getExactTreeEntryFilePath(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string | null {
+  return normalizeHuggingFaceFilePath(
+    entry.rfilename ?? entry.filename ?? ('path' in entry ? entry.path : undefined),
+  );
 }
 
 function addEvidence(
@@ -703,7 +719,7 @@ export function mergeCapabilityEvidence(evidence: readonly CapabilityEvidence[])
 
   return evidence.flatMap((entry) => {
     const source = normalizeCapabilityEvidenceSource(entry.source);
-    const value = normalizeSignal(entry.value);
+    const value = source ? normalizeCapabilityEvidenceValue(source, entry.value) : null;
     const confidence = normalizeCapabilityConfidence(entry.confidence);
     if (!source || !value || !confidence) {
       return [];
@@ -785,7 +801,7 @@ export function inferDeclaredInputCapabilities(
   addKnownInputProfileEvidence(accumulator, payload ?? {}, treeEntries);
 
   for (const entry of treeEntries) {
-    const fileName = getTreeEntryFileName(entry);
+    const fileName = getExactTreeEntryFilePath(entry);
     if (!fileName || !isProjectorFileName(fileName)) {
       continue;
     }

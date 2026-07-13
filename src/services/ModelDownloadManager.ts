@@ -30,10 +30,18 @@ import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValida
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../utils/modelProjectors';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import {
   getEffectiveActiveVariantProjectorCandidates,
   getEffectiveActiveVariantSelectedProjectorId,
+  hasAmbiguousCurrentProjectorId,
+  hasAmbiguousLegacyProjectorAlias,
+  projectorArtifactMatchesCandidate,
+  projectorArtifactUsesLegacyAlias,
 } from '../utils/modelCapabilities';
 import {
   getAllModelProjectorCandidates,
@@ -865,40 +873,78 @@ export class ModelDownloadManager {
     };
     let artifacts = deriveArtifactsFromLegacyModel(artifactProjection, { preferLegacyRuntimeState: true });
     if (hasExplicitActiveVariantModalities) {
+      const allProjectorCandidates = getAllModelProjectorCandidates(model);
       const requiredFor = [
         ...(activeVariant.chatModalities?.includes('vision') ? ['image' as const] : []),
         ...(activeVariant.chatModalities?.includes('audio') ? ['audio' as const] : []),
       ];
-      if (requiredFor.length > 0) {
-        const effectiveProjectorsById = new Map(
-          projectorCandidates.map((projector) => [projector.id, projector] as const),
+      const artifactMatchesCandidateInModelScope = (
+        artifact: NonNullable<ModelMetadata['artifacts']>[number],
+        candidate: ProjectorArtifact,
+      ): boolean => {
+        const identity = {
+          repoId: candidate.repoId,
+          hfRevision: candidate.hfRevision,
+          fileName: candidate.fileName,
+          ownerVariantId: candidate.ownerVariantId,
+        };
+        const currentId = buildProjectorArtifactId(identity);
+        const legacyId = buildLegacyProjectorArtifactId(identity);
+        return projectorArtifactMatchesCandidate(artifact, candidate) && (
+          (
+            artifact.id === currentId
+            && !hasAmbiguousCurrentProjectorId(model, candidate)
+          )
+          || (
+            artifact.id === legacyId
+            && !hasAmbiguousLegacyProjectorAlias(model, candidate)
+          )
         );
-        artifacts = artifacts.map((artifact) => {
-          const projector = artifact.kind === 'multimodal_projector'
-            ? effectiveProjectorsById.get(artifact.id)
+      };
+      artifacts = artifacts.flatMap((artifact) => {
+        if (artifact.kind !== 'multimodal_projector') {
+          return [artifact];
+        }
+
+        const projector = projectorCandidates.find((candidate) => (
+          artifactMatchesCandidateInModelScope(artifact, candidate)
+        ));
+        if (!projector) {
+          const outOfScopeProjector = allProjectorCandidates.find((candidate) => (
+            artifactMatchesCandidateInModelScope(artifact, candidate)
+          ));
+          return outOfScopeProjector ? [artifact] : [];
+        }
+        if (requiredFor.length === 0 || artifact.id !== projector.id) {
+          return [];
+        }
+
+        const compatiblePersistedArtifacts = model.artifacts?.filter((candidate) => (
+          artifactMatchesCandidateInModelScope(candidate, projector)
+        )) ?? [];
+        const legacyPersistedArtifacts = compatiblePersistedArtifacts.filter((candidate) => (
+          projectorArtifactUsesLegacyAlias(candidate, projector)
+        ));
+        const preferredPersistedArtifact = legacyPersistedArtifacts.length === 1
+          ? legacyPersistedArtifacts[0]
+          : legacyPersistedArtifacts.length === 0
+            ? compatiblePersistedArtifacts.find((candidate) => candidate.id === projector.id)
             : undefined;
-          if (!projector || artifact.remoteFileName !== projector.fileName) {
-            return artifact;
-          }
+        const persistedRequiredFor = preferredPersistedArtifact?.requiredFor.filter((requiredInput) => (
+            requiredInput !== 'text' && requiredFor.includes(requiredInput)
+        ));
 
-          const persistedRequiredFor = model.artifacts
-            ?.find((candidate) => (
-              candidate.kind === 'multimodal_projector'
-              && candidate.id === artifact.id
-              && candidate.remoteFileName === artifact.remoteFileName
-            ))
-            ?.requiredFor.filter((requiredInput) => (
-              requiredInput !== 'text' && requiredFor.includes(requiredInput)
-            ));
-
-          return {
-            ...artifact,
-            requiredFor: persistedRequiredFor?.length ? persistedRequiredFor : requiredFor,
-          };
-        });
-      }
+        return [{
+          ...artifact,
+          requiredFor: persistedRequiredFor?.length ? persistedRequiredFor : requiredFor,
+        }];
+      });
     }
-    return artifacts.length > 0 ? { ...model, artifacts } : model;
+    if (artifacts.length > 0) {
+      return { ...model, artifacts };
+    }
+
+    return model.artifacts?.length ? { ...model, artifacts: undefined } : model;
   }
 
   private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {

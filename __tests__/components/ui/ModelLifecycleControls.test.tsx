@@ -165,8 +165,16 @@ describe('ModelProjectorStatus', () => {
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       chatModalities: ['text', 'vision'],
       projectorCandidates: [
-        buildProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf' }),
-        buildProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf' }),
+        buildProjector({
+          id: 'projector-org-model-main-mmproj-a.gguf',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+        }),
+        buildProjector({
+          id: 'projector-org-model-main-mmproj-b.gguf',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+        }),
       ],
     });
     const onChooseProjector = jest.fn();

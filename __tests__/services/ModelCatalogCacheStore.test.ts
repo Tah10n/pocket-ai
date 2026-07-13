@@ -20,6 +20,11 @@ import {
   inputCapabilityEvidenceSupportsModality,
   resolveEffectiveInputCapabilities,
 } from '../../src/utils/modelInputCapabilities';
+import { buildHuggingFaceResolveUrl } from '../../src/utils/huggingFaceUrls';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../../src/utils/modelProjectors';
 
 const STORAGE_ID = 'model-catalog-cache';
 const SEARCH_CACHE_KEY = 'catalog-search-cache-v1';
@@ -55,7 +60,7 @@ function buildProjectorCandidate(
     fileName,
     downloadUrl: options.localOnly
       ? `file:///private/${fileName}`
-      : `https://huggingface.co/${modelId}/resolve/main/${fileName}`,
+      : buildHuggingFaceResolveUrl(modelId, fileName, 'main'),
     size: 1024,
     localPath: `private-${fileName}`,
     lifecycleStatus: 'downloaded',
@@ -78,11 +83,31 @@ function buildProjectorArtifact(
     remoteFileName: fileName,
     downloadUrl: options.localOnly
       ? `file:///private/${fileName}`
-      : `https://huggingface.co/${modelId}/resolve/main/${fileName}`,
+      : buildHuggingFaceResolveUrl(modelId, fileName, 'main'),
     sizeBytes: 1024,
     localPath: `private-artifact-${fileName}`,
     installState: 'installed',
   };
+}
+
+function roundTripAnonymousModel(model: ModelMetadata): [ModelMetadata, ModelMetadata] {
+  const scope = {
+    query: model.id,
+    cursor: null,
+    pageSize: 20,
+    sort: null,
+    authScope: 'anon' as const,
+  };
+  const store = new ModelCatalogCacheStore();
+  store.putSearch(scope, { models: [model], hasMore: false, nextCursor: null });
+  store.putModelSnapshots([model], 'anon');
+  const reloadedStore = new ModelCatalogCacheStore();
+  const searchModel = reloadedStore.getSearch(scope, 1000)?.models[0];
+  const snapshotModel = reloadedStore.getModelSnapshot(model.id, 'anon', 1000);
+  expect(searchModel).toBeDefined();
+  expect(snapshotModel).toBeDefined();
+  expect(snapshotModel).not.toBeNull();
+  return [searchModel as ModelMetadata, snapshotModel as ModelMetadata];
 }
 
 type NativeCacheMatrixCase = {
@@ -132,8 +157,8 @@ const NATIVE_CACHE_MATRIX: NativeCacheMatrixCase[] = [
       chatModalities: ['text', 'vision'],
       declaredImage: 'supported',
       declaredAudio: 'unknown',
-      projectorFileNames: ['mmproj-vision.gguf'],
-      artifactRequirements: [['image']],
+      projectorFileNames: [],
+      artifactRequirements: [],
       support: { vision: true, audio: false },
     },
   },
@@ -170,13 +195,13 @@ const NATIVE_CACHE_MATRIX: NativeCacheMatrixCase[] = [
       chatModalities: ['text', 'vision'],
       declaredImage: 'supported',
       declaredAudio: 'unknown',
-      projectorFileNames: ['mmproj-vision.gguf'],
-      artifactRequirements: [['image']],
+      projectorFileNames: [],
+      artifactRequirements: [],
       support: { vision: true, audio: false },
     },
   },
   {
-    name: 'safe audio plus runtime-only vision with case-insensitive projector evidence',
+    name: 'safe audio plus runtime-only vision with exact projector evidence',
     model: () => {
       const id = 'matrix/safe-audio';
       const fileName = 'mmproj-audio.gguf';
@@ -191,7 +216,7 @@ const NATIVE_CACHE_MATRIX: NativeCacheMatrixCase[] = [
           evidence: [
             { source: 'runtime', value: 'vision', confidence: 'high' },
             { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
-            { source: 'projector', value: 'MMPROJ-AUDIO.GGUF', confidence: 'medium' },
+            { source: 'projector', value: fileName, confidence: 'medium' },
             VIDEO_CATALOG_EVIDENCE,
           ],
         },
@@ -368,8 +393,8 @@ const NATIVE_CACHE_MATRIX: NativeCacheMatrixCase[] = [
       chatModalities: ['text', 'vision', 'audio'],
       declaredImage: 'supported',
       declaredAudio: 'supported',
-      projectorFileNames: ['mmproj-vision.gguf', 'mmproj-audio.gguf'],
-      artifactRequirements: [['image'], ['audio']],
+      projectorFileNames: ['mmproj-audio.gguf'],
+      artifactRequirements: [['audio']],
       support: { vision: true, audio: true },
     },
   },
@@ -404,8 +429,8 @@ const NATIVE_CACHE_MATRIX: NativeCacheMatrixCase[] = [
       chatModalities: ['text', 'vision'],
       declaredImage: 'supported',
       declaredAudio: 'unknown',
-      projectorFileNames: ['mmproj-vision.gguf'],
-      artifactRequirements: [['image']],
+      projectorFileNames: [],
+      artifactRequirements: [],
       support: { vision: true, audio: false },
     },
   },
@@ -795,6 +820,737 @@ describe('ModelCatalogCacheStore', () => {
     },
   );
 
+  it('keeps only the exact full-path projector when two candidates share a basename', () => {
+    const id = 'identity/same-basename';
+    const audio = buildProjectorCandidate(id, 'audio-projector', 'audio/mmproj.gguf');
+    const vision = buildProjectorCandidate(id, 'vision-projector', 'vision/mmproj.gguf');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: audio.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [audio, vision],
+      artifacts: [
+        buildProjectorArtifact(id, audio.id, audio.fileName, ['audio']),
+        buildProjectorArtifact(id, vision.id, vision.fileName, ['audio']),
+      ],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates?.map((candidate) => candidate.fileName)).toEqual([audio.fileName]);
+      expect(cached.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({ id: audio.id, remoteFileName: audio.fileName })]);
+    }
+  });
+
+  it('keeps case-distinct projector paths separate in current cache payloads', () => {
+    const id = 'identity/case-distinct';
+    const upper = buildProjectorCandidate(id, 'upper-projector', 'Adapters/MMProj.GGUF');
+    const lower = buildProjectorCandidate(id, 'lower-projector', 'Adapters/mmproj.gguf');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: upper.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [upper, lower],
+      artifacts: [
+        buildProjectorArtifact(id, upper.id, upper.fileName, ['audio']),
+        buildProjectorArtifact(id, lower.id, lower.fileName, ['audio']),
+      ],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates?.map((candidate) => candidate.fileName)).toEqual([upper.fileName]);
+      expect(cached.inputCapabilities?.evidence).toContainEqual(
+        expect.objectContaining({ source: 'projector', value: upper.fileName }),
+      );
+    }
+  });
+
+  it.each(['lower-first', 'upper-first'] as const)(
+    'keeps an exact current artifact when its id also equals a colliding legacy alias (%s)',
+    (candidateOrder) => {
+      const id = 'identity/current-id-before-legacy';
+      const lowerIdentity = {
+        repoId: id,
+        hfRevision: 'main',
+        fileName: 'projectors/mmproj.gguf',
+      };
+      const upperIdentity = {
+        repoId: id,
+        hfRevision: 'main',
+        fileName: 'projectors/MMProj.gguf',
+      };
+      const lower = buildProjectorCandidate(
+        id,
+        buildProjectorArtifactId(lowerIdentity),
+        lowerIdentity.fileName,
+      );
+      const upper = buildProjectorCandidate(
+        id,
+        buildProjectorArtifactId(upperIdentity),
+        upperIdentity.fileName,
+      );
+      expect(lower.id).not.toBe(upper.id);
+      expect(lower.id).toBe(buildLegacyProjectorArtifactId(lowerIdentity));
+      expect(lower.id).toBe(buildLegacyProjectorArtifactId(upperIdentity));
+
+      const model = buildModel({
+        id,
+        chatModalities: ['text', 'audio'],
+        inputCapabilities: {
+          detectedAt: 1,
+          declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+          evidence: [
+            { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+            { source: 'projector', value: lower.fileName, confidence: 'medium' },
+          ],
+        },
+        projectorCandidates: candidateOrder === 'lower-first' ? [lower, upper] : [upper, lower],
+        artifacts: [buildProjectorArtifact(id, lower.id, lower.fileName, ['audio'])],
+      });
+
+      for (const cached of roundTripAnonymousModel(model)) {
+        expect(cached.projectorCandidates).toEqual([
+          expect.objectContaining({ id: lower.id, fileName: lower.fileName }),
+        ]);
+        expect(cached.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+          .toEqual([expect.objectContaining({
+            id: lower.id,
+            remoteFileName: lower.fileName,
+            requiredFor: ['audio'],
+          })]);
+        expect(cached.inputCapabilities?.evidence).toContainEqual(
+          expect.objectContaining({ source: 'projector', value: lower.fileName }),
+        );
+      }
+    },
+  );
+
+  it('fails closed for ambiguous legacy v6 basename evidence in search and snapshot payloads', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/legacy-ambiguous';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [
+        buildProjectorCandidate(id, 'audio-projector', 'audio/mmproj.gguf'),
+        buildProjectorCandidate(id, 'vision-projector', 'vision/mmproj.gguf'),
+      ],
+    });
+    const searchEntry = {
+      key: `${id}::__initial__::20::__default__::anon`,
+      timestamp: Date.now(),
+      scope,
+      result: { models: [model], hasMore: false, nextCursor: null },
+    };
+    const snapshotEntry = {
+      key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model,
+    };
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({ version: 6, entries: [searchEntry] }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({ version: 6, entries: [snapshotEntry] }));
+
+    const store = new ModelCatalogCacheStore();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+    expect(JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string).version).toBe(7);
+    expect(JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string).version).toBe(7);
+  });
+
+  it('fails closed for case-distinct identities behind one folded legacy full path', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/legacy-case-ambiguous';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'adapters/mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [
+        buildProjectorCandidate(id, 'upper-projector', 'Adapters/MMProj.GGUF'),
+        buildProjectorCandidate(id, 'lower-projector', 'Adapters/mmproj.gguf'),
+      ],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+        result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+  });
+
+  it('migrates a unique folded legacy full path to its exact remote identity', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/legacy-full-path-unique';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const projector = buildProjectorCandidate(id, 'audio-projector', 'Nested/Audio/MMProj.GGUF');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'nested\\audio\\mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+        result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    for (const cached of [
+      store.getSearch(scope, 1000)?.models[0],
+      store.getModelSnapshot(id, 'anon', 1000),
+    ]) {
+      expect(cached?.projectorCandidates?.[0]?.fileName).toBe(projector.fileName);
+      expect(cached?.inputCapabilities?.evidence).toContainEqual(
+        expect.objectContaining({ source: 'projector', value: projector.fileName }),
+      );
+    }
+  });
+
+  it('migrates a unique legacy v6 basename to its exact full path in both payloads', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/legacy-unique';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const projector = buildProjectorCandidate(id, 'audio-projector', 'nested/Audio/MMProj.GGUF');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, projector.id, projector.fileName, ['audio'])],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`,
+        timestamp: Date.now(), scope, result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    for (const cached of [
+      store.getSearch(scope, 1000)?.models[0],
+      store.getModelSnapshot(id, 'anon', 1000),
+    ]) {
+      expect(cached?.projectorCandidates?.[0]?.fileName).toBe(projector.fileName);
+      expect(cached?.inputCapabilities?.evidence).toContainEqual(
+        expect.objectContaining({ source: 'projector', value: projector.fileName }),
+      );
+    }
+    expect(storage.getString(SEARCH_CACHE_KEY)).toContain(projector.fileName);
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).toContain(projector.fileName);
+  });
+
+  it.each([
+    {
+      label: 'file path',
+      mutate: (projector: NonNullable<ModelMetadata['projectorCandidates']>[number]) => {
+        projector.fileName = 'audio/mmproj.gguf';
+      },
+    },
+    {
+      label: 'repository',
+      mutate: (projector: NonNullable<ModelMetadata['projectorCandidates']>[number]) => {
+        projector.repoId = 'other/model';
+      },
+    },
+    {
+      label: 'revision',
+      mutate: (projector: NonNullable<ModelMetadata['projectorCandidates']>[number]) => {
+        projector.hfRevision = 'dev';
+      },
+    },
+    {
+      label: 'host',
+      mutate: (projector: NonNullable<ModelMetadata['projectorCandidates']>[number]) => {
+        projector.downloadUrl = projector.downloadUrl.replace('huggingface.co', 'example.com');
+      },
+    },
+    {
+      label: 'malformed URL',
+      mutate: (projector: NonNullable<ModelMetadata['projectorCandidates']>[number]) => {
+        projector.downloadUrl = 'not-a-url';
+      },
+    },
+  ])('drops a candidate whose $label disagrees with its remote identity', ({ label, mutate }) => {
+    const id = `identity/candidate-${label.replace(/\s+/gu, '-')}-mismatch`;
+    const projector = buildProjectorCandidate(id, 'mismatched-projector', 'vision/mmproj.gguf');
+    mutate(projector);
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, projector.id, projector.fileName, ['audio'])],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates).toBeUndefined();
+      expect(cached.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
+        .toBe(false);
+    }
+  });
+
+  it('drops a same-id artifact when its remote URL identifies another path', () => {
+    const id = 'identity/artifact-url-mismatch';
+    const projector = buildProjectorCandidate(id, 'audio-projector', 'audio/mmproj.gguf');
+    const staleArtifact = buildProjectorArtifact(id, projector.id, 'stale/mmproj.gguf', ['audio']);
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [staleArtifact],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates).toBeUndefined();
+      expect(cached.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
+        .toBe(false);
+    }
+  });
+
+  it('drops a legacy-id candidate when its derived-current-id artifact identifies another path', () => {
+    const id = 'identity/legacy-current-artifact-conflict';
+    const identity = {
+      repoId: id,
+      hfRevision: 'main',
+      fileName: 'Audio/MMProj.GGUF',
+    };
+    const currentId = buildProjectorArtifactId(identity);
+    const legacyId = buildLegacyProjectorArtifactId(identity);
+    expect(currentId).not.toBe(legacyId);
+    const projector = buildProjectorCandidate(id, legacyId, identity.fileName);
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, currentId, 'Stale/MMProj.GGUF', ['audio'])],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates).toBeUndefined();
+      expect(cached.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
+        .toBe(false);
+      expect(cached.inputCapabilities?.evidence.some((entry) => entry.source === 'projector') ?? false)
+        .toBe(false);
+    }
+  });
+
+  it('does not let a safe model candidate authorize a poisoned variant candidate with the same remote identity', () => {
+    const id = 'identity/candidate-scope-independence';
+    const fileName = 'shared/MMProj.GGUF';
+    const modelProjector = buildProjectorCandidate(id, 'model-projector', fileName);
+    const variantProjector = {
+      ...buildProjectorCandidate(id, 'variant-projector', fileName),
+      ownerVariantId: 'variant-b',
+    };
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [modelProjector],
+      variants: [{
+        variantId: 'variant-b',
+        fileName: 'model-b.gguf',
+        quantizationLabel: 'Q8_0',
+        size: 8_000,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [variantProjector],
+      }],
+      artifacts: [
+        buildProjectorArtifact(id, modelProjector.id, fileName, ['audio']),
+        buildProjectorArtifact(id, variantProjector.id, 'stale/MMProj.GGUF', ['audio']),
+      ],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates).toEqual([
+        expect.objectContaining({ id: modelProjector.id, fileName }),
+      ]);
+      expect(cached.variants?.[0]?.projectorCandidates).toBeUndefined();
+      expect(cached.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({ id: modelProjector.id, remoteFileName: fileName })]);
+    }
+  });
+
+  it('sees a raw canonically-equal artifact id collision before legacy normalization can hide it', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/raw-artifact-id-collision';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const projector = buildProjectorCandidate(id, ' audio-projector ', 'audio/mmproj.gguf');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [
+        buildProjectorArtifact(id, projector.id, projector.fileName, ['audio']),
+        buildProjectorArtifact(id, projector.id.trim(), 'stale/mmproj.gguf', ['audio']),
+      ],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+        result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+  });
+
+  it('drops raw duplicate artifacts with order-dependent projector requirements', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/raw-artifact-requirement-collision';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const projector = buildProjectorCandidate(id, 'shared-projector', 'shared/mmproj.gguf');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [
+        buildProjectorArtifact(id, projector.id, projector.fileName, ['audio']),
+        buildProjectorArtifact(id, projector.id, projector.fileName, ['image']),
+      ],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+        result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+  });
+
+  it.each(['current-first', 'legacy-first'] as const)(
+    'fails closed for divergent current and legacy projector requirements (%s)',
+    (artifactOrder) => {
+      const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+      const id = `identity/raw-alias-requirement-${artifactOrder}`;
+      const fileName = 'shared/mmproj.gguf';
+      const identity = { repoId: id, hfRevision: 'main', fileName };
+      const projector = buildProjectorCandidate(
+        id,
+        buildProjectorArtifactId(identity),
+        fileName,
+      );
+      const currentArtifact = buildProjectorArtifact(id, projector.id, fileName, ['image']);
+      const legacyArtifact = buildProjectorArtifact(
+        id,
+        buildLegacyProjectorArtifactId(identity),
+        fileName,
+        ['audio'],
+      );
+      const model = buildModel({
+        id,
+        chatModalities: ['text', 'vision', 'audio'],
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        inputCapabilities: {
+          detectedAt: 1,
+          declared: { image: 'supported', audio: 'supported', video: 'unknown' },
+          evidence: [
+            { source: 'tag', value: 'vision', confidence: 'medium' },
+            { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+            { source: 'projector', value: fileName, confidence: 'medium' },
+          ],
+        },
+        projectorCandidates: [projector],
+        artifacts: artifactOrder === 'current-first'
+          ? [currentArtifact, legacyArtifact]
+          : [legacyArtifact, currentArtifact],
+      });
+      const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+      storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+        version: 6,
+        entries: [{
+          key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+          result: { models: [model], hasMore: false, nextCursor: null },
+        }],
+      }));
+      storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+        version: 6,
+        entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+      }));
+
+      const store = new ModelCatalogCacheStore();
+      const searchModel = store.getSearch(scope, 1000)?.models[0] as ModelMetadata;
+      const snapshotModel = store.getModelSnapshot(id, 'anon', 1000) as ModelMetadata;
+      for (const cached of [searchModel, snapshotModel]) {
+        expect(cached.projectorCandidates).toBeUndefined();
+        expect(cached.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
+          .toBe(false);
+        expect(sanitizeCatalogModelRuntimeState(cached)).toEqual(cached);
+      }
+
+      const reloadedStore = new ModelCatalogCacheStore();
+      expect(reloadedStore.getSearch(scope, 1000)?.models[0]).toEqual(searchModel);
+      expect(reloadedStore.getModelSnapshot(id, 'anon', 1000)).toEqual(snapshotModel);
+      expect(JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string).version).toBe(7);
+      expect(JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string).version).toBe(7);
+    },
+  );
+
+  it('fails closed for a raw projector artifact without a multimodal requirement', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/raw-empty-projector-requirement';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const projector = buildProjectorCandidate(id, 'audio-projector', 'audio/mmproj.gguf');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, projector.id, projector.fileName, ['text'])],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+        result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+  });
+
+  it('counts a malformed raw path when resolving legacy basename ambiguity', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'identity/raw-malformed-legacy-alias';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const validProjector = buildProjectorCandidate(id, 'valid-projector', 'vision/mmproj.gguf');
+    const malformedProjector = buildProjectorCandidate(id, 'malformed-projector', '/audio/mmproj.gguf');
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'mmproj.gguf', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [validProjector, malformedProjector],
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`, timestamp: Date.now(), scope,
+        result: { models: [model], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: 6,
+      entries: [{ key: `${id}::anon`, id, authScope: 'anon', timestamp: Date.now(), model }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+  });
+
+  it('round-trips an exact nested projector identity unchanged', () => {
+    const id = 'identity/nested-happy-path';
+    const projector = buildProjectorCandidate(
+      id,
+      'nested-projector',
+      'Projectors/Audio + Vision/MMProj-A.GGUF',
+    );
+    const model = buildModel({
+      id,
+      chatModalities: ['text', 'audio'],
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
+        evidence: [
+          { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+          { source: 'projector', value: 'Projectors\\Audio + Vision\\MMProj-A.GGUF', confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [projector],
+      artifacts: [buildProjectorArtifact(id, projector.id, projector.fileName, ['audio'])],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+        id: projector.id,
+        repoId: id,
+        fileName: projector.fileName,
+        downloadUrl: buildHuggingFaceResolveUrl(id, projector.fileName, 'main'),
+      }));
+      expect(cached.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual(expect.objectContaining({ remoteFileName: projector.fileName }));
+    }
+  });
+
+  it('rederives a stale Q4 main artifact from the model-level Q8 identity', () => {
+    const id = 'identity/main-artifact';
+    const resolvedFileName = 'weights/model.Q8_0.gguf';
+    const model = buildModel({
+      id,
+      resolvedFileName,
+      hfRevision: 'main',
+      downloadUrl: buildHuggingFaceResolveUrl(id, resolvedFileName, 'main'),
+      size: 8_000,
+      sha256: 'a'.repeat(64),
+      artifacts: [{
+        id: 'stale-q4-main',
+        kind: 'main_model',
+        requiredFor: ['audio'],
+        hfRevision: 'main',
+        remoteFileName: 'weights/model.Q4_K_M.gguf',
+        downloadUrl: buildHuggingFaceResolveUrl(id, 'weights/model.Q4_K_M.gguf', 'main'),
+        sizeBytes: 4_000,
+        installState: 'remote',
+      }],
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      expect(cached.artifacts?.find((artifact) => artifact.kind === 'main_model'))
+        .toEqual(expect.objectContaining({
+          remoteFileName: resolvedFileName,
+          downloadUrl: buildHuggingFaceResolveUrl(id, resolvedFileName, 'main'),
+          sizeBytes: 8_000,
+          requiredFor: ['text'],
+        }));
+      expect(JSON.stringify(cached)).not.toContain('Q4_K_M');
+    }
+  });
+
   it('drops local-only main artifacts even when a resolved filename is present', () => {
     const sanitized = sanitizeCatalogModelRuntimeState(buildModel({
       id: 'matrix/local-main-artifact',
@@ -836,6 +1592,7 @@ describe('ModelCatalogCacheStore', () => {
         evidence: [
           { source: 'tag', value: 'vision', confidence: 'medium' },
           { source: 'runtime', value: 'audio', confidence: 'high' },
+          { source: 'projector', value: 'mmproj-migration.gguf', confidence: 'medium' },
         ],
       },
       selectedProjectorId: 'projector-migration',
@@ -999,6 +1756,14 @@ describe('ModelCatalogCacheStore', () => {
       chatModalities: ['text', 'vision'],
       visionSource: 'catalog_metadata',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [
+          { source: 'tag', value: 'vision', confidence: 'medium' },
+          { source: 'projector', value: safeProjector.fileName, confidence: 'medium' },
+        ],
+      },
       projectorCandidates: [safeProjector, privateDuplicate],
     });
     storage.set(SEARCH_CACHE_KEY, JSON.stringify({
@@ -1047,7 +1812,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBe(rewrittenSnapshot);
   });
 
-  it('rewrites current v6 search and snapshot payloads after field-level sanitization', () => {
+  it('rewrites current v7 search and snapshot payloads after field-level sanitization', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const id = 'rewrite/current-version-runtime-state';
     const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
@@ -1132,7 +1897,7 @@ describe('ModelCatalogCacheStore', () => {
         declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
         evidence: [
           { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
-          { source: 'projector', value: 'MMPROJ-VARIANT-AUDIO.GGUF', confidence: 'medium' },
+          { source: 'projector', value: audioProjector.fileName, confidence: 'medium' },
         ],
       },
       variants: [
@@ -1203,10 +1968,10 @@ describe('ModelCatalogCacheStore', () => {
     const variantId = 'vision.Q4_K_M.gguf';
     const projector = buildProjectorCandidate(id, 'vision-projector', 'mmproj-vision-owner.gguf');
     projector.ownerVariantId = variantId;
-    const sameIdImpostor = buildProjectorCandidate(id, projector.id, 'mmproj-impostor.gguf');
-    sameIdImpostor.ownerVariantId = variantId;
-    sameIdImpostor.matchStatus = 'user_selected';
-    sameIdImpostor.matchReason = 'user_selected_projector';
+    const unrelatedImpostor = buildProjectorCandidate(id, 'impostor-projector', 'mmproj-impostor.gguf');
+    unrelatedImpostor.ownerVariantId = variantId;
+    unrelatedImpostor.matchStatus = 'user_selected';
+    unrelatedImpostor.matchReason = 'user_selected_projector';
     const sourceModel = buildModel({
       id,
       resolvedFileName: variantId,
@@ -1217,9 +1982,12 @@ describe('ModelCatalogCacheStore', () => {
       inputCapabilities: {
         detectedAt: 222,
         declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
-        evidence: [{ source: 'tag', value: 'vision', confidence: 'medium' }],
+        evidence: [
+          { source: 'tag', value: 'vision', confidence: 'medium' },
+          { source: 'projector', value: projector.fileName, confidence: 'medium' },
+        ],
       },
-      projectorCandidates: [projector, sameIdImpostor],
+      projectorCandidates: [projector, unrelatedImpostor],
       artifacts: [buildProjectorArtifact(id, projector.id, projector.fileName, ['image'])],
       variants: [{
         variantId,
@@ -1271,6 +2039,14 @@ describe('ModelCatalogCacheStore', () => {
       chatModalities: ['text', 'vision'],
       visionSource: 'catalog_metadata',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [
+          { source: 'tag', value: 'vision', confidence: 'medium' },
+          { source: 'projector', value: safeProjector.fileName, confidence: 'medium' },
+        ],
+      },
       projectorCandidates: [safeProjector, userSelectedProjector],
       artifacts: [
         buildProjectorArtifact(id, safeProjector.id, safeProjector.fileName, ['image']),
@@ -1315,18 +2091,20 @@ describe('ModelCatalogCacheStore', () => {
     const id = 'variant/model-level-audio';
     const audioVariantId = 'audio-owner.Q4_K_M.gguf';
     const textVariantId = 'text-owner.Q4_K_M.gguf';
-    const projector = buildProjectorCandidate(id, 'audio-owner-projector', 'mmproj-owner-audio.gguf');
+    const projector = buildProjectorCandidate(
+      id,
+      'audio-owner-projector',
+      'projectors/audio/mmproj-owner-audio.gguf',
+    );
     projector.ownerVariantId = audioVariantId;
-    projector.fileName = 'C:\\private\\mmproj-owner-audio.gguf';
     const unrelated = buildProjectorCandidate(id, 'unrelated-projector', 'mmproj-unrelated.gguf');
     unrelated.ownerVariantId = textVariantId;
     const audioArtifact = buildProjectorArtifact(
       id,
       projector.id,
-      'mmproj-owner-audio.gguf',
+      projector.fileName,
       ['audio'],
     );
-    audioArtifact.remoteFileName = 'C:\\private-artifact\\mmproj-owner-audio.gguf';
     const sourceModel = buildModel({
       id,
       resolvedFileName: audioVariantId,
@@ -1337,7 +2115,7 @@ describe('ModelCatalogCacheStore', () => {
         declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
         evidence: [
           { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
-          { source: 'projector', value: 'C:\\private-evidence\\MMPROJ-OWNER-AUDIO.GGUF', confidence: 'medium' },
+          { source: 'projector', value: 'projectors\\audio\\mmproj-owner-audio.gguf', confidence: 'medium' },
         ],
       },
       projectorCandidates: [projector, unrelated],
@@ -1379,15 +2157,15 @@ describe('ModelCatalogCacheStore', () => {
       expect(model?.chatModalities).toEqual(['text']);
       expect(model?.inputCapabilities?.evidence).toContainEqual(expect.objectContaining({
         source: 'projector',
-        value: 'mmproj-owner-audio.gguf',
+        value: projector.fileName,
       }));
       expect(model?.projectorCandidates).toEqual([
-        expect.objectContaining({ id: projector.id, fileName: 'mmproj-owner-audio.gguf' }),
+        expect.objectContaining({ id: projector.id, fileName: projector.fileName }),
       ]);
       expect(model?.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
         .toEqual([expect.objectContaining({
           id: projector.id,
-          remoteFileName: 'mmproj-owner-audio.gguf',
+          remoteFileName: projector.fileName,
           requiredFor: ['audio'],
         })]);
       expect(resolveEffectiveActiveVariantNativeSupport(model as ModelMetadata))
@@ -1896,6 +2674,14 @@ describe('ModelCatalogCacheStore', () => {
       artifactRole: 'primary_chat_model',
       visionSource: 'catalog_metadata',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [
+          { source: 'projector', value: 'mmproj-selected-f16.gguf', confidence: 'medium' },
+          { source: 'projector', value: 'mmproj-ambiguous-f16.gguf', confidence: 'medium' },
+        ],
+      },
       selectedProjectorId: 'projector-selected',
       projectorCandidates: [
         {
@@ -1966,6 +2752,11 @@ describe('ModelCatalogCacheStore', () => {
     const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
     const model = buildModel({
       id: 'public/vision-variant-model',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [{ source: 'projector', value: 'mmproj-model-q4.gguf', confidence: 'medium' }],
+      },
       variants: [
         {
           variantId: 'q4',
@@ -2173,6 +2964,11 @@ describe('ModelCatalogCacheStore', () => {
       artifactRole: 'primary_chat_model',
       visionSource: 'catalog_metadata',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [{ source: 'projector', value: 'mmproj-search-f16.gguf', confidence: 'medium' }],
+      },
       projectorCandidates: [{
         id: 'search-projector',
         ownerModelId: 'public/legacy-search-projector-resume',
@@ -2188,6 +2984,11 @@ describe('ModelCatalogCacheStore', () => {
     });
     const legacySnapshotModel = buildModel({
       id: 'public/legacy-variant-projector-resume',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [{ source: 'projector', value: 'mmproj-variant-f16.gguf', confidence: 'medium' }],
+      },
       variants: [{
         variantId: 'q4',
         fileName: 'model-q4.gguf',
@@ -2270,6 +3071,11 @@ describe('ModelCatalogCacheStore', () => {
       artifactRole: 'primary_chat_model',
       visionSource: 'catalog_metadata',
       visionConfidence: 'trusted',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [{ source: 'projector', value: 'mmproj-search-f16.gguf', confidence: 'medium' }],
+      },
       projectorCandidates: [{
         id: 'search-projector',
         ownerModelId: 'public/legacy-search-projector-progress',
@@ -2285,6 +3091,11 @@ describe('ModelCatalogCacheStore', () => {
     });
     const legacySnapshotModel = buildModel({
       id: 'public/legacy-variant-projector-progress',
+      inputCapabilities: {
+        detectedAt: 1,
+        declared: { image: 'supported', audio: 'unknown', video: 'unknown' },
+        evidence: [{ source: 'projector', value: 'mmproj-variant-f16.gguf', confidence: 'medium' }],
+      },
       variants: [{
         variantId: 'q4',
         fileName: 'model-q4.gguf',

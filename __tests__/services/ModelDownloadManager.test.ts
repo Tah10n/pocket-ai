@@ -24,6 +24,10 @@ import {
   isPrivateStorageWritable,
 } from '../../src/services/storage';
 import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../../src/utils/modelSize';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../../src/utils/modelProjectors';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 
 let logSpy: jest.SpyInstance;
@@ -149,7 +153,11 @@ const mockModel: ModelMetadata = {
 };
 
 const mockProjector: ProjectorArtifact = {
-  id: 'test/model::main::mmproj-model.gguf',
+  id: buildProjectorArtifactId({
+    repoId: 'test/model',
+    hfRevision: 'main',
+    fileName: 'mmproj-model.gguf',
+  }),
   ownerModelId: 'test/model',
   repoId: 'test/model',
   fileName: 'mmproj-model.gguf',
@@ -164,6 +172,12 @@ const mockProjector: ProjectorArtifact = {
 function buildVariantOnlyAudioModel(
   projector: ProjectorArtifact = {
     ...mockProjector,
+    id: buildProjectorArtifactId({
+      repoId: mockProjector.repoId,
+      hfRevision: mockProjector.hfRevision,
+      ownerVariantId: 'audio-q4',
+      fileName: mockProjector.fileName,
+    }),
     ownerVariantId: 'audio-q4',
   },
 ): ModelMetadata {
@@ -625,6 +639,12 @@ describe('ModelDownloadManager Basic', () => {
   it('deletes a variant-only selected projector partial when cancelling its queued model', async () => {
     const variantProjector = {
       ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        ownerVariantId: 'audio-q4',
+        fileName: mockProjector.fileName,
+      }),
       ownerVariantId: 'audio-q4',
       localPath: 'variant-mmproj-partial.gguf',
       lifecycleStatus: 'downloading' as const,
@@ -2601,7 +2621,16 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it('completes a variant-only audio projector and derives its exact installed artifact', async () => {
-    const variantProjector = { ...mockProjector, ownerVariantId: 'audio-q4' };
+    const variantProjector = {
+      ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        ownerVariantId: 'audio-q4',
+        fileName: mockProjector.fileName,
+      }),
+      ownerVariantId: 'audio-q4',
+    };
     const variantModel = buildVariantOnlyAudioModel(variantProjector);
     let modelDownloaded = false;
     let projectorDownloaded = false;
@@ -2667,7 +2696,16 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it('records a variant-only projector failure on the active variant after the base model is ready', async () => {
-    const variantProjector = { ...mockProjector, ownerVariantId: 'audio-q4' };
+    const variantProjector = {
+      ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        ownerVariantId: 'audio-q4',
+        fileName: mockProjector.fileName,
+      }),
+      ownerVariantId: 'audio-q4',
+    };
     const variantModel = buildVariantOnlyAudioModel(variantProjector);
     let modelDownloaded = false;
     (FileSystem.createDownloadResumable as jest.Mock).mockImplementation((url: string) => ({
@@ -2705,10 +2743,23 @@ describe('ModelDownloadManager Basic', () => {
   });
 
   it('keeps separate persisted projector requirements within active mixed modalities', () => {
-    const imageProjector = { ...mockProjector, id: 'image-projector', fileName: 'mmproj-image.gguf' };
+    const imageProjector = {
+      ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        fileName: 'mmproj-image.gguf',
+      }),
+      fileName: 'mmproj-image.gguf',
+      downloadUrl: 'http://example.com/mmproj-image.gguf',
+    };
     const audioProjector = {
       ...mockProjector,
-      id: 'audio-projector',
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        fileName: 'mmproj-audio.gguf',
+      }),
       fileName: 'mmproj-audio.gguf',
       downloadUrl: 'http://example.com/mmproj-audio.gguf',
     };
@@ -2749,6 +2800,352 @@ describe('ModelDownloadManager Basic', () => {
     expect(synchronized.artifacts?.find((artifact) => artifact.id === imageProjector.id)?.requiredFor).toEqual(['image']);
     expect(synchronized.artifacts?.find((artifact) => artifact.id === audioProjector.id)?.requiredFor).toEqual(['audio']);
   });
+
+  it('does not restore projector requirements from a persisted artifact with another remote identity', () => {
+    const projector = {
+      ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        fileName: 'projectors/mmproj-audio.gguf',
+      }),
+      fileName: 'projectors/mmproj-audio.gguf',
+      downloadUrl: 'http://example.com/projectors/mmproj-audio.gguf',
+    };
+    const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+      ...mockModel,
+      activeVariantId: 'mixed-q4',
+      resolvedFileName: 'model-mixed.gguf',
+      variants: [{
+        variantId: 'mixed-q4',
+        fileName: 'model-mixed.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1000,
+        chatModalities: ['text', 'vision', 'audio'],
+        projectorCandidates: [projector],
+      }],
+      artifacts: [{
+        id: projector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+        remoteFileName: projector.fileName,
+        downloadUrl: 'http://example.com/stale/mmproj-audio.gguf',
+        sizeBytes: projector.size,
+        installState: 'remote',
+      }],
+    }) as ModelMetadata;
+
+    expect(synchronized.artifacts?.find((artifact) => artifact.id === projector.id)).toBeUndefined();
+  });
+
+  it('keeps an exact installed projector artifact owned by an inactive variant', () => {
+    const activeProjector = {
+      ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        ownerVariantId: 'variant-a',
+        fileName: 'active/mmproj-audio.gguf',
+      }),
+      ownerVariantId: 'variant-a',
+      fileName: 'active/mmproj-audio.gguf',
+      downloadUrl: 'http://example.com/active/mmproj-audio.gguf',
+    };
+    const inactiveProjector = {
+      ...mockProjector,
+      id: buildProjectorArtifactId({
+        repoId: mockProjector.repoId,
+        hfRevision: mockProjector.hfRevision,
+        ownerVariantId: 'variant-b',
+        fileName: 'inactive/mmproj-audio.gguf',
+      }),
+      ownerVariantId: 'variant-b',
+      fileName: 'inactive/mmproj-audio.gguf',
+      downloadUrl: 'http://example.com/inactive/mmproj-audio.gguf',
+    };
+    const inactiveArtifact = {
+      id: inactiveProjector.id,
+      kind: 'multimodal_projector' as const,
+      requiredFor: ['audio' as const],
+      hfRevision: inactiveProjector.hfRevision,
+      remoteFileName: inactiveProjector.fileName,
+      downloadUrl: inactiveProjector.downloadUrl,
+      sizeBytes: inactiveProjector.size,
+      localPath: 'file:///models/inactive-mmproj-audio.gguf',
+      installState: 'installed' as const,
+    };
+
+    const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+      ...mockModel,
+      activeVariantId: 'variant-a',
+      resolvedFileName: 'model-a.gguf',
+      variants: [
+        {
+          variantId: 'variant-a',
+          fileName: 'model-a.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1000,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [activeProjector],
+        },
+        {
+          variantId: 'variant-b',
+          fileName: 'model-b.gguf',
+          quantizationLabel: 'Q8_0',
+          size: 1000,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [inactiveProjector],
+        },
+      ],
+      artifacts: [inactiveArtifact],
+    }) as ModelMetadata;
+
+    expect(synchronized.artifacts?.find((artifact) => artifact.id === inactiveProjector.id))
+      .toEqual(inactiveArtifact);
+    expect(synchronized.artifacts?.find((artifact) => artifact.id === activeProjector.id))
+      .toEqual(expect.objectContaining({ requiredFor: ['audio'] }));
+  });
+
+  it.each(['current-first', 'legacy-first'] as const)(
+    'prefers a unique compatible legacy projector requirement independent of artifact order (%s)',
+    (artifactOrder) => {
+      const projector = {
+        ...mockProjector,
+        id: buildProjectorArtifactId({
+          repoId: mockProjector.repoId,
+          hfRevision: mockProjector.hfRevision,
+          fileName: 'Projectors/MMProj-Audio.GGUF',
+        }),
+        fileName: 'Projectors/MMProj-Audio.GGUF',
+        downloadUrl: 'http://example.com/Projectors/MMProj-Audio.GGUF',
+      };
+      const currentArtifact = {
+        id: projector.id,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['image' as const],
+        hfRevision: projector.hfRevision,
+        remoteFileName: projector.fileName,
+        downloadUrl: projector.downloadUrl,
+        sizeBytes: projector.size,
+        installState: 'remote' as const,
+      };
+      const legacyArtifact = {
+        ...currentArtifact,
+        id: buildLegacyProjectorArtifactId({
+          repoId: projector.repoId,
+          hfRevision: projector.hfRevision,
+          fileName: projector.fileName,
+        }),
+        requiredFor: ['audio' as const],
+      };
+      const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+        ...mockModel,
+        activeVariantId: 'mixed-q4',
+        resolvedFileName: 'model-mixed.gguf',
+        variants: [{
+          variantId: 'mixed-q4',
+          fileName: 'model-mixed.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1000,
+          chatModalities: ['text', 'vision', 'audio'],
+          projectorCandidates: [projector],
+        }],
+        artifacts: artifactOrder === 'current-first'
+          ? [currentArtifact, legacyArtifact]
+          : [legacyArtifact, currentArtifact],
+      }) as ModelMetadata;
+
+      expect(synchronized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({
+          id: projector.id,
+          requiredFor: ['audio'],
+        })]);
+    },
+  );
+
+  it.each(['legacy-first', 'current-first'] as const)(
+    'prefers legacy requirements when the active candidate still has the legacy id (%s)',
+    (artifactOrder) => {
+      const identity = {
+        repoId: mockModel.id,
+        hfRevision: 'main',
+        ownerVariantId: 'mixed-q4',
+        fileName: 'Projectors/MMProj-Audio.GGUF',
+      };
+      const currentId = buildProjectorArtifactId(identity);
+      const legacyId = buildLegacyProjectorArtifactId(identity);
+      expect(currentId).not.toBe(legacyId);
+      const projector = {
+        ...mockProjector,
+        ...identity,
+        id: legacyId,
+        ownerModelId: mockModel.id,
+        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/${identity.fileName}`,
+      };
+      const legacyArtifact = {
+        id: legacyId,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['audio' as const],
+        hfRevision: projector.hfRevision,
+        remoteFileName: projector.fileName,
+        downloadUrl: projector.downloadUrl,
+        sizeBytes: projector.size,
+        installState: 'remote' as const,
+      };
+      const currentArtifact = {
+        ...legacyArtifact,
+        id: currentId,
+        requiredFor: ['image' as const],
+      };
+      const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+        ...mockModel,
+        activeVariantId: 'mixed-q4',
+        resolvedFileName: 'model-mixed.gguf',
+        variants: [{
+          variantId: 'mixed-q4',
+          fileName: 'model-mixed.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1000,
+          chatModalities: ['text', 'vision', 'audio'],
+          projectorCandidates: [projector],
+        }],
+        artifacts: artifactOrder === 'legacy-first'
+          ? [legacyArtifact, currentArtifact]
+          : [currentArtifact, legacyArtifact],
+      }) as ModelMetadata;
+
+      expect(synchronized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({
+          id: legacyId,
+          requiredFor: ['audio'],
+        })]);
+    },
+  );
+
+  it.each(['current-first', 'legacy-first'] as const)(
+    'ignores an ambiguous legacy alias when restoring projector requirements (%s)',
+    (artifactOrder) => {
+      const sharedIdentity = {
+        repoId: mockModel.id,
+        hfRevision: 'main',
+        ownerVariantId: 'mixed-q4',
+      };
+      const upperProjector = {
+        ...mockProjector,
+        ...sharedIdentity,
+        id: buildProjectorArtifactId({
+          ...sharedIdentity,
+          fileName: 'Adapters/MMProj.GGUF',
+        }),
+        ownerModelId: mockModel.id,
+        fileName: 'Adapters/MMProj.GGUF',
+        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/Adapters/MMProj.GGUF`,
+      };
+      const lowerProjector = {
+        ...upperProjector,
+        id: buildProjectorArtifactId({
+          ...sharedIdentity,
+          fileName: 'Adapters/mmproj.gguf',
+        }),
+        fileName: 'Adapters/mmproj.gguf',
+        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/Adapters/mmproj.gguf`,
+      };
+      const currentArtifact = {
+        id: upperProjector.id,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['image' as const],
+        hfRevision: upperProjector.hfRevision,
+        remoteFileName: upperProjector.fileName,
+        downloadUrl: upperProjector.downloadUrl,
+        sizeBytes: upperProjector.size,
+        installState: 'remote' as const,
+      };
+      const ambiguousLegacyArtifact = {
+        ...currentArtifact,
+        id: buildLegacyProjectorArtifactId({
+          ...sharedIdentity,
+          fileName: upperProjector.fileName,
+        }),
+        requiredFor: ['audio' as const],
+      };
+      const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+        ...mockModel,
+        activeVariantId: 'mixed-q4',
+        resolvedFileName: 'model-mixed.gguf',
+        variants: [{
+          variantId: 'mixed-q4',
+          fileName: 'model-mixed.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1000,
+          chatModalities: ['text', 'vision', 'audio'],
+          projectorCandidates: [upperProjector, lowerProjector],
+        }],
+        artifacts: artifactOrder === 'current-first'
+          ? [currentArtifact, ambiguousLegacyArtifact]
+          : [ambiguousLegacyArtifact, currentArtifact],
+      }) as ModelMetadata;
+
+      expect(synchronized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({
+          id: upperProjector.id,
+          requiredFor: ['image'],
+        })]);
+    },
+  );
+
+  it.each(['legacy-first', 'current-first'] as const)(
+    'does not treat an ambiguous legacy candidate id as current (%s)',
+    (candidateOrder) => {
+      const sharedIdentity = {
+        repoId: mockModel.id,
+        hfRevision: 'main',
+        ownerVariantId: 'mixed-q4',
+      };
+      const legacyCandidate = {
+        ...mockProjector,
+        ...sharedIdentity,
+        id: buildLegacyProjectorArtifactId({
+          ...sharedIdentity,
+          fileName: 'Adapters/MMProj.GGUF',
+        }),
+        ownerModelId: mockModel.id,
+        fileName: 'Adapters/MMProj.GGUF',
+        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/Adapters/MMProj.GGUF`,
+      };
+      const currentCandidate = {
+        ...legacyCandidate,
+        id: buildProjectorArtifactId({
+          ...sharedIdentity,
+          fileName: 'adapters/mmproj.gguf',
+        }),
+        fileName: 'adapters/mmproj.gguf',
+        downloadUrl: `https://huggingface.co/${mockModel.id}/resolve/main/adapters/mmproj.gguf`,
+      };
+      expect(currentCandidate.id).toBe(legacyCandidate.id);
+      const projectorCandidates = candidateOrder === 'legacy-first'
+        ? [legacyCandidate, currentCandidate]
+        : [currentCandidate, legacyCandidate];
+      const synchronized = (modelDownloadManager as any).withSynchronizedArtifacts({
+        ...mockModel,
+        activeVariantId: 'mixed-q4',
+        resolvedFileName: 'model-mixed.gguf',
+        variants: [{
+          variantId: 'mixed-q4',
+          fileName: 'model-mixed.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1000,
+          chatModalities: ['text', 'vision', 'audio'],
+          projectorCandidates,
+        }],
+      }) as ModelMetadata;
+
+      expect(synchronized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
+        .toEqual([expect.objectContaining({
+          id: currentCandidate.id,
+          remoteFileName: currentCandidate.fileName,
+        })]);
+    },
+  );
 
   it('requests active multimodal readiness refresh after successful projector completion', async () => {
     let modelDownloaded = false;

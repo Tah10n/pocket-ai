@@ -27,12 +27,13 @@ function buildQueuedModel(
 }
 
 function buildProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const fileName = overrides.fileName ?? 'mmproj-model.gguf';
   return {
     id: 'vision/model:mmproj',
     ownerModelId: 'vision/model',
     repoId: 'vision/model',
-    fileName: 'mmproj-model.gguf',
-    downloadUrl: 'https://example.com/mmproj-model.gguf',
+    fileName,
+    downloadUrl: `https://example.com/${fileName}`,
     size: 256,
     lifecycleStatus: 'available',
     matchStatus: 'matched',

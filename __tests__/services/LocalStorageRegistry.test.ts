@@ -262,6 +262,7 @@ describe('LocalStorageRegistry', () => {
       id: 'test/model:q4-projector',
       ownerVariantId: 'q4',
       fileName: 'variant-mmproj.gguf',
+      downloadUrl: 'http://example.com/variant-mmproj.gguf',
       localPath: 'variant-mmproj.gguf',
     });
     const model = createMockModel({
@@ -276,11 +277,13 @@ describe('LocalStorageRegistry', () => {
         createProjectorArtifact({
           id: variantProjector.id,
           remoteFileName: variantProjector.fileName,
+          downloadUrl: variantProjector.downloadUrl,
           localPath: variantProjector.localPath,
         }),
         createProjectorArtifact({
           id: 'test/model:artifact-only-projector',
           remoteFileName: 'artifact-only-mmproj.gguf',
+          downloadUrl: 'http://example.com/artifact-only-mmproj.gguf',
           localPath: 'artifact-only-mmproj.gguf',
         }),
       ],
@@ -313,6 +316,7 @@ describe('LocalStorageRegistry', () => {
         createProjector({
           id: 'test/model:artifact-shared-projector',
           fileName: 'artifact-shared-mmproj.gguf',
+          downloadUrl: 'http://example.com/artifact-shared-mmproj.gguf',
           localPath: 'artifact-shared-mmproj.gguf',
         }),
       ],
@@ -330,12 +334,14 @@ describe('LocalStorageRegistry', () => {
           ownerModelId: 'test/other-model',
           ownerVariantId: 'q4',
           fileName: 'variant-shared-mmproj.gguf',
+          downloadUrl: 'http://example.com/variant-shared-mmproj.gguf',
           localPath: 'variant-shared-mmproj.gguf',
         })],
       }],
       artifacts: [createProjectorArtifact({
         id: 'test/other-model:artifact-projector',
         remoteFileName: 'artifact-shared-mmproj.gguf',
+        downloadUrl: 'http://example.com/artifact-shared-mmproj.gguf',
         localPath: 'artifact-shared-mmproj.gguf',
       })],
     });

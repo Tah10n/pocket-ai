@@ -3307,7 +3307,7 @@ describe('ModelCatalogService regressions', () => {
     { name: 'ready audio from the wrong variant', state: 'wrong_variant', preservesAudio: false, keepsReadiness: false, keepsSelection: false },
     { name: 'failed audio readiness without another runtime path', state: 'failed', preservesAudio: false, keepsReadiness: false, keepsSelection: false },
     { name: 'an installed matching audio artifact', state: 'artifact', preservesAudio: true, keepsReadiness: false, keepsSelection: false },
-    { name: 'an installed matching audio artifact with a normalized filename alias', state: 'artifact_normalized_filename', preservesAudio: true, keepsReadiness: false, keepsSelection: false },
+    { name: 'an installed audio artifact with a case and directory alias', state: 'artifact_normalized_filename', preservesAudio: false, keepsReadiness: false, keepsSelection: false },
     { name: 'an installed audio artifact without a local path', state: 'artifact_missing_path', preservesAudio: false, keepsReadiness: false, keepsSelection: false },
     { name: 'a selected downloaded audio projector', state: 'selected', preservesAudio: true, keepsReadiness: false, keepsSelection: true },
     { name: 'a selected downloaded projector with only declared audio evidence', state: 'selected_declared_only', preservesAudio: false, keepsReadiness: false, keepsSelection: false },

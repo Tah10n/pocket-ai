@@ -1,4 +1,5 @@
 import type { ModelArtifactRole, ProjectorArtifact } from '../types/multimodal';
+import { normalizeHuggingFaceFilePath } from './huggingFaceUrls';
 
 const PROJECTOR_FILE_NAME_PATTERN =
   /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/u;
@@ -26,13 +27,7 @@ function encodeProjectorPathIdentity(normalizedPath: string): string {
 }
 
 export function normalizeProjectorArtifactPath(fileName: string): string | null {
-  const normalized = fileName
-    .trim()
-    .replace(/\\+/gu, '/')
-    .replace(/\/+/gu, '/')
-    .replace(/^\/+|\/+$/gu, '');
-
-  return normalized.length > 0 ? normalized : null;
+  return normalizeHuggingFaceFilePath(fileName);
 }
 
 function normalizeProjectorArtifactFileIdentity(fileName: string): string | null {

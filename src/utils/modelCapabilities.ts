@@ -6,13 +6,20 @@ import type {
 } from '../types/models';
 import type { ModelChatModality } from '../types/multimodal';
 import { getActiveModelVariantKeys, resolveActiveModelVariant } from './activeModelVariant';
+import {
+  hasConsistentRemoteProjectorIdentity,
+  hasHuggingFaceHostname,
+  remoteProjectorIdentitiesEqual,
+  remoteProjectorIdentityKey,
+  resolveHuggingFaceResolveIdentity,
+  resolveRemoteProjectorIdentity,
+} from './huggingFaceUrls';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from './modelLimits';
 import { inputCapabilityEvidenceSupportsModality } from './modelInputCapabilities';
 import {
   buildLegacyProjectorArtifactId,
   buildProjectorArtifactId,
   normalizeProjectorArtifactPath,
-  normalizeProjectorFileName,
 } from './modelProjectors';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
 import { getValidatedMultimodalReadinessForResolvedScope } from './multimodalReadinessCore';
@@ -538,27 +545,53 @@ export function projectorArtifactMatchesCandidate(
     fileName: candidate.fileName,
     ownerVariantId: candidate.ownerVariantId,
   };
+  const currentCandidateId = buildProjectorArtifactId(candidateIdentity);
   const legacyCandidateId = buildLegacyProjectorArtifactId(candidateIdentity);
-  const hasExactCandidateId = artifact.id === candidate.id;
-  const hasLegacyAliasId = artifact.id !== candidate.id && artifact.id === legacyCandidateId;
+  const candidateIdDeclaresLegacyAlias = candidate.id === legacyCandidateId
+    && candidate.id !== currentCandidateId;
+  const hasExactCandidateId = artifact.id === currentCandidateId || (
+    artifact.id === candidate.id && !candidateIdDeclaresLegacyAlias
+  );
+  const hasLegacyAliasId = artifact.id !== currentCandidateId
+    && artifact.id === legacyCandidateId;
   const candidateArtifactPath = normalizeProjectorArtifactPath(candidate.fileName);
   const artifactPath = normalizeProjectorArtifactPath(artifact.remoteFileName);
   const hasExactArtifactPath = candidateArtifactPath !== null
     && artifactPath === candidateArtifactPath;
-  const pathsDifferOnlyByCase = candidateArtifactPath !== null
-    && artifactPath !== null
-    && artifactPath !== candidateArtifactPath
-    && artifactPath.toLowerCase() === candidateArtifactPath.toLowerCase();
-  const hasCompatibleFileIdentity = hasLegacyAliasId
-    ? hasExactArtifactPath
-    : !pathsDifferOnlyByCase
-      && normalizeProjectorFileName(artifact.remoteFileName)
-        === normalizeProjectorFileName(candidate.fileName);
+  const candidateRemoteIdentity = resolveRemoteProjectorIdentity({
+    repoId: candidate.repoId,
+    revision: candidate.hfRevision,
+    filePath: candidate.fileName,
+    downloadUrl: candidate.downloadUrl,
+  });
+  const artifactRemoteIdentity = resolveHuggingFaceResolveIdentity(artifact.downloadUrl);
+  const hasHuggingFaceUrl = hasHuggingFaceHostname(candidate.downloadUrl)
+    || hasHuggingFaceHostname(artifact.downloadUrl);
+  const candidateHasConsistentRemoteIdentity = hasConsistentRemoteProjectorIdentity({
+    repoId: candidate.repoId,
+    revision: candidate.hfRevision,
+    filePath: candidate.fileName,
+    downloadUrl: candidate.downloadUrl,
+  });
+  const artifactHasConsistentRemoteIdentity = hasConsistentRemoteProjectorIdentity({
+    repoId: candidate.repoId,
+    revision: artifact.hfRevision,
+    filePath: artifact.remoteFileName,
+    downloadUrl: artifact.downloadUrl,
+  });
+  const hasCompatibleRemoteIdentity = candidateRemoteIdentity && artifactRemoteIdentity
+    ? remoteProjectorIdentitiesEqual(candidateRemoteIdentity, artifactRemoteIdentity)
+    : !hasHuggingFaceUrl
+      && normalizeComparableProjectorDownloadUrl(artifact.downloadUrl)
+        === normalizeComparableProjectorDownloadUrl(candidate.downloadUrl);
 
   if (
     artifact.kind !== 'multimodal_projector'
     || (!hasExactCandidateId && !hasLegacyAliasId)
-    || !hasCompatibleFileIdentity
+    || !hasExactArtifactPath
+    || !candidateHasConsistentRemoteIdentity
+    || !artifactHasConsistentRemoteIdentity
+    || !hasCompatibleRemoteIdentity
     || (normalizeOptionalString(artifact.hfRevision) ?? 'main')
       !== (normalizeOptionalString(candidate.hfRevision) ?? 'main')
   ) {
@@ -571,21 +604,62 @@ export function projectorArtifactMatchesCandidate(
   ) && !projectorComparableValuesConflict(
     normalizeComparableProjectorSize(artifact.sizeBytes),
     normalizeComparableProjectorSize(candidate.size),
-  ) && !projectorComparableValuesConflict(
-    normalizeComparableProjectorDownloadUrl(artifact.downloadUrl),
-    normalizeComparableProjectorDownloadUrl(candidate.downloadUrl),
   );
 }
 
-function hasAmbiguousLegacyProjectorAlias(
+export function projectorArtifactUsesLegacyAlias(
+  artifact: NonNullable<ModelMetadata['artifacts']>[number],
+  candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
+): boolean {
+  const identity = {
+    repoId: candidate.repoId,
+    hfRevision: candidate.hfRevision,
+    fileName: candidate.fileName,
+    ownerVariantId: candidate.ownerVariantId,
+  };
+  return artifact.id === buildLegacyProjectorArtifactId(identity)
+    && artifact.id !== buildProjectorArtifactId(identity);
+}
+
+function getProjectorCandidateScopeKey(
+  candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
+): string {
+  const identity = resolveRemoteProjectorIdentity({
+    repoId: candidate.repoId,
+    revision: candidate.hfRevision,
+    filePath: candidate.fileName,
+    downloadUrl: candidate.downloadUrl,
+  });
+  return identity
+    ? JSON.stringify([
+      remoteProjectorIdentityKey(identity),
+      candidate.ownerVariantId?.trim() ?? '',
+    ])
+    : JSON.stringify([
+      null,
+      candidate.repoId.trim(),
+      candidate.hfRevision?.trim() || 'main',
+      candidate.fileName.trim(),
+      candidate.ownerVariantId?.trim() ?? '',
+      normalizeComparableProjectorDownloadUrl(candidate.downloadUrl),
+    ]);
+}
+
+function hasAmbiguousProjectorId(
   model: ModelNativeCapabilityInput,
   candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
-  legacyCandidateId: string,
+  buildId: typeof buildProjectorArtifactId,
 ): boolean {
-  const candidatePath = normalizeProjectorArtifactPath(candidate.fileName);
-  if (candidatePath === null) {
+  if (normalizeProjectorArtifactPath(candidate.fileName) === null) {
     return false;
   }
+
+  const candidateId = buildId({
+    repoId: candidate.repoId,
+    hfRevision: candidate.hfRevision,
+    fileName: candidate.fileName,
+    ownerVariantId: candidate.ownerVariantId,
+  });
 
   const scopedCandidates = [
     candidate,
@@ -602,19 +676,32 @@ function hasAmbiguousLegacyProjectorAlias(
       ownerVariantId: scopedCandidate.ownerVariantId,
     };
     if (
-      normalizeProjectorArtifactPath(scopedCandidate.fileName) !== candidatePath
-      || buildLegacyProjectorArtifactId(identity) !== legacyCandidateId
+      buildId(identity) !== candidateId
     ) {
       continue;
     }
 
-    currentIds.add(buildProjectorArtifactId(identity));
+    currentIds.add(getProjectorCandidateScopeKey(scopedCandidate));
     if (currentIds.size > 1) {
       return true;
     }
   }
 
   return false;
+}
+
+export function hasAmbiguousLegacyProjectorAlias(
+  model: ModelNativeCapabilityInput,
+  candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
+): boolean {
+  return hasAmbiguousProjectorId(model, candidate, buildLegacyProjectorArtifactId);
+}
+
+export function hasAmbiguousCurrentProjectorId(
+  model: ModelNativeCapabilityInput,
+  candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
+): boolean {
+  return hasAmbiguousProjectorId(model, candidate, buildProjectorArtifactId);
 }
 
 function getCandidateProjectorArtifactMatch(
@@ -625,6 +712,12 @@ function getCandidateProjectorArtifactMatch(
   hasIdentityConflict: boolean;
 } {
   const candidateArtifactPath = normalizeProjectorArtifactPath(candidate.fileName);
+  const currentCandidateId = buildProjectorArtifactId({
+    repoId: candidate.repoId,
+    hfRevision: candidate.hfRevision,
+    fileName: candidate.fileName,
+    ownerVariantId: candidate.ownerVariantId,
+  });
   const legacyCandidateId = buildLegacyProjectorArtifactId({
     repoId: candidate.repoId,
     hfRevision: candidate.hfRevision,
@@ -634,12 +727,12 @@ function getCandidateProjectorArtifactMatch(
   const hasAmbiguousLegacyAlias = hasAmbiguousLegacyProjectorAlias(
     model,
     candidate,
-    legacyCandidateId,
   );
   const relatedArtifacts = (model.artifacts ?? []).filter((artifact) => (
     artifact.kind === 'multimodal_projector'
     && (
       artifact.id === candidate.id
+      || artifact.id === currentCandidateId
       || artifact.id === legacyCandidateId
       || (
         candidateArtifactPath !== null
@@ -648,10 +741,12 @@ function getCandidateProjectorArtifactMatch(
     )
   ));
   const compatibleArtifacts = relatedArtifacts.filter((artifact) => (
-    !(hasAmbiguousLegacyAlias && artifact.id === legacyCandidateId)
+    !(hasAmbiguousLegacyAlias && projectorArtifactUsesLegacyAlias(artifact, candidate))
     && projectorArtifactMatchesCandidate(artifact, candidate)
   ));
-  const legacyArtifacts = compatibleArtifacts.filter((artifact) => artifact.id !== candidate.id);
+  const legacyArtifacts = compatibleArtifacts.filter((artifact) => (
+    projectorArtifactUsesLegacyAlias(artifact, candidate)
+  ));
   // During ID migration the persisted artifact carries the established,
   // projector-specific requirement boundary. A newly derived current-ID
   // duplicate can be broader because it was synthesized from model-wide
@@ -662,7 +757,7 @@ function getCandidateProjectorArtifactMatch(
   return {
     artifacts,
     hasIdentityConflict: relatedArtifacts.some((artifact) => (
-      hasAmbiguousLegacyAlias && artifact.id === legacyCandidateId
+      hasAmbiguousLegacyAlias && projectorArtifactUsesLegacyAlias(artifact, candidate)
         ? !hasUnambiguousCompatibleArtifact
         : !compatibleArtifacts.includes(artifact)
     )),
@@ -674,6 +769,15 @@ function candidateHasTrustedActiveVariantModality(
   candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
   modality: 'vision' | 'audio',
 ): boolean {
+  if (!hasConsistentRemoteProjectorIdentity({
+    repoId: candidate.repoId,
+    revision: candidate.hfRevision,
+    filePath: candidate.fileName,
+    downloadUrl: candidate.downloadUrl,
+  })) {
+    return false;
+  }
+
   const activeVariant = resolveActiveModelVariant(model);
   const { artifacts, hasIdentityConflict } = getCandidateProjectorArtifactMatch(model, candidate);
   if (hasIdentityConflict) {
@@ -701,10 +805,21 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
   const activeVariant = resolveActiveModelVariant(model);
   const activeVariantKeys = getEffectiveActiveVariantKeys(model);
   const modelId = normalizeOptionalString(model.id);
-  const seenIds = new Set<string>();
-
-  return candidates.filter((candidate) => {
+  const eligibleCandidates = candidates.filter((candidate) => {
     if (modelId !== null && candidate.ownerModelId !== modelId) {
+      return false;
+    }
+
+    if (!hasConsistentRemoteProjectorIdentity({
+      repoId: candidate.repoId,
+      revision: candidate.hfRevision,
+      filePath: candidate.fileName,
+      downloadUrl: candidate.downloadUrl,
+    })) {
+      return false;
+    }
+
+    if (hasAmbiguousCurrentProjectorId(model, candidate)) {
       return false;
     }
 
@@ -730,12 +845,58 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
       }
     }
 
-    if (seenIds.has(candidate.id)) {
-      return false;
-    }
-    seenIds.add(candidate.id);
     return true;
   });
+
+  const candidatesById = new Map<string, NonNullable<ModelMetadata['projectorCandidates']>[number]>();
+  const blockedLegacyIds = new Set<string>();
+  const blockedCurrentIds = new Set<string>();
+  for (const candidate of eligibleCandidates) {
+    const candidateUsesCurrentId = candidate.id === buildProjectorArtifactId({
+      repoId: candidate.repoId,
+      hfRevision: candidate.hfRevision,
+      fileName: candidate.fileName,
+      ownerVariantId: candidate.ownerVariantId,
+    });
+    if (blockedCurrentIds.has(candidate.id)) {
+      continue;
+    }
+    if (blockedLegacyIds.has(candidate.id)) {
+      if (candidateUsesCurrentId) {
+        blockedLegacyIds.delete(candidate.id);
+        candidatesById.set(candidate.id, candidate);
+      }
+      continue;
+    }
+
+    const existing = candidatesById.get(candidate.id);
+    if (!existing) {
+      candidatesById.set(candidate.id, candidate);
+      continue;
+    }
+
+    const existingUsesCurrentId = existing.id === buildProjectorArtifactId({
+      repoId: existing.repoId,
+      hfRevision: existing.hfRevision,
+      fileName: existing.fileName,
+      ownerVariantId: existing.ownerVariantId,
+    });
+    if (candidateUsesCurrentId && !existingUsesCurrentId) {
+      candidatesById.set(candidate.id, candidate);
+    } else if (
+      candidateUsesCurrentId
+      && existingUsesCurrentId
+      && getProjectorCandidateScopeKey(candidate) !== getProjectorCandidateScopeKey(existing)
+    ) {
+      candidatesById.delete(candidate.id);
+      blockedCurrentIds.add(candidate.id);
+    } else if (!candidateUsesCurrentId && !existingUsesCurrentId) {
+      candidatesById.delete(candidate.id);
+      blockedLegacyIds.add(candidate.id);
+    }
+  }
+
+  return [...candidatesById.values()];
 }
 
 export function getEffectiveActiveVariantProjectorCandidates(

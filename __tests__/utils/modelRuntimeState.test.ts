@@ -23,12 +23,15 @@ function makeModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 }
 
 function makeProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const repoId = overrides.repoId ?? 'org/model';
+  const fileName = overrides.fileName ?? 'mmproj-model.gguf';
+  const hfRevision = overrides.hfRevision ?? 'main';
   return {
     id: 'org/model:mmproj',
     ownerModelId: 'org/model',
-    repoId: 'org/model',
-    fileName: 'mmproj-model.gguf',
-    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    repoId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/${hfRevision}/${fileName}`,
     size: 256,
     lifecycleStatus: 'available',
     matchStatus: 'matched',

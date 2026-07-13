@@ -39,13 +39,14 @@ describe('modelArtifacts', () => {
     const artifacts = deriveArtifactsFromLegacyModel(makeModel({
       hfRevision: 'abc123',
       resolvedFileName: 'model.Q4_K_M.gguf',
+      downloadUrl: 'https://huggingface.co/test-org/model/resolve/abc123/model.Q4_K_M.gguf',
       projectorCandidates: [
         {
           id: 'projector-a',
           ownerModelId: 'test-org/model',
           repoId: 'test-org/model',
           fileName: 'mmproj-model-f16.gguf',
-          downloadUrl: 'https://huggingface.co/test-org/model/resolve/main/mmproj-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/test-org/model/resolve/abc123/mmproj-model-f16.gguf',
           hfRevision: 'abc123',
           size: 500,
           lifecycleStatus: 'available',
@@ -244,8 +245,191 @@ describe('modelArtifacts', () => {
     ]);
   });
 
+  it('preserves exact Hugging Face projector requirements across query and fragment URL metadata', () => {
+    const fileName = 'Projectors/MMProj-Audio.GGUF';
+    const downloadUrl = `https://huggingface.co/test-org/model/resolve/main/${fileName}`;
+    const projector = {
+      id: 'projector-audio',
+      ownerModelId: 'test-org/model',
+      repoId: 'test-org/model',
+      fileName,
+      downloadUrl,
+      hfRevision: 'main',
+      size: 500,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      projectorCandidates: [projector],
+      artifacts: [{
+        id: projector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+        hfRevision: 'main',
+        remoteFileName: fileName,
+        downloadUrl: `${downloadUrl}?download=1#artifact`,
+        sizeBytes: projector.size,
+        installState: 'remote',
+      }],
+    }), { preferLegacyRuntimeState: true });
+
+    expect(artifacts).toEqual([expect.objectContaining({
+      id: projector.id,
+      requiredFor: ['audio'],
+      downloadUrl,
+    })]);
+  });
+
+  it('preserves projector requirements for an exact ordinary HTTP mirror identity', () => {
+    const downloadUrl = 'http://example.com/projectors/mmproj-audio.gguf';
+    const projector = {
+      id: 'projector-audio',
+      ownerModelId: 'test-org/model',
+      repoId: 'test-org/model',
+      fileName: 'projectors/mmproj-audio.gguf',
+      downloadUrl,
+      size: 500,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      projectorCandidates: [projector],
+      artifacts: [{
+        id: projector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+        remoteFileName: projector.fileName,
+        downloadUrl,
+        sizeBytes: projector.size,
+        installState: 'remote',
+      }],
+    }), { preferLegacyRuntimeState: true });
+
+    expect(artifacts).toEqual([expect.objectContaining({ requiredFor: ['audio'] })]);
+  });
+
+  it.each(['huggingface.co', 'hf.co'])(
+    'does not preserve projector requirements across an invalid HTTP %s identity',
+    (host) => {
+      const downloadUrl = `http://${host}/test-org/model/resolve/main/mmproj-audio.gguf`;
+      const projector = {
+        id: 'projector-audio',
+        ownerModelId: 'test-org/model',
+        repoId: 'test-org/model',
+        fileName: 'mmproj-audio.gguf',
+        downloadUrl,
+        hfRevision: 'main',
+        size: 500,
+        lifecycleStatus: 'available' as const,
+        matchStatus: 'matched' as const,
+      };
+      const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+        chatModalities: ['text', 'vision', 'audio'],
+        projectorCandidates: [projector],
+        artifacts: [{
+          id: projector.id,
+          kind: 'multimodal_projector',
+          requiredFor: ['audio'],
+          hfRevision: 'main',
+          remoteFileName: projector.fileName,
+          downloadUrl,
+          sizeBytes: projector.size,
+          installState: 'remote',
+        }],
+      }), { preferLegacyRuntimeState: true });
+
+      expect(artifacts).toEqual([]);
+    },
+  );
+
+  it.each(['huggingface.co.', 'hf.co.'])(
+    'drops a root-dotted %s projector candidate and artifact instead of treating them as mirrors',
+    (host) => {
+      const fileName = 'audio/mmproj-audio.gguf';
+      const downloadUrl = `https://${host}/test-org/model/resolve/main/${fileName}`;
+      const malformedArtifact: ModelArtifactMetadata = {
+        id: 'projector-audio',
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+        hfRevision: 'main',
+        remoteFileName: fileName,
+        downloadUrl,
+        sizeBytes: 500,
+        installState: 'remote',
+      };
+      const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+        chatModalities: ['text', 'vision', 'audio'],
+        projectorCandidates: [{
+          id: malformedArtifact.id,
+          ownerModelId: 'test-org/model',
+          repoId: 'test-org/model',
+          fileName,
+          downloadUrl,
+          hfRevision: 'main',
+          size: malformedArtifact.sizeBytes,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        }],
+        artifacts: [malformedArtifact],
+      }), { preferLegacyRuntimeState: true });
+
+      expect(artifacts).toEqual([]);
+      expect(normalizePersistedModelArtifacts([malformedArtifact])).toBeUndefined();
+    },
+  );
+
+  it('drops copied Hugging Face projector metadata whose own path disagrees with its URL', () => {
+    const malformedArtifact: ModelArtifactMetadata = {
+      id: 'projector-self-mismatch',
+      kind: 'multimodal_projector',
+      requiredFor: ['audio'],
+      hfRevision: 'main',
+      remoteFileName: 'audio/mmproj.gguf',
+      downloadUrl: 'https://huggingface.co/test-org/model/resolve/main/vision/mmproj.gguf',
+      sizeBytes: 500,
+      installState: 'remote',
+    };
+    const artifacts = deriveArtifactsFromLegacyModel(makeModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      projectorCandidates: [{
+        id: malformedArtifact.id,
+        ownerModelId: 'test-org/model',
+        repoId: 'test-org/model',
+        fileName: malformedArtifact.remoteFileName,
+        downloadUrl: malformedArtifact.downloadUrl,
+        hfRevision: malformedArtifact.hfRevision,
+        size: malformedArtifact.sizeBytes,
+        lifecycleStatus: 'available',
+        matchStatus: 'matched',
+      }],
+      artifacts: [malformedArtifact],
+    }), { preferLegacyRuntimeState: true });
+
+    expect(artifacts).toEqual([]);
+    expect(normalizePersistedModelArtifacts([malformedArtifact])).toBeUndefined();
+  });
+
+  it('drops copied ordinary-mirror projector metadata whose path disagrees with its URL', () => {
+    const malformedArtifact: ModelArtifactMetadata = {
+      id: 'projector-mirror-mismatch',
+      kind: 'multimodal_projector',
+      requiredFor: ['audio'],
+      hfRevision: 'main',
+      remoteFileName: 'audio/mmproj.gguf',
+      downloadUrl: 'https://mirror.example/vision/mmproj.gguf',
+      sizeBytes: 500,
+      installState: 'remote',
+    };
+
+    expect(normalizePersistedModelArtifacts([malformedArtifact])).toBeUndefined();
+  });
+
   it.each([
     ['filename', { remoteFileName: 'mmproj-old-f16.gguf' }],
+    ['full path', { remoteFileName: 'stale/mmproj-model-f16.gguf' }],
+    ['filename case', { remoteFileName: 'MMProj-model-f16.gguf' }],
     ['revision', { hfRevision: 'refs/pr/1' }],
     ['sha256', { sha256: 'b'.repeat(64) }],
     ['size', { sizeBytes: 501 }],

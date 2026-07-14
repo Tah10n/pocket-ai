@@ -66,6 +66,26 @@ function ensurePrivateStorageReadyForDownload(t: Translate): boolean {
   return false;
 }
 
+function shouldWarnForModelMemory(model: ModelMetadata): boolean {
+  return model.memoryFitDecision === 'borderline'
+    || model.memoryFitDecision === 'likely_oom'
+    || (model.memoryFitDecision === undefined && model.fitsInRam === false);
+}
+
+function showModelMemoryWarning(
+  t: Translate,
+  onProceed: () => void,
+): void {
+  Alert.alert(
+    t('models.memoryWarningTitle'),
+    t('models.downloadMemoryWarningMessage'),
+    [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('models.downloadAnyway'), onPress: onProceed },
+    ],
+  );
+}
+
 export function startModelDownloadFlow({
   model,
   t,
@@ -84,7 +104,7 @@ export function startModelDownloadFlow({
     startDownload(downloadModel);
   };
 
-  const startPreparedDownload = async () => {
+  const startPreparedDownload = async (options: { memoryWarningAcknowledged?: boolean } = {}) => {
     try {
       if (model.accessState === ModelAccessState.AUTH_REQUIRED) {
         openTokenSettings();
@@ -97,6 +117,20 @@ export function startModelDownloadFlow({
       }
 
       if (!ensurePrivateStorageReadyForDownload(t)) {
+        return;
+      }
+
+      // A catalog/details card may already have a trustworthy RAM-risk decision while its file
+      // inventory still requires a strict tree refresh. Surface that known warning immediately;
+      // only perform the potentially slow verification after the user explicitly proceeds.
+      if (
+        options.memoryWarningAcknowledged !== true
+        && model.size !== null
+        && shouldWarnForModelMemory(model)
+      ) {
+        showModelMemoryWarning(t, () => {
+          void startPreparedDownload({ memoryWarningAcknowledged: true });
+        });
         return;
       }
 
@@ -159,18 +193,13 @@ export function startModelDownloadFlow({
         return;
       }
 
-      const shouldWarnForMemory = resolvedModel.memoryFitDecision === 'borderline'
-        || resolvedModel.memoryFitDecision === 'likely_oom'
-        || (resolvedModel.memoryFitDecision === undefined && resolvedModel.fitsInRam === false);
-      if (shouldWarnForMemory) {
-        Alert.alert(
-          t('models.memoryWarningTitle'),
-          t('models.downloadMemoryWarningMessage'),
-          [
-            { text: t('common.cancel'), style: 'cancel' },
-            { text: t('models.downloadAnyway'), onPress: () => { startDownloadWhenStorageReady(resolvedModel); } },
-          ],
-        );
+      if (
+        options.memoryWarningAcknowledged !== true
+        && shouldWarnForModelMemory(resolvedModel)
+      ) {
+        showModelMemoryWarning(t, () => {
+          startDownloadWhenStorageReady(resolvedModel);
+        });
         return;
       }
 

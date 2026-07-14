@@ -556,6 +556,69 @@ describe('ModelCatalogCacheStore', () => {
     parseSpy.mockRestore();
   });
 
+  it('keeps public-only and unfiltered search payloads in separate persisted scopes', () => {
+    const baseScope = {
+      query: 'scope-isolation',
+      cursor: null,
+      pageSize: 20,
+      sort: null,
+      authScope: 'anon' as const,
+    };
+    const store = new ModelCatalogCacheStore();
+    store.putSearch({ ...baseScope, gated: null }, {
+      models: [buildModel({ id: 'org/unfiltered-cache-model' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    store.putSearch({ ...baseScope, gated: false }, {
+      models: [buildModel({ id: 'org/public-only-cache-model' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+
+    const reloadedStore = new ModelCatalogCacheStore();
+
+    expect(reloadedStore.getSearch({ ...baseScope, gated: null }, 1000)?.models[0]?.id)
+      .toBe('org/unfiltered-cache-model');
+    expect(reloadedStore.getSearch({ ...baseScope, gated: false }, 1000)?.models[0]?.id)
+      .toBe('org/public-only-cache-model');
+  });
+
+  it('migrates version 7 search keys into the explicit unfiltered scope', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const scope = {
+      query: 'legacy-scope',
+      cursor: null,
+      pageSize: 20,
+      sort: null,
+      authScope: 'anon' as const,
+    };
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: 7,
+      entries: [{
+        key: 'legacy-scope::__initial__::20::__default__::anon',
+        timestamp: Date.now(),
+        scope,
+        result: {
+          models: [buildModel({ id: 'org/version-seven-cache-model' })],
+          hasMore: false,
+          nextCursor: null,
+        },
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+    const rewrittenPayload = JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string);
+
+    expect(store.getSearch({ ...scope, gated: null }, 1000)?.models[0]?.id)
+      .toBe('org/version-seven-cache-model');
+    expect(rewrittenPayload.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+    expect(rewrittenPayload.entries[0]).toEqual(expect.objectContaining({
+      key: 'legacy-scope::__initial__::20::__default__::anon::gated:__any__',
+      scope: expect.objectContaining({ gated: null }),
+    }));
+  });
+
   it('retries a failed hydration without retaining partially loaded entries', () => {
     const scope = { query: 'retry', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
     const eagerStore = new ModelCatalogCacheStore();
@@ -1038,8 +1101,8 @@ describe('ModelCatalogCacheStore', () => {
     const store = new ModelCatalogCacheStore();
     expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
     expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
-    expect(JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string).version).toBe(7);
-    expect(JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string).version).toBe(7);
+    expect(JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+    expect(JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
   });
 
   it('fails closed for case-distinct identities behind one folded legacy full path', () => {
@@ -1616,8 +1679,8 @@ describe('ModelCatalogCacheStore', () => {
       const reloadedStore = new ModelCatalogCacheStore();
       expect(reloadedStore.getSearch(scope, 1000)?.models[0]).toEqual(searchModel);
       expect(reloadedStore.getModelSnapshot(id, 'anon', 1000)).toEqual(snapshotModel);
-      expect(JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string).version).toBe(7);
-      expect(JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string).version).toBe(7);
+      expect(JSON.parse(storage.getString(SEARCH_CACHE_KEY) as string).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+      expect(JSON.parse(storage.getString(SNAPSHOT_CACHE_KEY) as string).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
     },
   );
 

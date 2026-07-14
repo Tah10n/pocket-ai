@@ -18,6 +18,7 @@ const {
   findAttachImageActionInSnapshot,
   findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
+  findBottomTabNodeInSnapshot,
   findAnyNodeInSnapshot,
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
@@ -25,6 +26,9 @@ const {
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
+  getBottomTabTapPoint,
+  goToHome,
+  goToModelCatalog,
   isAppForegroundSnapshot,
   openFirstVisibleVariantPicker,
   parseCliOptions,
@@ -43,6 +47,7 @@ const {
   ScenarioSkipFailureError,
   serializeReportResults,
   shouldAppendRunnerFailure,
+  waitForAnyNode,
 } = require('../../scripts/android-scenarios');
 
 const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
@@ -515,6 +520,75 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(match.node.text).toBe('Home');
   });
 
+  it('accepts a node from the final timeout-boundary snapshot', async () => {
+    const finalSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Model Catalog" content-desc="" clickable="false" bounds="[100,120][980,220]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn(() => finalSnapshot);
+
+    await expect(waitForAnyNode('adb', 'serial', ['Model Catalog'], {
+      timeoutMs: 0,
+      visibleOnly: true,
+      createSnapshot,
+    })).resolves.toEqual(expect.objectContaining({ label: 'Model Catalog' }));
+    expect(createSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the same final snapshot for timeout diagnostics', async () => {
+    const finalSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Still loading" content-desc="" clickable="false" bounds="[100,120][980,220]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn(() => finalSnapshot);
+
+    await expect(waitForAnyNode('adb', 'serial', ['Model Catalog'], {
+      timeoutMs: 0,
+      visibleOnly: true,
+      createSnapshot,
+    })).rejects.toThrow(/Visible UI: Still loading/);
+    expect(createSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts Home when it appears on the final recovery snapshot', async () => {
+    const findAnyNodeNow = jest.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ label: 'Active model' });
+    const ctx = {
+      serial: 'device-1',
+      ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+      dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockRejectedValueOnce(new Error('boundary timeout')),
+    };
+
+    await expect(goToHome(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow,
+      tryReachHome: jest.fn().mockResolvedValue(false),
+    })).resolves.toBeUndefined();
+
+    expect(findAnyNodeNow).toHaveBeenCalledTimes(2);
+    expect(ctx.expectAnyText).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens catalog scenarios through the bottom tab independently of the active-model CTA', async () => {
+    const ctx = {
+      tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+    const goHome = jest.fn().mockResolvedValue(undefined);
+
+    await goToModelCatalog(ctx, { goToHome: goHome });
+
+    expect(goHome).toHaveBeenCalledWith(ctx);
+    expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Models']));
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']));
+  });
+
   it('matches a visible namespaced resource id and ignores offscreen duplicates', () => {
     const resourceSnapshot = parseUiSnapshot(`
       <hierarchy>
@@ -708,6 +782,21 @@ describe('android-scenarios UI snapshot matching', () => {
 
     expect(match).toBeTruthy();
     expect(match.node.contentDesc).toBe('Choose GGUF file, current: Q8_0 - 7.20 GB');
+  });
+
+  it('recognizes a generic GGUF variant row by its stable selector resource id', () => {
+    const genericSelectorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node resource-id="model-variant-selector-deepseek-v4-gguf" text="" content-desc="Choose GGUF file, current: GGUF - 86.72 GB" clickable="true" bounds="[40,500][1040,620]" />
+        <node text="GGUF - 86.72 GB" content-desc="" clickable="false" bounds="[80,520][760,600]" />
+      </hierarchy>
+    `);
+
+    const match = findQuantizationSelectorNodeClearOfBottomOverlay(genericSelectorSnapshot);
+
+    expect(match).toBeTruthy();
+    expect(match.node.resourceId).toBe('model-variant-selector-deepseek-v4-gguf');
   });
 
   it('finds i-quant and float selector rows by the compact value text', () => {
@@ -1162,6 +1251,26 @@ describe('android-scenarios pack selection', () => {
       'bottom-tabs',
       'new-chat-cta',
     ]);
+  });
+
+  it('taps the clickable upper portion of a bottom tab when a warning banner covers its center', () => {
+    const tabSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Models" content-desc="" clickable="true" bounds="[50,200][350,320]" />
+        <node text="" content-desc="icon, Models" clickable="true" bounds="[540,2142][810,2286]" />
+        <node text="Models" content-desc="" clickable="false" bounds="[625,2250][724,2286]" />
+        <node text="Open debugger to view warnings." content-desc="" clickable="true" bounds="[30,2194][1050,2337]" />
+      </hierarchy>
+    `);
+
+    const match = findBottomTabNodeInSnapshot(tabSnapshot, ['Models']);
+    const tapPoint = getBottomTabTapPoint(match.node);
+
+    expect(match.node.clickable).toBe(true);
+    expect(match.node.bounds.top).toBe(2142);
+    expect(tapPoint).toEqual({ centerX: 675, centerY: 2174 });
+    expect(tapPoint.centerY).toBeLessThan(2194);
   });
 
   it('uses stable route anchors in core navigation scenarios without scanning Settings content', async () => {

@@ -130,6 +130,7 @@ export type CatalogCacheEntry<Result> = {
   result: Result;
   timestamp: number;
   isBufferedCursor: boolean;
+  requestId?: number;
 };
 
 export type CatalogBatchResult = {

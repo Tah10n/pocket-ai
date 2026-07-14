@@ -153,6 +153,7 @@ export function useModelsCatalogData({
           sort: serverSort,
           forceRefresh,
           gated: filters.noTokenRequiredOnly ? false : undefined,
+          metadataResolution: 'deferred',
         });
         resultCount = result.models.length;
         resultHasMore = result.hasMore;
@@ -234,6 +235,48 @@ export function useModelsCatalogData({
   }, []);
 
   useEffect(() => {
+    if (activeTab !== 'all') {
+      return undefined;
+    }
+
+    return modelCatalogService.subscribeMetadataUpdates(({
+      query,
+      sort: updateSort,
+      gated,
+      models: updatedModels,
+      removedModelIds,
+    }) => {
+      const expectedGated = filters.noTokenRequiredOnly ? false : undefined;
+      if (query !== searchQuery || updateSort !== serverSort || gated !== expectedGated) {
+        return;
+      }
+
+      const replacements = new Map(updatedModels.map((model) => [model.id, model]));
+      const removals = new Set(removedModelIds);
+
+      setModels((current) => {
+        let didChange = false;
+        const next = current.flatMap((model) => {
+          if (removals.has(model.id)) {
+            didChange = true;
+            return [];
+          }
+
+          const replacement = replacements.get(model.id);
+          if (!replacement) {
+            return [model];
+          }
+
+          didChange = didChange || replacement !== model;
+          return [replacement];
+        });
+
+        return didChange ? next : current;
+      });
+    });
+  }, [activeTab, filters.noTokenRequiredOnly, searchQuery, serverSort]);
+
+  useEffect(() => {
     let cancelled = false;
 
     void huggingFaceTokenService.refreshState()
@@ -299,6 +342,7 @@ export function useModelsCatalogData({
         pageSize: MODELS_PAGE_SIZE,
         sort: serverSort,
         gated: filters.noTokenRequiredOnly ? false : undefined,
+        metadataResolution: 'deferred',
       });
 
       if (cachedResult) {

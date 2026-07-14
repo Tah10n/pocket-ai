@@ -119,6 +119,41 @@ describe('modelDownloadFlow', () => {
     }));
   });
 
+  it('shows a known RAM warning before a required tree refresh', async () => {
+    const startDownload = jest.fn();
+    const model = createModel({
+      fitsInRam: false,
+      requiresTreeProbe: true,
+    });
+    mockRefreshModelMetadata.mockResolvedValue(model);
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.memoryWarningTitle',
+      'models.downloadMemoryWarningMessage',
+      expect.any(Array),
+    );
+    expect(mockRefreshModelMetadata).not.toHaveBeenCalled();
+    expect(startDownload).not.toHaveBeenCalled();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    buttons[1]?.onPress?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockRefreshModelMetadata).toHaveBeenCalledWith(model, { includeDetails: false });
+    expect(startDownload).toHaveBeenCalledWith(model);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes unresolved metadata and propagates the resolved model to the caller', async () => {
     const resolvedModel = createModel({
       size: 2048,

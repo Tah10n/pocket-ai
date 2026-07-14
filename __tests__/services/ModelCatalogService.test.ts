@@ -228,8 +228,9 @@ describe('ModelCatalogService', () => {
     const result = await pendingResult;
 
     expect(result.models.map((model) => model.id)).toEqual([cachedModel.id]);
-    expect(invalidationListener).toHaveBeenCalledTimes(1);
-    expect(invalidationListener).toHaveBeenCalledWith(0, 'replay');
+    expect(invalidationListener).toHaveBeenCalledTimes(2);
+    expect(invalidationListener).toHaveBeenNthCalledWith(1, 0, 'replay');
+    expect(invalidationListener).toHaveBeenNthCalledWith(2, 1, 'hydrate');
     expect(global.fetch).not.toHaveBeenCalled();
     deferredService.dispose();
   });
@@ -804,6 +805,171 @@ describe('ModelCatalogService', () => {
 
     const firstUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(firstUrl).toContain('gated=false');
+  });
+
+  it('returns deferred catalog summaries before tree metadata and updates the cache in the background', async () => {
+    const treeResponse = createDeferred<any>();
+    const service = new ModelCatalogService();
+    const metadataListener = jest.fn();
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tree/main?recursive=true')) {
+        return treeResponse.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/deferred-catalog-model')]),
+      });
+    }) as jest.Mock;
+
+    try {
+      const result = await service.searchModels('phi', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      });
+
+      expect(result.models[0]).toEqual(expect.objectContaining({
+        id: 'org/deferred-catalog-model',
+        size: null,
+        requiresTreeProbe: true,
+      }));
+      expect(metadataListener).not.toHaveBeenCalled();
+      const firstUrl = String((global.fetch as jest.Mock).mock.calls[0][0]);
+      expect(firstUrl).toContain('limit=1');
+
+      await waitForMockCallCount(global.fetch as jest.Mock, 2);
+      treeResponse.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          path: 'model.Q4_K_M.gguf',
+          size: 2 * 1024 * 1024 * 1024,
+          lfs: { oid: `sha256:${TREE_SHA256}` },
+        }]),
+      });
+      await waitForMockCallCount(metadataListener, 1);
+
+      expect(metadataListener).toHaveBeenCalledWith({
+        query: 'phi',
+        sort: null,
+        gated: false,
+        models: [expect.objectContaining({
+          id: 'org/deferred-catalog-model',
+          size: 2 * 1024 * 1024 * 1024,
+          requiresTreeProbe: false,
+        })],
+        removedModelIds: [],
+      });
+      expect(service.getCachedSearchResult('phi', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      })?.models[0]).toEqual(expect.objectContaining({
+        size: 2 * 1024 * 1024 * 1024,
+        requiresTreeProbe: false,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it('does not let a delayed deferred metadata batch overwrite a force-refreshed search', async () => {
+    const staleTreeResponse = createDeferred<any>();
+    const service = new ModelCatalogService();
+    const metadataListener = jest.fn();
+    let searchRequestCount = 0;
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tree/main?recursive=true')) {
+        return staleTreeResponse.promise;
+      }
+
+      searchRequestCount += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([
+          searchRequestCount === 1
+            ? makeRepoWithUnknownSize('org/deferred-refresh-model')
+            : makeRepo('org/deferred-refresh-model', 4 * 1024 * 1024 * 1024),
+        ]),
+      });
+    }) as jest.Mock;
+
+    try {
+      await service.searchModels('phi', {
+        pageSize: 1,
+        metadataResolution: 'deferred',
+      });
+      await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+      const refreshed = await service.searchModels('phi', {
+        pageSize: 1,
+        forceRefresh: true,
+        metadataResolution: 'deferred',
+      });
+      expect(refreshed.models[0].size).toBe(4 * 1024 * 1024 * 1024);
+
+      staleTreeResponse.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          path: 'model.Q4_K_M.gguf',
+          size: 2 * 1024 * 1024 * 1024,
+        }]),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(metadataListener).not.toHaveBeenCalled();
+      expect(service.getCachedSearchResult('phi', {
+        pageSize: 1,
+        metadataResolution: 'deferred',
+      })?.models[0].size).toBe(4 * 1024 * 1024 * 1024);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it('persists public-only searches under a cache scope isolated from ungated results', async () => {
+    global.fetch = jest.fn(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeRepo('org/public-only-cached-model')]),
+    })) as jest.Mock;
+
+    const initialResult = await modelCatalogService.searchModels('phi', {
+      pageSize: 10,
+      gated: false,
+    });
+    expect(initialResult.models[0].id).toBe('org/public-only-cached-model');
+
+    const coldStartService = new ModelCatalogService();
+    (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
+
+    try {
+      expect(coldStartService.getCachedSearchResult('phi', { pageSize: 10 })).toBeNull();
+      const offlineResult = await coldStartService.searchModels('phi', {
+        pageSize: 10,
+        gated: false,
+      });
+
+      expect(offlineResult.models[0].id).toBe('org/public-only-cached-model');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      coldStartService.dispose();
+    }
   });
 
   it('does not reuse cache entries across gated and ungated catalog searches', async () => {

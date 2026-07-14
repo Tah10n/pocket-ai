@@ -54,6 +54,7 @@ export type CatalogCacheScope = {
   pageSize: number;
   sort: CatalogCacheSort;
   authScope: CatalogCacheAuthScope;
+  gated?: boolean | null;
 };
 
 export type CatalogCacheResult = {
@@ -98,9 +99,9 @@ const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 7;
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 8;
 export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 1_500_000;
-const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, 7, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
@@ -1422,7 +1423,13 @@ function rawSearchEntryNeedsAnonymousRewrite(value: unknown): boolean {
     return true;
   }
 
-  const result = (value as { result?: unknown }).result;
+  const candidate = value as { key?: unknown; scope?: unknown; result?: unknown };
+  const scope = normalizeSearchScope(candidate.scope);
+  if (!scope || candidate.key !== buildCatalogSearchKey(scope)) {
+    return true;
+  }
+
+  const result = candidate.result;
   if (!result || typeof result !== 'object') {
     return true;
   }
@@ -1448,6 +1455,18 @@ function inferSnapshotAuthScope(model: ModelMetadata): CatalogCacheAuthScope {
 
 function buildSnapshotKey(modelId: string, authScope: CatalogCacheAuthScope): string {
   return `${modelId}::${authScope}`;
+}
+
+function buildCatalogSearchKey(scope: CatalogCacheScope): string {
+  const gatedKey = typeof scope.gated === 'boolean' ? String(scope.gated) : '__any__';
+  return [
+    scope.query,
+    scope.cursor ?? '__initial__',
+    scope.pageSize,
+    scope.sort ?? '__default__',
+    scope.authScope,
+    `gated:${gatedKey}`,
+  ].join('::');
 }
 
 function normalizeSearchResult(value: unknown, persistedVersion?: number): CatalogCacheResult | null {
@@ -1489,6 +1508,7 @@ function normalizeSearchScope(value: unknown): CatalogCacheScope | null {
       : 20,
     sort: isSort(candidate.sort) ? candidate.sort : null,
     authScope: candidate.authScope === 'auth' ? 'auth' : 'anon',
+    gated: typeof candidate.gated === 'boolean' ? candidate.gated : null,
   };
 }
 
@@ -1511,7 +1531,7 @@ function normalizeSearchEntry(value: unknown, persistedVersion?: number): Search
   }
 
   return {
-    key: candidate.key,
+    key: buildCatalogSearchKey(scope),
     timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
       ? Math.round(candidate.timestamp)
       : 0,
@@ -1622,6 +1642,7 @@ export class ModelCatalogCacheStore {
       scope: {
         ...scope,
         cursor: scope.cursor ?? null,
+        gated: typeof scope.gated === 'boolean' ? scope.gated : null,
       },
       result: clonedResult,
     };
@@ -2110,12 +2131,6 @@ export class ModelCatalogCacheStore {
   }
 
   private buildSearchKey(scope: CatalogCacheScope): string {
-    return [
-      scope.query,
-      scope.cursor ?? '__initial__',
-      scope.pageSize,
-      scope.sort ?? '__default__',
-      scope.authScope,
-    ].join('::');
+    return buildCatalogSearchKey(scope);
   }
 }

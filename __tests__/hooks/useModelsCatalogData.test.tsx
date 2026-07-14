@@ -25,6 +25,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
     getLocalModels: jest.fn(),
     searchModels: jest.fn(),
     subscribeCacheInvalidations: jest.fn(() => jest.fn()),
+    subscribeMetadataUpdates: jest.fn(() => jest.fn()),
   },
 }));
 
@@ -115,6 +116,7 @@ describe('useModelsCatalogData', () => {
     mockTokenService.refreshState.mockResolvedValue({ hasToken: false, updatedAt: 0 });
     mockTokenService.subscribe.mockReturnValue(jest.fn());
     mockCatalogService.subscribeCacheInvalidations.mockImplementation(() => jest.fn());
+    mockCatalogService.subscribeMetadataUpdates.mockImplementation(() => jest.fn());
     mockCatalogService.getLocalModels.mockResolvedValue([]);
     mockCatalogService.getCachedSearchResult.mockReturnValue({
       models: [createModel('org/first-model')],
@@ -183,6 +185,81 @@ describe('useModelsCatalogData', () => {
     ]);
     expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(2);
     expect(mockCatalogService.searchModels).not.toHaveBeenCalled();
+  });
+
+  it('renders cold catalog summaries before deferred metadata arrives and applies updates in place', async () => {
+    let metadataListener: ((update: {
+      query: string;
+      sort: 'downloads' | 'likes' | 'lastModified' | null;
+      gated: boolean | undefined;
+      models: ModelMetadata[];
+      removedModelIds: string[];
+    }) => void) | undefined;
+    const summaryModel: ModelMetadata = {
+      ...createModel('org/deferred-model'),
+      size: null,
+      fitsInRam: null,
+      requiresTreeProbe: true,
+    };
+    const resolvedModel: ModelMetadata = {
+      ...summaryModel,
+      size: 2_048,
+      fitsInRam: true,
+      requiresTreeProbe: false,
+    };
+    mockCatalogService.subscribeMetadataUpdates.mockImplementation((listener) => {
+      metadataListener = listener;
+      return jest.fn();
+    });
+    mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+    mockCatalogService.searchModels.mockResolvedValue({
+      models: [summaryModel],
+      hasMore: true,
+      nextCursor: 'https://huggingface.co/api/models?cursor=page-2',
+    });
+
+    const { getCurrentValue } = renderHookHarness();
+    await flushMicrotasks();
+
+    await act(async () => {
+      jest.advanceTimersByTime(400);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockCatalogService.searchModels).toHaveBeenCalledWith('phi', expect.objectContaining({
+      cursor: null,
+      pageSize: 20,
+      metadataResolution: 'deferred',
+    }));
+    expect(getCurrentValue()?.models).toEqual([summaryModel]);
+    expect(getCurrentValue()?.loading).toBe(false);
+
+    await act(async () => {
+      metadataListener?.({
+        query: 'stale-query',
+        sort: 'downloads',
+        gated: undefined,
+        models: [resolvedModel],
+        removedModelIds: [],
+      });
+      await Promise.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([summaryModel]);
+
+    await act(async () => {
+      metadataListener?.({
+        query: 'phi',
+        sort: 'downloads',
+        gated: undefined,
+        models: [resolvedModel],
+        removedModelIds: [],
+      });
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models).toEqual([resolvedModel]);
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
   });
 
   it('requires fresh user drag input before auto-loading the next catalog page', async () => {

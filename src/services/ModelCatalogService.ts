@@ -108,10 +108,12 @@ import {
 } from '../types/huggingFace';
 
 export type CatalogServerSort = 'downloads' | 'likes' | 'lastModified';
+export type CatalogMetadataResolution = 'blocking' | 'deferred';
 export type ModelCatalogCacheInvalidationSource = 'replay' | 'hydrate' | 'manual' | 'token' | 'unknown';
 export { ModelCatalogError, getModelCatalogErrorMessage, type ModelCatalogErrorCode } from './ModelCatalogHttpClient';
 
 type CacheInvalidationListener = (revision: number, source: ModelCatalogCacheInvalidationSource) => void;
+type MetadataUpdateListener = (update: ModelCatalogMetadataUpdate) => void;
 
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const PERSISTENT_CACHE_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
@@ -131,6 +133,9 @@ const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
 const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
 const ACCESS_PROBE_CACHE_MAX_ENTRIES = 500;
 const PERSISTENT_CACHE_HYDRATION_WAIT_TIMEOUT_MS = 5000;
+const DEFERRED_CATALOG_MAX_EMPTY_PAGES = 2;
+const DEFERRED_METADATA_BATCH_SIZE = 2;
+const DEFERRED_METADATA_TREE_MAX_PAGES = 1;
 
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
 export { getHuggingFaceModelUrl };
@@ -149,12 +154,36 @@ export interface ModelCatalogSearchResult {
   warning?: ModelCatalogError;
 }
 
+export type ModelCatalogSearchOptions = {
+  cursor?: string | null;
+  pageSize?: number;
+  sort?: CatalogServerSort | null;
+  forceRefresh?: boolean;
+  gated?: boolean;
+  metadataResolution?: CatalogMetadataResolution;
+};
+
+export type ModelCatalogMetadataUpdate = {
+  query: string;
+  sort: CatalogServerSort | null;
+  gated: boolean | undefined;
+  models: ModelMetadata[];
+  removedModelIds: string[];
+};
+
 type RefreshModelMetadataOptions = {
   includeDetails?: boolean;
 };
 
 type ResolveMissingModelMetadataOptions = {
   treeProbeMode?: 'bounded' | 'full';
+  treeProbeMaxPages?: number;
+  resolveProjectorAwareModels?: boolean;
+  batchSize?: number;
+  onBatchResolved?: (input: {
+    requestedModelIds: string[];
+    models: ModelMetadata[];
+  }) => void;
 };
 
 type FetchModelTreeOptions = {
@@ -180,6 +209,28 @@ type ModelCatalogServiceOptions = {
   hydratePersistentCacheOnCreate?: boolean;
 };
 
+type DeferredMetadataResolutionInput = {
+  cacheKey: string;
+  cacheRequestId: number;
+  query: string;
+  normalizedQuery: string;
+  cursor: string | null;
+  pageSize: number;
+  sort: CatalogServerSort | null;
+  gated: boolean | undefined;
+  catalogSearchHasAuthScope: boolean;
+  memoryFitContext: CatalogMemoryFitContext;
+  requestContext: CatalogRequestContext;
+  models: ModelMetadata[];
+};
+
+type PersistAnonymousSearchInput = Pick<
+  DeferredMetadataResolutionInput,
+  'normalizedQuery' | 'cursor' | 'pageSize' | 'sort' | 'gated' | 'catalogSearchHasAuthScope'
+> & {
+  result: Omit<ModelCatalogSearchResult, 'warning'>;
+};
+
 export class ModelCatalogService {
   private searchCache: Map<string, CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>>> = new Map();
   private searchRequestCache: Map<string, Promise<ModelCatalogSearchResult>> = new Map();
@@ -187,10 +238,13 @@ export class ModelCatalogService {
   private persistentCache: ModelCatalogCacheStore;
   private authCacheVersion = 0;
   private bufferedCursorSequence = 0;
+  private searchRequestSequence = 0;
   private rateLimitUntilByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
   private rateLimitBackoffMsByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
   private cacheInvalidationRevision = 0;
   private cacheInvalidationListeners: Set<CacheInvalidationListener> = new Set();
+  private metadataUpdateListeners: Set<MetadataUpdateListener> = new Set();
+  private deferredMetadataRequestCache: Map<string, Promise<void>> = new Map();
   private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
   private readmeRequestCache: Map<string, Promise<ReadmeModelData | undefined>> = new Map();
   private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
@@ -202,6 +256,7 @@ export class ModelCatalogService {
   private resolvePersistentCacheHydrationAttempt: (() => void) | undefined;
   private persistentCacheHydrationFailOpenTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly unsubscribeFromTokenService: () => void;
+  private isDisposed = false;
 
   constructor(options: ModelCatalogServiceOptions = {}) {
     const hydratePersistentCacheOnCreate = options.hydratePersistentCacheOnCreate !== false;
@@ -232,7 +287,11 @@ export class ModelCatalogService {
   }
 
   public dispose(): void {
+    this.isDisposed = true;
     this.completePersistentCacheHydrationAttempt();
+    this.cacheInvalidationListeners.clear();
+    this.metadataUpdateListeners.clear();
+    this.deferredMetadataRequestCache.clear();
     this.unsubscribeFromTokenService();
   }
 
@@ -246,20 +305,16 @@ export class ModelCatalogService {
       return;
     }
 
-    // Normal deferred hydration completes before waiting catalog calls resume,
-    // so those calls observe the hydrated cache directly. Only a hydration
-    // that succeeds after the initial wait was already released (timeout or
-    // failure) needs to invalidate mounted consumers.
-    const shouldInvalidateConsumers = this.persistentCacheHydrationAttemptSettled;
     const span = performanceMonitor.startSpan('catalog.hydratePersistentCache');
     try {
       this.persistentCache.hydrate();
       this.persistentCacheHydrated = true;
       this.completePersistentCacheHydrationAttempt();
       span.end({ outcome: 'success' });
-      if (shouldInvalidateConsumers) {
-        this.emitCacheInvalidation('hydrate');
-      }
+      // A mounted online catalog may already be waiting for hydration before
+      // starting its network refresh. Notify it so the persisted page can paint
+      // immediately while that refresh continues in the background.
+      this.emitCacheInvalidation('hydrate');
     } catch (error) {
       // Unblock callers so a transient cache-tier failure cannot stall catalog
       // access indefinitely. A later explicit hydration call remains retryable.
@@ -307,6 +362,13 @@ export class ModelCatalogService {
     };
   }
 
+  public subscribeMetadataUpdates(listener: MetadataUpdateListener): () => void {
+    this.metadataUpdateListeners.add(listener);
+    return () => {
+      this.metadataUpdateListeners.delete(listener);
+    };
+  }
+
   public clearCache(
     source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
   ): void {
@@ -330,6 +392,7 @@ export class ModelCatalogService {
     this.bufferedCursorSequence = 0;
     this.searchCache.clear();
     this.searchRequestCache.clear();
+    this.deferredMetadataRequestCache.clear();
     this.modelSnapshotCache.clear();
     this.rateLimitUntilByAuthScope = { anon: 0, auth: 0 };
     this.rateLimitBackoffMsByAuthScope = { anon: 0, auth: 0 };
@@ -360,6 +423,20 @@ export class ModelCatalogService {
     } catch (error) {
       console.warn('[ModelCatalogService] Cache invalidation listener failed', error);
     }
+  }
+
+  private emitMetadataUpdate(update: ModelCatalogMetadataUpdate): void {
+    if (this.isDisposed || (update.models.length === 0 && update.removedModelIds.length === 0)) {
+      return;
+    }
+
+    this.metadataUpdateListeners.forEach((listener) => {
+      try {
+        listener(update);
+      } catch (error) {
+        console.warn('[ModelCatalogService] Metadata update listener failed', error);
+      }
+    });
   }
 
   private pruneSearchCache(): void {
@@ -444,13 +521,7 @@ export class ModelCatalogService {
    */
   public async searchModels(
     query: string = 'gguf',
-    options?: {
-      cursor?: string | null;
-      pageSize?: number;
-      sort?: CatalogServerSort | null;
-      forceRefresh?: boolean;
-      gated?: boolean;
-    },
+    options?: ModelCatalogSearchOptions,
   ): Promise<ModelCatalogSearchResult> {
     await this.waitForPersistentCacheHydrationAttempt();
     return this.searchModelsInternal(query, options, 0);
@@ -458,13 +529,7 @@ export class ModelCatalogService {
 
   private async searchModelsInternal(
     query: string,
-    options: {
-      cursor?: string | null;
-      pageSize?: number;
-      sort?: CatalogServerSort | null;
-      forceRefresh?: boolean;
-      gated?: boolean;
-    } | undefined,
+    options: ModelCatalogSearchOptions | undefined,
     retryCount: number,
   ): Promise<ModelCatalogSearchResult> {
     const requestContext = await this.createRequestContext();
@@ -478,6 +543,7 @@ export class ModelCatalogService {
     const sort = options?.sort ?? null;
     const forceRefresh = options?.forceRefresh === true && cursor === null;
     const gated = options?.gated;
+    const metadataResolution = options?.metadataResolution ?? 'blocking';
     const normalizedQuery = this.normalizeQuery(query);
     const catalogSearchAuthPolicy = requestContext.hasAuthToken
       ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
@@ -493,6 +559,7 @@ export class ModelCatalogService {
       sort,
       catalogSearchHasAuthScope,
       gated,
+      metadataResolution,
     );
     const cached = this.searchCache.get(cacheKey);
     const isBufferedCursor = this.isBufferedCursor(cursor);
@@ -517,10 +584,11 @@ export class ModelCatalogService {
       const memoryFitContext = await memoryFitContextPromise;
       return {
         ...this.sanitizeSearchResultCursor(cached.result),
-        models: this.mergeWithRegistry(
+        models: this.mergeSearchModelsWithRegistry(
           filteredCachedModels,
           this.getAuthScope(catalogSearchHasAuthScope),
           memoryFitContext,
+          metadataResolution,
         ),
       };
     }
@@ -601,6 +669,7 @@ export class ModelCatalogService {
           sort,
           gated,
           catalogSearchAuthPolicy,
+          metadataResolution,
         );
         this.assertRequestContextIsCurrent(requestContext);
         const filteredModels = filterCatalogSearchModels(fetched.models);
@@ -611,52 +680,53 @@ export class ModelCatalogService {
           nextCursor: fetched.nextCursor,
         };
 
+        const cacheTimestamp = Date.now();
+        this.searchRequestSequence += 1;
+        const cacheRequestId = this.searchRequestSequence;
         this.searchCache.set(cacheKey, {
           result,
-          timestamp: Date.now(),
+          timestamp: cacheTimestamp,
           isBufferedCursor,
+          requestId: cacheRequestId,
         });
         this.pruneSearchCache();
-        if (cursor === null && typeof gated !== 'boolean' && !catalogSearchHasAuthScope) {
-          const persistableResult = this.toPersistableSearchResult(result);
-          const persistableModels = persistableResult.models.filter((model) => {
-            if (model.isPrivate) {
-              return false;
-            }
+        this.persistAnonymousFirstPageSearch({
+          normalizedQuery,
+          cursor,
+          pageSize,
+          sort,
+          gated,
+          catalogSearchHasAuthScope,
+          result,
+        });
 
-            if (!catalogSearchHasAuthScope) {
-              return true;
-            }
-
-            return model.accessState === ModelAccessState.PUBLIC && !model.isGated;
-          });
-
-          this.persistentCache.putSearch(
-            this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, false),
-            {
-              ...persistableResult,
-              models: persistableModels.map((model) => (
-                model.accessState === ModelAccessState.AUTHORIZED || model.accessState === ModelAccessState.ACCESS_DENIED
-                  ? {
-                    ...model,
-                    accessState: model.isGated || model.isPrivate
-                      ? ModelAccessState.AUTH_REQUIRED
-                      : ModelAccessState.PUBLIC,
-                  }
-                  : model
-              )),
-            },
-          );
-        }
-
-        const mergedModels = this.mergeWithRegistry(
+        const searchAuthScope = this.getAuthScope(catalogSearchHasAuthScope);
+        const mergedModels = this.mergeSearchModelsWithRegistry(
           result.models,
-          this.getAuthScope(catalogSearchHasAuthScope),
+          searchAuthScope,
           memoryFitContext,
+          metadataResolution,
         );
 
         if (catalogSearchHasAuthScope && mergedModels.length > 0) {
           this.reconcileAnonymousModelVisibility(mergedModels);
+        }
+
+        if (metadataResolution === 'deferred') {
+          this.scheduleDeferredMetadataResolution({
+            cacheKey,
+            cacheRequestId,
+            query,
+            normalizedQuery,
+            cursor,
+            pageSize,
+            sort,
+            gated,
+            catalogSearchHasAuthScope,
+            memoryFitContext,
+            requestContext,
+            models: result.models,
+          });
         }
 
         return {
@@ -1010,7 +1080,7 @@ export class ModelCatalogService {
 
   public getCachedSearchResult(
     query: string = 'gguf',
-    options?: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null; gated?: boolean },
+    options?: ModelCatalogSearchOptions,
   ): Omit<ModelCatalogSearchResult, 'warning'> | null {
     const cached = this.getCachedSearchResultForScope(
       query,
@@ -1027,7 +1097,7 @@ export class ModelCatalogService {
 
   private getCachedSearchResultForScope(
     query: string,
-    options: { cursor?: string | null; pageSize?: number; sort?: CatalogServerSort | null; gated?: boolean } | undefined,
+    options: ModelCatalogSearchOptions | undefined,
     hasToken: boolean,
     memoryFitContext: CatalogMemoryFitContext | null = this.getRememberedMemoryFitContext(),
   ): Omit<ModelCatalogSearchResult, 'warning'> | null {
@@ -1039,6 +1109,7 @@ export class ModelCatalogService {
     const pageSize = options?.pageSize ?? 20;
     const sort = options?.sort ?? null;
     const gated = options?.gated;
+    const metadataResolution = options?.metadataResolution ?? 'blocking';
     const normalizedQuery = this.normalizeQuery(query);
     const memoryKey = this.buildMemorySearchCacheKey(
       normalizedQuery,
@@ -1047,6 +1118,7 @@ export class ModelCatalogService {
       sort,
       hasToken,
       gated,
+      metadataResolution,
     );
     const memoryEntry = this.searchCache.get(memoryKey);
     const isMemoryEntryFresh = Boolean(memoryEntry) && Date.now() - (memoryEntry?.timestamp ?? 0) < CACHE_TTL;
@@ -1061,16 +1133,21 @@ export class ModelCatalogService {
       ).map((model) => this.toSearchResultModel(model));
       return {
         ...memoryEntry.result,
-        models: this.mergeWithRegistry(filteredMemoryModels, this.getAuthScope(hasToken), memoryFitContext),
+        models: this.mergeSearchModelsWithRegistry(
+          filteredMemoryModels,
+          this.getAuthScope(hasToken),
+          memoryFitContext,
+          metadataResolution,
+        ),
       };
     }
 
-    if (typeof gated === 'boolean') {
+    if (gated === true) {
       return null;
     }
 
     const persistentEntry = this.persistentCache.getSearch(
-      this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, hasToken),
+      this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, hasToken, gated),
       PERSISTENT_CACHE_MAX_AGE,
     );
     if (!persistentEntry) {
@@ -1080,10 +1157,11 @@ export class ModelCatalogService {
     const filteredPersistedModels = filterCatalogSearchModels(
       this.sanitizeCachedCatalogModelsResolvedFiles(persistentEntry.models),
     ).map((model) => this.toSearchResultModel(model));
-    const mergedModels = this.mergeWithRegistry(
+    const mergedModels = this.mergeSearchModelsWithRegistry(
       filteredPersistedModels,
       this.getAuthScope(hasToken),
       memoryFitContext,
+      metadataResolution,
     );
       return {
         ...this.sanitizeSearchResultCursor(persistentEntry),
@@ -1538,7 +1616,9 @@ export class ModelCatalogService {
     requestContext: CatalogRequestContext,
     options: ResolveMissingModelMetadataOptions = {},
   ): Promise<ModelMetadata[]> {
-    const batchSize = 5;
+    const batchSize = typeof options.batchSize === 'number' && Number.isFinite(options.batchSize)
+      ? Math.max(1, Math.round(options.batchSize))
+      : 5;
     const span = performanceMonitor.startSpan('catalog.resolveMissingModelMetadata', {
       count: models.length,
       hasAuthToken: requestContext.hasAuthToken,
@@ -1559,7 +1639,7 @@ export class ModelCatalogService {
         hasKnownSize
         && !requiresAuthValidation
         && model.requiresTreeProbe !== true
-        && !shouldCollectProjectorCandidates
+        && (!shouldCollectProjectorCandidates || options.resolveProjectorAwareModels === false)
       ) {
         return model;
       }
@@ -1568,7 +1648,7 @@ export class ModelCatalogService {
         hasKnownSize
         && requiresAuthValidation
         && model.requiresTreeProbe !== true
-        && !shouldCollectProjectorCandidates
+        && (!shouldCollectProjectorCandidates || options.resolveProjectorAwareModels === false)
       ) {
         const probedAccessState = await this.probeResolvedModelAccess(model, requestContext);
         if (probedAccessState) {
@@ -1600,7 +1680,8 @@ export class ModelCatalogService {
             allowTargetEarlyStop: !shouldScanForProjectorCandidates,
             maxPages: shouldScanForProjectorCandidates
               ? HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES
-              : useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES,
+              : options.treeProbeMaxPages
+                ?? (useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES),
           },
         );
         const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
@@ -1929,7 +2010,12 @@ export class ModelCatalogService {
       for (let index = 0; index < models.length; index += batchSize) {
         const batch = models.slice(index, index + batchSize);
         const batchResults = await Promise.all(batch.map(resolveModel));
-        results.push(...batchResults.filter((model): model is ModelMetadata => model !== null));
+        const resolvedBatch = batchResults.filter((model): model is ModelMetadata => model !== null);
+        results.push(...resolvedBatch);
+        options.onBatchResolved?.({
+          requestedModelIds: batch.map((model) => model.id),
+          models: resolvedBatch,
+        });
       }
 
       return results;
@@ -1941,6 +2027,203 @@ export class ModelCatalogService {
     }
   }
 
+  private persistAnonymousFirstPageSearch({
+    normalizedQuery,
+    cursor,
+    pageSize,
+    sort,
+    gated,
+    catalogSearchHasAuthScope,
+    result,
+  }: PersistAnonymousSearchInput): void {
+    if (cursor !== null || gated === true || catalogSearchHasAuthScope) {
+      return;
+    }
+
+    const persistableResult = this.toPersistableSearchResult(result);
+    const publicModels = persistableResult.models.filter((model) => (
+      model.accessState === ModelAccessState.PUBLIC
+      && model.isGated !== true
+      && model.isPrivate !== true
+    ));
+
+    this.persistentCache.putSearch(
+      this.buildPersistentSearchScope(normalizedQuery, pageSize, sort, false, gated),
+      {
+        ...persistableResult,
+        models: publicModels,
+      },
+    );
+  }
+
+  private shouldResolveDeferredMetadata(
+    model: ModelMetadata,
+    requestContext: CatalogRequestContext,
+  ): boolean {
+    const hasKnownSize = typeof model.size === 'number' && Number.isFinite(model.size) && model.size > 0;
+    const requiresAuthValidation = requestContext.hasAuthToken && (
+      model.accessState !== ModelAccessState.PUBLIC
+      || model.isGated
+      || model.isPrivate
+    );
+
+    return !hasKnownSize || model.requiresTreeProbe === true || requiresAuthValidation;
+  }
+
+  private scheduleDeferredMetadataResolution(input: DeferredMetadataResolutionInput): void {
+    const models = input.models.filter((model) => this.shouldResolveDeferredMetadata(model, input.requestContext));
+    if (models.length === 0 || this.isDisposed) {
+      return;
+    }
+
+    const requestKey = `${input.cacheKey}::request:${input.cacheRequestId}`;
+    if (this.deferredMetadataRequestCache.has(requestKey)) {
+      return;
+    }
+
+    const requestPromise = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        if (this.isDisposed) {
+          resolve();
+          return;
+        }
+
+        void this.runDeferredMetadataResolution({ ...input, models })
+          .catch((error) => {
+            if (!(error instanceof StaleCatalogAuthError) && process.env.NODE_ENV !== 'test') {
+              console.warn('[ModelCatalogService] Deferred catalog metadata resolution failed', error);
+            }
+          })
+          .finally(() => resolve());
+      }, 0);
+    });
+
+    this.deferredMetadataRequestCache.set(requestKey, requestPromise);
+    void requestPromise.finally(() => {
+      if (this.deferredMetadataRequestCache.get(requestKey) === requestPromise) {
+        this.deferredMetadataRequestCache.delete(requestKey);
+      }
+    });
+  }
+
+  private async runDeferredMetadataResolution(input: DeferredMetadataResolutionInput): Promise<void> {
+    const span = performanceMonitor.startSpan('catalog.resolveDeferredMetadata', {
+      count: input.models.length,
+      cursorType: input.cursor ? 'cursor' : 'initial',
+      hasAuthToken: input.catalogSearchHasAuthScope,
+    });
+    performanceMonitor.incrementCounter('catalog.resolveDeferredMetadata.calls');
+    let outcome: 'success' | 'stale' | 'error' = 'success';
+
+    try {
+      await this.resolveMissingModelMetadata(
+        input.models,
+        input.memoryFitContext,
+        input.requestContext,
+        {
+          treeProbeMode: 'bounded',
+          treeProbeMaxPages: DEFERRED_METADATA_TREE_MAX_PAGES,
+          resolveProjectorAwareModels: false,
+          batchSize: DEFERRED_METADATA_BATCH_SIZE,
+          onBatchResolved: ({ requestedModelIds, models }) => {
+            this.applyDeferredMetadataBatch(input, requestedModelIds, models);
+          },
+        },
+      );
+      this.assertRequestContextIsCurrent(input.requestContext);
+
+      const currentEntry = this.searchCache.get(input.cacheKey);
+      if (!currentEntry || currentEntry.requestId !== input.cacheRequestId || this.isDisposed) {
+        outcome = 'stale';
+        return;
+      }
+
+      const authScope = this.getAuthScope(input.catalogSearchHasAuthScope);
+      this.upsertModelSnapshots(currentEntry.result.models, authScope);
+      if (input.catalogSearchHasAuthScope && currentEntry.result.models.length > 0) {
+        this.reconcileAnonymousModelVisibility(currentEntry.result.models);
+      }
+      this.persistAnonymousFirstPageSearch({
+        normalizedQuery: input.normalizedQuery,
+        cursor: input.cursor,
+        pageSize: input.pageSize,
+        sort: input.sort,
+        gated: input.gated,
+        catalogSearchHasAuthScope: input.catalogSearchHasAuthScope,
+        result: currentEntry.result,
+      });
+    } catch (error) {
+      outcome = error instanceof StaleCatalogAuthError ? 'stale' : 'error';
+      throw error;
+    } finally {
+      span.end({ outcome });
+    }
+  }
+
+  private applyDeferredMetadataBatch(
+    input: DeferredMetadataResolutionInput,
+    requestedModelIds: string[],
+    resolvedModels: ModelMetadata[],
+  ): void {
+    this.assertRequestContextIsCurrent(input.requestContext);
+    if (this.isDisposed) {
+      return;
+    }
+
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (!currentEntry || currentEntry.requestId !== input.cacheRequestId) {
+      return;
+    }
+
+    const mergedModels = filterCatalogSearchModels(resolvedModels).map((model) => (
+      this.mergeModelWithRegistry(model, input.memoryFitContext) ?? model
+    ));
+    const replacements = new Map(mergedModels.map((model) => [model.id, this.toSearchResultModel(model)]));
+    const requestedIds = new Set(requestedModelIds);
+    const removedModelIds = requestedModelIds.filter((modelId) => !replacements.has(modelId));
+
+    removedModelIds.forEach((modelId) => this.evictModelFromCatalogCaches(modelId));
+
+    const latestEntry = this.searchCache.get(input.cacheKey);
+    if (!latestEntry || latestEntry.requestId !== input.cacheRequestId) {
+      return;
+    }
+
+    const nextModels = latestEntry.result.models.flatMap((model) => {
+      if (!requestedIds.has(model.id)) {
+        return [model];
+      }
+
+      const replacement = replacements.get(model.id);
+      return replacement ? [replacement] : [];
+    });
+    this.searchCache.set(input.cacheKey, {
+      ...latestEntry,
+      result: {
+        ...latestEntry.result,
+        models: nextModels,
+      },
+    });
+
+    const authScope = this.getAuthScope(input.catalogSearchHasAuthScope);
+    this.cacheModelSnapshotsInMemory(mergedModels, authScope);
+    const authScopedModels = mergedModels.filter((model) => (
+      model.accessState === ModelAccessState.AUTHORIZED
+      || model.accessState === ModelAccessState.ACCESS_DENIED
+    ));
+    if (authScopedModels.length > 0) {
+      this.cacheModelSnapshotsInMemory(authScopedModels, 'auth');
+    }
+
+    this.emitMetadataUpdate({
+      query: input.query,
+      sort: input.sort,
+      gated: input.gated,
+      models: mergedModels,
+      removedModelIds,
+    });
+  }
+
   private async fetchCatalogBatch(
     normalizedQuery: string,
     minimumResults: number,
@@ -1950,6 +2233,7 @@ export class ModelCatalogService {
     sort: CatalogServerSort | null,
     gated: boolean | undefined,
     catalogAuthPolicy: RequestAuthPolicy = REQUEST_AUTH_POLICY.ANONYMOUS,
+    metadataResolution: CatalogMetadataResolution = 'blocking',
   ): Promise<CatalogBatchResult> {
     const catalogAuthToken = resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
     const hasAuthToken = Boolean(catalogAuthToken);
@@ -1958,6 +2242,7 @@ export class ModelCatalogService {
       minimumResults,
       hasAuthToken,
       sort: sort ?? undefined,
+      metadataResolution,
     });
     performanceMonitor.incrementCounter('catalog.fetchCatalogBatch.calls');
 
@@ -1966,7 +2251,9 @@ export class ModelCatalogService {
     let exhausted = false;
     const visitedCursors = new Set<string>();
     const resolvedPageSize = Math.max(1, Math.round(minimumResults));
-    const requestLimit = this.resolveCatalogRequestLimit(resolvedPageSize);
+    const requestLimit = metadataResolution === 'deferred'
+      ? resolvedPageSize
+      : this.resolveCatalogRequestLimit(resolvedPageSize);
     let pagesFetched = 0;
     let outcome: 'success' | 'error' = 'success';
 
@@ -1988,12 +2275,14 @@ export class ModelCatalogService {
           gated,
         );
         const baseModels = transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
-        const hydratedModels = await this.resolveMissingModelMetadata(
-          baseModels,
-          memoryFitContext,
-          requestContext,
-          { treeProbeMode: 'bounded' },
-        );
+        const hydratedModels = metadataResolution === 'deferred'
+          ? baseModels
+          : await this.resolveMissingModelMetadata(
+            baseModels,
+            memoryFitContext,
+            requestContext,
+            { treeProbeMode: 'bounded' },
+          );
         // Merge with the local registry so downloaded entries don't disappear just because the
         // remote payload omitted some metadata or a tree lookup failed.
         const mergedHydratedModels = hydratedModels.map((model) => (
@@ -2006,6 +2295,13 @@ export class ModelCatalogService {
         if (page.items.length === 0) {
           exhausted = true;
         }
+
+        if (
+          metadataResolution === 'deferred'
+          && (models.length > 0 || pagesFetched >= DEFERRED_CATALOG_MAX_EMPTY_PAGES)
+        ) {
+          break;
+        }
       }
 
       return this.createPaginatedCatalogBatchResult(
@@ -2016,6 +2312,7 @@ export class ModelCatalogService {
         sort,
         hasAuthToken,
         gated,
+        metadataResolution,
       );
     } catch (error) {
       outcome = 'error';
@@ -2046,6 +2343,7 @@ export class ModelCatalogService {
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
     gated: boolean | undefined,
+    metadataResolution: CatalogMetadataResolution = 'blocking',
   ): CatalogBatchResult {
     if (models.length <= pageSize) {
       return {
@@ -2064,6 +2362,7 @@ export class ModelCatalogService {
         sort,
         hasAuthToken,
         gated,
+        metadataResolution,
       ),
     };
   }
@@ -2076,6 +2375,7 @@ export class ModelCatalogService {
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
     gated: boolean | undefined,
+    metadataResolution: CatalogMetadataResolution = 'blocking',
   ): string {
     const timestamp = Date.now();
     let nextCursor = finalNextCursor;
@@ -2091,6 +2391,7 @@ export class ModelCatalogService {
           sort,
           hasAuthToken,
           gated,
+          metadataResolution,
         ),
         {
           result: {
@@ -2261,6 +2562,32 @@ export class ModelCatalogService {
     ));
     if (authScoped.length > 0) {
       this.upsertModelSnapshots(authScoped, 'auth');
+    }
+    return merged;
+  }
+
+  private mergeSearchModelsWithRegistry(
+    remoteModels: ModelMetadata[],
+    authScope: CatalogCacheAuthScope,
+    memoryFitContext: CatalogMemoryFitContext | null,
+    metadataResolution: CatalogMetadataResolution,
+  ): ModelMetadata[] {
+    if (metadataResolution === 'blocking') {
+      return this.mergeWithRegistry(remoteModels, authScope, memoryFitContext);
+    }
+
+    const merged = remoteModels.map((model) => (
+      this.mergeModelWithRegistry(model, memoryFitContext) ?? model
+    ));
+    // Keep summary and persisted-cache paints free of a second synchronous
+    // persistence write. Full snapshots are persisted after deferred enrichment.
+    this.cacheModelSnapshotsInMemory(merged, authScope);
+    const authScopedModels = merged.filter((model) => (
+      model.accessState === ModelAccessState.AUTHORIZED
+      || model.accessState === ModelAccessState.ACCESS_DENIED
+    ));
+    if (authScopedModels.length > 0) {
+      this.cacheModelSnapshotsInMemory(authScopedModels, 'auth');
     }
     return merged;
   }
@@ -3980,11 +4307,12 @@ export class ModelCatalogService {
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
     gated: boolean | undefined,
+    metadataResolution: CatalogMetadataResolution = 'blocking',
   ): string {
     const cursorKey = cursor ?? '__initial__';
     const sortKey = sort ?? '__default__';
     const gatedKey = typeof gated === 'boolean' ? String(gated) : '__any__';
-    return `${normalizedQuery}::${cursorKey}::${pageSize}::${sortKey}::${this.getAuthScope(hasAuthToken)}::gated:${gatedKey}::${this.authCacheVersion}`;
+    return `${normalizedQuery}::${cursorKey}::${pageSize}::${sortKey}::${this.getAuthScope(hasAuthToken)}::gated:${gatedKey}::metadata:${metadataResolution}::${this.authCacheVersion}`;
   }
 
   private isBufferedCursor(cursor: string | null): boolean {
@@ -4035,6 +4363,7 @@ export class ModelCatalogService {
     pageSize: number,
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
+    gated: boolean | undefined = undefined,
   ): CatalogCacheScope {
     return {
       query: normalizedQuery,
@@ -4042,6 +4371,7 @@ export class ModelCatalogService {
       pageSize,
       sort,
       authScope: this.getAuthScope(hasAuthToken),
+      gated: typeof gated === 'boolean' ? gated : null,
     };
   }
 

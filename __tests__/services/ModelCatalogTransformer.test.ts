@@ -6,6 +6,10 @@ import {
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus } from '../../src/types/models';
 import {
+  resolveEffectiveActiveVariantNativeSupport,
+  resolveModelNativeMultimodalSupport,
+} from '../../src/utils/modelCapabilities';
+import {
   ambiguousProjectorCatalogSiblings,
   projectorOnlyCatalogSiblings,
   projectorFileName,
@@ -179,6 +183,8 @@ describe('ModelCatalogTransformer', () => {
     ], null, null);
 
     expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text']);
+    expect(resolveModelNativeMultimodalSupport(models[0])).toEqual({ vision: false, audio: false });
     expect(models[0].inputCapabilities).toEqual(expect.objectContaining({
       declared: {
         image: 'unknown',
@@ -198,6 +204,226 @@ describe('ModelCatalogTransformer', () => {
         installState: 'remote',
       }),
     ]);
+  });
+
+  it('preserves vision and audio chat modalities when catalog metadata exposes both', () => {
+    const models = transformHFResponse([
+      {
+        id: 'test-org/vision-audio-chat-model',
+        author: 'test-org',
+        pipeline_tag: 'image-text-to-text',
+        tags: ['gguf', 'vision', 'audio'],
+        siblings: [...visionCatalogSiblings],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(models[0].inputCapabilities?.declared).toEqual(expect.objectContaining({
+      image: 'supported',
+      audio: 'supported',
+    }));
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        requiredFor: ['audio', 'image'],
+      }),
+    ]));
+  });
+
+  it('maps the Gemma 4 E2B nested config to deployable vision and audio support', () => {
+    const modelFileName = 'gemma-4-E2B-it-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-BF16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'unsloth/gemma-4-E2B-it-GGUF',
+        author: 'unsloth',
+        tags: ['gguf', 'image-text-to-text'],
+        config: {
+          model_type: 'gemma4',
+          architectures: ['Gemma4ForConditionalGeneration'],
+          vision_config: { model_type: 'gemma4_vision' },
+          audio_config: { model_type: 'gemma4_audio' },
+        },
+        gguf: { architecture: 'gemma4' },
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision', 'audio'],
+      activeVariantId: modelFileName,
+    }));
+    expect(models[0].inputCapabilities?.declared).toEqual(expect.objectContaining({
+      image: 'supported',
+      audio: 'supported',
+    }));
+    expect(models[0].projectorCandidates).toEqual([
+      expect.objectContaining({ fileName: projectorFileName }),
+    ]);
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        remoteFileName: projectorFileName,
+        requiredFor: ['audio', 'image'],
+      }),
+    ]));
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: true,
+      audio: true,
+    });
+  });
+
+  it('maps a sparse Phi-4 multimodal GGUF conversion to vision and audio support', () => {
+    const modelFileName = 'Phi-4-multimodal-instruct-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-Phi-4-multimodal-f16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'community/Phi-4-multimodal-instruct-GGUF',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(models[0].inputCapabilities?.declared).toEqual({
+      image: 'supported',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        requiredFor: ['audio', 'image'],
+      }),
+    ]));
+  });
+
+  it('keeps sparse audio-only GGUF models out of vision when metadata only says multimodal', () => {
+    const modelFileName = 'Voxtral-Mini-3B-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-Voxtral-Mini-3B-f16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'community/Voxtral-Mini-3B-multimodal-GGUF',
+        tags: ['gguf', 'multimodal'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'audio']);
+    expect(models[0].inputCapabilities?.declared).toEqual({
+      image: 'unknown',
+      audio: 'supported',
+      video: 'unknown',
+    });
+    expect(models[0].visionSource).toBeUndefined();
+    expect(models[0].visionConfidence).toBeUndefined();
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+      }),
+    ]));
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: false,
+      audio: true,
+    });
+  });
+
+  it('keeps an ambiguous multimodal label passive without image or projector evidence', () => {
+    const models = transformHFResponse([
+      {
+        id: 'community/generic-multimodal-model-GGUF',
+        tags: ['gguf', 'multimodal'],
+        siblings: [
+          { rfilename: 'generic-model-Q4_K_M.gguf', size: REMOTE_SIZE },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text']);
+    expect(models[0].inputCapabilities).toBeUndefined();
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: false,
+      audio: false,
+    });
+  });
+
+  it('recognizes sparse Qwen 3 VL conversions from matching repository artifacts', () => {
+    const modelFileName = 'Qwen3-VL-4B-Q4_K_M.gguf';
+    const projectorFileName = 'mmproj-Qwen3-VL-4B-f16.gguf';
+    const models = transformHFResponse([
+      {
+        id: 'community/Qwen3-VL-4B-GGUF',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].chatModalities).toEqual(['text', 'vision']);
+    expect(models[0].inputCapabilities?.declared).toEqual({
+      image: 'supported',
+      audio: 'unknown',
+      video: 'unknown',
+    });
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: true,
+      audio: false,
+    });
+  });
+
+  it('preserves audio chat modalities from detailed payload input capabilities', () => {
+    const result = buildModelMetadataFromPayload(
+      {
+        id: 'test-org/audio-detail-model',
+        author: 'test-org',
+        pipeline_tag: 'automatic-speech-recognition',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: 'audio-model.Q4_K_M.gguf', size: REMOTE_SIZE },
+          { rfilename: 'mmproj-audio-model-f16.gguf', size: 1_000_000 },
+        ],
+      },
+      null,
+      null,
+      createFallbackModel('test-org/audio-detail-model'),
+    );
+
+    expect(result.chatModalities).toEqual(['text', 'audio']);
+    expect(result.inputCapabilities?.declared.audio).toBe('supported');
+    expect(result.inputCapabilities?.evidence).toEqual(expect.arrayContaining([
+      { source: 'pipeline_tag', value: 'automatic-speech-recognition', confidence: 'high' },
+      { source: 'projector', value: 'mmproj-audio-model-f16.gguf', confidence: 'medium' },
+    ]));
+    expect(result.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      fileName: 'mmproj-audio-model-f16.gguf',
+    }));
+    expect(result.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector')).toEqual(
+      expect.objectContaining({
+        requiredFor: ['audio'],
+      }),
+    );
+    expect(result.visionSource).toBeUndefined();
+    expect(result.visionConfidence).toBeUndefined();
   });
 
   it('includes matched projector bytes in catalog memory-fit estimates', () => {

@@ -45,6 +45,7 @@ export type HuggingFaceModelCardData = {
 };
 
 export type HuggingFaceModelConfig = {
+  [key: string]: unknown;
   max_position_embeddings?: number;
   n_positions?: number;
   max_sequence_length?: number;
@@ -57,6 +58,8 @@ export type HuggingFaceModelConfig = {
   num_ctx?: number;
   original_max_position_embeddings?: number;
   text_config?: HuggingFaceModelConfig;
+  vision_config?: HuggingFaceModelConfig;
+  audio_config?: HuggingFaceModelConfig;
   rope_scaling?: {
     original_max_position_embeddings?: number;
     max_position_embeddings?: number;
@@ -127,6 +130,7 @@ export type CatalogCacheEntry<Result> = {
   result: Result;
   timestamp: number;
   isBufferedCursor: boolean;
+  requestId?: number;
 };
 
 export type CatalogBatchResult = {

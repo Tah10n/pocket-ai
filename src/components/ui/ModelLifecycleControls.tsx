@@ -79,21 +79,21 @@ function getProjectorDownloadAction(model: ModelMetadata): { labelKey: string; t
 
   if (projectorState.status === 'available') {
     return {
-      labelKey: 'models.vision.downloadProjector',
+      labelKey: 'models.multimodal.downloadProjector',
       testID: `model-projector-download-${model.id}`,
     };
   }
 
   if (projectorState.status === 'failed') {
     return {
-      labelKey: 'models.vision.retryProjectorDownload',
+      labelKey: 'models.multimodal.retryProjectorDownload',
       testID: `model-projector-retry-${model.id}`,
     };
   }
 
   if (projectorState.status === 'paused') {
     return {
-      labelKey: 'models.vision.resumeProjectorDownload',
+      labelKey: 'models.multimodal.resumeProjectorDownload',
       testID: `model-projector-resume-${model.id}`,
     };
   }
@@ -227,10 +227,10 @@ function getDownloadProgressPresentation(
 } {
   if (projectorDownloadStatus) {
     const labelKey = projectorDownloadStatus === 'queued'
-      ? 'models.vision.projectorQueued'
+      ? 'models.multimodal.projectorQueued'
       : projectorDownloadStatus === 'paused'
-        ? 'models.vision.projectorPaused'
-        : 'models.vision.projectorDownloading';
+        ? 'models.multimodal.projectorPaused'
+        : 'models.multimodal.projectorDownloading';
 
     return {
       iconName: projectorDownloadStatus === 'paused' ? 'pause-circle-outline' : 'download',
@@ -288,8 +288,8 @@ function getProjectorStatusPresentation(
 } {
   if (status === 'downloaded' || status === 'active') {
     return {
-      titleKey: 'models.vision.projectorStatusReadyTitle',
-      descriptionKey: 'models.vision.projectorStatusReadyDescription',
+      titleKey: 'models.multimodal.projectorStatusReadyTitle',
+      descriptionKey: 'models.multimodal.projectorStatusReadyDescription',
       iconName: 'visibility',
       tone: 'success',
     };
@@ -297,8 +297,8 @@ function getProjectorStatusPresentation(
 
   if (status === 'ambiguous') {
     return {
-      titleKey: 'models.vision.projectorStatusAmbiguousTitle',
-      descriptionKey: 'models.vision.projectorStatusAmbiguousDescription',
+      titleKey: 'models.multimodal.projectorStatusAmbiguousTitle',
+      descriptionKey: 'models.multimodal.projectorStatusAmbiguousDescription',
       iconName: 'extension',
       tone: 'warning',
     };
@@ -306,8 +306,8 @@ function getProjectorStatusPresentation(
 
   if (status === 'queued' || status === 'downloading' || status === 'paused') {
     return {
-      titleKey: 'models.vision.projectorStatusDownloadingTitle',
-      descriptionKey: 'models.vision.projectorStatusDownloadingDescription',
+      titleKey: 'models.multimodal.projectorStatusDownloadingTitle',
+      descriptionKey: 'models.multimodal.projectorStatusDownloadingDescription',
       iconName: status === 'paused' ? 'pause-circle-outline' : 'download',
       tone: 'info',
     };
@@ -315,16 +315,16 @@ function getProjectorStatusPresentation(
 
   if (status === 'failed') {
     return {
-      titleKey: 'models.vision.projectorStatusFailedTitle',
-      descriptionKey: 'models.vision.projectorStatusFailedDescription',
+      titleKey: 'models.multimodal.projectorStatusFailedTitle',
+      descriptionKey: 'models.multimodal.projectorStatusFailedDescription',
       iconName: 'error-outline',
       tone: 'error',
     };
   }
 
   return {
-    titleKey: 'models.vision.projectorStatusMissingTitle',
-    descriptionKey: 'models.vision.projectorStatusMissingDescription',
+    titleKey: 'models.multimodal.projectorStatusMissingTitle',
+    descriptionKey: 'models.multimodal.projectorStatusMissingDescription',
     iconName: 'extension',
     tone: 'warning',
   };
@@ -379,7 +379,7 @@ export function ModelProjectorStatus({
       {projectorState.shouldPromptForChoice && onChooseProjector ? (
         <Box className="mt-3">
           <ActionPill
-            label={t('models.vision.chooseProjectorAction')}
+            label={t('models.multimodal.chooseProjectorAction')}
             tone="primary"
             onPress={() => onChooseProjector(model)}
             className="self-start"

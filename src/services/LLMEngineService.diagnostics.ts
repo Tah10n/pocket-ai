@@ -23,13 +23,32 @@ function resolveVisionCapability(readiness: MultimodalReadinessState | null | un
     return 'text_only';
   }
 
+  if (readiness.requestedSupport !== undefined && !readiness.requestedSupport.includes('vision')) {
+    return 'unknown';
+  }
+
   if (readiness.status === 'unsupported') {
     return 'unsupported';
   }
 
+  if (readiness.support.includes('vision')) {
+    return 'vision_capable';
+  }
+
+  if (readiness.status === 'ready') {
+    return 'unknown';
+  }
+
+  if (readiness.requestedSupport?.includes('vision') === true) {
+    return 'vision_capable';
+  }
+
+  if ((readiness.requestedSupport?.length ?? 0) > 0) {
+    return 'unknown';
+  }
+
   if (
-    readiness.support.includes('vision')
-    || readiness.projectorId
+    readiness.projectorId
     || typeof readiness.projectorSize === 'number'
     || readiness.status === 'missing_projector'
     || readiness.status === 'ambiguous_projector'
@@ -43,6 +62,13 @@ function resolveVisionCapability(readiness: MultimodalReadinessState | null | un
   return 'unknown';
 }
 
+function hasProjectorEvidence(readiness: MultimodalReadinessState | null | undefined): boolean {
+  return Boolean(readiness?.projectorId)
+    || (typeof readiness?.projectorSize === 'number'
+      && Number.isFinite(readiness.projectorSize)
+      && readiness.projectorSize > 0);
+}
+
 function resolveProjectorPresence(readiness: MultimodalReadinessState | null | undefined): ProjectorPresenceDiagnostic {
   switch (readiness?.status) {
     case 'ready':
@@ -50,8 +76,9 @@ function resolveProjectorPresence(readiness: MultimodalReadinessState | null | u
       return readiness.projectorId || readiness.support.includes('vision') ? 'downloaded' : 'available_remote';
     case 'missing_projector':
     case 'text_only':
-    case 'unsupported':
       return 'missing';
+    case 'unsupported':
+      return hasProjectorEvidence(readiness) ? 'downloaded' : 'missing';
     case 'ambiguous_projector':
       return 'ambiguous';
     case 'projector_downloading':
@@ -71,8 +98,9 @@ function resolveProjectorPathCategory(readiness: MultimodalReadinessState | null
       return readiness.projectorId || readiness.support.includes('vision') ? 'models' : 'unknown';
     case 'missing_projector':
     case 'text_only':
-    case 'unsupported':
       return 'missing';
+    case 'unsupported':
+      return hasProjectorEvidence(readiness) ? 'models' : 'missing';
     case 'ambiguous_projector':
     case 'projector_downloading':
       return 'unknown';

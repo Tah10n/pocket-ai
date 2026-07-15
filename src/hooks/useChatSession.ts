@@ -743,7 +743,7 @@ function throwMissingAttachments(
   const pathCategories = Array.from(new Set(attachments.map((attachment) => attachment.pathCategory)));
   throw new AppError(
     'chat_attachment_missing',
-    'One or more selected image attachments are no longer available. Remove the image and try again.',
+    'One or more selected attachments are no longer available. Remove the missing attachment and try again.',
     {
       details: {
         ...(messageId ? { messageId } : null),
@@ -968,6 +968,17 @@ async function assertUserMessageAttachmentsReadyForRegeneration(
 ): Promise<MultimodalReadinessState | undefined> {
   if (!messageHasAttachments(message)) {
     return readiness;
+  }
+
+  const unsupportedVideoCount = message.attachments?.filter((attachment) => (
+    isGenericChatAttachment(attachment) && attachment.kind === 'video'
+  )).length ?? 0;
+  if (unsupportedVideoCount > 0) {
+    throw new AppError(
+      'chat_attachment_unsupported_type',
+      'Video attachments cannot be regenerated because video input is disabled.',
+      { details: { attachmentKind: 'video', attachmentCount: unsupportedVideoCount } },
+    );
   }
 
   assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);

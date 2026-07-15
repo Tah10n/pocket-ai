@@ -314,6 +314,51 @@ function scheduleAfterFirstFrame(task: () => void): void {
   scheduleAfterPaint();
 }
 
+const MODEL_CATALOG_CACHE_HYDRATION_MAX_ATTEMPTS = 3;
+const MODEL_CATALOG_CACHE_HYDRATION_RETRY_DELAY_MS = 1000;
+
+function hydrateModelCatalogCacheWithRetry(attempt: number = 1): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const module = require('./ModelCatalogService') as typeof import('./ModelCatalogService');
+    module.modelCatalogService.hydratePersistentCache();
+  } catch (error) {
+    const hasRetryRemaining = attempt < MODEL_CATALOG_CACHE_HYDRATION_MAX_ATTEMPTS;
+    if (!isRuntimeTestEnvironment()) {
+      console.warn(
+        hasRetryRemaining
+          ? '[bootstrapApp] Failed to hydrate model catalog cache; retry scheduled'
+          : '[bootstrapApp] Failed to hydrate model catalog cache after bounded retries',
+        {
+          attempt,
+          maxAttempts: MODEL_CATALOG_CACHE_HYDRATION_MAX_ATTEMPTS,
+          retryDelayMs: hasRetryRemaining
+            ? MODEL_CATALOG_CACHE_HYDRATION_RETRY_DELAY_MS * attempt
+            : undefined,
+        },
+        error,
+      );
+    }
+
+    if (hasRetryRemaining) {
+      setTimeout(
+        () => hydrateModelCatalogCacheWithRetry(attempt + 1),
+        MODEL_CATALOG_CACHE_HYDRATION_RETRY_DELAY_MS * attempt,
+      );
+    }
+  }
+}
+
+export function scheduleModelCatalogCacheHydrationAfterFirstFrame(): void {
+  scheduleAfterFirstFrame(() => {
+    // Cache-tier hydration can parse a bounded JSON payload. Load it only
+    // after the app shell has committed its first frame. A short bounded retry
+    // window recovers transient private-storage readiness failures without
+    // moving cache parsing back onto the startup critical path.
+    hydrateModelCatalogCacheWithRetry();
+  });
+}
+
 type BootRestoreSkipReason =
   | 'settings_changed'
   | 'engine_ready_other'
@@ -551,11 +596,11 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
 
     if (!isRuntimeTestEnvironment() && Platform.OS !== 'web') {
       scheduleAfterFirstFrame(() => {
-        try {
-          if (getPrivateStorageHealthSnapshot().status !== 'ready') {
-            return;
-          }
+        if (getPrivateStorageHealthSnapshot().status !== 'ready') {
+          return;
+        }
 
+        try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const module = require('./ModelDownloadManager') as typeof import('./ModelDownloadManager');
           module.resumeModelDownloadQueueIfStorageReady();

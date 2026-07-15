@@ -1,6 +1,6 @@
 # Multimodal Attachment Architecture
 
-Last updated: 2026-06-19
+Last updated: 2026-06-27
 
 Pocket AI's multimodal attachment pipeline is designed to keep user files local while passing
 supported media to the on-device `llama.rn` runtime. The current product surface uses one shared
@@ -12,7 +12,7 @@ old persisted video metadata may still be read for chat-history compatibility.
 ## Current Runtime Contract
 
 The app pins `llama.rn` through `package.json` and validates the installed runtime declarations
-before relying on native multimodal behavior. With `llama.rn@0.12.4`, the native chat message
+before relying on native multimodal behavior. With `llama.rn@0.12.5`, the native chat message
 contract accepts:
 
 - plain text message content
@@ -23,6 +23,9 @@ contract accepts:
 The app-level inference type keeps durable chat text separate from structured runtime media parts.
 Persisted chat messages can carry attachment metadata, while the native adapter validates structured
 media payloads before calling `llama.rn`.
+
+Model chat modality metadata uses `text`, `vision`, and `audio`. Documents are intentionally not a
+native model modality because document files are processed locally and injected as bounded text.
 
 ## Attachment Domain Contract
 
@@ -48,9 +51,15 @@ Input support is tracked in separate layers:
 
 Catalog evidence can mark image, audio, or video as likely supported, but it is not enough to send
 native media. Image and audio sending require an active model, a ready projector, and runtime
-confirmation for the matching modality. Document support depends on local processors and does not
-require a projector. Video declarations are retained as catalog metadata only; composer video
-attachment, sampled-frame processing, and direct video input are disabled.
+confirmation for the matching modality. Audio-only model metadata is allowed: the app still resolves
+and initializes the projector path, then enables audio only if the runtime confirms audio support.
+Document support depends on local processors and does not require a projector. Video declarations are
+retained as catalog metadata only; composer video attachment, sampled-frame processing, and direct
+video input are disabled.
+
+When a model declares multiple native media modalities, runtime readiness can be partial. For
+example, a model may remain ready for vision if the active runtime confirms vision but not audio. In
+that state image sends remain available and audio sends stay disabled.
 
 ## Model Artifact Manifest
 
@@ -58,7 +67,7 @@ Model metadata can expose an artifact manifest alongside the legacy main-model f
 projector candidates. The manifest currently represents:
 
 - the main GGUF artifact required for text chat
-- multimodal projector artifacts required for image, and later audio, inputs
+- multimodal projector artifacts required for image and audio inputs
 
 Legacy fields such as the selected GGUF filename, model URL, local path, integrity marker, and
 download progress remain the compatibility source for current download code. The manifest is a
@@ -84,6 +93,14 @@ Before inference:
   inference content
 
 Text-only chat remains available when projector setup is missing, ambiguous, failed, or unsupported.
+
+## Startup Cleanup
+
+Attachment cleanup reconciles durable chat references with files in `Documents/chat-attachments/`.
+Fresh app-generated draft files are preserved during startup reconciliation while the UI and stores
+settle. Draft file names use the `draft-<timestamp>-<random>` prefix, with optional `-thumb` and a
+bounded extension. This policy protects image, document, and audio drafts created by the app; it is
+not used as MIME validation for user-selected files.
 
 ## Audio Attachments
 

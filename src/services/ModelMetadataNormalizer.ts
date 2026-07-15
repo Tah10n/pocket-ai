@@ -23,20 +23,44 @@ import type {
   VisionCapabilityConfidence,
   VisionCapabilitySource,
 } from '../types/multimodal';
+import type { ModelInputCapabilitySnapshot } from '../types/modelInputCapabilities';
 import {
   deriveArtifactsFromLegacyModel,
+  getUnboundProjectorArtifactsForBookkeeping,
   normalizePersistedModelArtifacts,
 } from '../utils/modelArtifacts';
-import { normalizePersistedModelCapabilitySnapshot } from '../utils/modelCapabilities';
-import { normalizePersistedInputCapabilitySnapshot } from '../utils/modelInputCapabilities';
+import {
+  normalizePersistedModelCapabilitySnapshot,
+  projectorArtifactMatchesCandidate,
+} from '../utils/modelCapabilities';
+import {
+  inferDeclaredInputCapabilities,
+  inputCapabilityEvidenceSupportsModality,
+  isKnownAudioInputProfileSignal,
+  isKnownAudioOnlyInputProfileSignal,
+  isKnownVisionAudioInputProfileSignal,
+  mergeInputCapabilitySnapshots,
+  normalizePersistedInputCapabilitySnapshot,
+} from '../utils/modelInputCapabilities';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import { getShortModelLabel } from '../utils/modelLabel';
 import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
-import { resolveModelArtifactRole } from '../utils/modelProjectors';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+  resolveModelArtifactRole,
+} from '../utils/modelProjectors';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
+import { normalizeMultimodalReadinessState as normalizeReadinessSupport } from '../utils/multimodalReadiness';
+import { resolveActiveModelVariant } from '../utils/activeModelVariant';
+import {
+  canonicalizeProjectorCandidateAliases,
+  getProjectorExactScopeKey,
+  remapProjectorAliasId,
+} from '../utils/projectorIdentity';
 import {
   isProjectorFileName,
   isSupportedGgufFileName,
@@ -150,11 +174,55 @@ function normalizeChatModalities(value: unknown): ModelChatModality[] | undefine
   }
 
   const modalities = value.filter((entry): entry is ModelChatModality => (
-    entry === 'text' || entry === 'vision'
+    entry === 'text' || entry === 'vision' || entry === 'audio'
   ));
   const deduped = [...new Set(modalities)];
 
   return deduped.length > 0 ? deduped : undefined;
+}
+
+function reconcileChatModalitiesWithTrustedProfile(
+  chatModalities: ModelChatModality[] | undefined,
+  profileSupport: { image: boolean; audio: boolean; audioOnly: boolean },
+): ModelChatModality[] {
+  const modalities = new Set<ModelChatModality>(chatModalities ?? ['text']);
+  modalities.add('text');
+  if (profileSupport.audioOnly) {
+    modalities.delete('vision');
+  }
+  if (profileSupport.image) {
+    modalities.add('vision');
+  }
+  if (profileSupport.audio) {
+    modalities.add('audio');
+  }
+
+  return [
+    'text',
+    ...(modalities.has('vision') ? ['vision' as const] : []),
+    ...(modalities.has('audio') ? ['audio' as const] : []),
+  ];
+}
+
+function hasExplicitTextOnlyChatModalities(chatModalities: ModelChatModality[] | undefined): boolean {
+  return Array.isArray(chatModalities)
+    && chatModalities.includes('text')
+    && !chatModalities.includes('vision')
+    && !chatModalities.includes('audio');
+}
+
+function hasTrustedPersistedImageEvidence(
+  inputCapabilities: ModelInputCapabilitySnapshot | undefined,
+): boolean {
+  return inputCapabilities?.evidence.some((entry) => (
+    inputCapabilityEvidenceSupportsModality(entry, 'image')
+    && (
+      entry.source === 'runtime'
+      || entry.source === 'architecture'
+      || entry.source === 'config'
+      || entry.confidence === 'high'
+    )
+  )) === true;
 }
 
 function normalizeMultimodalReadinessStatus(value: unknown): MultimodalReadinessStatus | undefined {
@@ -198,18 +266,22 @@ function normalizeMultimodalReadinessState(value: unknown): MultimodalReadinessS
   const projectorSize = typeof record.projectorSize === 'number' && Number.isFinite(record.projectorSize) && record.projectorSize > 0
     ? Math.round(record.projectorSize)
     : undefined;
+  const requestedSupport = Array.isArray(record.requestedSupport)
+    ? normalizeMultimodalSupport(record.requestedSupport)
+    : undefined;
   const failureReason = sanitizeMultimodalFailureReason(normalizeNonEmptyString(record.failureReason));
 
-  return {
+  return normalizeReadinessSupport({
     modelId,
     ...(normalizeNonEmptyString(record.variantId) ? { variantId: normalizeNonEmptyString(record.variantId) } : {}),
     status,
     ...(normalizeNonEmptyString(record.projectorId) ? { projectorId: normalizeNonEmptyString(record.projectorId) } : {}),
     ...(projectorSize !== undefined ? { projectorSize } : {}),
     support: normalizeMultimodalSupport(record.support),
+    ...(requestedSupport !== undefined ? { requestedSupport } : {}),
     ...(failureReason ? { failureReason } : {}),
     checkedAt,
-  };
+  });
 }
 
 function normalizeVisionCapabilitySource(value: unknown): VisionCapabilitySource | undefined {
@@ -303,18 +375,45 @@ function normalizeProjectorArtifacts(value: unknown): ProjectorArtifact[] | unde
     return undefined;
   }
 
-  const seen = new Set<string>();
+  if (value.length === 0) {
+    return [];
+  }
+
   const artifacts = value.flatMap((entry) => {
     const artifact = normalizeProjectorArtifact(entry);
-    if (!artifact || seen.has(artifact.id)) {
+    if (!artifact) {
       return [];
     }
 
-    seen.add(artifact.id);
     return [artifact];
   });
 
   return artifacts.length > 0 ? artifacts : undefined;
+}
+
+function selectCanonicalProjectorsForSource(
+  sourceCandidates: ProjectorArtifact[] | undefined,
+  canonicalCandidates: readonly ProjectorArtifact[],
+): ProjectorArtifact[] | undefined {
+  if (!sourceCandidates) {
+    return undefined;
+  }
+  if (sourceCandidates.length === 0) {
+    return [];
+  }
+
+  const sourceScopeKeys = new Set(sourceCandidates.flatMap((candidate) => {
+    const scopeKey = getProjectorExactScopeKey(candidate);
+    return scopeKey ? [scopeKey] : [];
+  }));
+  const candidates = canonicalCandidates.filter((candidate) => {
+    const scopeKey = getProjectorExactScopeKey(candidate);
+    return scopeKey !== null && sourceScopeKeys.has(scopeKey);
+  });
+  // A non-empty explicit source remains authoritative even when exact
+  // canonicalization rejects every candidate. Returning an empty array keeps
+  // downstream merges from reviving stale projector state.
+  return candidates;
 }
 
 function fitsInRamForMemoryFitDecision(decision: ModelMemoryFitDecision): boolean | null {
@@ -447,8 +546,13 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
   const ramFitConfidence = normalizeMemoryFitConfidence(record.ramFitConfidence);
   const chatModalities = normalizeChatModalities(record.chatModalities);
   const artifactRole = normalizeModelArtifactRole(record.artifactRole);
-  const visionSource = normalizeVisionCapabilitySource(record.visionSource);
-  const visionConfidence = normalizeVisionCapabilityConfidence(record.visionConfidence);
+  const permitsVisionMetadata = chatModalities === undefined || chatModalities.includes('vision');
+  const visionSource = permitsVisionMetadata
+    ? normalizeVisionCapabilitySource(record.visionSource)
+    : undefined;
+  const visionConfidence = permitsVisionMetadata
+    ? normalizeVisionCapabilityConfidence(record.visionConfidence)
+    : undefined;
   const projectorCandidates = normalizeProjectorArtifacts(record.projectorCandidates);
   const selectedProjectorId = normalizeNonEmptyString(record.selectedProjectorId);
 
@@ -493,20 +597,14 @@ function resolveActiveVariantId(
       return activeVariantId;
     }
 
-    const activeVariant = variants.find((variant) => (
-      variant.variantId === activeVariantId
-      || variant.fileName === activeVariantId
-    ));
+    const activeVariant = resolveActiveModelVariant({ activeVariantId, variants });
     if (activeVariant) {
       return activeVariant.variantId;
     }
   }
 
   if (resolvedFileName) {
-    const resolvedVariant = variants?.find((variant) => (
-      variant.variantId === resolvedFileName
-      || variant.fileName === resolvedFileName
-    ));
+    const resolvedVariant = resolveActiveModelVariant({ resolvedFileName, variants });
     if (resolvedVariant) {
       return resolvedVariant.variantId;
     }
@@ -586,35 +684,115 @@ export function normalizePersistedModelMetadata(
   const normalizedMemoryFitDecision = size === null ? undefined : normalizeMemoryFitDecision(model.memoryFitDecision);
   const normalizedMemoryFitConfidence = size === null ? undefined : normalizeMemoryFitConfidence(model.memoryFitConfidence);
   const normalizedGguf = normalizeGgufMetadata(model.gguf);
+  const normalizedModelType = normalizeNonEmptyString(model.modelType);
+  const normalizedArchitectures = normalizeStringArray(model.architectures);
+  const normalizedTags = normalizeStringArray(model.tags);
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
   const normalizedActiveVariantId = normalizeNonEmptyString(model.activeVariantId);
   const normalizedResolvedFileName = normalizeNonEmptyString(model.resolvedFileName);
-  const variants = normalizeModelVariants(
+  const normalizedVariantsBeforeProjectorCanonicalization = normalizeModelVariants(
     (model as PersistedModelMetadata & { variants?: unknown }).variants,
     {
       activeVariantId: normalizedActiveVariantId,
       resolvedFileName: normalizedResolvedFileName,
     },
   );
-  const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
-  const chatModalities = normalizeChatModalities(model.chatModalities);
-  const inputCapabilities = normalizePersistedInputCapabilitySnapshot(
+  const persistedChatModalities = normalizeChatModalities(model.chatModalities);
+  const persistedInputCapabilities = normalizePersistedInputCapabilitySnapshot(
     (model as PersistedModelMetadata & { inputCapabilities?: unknown }).inputCapabilities,
   );
   const artifactRole = normalizeModelArtifactRole(model.artifactRole)
     ?? (normalizedResolvedFileName ? resolveModelArtifactRole(normalizedResolvedFileName) : undefined);
   const visionSource = normalizeVisionCapabilitySource(model.visionSource);
   const visionConfidence = normalizeVisionCapabilityConfidence(model.visionConfidence);
-  const projectorCandidates = normalizeProjectorArtifacts(model.projectorCandidates);
-  const selectedProjectorId = normalizeNonEmptyString(model.selectedProjectorId);
-  const persistedArtifacts = normalizePersistedModelArtifacts(
+  const normalizedModelProjectorCandidates = normalizeProjectorArtifacts(model.projectorCandidates);
+  const normalizedPersistedArtifacts = normalizePersistedModelArtifacts(
     (model as PersistedModelMetadata & { artifacts?: unknown }).artifacts,
   );
-  const multimodalReadiness = normalizeMultimodalReadinessState(
+  const normalizedAllProjectorCandidates = [
+    ...(normalizedModelProjectorCandidates ?? []),
+    ...(normalizedVariantsBeforeProjectorCanonicalization ?? []).flatMap((variant) => (
+      variant.projectorCandidates ?? []
+    )),
+  ];
+  const canonicalProjectors = canonicalizeProjectorCandidateAliases(
+    normalizedAllProjectorCandidates,
+    normalizedPersistedArtifacts,
+  );
+  const projectorCandidates = selectCanonicalProjectorsForSource(
+    normalizedModelProjectorCandidates,
+    canonicalProjectors.candidates,
+  );
+  const normalizedVariants = normalizedVariantsBeforeProjectorCanonicalization?.map((variant) => {
+    const variantProjectorCandidates = selectCanonicalProjectorsForSource(
+      variant.projectorCandidates,
+      canonicalProjectors.candidates,
+    );
+    const remappedSelectedProjectorId = remapProjectorAliasId(
+      variant.selectedProjectorId,
+      canonicalProjectors,
+    );
+    const selectedProjectorId = remappedSelectedProjectorId
+      && canonicalProjectors.candidates.some((candidate) => (
+        candidate.id === remappedSelectedProjectorId
+        && (
+          candidate.ownerVariantId === undefined
+          || candidate.ownerVariantId === variant.variantId
+          || candidate.ownerVariantId === variant.fileName
+        )
+      ))
+      ? remappedSelectedProjectorId
+      : undefined;
+    const normalizedVariant = { ...variant };
+    delete normalizedVariant.projectorCandidates;
+    delete normalizedVariant.selectedProjectorId;
+    return {
+      ...normalizedVariant,
+      ...(variantProjectorCandidates !== undefined
+        ? { projectorCandidates: variantProjectorCandidates }
+        : {}),
+      ...(selectedProjectorId ? { selectedProjectorId } : {}),
+    };
+  });
+  const remappedSelectedProjectorId = remapProjectorAliasId(
+    normalizeNonEmptyString(model.selectedProjectorId),
+    canonicalProjectors,
+  );
+  const selectedProjectorId = remappedSelectedProjectorId
+    && canonicalProjectors.candidates.some((candidate) => candidate.id === remappedSelectedProjectorId)
+    ? remappedSelectedProjectorId
+    : undefined;
+  const persistedArtifacts = normalizedPersistedArtifacts === undefined
+    ? undefined
+    : [
+        ...normalizedPersistedArtifacts.filter((artifact) => artifact.kind !== 'multimodal_projector'),
+        ...canonicalProjectors.artifacts,
+        ...getUnboundProjectorArtifactsForBookkeeping(
+          normalizedPersistedArtifacts,
+          normalizedAllProjectorCandidates,
+        ),
+      ];
+  const normalizedMultimodalReadiness = normalizeMultimodalReadinessState(
     (model as PersistedModelMetadata & { multimodalReadiness?: unknown }).multimodalReadiness,
   );
+  const remappedReadinessProjectorId = remapProjectorAliasId(
+    normalizedMultimodalReadiness?.projectorId,
+    canonicalProjectors,
+  );
+  const hasAnyProjectorEvidence = normalizedAllProjectorCandidates.length > 0
+    || normalizedPersistedArtifacts?.some((artifact) => artifact.kind === 'multimodal_projector') === true;
+  const multimodalReadiness = normalizedMultimodalReadiness?.projectorId === undefined
+    ? (!hasAnyProjectorEvidence ? normalizedMultimodalReadiness : undefined)
+    : normalizedMultimodalReadiness
+      && remappedReadinessProjectorId
+      && canonicalProjectors.candidates.some((candidate) => candidate.id === remappedReadinessProjectorId)
+      ? {
+          ...normalizedMultimodalReadiness,
+          projectorId: remappedReadinessProjectorId,
+        }
+      : undefined;
   const normalizedDownloadIntegrity = normalizeFileIntegrityMarker(
     (model as PersistedModelMetadata & { downloadIntegrity?: unknown }).downloadIntegrity,
   );
@@ -637,6 +815,123 @@ export function normalizePersistedModelMetadata(
     : undefined;
   const maxContextTokens = shouldClearVerifiedLocalTrust ? undefined : normalizedMaxContextTokens;
   const hasVerifiedContextWindow = !shouldClearVerifiedLocalTrust && model.hasVerifiedContextWindow === true;
+  const knownAudioProfileSignals = [
+    model.id,
+    normalizedModelType,
+    ...(normalizedArchitectures ?? []),
+    ...(normalizedTags ?? []),
+    gguf?.architecture,
+  ];
+  const shouldInferKnownAudioProfile = knownAudioProfileSignals.some(isKnownAudioInputProfileSignal);
+  const inferredProfileInputCapabilities = shouldInferKnownAudioProfile
+    ? inferDeclaredInputCapabilities({
+        id: model.id,
+        modelId: model.id,
+        ...(normalizedTags ? { tags: normalizedTags } : {}),
+        config: {
+          ...(normalizedModelType ? { model_type: normalizedModelType } : {}),
+          ...(normalizedArchitectures ? { architectures: normalizedArchitectures } : {}),
+        },
+        ...(gguf?.architecture ? { gguf: { architecture: gguf.architecture } } : {}),
+      }, [
+        normalizedResolvedFileName,
+        localPath,
+        ...(normalizedVariants?.map((variant) => variant.fileName) ?? []),
+        ...(projectorCandidates?.map((candidate) => candidate.fileName) ?? []),
+        ...(normalizedVariants?.flatMap((variant) => (
+          variant.projectorCandidates?.map((candidate) => candidate.fileName) ?? []
+        )) ?? []),
+      ].flatMap((path) => path ? [{ path }] : []), {
+        detectedAt: persistedInputCapabilities?.detectedAt ?? 0,
+      })
+    : undefined;
+  const hasTrustedProfileEvidenceFor = (modality: 'image' | 'audio') => (
+    inferredProfileInputCapabilities?.evidence.some((entry) => (
+      (entry.source === 'architecture' || entry.source === 'config' || entry.source === 'repository_tree')
+      && entry.confidence === 'high'
+      && inputCapabilityEvidenceSupportsModality(entry, modality)
+    )) === true
+  );
+  const hasTrustedAudioProfile = hasTrustedProfileEvidenceFor('audio');
+  const hasTrustedInferredImageProfile = hasTrustedProfileEvidenceFor('image');
+  const hasTrustedPersistedImageProfile = hasTrustedPersistedImageEvidence(persistedInputCapabilities);
+  const hasRuntimeVisionSupport = multimodalReadiness?.support.includes('vision') === true;
+  const hasKnownVisionAudioProfile = knownAudioProfileSignals.some(isKnownVisionAudioInputProfileSignal);
+  const hasVerifiedPersistedVision = persistedChatModalities?.includes('vision') === true
+    && visionConfidence === 'verified';
+  const hasVerifiedVariantVision = normalizedVariants?.some((variant) => (
+    variant.chatModalities?.includes('vision') === true
+    && variant.visionConfidence === 'verified'
+  )) === true;
+  const trustedProfileIsAudioOnly = hasTrustedAudioProfile
+    && knownAudioProfileSignals.some(isKnownAudioOnlyInputProfileSignal)
+    && !hasKnownVisionAudioProfile
+    && !hasTrustedInferredImageProfile
+    && !hasTrustedPersistedImageProfile
+    && !hasRuntimeVisionSupport
+    && !hasVerifiedPersistedVision
+    && !hasVerifiedVariantVision;
+  const trustedProfileSupport = {
+    image: !trustedProfileIsAudioOnly && (
+      hasTrustedInferredImageProfile
+      || hasTrustedPersistedImageProfile
+      || hasRuntimeVisionSupport
+      || hasVerifiedPersistedVision
+      || hasVerifiedVariantVision
+      || persistedInputCapabilities?.declared.image === 'supported'
+    ),
+    audio: hasTrustedAudioProfile,
+    audioOnly: trustedProfileIsAudioOnly,
+  };
+  const persistedInputCapabilitiesForProfile = trustedProfileIsAudioOnly && persistedInputCapabilities
+    ? {
+        ...persistedInputCapabilities,
+        declared: {
+          ...persistedInputCapabilities.declared,
+          image: 'unknown' as const,
+        },
+        evidence: persistedInputCapabilities.evidence.filter((entry) => (
+          !inputCapabilityEvidenceSupportsModality(entry, 'image') || entry.source === 'runtime'
+        )),
+      }
+    : persistedInputCapabilities;
+  const inputCapabilities = hasTrustedAudioProfile
+    ? mergeInputCapabilitySnapshots(persistedInputCapabilitiesForProfile, inferredProfileInputCapabilities)
+    : persistedInputCapabilitiesForProfile;
+  const shouldReconcileParentChatModalities = hasTrustedAudioProfile
+    && Boolean(projectorCandidates?.length);
+  const chatModalities = shouldReconcileParentChatModalities
+    ? reconcileChatModalitiesWithTrustedProfile(persistedChatModalities, trustedProfileSupport)
+    : persistedChatModalities;
+  const variants = hasTrustedAudioProfile
+    ? normalizedVariants?.map((variant) => {
+        const variantHasProjector = Boolean(variant.projectorCandidates?.length)
+          || projectorCandidates?.some((candidate) => (
+            candidate.ownerVariantId === undefined
+            || candidate.ownerVariantId === variant.variantId
+            || candidate.ownerVariantId === variant.fileName
+          )) === true;
+        if (
+          !variantHasProjector
+          || variant.artifactRole === 'projector_companion'
+          || hasExplicitTextOnlyChatModalities(variant.chatModalities)
+        ) {
+          return variant;
+        }
+
+        return {
+          ...variant,
+          chatModalities: reconcileChatModalitiesWithTrustedProfile(
+            variant.chatModalities,
+            trustedProfileSupport,
+          ),
+          ...(trustedProfileIsAudioOnly
+            ? { visionSource: undefined, visionConfidence: undefined }
+            : {}),
+        };
+      })
+    : normalizedVariants;
+  const activeVariantId = resolveActiveVariantId(normalizedActiveVariantId, normalizedResolvedFileName, variants);
   const downloadIntegrity = shouldDropDownloadedState || hasMismatchedSha256Integrity
     ? undefined
     : normalizedDownloadIntegrity;
@@ -673,8 +968,97 @@ export function normalizePersistedModelMetadata(
     sha256: normalizedSha256,
     size,
   }, (model as PersistedModelMetadata & { capabilitySnapshot?: ModelCapabilitySnapshot }).capabilitySnapshot);
+  const hasReconciledAudioModality = chatModalities?.includes('audio') === true
+    || variants?.some((variant) => variant.chatModalities?.includes('audio') === true) === true;
+  const matchingPersistedProjectorCount = persistedArtifacts?.filter((artifact) => (
+    artifact.kind === 'multimodal_projector'
+    && projectorCandidates?.some((candidate) => projectorArtifactMatchesCandidate(artifact, candidate)) === true
+  )).length ?? 0;
+  const stableProjectorCandidateIds = new Set((projectorCandidates ?? []).map((candidate) => (
+    buildProjectorArtifactId({
+      repoId: candidate.repoId,
+      hfRevision: candidate.hfRevision,
+      ownerVariantId: candidate.ownerVariantId,
+      fileName: candidate.fileName,
+    })
+  )));
+  // Multiple projectors can intentionally split image and audio requirements.
+  // Current and legacy IDs can coexist for one physical projector, so count
+  // canonical candidate identities instead of persisted artifact records.
+  const hasSingleStableLegacyProjector = stableProjectorCandidateIds.size === 1
+    && matchingPersistedProjectorCount > 0;
+  const canRepairAudioOnlyLegacyProjector = hasSingleStableLegacyProjector
+    && trustedProfileIsAudioOnly;
+  const canRepairUnifiedLegacyProjector = hasSingleStableLegacyProjector
+    && trustedProfileSupport.image
+    && trustedProfileSupport.audio;
+  const hasExplicitAudioOnlyModelModalities = Array.isArray(chatModalities)
+    && chatModalities.includes('audio')
+    && !chatModalities.includes('vision');
+  const hasVariantVisionDeclaration = variants?.some((variant) => (
+    variant.chatModalities?.includes('vision') === true
+  )) === true;
+  const hasReadyAudioOnlyRuntime = multimodalReadiness?.status === 'ready'
+    && multimodalReadiness.support.includes('audio')
+    && !multimodalReadiness.support.includes('vision');
+  const hasStaleMixedRequestedSupport = multimodalReadiness?.requestedSupport?.includes('vision') === true
+    && multimodalReadiness.requestedSupport.includes('audio');
+  const canRepairPersistedAudioOnlyProjectorRequirement = hasSingleStableLegacyProjector
+    && hasExplicitAudioOnlyModelModalities
+    && hasReadyAudioOnlyRuntime
+    && hasStaleMixedRequestedSupport
+    && !trustedProfileSupport.image
+    && !hasVariantVisionDeclaration;
+  const shouldReconcilePersistedProjectorRequirements = (
+    hasTrustedAudioProfile && hasReconciledAudioModality
+  ) || canRepairPersistedAudioOnlyProjectorRequirement;
+  const readinessProjectorCandidate = projectorCandidates?.find((candidate) => (
+    candidate.id === multimodalReadiness?.projectorId
+    || buildLegacyProjectorArtifactId({
+      repoId: candidate.repoId,
+      hfRevision: candidate.hfRevision,
+      ownerVariantId: candidate.ownerVariantId,
+      fileName: candidate.fileName,
+    }) === multimodalReadiness?.projectorId
+  ));
+  const reconciledPersistedArtifacts = shouldReconcilePersistedProjectorRequirements
+    ? persistedArtifacts?.map((artifact) => {
+        const matchingProjector = artifact.kind === 'multimodal_projector'
+          ? projectorCandidates?.find((candidate) => projectorArtifactMatchesCandidate(artifact, candidate))
+          : undefined;
+        if (!matchingProjector) {
+          return artifact;
+        }
+
+        if (
+          canRepairPersistedAudioOnlyProjectorRequirement
+          && readinessProjectorCandidate !== undefined
+          && projectorArtifactMatchesCandidate(artifact, readinessProjectorCandidate)
+          && artifact.requiredFor.includes('image')
+          && artifact.requiredFor.includes('audio')
+        ) {
+          // Older normalization could derive an image requirement from a stale
+          // requestedSupport entry and then persist that derived artifact. Do
+          // not let the cached artifact become circular evidence that widens an
+          // explicitly audio-only model on every subsequent cold start.
+          return { ...artifact, requiredFor: ['audio' as const] };
+        }
+
+        if (canRepairAudioOnlyLegacyProjector && (
+          artifact.requiredFor.includes('image') || artifact.requiredFor.includes('audio')
+        )) {
+          return { ...artifact, requiredFor: ['audio' as const] };
+        }
+
+        const hasLegacyImageOnlyRequirement = artifact.requiredFor.length === 1
+          && artifact.requiredFor[0] === 'image';
+        return canRepairUnifiedLegacyProjector && hasLegacyImageOnlyRequirement
+          ? { ...artifact, requiredFor: ['image' as const, 'audio' as const] }
+          : artifact;
+      })
+    : persistedArtifacts;
   const artifacts = deriveArtifactsFromLegacyModel({
-    artifacts: persistedArtifacts,
+    artifacts: reconciledPersistedArtifacts,
     downloadErrorAt,
     downloadErrorCode,
     downloadErrorMessage,
@@ -683,6 +1067,7 @@ export function normalizePersistedModelMetadata(
     downloadUrl,
     hfRevision: normalizedRevision,
     id: model.id,
+    chatModalities,
     inputCapabilities,
     lifecycleStatus,
     localPath,
@@ -741,8 +1126,8 @@ export function normalizePersistedModelMetadata(
     hasVerifiedContextWindow,
     capabilitySnapshot,
     parameterSizeLabel: normalizeNonEmptyString(model.parameterSizeLabel),
-    modelType: normalizeNonEmptyString(model.modelType),
-    architectures: normalizeStringArray(model.architectures),
+    modelType: normalizedModelType,
+    architectures: normalizedArchitectures,
     baseModels: normalizeStringArray(model.baseModels),
     license: normalizeNonEmptyString(model.license),
     languages: normalizeStringArray(model.languages),
@@ -751,7 +1136,7 @@ export function normalizePersistedModelMetadata(
     modelCreator: normalizeNonEmptyString(model.modelCreator),
     downloads: normalizeNullableCount(model.downloads),
     likes: normalizeNullableCount(model.likes),
-    tags: normalizeStringArray(model.tags),
+    tags: normalizedTags,
     description: normalizeNonEmptyString(model.description),
     variants,
     activeVariantId,
@@ -759,8 +1144,8 @@ export function normalizePersistedModelMetadata(
     ...(shouldPersistArtifacts ? { artifacts } : {}),
     ...(inputCapabilities !== undefined ? { inputCapabilities } : {}),
     ...(artifactRole !== undefined ? { artifactRole } : {}),
-    ...(visionSource !== undefined ? { visionSource } : {}),
-    ...(visionConfidence !== undefined ? { visionConfidence } : {}),
+    ...(!trustedProfileIsAudioOnly && visionSource !== undefined ? { visionSource } : {}),
+    ...(!trustedProfileIsAudioOnly && visionConfidence !== undefined ? { visionConfidence } : {}),
     ...(projectorCandidates !== undefined ? { projectorCandidates } : {}),
     ...(selectedProjectorId !== undefined ? { selectedProjectorId } : {}),
     ...(multimodalReadiness !== undefined ? { multimodalReadiness } : {}),

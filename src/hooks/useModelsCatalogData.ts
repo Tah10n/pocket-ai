@@ -51,7 +51,7 @@ export function useModelsCatalogData({
   const [hasTokenConfigured, setHasTokenConfigured] = useState(
     () => huggingFaceTokenService.getCachedState().hasToken,
   );
-  const [manualRefreshRevision, setManualRefreshRevision] = useState(0);
+  const [cacheRefreshRevision, setCacheRefreshRevision] = useState(0);
   const [{ warningMessage, loadMoreError }, setFetchState] = useState<FetchState>({
     warningMessage: null,
     loadMoreError: null,
@@ -74,13 +74,13 @@ export function useModelsCatalogData({
     sizeRangesSessionKey,
     `${sort.field}:${sort.direction}`,
     `token:${tokenRevision}`,
-    `refresh:${manualRefreshRevision}`,
+    `refresh:${cacheRefreshRevision}`,
   ].join('::')), [
     activeTab,
     effectiveSearchSessionKey,
     filters.fitsInRamOnly,
     filters.noTokenRequiredOnly,
-    manualRefreshRevision,
+    cacheRefreshRevision,
     sizeRangesSessionKey,
     sort.direction,
     sort.field,
@@ -104,7 +104,7 @@ export function useModelsCatalogData({
   }, [activeTab]);
 
   const requestCatalogRefresh = useCallback(() => {
-    setManualRefreshRevision((current) => current + 1);
+    setCacheRefreshRevision((current) => current + 1);
   }, []);
 
   const fetchModels = useCallback(
@@ -153,6 +153,7 @@ export function useModelsCatalogData({
           sort: serverSort,
           forceRefresh,
           gated: filters.noTokenRequiredOnly ? false : undefined,
+          metadataResolution: 'deferred',
         });
         resultCount = result.models.length;
         resultHasMore = result.hasMore;
@@ -225,13 +226,55 @@ export function useModelsCatalogData({
 
   useEffect(() => {
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
-      if (source !== 'manual') {
+      if (source !== 'manual' && source !== 'hydrate') {
         return;
       }
 
-      setManualRefreshRevision((current) => current + 1);
+      setCacheRefreshRevision((current) => current + 1);
     });
   }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'all') {
+      return undefined;
+    }
+
+    return modelCatalogService.subscribeMetadataUpdates(({
+      query,
+      sort: updateSort,
+      gated,
+      models: updatedModels,
+      removedModelIds,
+    }) => {
+      const expectedGated = filters.noTokenRequiredOnly ? false : undefined;
+      if (query !== searchQuery || updateSort !== serverSort || gated !== expectedGated) {
+        return;
+      }
+
+      const replacements = new Map(updatedModels.map((model) => [model.id, model]));
+      const removals = new Set(removedModelIds);
+
+      setModels((current) => {
+        let didChange = false;
+        const next = current.flatMap((model) => {
+          if (removals.has(model.id)) {
+            didChange = true;
+            return [];
+          }
+
+          const replacement = replacements.get(model.id);
+          if (!replacement) {
+            return [model];
+          }
+
+          didChange = didChange || replacement !== model;
+          return [replacement];
+        });
+
+        return didChange ? next : current;
+      });
+    });
+  }, [activeTab, filters.noTokenRequiredOnly, searchQuery, serverSort]);
 
   useEffect(() => {
     let cancelled = false;
@@ -299,6 +342,7 @@ export function useModelsCatalogData({
         pageSize: MODELS_PAGE_SIZE,
         sort: serverSort,
         gated: filters.noTokenRequiredOnly ? false : undefined,
+        metadataResolution: 'deferred',
       });
 
       if (cachedResult) {

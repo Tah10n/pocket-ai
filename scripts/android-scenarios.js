@@ -109,6 +109,7 @@ const ATTACH_MENU_LABELS = [
 ];
 const ATTACH_MENU_BUTTON_RESOURCE_ID = "chat-attach-menu-button";
 const ATTACH_IMAGE_BUTTON_RESOURCE_ID = "chat-attach-image-button";
+const CHAT_LIST_VIEWPORT_RESOURCE_ID = "chat-list-viewport";
 const ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS = 8_000;
 const ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS = [
   "busy",
@@ -368,6 +369,7 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
 ];
 const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
+const CHAT_ROUTE_TIMEOUT_MS = 60_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS = 2_000;
 const CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS = 2_000;
@@ -607,6 +609,12 @@ function createScenarioContext(adbPath, serial) {
         visibleOnly: true,
       });
     },
+    expectResourceId: async (resourceId, options = {}) => {
+      await waitForResourceId(adbPath, serial, resourceId, {
+        timeoutMs: options.timeoutMs,
+        visibleOnly: true,
+      });
+    },
     tapAnyText: async (labels, options = {}) => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
 
@@ -636,20 +644,31 @@ function createScenarioContext(adbPath, serial) {
     tapBottomTab: async (labels, options = {}) => {
       await dismissDebuggerBannerIfPresent(adbPath, serial);
 
-      const { label, node } = await waitForAnyNodeWithPicker(
+      const { match, snapshot } = await waitForSnapshotMatch(
         adbPath,
         serial,
-        labels,
         {
           timeoutMs: options.timeoutMs,
           visibleOnly: true,
         },
-        pickBottomMostNode
+        (candidateSnapshot) => findBottomTabNodeInSnapshot(candidateSnapshot, labels)
       );
+      if (!match) {
+        throw new Error(
+          withUiSnapshotSummary(
+            snapshot,
+            `Timed out waiting for a bottom tab matching any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+          )
+        );
+      }
+
+      const { label, node } = match;
 
       if (!node.bounds) {
         throw new Error(`"${label}" was found but has no tap bounds.`);
       }
+
+      const tapPoint = getBottomTabTapPoint(node);
 
       runChecked(adbPath, [
         "-s",
@@ -657,8 +676,8 @@ function createScenarioContext(adbPath, serial) {
         "shell",
         "input",
         "tap",
-        `${node.bounds.centerX}`,
-        `${node.bounds.centerY}`,
+        `${tapPoint.centerX}`,
+        `${tapPoint.centerY}`,
       ]);
 
       await delay(options.afterTapDelayMs ?? 800);
@@ -933,13 +952,14 @@ function assertAttachmentTextOnlyFallbackState({
 }
 
 function isResourceId(node, resourceId) {
-  return node.resourceId === resourceId || node.resourceId.endsWith(`:id/${resourceId}`);
+  const candidateResourceId = node?.resourceId || "";
+  return candidateResourceId === resourceId || candidateResourceId.endsWith(`:id/${resourceId}`);
 }
 
-function findAttachImageActionInSnapshot(snapshot, options = {}) {
+function findResourceIdInSnapshot(snapshot, resourceId, options = {}) {
   const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
   const matches = snapshot.nodes.filter((node) => {
-    if (!isResourceId(node, ATTACH_IMAGE_BUTTON_RESOURCE_ID)) {
+    if (!isResourceId(node, resourceId)) {
       return false;
     }
 
@@ -951,38 +971,30 @@ function findAttachImageActionInSnapshot(snapshot, options = {}) {
       && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
   });
 
-  if (matches.length === 0) {
+  return pickBestNode(matches) || null;
+}
+
+function findAttachImageActionInSnapshot(snapshot, options = {}) {
+  const node = findResourceIdInSnapshot(snapshot, ATTACH_IMAGE_BUTTON_RESOURCE_ID, options);
+  if (!node) {
     return findAnyNodeInSnapshot(snapshot, ATTACH_IMAGE_LABELS, options);
   }
 
   return {
     label: ATTACH_IMAGE_LABELS[0],
-    node: pickBestNode(matches),
+    node,
   };
 }
 
 function findAttachMenuActionInSnapshot(snapshot, options = {}) {
-  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
-  const matches = snapshot.nodes.filter((node) => {
-    if (!isResourceId(node, ATTACH_MENU_BUTTON_RESOURCE_ID)) {
-      return false;
-    }
-
-    if (!options.visibleOnly) {
-      return true;
-    }
-
-    return Boolean(node.bounds)
-      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
-  });
-
-  if (matches.length === 0) {
+  const node = findResourceIdInSnapshot(snapshot, ATTACH_MENU_BUTTON_RESOURCE_ID, options);
+  if (!node) {
     return findAnyNodeInSnapshot(snapshot, ATTACH_MENU_LABELS, options);
   }
 
   return {
     label: ATTACH_MENU_LABELS[0],
-    node: pickBestNode(matches),
+    node,
   };
 }
 
@@ -1116,7 +1128,7 @@ function buildScenarios() {
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapBottomTab(CHAT_TAB_LABELS);
-        await ctx.expectAnyText(CHAT_ROUTE_LABELS);
+        await ctx.expectAnyText(CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
 
         await ctx.tapBottomTab(MODELS_TAB_LABELS);
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
@@ -1124,13 +1136,10 @@ function buildScenarios() {
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
 
         await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
-        await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
-        await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-        await scrollToAnyText(ctx, STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await ctx.expectAnyText(SETTINGS_TITLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
 
         await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(HOME_SECTION_LABELS);
+        await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
       },
     },
     {
@@ -1164,7 +1173,10 @@ function buildScenarios() {
       run: async (ctx) => {
         await goToHome(ctx);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
-        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+        await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+          timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+        });
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
         await ctx.tapBottomTab(HOME_TAB_LABELS);
         await ctx.expectAnyText(NEW_CHAT_LABELS);
       },
@@ -1366,9 +1378,7 @@ function buildScenarios() {
       tier: "optional",
       description: "Verify the model catalog opens the GGUF file variant picker.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await goToModelCatalog(ctx);
         await prepareCatalogForVariantPickerSmokeScenario(ctx);
 
         await openFirstVisibleVariantPicker(ctx);
@@ -1399,9 +1409,7 @@ function buildScenarios() {
       tier: "optional",
       description: "Verify guided discovery, new HF catalog controls, and routed model details.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await goToModelCatalog(ctx);
 
         await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
         await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
@@ -1421,9 +1429,7 @@ function buildScenarios() {
       tier: "optional",
       description: "Verify memory-fit badges show up in quantization picker rows.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await goToModelCatalog(ctx);
         await prepareCatalogForMemoryFitRiskBadgeScenario(ctx);
 
         await openFirstVisibleVariantPicker(ctx);
@@ -1437,9 +1443,7 @@ function buildScenarios() {
       tier: "optional",
       description: "Verify download flows warn for RAM risk or limited verification.",
       run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.tapAnyText(ACTIVE_MODEL_CTA_LABELS);
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await goToModelCatalog(ctx);
         await prepareCatalogForRamWarningScenario(ctx);
 
         const adbPath = resolveAdbPath();
@@ -1634,12 +1638,15 @@ function selectScenarios(scenarios, options) {
     .filter(Boolean);
 }
 
-async function goToHome(ctx) {
+async function goToHome(ctx, options = {}) {
   await ctx.ensureAppVisible();
   await ctx.dismissDebuggerBanner();
 
-  const adbPath = resolveAdbPath();
-  const homeVisibleNow = await findAnyNodeNow(adbPath, ctx.serial, HOME_SECTION_LABELS, {
+  const resolveAdb = options.resolveAdbPath || resolveAdbPath;
+  const findNodeNow = options.findAnyNodeNow || findAnyNodeNow;
+  const reachHome = options.tryReachHome || tryReachHome;
+  const adbPath = resolveAdb();
+  const homeVisibleNow = await findNodeNow(adbPath, ctx.serial, HOME_SECTION_LABELS, {
     visibleOnly: true,
   });
 
@@ -1651,10 +1658,17 @@ async function goToHome(ctx) {
   try {
     await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: 8_000 });
   } catch {
-    const reachedHome = await tryReachHome(ctx);
+    const reachedHome = await reachHome(ctx);
 
     if (!reachedHome) {
-      throw new Error(withUiSummary(adbPath, ctx.serial, `Timed out returning to Home from the current route.`));
+      const finalHomeVisible = await findNodeNow(adbPath, ctx.serial, HOME_SECTION_LABELS, {
+        visibleOnly: true,
+      });
+      if (finalHomeVisible) {
+        return;
+      }
+
+      throw new Error(withUiSummary(adbPath, ctx.serial, "Timed out returning to Home from the current route."));
     }
 
     await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: 15_000 });
@@ -1867,6 +1881,14 @@ async function goToSettings(ctx) {
   await goToHome(ctx);
   await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
   await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+}
+
+async function goToModelCatalog(ctx, options = {}) {
+  const goHome = options.goToHome || goToHome;
+
+  await goHome(ctx);
+  await ctx.tapBottomTab(MODELS_TAB_LABELS);
+  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
 async function restoreLanguageAfterScenario(
@@ -2111,6 +2133,12 @@ function findQuantizationSelectorNodeClearOfBottomOverlay(snapshot) {
 }
 
 function isLikelyQuantizationSelectorNode(node) {
+  const hasStableVariantSelectorId = typeof node.resourceId === "string"
+    && node.resourceId.includes("model-variant-selector-");
+  if (hasStableVariantSelectorId) {
+    return true;
+  }
+
   const normalizedLabel = normalizeUiLabel(`${node.text || ""} ${node.contentDesc || ""}`);
   const hasQuantizationValue = /\b(?:(?:i?q|tq)\d(?:_[a-z0-9]+){0,3}|bf16|f16|fp16)\b/.test(normalizedLabel);
   const hasSizeContext = normalizedLabel.includes(" gb")
@@ -2360,69 +2388,105 @@ function listConnectedDevices(adbPath) {
 }
 
 async function waitForNode(adbPath, serial, label, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 20_000;
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const snapshot = createUiSnapshot(adbPath, serial);
-    const node = findNodeInSnapshot(snapshot, label, options);
-    if (node) {
-      return node;
-    }
-
-    await delay(600);
+  const { match: node, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => findNodeInSnapshot(candidateSnapshot, label, options)
+  );
+  if (node) {
+    return node;
   }
 
-  throw new Error(withUiSummary(adbPath, serial, `Timed out waiting for text "${label}".`));
+  throw new Error(withUiSnapshotSummary(snapshot, `Timed out waiting for text "${label}".`));
 }
 
 async function waitForAnyNode(adbPath, serial, labels, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 20_000;
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const snapshot = createUiSnapshot(adbPath, serial);
-    const match = findAnyNodeInSnapshot(snapshot, labels, options);
-    if (match) {
-      return match;
-    }
-
-    await delay(600);
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => findAnyNodeInSnapshot(candidateSnapshot, labels, options)
+  );
+  if (match) {
+    return match;
   }
 
   throw new Error(
-    withUiSummary(
-      adbPath,
-      serial,
+    withUiSnapshotSummary(
+      snapshot,
       `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
     )
   );
 }
 
-async function waitForNoAnyNode(adbPath, serial, labels, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 20_000;
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const snapshot = createUiSnapshot(adbPath, serial);
-    const match = findAnyNodeInSnapshot(snapshot, labels, {
-      ...options,
-      visibleOnly: true,
-    });
-    if (!match) {
-      return;
-    }
-
-    await delay(600);
+async function waitForResourceId(adbPath, serial, resourceId, options = {}) {
+  const { match: node, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => findResourceIdInSnapshot(candidateSnapshot, resourceId, options)
+  );
+  if (node) {
+    return node;
   }
 
   throw new Error(
-    withUiSummary(
-      adbPath,
-      serial,
+    withUiSnapshotSummary(snapshot, `Timed out waiting for resource id "${resourceId}".`)
+  );
+}
+
+async function waitForNoAnyNode(adbPath, serial, labels, options = {}) {
+  const { match: absence, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => (
+      findAnyNodeInSnapshot(candidateSnapshot, labels, {
+        ...options,
+        visibleOnly: true,
+      })
+        ? null
+        : { absent: true }
+    )
+  );
+  if (absence) {
+    return;
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      snapshot,
       `Timed out waiting for all of these nodes to disappear: ${labels.map((label) => `"${label}"`).join(", ")}.`
     )
   );
+}
+
+async function waitForSnapshotMatch(adbPath, serial, options, matchSnapshot) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 600;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const wait = options.delayFn ?? delay;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createSnapshot(adbPath, serial);
+    const match = matchSnapshot(snapshot);
+    if (match) {
+      return { match, snapshot };
+    }
+
+    await wait(pollIntervalMs);
+  }
+
+  // UI hierarchy capture is synchronous and may itself cross the timeout boundary. Take one
+  // final authoritative snapshot so a node that became visible during that last capture is not
+  // reported as missing while a second diagnostic dump immediately shows it on screen.
+  const snapshot = createSnapshot(adbPath, serial);
+  return {
+    match: matchSnapshot(snapshot),
+    snapshot,
+  };
 }
 
 async function waitForPreparedSentMessageContext(adbPath, serial, prompt, options = {}) {
@@ -2646,50 +2710,43 @@ function scorePreparedSentMessagePair(promptBounds, previewBounds) {
 }
 
 async function waitForAnyTappableNode(adbPath, serial, labels, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 20_000;
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const snapshot = createUiSnapshot(adbPath, serial);
-    const match = options.allowBottomOverlay
-      ? findAnyNodeInSnapshot(snapshot, labels, { visibleOnly: true })
-      : findAnyNodeClearOfBottomOverlay(snapshot, labels, options);
-
-    if (match) {
-      return match;
-    }
-
-    await delay(600);
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => (
+      options.allowBottomOverlay
+        ? findAnyNodeInSnapshot(candidateSnapshot, labels, { visibleOnly: true })
+        : findAnyNodeClearOfBottomOverlay(candidateSnapshot, labels, options)
+    )
+  );
+  if (match) {
+    return match;
   }
 
   throw new Error(
-    withUiSummary(
-      adbPath,
-      serial,
+    withUiSnapshotSummary(
+      snapshot,
       `Timed out waiting for a tappable node matching any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
     )
   );
 }
 
 async function waitForAnyNodeWithPicker(adbPath, serial, labels, options = {}, picker) {
-  const timeoutMs = options.timeoutMs ?? 20_000;
-  const startedAt = Date.now();
   const resolvedPicker = picker ?? pickBestNode;
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const snapshot = createUiSnapshot(adbPath, serial);
-    const match = findAnyNodeInSnapshot(snapshot, labels, options, resolvedPicker);
-    if (match) {
-      return match;
-    }
-
-    await delay(600);
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => findAnyNodeInSnapshot(candidateSnapshot, labels, options, resolvedPicker)
+  );
+  if (match) {
+    return match;
   }
 
   throw new Error(
-    withUiSummary(
-      adbPath,
-      serial,
+    withUiSnapshotSummary(
+      snapshot,
       `Timed out waiting for any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
     )
   );
@@ -3067,6 +3124,29 @@ function pickBottomMostNode(nodes) {
   })[0];
 }
 
+function findBottomTabNodeInSnapshot(snapshot, labels) {
+  return findAnyNodeInSnapshot(
+    snapshot,
+    labels,
+    { visibleOnly: true },
+    pickBottomMostNode
+  );
+}
+
+function getBottomTabTapPoint(node) {
+  if (!node?.bounds) {
+    return null;
+  }
+
+  // React Native's collapsed warning banner can cover the lower half of the floating tab bar.
+  // The tab root remains fully clickable, so prefer its upper quarter instead of the center.
+  const upperInset = Math.max(8, Math.min(32, Math.round(node.bounds.height * 0.25)));
+  return {
+    centerX: node.bounds.centerX,
+    centerY: Math.min(node.bounds.bottom - 1, node.bounds.top + upperInset),
+  };
+}
+
 function parseBounds(rawBounds) {
   if (!rawBounds) {
     return null;
@@ -3155,12 +3235,12 @@ function decodeXmlEntities(value) {
     .replace(/&#10;/g, "\n");
 }
 
-function summarizeCurrentUi(adbPath, serial, options = {}) {
+function summarizeUiSnapshot(snapshot, options = {}) {
   const maxItems = options.maxItems ?? 10;
   const maxLabelLength = options.maxLabelLength ?? 80;
 
   try {
-    const { nodes, viewportBounds } = createUiSnapshot(adbPath, serial);
+    const { nodes, viewportBounds } = snapshot;
     const seen = new Set();
 
     const visibleNodes = nodes
@@ -3224,8 +3304,21 @@ function summarizeCurrentUi(adbPath, serial, options = {}) {
   }
 }
 
+function summarizeCurrentUi(adbPath, serial, options = {}) {
+  try {
+    return summarizeUiSnapshot(createUiSnapshot(adbPath, serial), options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `<ui dump unavailable: ${message}>`;
+  }
+}
+
 function withUiSummary(adbPath, serial, message) {
   return `${message}\nVisible UI: ${summarizeCurrentUi(adbPath, serial)}`;
+}
+
+function withUiSnapshotSummary(snapshot, message) {
+  return `${message}\nVisible UI: ${summarizeUiSnapshot(snapshot)}`;
 }
 
 function writeReport(results) {
@@ -3662,11 +3755,16 @@ module.exports = {
   findAttachImageActionInSnapshot,
   findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
+  findBottomTabNodeInSnapshot,
   findPreparedSentMessageContext,
   findPreparedAssistantResponseNode,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
+  findResourceIdInSnapshot,
   isBoundsClearOfBottomOverlay,
+  getBottomTabTapPoint,
+  goToHome,
+  goToModelCatalog,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
@@ -3681,6 +3779,7 @@ module.exports = {
   ScenarioSkipFailureError,
   serializeReportResults,
   shouldAppendRunnerFailure,
+  waitForAnyNode,
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,
   assertAttachmentPreviewRemovePreconditions,

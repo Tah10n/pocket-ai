@@ -12,6 +12,8 @@ import { registry } from '../../src/services/LocalStorageRegistry';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { REQUEST_AUTH_POLICY } from '../../src/types/huggingFace';
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
+import { ModelCatalogCacheStore } from '../../src/services/ModelCatalogCacheStore';
+import { createStorage } from '../../src/services/storage';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -189,6 +191,297 @@ describe('ModelCatalogService', () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (DeviceInfo.getFreeDiskStorage as jest.Mock).mockResolvedValue(50 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+  });
+
+  it('waits for deferred hydration before resolving an offline catalog fallback', async () => {
+    const query = 'offline-ready';
+    const cachedModel = makeLocalModel('org/offline-ready-model');
+    const seedCache = new ModelCatalogCacheStore();
+    seedCache.putSearch({
+      query: `${query} gguf`,
+      cursor: null,
+      pageSize: 20,
+      sort: null,
+      authScope: 'anon',
+    }, {
+      models: [cachedModel],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    const invalidationListener = jest.fn();
+    deferredService.subscribeCacheInvalidations(invalidationListener);
+    (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
+    global.fetch = jest.fn();
+    let didSettle = false;
+
+    const pendingResult = deferredService.searchModels(query).then((result) => {
+      didSettle = true;
+      return result;
+    });
+    await Promise.resolve();
+
+    expect(didSettle).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    deferredService.hydratePersistentCache();
+    const result = await pendingResult;
+
+    expect(result.models.map((model) => model.id)).toEqual([cachedModel.id]);
+    expect(invalidationListener).toHaveBeenCalledTimes(2);
+    expect(invalidationListener).toHaveBeenNthCalledWith(1, 0, 'replay');
+    expect(invalidationListener).toHaveBeenNthCalledWith(2, 1, 'hydrate');
+    expect(global.fetch).not.toHaveBeenCalled();
+    deferredService.dispose();
+  });
+
+  it('uses one shared fail-open timeout and still allows a later explicit hydration', async () => {
+    const cachedModel: ModelMetadata = {
+      ...makeLocalModel('org/late-hydration-model'),
+      description: 'Loaded after the shared wait timed out',
+    };
+    const seedCache = new ModelCatalogCacheStore();
+    seedCache.putModelSnapshots([cachedModel], 'anon');
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    const invalidationListener = jest.fn();
+    deferredService.subscribeCacheInvalidations(invalidationListener);
+    const waitForHydrationAttempt = (
+      deferredService as unknown as {
+        waitForPersistentCacheHydrationAttempt: () => Promise<void>;
+      }
+    ).waitForPersistentCacheHydrationAttempt.bind(deferredService);
+    jest.useFakeTimers();
+    const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+
+    try {
+      let didFirstWaitSettle = false;
+      const firstWait = waitForHydrationAttempt().then(() => {
+        didFirstWaitSettle = true;
+      });
+      await Promise.resolve();
+
+      expect(didFirstWaitSettle).toBe(false);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(4_999);
+      await Promise.resolve();
+      expect(didFirstWaitSettle).toBe(false);
+
+      jest.advanceTimersByTime(1);
+      await firstWait;
+      expect(didFirstWaitSettle).toBe(true);
+
+      await expect(waitForHydrationAttempt()).resolves.toBeUndefined();
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+
+      deferredService.hydratePersistentCache();
+
+      expect(deferredService.getCachedModel(cachedModel.id)).toEqual(expect.objectContaining({
+        id: cachedModel.id,
+        description: cachedModel.description,
+      }));
+      expect(invalidationListener).toHaveBeenLastCalledWith(1, 'hydrate');
+    } finally {
+      deferredService.dispose();
+      setTimeoutSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('hydrates a deferred model snapshot before an offline details failure is exposed', async () => {
+    const cachedModel = makeLocalModel('org/offline-details-model');
+    const seedCache = new ModelCatalogCacheStore();
+    seedCache.putModelSnapshots([cachedModel], 'anon');
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
+    let didSettle = false;
+
+    const pendingDetails = deferredService.getModelDetails(cachedModel.id).finally(() => {
+      didSettle = true;
+    });
+    await Promise.resolve();
+
+    expect(didSettle).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    deferredService.hydratePersistentCache();
+
+    await expect(pendingDetails).rejects.toThrow('offline');
+    expect(deferredService.getCachedModel(cachedModel.id)?.id).toBe(cachedModel.id);
+    deferredService.dispose();
+  });
+
+  it('hydrates deferred snapshots before merging local models and preserves cached metadata', async () => {
+    const localModel = makeLocalModel('org/deferred-local-model');
+    const cachedModel: ModelMetadata = {
+      ...localModel,
+      description: 'Persisted catalog description',
+      maxContextTokens: 32_768,
+      hasVerifiedContextWindow: true,
+    };
+    const seedCache = new ModelCatalogCacheStore();
+    seedCache.putModelSnapshots([cachedModel], 'anon');
+    mockedRegistry.getModels.mockReturnValue([localModel]);
+    mockedRegistry.getModel.mockImplementation((modelId) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    let didSettle = false;
+
+    try {
+      const pendingModels = deferredService.getLocalModels().then((models) => {
+        didSettle = true;
+        return models;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(didSettle).toBe(false);
+      expect(mockedRegistry.getModels).not.toHaveBeenCalled();
+
+      deferredService.hydratePersistentCache();
+      const models = await pendingModels;
+
+      expect(models).toHaveLength(1);
+      expect(models[0]).toEqual(expect.objectContaining({
+        id: localModel.id,
+        localPath: localModel.localPath,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        description: cachedModel.description,
+        maxContextTokens: cachedModel.maxContextTokens,
+        hasVerifiedContextWindow: true,
+      }));
+
+      const rehydratedStore = new ModelCatalogCacheStore();
+      expect(rehydratedStore.getModelSnapshot(localModel.id, 'anon', 1000)).toEqual(
+        expect.objectContaining({
+          description: cachedModel.description,
+          maxContextTokens: cachedModel.maxContextTokens,
+          hasVerifiedContextWindow: true,
+        }),
+      );
+    } finally {
+      deferredService.dispose();
+    }
+  });
+
+  it('falls back to registry models when deferred cache hydration fails', async () => {
+    const localModel = makeLocalModel('org/deferred-local-cache-failure');
+    mockedRegistry.getModels.mockReturnValue([localModel]);
+    mockedRegistry.getModel.mockImplementation((modelId) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    const persistentCache = (deferredService as unknown as {
+      persistentCache: ModelCatalogCacheStore;
+    }).persistentCache;
+    const storage = (persistentCache as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const getStringSpy = jest.spyOn(storage, 'getString').mockImplementation(() => {
+      throw new Error('persistent storage unavailable');
+    });
+
+    try {
+      const pendingModels = deferredService.getLocalModels();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mockedRegistry.getModels).not.toHaveBeenCalled();
+      expect(() => deferredService.hydratePersistentCache()).toThrow('persistent storage unavailable');
+
+      await expect(pendingModels).resolves.toEqual([
+        expect.objectContaining({ id: localModel.id, localPath: localModel.localPath }),
+      ]);
+      expect(getStringSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      getStringSpy.mockRestore();
+      deferredService.dispose();
+    }
+  });
+
+  it('does not overwrite a rich persisted snapshot during offline search after transient hydration failure', async () => {
+    const localModel = makeLocalModel('org/transient-local-search');
+    const cachedModel: ModelMetadata = {
+      ...localModel,
+      description: 'Rich persisted catalog description',
+      maxContextTokens: 65_536,
+      hasVerifiedContextWindow: true,
+    };
+    const seedCache = new ModelCatalogCacheStore();
+    seedCache.putModelSnapshots([cachedModel], 'anon');
+    mockedRegistry.getModels.mockReturnValue([localModel]);
+    mockedRegistry.getModel.mockImplementation((modelId) => (
+      modelId === localModel.id ? localModel : undefined
+    ));
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    const invalidationListener = jest.fn();
+    deferredService.subscribeCacheInvalidations(invalidationListener);
+    const persistentCache = (deferredService as unknown as {
+      persistentCache: ModelCatalogCacheStore;
+    }).persistentCache;
+    const storage = (persistentCache as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const originalGetString = storage.getString.bind(storage);
+    const getStringSpy = jest.spyOn(storage, 'getString')
+      .mockImplementationOnce(() => {
+        throw new Error('transient persistent storage failure');
+      })
+      .mockImplementation((key) => originalGetString(key));
+    (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
+    global.fetch = jest.fn();
+
+    try {
+      expect(() => deferredService.hydratePersistentCache()).toThrow('transient persistent storage failure');
+
+      const result = await deferredService.searchModels('transient-local-search');
+
+      expect(result.models).toEqual([
+        expect.objectContaining({ id: localModel.id, localPath: localModel.localPath }),
+      ]);
+      expect(global.fetch).not.toHaveBeenCalled();
+
+      const coldReload = new ModelCatalogCacheStore();
+      expect(coldReload.getModelSnapshot(localModel.id, 'anon', 1000)).toEqual(expect.objectContaining({
+        description: cachedModel.description,
+        maxContextTokens: cachedModel.maxContextTokens,
+        hasVerifiedContextWindow: true,
+      }));
+
+      deferredService.hydratePersistentCache();
+      expect(invalidationListener).toHaveBeenLastCalledWith(1, 'hydrate');
+    } finally {
+      getStringSpy.mockRestore();
+      deferredService.dispose();
+    }
+  });
+
+  it('returns a successful network search after deferred persistent hydration fails', async () => {
+    const modelId = 'org/cache-fail-open-model';
+    const deferredService = new ModelCatalogService({ hydratePersistentCacheOnCreate: false });
+    const persistentCache = (deferredService as unknown as {
+      persistentCache: ModelCatalogCacheStore;
+    }).persistentCache;
+    const storage = (persistentCache as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const getStringSpy = jest.spyOn(storage, 'getString').mockImplementation(() => {
+      throw new Error('persistent storage unavailable');
+    });
+    global.fetch = jest.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve([makeRepo(modelId)]),
+    })) as jest.Mock;
+
+    try {
+      expect(() => deferredService.hydratePersistentCache()).toThrow('persistent storage unavailable');
+
+      const result = await deferredService.searchModels('cache fail open');
+
+      expect(result.models.map((model) => model.id)).toEqual([modelId]);
+      expect(global.fetch).toHaveBeenCalled();
+    } finally {
+      getStringSpy.mockRestore();
+      deferredService.dispose();
+    }
   });
 
   it('filters models based on hardware constraints', async () => {
@@ -512,6 +805,171 @@ describe('ModelCatalogService', () => {
 
     const firstUrl = (global.fetch as jest.Mock).mock.calls[0][0] as string;
     expect(firstUrl).toContain('gated=false');
+  });
+
+  it('returns deferred catalog summaries before tree metadata and updates the cache in the background', async () => {
+    const treeResponse = createDeferred<any>();
+    const service = new ModelCatalogService();
+    const metadataListener = jest.fn();
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tree/main?recursive=true')) {
+        return treeResponse.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/deferred-catalog-model')]),
+      });
+    }) as jest.Mock;
+
+    try {
+      const result = await service.searchModels('phi', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      });
+
+      expect(result.models[0]).toEqual(expect.objectContaining({
+        id: 'org/deferred-catalog-model',
+        size: null,
+        requiresTreeProbe: true,
+      }));
+      expect(metadataListener).not.toHaveBeenCalled();
+      const firstUrl = String((global.fetch as jest.Mock).mock.calls[0][0]);
+      expect(firstUrl).toContain('limit=1');
+
+      await waitForMockCallCount(global.fetch as jest.Mock, 2);
+      treeResponse.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          path: 'model.Q4_K_M.gguf',
+          size: 2 * 1024 * 1024 * 1024,
+          lfs: { oid: `sha256:${TREE_SHA256}` },
+        }]),
+      });
+      await waitForMockCallCount(metadataListener, 1);
+
+      expect(metadataListener).toHaveBeenCalledWith({
+        query: 'phi',
+        sort: null,
+        gated: false,
+        models: [expect.objectContaining({
+          id: 'org/deferred-catalog-model',
+          size: 2 * 1024 * 1024 * 1024,
+          requiresTreeProbe: false,
+        })],
+        removedModelIds: [],
+      });
+      expect(service.getCachedSearchResult('phi', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      })?.models[0]).toEqual(expect.objectContaining({
+        size: 2 * 1024 * 1024 * 1024,
+        requiresTreeProbe: false,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it('does not let a delayed deferred metadata batch overwrite a force-refreshed search', async () => {
+    const staleTreeResponse = createDeferred<any>();
+    const service = new ModelCatalogService();
+    const metadataListener = jest.fn();
+    let searchRequestCount = 0;
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tree/main?recursive=true')) {
+        return staleTreeResponse.promise;
+      }
+
+      searchRequestCount += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([
+          searchRequestCount === 1
+            ? makeRepoWithUnknownSize('org/deferred-refresh-model')
+            : makeRepo('org/deferred-refresh-model', 4 * 1024 * 1024 * 1024),
+        ]),
+      });
+    }) as jest.Mock;
+
+    try {
+      await service.searchModels('phi', {
+        pageSize: 1,
+        metadataResolution: 'deferred',
+      });
+      await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+      const refreshed = await service.searchModels('phi', {
+        pageSize: 1,
+        forceRefresh: true,
+        metadataResolution: 'deferred',
+      });
+      expect(refreshed.models[0].size).toBe(4 * 1024 * 1024 * 1024);
+
+      staleTreeResponse.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          path: 'model.Q4_K_M.gguf',
+          size: 2 * 1024 * 1024 * 1024,
+        }]),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(metadataListener).not.toHaveBeenCalled();
+      expect(service.getCachedSearchResult('phi', {
+        pageSize: 1,
+        metadataResolution: 'deferred',
+      })?.models[0].size).toBe(4 * 1024 * 1024 * 1024);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it('persists public-only searches under a cache scope isolated from ungated results', async () => {
+    global.fetch = jest.fn(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeRepo('org/public-only-cached-model')]),
+    })) as jest.Mock;
+
+    const initialResult = await modelCatalogService.searchModels('phi', {
+      pageSize: 10,
+      gated: false,
+    });
+    expect(initialResult.models[0].id).toBe('org/public-only-cached-model');
+
+    const coldStartService = new ModelCatalogService();
+    (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
+
+    try {
+      expect(coldStartService.getCachedSearchResult('phi', { pageSize: 10 })).toBeNull();
+      const offlineResult = await coldStartService.searchModels('phi', {
+        pageSize: 10,
+        gated: false,
+      });
+
+      expect(offlineResult.models[0].id).toBe('org/public-only-cached-model');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      coldStartService.dispose();
+    }
   });
 
   it('does not reuse cache entries across gated and ungated catalog searches', async () => {

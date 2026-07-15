@@ -7,7 +7,10 @@ import { Text, composeTextRole } from './text';
 import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
 import type { ProjectorArtifact } from '../../types/multimodal';
-import { getModelVisionCapabilityBadgePresentation } from '../../utils/modelCapabilities';
+import {
+  getModelAudioCapabilityBadgePresentation,
+  getModelVisionCapabilityBadgePresentation,
+} from '../../utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
 import {
   formatModelFileSize,
@@ -66,7 +69,7 @@ const ModelCardComponent = ({
   const canOpenVariantSelector = typeof onOpenVariantSelector === 'function' && canSelectModelVariant(model);
   const displayProjectorCandidates = getModelDisplayProjectorCandidates(model);
   const displaySelectedProjectorId = getModelDisplaySelectedProjectorId(model, displayProjectorCandidates);
-  const visionBadge = getModelVisionCapabilityBadgePresentation(activeVariant
+  const capabilityBadgeModel = activeVariant
     ? {
         ...model,
         chatModalities: activeVariant.chatModalities ?? model.chatModalities,
@@ -76,7 +79,9 @@ const ModelCardComponent = ({
         projectorCandidates: displayProjectorCandidates,
         selectedProjectorId: displaySelectedProjectorId,
       }
-    : model);
+    : model;
+  const visionBadge = getModelVisionCapabilityBadgePresentation(capabilityBadgeModel);
+  const audioBadge = getModelAudioCapabilityBadgePresentation(capabilityBadgeModel);
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -129,6 +134,11 @@ const ModelCardComponent = ({
         {visionBadge ? (
           <ScreenBadge tone={visionBadge.tone} size="micro" iconName={visionBadge.iconName}>
             {t(visionBadge.labelKey)}
+          </ScreenBadge>
+        ) : null}
+        {audioBadge ? (
+          <ScreenBadge tone={audioBadge.tone} size="micro" iconName={audioBadge.iconName}>
+            {t(audioBadge.labelKey)}
           </ScreenBadge>
         ) : null}
         {shouldShowStandaloneMemoryBadge ? (
@@ -301,8 +311,55 @@ function multimodalReadinessEqual(
     nullableFieldEqual(prev.projectorId, next.projectorId) &&
     nullableFieldEqual(prev.projectorSize, next.projectorSize) &&
     scalarArrayFieldEqual(prev.support, next.support) &&
+    scalarArrayFieldEqual(prev.requestedSupport, next.requestedSupport) &&
     nullableFieldEqual(prev.failureReason, next.failureReason) &&
     prev.checkedAt === next.checkedAt;
+}
+
+function inputCapabilitiesEqual(
+  prev: ModelMetadata['inputCapabilities'],
+  next: ModelMetadata['inputCapabilities'],
+): boolean {
+  if (prev === next) {
+    return true;
+  }
+
+  if (!prev || !next) {
+    return prev === next;
+  }
+
+  return prev.detectedAt === next.detectedAt &&
+    prev.declared.image === next.declared.image &&
+    prev.declared.audio === next.declared.audio &&
+    prev.declared.video === next.declared.video &&
+    arrayFieldEqual(prev.evidence, next.evidence, (prevEvidence, nextEvidence) => (
+      prevEvidence.source === nextEvidence.source &&
+      prevEvidence.value === nextEvidence.value &&
+      prevEvidence.confidence === nextEvidence.confidence
+    ));
+}
+
+function modelArtifactsEqual(
+  prev: ModelMetadata['artifacts'],
+  next: ModelMetadata['artifacts'],
+): boolean {
+  return arrayFieldEqual(prev, next, (prevArtifact, nextArtifact) => (
+    prevArtifact.id === nextArtifact.id &&
+    prevArtifact.kind === nextArtifact.kind &&
+    scalarArrayFieldEqual(prevArtifact.requiredFor, nextArtifact.requiredFor) &&
+    nullableFieldEqual(prevArtifact.hfRevision, nextArtifact.hfRevision) &&
+    prevArtifact.remoteFileName === nextArtifact.remoteFileName &&
+    prevArtifact.downloadUrl === nextArtifact.downloadUrl &&
+    unknownSizeFieldEqual(prevArtifact.sizeBytes, nextArtifact.sizeBytes) &&
+    nullableFieldEqual(prevArtifact.sha256, nextArtifact.sha256) &&
+    nullableFieldEqual(prevArtifact.localPath, nextArtifact.localPath) &&
+    prevArtifact.installState === nextArtifact.installState &&
+    nullableFieldEqual(prevArtifact.downloadProgress, nextArtifact.downloadProgress) &&
+    nullableFieldEqual(prevArtifact.resumeData, nextArtifact.resumeData) &&
+    nullableFieldEqual(prevArtifact.errorCode, nextArtifact.errorCode) &&
+    nullableFieldEqual(prevArtifact.errorMessage, nextArtifact.errorMessage) &&
+    nullableFieldEqual(prevArtifact.updatedAt, nextArtifact.updatedAt)
+  ));
 }
 
 export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
@@ -348,6 +405,8 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
            modelVariantsEqual(prevProps.model, nextProps.model) &&
            modelVisionFieldsEqual(prevProps.model, nextProps.model) &&
            multimodalReadinessEqual(prevProps.model.multimodalReadiness, nextProps.model.multimodalReadiness) &&
+           inputCapabilitiesEqual(prevProps.model.inputCapabilities, nextProps.model.inputCapabilities) &&
+           modelArtifactsEqual(prevProps.model.artifacts, nextProps.model.artifacts) &&
            prevProps.model.activeVariantId === nextProps.model.activeVariantId &&
            prevProps.model.accessState === nextProps.model.accessState &&
            prevProps.model.isGated === nextProps.model.isGated &&

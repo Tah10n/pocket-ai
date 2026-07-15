@@ -35,11 +35,89 @@ function getVariantActiveRank(
 function getVariantCompletenessScore(variant: ModelVariant): number {
   return (variant.isLocal === true ? 16 : 0)
     + (variant.chatModalities?.includes('vision') ? 8 : 0)
+    + (variant.chatModalities?.includes('audio') ? 8 : 0)
     + (variant.projectorCandidates?.length ? 4 : 0)
     + (variant.sha256 ? 4 : 0)
     + (typeof variant.size === 'number' ? 2 : 0)
     + (variant.ramFit ? 1 : 0)
     + (variant.ramFitConfidence ? 1 : 0);
+}
+
+function mergeVariantChatModalities(
+  preferred: ModelVariant['chatModalities'],
+  fallback: ModelVariant['chatModalities'],
+): ModelVariant['chatModalities'] {
+  const source = preferred ?? fallback;
+  const modalities = [...new Set(source ?? [])];
+  return modalities.length > 0 ? modalities : undefined;
+}
+
+function getNativeVariantModalities(variant: ModelVariant): Set<'vision' | 'audio'> {
+  return new Set((variant.chatModalities ?? []).filter((modality): modality is 'vision' | 'audio' => modality !== 'text'));
+}
+
+function canUseFallbackProjectorMetadata(preferred: ModelVariant, fallback: ModelVariant): boolean {
+  if (!Array.isArray(preferred.chatModalities)) {
+    return true;
+  }
+
+  const preferredNativeModalities = getNativeVariantModalities(preferred);
+  if (preferredNativeModalities.size === 0) {
+    return false;
+  }
+
+  if (!Array.isArray(fallback.chatModalities)) {
+    return preferredNativeModalities.has('vision');
+  }
+
+  const fallbackNativeModalities = getNativeVariantModalities(fallback);
+  if (fallbackNativeModalities.size === 0) {
+    return false;
+  }
+
+  return Array.from(fallbackNativeModalities).every((modality) => preferredNativeModalities.has(modality));
+}
+
+function canUseFallbackVisionMetadata(preferred: ModelVariant, fallback: ModelVariant): boolean {
+  if (!Array.isArray(preferred.chatModalities)) {
+    return true;
+  }
+
+  if (!preferred.chatModalities.includes('vision')) {
+    return false;
+  }
+
+  return !Array.isArray(fallback.chatModalities) || fallback.chatModalities.includes('vision');
+}
+
+function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVariant): ModelVariant {
+  const shouldUseFallbackProjectorMetadata = canUseFallbackProjectorMetadata(preferred, fallback);
+  const shouldUseFallbackVisionMetadata = canUseFallbackVisionMetadata(preferred, fallback);
+  const chatModalities = mergeVariantChatModalities(preferred.chatModalities, fallback.chatModalities);
+  const permitsVisionMetadata = !Array.isArray(chatModalities) || chatModalities.includes('vision');
+
+  return {
+    ...preferred,
+    size: preferred.size ?? fallback.size,
+    sha256: preferred.sha256 ?? fallback.sha256,
+    ramFit: preferred.ramFit ?? fallback.ramFit,
+    ramFitConfidence: preferred.ramFitConfidence ?? fallback.ramFitConfidence,
+    isLocal: preferred.isLocal ?? fallback.isLocal,
+    chatModalities,
+    artifactRole: preferred.artifactRole ?? fallback.artifactRole,
+    visionSource: permitsVisionMetadata
+      ? preferred.visionSource ?? (shouldUseFallbackVisionMetadata ? fallback.visionSource : undefined)
+      : undefined,
+    visionConfidence: permitsVisionMetadata
+      ? preferred.visionConfidence ?? (shouldUseFallbackVisionMetadata ? fallback.visionConfidence : undefined)
+      : undefined,
+    projectorCandidates: preferred.projectorCandidates ?? (
+      shouldUseFallbackProjectorMetadata ? fallback.projectorCandidates : undefined
+    ),
+    selectedProjectorId: preferred.selectedProjectorId ?? (
+      shouldUseFallbackProjectorMetadata ? fallback.selectedProjectorId : undefined
+    ),
+  };
 }
 
 function shouldReplaceVariant(
@@ -78,8 +156,11 @@ function dedupeModelVariantsByKey(
       return;
     }
 
-    if (shouldReplaceVariant(deduped[existingIndex], variant, options)) {
-      deduped[existingIndex] = variant;
+    const existingVariant = deduped[existingIndex];
+    if (shouldReplaceVariant(existingVariant, variant, options)) {
+      deduped[existingIndex] = mergeDedupeVariantMetadata(variant, existingVariant);
+    } else {
+      deduped[existingIndex] = mergeDedupeVariantMetadata(existingVariant, variant);
     }
   });
 

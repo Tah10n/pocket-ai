@@ -32,7 +32,10 @@ import { Text } from '@/components/ui/text';
 import { ValueSelectorRow } from '@/components/ui/ValueSelectorRow';
 import { useModelDetailsController } from '@/hooks/useModelDetailsController';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '@/types/models';
-import { getModelVisionCapabilityBadgePresentation } from '@/utils/modelCapabilities';
+import {
+  getModelAudioCapabilityBadgePresentation,
+  getModelVisionCapabilityBadgePresentation,
+} from '@/utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '@/utils/modelMemoryBadgePresentation';
 import {
   formatModelFileSize,
@@ -156,6 +159,7 @@ export function ModelDetailsScreen() {
   }, [detailsDisplaySize, detailsQuantizationLabel, t]);
   const shouldShowStandaloneDetailsMemoryBadge = !variantSelectorValue && shouldShowDetailsMemoryBadge;
   const detailsVisionBadge = detailsPresentationModel ? getModelVisionCapabilityBadgePresentation(detailsPresentationModel) : null;
+  const detailsAudioBadge = detailsPresentationModel ? getModelAudioCapabilityBadgePresentation(detailsPresentationModel) : null;
   const detailsProjectorLifecycle = detailsPresentationModel ? selectModelProjectorLifecycleState(detailsPresentationModel) : null;
   const shouldShowProjectorStatus = detailsProjectorLifecycle !== null && detailsProjectorLifecycle.status !== 'text_only';
   const shouldShowDownloadProgress = Boolean(displayModel && (
@@ -257,6 +261,11 @@ export function ModelDetailsScreen() {
                       {detailsVisionBadge ? (
                         <ScreenBadge tone={detailsVisionBadge.tone} size="micro" iconName={detailsVisionBadge.iconName}>
                           {t(detailsVisionBadge.labelKey)}
+                        </ScreenBadge>
+                      ) : null}
+                      {detailsAudioBadge ? (
+                        <ScreenBadge tone={detailsAudioBadge.tone} size="micro" iconName={detailsAudioBadge.iconName}>
+                          {t(detailsAudioBadge.labelKey)}
                         </ScreenBadge>
                       ) : null}
                       {shouldShowStandaloneDetailsMemoryBadge && detailsMemoryBadge ? (

@@ -49,12 +49,15 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 }
 
 function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const repoId = overrides.repoId ?? 'org/model';
+  const fileName = overrides.fileName ?? 'mmproj-a.gguf';
+  const hfRevision = overrides.hfRevision ?? 'main';
   return {
     id: 'projector-org-model-main-mmproj-a.gguf',
     ownerModelId: 'org/model',
-    repoId: 'org/model',
-    fileName: 'mmproj-a.gguf',
-    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+    repoId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/${hfRevision}/${fileName}`,
     size: 1024,
     lifecycleStatus: 'available',
     matchStatus: 'ambiguous',
@@ -116,6 +119,41 @@ describe('modelDownloadFlow', () => {
     }));
   });
 
+  it('shows a known RAM warning before a required tree refresh', async () => {
+    const startDownload = jest.fn();
+    const model = createModel({
+      fitsInRam: false,
+      requiresTreeProbe: true,
+    });
+    mockRefreshModelMetadata.mockResolvedValue(model);
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.memoryWarningTitle',
+      'models.downloadMemoryWarningMessage',
+      expect.any(Array),
+    );
+    expect(mockRefreshModelMetadata).not.toHaveBeenCalled();
+    expect(startDownload).not.toHaveBeenCalled();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    buttons[1]?.onPress?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockRefreshModelMetadata).toHaveBeenCalledWith(model, { includeDetails: false });
+    expect(startDownload).toHaveBeenCalledWith(model);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes unresolved metadata and propagates the resolved model to the caller', async () => {
     const resolvedModel = createModel({
       size: 2048,
@@ -175,8 +213,8 @@ describe('modelDownloadFlow', () => {
 
     expect(onProjectorChoiceRequired).toHaveBeenCalledWith(ambiguousModel);
     expect(alertSpy).not.toHaveBeenCalledWith(
-      'models.vision.projectorChoiceRequiredTitle',
-      'models.vision.projectorChoiceRequiredMessage',
+      'models.multimodal.projectorChoiceRequiredTitle',
+      'models.multimodal.projectorChoiceRequiredMessage',
     );
     expect(startDownload).not.toHaveBeenCalled();
   });
@@ -237,8 +275,8 @@ describe('modelDownloadFlow', () => {
     await Promise.resolve();
 
     expect(alertSpy).toHaveBeenCalledWith(
-      'models.vision.projectorChoiceRequiredTitle',
-      'models.vision.projectorChoiceRequiredMessage',
+      'models.multimodal.projectorChoiceRequiredTitle',
+      'models.multimodal.projectorChoiceRequiredMessage',
     );
     expect(startDownload).not.toHaveBeenCalled();
   });

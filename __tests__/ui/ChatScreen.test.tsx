@@ -1,6 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert, Platform } from 'react-native';
+import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -627,6 +628,7 @@ const {
 const { registry } = require('../../src/services/LocalStorageRegistry');
 const { AppError } = require('../../src/services/AppError');
 const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
+const { buildProjectorArtifactId } = require('../../src/utils/modelProjectors');
 const VERIFIED_LOCAL_SHA256 = 'f'.repeat(64);
 const copiedDraftImageAttachment = {
   id: 'draft-image-1',
@@ -663,7 +665,7 @@ const failedDraftImageAttachment = {
   errorReason: 'copy_failed',
 };
 
-function createVisionProjector(overrides: Record<string, unknown> = {}) {
+function createVisionProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
   return {
     id: 'author/model-q4-mmproj',
     ownerModelId: 'author/model-q4',
@@ -676,6 +678,15 @@ function createVisionProjector(overrides: Record<string, unknown> = {}) {
     matchStatus: 'matched',
     ...overrides,
   };
+}
+
+function getCanonicalVisionProjectorId(projector = createVisionProjector()): string {
+  return buildProjectorArtifactId({
+    repoId: projector.repoId,
+    hfRevision: projector.hfRevision,
+    ownerVariantId: projector.ownerVariantId,
+    fileName: projector.fileName,
+  });
 }
 
 function createVisionModel(overrides: Record<string, unknown> = {}) {
@@ -729,6 +740,95 @@ function setImageOnlyRegenerateThread() {
               size: 123_456,
               source: 'photo_library',
               createdAt: 1,
+            }],
+            createdAt: 1,
+            state: 'complete',
+          },
+          {
+            id: 'message-2',
+            role: 'assistant',
+            content: 'Saved assistant reply',
+            createdAt: 2,
+            state: 'complete',
+          },
+        ],
+      },
+    },
+    activeThreadId: 'thread-1',
+  });
+}
+
+function setAudioOnlyRegenerateThread() {
+  useChatStore.setState({
+    threads: {
+      'thread-1': {
+        ...useChatStore.getState().threads['thread-1'],
+        messages: [
+          {
+            id: 'message-audio-only',
+            role: 'user',
+            content: '',
+            attachments: [{
+              id: 'attachment-audio-only',
+              kind: 'audio',
+              state: 'ready',
+              threadId: 'thread-1',
+              messageId: 'message-audio-only',
+              localUri: 'test-dir/chat-attachments/audio-only.mp3',
+              pathCategory: 'chat_attachment',
+              fileName: 'audio-only.mp3',
+              mimeType: 'audio/mpeg',
+              sizeBytes: 123_456,
+              source: 'document_picker',
+              createdAt: 1,
+              audio: {
+                format: 'mp3',
+              },
+            }],
+            createdAt: 1,
+            state: 'complete',
+          },
+          {
+            id: 'message-2',
+            role: 'assistant',
+            content: 'Saved assistant reply',
+            createdAt: 2,
+            state: 'complete',
+          },
+        ],
+      },
+    },
+    activeThreadId: 'thread-1',
+  });
+}
+
+function setVideoOnlyRegenerateThread() {
+  useChatStore.setState({
+    threads: {
+      'thread-1': {
+        ...useChatStore.getState().threads['thread-1'],
+        messages: [
+          {
+            id: 'message-video-only',
+            role: 'user',
+            content: '',
+            attachments: [{
+              id: 'attachment-video-only',
+              kind: 'video',
+              state: 'ready',
+              threadId: 'thread-1',
+              messageId: 'message-video-only',
+              localUri: 'test-dir/chat-attachments/video-only.mp4',
+              pathCategory: 'chat_attachment',
+              fileName: 'video-only.mp4',
+              mimeType: 'video/mp4',
+              sizeBytes: 123_456,
+              source: 'photo_library',
+              createdAt: 1,
+              video: {
+                derivedAttachmentIds: [],
+                samplingVersion: 1,
+              },
             }],
             createdAt: 1,
             state: 'complete',
@@ -932,6 +1032,9 @@ describe('ChatScreen', () => {
       attachmentDrafts: [copiedDraftImageAttachment],
       imageAttachmentsEnabled: true,
       imageAttachmentsDisabledReason: 'chat.visionReadiness.ready',
+      audioAttachmentsSupported: false,
+      audioAttachmentsEnabled: false,
+      audioAttachmentsDisabledReason: 'chat.attachments.audioModelUnsupported',
       isImageAttachmentActionBusy: false,
     }));
 
@@ -952,6 +1055,211 @@ describe('ChatScreen', () => {
     );
     expect(mockConsumeAttachmentDrafts).toHaveBeenCalledTimes(1);
     expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse stale mixed readiness for audio-only model metadata', () => {
+    const projector = createVisionProjector();
+    const model = createVisionModel({
+      chatModalities: ['text', 'audio'],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['audio'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: getCanonicalVisionProjectorId(projector),
+        support: [],
+        requestedSupport: ['audio'],
+      }),
+    );
+
+    registry.saveModels([model]);
+
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.initializing',
+      audioAttachmentsSupported: true,
+      audioAttachmentsEnabled: false,
+      audioAttachmentsDisabledReason: 'chat.attachments.audioRuntimeUnavailable',
+    }));
+  });
+
+  it('reports runtime unavailable when the displayed audio model differs from the engine model', () => {
+    const projector = createVisionProjector();
+    registry.saveModels([
+      createVisionModel({
+        chatModalities: ['text', 'audio'],
+        selectedProjectorId: projector.id,
+        projectorCandidates: [projector],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          projectorId: projector.id,
+          support: ['audio'],
+          requestedSupport: ['audio'],
+          checkedAt: 1,
+        },
+      }),
+    ]);
+    mockEngineState = {
+      activeModelId: 'other/model',
+      status: 'ready',
+    };
+
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      audioAttachmentsSupported: true,
+      audioAttachmentsEnabled: false,
+      audioAttachmentsDisabledReason: 'chat.attachments.audioRuntimeUnavailable',
+    }));
+  });
+
+  it('never enables image attachments for an active audio-only variant', () => {
+    const projector = createVisionProjector({ ownerVariantId: 'audio-variant' });
+    const model = createVisionModel({
+      chatModalities: ['text', 'vision'],
+      activeVariantId: 'audio-variant',
+      resolvedFileName: 'audio.gguf',
+      variants: [{
+        variantId: 'audio-variant',
+        fileName: 'audio.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [projector],
+        selectedProjectorId: projector.id,
+      }],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        variantId: 'audio-variant',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    });
+    registry.saveModels([model]);
+
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: false,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.unsupported',
+      audioAttachmentsSupported: true,
+      audioAttachmentsEnabled: true,
+    }));
+  });
+
+  it('does not request stale audio readiness owned by another model', () => {
+    const projector = createVisionProjector();
+    const model = createVisionModel({
+      chatModalities: undefined,
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: 'other/model',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['audio'],
+        requestedSupport: ['audio'],
+        checkedAt: 1,
+      },
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(expect.objectContaining({
+      modelId: 'author/model-q4',
+      status: 'initializing',
+      projectorId: getCanonicalVisionProjectorId(projector),
+      support: [],
+      requestedSupport: ['vision'],
+    }));
+  });
+
+  it.each([
+    {
+      label: 'vision-only',
+      parentModalities: ['text', 'audio'] as const,
+      variantModalities: ['text', 'vision'] as const,
+      support: ['vision'] as const,
+      expectedImageEnabled: true,
+      expectedAudioEnabled: false,
+    },
+    {
+      label: 'mixed',
+      parentModalities: ['text'] as const,
+      variantModalities: ['text', 'vision', 'audio'] as const,
+      support: ['vision', 'audio'] as const,
+      expectedImageEnabled: true,
+      expectedAudioEnabled: true,
+    },
+  ])('enables exact composer modalities for an active $label variant', ({
+    label,
+    parentModalities,
+    variantModalities,
+    support,
+    expectedImageEnabled,
+    expectedAudioEnabled,
+  }) => {
+    const variantId = `${label}-variant`;
+    const projector = createVisionProjector({ ownerVariantId: variantId });
+    const model = createVisionModel({
+      chatModalities: [...parentModalities],
+      activeVariantId: variantId,
+      resolvedFileName: `${label}.gguf`,
+      variants: [{
+        variantId,
+        fileName: `${label}.gguf`,
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: [...variantModalities],
+        projectorCandidates: [projector],
+        selectedProjectorId: projector.id,
+      }],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        variantId,
+        status: 'ready',
+        projectorId: projector.id,
+        support: [...support],
+        requestedSupport: [...support],
+        checkedAt: 1,
+      },
+    });
+    registry.saveModels([model]);
+
+    render(React.createElement(ChatScreen));
+
+    expect(resolveFallbackMultimodalReadiness(model, model.id)).toEqual(expect.objectContaining({
+      status: 'ready',
+      variantId,
+      projectorId: projector.id,
+      support: [...support],
+      requestedSupport: [...support],
+    }));
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      imageAttachmentsEnabled: expectedImageEnabled,
+      imageAttachmentsDisabledReason: 'chat.visionReadiness.ready',
+      audioAttachmentsSupported: expectedAudioEnabled,
+      audioAttachmentsEnabled: expectedAudioEnabled,
+    }));
   });
 
   it('uses initializing fallback for vision models with a selected downloaded projector and no persisted readiness', () => {
@@ -996,7 +1304,8 @@ describe('ChatScreen', () => {
     expect(resolveFallbackMultimodalReadiness(registry.getModel('author/model-q4'), 'author/model-q4')).toEqual(
       expect.objectContaining({
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1010,7 +1319,8 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
+        requestedSupport: ['vision'],
       }),
     );
 
@@ -1023,6 +1333,106 @@ describe('ChatScreen', () => {
     }));
   });
 
+  it('uses projector fallback readiness for audio-only model metadata', () => {
+    const projector = createVisionProjector();
+    const model = createVisionModel({
+      chatModalities: ['text', 'audio'],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: getCanonicalVisionProjectorId(projector),
+        support: [],
+        requestedSupport: ['audio'],
+      }),
+    );
+  });
+
+  it('preserves checked unsupported readiness for audio-only model metadata', () => {
+    const projector = createVisionProjector();
+    const model = createVisionModel({
+      chatModalities: ['text', 'audio'],
+      selectedProjectorId: projector.id,
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'unsupported',
+        projectorId: projector.id,
+        support: [],
+        requestedSupport: ['audio'],
+        failureReason: 'runtime_did_not_report_audio',
+        checkedAt: 1,
+      },
+      projectorCandidates: [projector],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'unsupported',
+        projectorId: projector.id,
+        support: [],
+        requestedSupport: ['audio'],
+      }),
+    );
+  });
+
+  it('does not preserve legacy ready readiness when requested native modalities expand', () => {
+    const projector = createVisionProjector();
+    const model = createVisionModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      selectedProjectorId: projector.id,
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['vision'],
+        checkedAt: 1,
+      },
+      projectorCandidates: [projector],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'initializing',
+        projectorId: getCanonicalVisionProjectorId(projector),
+        support: [],
+        requestedSupport: ['vision', 'audio'],
+      }),
+    );
+  });
+
+  it('preserves partial ready readiness after all requested native modalities were checked', () => {
+    const projector = createVisionProjector();
+    const model = createVisionModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      selectedProjectorId: projector.id,
+      multimodalReadiness: {
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['vision'],
+        requestedSupport: ['vision', 'audio'],
+        checkedAt: 1,
+      },
+      projectorCandidates: [projector],
+    });
+
+    expect(resolveFallbackMultimodalReadiness(model, 'author/model-q4')).toEqual(
+      expect.objectContaining({
+        modelId: 'author/model-q4',
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['vision'],
+        requestedSupport: ['vision', 'audio'],
+      }),
+    );
+  });
+
   it('uses runtime-compatible fallback when projector metadata is present before chat modalities hydrate', () => {
     const model = createVisionModel({
       chatModalities: undefined,
@@ -1033,7 +1443,8 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1053,7 +1464,8 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'initializing',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1074,6 +1486,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'missing_projector',
         support: [],
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1088,8 +1501,16 @@ describe('ChatScreen', () => {
         checkedAt: 1,
       },
       projectorCandidates: [
-        createVisionProjector({ id: 'author/model-q4-mmproj-a' }),
-        createVisionProjector({ id: 'author/model-q4-mmproj-b' }),
+        createVisionProjector({
+          id: 'author/model-q4-mmproj-a',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://example.com/mmproj-a.gguf',
+        }),
+        createVisionProjector({
+          id: 'author/model-q4-mmproj-b',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://example.com/mmproj-b.gguf',
+        }),
       ],
     });
 
@@ -1098,6 +1519,7 @@ describe('ChatScreen', () => {
         modelId: 'author/model-q4',
         status: 'ambiguous_projector',
         support: [],
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -1133,6 +1555,7 @@ describe('ChatScreen', () => {
           modelId: 'author/model-q4',
           status: expectedStatus,
           support: [],
+          requestedSupport: ['vision'],
         }),
       );
     },
@@ -1146,6 +1569,7 @@ describe('ChatScreen', () => {
         status: 'unsupported',
         projectorId: 'author/model-q4-mmproj',
         support: [],
+        requestedSupport: ['vision'],
         checkedAt: 1,
       },
       projectorCandidates: [createVisionProjector()],
@@ -1166,6 +1590,7 @@ describe('ChatScreen', () => {
         status: 'failed',
         projectorId: 'author/model-q4-mmproj',
         support: ['vision'],
+        requestedSupport: ['vision'],
         failureReason: 'Runtime init failed',
         checkedAt: 1,
       },
@@ -1192,7 +1617,8 @@ describe('ChatScreen', () => {
         expect.objectContaining({
           modelId: 'author/model-q4',
           status: 'projector_downloading',
-          projectorId: 'author/model-q4-mmproj',
+          projectorId: getCanonicalVisionProjectorId(),
+          requestedSupport: ['vision'],
         }),
       );
     },
@@ -1212,8 +1638,9 @@ describe('ChatScreen', () => {
       expect.objectContaining({
         modelId: 'author/model-q4',
         status: 'failed',
-        projectorId: 'author/model-q4-mmproj',
+        projectorId: getCanonicalVisionProjectorId(),
         failureReason: 'Checksum mismatch',
+        requestedSupport: ['vision'],
       }),
     );
   });
@@ -2882,6 +3309,58 @@ describe('ChatScreen', () => {
       '',
       { multimodalReadiness: expect.objectContaining({ status: 'ready', support: ['vision'] }) },
     );
+  });
+
+  it('uses the unsupported-model reason when retained audio cannot be regenerated', () => {
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.retainedForRegenerateBlockedDescription',
+      'blocked: {{reason}}',
+    );
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.audioModelUnsupported',
+      'Current model does not support audio',
+    );
+    reactI18nextMock.__setTranslationOverride('chat.visionReadiness.ready', 'Vision ready');
+    registry.saveModels([
+      createReadyVisionModel(),
+    ]);
+    setAudioOnlyRegenerateThread();
+
+    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('regenerate-message-message-audio-only'));
+
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
+    expect(lastChatInputBarProps.sendDisabled).toBe(true);
+    expect(getByText('blocked: Current model does not support audio')).toBeTruthy();
+  });
+
+  it('blocks legacy video regeneration even when vision runtime is ready', async () => {
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.retainedForRegenerateBlockedDescription',
+      'blocked: {{reason}}',
+    );
+    reactI18nextMock.__setTranslationOverride(
+      'chat.attachments.videoRegenerateUnsupported',
+      'Video input is disabled',
+    );
+    registry.saveModels([createReadyVisionModel()]);
+    setVideoOnlyRegenerateThread();
+
+    const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('regenerate-message-message-video-only'));
+
+    expect(lastChatInputBarProps.allowEmptyMessageSend).toBe(false);
+    expect(lastChatInputBarProps.sendDisabled).toBe(true);
+    expect(lastChatInputBarProps.attachmentsTray).toBeTruthy();
+    expect(getByText('blocked: Video input is disabled')).toBeTruthy();
+
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Edited video prompt');
+    });
+
+    expect(mockRegenerateFromUserMessage).not.toHaveBeenCalled();
   });
 
   it.each([

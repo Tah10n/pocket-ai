@@ -6,7 +6,10 @@ import {
   getActiveModelVariant,
   getDefaultCatalogModelVariant,
 } from '../../src/utils/modelVariants';
+import { dedupeModelVariantsByIdentity } from '../../src/utils/modelVariantIdentity';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import { resolveEffectiveActiveVariantNativeSupport } from '../../src/utils/modelCapabilities';
+import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   return {
@@ -57,6 +60,90 @@ describe('modelVariants', () => {
     const model = createModel({ activeVariantId: undefined });
 
     expect(getActiveModelVariant(model)?.variantId).toBe('model.Q4_K_M.gguf');
+  });
+
+  it('resolves either active identity alias without falling back to the first stale variant', () => {
+    const model = createModel({
+      activeVariantId: 'model.Q8_0.gguf',
+      resolvedFileName: 'stale.gguf',
+      variants: [
+        { ...createModel().variants![0], variantId: 'q4' },
+        { ...createModel().variants![1], variantId: 'q8' },
+      ],
+    });
+
+    expect(getActiveModelVariant(model)?.variantId).toBe('q8');
+    expect(getActiveModelVariant({
+      ...model,
+      activeVariantId: 'missing-variant',
+      resolvedFileName: 'model.Q8_0.gguf',
+    })?.variantId).toBe('q8');
+    expect(getActiveModelVariant({
+      ...model,
+      activeVariantId: 'missing-variant',
+      resolvedFileName: 'missing-file.gguf',
+    })).toBeUndefined();
+  });
+
+  it('selects an exact variant id before an earlier filename alias collision', () => {
+    const selected = applyModelVariantSelectionIfAvailable(
+      createModel({
+        variants: [
+          {
+            variantId: 'legacy-audio',
+            fileName: 'audio-q4.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1,
+            chatModalities: ['text', 'vision'],
+          },
+          {
+            variantId: 'audio-q4.gguf',
+            fileName: 'audio-main.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 2,
+            chatModalities: ['text', 'audio'],
+          },
+        ],
+      }),
+      {
+        activeVariantId: 'audio-q4.gguf',
+        downloadedAt: 1,
+      },
+    );
+
+    expect(selected.activeVariantId).toBe('audio-q4.gguf');
+    expect(selected.resolvedFileName).toBe('audio-main.gguf');
+  });
+
+  it('selects an exact resolved filename before an earlier variant-id alias collision', () => {
+    const selected = applyModelVariantSelectionIfAvailable(
+      createModel({
+        variants: [
+          {
+            variantId: 'audio-q4.gguf',
+            fileName: 'audio-main.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 2,
+            chatModalities: ['text', 'audio'],
+          },
+          {
+            variantId: 'legacy-audio',
+            fileName: 'audio-q4.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1,
+            chatModalities: ['text', 'vision'],
+          },
+        ],
+      }),
+      {
+        resolvedFileName: 'audio-q4.gguf',
+        size: 1,
+        downloadedAt: 1,
+      },
+    );
+
+    expect(selected.activeVariantId).toBe('legacy-audio');
+    expect(selected.resolvedFileName).toBe('audio-q4.gguf');
   });
 
   it('defaults catalog selection to Q4_K_M when another variant is currently active', () => {
@@ -183,12 +270,20 @@ describe('modelVariants', () => {
     expect(selected.selectedProjectorId).toBeUndefined();
     expect(selected.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'projector-q4',
+        id: buildProjectorArtifactId({
+          repoId: 'org/model',
+          hfRevision: 'main',
+          fileName: 'mmproj-q4.gguf',
+        }),
         matchStatus: 'ambiguous',
         matchReason: 'variant_selection_changed',
       }),
       expect.objectContaining({
-        id: 'projector-q8',
+        id: buildProjectorArtifactId({
+          repoId: 'org/model',
+          hfRevision: 'main',
+          fileName: 'mmproj-q8.gguf',
+        }),
         matchStatus: 'ambiguous',
       }),
     ]);
@@ -632,6 +727,236 @@ describe('modelVariants', () => {
     }));
   });
 
+  it('preserves audio modality when deduping duplicate variants for the same file', () => {
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'model.Q4_K_M.gguf',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+      },
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'audio'],
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        variantId: 'audio-q4',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text', 'audio'],
+      }),
+    ]);
+  });
+
+  it('keeps an explicit text-only preferred variant when fallback has audio metadata', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
+      },
+      {
+        variantId: 'text-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text'],
+      },
+    ], { activeVariantId: 'text-q4' })).toEqual([
+      expect.objectContaining({
+        variantId: 'text-q4',
+        chatModalities: ['text'],
+        projectorCandidates: undefined,
+        selectedProjectorId: undefined,
+      }),
+    ]);
+  });
+
+  it('keeps an explicit text-only preferred variant when fallback has vision metadata', () => {
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'vision-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'vision'],
+      },
+      {
+        variantId: 'text-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text'],
+      },
+    ], { activeVariantId: 'text-q4' })).toEqual([
+      expect.objectContaining({
+        variantId: 'text-q4',
+        chatModalities: ['text'],
+      }),
+    ]);
+  });
+
+  it('uses fallback modalities when the preferred variant has none', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'preferred-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+      },
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
+      },
+    ], { activeVariantId: 'preferred-q4' })).toEqual([
+      expect.objectContaining({
+        variantId: 'preferred-q4',
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
+      }),
+    ]);
+  });
+
+  it('does not add fallback vision metadata to an explicit audio preferred variant', () => {
+    const visionProjector = {
+      id: 'vision-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-vision-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'vision-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'vision'],
+        visionSource: 'catalog_metadata',
+        visionConfidence: 'trusted',
+        projectorCandidates: [visionProjector],
+        selectedProjectorId: visionProjector.id,
+      },
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text', 'audio'],
+      },
+    ], { activeVariantId: 'audio-q4' })).toEqual([
+      expect.objectContaining({
+        variantId: 'audio-q4',
+        chatModalities: ['text', 'audio'],
+        visionSource: undefined,
+        visionConfidence: undefined,
+        projectorCandidates: undefined,
+        selectedProjectorId: undefined,
+      }),
+    ]);
+  });
+
+  it('preserves an explicit audio preferred variant own projector metadata', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const visionProjector = {
+      id: 'vision-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-model-f16.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-vision-model-f16.gguf',
+      size: 1024,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+
+    expect(dedupeModelVariantsByIdentity([
+      {
+        variantId: 'vision-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: null,
+        chatModalities: ['text', 'vision'],
+        projectorCandidates: [visionProjector],
+        selectedProjectorId: visionProjector.id,
+      },
+      {
+        variantId: 'audio-q4',
+        fileName: 'model.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        sha256: 'a'.repeat(64),
+        chatModalities: ['text', 'audio'],
+        visionSource: 'gguf_metadata',
+        visionConfidence: 'verified',
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
+      },
+    ], { activeVariantId: 'audio-q4' })).toEqual([
+      expect.objectContaining({
+        variantId: 'audio-q4',
+        chatModalities: ['text', 'audio'],
+        visionSource: undefined,
+        visionConfidence: undefined,
+        projectorCandidates: [audioProjector],
+        selectedProjectorId: audioProjector.id,
+      }),
+    ]);
+  });
+
   it('clears stale gguf total bytes when the selected variant has unknown size', () => {
     const selected = applyModelVariantSelection(
       createModel({
@@ -651,5 +976,50 @@ describe('modelVariants', () => {
     expect(selected.size).toBeNull();
     expect(selected.metadataTrust).toBeUndefined();
     expect(selected.gguf).toEqual({ sizeLabel: 'GGUF' });
+  });
+
+  it('restores model fallback modalities after switching through an explicit audio variant', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'audio',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 100,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = createModel({
+      chatModalities: ['text', 'vision'],
+      activeVariantId: undefined,
+      resolvedFileName: 'parent.gguf',
+      variants: [
+        {
+          variantId: 'audio',
+          fileName: 'audio.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1_000,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [audioProjector],
+        },
+        {
+          variantId: 'fallback',
+          fileName: 'fallback.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 2_000,
+        },
+      ],
+    });
+
+    const audioSelected = applyModelVariantSelection(model, 'audio');
+    const selectedAfterTwoSwitches = applyModelVariantSelection(audioSelected, 'fallback');
+    const directlySelectedFallback = applyModelVariantSelection(model, 'fallback');
+
+    expect(audioSelected.chatModalities).toEqual(['text', 'vision']);
+    expect(resolveEffectiveActiveVariantNativeSupport(audioSelected)).toEqual({ vision: false, audio: true });
+    expect(selectedAfterTwoSwitches).toEqual(directlySelectedFallback);
+    expect(selectedAfterTwoSwitches.chatModalities).toEqual(['text', 'vision']);
+    expect(resolveEffectiveActiveVariantNativeSupport(selectedAfterTwoSwitches)).toEqual({ vision: true, audio: false });
   });
 });

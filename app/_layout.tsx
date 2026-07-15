@@ -16,7 +16,11 @@ import {
 import { useMotionPreferences } from '../src/hooks/useDeviceMetrics';
 import { usePerformanceNavigationTrace } from '../src/hooks/usePerformanceNavigationTrace';
 import { hardwareListenerService } from '../src/services/HardwareListenerService';
-import { bootstrapAppBackground, bootstrapAppCritical } from '../src/services/AppBootstrap';
+import {
+  bootstrapAppBackground,
+  bootstrapAppCritical,
+  scheduleModelCatalogCacheHydrationAfterFirstFrame,
+} from '../src/services/AppBootstrap';
 import { performanceMonitor } from '../src/services/PerformanceMonitor';
 import {
   getPrivateStorageHealthSnapshot,
@@ -229,6 +233,14 @@ export default function RootLayout() {
     hardwareListenerService.start();
     return () => hardwareListenerService.stop();
   }, []);
+
+  useEffect(() => {
+    if (!isReady || criticalOutcome === 'storage_blocked') {
+      return;
+    }
+
+    scheduleModelCatalogCacheHydrationAfterFirstFrame();
+  }, [criticalOutcome, isReady]);
 
   useEffect(() => {
     async function prepare() {

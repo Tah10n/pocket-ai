@@ -1,6 +1,10 @@
 import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../../src/utils/modelProjectors';
 
 const LOCAL_SHA256 = 'b'.repeat(64);
 const REMOTE_SHA256 = 'c'.repeat(64);
@@ -23,12 +27,15 @@ function makeModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 }
 
 function makeProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const repoId = overrides.repoId ?? 'org/model';
+  const fileName = overrides.fileName ?? 'mmproj-model.gguf';
+  const hfRevision = overrides.hfRevision ?? 'main';
   return {
     id: 'org/model:mmproj',
     ownerModelId: 'org/model',
-    repoId: 'org/model',
-    fileName: 'mmproj-model.gguf',
-    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    repoId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/${hfRevision}/${fileName}`,
     size: 256,
     lifecycleStatus: 'available',
     matchStatus: 'matched',
@@ -459,11 +466,16 @@ describe('modelRuntimeState', () => {
   });
 
   it('preserves compatible queued projector resume state across catalog refreshes', () => {
+    const currentProjector = makeProjector();
+    currentProjector.id = buildProjectorArtifactId(currentProjector);
+    const legacyProjector = makeProjector({
+      id: buildLegacyProjectorArtifactId(currentProjector),
+    });
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
         resolvedFileName: 'model.Q4_K_M.gguf',
-        projectorCandidates: [makeProjector({ id: 'org/model:mmproj-v2' })],
+        projectorCandidates: [currentProjector],
       }),
       {
         queuedItem: makeModel({
@@ -471,30 +483,30 @@ describe('modelRuntimeState', () => {
           resolvedFileName: 'model.Q4_K_M.gguf',
           lifecycleStatus: LifecycleStatus.PAUSED,
           downloadProgress: 0.5,
-          selectedProjectorId: 'org/model:mmproj-v1',
+          selectedProjectorId: legacyProjector.id,
           multimodalReadiness: {
             modelId: 'org/model',
             status: 'ready',
-            projectorId: 'org/model:mmproj-v1',
+            projectorId: legacyProjector.id,
             projectorSize: 256,
             support: ['vision'],
             checkedAt: 123,
           },
-          projectorCandidates: [makeProjector({
-            id: 'org/model:mmproj-v1',
+          projectorCandidates: [{
+            ...legacyProjector,
             localPath: 'partial-mmproj-model.gguf',
             resumeData: JSON.stringify({ resumeData: 'projector-resume' }),
             downloadProgress: 0.42,
             lifecycleStatus: 'paused',
             matchStatus: 'user_selected',
             matchReason: 'user_selected_projector',
-          })],
+          }],
         }),
       },
     );
 
     expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: 'org/model:mmproj-v2',
+      id: currentProjector.id,
       localPath: 'partial-mmproj-model.gguf',
       resumeData: 'projector-resume',
       downloadProgress: 0.42,
@@ -502,14 +514,15 @@ describe('modelRuntimeState', () => {
       matchStatus: 'user_selected',
       matchReason: 'user_selected_projector',
     }));
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj-v2');
+    expect(merged.selectedProjectorId).toBe(currentProjector.id);
     expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
       status: 'ready',
-      projectorId: 'org/model:mmproj-v2',
+      projectorId: currentProjector.id,
     }));
   });
 
   it('preserves runtime projector candidates when the refreshed model lacks candidates', () => {
+    const canonicalProjectorId = buildProjectorArtifactId(makeProjector());
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
@@ -543,14 +556,82 @@ describe('modelRuntimeState', () => {
 
     expect(merged.projectorCandidates).toEqual([
       expect.objectContaining({
-        id: 'org/model:mmproj-runtime',
+        id: canonicalProjectorId,
         localPath: 'mmproj-model.gguf',
         lifecycleStatus: 'downloaded',
         matchStatus: 'user_selected',
       }),
     ]);
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj-runtime');
-    expect(merged.multimodalReadiness?.projectorId).toBe('org/model:mmproj-runtime');
+    expect(merged.selectedProjectorId).toBe(canonicalProjectorId);
+    expect(merged.multimodalReadiness?.projectorId).toBe(canonicalProjectorId);
+  });
+
+  it('clears variant runtime projector state for an authoritative empty candidate list', () => {
+    const modelFileName = 'model.Q4_K_M.gguf';
+    const runtimeProjector = makeProjector({
+      id: 'org/model:mmproj-runtime',
+      ownerVariantId: modelFileName,
+      localPath: 'mmproj-model.gguf',
+      lifecycleStatus: 'downloaded',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 3 * 1024 * 1024 * 1024,
+        resolvedFileName: modelFileName,
+        activeVariantId: modelFileName,
+        variants: [{
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_M',
+          size: 3 * 1024 * 1024 * 1024,
+          projectorCandidates: [],
+        }],
+      }),
+      {
+        localModel: makeModel({
+          size: 3 * 1024 * 1024 * 1024,
+          resolvedFileName: modelFileName,
+          activeVariantId: modelFileName,
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          fitsInRam: true,
+          memoryFitDecision: 'fits_high_confidence',
+          memoryFitConfidence: 'high',
+          multimodalReadiness: {
+            modelId: 'org/model',
+            variantId: modelFileName,
+            status: 'ready',
+            projectorId: runtimeProjector.id,
+            projectorSize: 256,
+            support: ['vision'],
+            checkedAt: 456,
+          },
+          variants: [{
+            variantId: modelFileName,
+            fileName: modelFileName,
+            quantizationLabel: 'Q4_K_M',
+            size: 3 * 1024 * 1024 * 1024,
+            ramFit: 'fits_high_confidence',
+            ramFitConfidence: 'high',
+            selectedProjectorId: runtimeProjector.id,
+            projectorCandidates: [runtimeProjector],
+          }],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
+    expect(merged.variants?.[0]?.projectorCandidates).toEqual([]);
+    expect(merged.variants?.[0]?.selectedProjectorId).toBeUndefined();
+    expect(merged.variants?.[0]?.ramFit).toBeUndefined();
+    expect(merged.variants?.[0]?.ramFitConfidence).toBeUndefined();
+    expect(merged.fitsInRam).toBeNull();
+    expect(merged.memoryFitDecision).toBeUndefined();
+    expect(merged.memoryFitConfidence).toBeUndefined();
   });
 
   it('does not inherit projector resume state when projector identity conflicts', () => {
@@ -590,18 +671,12 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      fileName: 'mmproj-new.gguf',
-      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-new.gguf',
-      lifecycleStatus: 'available',
-    }));
-    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
-    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.projectorCandidates ?? []).toEqual([]);
     expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
-  it('preserves legacy runtime projector selection while clearing stale readiness on metadata conflict', () => {
+  it('fails closed on conflicting runtime projector metadata', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
@@ -634,13 +709,8 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      lifecycleStatus: 'available',
-      sha256: 'd'.repeat(64),
-    }));
-    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
-    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
+    expect(merged.projectorCandidates ?? []).toEqual([]);
+    expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
@@ -686,7 +756,7 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj-current');
+    expect(merged.selectedProjectorId).toBe(buildProjectorArtifactId(makeProjector()));
     expect(merged.fitsInRam).toBe(true);
     expect(merged.memoryFitDecision).toBe('fits_high_confidence');
     expect(merged.memoryFitConfidence).toBe('high');
@@ -696,7 +766,7 @@ describe('modelRuntimeState', () => {
     }));
   });
 
-  it('remaps legacy runtime projector selection while clearing stale readiness on metadata conflict', () => {
+  it('clears legacy runtime projector selection on stable metadata conflict', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
@@ -705,7 +775,7 @@ describe('modelRuntimeState', () => {
           id: 'org/model:mmproj-current',
           sha256: 'd'.repeat(64),
           size: 512,
-          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf?download=true',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
         })],
       }),
       {
@@ -746,15 +816,8 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: 'org/model:mmproj-current',
-      lifecycleStatus: 'available',
-      sha256: 'd'.repeat(64),
-      size: 512,
-    }));
-    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
-    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj-current');
+    expect(merged.projectorCandidates ?? []).toEqual([]);
+    expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
     expect(merged.fitsInRam).toBeNull();
     expect(merged.memoryFitDecision).toBeUndefined();
@@ -809,11 +872,8 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      sha256: 'd'.repeat(64),
-      size: 512,
-    }));
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.projectorCandidates ?? []).toEqual([]);
     expect(merged.fitsInRam).toBeNull();
     expect(merged.memoryFitDecision).toBeUndefined();
     expect(merged.memoryFitConfidence).toBeUndefined();
@@ -823,7 +883,7 @@ describe('modelRuntimeState', () => {
     }));
   });
 
-  it('preserves explicit runtime projector selection while clearing stale readiness on metadata conflict', () => {
+  it('clears explicit runtime projector selection on stable metadata conflict', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
@@ -858,14 +918,129 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      lifecycleStatus: 'available',
-      sha256: 'd'.repeat(64),
-    }));
-    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
-    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
+    expect(merged.projectorCandidates ?? []).toEqual([]);
+    expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
+  });
+
+  it('hydrates variant-only projector runtime state through active variant id and filename aliases', () => {
+    const catalogProjector = makeProjector({
+      id: 'org/model:mmproj-catalog',
+      ownerVariantId: 'audio-q4',
+    });
+    const runtimeProjector = makeProjector({
+      id: 'org/model:mmproj-runtime',
+      ownerVariantId: 'model-audio.gguf',
+      localPath: 'partial-mmproj-audio.gguf',
+      resumeData: JSON.stringify({ resumeData: 'runtime-audio-resume' }),
+      downloadProgress: 0.6,
+      lifecycleStatus: 'paused',
+      matchStatus: 'user_selected',
+      matchReason: 'user_selected_projector',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 1024,
+        resolvedFileName: 'model-audio.gguf',
+        activeVariantId: 'audio-q4',
+        variants: [{
+          variantId: 'audio-q4',
+          fileName: 'model-audio.gguf',
+          quantizationLabel: 'Q4_K_M',
+          size: 1024,
+          chatModalities: ['text', 'audio'],
+          projectorCandidates: [catalogProjector],
+          selectedProjectorId: catalogProjector.id,
+        }],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 1024,
+          resolvedFileName: 'model-audio.gguf',
+          activeVariantId: 'model-audio.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          downloadProgress: 0.5,
+          variants: [{
+            variantId: 'audio-q4',
+            fileName: 'model-audio.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1024,
+            chatModalities: ['text', 'audio'],
+            projectorCandidates: [runtimeProjector],
+            selectedProjectorId: runtimeProjector.id,
+          }],
+          multimodalReadiness: {
+            modelId: 'org/model',
+            variantId: 'model-audio.gguf',
+            status: 'ready',
+            projectorId: runtimeProjector.id,
+            support: ['audio'],
+            checkedAt: 123,
+          },
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toBeUndefined();
+    expect(merged.selectedProjectorId).toBeUndefined();
+    const canonicalCatalogProjectorId = buildProjectorArtifactId(catalogProjector);
+    expect(merged.variants?.[0]).toEqual(expect.objectContaining({
+      selectedProjectorId: canonicalCatalogProjectorId,
+      projectorCandidates: [expect.objectContaining({
+        id: canonicalCatalogProjectorId,
+        localPath: 'partial-mmproj-audio.gguf',
+        resumeData: 'runtime-audio-resume',
+        downloadProgress: 0.6,
+        lifecycleStatus: 'paused',
+        matchStatus: 'user_selected',
+      })],
+    }));
+    expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
+      variantId: 'model-audio.gguf',
+      projectorId: canonicalCatalogProjectorId,
+      support: ['audio'],
+    }));
+  });
+
+  it('does not hydrate Q4 projector state through a stale resolved alias when Q8 is explicitly active', () => {
+    const incomingProjector = makeProjector({
+      id: 'org/model:mmproj-q8',
+      ownerVariantId: 'q8',
+    });
+    const runtimeProjector = makeProjector({
+      id: 'org/model:mmproj-q4',
+      ownerVariantId: 'q4',
+      localPath: 'partial-mmproj-q4.gguf',
+      resumeData: 'q4-resume',
+      lifecycleStatus: 'paused',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        size: 1024,
+        activeVariantId: 'q8',
+        resolvedFileName: 'model-q4.gguf',
+        projectorCandidates: [incomingProjector],
+      }),
+      {
+        queuedItem: makeModel({
+          size: 1024,
+          activeVariantId: 'q4',
+          resolvedFileName: 'model-q4.gguf',
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          projectorCandidates: [runtimeProjector],
+        }),
+      },
+    );
+
+    expect(merged.projectorCandidates).toEqual([
+      expect.objectContaining({
+        id: buildProjectorArtifactId(incomingProjector),
+        ownerVariantId: 'q8',
+        lifecycleStatus: 'available',
+      }),
+    ]);
+    expect(merged.projectorCandidates?.[0].localPath).toBeUndefined();
+    expect(merged.projectorCandidates?.[0].resumeData).toBeUndefined();
   });
 
   it('does not preserve variant-scoped projector runtime state for a different active variant without catalog candidates', () => {
@@ -951,12 +1126,7 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      fileName: 'mmproj-new.gguf',
-      lifecycleStatus: 'available',
-    }));
-    expect(merged.projectorCandidates?.[0]?.resumeData).toBeUndefined();
-    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.projectorCandidates ?? []).toEqual([]);
     expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
   });
@@ -997,12 +1167,7 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      fileName: 'mmproj-new.gguf',
-      lifecycleStatus: 'available',
-      matchStatus: 'user_selected',
-    }));
-    expect(merged.projectorCandidates?.[0]?.localPath).toBeUndefined();
+    expect(merged.projectorCandidates ?? []).toEqual([]);
     expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
   });
@@ -1060,22 +1225,20 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    const projectorA = merged.projectorCandidates?.find((projector) => projector.id === 'org/model:mmproj-a');
-    const projectorB = merged.projectorCandidates?.find((projector) => projector.id === 'org/model:mmproj-b');
+    const projectorAId = buildProjectorArtifactId(makeProjector({ fileName: 'mmproj-a.gguf' }));
+    const projectorBId = buildProjectorArtifactId(makeProjector({ fileName: 'fresh-mmproj-b.gguf' }));
+    const projectorA = merged.projectorCandidates?.find((projector) => projector.id === projectorAId);
+    const projectorB = merged.projectorCandidates?.find((projector) => projector.id === projectorBId);
     expect(projectorA).toEqual(expect.objectContaining({
-      id: 'org/model:mmproj-a',
+      id: projectorAId,
       localPath: 'partial-mmproj-a.gguf',
     }));
-    expect(projectorB).toEqual(expect.objectContaining({
-      id: 'org/model:mmproj-b',
-      fileName: 'fresh-mmproj-b.gguf',
-    }));
-    expect(projectorB?.localPath).toBeUndefined();
+    expect(projectorB).toBeUndefined();
     expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
-  it('preserves a compatible runtime projector remapped to the blocked incoming selected projector', () => {
+  it('fails closed when one alias conflicts even if another runtime alias is compatible', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({
         size: 3 * 1024 * 1024 * 1024,
@@ -1134,18 +1297,8 @@ describe('modelRuntimeState', () => {
       },
     );
 
-    expect(merged.projectorCandidates?.[0]).toEqual(expect.objectContaining({
-      id: 'org/model:mmproj',
-      fileName: 'mmproj-new.gguf',
-      localPath: 'mmproj-new.gguf',
-      lifecycleStatus: 'downloaded',
-      matchStatus: 'user_selected',
-    }));
-    expect(merged.selectedProjectorId).toBe('org/model:mmproj');
-    expect(merged.multimodalReadiness).toEqual(expect.objectContaining({
-      status: 'ready',
-      projectorId: 'org/model:mmproj',
-      checkedAt: 123,
-    }));
+    expect(merged.projectorCandidates ?? []).toEqual([]);
+    expect(merged.selectedProjectorId).toBeUndefined();
+    expect(merged.multimodalReadiness).toBeUndefined();
   });
 });

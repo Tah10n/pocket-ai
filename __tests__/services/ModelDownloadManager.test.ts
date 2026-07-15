@@ -169,6 +169,24 @@ const mockProjector: ProjectorArtifact = {
   matchReason: 'single_projector_candidate',
 };
 
+function buildArtifactOnlyInstalledProjectorModel(localPath: string): ModelMetadata {
+  return {
+    ...mockModel,
+    id: 'other/artifact-only-projector-owner',
+    artifacts: [{
+      id: 'artifact-only-installed-projector',
+      kind: 'multimodal_projector',
+      requiredFor: ['image'],
+      hfRevision: 'main',
+      remoteFileName: 'archive/mmproj-installed.gguf',
+      downloadUrl: 'https://huggingface.co/other/artifact-only-projector-owner/resolve/main/archive/mmproj-installed.gguf',
+      sizeBytes: 1000,
+      localPath,
+      installState: 'installed',
+    }],
+  };
+}
+
 function buildVariantOnlyAudioModel(
   projector: ProjectorArtifact = {
     ...mockProjector,
@@ -1458,6 +1476,34 @@ describe('ModelDownloadManager Basic', () => {
     }
   });
 
+  it('does not reuse a filename owned only by an installed projector artifact', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const protectedFileName = 'artifact-only-installed-mmproj.gguf';
+    (mockedRegistry.getModels as jest.Mock).mockReturnValue([
+      buildArtifactOnlyInstalledProjectorModel(protectedFileName),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false, size: 0 });
+
+    try {
+      const resolvedFileName = await (modelDownloadManager as any).resolveProjectorDownloadFileName(
+        { ...mockProjector, localPath: protectedFileName },
+        'test-dir/models/',
+      );
+
+      expect(resolvedFileName).not.toBe(protectedFileName);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ModelDownloadManager] Projector download candidate is already completed, skipping overwrite',
+        expect.objectContaining({
+          artifactKind: 'projector',
+          pathCategory: 'model_storage',
+        }),
+      );
+      expect(stringifyMockCalls(warnSpy)).not.toContain(protectedFileName);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('does not delete completed model files when corrupted verification cleanup runs', async () => {
     (mockedRegistry.getModels as jest.Mock).mockReturnValue([
       {
@@ -1470,6 +1516,23 @@ describe('ModelDownloadManager Basic', () => {
     await (modelDownloadManager as any).deleteCorruptedDownload('test-dir/models/completed.gguf', mockModel.id);
 
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/completed.gguf', expect.anything());
+  });
+
+  it('does not delete files owned only by installed projector artifacts during corrupted cleanup', async () => {
+    const protectedFileName = 'artifact-only-installed-mmproj.gguf';
+    (mockedRegistry.getModels as jest.Mock).mockReturnValue([
+      buildArtifactOnlyInstalledProjectorModel(protectedFileName),
+    ]);
+
+    await (modelDownloadManager as any).deleteCorruptedDownload(
+      `test-dir/models/${protectedFileName}`,
+      mockModel.id,
+    );
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      `test-dir/models/${protectedFileName}`,
+      expect.anything(),
+    );
   });
 
   it('does not delete model files still owned by another queued download when corrupted verification cleanup runs', async () => {

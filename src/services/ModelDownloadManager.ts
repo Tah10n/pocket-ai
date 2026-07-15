@@ -29,7 +29,7 @@ import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPriv
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
-import { deriveArtifactsFromLegacyModel } from '../utils/modelArtifacts';
+import { deriveArtifactsFromLegacyModel, getProjectorArtifacts } from '../utils/modelArtifacts';
 import { canonicalizeProjectorCandidateAliases } from '../utils/projectorIdentity';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import {
@@ -2596,6 +2596,14 @@ export class ModelDownloadManager {
               && projector.id === options.excludeProjector.id
             ))
             .map((projector) => projector.localPath),
+          ...getProjectorArtifacts(model)
+            .filter((artifact) => artifact.installState === 'installed')
+            .filter((artifact) => !(
+              options.excludeProjector
+              && model.id === options.excludeProjector.ownerModelId
+              && artifact.id === options.excludeProjector.id
+            ))
+            .map((artifact) => artifact.localPath),
         ])
         .filter((fileName): fileName is string => typeof fileName === 'string' && isValidLocalFileName(fileName)),
     );

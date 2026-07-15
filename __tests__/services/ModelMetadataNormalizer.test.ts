@@ -266,7 +266,7 @@ describe('ModelMetadataNormalizer', () => {
     });
 
     expect(projectorId).not.toBe('projector-a');
-    expect(normalized.projectorCandidates).toBeUndefined();
+    expect(normalized.projectorCandidates).toEqual([]);
     expect(normalized.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector'))
       .toEqual([]);
   });
@@ -811,6 +811,40 @@ describe('ModelMetadataNormalizer', () => {
     expect(new Set(normalized.projectorCandidates?.map((projector) => projector.id)).size).toBe(2);
   });
 
+  it('preserves rejected explicit projector metadata as authoritative empty state', () => {
+    const modelId = 'author/conflicting-projectors';
+    const projectorIdentity = {
+      repoId: modelId,
+      hfRevision: 'main',
+      fileName: 'projectors/mmproj-conflicting.gguf',
+    };
+    const projectorId = buildProjectorArtifactId(projectorIdentity);
+    const projector = {
+      ...buildAvailableProjectorCandidate(modelId, projectorId, projectorIdentity.fileName),
+      sha256: VALID_SHA256,
+    };
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      projectorCandidates: [
+        projector,
+        { ...projector, sha256: OTHER_VALID_SHA256 },
+      ],
+      selectedProjectorId: projectorId,
+      multimodalReadiness: {
+        modelId,
+        status: 'ready',
+        projectorId,
+        support: ['vision'],
+        requestedSupport: ['vision'],
+        checkedAt: 10,
+      },
+    });
+
+    expect(normalized.projectorCandidates).toEqual([]);
+    expect(normalized.selectedProjectorId).toBeUndefined();
+    expect(normalized.multimodalReadiness).toBeUndefined();
+  });
+
   it('preserves multimodal model and variant metadata with valid projector candidates', () => {
     const projectorIdentity = {
       repoId: 'author/vision-model',
@@ -1162,6 +1196,58 @@ describe('ModelMetadataNormalizer', () => {
     expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
       vision: false,
       audio: false,
+    });
+  });
+
+  it('repairs a known audio profile when its projector exists only on the active variant', () => {
+    const modelId = 'community/Voxtral-Mini-3B-GGUF';
+    const variantId = 'voxtral-audio-q4';
+    const modelFileName = 'Voxtral-Mini-3B-Q4_K_M.gguf';
+    const projectorFileName = 'projectors/mmproj-Voxtral-Mini-3B-f16.gguf';
+    const projector = {
+      ...buildAvailableProjectorCandidate(
+        modelId,
+        buildProjectorArtifactId({
+          repoId: modelId,
+          hfRevision: 'main',
+          ownerVariantId: variantId,
+          fileName: projectorFileName,
+        }),
+        projectorFileName,
+      ),
+      ownerVariantId: variantId,
+    };
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      resolvedFileName: modelFileName,
+      activeVariantId: variantId,
+      chatModalities: ['text'],
+      variants: [{
+        variantId,
+        fileName: modelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 2_000_000_000,
+        projectorCandidates: [projector],
+      }],
+    });
+
+    expect(normalized.projectorCandidates).toBeUndefined();
+    expect(normalized.variants?.[0]).toEqual(expect.objectContaining({
+      variantId,
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [expect.objectContaining({ id: projector.id })],
+    }));
+    expect(normalized.inputCapabilities?.evidence).toEqual(expect.arrayContaining([
+      {
+        source: 'repository_tree',
+        value: 'voxtral-audio-profile',
+        confidence: 'high',
+      },
+    ]));
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: false,
+      audio: true,
     });
   });
 

@@ -410,7 +410,10 @@ function selectCanonicalProjectorsForSource(
     const scopeKey = getProjectorExactScopeKey(candidate);
     return scopeKey !== null && sourceScopeKeys.has(scopeKey);
   });
-  return candidates.length > 0 ? candidates : undefined;
+  // A non-empty explicit source remains authoritative even when exact
+  // canonicalization rejects every candidate. Returning an empty array keeps
+  // downstream merges from reviving stale projector state.
+  return candidates;
 }
 
 function fitsInRamForMemoryFitDecision(decision: ModelMemoryFitDecision): boolean | null {
@@ -835,6 +838,9 @@ export function normalizePersistedModelMetadata(
         localPath,
         ...(normalizedVariants?.map((variant) => variant.fileName) ?? []),
         ...(projectorCandidates?.map((candidate) => candidate.fileName) ?? []),
+        ...(normalizedVariants?.flatMap((variant) => (
+          variant.projectorCandidates?.map((candidate) => candidate.fileName) ?? []
+        )) ?? []),
       ].flatMap((path) => path ? [{ path }] : []), {
         detectedAt: persistedInputCapabilities?.detectedAt ?? 0,
       })

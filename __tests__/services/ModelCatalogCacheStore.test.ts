@@ -1572,8 +1572,8 @@ describe('ModelCatalogCacheStore', () => {
     }));
 
     const store = new ModelCatalogCacheStore();
-    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
-    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toEqual([]);
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toEqual([]);
   });
 
   it('drops raw duplicate artifacts with order-dependent projector requirements', () => {
@@ -1611,8 +1611,8 @@ describe('ModelCatalogCacheStore', () => {
     }));
 
     const store = new ModelCatalogCacheStore();
-    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
-    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toEqual([]);
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toEqual([]);
   });
 
   it.each(['current-first', 'legacy-first'] as const)(
@@ -1670,7 +1670,7 @@ describe('ModelCatalogCacheStore', () => {
       const searchModel = store.getSearch(scope, 1000)?.models[0] as ModelMetadata;
       const snapshotModel = store.getModelSnapshot(id, 'anon', 1000) as ModelMetadata;
       for (const cached of [searchModel, snapshotModel]) {
-        expect(cached.projectorCandidates).toBeUndefined();
+        expect(cached.projectorCandidates).toEqual([]);
         expect(cached.artifacts?.some((artifact) => artifact.kind === 'multimodal_projector') ?? false)
           .toBe(false);
         expect(sanitizeCatalogModelRuntimeState(cached)).toEqual(cached);
@@ -1716,8 +1716,8 @@ describe('ModelCatalogCacheStore', () => {
     }));
 
     const store = new ModelCatalogCacheStore();
-    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toBeUndefined();
-    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toBeUndefined();
+    expect(store.getSearch(scope, 1000)?.models[0]?.projectorCandidates).toEqual([]);
+    expect(store.getModelSnapshot(id, 'anon', 1000)?.projectorCandidates).toEqual([]);
   });
 
   it('counts a malformed raw path when resolving legacy basename ambiguity', () => {

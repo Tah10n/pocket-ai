@@ -1,8 +1,25 @@
 import type { ModelMetadata, ModelVariant } from '../types/models';
 import type { ProjectorArtifact } from '../types/multimodal';
 import { isStoredProjectorArtifact } from './modelSize';
+import {
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+} from './modelCapabilities';
 
-type ProjectorIdentityModel = Pick<ModelMetadata, 'projectorCandidates' | 'selectedProjectorId' | 'variants'>;
+type ProjectorIdentityModel = Pick<
+  ModelMetadata,
+  | 'activeVariantId'
+  | 'artifactRole'
+  | 'artifacts'
+  | 'chatModalities'
+  | 'id'
+  | 'inputCapabilities'
+  | 'multimodalReadiness'
+  | 'projectorCandidates'
+  | 'resolvedFileName'
+  | 'selectedProjectorId'
+  | 'variants'
+>;
 
 function clearVariantRamFit(variant: ModelVariant): ModelVariant {
   return variant.ramFit || variant.ramFitConfidence
@@ -14,15 +31,9 @@ function clearVariantRamFit(variant: ModelVariant): ModelVariant {
     : variant;
 }
 
-function normalizeSelectedProjectorId(selectedProjectorId: string | undefined): string | undefined {
-  return typeof selectedProjectorId === 'string' && selectedProjectorId.trim().length > 0
-    ? selectedProjectorId.trim()
-    : undefined;
-}
-
 function getEffectiveMemoryFitProjectors(model: ProjectorIdentityModel): ProjectorArtifact[] {
-  const candidates = model.projectorCandidates ?? [];
-  const selectedProjectorId = normalizeSelectedProjectorId(model.selectedProjectorId);
+  const candidates = getEffectiveActiveVariantProjectorCandidates(model);
+  const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, candidates);
   if (!selectedProjectorId) {
     const userSelectedProjectors = candidates.filter((projector) => projector.matchStatus === 'user_selected');
     if (userSelectedProjectors.length > 0) {
@@ -39,10 +50,7 @@ function getEffectiveMemoryFitProjectors(model: ProjectorIdentityModel): Project
   }
 
   const selectedProjector = candidates.find((projector) => projector.id === selectedProjectorId);
-  return selectedProjector ? [selectedProjector] : getEffectiveMemoryFitProjectors({
-    ...model,
-    selectedProjectorId: undefined,
-  });
+  return selectedProjector ? [selectedProjector] : [];
 }
 
 function getProjectorMemoryFitSignature(projector: ProjectorArtifact): string {

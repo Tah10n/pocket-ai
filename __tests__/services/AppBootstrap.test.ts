@@ -70,6 +70,14 @@ jest.mock('../../src/services/ModelDownloadManager', () => ({
   resumeModelDownloadQueueIfStorageReady: jest.fn(),
 }));
 
+const mockHydrateModelCatalogCache = jest.fn();
+
+jest.mock('../../src/services/ModelCatalogService', () => ({
+  modelCatalogService: {
+    hydratePersistentCache: (...args: unknown[]) => mockHydrateModelCatalogCache(...args),
+  },
+}));
+
 const mockStopPrivateRuntimeWorkForStorageBlocked = jest.fn();
 
 jest.mock('../../src/services/PrivateStorageRecovery', () => ({
@@ -107,7 +115,12 @@ jest.mock('../../src/store/modelsStore', () => ({
   },
 }));
 
-import { bootstrapApp, bootstrapAppBackground, bootstrapAppCritical } from '../../src/services/AppBootstrap';
+import {
+  bootstrapApp,
+  bootstrapAppBackground,
+  bootstrapAppCritical,
+  scheduleModelCatalogCacheHydrationAfterFirstFrame,
+} from '../../src/services/AppBootstrap';
 import { setupFileSystem } from '../../src/services/FileSystemSetup';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getModelDownloadManager, resumeModelDownloadQueueIfStorageReady } from '../../src/services/ModelDownloadManager';
@@ -140,6 +153,8 @@ function buildPrivateStorageHealth(
 describe('AppBootstrap', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockHydrateModelCatalogCache.mockReset();
+    mockHydrateModelCatalogCache.mockImplementation(() => undefined);
     const readyStorageHealth = buildPrivateStorageHealth();
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue(readyStorageHealth);
     (initializePrivateStorageEncryption as jest.Mock).mockResolvedValue(readyStorageHealth);
@@ -754,6 +769,127 @@ describe('AppBootstrap', () => {
     expect(registry.validateRegistry).toHaveBeenCalled();
   });
 
+  it('hydrates the model catalog cache only after the app-shell frame delay', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+
+    jest.useFakeTimers();
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      const requestAnimationFrameMock = jest.fn((cb: any) => cb(0));
+      globalThis.requestAnimationFrame = requestAnimationFrameMock;
+
+      scheduleModelCatalogCacheHydrationAfterFirstFrame();
+
+      expect(requestAnimationFrameMock).toHaveBeenCalledTimes(2);
+      expect(mockHydrateModelCatalogCache).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(800);
+      await Promise.resolve();
+
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(1);
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      jest.useRealTimers();
+    }
+  });
+
+  it('retries deferred model catalog hydration after a transient storage failure', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalExpoOs = process.env.EXPO_OS;
+    const originalJestWorkerId = process.env.JEST_WORKER_ID;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    jest.useFakeTimers();
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      (process.env as any).EXPO_OS = 'android';
+      delete (process.env as any).JEST_WORKER_ID;
+      const requestAnimationFrameMock = jest.fn((cb: any) => cb(0));
+      globalThis.requestAnimationFrame = requestAnimationFrameMock;
+      mockHydrateModelCatalogCache
+        .mockImplementationOnce(() => {
+          throw new Error('private storage is still becoming ready');
+        })
+        .mockImplementationOnce(() => undefined);
+
+      scheduleModelCatalogCacheHydrationAfterFirstFrame();
+
+      jest.advanceTimersByTime(800);
+      await Promise.resolve();
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(949);
+      await Promise.resolve();
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(1);
+      await Promise.resolve();
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(2);
+
+      jest.advanceTimersByTime(10_000);
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[bootstrapApp] Failed to hydrate model catalog cache; retry scheduled',
+        expect.objectContaining({ attempt: 1, maxAttempts: 3, retryDelayMs: 1000 }),
+        expect.any(Error),
+      );
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (process.env as any).EXPO_OS = originalExpoOs;
+      (process.env as any).JEST_WORKER_ID = originalJestWorkerId;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      warnSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('stops deferred model catalog hydration after the bounded retry budget', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalExpoOs = process.env.EXPO_OS;
+    const originalJestWorkerId = process.env.JEST_WORKER_ID;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    jest.useFakeTimers();
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      (process.env as any).EXPO_OS = 'android';
+      delete (process.env as any).JEST_WORKER_ID;
+      const requestAnimationFrameMock = jest.fn((cb: any) => cb(0));
+      globalThis.requestAnimationFrame = requestAnimationFrameMock;
+      mockHydrateModelCatalogCache.mockImplementation(() => {
+        throw new Error('persistent storage unavailable');
+      });
+
+      scheduleModelCatalogCacheHydrationAfterFirstFrame();
+
+      jest.advanceTimersByTime(4_000);
+      await Promise.resolve();
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(3);
+
+      jest.advanceTimersByTime(10_000);
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(3);
+      expect(warnSpy).toHaveBeenLastCalledWith(
+        '[bootstrapApp] Failed to hydrate model catalog cache after bounded retries',
+        expect.objectContaining({ attempt: 3, maxAttempts: 3, retryDelayMs: undefined }),
+        expect.any(Error),
+      );
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      (process.env as any).EXPO_OS = originalExpoOs;
+      (process.env as any).JEST_WORKER_ID = originalJestWorkerId;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      warnSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
   it('does not fail background bootstrap when warming ModelDownloadManager fails outside tests', async () => {
     const originalNodeEnv = process.env.NODE_ENV;
     const originalExpoOs = process.env.EXPO_OS;
@@ -789,10 +925,12 @@ describe('AppBootstrap', () => {
       await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
 
       expect(requestAnimationFrameMock).toHaveBeenCalledTimes(2);
+      expect(mockHydrateModelCatalogCache).not.toHaveBeenCalled();
 
       jest.advanceTimersByTime(800);
       await Promise.resolve();
 
+      expect(mockHydrateModelCatalogCache).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalledWith(
         '[bootstrapApp] Failed to warm modelDownloadManager',
         expect.any(Error),

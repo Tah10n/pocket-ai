@@ -7,6 +7,18 @@ import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormal
 import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
+import {
+  getEffectiveActiveVariantKeys,
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+  hasExplicitEffectiveActiveVariantProjectorCandidates,
+  remapProjectorIdToEffectiveCandidate,
+} from '../utils/modelCapabilities';
+import {
+  applyEffectiveProjectorState,
+  getAllModelProjectorCandidates,
+  mapModelProjectorCandidates,
+} from '../utils/effectiveProjectorState';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
@@ -173,18 +185,40 @@ function remapMultimodalReadiness(
     : { ...readiness, projectorId };
 }
 
+function getEffectiveMultimodalReadiness(
+  model: ModelMetadata,
+  projectorCandidates: ProjectorArtifact[],
+): ModelMetadata['multimodalReadiness'] {
+  const readiness = model.multimodalReadiness;
+  if (!readiness?.projectorId) {
+    return readiness;
+  }
+
+  const projectorId = remapProjectorIdToEffectiveCandidate(
+    model,
+    readiness.projectorId,
+    projectorCandidates,
+  );
+  return projectorId && projectorId !== readiness.projectorId
+    ? { ...readiness, projectorId }
+    : readiness;
+}
+
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
-  const activeProjectorVariantId = model.activeVariantId
-    ?? model.resolvedFileName
-    ?? existing.activeVariantId
-    ?? existing.resolvedFileName;
+  const incomingActiveVariantIds = getEffectiveActiveVariantKeys(model);
+  const activeProjectorVariantIds = incomingActiveVariantIds.size > 0
+    ? incomingActiveVariantIds
+    : getEffectiveActiveVariantKeys(existing);
+  const nextProjectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
+  const existingProjectorCandidates = getEffectiveActiveVariantProjectorCandidates(existing);
   const projectorRuntimeMerge = canPreserveResumeState
-    ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(model.projectorCandidates, existing.projectorCandidates, {
-      activeVariantId: activeProjectorVariantId,
+    ? mergeProjectorCandidatesWithRuntimeStateAndIdMap(nextProjectorCandidates, existingProjectorCandidates, {
+      activeVariantIds: activeProjectorVariantIds,
+      emptyNextProjectorsAreAuthoritative: hasExplicitEffectiveActiveVariantProjectorCandidates(model),
     })
     : {
-      projectorCandidates: model.projectorCandidates,
+      projectorCandidates: nextProjectorCandidates,
       runtimeToNextProjectorIds: new Map<string, string>(),
       blockedRuntimeProjectorIds: new Set<string>(),
       blockedNextProjectorIds: new Set<string>(),
@@ -208,17 +242,17 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
   );
   const selectedProjectorId = canPreserveResumeState
     ? resolveMergedSelectedProjectorId(
-      model.selectedProjectorId,
-      existing.selectedProjectorId,
+      getEffectiveActiveVariantSelectedProjectorId(model, nextProjectorCandidates),
+      getEffectiveActiveVariantSelectedProjectorId(existing, existingProjectorCandidates),
       candidateIds,
       projectorRuntimeMerge.runtimeToNextProjectorIds,
       projectorRuntimeMerge.blockedRuntimeProjectorIds,
       projectorRuntimeMerge.blockedNextProjectorIds,
     )
-    : model.selectedProjectorId;
+    : getEffectiveActiveVariantSelectedProjectorId(model, nextProjectorCandidates);
   const shouldSuppressMultimodalReadiness = canPreserveResumeState
     && shouldSuppressReadinessForBlockedIncomingProjector(
-      model.selectedProjectorId,
+      getEffectiveActiveVariantSelectedProjectorId(model, nextProjectorCandidates),
       selectedProjectorId,
       candidateIds,
       projectorRuntimeMerge.blockedNextProjectorIds,
@@ -228,7 +262,7 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       ? undefined
       : remapMultimodalReadiness(
         model.id,
-        model.multimodalReadiness,
+        getEffectiveMultimodalReadiness(model, nextProjectorCandidates),
         candidateIds,
         projectorRuntimeMerge.runtimeToNextProjectorIds,
         selectedProjectorId,
@@ -236,7 +270,7 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
         blockedNextReadinessProjectorIds,
       ) ?? remapMultimodalReadiness(
         model.id,
-        existing.multimodalReadiness,
+        getEffectiveMultimodalReadiness(existing, existingProjectorCandidates),
         candidateIds,
         projectorRuntimeMerge.runtimeToNextProjectorIds,
         selectedProjectorId,
@@ -245,10 +279,19 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       )
     : model.multimodalReadiness;
   const retryableBaseModel = canPreserveResumeState
-    ? { ...existing, ...model }
+    ? {
+      ...existing,
+      ...model,
+      // Projector runtime state is reconciled below from the effective incoming
+      // scope. Do not let stale runtime-only top-level fields survive merely
+      // because the incoming catalog object omitted them.
+      projectorCandidates: model.projectorCandidates,
+      selectedProjectorId: model.selectedProjectorId,
+      variants: model.variants ?? existing.variants,
+    }
     : model;
 
-  return normalizePersistedModelMetadata({
+  const retryableModel = normalizePersistedModelMetadata({
     ...retryableBaseModel,
     resumeData: canPreserveResumeState ? existing.resumeData : undefined,
     downloadProgress: canPreserveResumeState ? existing.downloadProgress : 0,
@@ -259,18 +302,21 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
     allowUnknownSizeDownload: canPreserveResumeState
       ? existing.allowUnknownSizeDownload === true || model.allowUnknownSizeDownload === true
       : model.allowUnknownSizeDownload === true,
-    projectorCandidates,
-    selectedProjectorId,
     multimodalReadiness,
     lifecycleStatus: LifecycleStatus.QUEUED,
     downloadErrorAt: undefined,
     downloadErrorCode: undefined,
     downloadErrorMessage: undefined,
   });
+
+  return normalizePersistedModelMetadata(applyEffectiveProjectorState(retryableModel, {
+    projectorCandidates,
+    selectedProjectorId,
+  }));
 }
 
 function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
-  return (model.projectorCandidates ?? []).flatMap((projector) => [
+  return getAllModelProjectorCandidates(model).flatMap((projector) => [
     ...(projector.localPath && isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
     ...getCandidateProjectorDownloadFileNames(projector),
   ]);
@@ -329,6 +375,16 @@ function normalizePersistedProjectorDownloadStates(
   return didChange ? normalized : projectors;
 }
 
+function normalizePersistedProjectorDownloadStatesForModel(
+  model: ModelMetadata,
+  options: { clearVolatileProgress?: boolean } = {},
+): ModelMetadata {
+  return mapModelProjectorCandidates(
+    model,
+    (projector) => normalizePersistedProjectorDownloadState(projector, options),
+  );
+}
+
 interface DownloadState {
   queue: ModelMetadata[];
   activeDownloadId: string | null;
@@ -344,8 +400,8 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
     const normalizedModel = normalizePersistedModelMetadata(model);
     const wasInFlight = normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
       || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING;
-    const projectorCandidates = normalizePersistedProjectorDownloadStates(
-      normalizedModel.projectorCandidates,
+    const modelWithNormalizedProjectors = normalizePersistedProjectorDownloadStatesForModel(
+      normalizedModel,
       { clearVolatileProgress: wasInFlight },
     );
     if (
@@ -353,20 +409,12 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
       || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
     ) {
       return {
-        ...normalizedModel,
+        ...modelWithNormalizedProjectors,
         lifecycleStatus: LifecycleStatus.QUEUED,
-        ...(projectorCandidates !== normalizedModel.projectorCandidates ? { projectorCandidates } : {}),
       };
     }
 
-    if (projectorCandidates !== normalizedModel.projectorCandidates) {
-      return {
-        ...normalizedModel,
-        projectorCandidates,
-      };
-    }
-
-    return normalizedModel;
+    return modelWithNormalizedProjectors;
   });
 }
 
@@ -458,13 +506,10 @@ export const useDownloadStore = create<DownloadState>()(
             const shouldZeroProgress = model.lifecycleStatus === LifecycleStatus.DOWNLOADING
               || model.lifecycleStatus === LifecycleStatus.VERIFYING;
 
-            return {
+            return normalizePersistedProjectorDownloadStatesForModel({
               ...model,
               downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
-              projectorCandidates: normalizePersistedProjectorDownloadStates(model.projectorCandidates, {
-                clearVolatileProgress: shouldZeroProgress,
-              }),
-            };
+            }, { clearVolatileProgress: shouldZeroProgress });
           }),
         }),
         onRehydrateStorage: () => (state) => {

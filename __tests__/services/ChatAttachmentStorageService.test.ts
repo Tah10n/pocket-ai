@@ -1096,6 +1096,14 @@ describe('ChatAttachmentStorageService', () => {
       'draft-100-samems.jpg',
       'draft-101-after.png',
       'draft-101-after-thumb.png',
+      'draft-101-document.pdf',
+      'draft-101-note.txt',
+      'draft-101-table.csv',
+      'draft-101-table.tsv',
+      'draft-101-markdown.md',
+      'draft-101-data.json',
+      'draft-101-audio.mp3',
+      'draft-101-audio.wav',
       'draft-400101-beyondgrace.jpg',
       'legacy-orphan.jpg',
     ]);
@@ -1126,6 +1134,14 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-100-samems.jpg', expect.anything());
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-after.png', expect.anything());
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-after-thumb.png', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-document.pdf', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-note.txt', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-table.csv', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-table.tsv', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-markdown.md', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-data.json', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-audio.mp3', expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/draft-101-audio.wav', expect.anything());
   });
 
   it('deletes every direct child inside app-owned attachment storage for private storage reset while preserving the directory', async () => {

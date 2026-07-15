@@ -3,6 +3,7 @@ import { buildHuggingFaceResolveUrl } from './huggingFaceUrls';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { isSupportedGgufFileName } from '../services/ModelCatalogFileSelector';
 import { dedupeModelVariantsByIdentity } from './modelVariantIdentity';
+import { resolveActiveModelVariant } from './activeModelVariant';
 
 type ModelVariantSelectionSource = Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName'> & Partial<Pick<
   ModelMetadata,
@@ -30,14 +31,10 @@ interface ApplyModelVariantSelectionOptions {
 }
 
 export function getActiveModelVariant(model: Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName' | 'variants'>): ModelVariant | undefined {
-  const variants = getSelectableModelVariants(model);
-  if (variants.length === 0) {
-    return undefined;
-  }
-
-  return variants.find((variant) => variant.variantId === model.activeVariantId)
-    ?? variants.find((variant) => variant.fileName === model.resolvedFileName)
-    ?? variants[0];
+  return resolveActiveModelVariant({
+    ...model,
+    variants: getSelectableModelVariants(model),
+  });
 }
 
 export function canSelectModelVariant(model: Pick<ModelMetadata, 'lifecycleStatus' | 'variants'>): boolean {
@@ -52,6 +49,7 @@ export function canSelectModelVariant(model: Pick<ModelMetadata, 'lifecycleStatu
 function findVariantByIdOrFileName(
   model: Pick<ModelMetadata, 'variants'>,
   variantIdOrFileName: string,
+  preferredIdentity: 'variantId' | 'fileName',
 ): ModelVariant | undefined {
   const variants = getSelectableModelVariants(model);
   if (variants.length === 0) {
@@ -63,7 +61,9 @@ function findVariantByIdOrFileName(
     return undefined;
   }
 
-  return variants.find((variant) => variant.variantId === normalized || variant.fileName === normalized);
+  return preferredIdentity === 'variantId'
+    ? resolveActiveModelVariant({ activeVariantId: normalized, variants })
+    : resolveActiveModelVariant({ resolvedFileName: normalized, variants });
 }
 
 function buildFallbackVariant(
@@ -216,21 +216,21 @@ export function applyModelVariantSelectionIfAvailable(
     && resolvedSelectionFileName !== explicitVariantId
     && allowResolvedFileNameVariantMatch;
   if (shouldPreferResolvedVariantMatch) {
-    const resolvedVariant = findVariantByIdOrFileName(model, resolvedSelectionFileName);
+    const resolvedVariant = findVariantByIdOrFileName(model, resolvedSelectionFileName, 'fileName');
     if (resolvedVariant) {
       return applyModelVariantSelection(model, resolvedVariant.variantId);
     }
   }
 
   if (!shouldPreferResolvedVariantMatch && explicitVariantId.length > 0) {
-    const explicitVariant = findVariantByIdOrFileName(model, explicitVariantId);
+    const explicitVariant = findVariantByIdOrFileName(model, explicitVariantId, 'variantId');
     if (explicitVariant) {
       return applyModelVariantSelection(model, explicitVariant.variantId);
     }
   }
 
   if (allowResolvedFileNameVariantMatch) {
-    const resolvedVariant = findVariantByIdOrFileName(model, resolvedSelectionFileName);
+    const resolvedVariant = findVariantByIdOrFileName(model, resolvedSelectionFileName, 'fileName');
     if (resolvedVariant) {
       return applyModelVariantSelection(model, resolvedVariant.variantId);
     }
@@ -375,6 +375,11 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
       };
   const memoryFitPatch = getVariantMemoryFitPatch(model, variant, isDifferentFitIdentity);
 
+  // Keep repository-level chatModalities as the catalog baseline. Runtime and
+  // UI surfaces resolve the explicit active variant through
+  // resolveEffectiveActiveVariantNativeSupport(); overwriting the baseline
+  // here would make an explicit variant contaminate a later variant whose
+  // modalities are intentionally undefined.
   return normalizePersistedModelMetadata({
     ...model,
     size: nextSize,

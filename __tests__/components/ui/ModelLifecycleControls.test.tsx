@@ -103,9 +103,9 @@ describe('ModelDownloadProgress', () => {
   });
 
   it.each([
-    ['queued', 'models.vision.projectorQueued', undefined, '0%'],
-    ['downloading', 'models.vision.projectorDownloading', 0.37, '37%'],
-    ['paused', 'models.vision.projectorPaused', 0.58, '58%'],
+    ['queued', 'models.multimodal.projectorQueued', undefined, '0%'],
+    ['downloading', 'models.multimodal.projectorDownloading', 0.37, '37%'],
+    ['paused', 'models.multimodal.projectorPaused', 0.58, '58%'],
   ] as const)('labels %s projector work instead of generic model verification', (projectorLifecycleStatus, expectedLabel, projectorProgress, expectedPercent) => {
     const queuedModel = buildModel({
       lifecycleStatus: LifecycleStatus.VERIFYING,
@@ -145,7 +145,7 @@ describe('ModelDownloadProgress', () => {
 
     expect(getByText('models.downloading')).toBeTruthy();
     expect(getByText('42%')).toBeTruthy();
-    expect(queryByText('models.vision.projectorQueued')).toBeNull();
+    expect(queryByText('models.multimodal.projectorQueued')).toBeNull();
   });
 
   it('can render a compact layout for catalog cards', () => {
@@ -165,8 +165,16 @@ describe('ModelProjectorStatus', () => {
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       chatModalities: ['text', 'vision'],
       projectorCandidates: [
-        buildProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf' }),
-        buildProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf' }),
+        buildProjector({
+          id: 'projector-org-model-main-mmproj-a.gguf',
+          fileName: 'mmproj-a.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-a.gguf',
+        }),
+        buildProjector({
+          id: 'projector-org-model-main-mmproj-b.gguf',
+          fileName: 'mmproj-b.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-b.gguf',
+        }),
       ],
     });
     const onChooseProjector = jest.fn();
@@ -176,10 +184,10 @@ describe('ModelProjectorStatus', () => {
     );
 
     expect(getByTestId('model-projector-status-org/model')).toBeTruthy();
-    expect(getByText('models.vision.projectorStatusAmbiguousTitle')).toBeTruthy();
-    expect(getByText('models.vision.projectorStatusAmbiguousDescription')).toBeTruthy();
+    expect(getByText('models.multimodal.projectorStatusAmbiguousTitle')).toBeTruthy();
+    expect(getByText('models.multimodal.projectorStatusAmbiguousDescription')).toBeTruthy();
 
-    fireEvent.press(getByText('models.vision.chooseProjectorAction'));
+    fireEvent.press(getByText('models.multimodal.chooseProjectorAction'));
 
     expect(onChooseProjector).toHaveBeenCalledWith(model);
   });
@@ -213,9 +221,9 @@ describe('ModelLifecycleActionRow projector actions', () => {
   }
 
   it.each([
-    ['available', 'models.vision.downloadProjector', 'model-projector-download-org/model'],
-    ['failed', 'models.vision.retryProjectorDownload', 'model-projector-retry-org/model'],
-    ['paused', 'models.vision.resumeProjectorDownload', 'model-projector-resume-org/model'],
+    ['available', 'models.multimodal.downloadProjector', 'model-projector-download-org/model'],
+    ['failed', 'models.multimodal.retryProjectorDownload', 'model-projector-retry-org/model'],
+    ['paused', 'models.multimodal.resumeProjectorDownload', 'model-projector-resume-org/model'],
   ] as const)('shows %s selected projector recovery action for downloaded vision models', (projectorLifecycleStatus, expectedLabel, testID) => {
     const model = buildModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -230,6 +238,24 @@ describe('ModelLifecycleActionRow projector actions', () => {
     expect(getByText(expectedLabel)).toBeTruthy();
 
     fireEvent.press(getByTestId(testID));
+
+    expect(props.onDownload).toHaveBeenCalledWith(model);
+  });
+
+  it('shows selected projector recovery action for downloaded audio-only models', () => {
+    const model = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      chatModalities: ['text', 'audio'],
+      artifactRole: 'primary_chat_model',
+      projectorCandidates: [buildProjector({ lifecycleStatus: 'available', matchStatus: 'matched' })],
+    });
+
+    const { getByTestId, getByText, props } = renderActionRow(model);
+
+    expect(getByText('models.multimodal.downloadProjector')).toBeTruthy();
+
+    fireEvent.press(getByTestId('model-projector-download-org/model'));
 
     expect(props.onDownload).toHaveBeenCalledWith(model);
   });

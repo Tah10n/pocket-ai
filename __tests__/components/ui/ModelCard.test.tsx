@@ -332,6 +332,272 @@ describe('ModelCard', () => {
     ).toBe(true);
   });
 
+  it('renders an audio badge for native-audio primary chat models', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio.gguf',
+      size: 536_870_912,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'audio'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [audioProjector],
+          artifacts: [{
+            id: audioProjector.id,
+            kind: 'multimodal_projector',
+            requiredFor: ['audio'],
+            remoteFileName: audioProjector.fileName,
+            downloadUrl: audioProjector.downloadUrl,
+            sizeBytes: audioProjector.size,
+            installState: 'remote',
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(
+      mockScreenBadge.mock.calls.some(([props]) => (
+        props.tone === 'info'
+        && props.iconName === 'graphic-eq'
+        && props.children === 'models.audio.badge'
+      )),
+    ).toBe(true);
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+  });
+
+  it('renders vision and audio badges together for a dual-capability model', () => {
+    const dualProjector = {
+      id: 'dual-projector',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-vision-audio.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-vision-audio.gguf',
+      size: 536_870_912,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'vision', 'audio'],
+          artifactRole: 'primary_chat_model',
+          projectorCandidates: [dualProjector],
+          artifacts: [{
+            id: dualProjector.id,
+            kind: 'multimodal_projector',
+            requiredFor: ['image', 'audio'],
+            remoteFileName: dualProjector.fileName,
+            downloadUrl: dualProjector.downloadUrl,
+            sizeBytes: dualProjector.size,
+            installState: 'remote',
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    const visionBadge = screen.getByText('models.vision.badge');
+    const audioBadge = screen.getByText('models.audio.badge');
+    expect(visionBadge).toBeTruthy();
+    expect(audioBadge).toBeTruthy();
+  });
+
+  it('rerenders when discovered audio capability changes the model card badge', () => {
+    const handlers = buildModelCardHandlers();
+    const createModel = (audio: 'unknown' | 'supported'): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      artifactRole: 'primary_chat_model',
+      inputCapabilities: {
+        detectedAt: audio === 'supported' ? 2 : 1,
+        declared: {
+          image: 'unknown',
+          audio,
+          video: 'unknown',
+        },
+        evidence: audio === 'supported'
+          ? [{ source: 'tag', value: 'audio', confidence: 'medium' }]
+          : [],
+      },
+      projectorCandidates: audio === 'supported'
+        ? [{
+          id: 'audio-projector',
+          ownerModelId: 'org/model',
+          repoId: 'org/model',
+          fileName: 'mmproj-audio-model-f16.gguf',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-audio-model-f16.gguf',
+          size: 1024,
+          lifecycleStatus: 'available',
+          matchStatus: 'matched',
+        }]
+        : undefined,
+    });
+    const screen = render(
+      <ModelCard
+        model={createModel('unknown')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.audio.badge')).toBeNull();
+
+    screen.rerender(
+      <ModelCard
+        model={createModel('supported')}
+        {...handlers}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
+  });
+
+  it('does not inherit a top-level audio badge for an active text-only variant', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'audio'],
+          activeVariantId: 'model.Q4_K_M.gguf',
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          variants: [{
+            variantId: 'model.Q4_K_M.gguf',
+            fileName: 'model.Q4_K_M.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 4_000_000_000,
+            chatModalities: ['text'],
+          }],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.queryByText('models.audio.badge')).toBeNull();
+  });
+
+  it('shows only audio capability for an active audio-only variant with parent vision metadata', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'audio-variant',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          chatModalities: ['text', 'vision'],
+          activeVariantId: 'audio-variant',
+          resolvedFileName: 'audio.gguf',
+          variants: [{
+            variantId: 'audio-variant',
+            fileName: 'audio.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1,
+            chatModalities: ['text', 'audio'],
+            projectorCandidates: [audioProjector],
+          }],
+          projectorCandidates: [audioProjector],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+  });
+
+  it('counts only the audio projector in active audio-only variant display size', () => {
+    const audioProjector = {
+      id: 'audio-projector',
+      ownerModelId: 'org/model',
+      ownerVariantId: 'audio-variant',
+      repoId: 'org/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      hfRevision: 'main',
+      size: 200_000_000,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const visionProjector = {
+      ...audioProjector,
+      id: 'vision-projector',
+      fileName: 'mmproj-vision.gguf',
+      downloadUrl: 'https://example.com/mmproj-vision.gguf',
+      size: 500_000_000,
+      matchStatus: 'user_selected' as const,
+    };
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: 1_000_000_000,
+          chatModalities: ['text', 'vision'],
+          activeVariantId: 'audio-variant',
+          resolvedFileName: 'audio.gguf',
+          selectedProjectorId: visionProjector.id,
+          variants: [{
+            variantId: 'audio-variant',
+            fileName: 'audio.gguf',
+            quantizationLabel: 'Q4_K_M',
+            size: 1_000_000_000,
+            chatModalities: ['text', 'audio'],
+            projectorCandidates: [audioProjector, visionProjector],
+          }],
+          projectorCandidates: [audioProjector, visionProjector],
+          artifacts: [
+            {
+              id: audioProjector.id,
+              kind: 'multimodal_projector',
+              requiredFor: ['audio'],
+              hfRevision: 'main',
+              remoteFileName: audioProjector.fileName,
+              downloadUrl: audioProjector.downloadUrl,
+              sizeBytes: audioProjector.size,
+              installState: 'remote',
+            },
+            {
+              id: visionProjector.id,
+              kind: 'multimodal_projector',
+              requiredFor: ['image'],
+              hfRevision: 'main',
+              remoteFileName: visionProjector.fileName,
+              downloadUrl: visionProjector.downloadUrl,
+              sizeBytes: visionProjector.size,
+              installState: 'remote',
+            },
+          ],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - 1.20 GB')).toBeTruthy();
+    expect(screen.getByText('models.audio.badge')).toBeTruthy();
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
+  });
+
   it('includes matched projector bytes in the displayed vision model size', () => {
     const screen = render(
       <ModelCard
@@ -560,7 +826,7 @@ describe('ModelCard', () => {
       />,
     );
 
-    expect(screen.getByText('models.vision.projectorDownloading')).toBeTruthy();
+    expect(screen.getByText('models.multimodal.projectorDownloading')).toBeTruthy();
     expect(screen.getByText('25%')).toBeTruthy();
 
     screen.rerender(
@@ -717,7 +983,7 @@ describe('ModelCard', () => {
     ).toBe(false);
   });
 
-  it('rerenders when only multimodal readiness changes vision badge support', () => {
+  it('does not let multimodal readiness reconstruct vision capability without a projector path', () => {
     const handlers = buildModelCardHandlers();
     const createModel = (ready: boolean): ModelMetadata => ({
       ...buildModel(ModelAccessState.PUBLIC),
@@ -756,7 +1022,7 @@ describe('ModelCard', () => {
       />,
     );
 
-    expect(screen.getByText('models.vision.badge')).toBeTruthy();
+    expect(screen.queryByText('models.vision.badge')).toBeNull();
   });
 
   it('renders the active quantization memory badge on the model card row', () => {

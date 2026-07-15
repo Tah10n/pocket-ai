@@ -50,7 +50,12 @@ import { useRouter } from 'expo-router';
 import { EngineStatus, LifecycleStatus, type ModelMetadata } from '../../types/models';
 import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../types/attachments';
-import type { AttachmentDraft, MultimodalReadinessState, MultimodalReadinessStatus } from '../../types/multimodal';
+import type {
+    AttachmentDraft,
+    MultimodalReadinessState,
+    MultimodalReadinessStatus,
+    MultimodalSupportModality,
+} from '../../types/multimodal';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
@@ -66,6 +71,8 @@ import {
 } from '../../services/SettingsStore';
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
 import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
+import { resolveEffectiveActiveVariantNativeSupport } from '../../utils/modelCapabilities';
+import { isMultimodalReadinessReusableForModel } from '../../utils/multimodalReadiness';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
 
@@ -133,24 +140,36 @@ const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
 const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
 const DOCUMENT_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.documentEditingDisabled';
 const MEDIA_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.mediaEditingDisabled';
+const MEDIA_ATTACHMENTS_RUNTIME_UNAVAILABLE_REASON_KEY = 'chat.attachments.mediaRuntimeUnavailable';
+const VIDEO_ATTACHMENTS_REGENERATE_UNSUPPORTED_REASON_KEY = 'chat.attachments.videoRegenerateUnsupported';
+
+function isVisionReadinessReady(readiness: MultimodalReadinessState): boolean {
+    return readiness.status === 'ready' && readiness.support.includes('vision');
+}
+
+function isAudioReadinessReady(readiness: MultimodalReadinessState): boolean {
+    return readiness.status === 'ready' && readiness.support.includes('audio');
+}
 
 function canSendRetainedAttachment(
     attachment: NonNullable<ChatMessage['attachments']>[number],
     readiness: MultimodalReadinessState,
 ): boolean {
-    if ('kind' in attachment) {
-        if (attachment.kind === 'audio') {
-            return readiness.status === 'ready' && readiness.support.includes('audio');
-        }
-
-        if (attachment.kind === 'document') {
-            return true;
-        }
-
-        return readiness.status === 'ready' && readiness.support.includes('vision');
+    if (!('kind' in attachment)) {
+        return isVisionReadinessReady(readiness);
     }
 
-    return readiness.status === 'ready' && readiness.support.includes('vision');
+    switch (attachment.kind) {
+        case 'audio':
+            return isAudioReadinessReady(readiness);
+        case 'document':
+            return true;
+        case 'image':
+            return isVisionReadinessReady(readiness);
+        case 'video':
+        default:
+            return false;
+    }
 }
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
@@ -159,16 +178,117 @@ function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): st
     return VISION_READINESS_TRANSLATION_KEYS[status];
 }
 
-function canPreserveReadyOrUnsupportedReadiness(
-    readiness: MultimodalReadinessState | undefined,
-    selectedProjectorId: string | undefined,
-    lifecycleReadiness: MultimodalReadinessStatus | null,
-): boolean {
-    return (
-        (readiness?.status === 'ready' || readiness?.status === 'unsupported')
-        && readiness.projectorId === selectedProjectorId
-        && lifecycleReadiness === null
-    );
+function resolveImageAttachmentReadinessReason({
+    activeModelId,
+    displayedModelId,
+    isEngineReady,
+    readiness,
+}: {
+    activeModelId?: string | null;
+    displayedModelId?: string | null;
+    isEngineReady: boolean;
+    readiness: MultimodalReadinessState;
+}): string {
+    if (!displayedModelId) {
+        return IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY;
+    }
+
+    if (!isEngineReady || activeModelId !== displayedModelId) {
+        return 'chat.visionReadiness.initializing';
+    }
+
+    if (readiness.status === 'ready' && !readiness.support.includes('vision')) {
+        return 'chat.visionReadiness.unsupported';
+    }
+
+    return getVisionReadinessTranslationKey(readiness.status);
+}
+
+function resolveAudioAttachmentReadinessReason({
+    activeModelId,
+    displayedModelId,
+    hasDisplayedModel,
+    isAudioSupported,
+    isEngineReady,
+    readiness,
+}: {
+    activeModelId?: string | null;
+    displayedModelId?: string | null;
+    hasDisplayedModel: boolean;
+    isAudioSupported: boolean;
+    isEngineReady: boolean;
+    readiness: MultimodalReadinessState;
+}): string | undefined {
+    if (!displayedModelId || !hasDisplayedModel) {
+        return 'chat.attachments.audioPickerDisabled';
+    }
+
+    if (!isAudioSupported) {
+        return 'chat.attachments.audioModelUnsupported';
+    }
+
+    if (
+        !isEngineReady
+        || activeModelId !== displayedModelId
+        || !isAudioReadinessReady(readiness)
+    ) {
+        return 'chat.attachments.audioRuntimeUnavailable';
+    }
+
+    return undefined;
+}
+
+function resolveRetainedRegenerateAttachmentBlockedReason({
+    audioReadinessReason,
+    imageReadinessReason,
+    readiness,
+    retainedAttachments,
+}: {
+    audioReadinessReason: string | undefined;
+    imageReadinessReason: string;
+    readiness: MultimodalReadinessState;
+    retainedAttachments: ChatMessage['attachments'];
+}): string {
+    let hasBlockedAudio = false;
+    let hasBlockedVideo = false;
+    let hasBlockedVision = false;
+
+    for (const attachment of retainedAttachments ?? []) {
+        if (canSendRetainedAttachment(attachment, readiness)) {
+            continue;
+        }
+
+        if ('kind' in attachment && attachment.kind === 'audio') {
+            hasBlockedAudio = true;
+        } else if ('kind' in attachment && attachment.kind === 'video') {
+            hasBlockedVideo = true;
+        } else if (!('kind' in attachment) || attachment.kind !== 'document') {
+            hasBlockedVision = true;
+        }
+    }
+
+    if (hasBlockedVideo) {
+        return VIDEO_ATTACHMENTS_REGENERATE_UNSUPPORTED_REASON_KEY;
+    }
+
+    if (hasBlockedAudio && hasBlockedVision) {
+        return MEDIA_ATTACHMENTS_RUNTIME_UNAVAILABLE_REASON_KEY;
+    }
+
+    if (hasBlockedAudio) {
+        return audioReadinessReason ?? 'chat.attachments.audioRuntimeUnavailable';
+    }
+
+    return imageReadinessReason;
+}
+
+function resolveRequestedSupportFromNativeModalities(
+    requestedNativeModalities: { vision: boolean; audio: boolean },
+): MultimodalSupportModality[] {
+    return [
+        ...(requestedNativeModalities.vision ? ['vision' as const] : []),
+        ...(requestedNativeModalities.audio ? ['audio' as const] : []),
+    ];
 }
 
 export function resolveFallbackMultimodalReadiness(
@@ -176,10 +296,8 @@ export function resolveFallbackMultimodalReadiness(
     modelId: string | null,
 ): MultimodalReadinessState {
     const resolvedModelId = modelId ?? model?.id ?? '';
-    const supportsVision = model?.chatModalities?.includes('vision') === true
-        || Boolean(model?.projectorCandidates?.length);
 
-    if (!supportsVision || !model) {
+    if (!model) {
         return {
             modelId: resolvedModelId,
             status: 'text_only',
@@ -187,6 +305,18 @@ export function resolveFallbackMultimodalReadiness(
             checkedAt: 0,
         };
     }
+
+    const requestedNativeModalities = resolveEffectiveActiveVariantNativeSupport(model);
+    if (!requestedNativeModalities.vision && !requestedNativeModalities.audio) {
+        return {
+            modelId: resolvedModelId,
+            status: 'text_only',
+            support: [],
+            checkedAt: 0,
+        };
+    }
+    const requestedSupport = resolveRequestedSupportFromNativeModalities(requestedNativeModalities);
+    const requestedSupportPayload = requestedSupport.length > 0 ? { requestedSupport } : null;
 
     const resolution = projectorArtifactService.resolveProjectorForModel(model);
     const selectedProjector = resolution.selectedProjector;
@@ -201,6 +331,7 @@ export function resolveFallbackMultimodalReadiness(
                     ? 'failed'
                     : 'missing_projector',
             support: [],
+            ...requestedSupportPayload,
             failureReason: resolution.status === 'failed' ? resolution.reason : undefined,
             checkedAt: 0,
         };
@@ -217,23 +348,31 @@ export function resolveFallbackMultimodalReadiness(
         projectorId: selectedProjector.id,
         projectorSize: selectedProjector.size ?? undefined,
         support: [],
+        ...requestedSupportPayload,
         failureReason: status === 'failed'
             ? selectedProjector.matchReason ?? resolution.reason
             : undefined,
         checkedAt: 0,
     };
 
-    if (persistedReadiness && canPreserveReadyOrUnsupportedReadiness(
-        persistedReadiness,
-        selectedProjector.id,
-        lifecycleReadiness,
-    )) {
+    const canReusePersistedReadiness = isMultimodalReadinessReusableForModel({
+        model,
+        readiness: persistedReadiness,
+        projectorId: selectedProjector.id,
+        requestedSupport,
+        projectorCandidates: resolution.candidates,
+    });
+    if (
+        canReusePersistedReadiness
+        && lifecycleReadiness === null
+        && (persistedReadiness?.status === 'ready' || persistedReadiness?.status === 'unsupported')
+    ) {
         return persistedReadiness;
     }
 
     if (
         persistedReadiness?.status === 'failed'
-        && persistedReadiness.projectorId === selectedProjector.id
+        && canReusePersistedReadiness
         && status === 'initializing'
     ) {
         return persistedReadiness;
@@ -588,15 +727,16 @@ export const ChatScreen = () => {
         () => resolveFallbackMultimodalReadiness(activeChatModel, displayedChatActiveModelId),
         [activeChatModel, displayedChatActiveModelId],
     );
-    const hasReadyVisionSupport = multimodalReadiness.status === 'ready'
-        && multimodalReadiness.support.includes('vision');
-    const hasReadyAudioSupport = multimodalReadiness.status === 'ready'
-        && multimodalReadiness.support.includes('audio');
-    const visionAttachmentReadinessReason = !displayedChatActiveModelId
-        ? IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY
-        : !isEngineReady || engineState.activeModelId !== displayedChatActiveModelId
-            ? 'chat.visionReadiness.initializing'
-            : getVisionReadinessTranslationKey(multimodalReadiness.status);
+    const hasReadyVisionSupport = isVisionReadinessReady(multimodalReadiness);
+    const audioAttachmentsSupported = activeChatModel
+        ? resolveEffectiveActiveVariantNativeSupport(activeChatModel).audio
+        : false;
+    const visionAttachmentReadinessReason = resolveImageAttachmentReadinessReason({
+        activeModelId: engineState.activeModelId,
+        displayedModelId: displayedChatActiveModelId,
+        isEngineReady,
+        readiness: multimodalReadiness,
+    });
     const imageAttachmentsDisabledReason = pendingRegenerateMessage
         ? IMAGE_ATTACHMENTS_EDITING_REASON_KEY
         : visionAttachmentReadinessReason;
@@ -635,16 +775,21 @@ export const ChatScreen = () => {
         activeThread?.id ?? 'new-thread',
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
+    const audioAttachmentReadinessReason = resolveAudioAttachmentReadinessReason({
+        activeModelId: engineState.activeModelId,
+        displayedModelId: displayedChatActiveModelId,
+        hasDisplayedModel: Boolean(activeChatModel),
+        isAudioSupported: audioAttachmentsSupported,
+        isEngineReady,
+        readiness: multimodalReadiness,
+    });
     const audioAttachmentsEnabled =
         !isInputDisabled
         && !pendingRegenerateMessage
-        && engineState.activeModelId === displayedChatActiveModelId
-        && hasReadyAudioSupport;
+        && audioAttachmentReadinessReason === undefined;
     const audioAttachmentsDisabledReason = pendingRegenerateMessage
         ? MEDIA_ATTACHMENTS_EDITING_REASON_KEY
-        : !hasReadyAudioSupport
-            ? 'chat.attachments.audioRuntimeUnavailable'
-            : undefined;
+        : audioAttachmentReadinessReason;
     const mediaAttachmentDrafts = useChatMediaAttachments({
         audioEnabled: audioAttachmentsEnabled,
         audioDisabledReason: audioAttachmentsDisabledReason,
@@ -657,6 +802,14 @@ export const ChatScreen = () => {
         && retainedRegenerateAttachments.every((attachment) => canSendRetainedAttachment(attachment, multimodalReadiness));
     const retainedRegenerateAttachmentsSendBlocked = retainedRegenerateAttachments.length > 0
         && !canSendRetainedRegenerateAttachments;
+    const retainedRegenerateAttachmentsBlockedReason = retainedRegenerateAttachmentsSendBlocked
+        ? resolveRetainedRegenerateAttachmentBlockedReason({
+            audioReadinessReason: audioAttachmentReadinessReason,
+            imageReadinessReason: visionAttachmentReadinessReason,
+            readiness: multimodalReadiness,
+            retainedAttachments: retainedRegenerateAttachments,
+        })
+        : undefined;
     const retainedRegenerateAttachmentsTray = retainedRegenerateAttachments.length > 0 ? (
         <ScreenSurface
             testID="chat-regenerate-retained-attachments"
@@ -680,7 +833,7 @@ export const ChatScreen = () => {
                     <Text className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
                         {retainedRegenerateAttachmentsSendBlocked
                             ? t('chat.attachments.retainedForRegenerateBlockedDescription', {
-                                reason: t(visionAttachmentReadinessReason),
+                                reason: t(retainedRegenerateAttachmentsBlockedReason ?? visionAttachmentReadinessReason),
                             })
                             : t('chat.attachments.retainedForRegenerateDescription')}
                     </Text>
@@ -2134,6 +2287,7 @@ export const ChatScreen = () => {
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
                                 imageAttachmentsEnabled={imageAttachmentsEnabled}
                                 documentAttachmentsEnabled={documentAttachmentsEnabled}
+                                audioAttachmentsSupported={audioAttachmentsSupported}
                                 audioAttachmentsEnabled={audioAttachmentsEnabled}
                                 imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
@@ -2180,6 +2334,7 @@ export const ChatScreen = () => {
                                 onRemoveMediaAttachmentDraft={mediaAttachmentDrafts.removeDraft}
                                 imageAttachmentsEnabled={imageAttachmentsEnabled}
                                 documentAttachmentsEnabled={documentAttachmentsEnabled}
+                                audioAttachmentsSupported={audioAttachmentsSupported}
                                 audioAttachmentsEnabled={audioAttachmentsEnabled}
                                 imageAttachmentsDisabledReason={imageAttachmentsDisabledReason}
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}

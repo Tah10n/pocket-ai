@@ -31,6 +31,11 @@ import { mergeModelWithRuntimeState } from '../utils/modelRuntimeState';
 import { clearProjectorScopedMemoryFit, shouldClearProjectorScopedMemoryFit } from '../utils/projectorMemoryFitInvalidation';
 import { applyModelVariantSelection, canSelectModelVariant } from '../utils/modelVariants';
 import { clearModelProjectorLocalState, selectModelProjectorLifecycleState } from '../store/modelsStore';
+import {
+  getEffectiveActiveVariantKeys,
+  getEffectiveActiveVariantProjectorCandidates,
+  getEffectiveActiveVariantSelectedProjectorId,
+} from '../utils/modelCapabilities';
 
 function shouldApplyVariantSelection(model: ModelMetadata, variantId: string | null): variantId is string {
   if (!variantId) {
@@ -62,6 +67,7 @@ function preserveFreshProjectorSelection(
     ...modelWithRuntimeState,
     artifactRole: freshSelectedModel.artifactRole,
     chatModalities: freshSelectedModel.chatModalities,
+    variants: freshSelectedModel.variants ?? modelWithRuntimeState.variants,
     projectorCandidates: modelWithRuntimeState.projectorCandidates?.map((projector) => {
       const freshProjector = freshProjectorsById.get(projector.id);
       if (!freshProjector) {
@@ -89,21 +95,7 @@ function normalizeChoiceScopeKey(value: string | null | undefined): string | und
 }
 
 function getProjectorChoiceVariantScopeKeys(model: ModelMetadata): Set<string> {
-  const activeVariantId = normalizeChoiceScopeKey(model.activeVariantId);
-  const resolvedFileName = normalizeChoiceScopeKey(model.resolvedFileName);
-  const activeVariant = model.variants?.find((variant) => (
-    variant.variantId === activeVariantId
-    || variant.fileName === activeVariantId
-    || variant.variantId === resolvedFileName
-    || variant.fileName === resolvedFileName
-  ));
-
-  return new Set([
-    activeVariantId,
-    resolvedFileName,
-    normalizeChoiceScopeKey(activeVariant?.variantId),
-    normalizeChoiceScopeKey(activeVariant?.fileName),
-  ].filter((value): value is string => value !== undefined));
+  return new Set(getEffectiveActiveVariantKeys(model));
 }
 
 function isProjectorOutsideChoiceVariantScope(projector: ProjectorCandidate, activeVariantKeys: Set<string>): boolean {
@@ -191,11 +183,9 @@ function normalizeReusedSelectedProjectorState(model: ModelMetadata): ModelMetad
 }
 
 function getSelectedProjector(model: ModelMetadata) {
-  if (!model.selectedProjectorId) {
-    return undefined;
-  }
-
-  return model.projectorCandidates?.find((projector) => projector.id === model.selectedProjectorId);
+  const candidates = getEffectiveActiveVariantProjectorCandidates(model);
+  const selectedProjectorId = getEffectiveActiveVariantSelectedProjectorId(model, candidates);
+  return candidates.find((projector) => projector.id === selectedProjectorId);
 }
 
 function isDownloadedProjector(projector: ReturnType<typeof getSelectedProjector>): boolean {
@@ -235,7 +225,8 @@ function shouldRequestReadinessRefreshAfterProjectorSelection({
     return false;
   }
 
-  return sourceModel.selectedProjectorId !== nextModel.selectedProjectorId
+  return getEffectiveActiveVariantSelectedProjectorId(sourceModel)
+      !== getEffectiveActiveVariantSelectedProjectorId(nextModel)
     || getReadinessSignature(sourceModel) !== getReadinessSignature(nextModel);
 }
 
@@ -566,7 +557,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
 
     const selection = projectorArtifactService.selectProjectorForModel(sourceModel, projectorId);
     if (!selection.model) {
-      Alert.alert(t('models.actionFailedTitle'), t('models.vision.projectorChoiceFailedMessage'));
+      Alert.alert(t('models.actionFailedTitle'), t('models.multimodal.projectorChoiceFailedMessage'));
       return;
     }
 

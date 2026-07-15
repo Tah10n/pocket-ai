@@ -257,6 +257,122 @@ describe('StorageManagerService', () => {
     );
   });
 
+  it('counts case-distinct Android projector files independently', async () => {
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        projectorCandidates: [
+          createDownloadedProjector({
+            id: 'org/model:upper-projector',
+            fileName: 'MMProj.gguf',
+            localPath: 'MMProj.gguf',
+            size: 1024,
+          }),
+          createDownloadedProjector({
+            id: 'org/model:lower-projector',
+            fileName: 'mmproj.gguf',
+            localPath: 'mmproj.gguf',
+            size: 2048,
+          }),
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+      if (uri === 'test-models/MMProj.gguf') {
+        return { exists: true, size: 1024 };
+      }
+      if (uri === 'test-models/mmproj.gguf') {
+        return { exists: true, size: 2048 };
+      }
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.modelsBytes).toBe(4096 + 1024 + 2048);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/MMProj.gguf');
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-models/mmproj.gguf');
+  });
+
+  it('includes and deduplicates variant-only and artifact-only projector files in storage metrics', async () => {
+    const variantProjector = createDownloadedProjector({
+      id: 'org/model:q4-projector',
+      ownerVariantId: 'q4',
+      fileName: 'variant-mmproj.gguf',
+      localPath: 'variant-mmproj.gguf',
+      size: 1024,
+    });
+    mockedRegistry.getModels.mockReturnValue([
+      createDownloadedModel({
+        variants: [{
+          variantId: 'q4',
+          fileName: 'model-q4.gguf',
+          quantizationLabel: 'Q4',
+          size: 4096,
+          projectorCandidates: [variantProjector],
+        }],
+        artifacts: [
+          {
+            id: variantProjector.id,
+            kind: 'multimodal_projector',
+            requiredFor: ['image'],
+            remoteFileName: variantProjector.fileName,
+            downloadUrl: variantProjector.downloadUrl,
+            sizeBytes: 1024,
+            localPath: variantProjector.localPath,
+            installState: 'installed',
+          },
+          {
+            id: 'org/model:artifact-only-projector',
+            kind: 'multimodal_projector',
+            requiredFor: ['audio'],
+            remoteFileName: 'artifact-only-mmproj.gguf',
+            downloadUrl: 'https://huggingface.co/org/model/resolve/main/artifact-only-mmproj.gguf',
+            sizeBytes: 1024,
+            localPath: 'artifact-only-mmproj.gguf',
+            installState: 'installed',
+          },
+        ],
+      }),
+    ]);
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: false };
+      }
+
+      if (uri === 'test-models/org_model.gguf') {
+        return { exists: true, size: 4096 };
+      }
+
+      if (uri === 'test-models/variant-mmproj.gguf') {
+        return { exists: true, size: 2048 };
+      }
+
+      if (uri === 'test-models/artifact-only-mmproj.gguf') {
+        return { exists: true, size: 3072 };
+      }
+
+      return { exists: false };
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.modelsBytes).toBe(4096 + 2048 + 3072);
+    expect(metrics.downloadedModels[0].variants?.[0].projectorCandidates?.[0].size).toBe(2048);
+    expect(metrics.downloadedModels[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: variantProjector.id, sizeBytes: 2048 }),
+      expect.objectContaining({ id: 'org/model:artifact-only-projector', sizeBytes: 3072 }),
+    ]));
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter(
+      ([uri]) => uri === 'test-models/variant-mmproj.gguf',
+    )).toHaveLength(1);
+  });
+
   it('includes existing failed projector partial files in model storage metrics', async () => {
     mockedRegistry.getModels.mockReturnValue([
       createDownloadedModel({

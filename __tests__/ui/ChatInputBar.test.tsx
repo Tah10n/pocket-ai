@@ -266,6 +266,7 @@ describe('ChatInputBar', () => {
         onAttachAudio={onAttachAudio}
         imageAttachmentsEnabled
         documentAttachmentsEnabled
+        audioAttachmentsSupported
         audioAttachmentsEnabled
       />,
     );
@@ -361,6 +362,7 @@ describe('ChatInputBar', () => {
         onSendMessage={onSendMessage}
         mediaAttachmentDrafts={[audioDraft]}
         onAttachAudio={jest.fn()}
+        audioAttachmentsSupported
         audioAttachmentsEnabled={false}
         audioAttachmentsDisabledReason="chat.attachments.audioRuntimeUnavailable"
       />,
@@ -388,20 +390,52 @@ describe('ChatInputBar', () => {
     });
   });
 
-  it('keeps audio disabled hints scoped to the audio menu action', () => {
-    const { getByLabelText, getByTestId } = render(
+  it('keeps supported-but-not-ready audio hints scoped to the audio menu action', () => {
+    const { getByLabelText, getByTestId, getByText, queryByTestId, queryByText } = render(
       <ChatInputBar
         onSendMessage={jest.fn()}
         onAttachAudio={jest.fn()}
+        audioAttachmentsSupported
         audioAttachmentsEnabled={false}
         audioAttachmentsDisabledReason="chat.attachments.audioRuntimeUnavailable"
       />,
     );
 
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
+    expect(queryByText('chat.attachments.audioRuntimeUnavailable')).toBeNull();
+
     fireEvent.press(getByTestId('chat-attach-menu-button'));
 
     expect(getByLabelText('chat.attachments.attachAudioAccessibilityLabel').props.accessibilityHint)
       .toBe('chat.attachments.audioRuntimeUnavailable');
+    expect(getByText('chat.attachments.audioRuntimeUnavailable')).toBeTruthy();
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
+  });
+
+  it('hides audio actions and audio readiness copy for models without audio capability', () => {
+    const { getByTestId, queryByTestId, queryByText } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        onAttachDocuments={jest.fn()}
+        onAttachAudio={jest.fn()}
+        imageAttachmentsEnabled
+        documentAttachmentsEnabled
+        audioAttachmentsSupported={false}
+        audioAttachmentsEnabled={false}
+        audioAttachmentsDisabledReason="chat.attachments.audioModelUnsupported"
+      />,
+    );
+
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
+    expect(queryByText('chat.attachments.audioModelUnsupported')).toBeNull();
+
+    fireEvent.press(getByTestId('chat-attach-menu-button'));
+
+    expect(getByTestId('chat-attach-image-button')).toBeTruthy();
+    expect(getByTestId('chat-attach-document-button')).toBeTruthy();
+    expect(queryByTestId('chat-attach-audio-button')).toBeNull();
+    expect(queryByText('chat.attachments.audioModelUnsupported')).toBeNull();
   });
 
   it('renders a retained attachments tray and allows blank sends when explicitly enabled', async () => {

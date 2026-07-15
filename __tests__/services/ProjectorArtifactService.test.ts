@@ -7,7 +7,11 @@ import {
   visionModelFileName,
   visionModelRepoId,
 } from '../fixtures/multimodalCatalogFixtures';
-import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../../src/utils/modelProjectors';
+import { resolveEffectiveActiveVariantNativeSupport } from '../../src/utils/modelCapabilities';
 
 function createProjector(fileName: string, overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
   const ownerVariantId = overrides.ownerVariantId ?? visionModelFileName;
@@ -277,9 +281,10 @@ describe('ProjectorArtifactService', () => {
       }],
       projectorCandidates: [implicitProjector, explicitProjector],
     }), explicitProjector.id);
+    const canonicalProjectorId = buildProjectorArtifactId(explicitProjector);
 
     expect(selection.model).toEqual(expect.objectContaining({
-      selectedProjectorId: explicitProjector.id,
+      selectedProjectorId: canonicalProjectorId,
       fitsInRam: true,
       memoryFitDecision: 'fits_high_confidence',
       memoryFitConfidence: 'high',
@@ -329,6 +334,79 @@ describe('ProjectorArtifactService', () => {
     }));
   });
 
+  it.each(['current-first', 'legacy-first'] as const)(
+    'collapses current and legacy aliases before projector selection (%s)',
+    (order) => {
+      const currentProjector = createProjector(projectorFileName);
+      const legacyProjector = {
+        ...currentProjector,
+        id: buildLegacyProjectorArtifactId(currentProjector),
+        localPath: 'legacy-mmproj.gguf',
+        lifecycleStatus: 'downloaded' as const,
+      };
+      const projectorCandidates = order === 'current-first'
+        ? [currentProjector, legacyProjector]
+        : [legacyProjector, currentProjector];
+      const model = createVisionModel({ projectorCandidates });
+      const service = new ProjectorArtifactService();
+
+      expect(service.resolveProjectorForModel(model)).toEqual(expect.objectContaining({
+        status: 'matched',
+        reason: 'single_projector_candidate',
+        selectedProjector: expect.objectContaining({
+          id: currentProjector.id,
+          localPath: legacyProjector.localPath,
+          lifecycleStatus: 'downloaded',
+        }),
+      }));
+      expect(service.selectProjectorForModel(model, legacyProjector.id).model)
+        .toEqual(expect.objectContaining({ selectedProjectorId: currentProjector.id }));
+    },
+  );
+
+  it('clears projector-scoped memory fit when the active variant owns the previous selection', () => {
+    const firstProjector = createProjector(projectorFileName, {
+      size: 512 * 1024 * 1024,
+      matchStatus: 'user_selected',
+    });
+    const secondProjector = createProjector(alternateProjectorFileName, {
+      size: 4 * 1024 * 1024 * 1024,
+      matchStatus: 'ambiguous',
+    });
+    const service = new ProjectorArtifactService();
+    const model = createVisionModel({
+      selectedProjectorId: firstProjector.id,
+      fitsInRam: true,
+      memoryFitDecision: 'fits_high_confidence',
+      memoryFitConfidence: 'high',
+      projectorCandidates: [firstProjector, secondProjector],
+      variants: [{
+        variantId: visionModelFileName,
+        fileName: visionModelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        ramFit: 'fits_high_confidence',
+        ramFitConfidence: 'high',
+        selectedProjectorId: firstProjector.id,
+        projectorCandidates: [firstProjector, secondProjector],
+      }],
+    });
+
+    const selection = service.selectProjectorForModel(model, secondProjector.id);
+
+    expect(selection.model).toEqual(expect.objectContaining({
+      selectedProjectorId: secondProjector.id,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      variants: [expect.objectContaining({
+        selectedProjectorId: secondProjector.id,
+        ramFit: undefined,
+        ramFitConfidence: undefined,
+      })],
+    }));
+  });
+
   it('preserves multimodal readiness when reselecting the same projector', () => {
     const firstProjector = createProjector(projectorFileName, { matchStatus: 'user_selected' });
     const readiness = {
@@ -350,6 +428,45 @@ describe('ProjectorArtifactService', () => {
     expect(selection.model).toEqual(expect.objectContaining({
       selectedProjectorId: firstProjector.id,
       multimodalReadiness: readiness,
+    }));
+  });
+
+  it.each([
+    {
+      label: 'another variant',
+      readiness: {
+        variantId: 'vision-chat-model-Q8_0.gguf',
+        requestedSupport: ['vision'] as Array<'vision' | 'audio'>,
+      },
+    },
+    {
+      label: 'another requested modality set',
+      readiness: {
+        variantId: visionModelFileName,
+        requestedSupport: ['vision', 'audio'] as Array<'vision' | 'audio'>,
+      },
+    },
+  ])('clears readiness from $label when reselecting the same projector', ({ readiness }) => {
+    const projector = createProjector(projectorFileName, { matchStatus: 'user_selected' });
+    const model = createVisionModel({
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+      multimodalReadiness: {
+        modelId: visionModelRepoId,
+        status: 'ready',
+        projectorId: projector.id,
+        support: ['vision'],
+        checkedAt: 123,
+        ...readiness,
+      },
+    });
+    const service = new ProjectorArtifactService();
+
+    const selection = service.selectProjectorForModel(model, projector.id);
+
+    expect(selection.model).toEqual(expect.objectContaining({
+      selectedProjectorId: projector.id,
+      multimodalReadiness: undefined,
     }));
   });
 
@@ -383,5 +500,44 @@ describe('ProjectorArtifactService', () => {
       reason: 'selected_projector',
       selectedProjector: expect.objectContaining({ id: secondProjector.id }),
     }));
+  });
+
+  it('does not write vision provenance when selecting an audio-only active variant projector', () => {
+    const audioProjector = createProjector('mmproj-audio-model-f16.gguf');
+    const model = createVisionModel({
+      visionSource: 'catalog_metadata',
+      visionConfidence: 'trusted',
+      variants: [{
+        variantId: visionModelFileName,
+        fileName: visionModelFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        chatModalities: ['text', 'audio'],
+        projectorCandidates: [audioProjector],
+      }],
+      projectorCandidates: [audioProjector],
+    });
+    const service = new ProjectorArtifactService();
+
+    const selection = service.selectProjectorForModel(model, audioProjector.id);
+
+    expect(selection.model).toEqual(expect.objectContaining({
+      selectedProjectorId: audioProjector.id,
+      visionSource: undefined,
+      visionConfidence: undefined,
+      variants: [expect.objectContaining({
+        selectedProjectorId: audioProjector.id,
+        visionSource: undefined,
+        visionConfidence: undefined,
+        projectorCandidates: [expect.objectContaining({
+          id: audioProjector.id,
+          matchStatus: 'user_selected',
+        })],
+      })],
+    }));
+    expect(selection.model && resolveEffectiveActiveVariantNativeSupport(selection.model)).toEqual({
+      vision: false,
+      audio: true,
+    });
   });
 });

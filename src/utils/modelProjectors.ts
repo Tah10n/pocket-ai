@@ -1,10 +1,13 @@
 import type { ModelArtifactRole, ProjectorArtifact } from '../types/multimodal';
+import { normalizeHuggingFaceFilePath } from './huggingFaceUrls';
 
 const PROJECTOR_FILE_NAME_PATTERN =
   /(^|[._-])(mmproj|mm_projector|clip-projector|clip_projector)([._-]|$)/u;
 const GGUF_EXTENSION_PATTERN = /\.gguf$/iu;
 const QUANTIZATION_TOKEN_PATTERN =
   /^(q\d(?:_[a-z0-9]+)*|iq\d(?:_[a-z0-9]+)*|f16|fp16|bf16|q8(?:_[a-z0-9]+)?)$/iu;
+const SIMPLE_PROJECTOR_IDENTITY_PATTERN = /^[a-z0-9._-]+$/u;
+const RESERVED_EXACT_IDENTITY_SUFFIX_PATTERN = /-exact-path-[0-9a-f]+(?:_[0-9a-f]+)*$/u;
 
 function getBaseFileName(fileName: string): string {
   const normalizedPath = fileName.trim();
@@ -23,15 +26,38 @@ function encodeProjectorPathIdentity(normalizedPath: string): string {
   return `path-${encodedPath}`;
 }
 
-function normalizeProjectorArtifactFileIdentity(fileName: string): string | null {
-  const normalized = fileName
-    .trim()
-    .replace(/\\+/gu, '/')
-    .replace(/\/+/gu, '/')
-    .replace(/^\/+|\/+$/gu, '')
-    .toLowerCase();
+export function normalizeProjectorArtifactPath(fileName: string): string | null {
+  return normalizeHuggingFaceFilePath(fileName);
+}
 
-  if (normalized.length === 0) {
+function normalizeProjectorArtifactFileIdentity(fileName: string): string | null {
+  const normalized = normalizeProjectorArtifactPath(fileName);
+  if (normalized === null) {
+    return null;
+  }
+
+  const caseFolded = normalized.toLowerCase();
+  const baseIdentity = caseFolded.includes('/')
+    ? encodeProjectorPathIdentity(caseFolded)
+    : caseFolded;
+  const needsExactPunctuationIdentity = !caseFolded.includes('/') && (
+    !SIMPLE_PROJECTOR_IDENTITY_PATTERN.test(caseFolded)
+    || RESERVED_EXACT_IDENTITY_SUFFIX_PATTERN.test(caseFolded)
+  );
+
+  // Hugging Face paths and Android app storage are case-sensitive. Preserve
+  // established IDs for simple lowercase names, while adding an exact suffix
+  // whenever case-folding or the final ID sanitizer would otherwise collapse
+  // two physical artifacts. The reserved suffix check prevents a deliberately
+  // named safe file from impersonating an encoded punctuation identity.
+  return normalized === caseFolded && !needsExactPunctuationIdentity
+    ? baseIdentity
+    : `${baseIdentity}-exact-${encodeProjectorPathIdentity(normalized)}`;
+}
+
+function normalizeLegacyProjectorArtifactFileIdentity(fileName: string): string | null {
+  const normalized = normalizeProjectorArtifactPath(fileName)?.toLowerCase() ?? null;
+  if (normalized === null) {
     return null;
   }
 
@@ -87,8 +113,35 @@ export function buildProjectorArtifactId({
   const parts = [
     repoId.trim().toLowerCase(),
     (hfRevision ?? 'main').trim().toLowerCase(),
-    ownerVariantId?.trim().toLowerCase() ?? '',
+    ownerVariantId ? normalizeProjectorArtifactFileIdentity(ownerVariantId) ?? '' : '',
     normalizeProjectorArtifactFileIdentity(fileName)
+      ?? normalizeProjectorFileName(fileName)
+      ?? fileName.trim().toLowerCase(),
+  ];
+  const stable = parts.join('|').replace(/[^a-z0-9._-]+/giu, '-').replace(/^-+|-+$/gu, '');
+  return `projector-${stable}`;
+}
+
+// Keep the pre-exact identity available only as a migration alias. It is
+// intentionally collision-prone for case- or punctuation-distinct identities
+// and must be paired with exact artifact metadata plus ambiguity checks before
+// it is trusted.
+export function buildLegacyProjectorArtifactId({
+  repoId,
+  hfRevision,
+  fileName,
+  ownerVariantId,
+}: {
+  repoId: string;
+  hfRevision?: string;
+  fileName: string;
+  ownerVariantId?: string;
+}): string {
+  const parts = [
+    repoId.trim().toLowerCase(),
+    (hfRevision ?? 'main').trim().toLowerCase(),
+    ownerVariantId?.trim().toLowerCase() ?? '',
+    normalizeLegacyProjectorArtifactFileIdentity(fileName)
       ?? normalizeProjectorFileName(fileName)
       ?? fileName.trim().toLowerCase(),
   ];

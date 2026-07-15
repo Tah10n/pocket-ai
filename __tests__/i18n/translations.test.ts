@@ -209,6 +209,9 @@ describe('i18n locale parity', () => {
           key: 'chat.attachments.mixedFailures',
         },
         {
+          key: 'chat.attachments.mediaRuntimeUnavailable',
+        },
+        {
           key: 'chat.attachments.failedPreviewIndexedAccessibilityLabel',
           options: { index: 1, count: 2, reason: tooLargeReason },
           expectedFragments: ['1', '2', tooLargeReason],
@@ -227,6 +230,20 @@ describe('i18n locale parity', () => {
         },
         {
           key: 'chat.visionReadiness.unsupported',
+        },
+        {
+          key: 'models.multimodal.projectorChoiceTitle',
+        },
+        {
+          key: 'models.multimodal.projectorChoiceRequiredMessage',
+        },
+        {
+          key: 'models.multimodal.projectorChoiceItemAccessibilityLabel',
+          options: { modelName: 'Model', title: 'Projector - 1 MB', fileName: 'mmproj.gguf' },
+          expectedFragments: ['Model', 'Projector - 1 MB', 'mmproj.gguf'],
+        },
+        {
+          key: 'models.multimodal.projectorStatusReadyDescription',
         },
       ];
 

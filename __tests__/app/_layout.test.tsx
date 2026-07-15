@@ -4,6 +4,7 @@ import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 const mockStackProps = jest.fn();
 const mockBootstrapAppCritical = jest.fn();
 const mockBootstrapAppBackground = jest.fn();
+const mockScheduleModelCatalogCacheHydration = jest.fn();
 const mockGetPrivateStorageHealthSnapshot = jest.fn();
 const mockGetStorageFallbackReport = jest.fn();
 const mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation = jest.fn();
@@ -123,6 +124,9 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
 jest.mock('../../src/services/AppBootstrap', () => ({
   bootstrapAppCritical: (...args: unknown[]) => mockBootstrapAppCritical(...args),
   bootstrapAppBackground: (...args: unknown[]) => mockBootstrapAppBackground(...args),
+  scheduleModelCatalogCacheHydrationAfterFirstFrame: (...args: unknown[]) => (
+    mockScheduleModelCatalogCacheHydration(...args)
+  ),
 }));
 
 jest.mock('../../src/services/PerformanceMonitor', () => ({
@@ -200,6 +204,7 @@ describe('RootLayout storage recovery gate', () => {
     expect(await findByTestId('static-theme-light')).toBeTruthy();
     expect(mockStaticThemeResolvedModes).toHaveBeenCalledWith('light');
     expect(mockBootstrapAppBackground).not.toHaveBeenCalled();
+    expect(mockScheduleModelCatalogCacheHydration).not.toHaveBeenCalled();
     expect(mockNotificationInitialize).not.toHaveBeenCalled();
     expect(useBootstrapStore.getState().criticalOutcome).toBe('storage_blocked');
     expect(useBootstrapStore.getState().criticalStorageHealth).toEqual(expect.objectContaining({
@@ -235,6 +240,7 @@ describe('RootLayout storage recovery gate', () => {
     await waitFor(() => expect(mockBootstrapAppCritical).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(mockBootstrapAppBackground).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(queryByTestId('root-stack')).toBeTruthy());
+    expect(mockScheduleModelCatalogCacheHydration).toHaveBeenCalledTimes(1);
     expect(queryByTestId('storage-recovery-screen')).toBeNull();
   });
 

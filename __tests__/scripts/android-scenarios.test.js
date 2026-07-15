@@ -18,12 +18,17 @@ const {
   findAttachImageActionInSnapshot,
   findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
+  findBottomTabNodeInSnapshot,
   findAnyNodeInSnapshot,
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
+  findResourceIdInSnapshot,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
+  getBottomTabTapPoint,
+  goToHome,
+  goToModelCatalog,
   isAppForegroundSnapshot,
   openFirstVisibleVariantPicker,
   parseCliOptions,
@@ -42,6 +47,7 @@ const {
   ScenarioSkipFailureError,
   serializeReportResults,
   shouldAppendRunnerFailure,
+  waitForAnyNode,
 } = require('../../scripts/android-scenarios');
 
 const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
@@ -514,6 +520,91 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(match.node.text).toBe('Home');
   });
 
+  it('accepts a node from the final timeout-boundary snapshot', async () => {
+    const finalSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Model Catalog" content-desc="" clickable="false" bounds="[100,120][980,220]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn(() => finalSnapshot);
+
+    await expect(waitForAnyNode('adb', 'serial', ['Model Catalog'], {
+      timeoutMs: 0,
+      visibleOnly: true,
+      createSnapshot,
+    })).resolves.toEqual(expect.objectContaining({ label: 'Model Catalog' }));
+    expect(createSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the same final snapshot for timeout diagnostics', async () => {
+    const finalSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Still loading" content-desc="" clickable="false" bounds="[100,120][980,220]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn(() => finalSnapshot);
+
+    await expect(waitForAnyNode('adb', 'serial', ['Model Catalog'], {
+      timeoutMs: 0,
+      visibleOnly: true,
+      createSnapshot,
+    })).rejects.toThrow(/Visible UI: Still loading/);
+    expect(createSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts Home when it appears on the final recovery snapshot', async () => {
+    const findAnyNodeNow = jest.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ label: 'Active model' });
+    const ctx = {
+      serial: 'device-1',
+      ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+      dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockRejectedValueOnce(new Error('boundary timeout')),
+    };
+
+    await expect(goToHome(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow,
+      tryReachHome: jest.fn().mockResolvedValue(false),
+    })).resolves.toBeUndefined();
+
+    expect(findAnyNodeNow).toHaveBeenCalledTimes(2);
+    expect(ctx.expectAnyText).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens catalog scenarios through the bottom tab independently of the active-model CTA', async () => {
+    const ctx = {
+      tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+    const goHome = jest.fn().mockResolvedValue(undefined);
+
+    await goToModelCatalog(ctx, { goToHome: goHome });
+
+    expect(goHome).toHaveBeenCalledWith(ctx);
+    expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Models']));
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']));
+  });
+
+  it('matches a visible namespaced resource id and ignores offscreen duplicates', () => {
+    const resourceSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-list-viewport" text="" content-desc="" clickable="false" bounds="[20,2500][1060,3000]" />
+        <node resource-id="com.github.tah10n.pocketai:id/chat-list-viewport" text="" content-desc="" clickable="false" bounds="[20,300][1060,1800]" />
+      </hierarchy>
+    `);
+
+    const node = findResourceIdInSnapshot(resourceSnapshot, 'chat-list-viewport', {
+      visibleOnly: true,
+    });
+
+    expect(node?.resourceId).toBe('com.github.tah10n.pocketai:id/chat-list-viewport');
+  });
+
   it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
     const uniquePrompt = 'Describe prepared image 12345 67890';
     const staleComposerSnapshot = parseUiSnapshot(`
@@ -691,6 +782,21 @@ describe('android-scenarios UI snapshot matching', () => {
 
     expect(match).toBeTruthy();
     expect(match.node.contentDesc).toBe('Choose GGUF file, current: Q8_0 - 7.20 GB');
+  });
+
+  it('recognizes a generic GGUF variant row by its stable selector resource id', () => {
+    const genericSelectorSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node resource-id="model-variant-selector-deepseek-v4-gguf" text="" content-desc="Choose GGUF file, current: GGUF - 86.72 GB" clickable="true" bounds="[40,500][1040,620]" />
+        <node text="GGUF - 86.72 GB" content-desc="" clickable="false" bounds="[80,520][760,600]" />
+      </hierarchy>
+    `);
+
+    const match = findQuantizationSelectorNodeClearOfBottomOverlay(genericSelectorSnapshot);
+
+    expect(match).toBeTruthy();
+    expect(match.node.resourceId).toBe('model-variant-selector-deepseek-v4-gguf');
   });
 
   it('finds i-quant and float selector rows by the compact value text', () => {
@@ -1147,6 +1253,122 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('taps the clickable upper portion of a bottom tab when a warning banner covers its center', () => {
+    const tabSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Models" content-desc="" clickable="true" bounds="[50,200][350,320]" />
+        <node text="" content-desc="icon, Models" clickable="true" bounds="[540,2142][810,2286]" />
+        <node text="Models" content-desc="" clickable="false" bounds="[625,2250][724,2286]" />
+        <node text="Open debugger to view warnings." content-desc="" clickable="true" bounds="[30,2194][1050,2337]" />
+      </hierarchy>
+    `);
+
+    const match = findBottomTabNodeInSnapshot(tabSnapshot, ['Models']);
+    const tapPoint = getBottomTabTapPoint(match.node);
+
+    expect(match.node.clickable).toBe(true);
+    expect(match.node.bounds.top).toBe(2142);
+    expect(tapPoint).toEqual({ centerX: 675, centerY: 2174 });
+    expect(tapPoint.centerY).toBeLessThan(2194);
+  });
+
+  it('uses stable route anchors in core navigation scenarios without scanning Settings content', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
+    const previousAndroidHome = process.env.ANDROID_HOME;
+    const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
+    const adbDir = path.join(tempDir, 'platform-tools');
+    const adbPath = path.join(adbDir, process.platform === 'win32' ? 'adb.exe' : 'adb');
+    const homeHierarchyXml = `
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" content-desc="" clickable="false" bounds="[20,40][420,120]" />
+        <node text="Recent Conversations" content-desc="" clickable="false" bounds="[20,160][720,240]" />
+        <node text="Theme Mode" content-desc="" clickable="true" bounds="[40,400][1040,520]" />
+        <node text="Language" content-desc="" clickable="true" bounds="[40,600][1040,720]" />
+        <node text="Storage Manager" content-desc="" clickable="true" bounds="[40,800][1040,920]" />
+      </hierarchy>
+    `;
+
+    fs.mkdirSync(adbDir, { recursive: true });
+    fs.writeFileSync(adbPath, '');
+    process.env.ANDROID_HOME = tempDir;
+    delete process.env.ANDROID_SDK_ROOT;
+
+    try {
+      const spawnSync = jest.fn((_command, args) => {
+        if (args.includes('exec-out')) {
+          return { status: 0, stdout: homeHierarchyXml, stderr: '' };
+        }
+
+        return { status: 0, stdout: '', stderr: '' };
+      });
+      let isolatedBuildScenarios;
+      jest.isolateModules(() => {
+        jest.doMock('child_process', () => ({ spawnSync }));
+        ({ buildScenarios: isolatedBuildScenarios } = require('../../scripts/android-scenarios'));
+      });
+
+      const isolatedScenarios = isolatedBuildScenarios();
+      const events = [];
+      const newChatContext = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn(async (labels) => {
+          events.push(labels.includes('No messages yet') ? 'empty-copy' : 'text');
+        }),
+        expectResourceId: jest.fn(async () => {
+          events.push('chat-viewport');
+        }),
+        tapAnyText: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await isolatedScenarios.find((scenario) => scenario.id === 'new-chat-cta').run(newChatContext);
+
+      expect(newChatContext.expectResourceId).toHaveBeenCalledWith('chat-list-viewport', {
+        timeoutMs: 60_000,
+      });
+      expect(newChatContext.expectAnyText).toHaveBeenCalledWith(
+        expect.arrayContaining(['No messages yet']),
+        { timeoutMs: 60_000 }
+      );
+      expect(events.indexOf('chat-viewport')).toBeLessThan(events.indexOf('empty-copy'));
+
+      const dumpsBeforeBottomTabs = spawnSync.mock.calls.filter(([, args]) => args.includes('exec-out')).length;
+      const bottomTabsContext = {
+        serial: 'device-1',
+        ensureAppVisible: jest.fn().mockResolvedValue(undefined),
+        dismissDebuggerBanner: jest.fn().mockResolvedValue(undefined),
+        expectAnyText: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        swipeDown: jest.fn().mockResolvedValue(undefined),
+        swipeUp: jest.fn().mockResolvedValue(undefined),
+      };
+
+      await isolatedScenarios.find((scenario) => scenario.id === 'bottom-tabs').run(bottomTabsContext);
+
+      const dumpsAfterBottomTabs = spawnSync.mock.calls.filter(([, args]) => args.includes('exec-out')).length;
+      expect(dumpsAfterBottomTabs - dumpsBeforeBottomTabs).toBe(1);
+      expect(bottomTabsContext.swipeDown).not.toHaveBeenCalled();
+      expect(bottomTabsContext.swipeUp).not.toHaveBeenCalled();
+    } finally {
+      jest.dontMock('child_process');
+      if (previousAndroidHome === undefined) {
+        delete process.env.ANDROID_HOME;
+      } else {
+        process.env.ANDROID_HOME = previousAndroidHome;
+      }
+      if (previousAndroidSdkRoot === undefined) {
+        delete process.env.ANDROID_SDK_ROOT;
+      } else {
+        process.env.ANDROID_SDK_ROOT = previousAndroidSdkRoot;
+      }
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
   it('runs the variant picker smoke check from the catalog pack', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'catalog'])).map((scenario) => scenario.id)).toEqual([
       'variant-picker-smoke',
@@ -1340,7 +1562,7 @@ describe('android-scenarios pack selection', () => {
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${prompt || ''}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="${prompt ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
@@ -1349,7 +1571,7 @@ describe('android-scenarios pack selection', () => {
     const textOnlyMenuHierarchyXml = () => `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;
@@ -1473,7 +1695,7 @@ describe('android-scenarios pack selection', () => {
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
         <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${typedPrompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
@@ -1482,7 +1704,7 @@ describe('android-scenarios pack selection', () => {
     const textOnlyMenuHierarchyXml = () => `
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
-        <node text="This model supports text chat only. Load an audio-capable model before attaching audio." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
+        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `;

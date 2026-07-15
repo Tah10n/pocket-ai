@@ -11,12 +11,15 @@ import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 function createProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArtifact {
+  const repoId = overrides.repoId ?? 'org/model';
+  const fileName = overrides.fileName ?? 'mmproj-model.gguf';
+  const hfRevision = overrides.hfRevision ?? 'main';
   return {
     id: 'projector-org-model-main-mmproj-model.gguf',
     ownerModelId: 'org/model',
-    repoId: 'org/model',
-    fileName: 'mmproj-model.gguf',
-    downloadUrl: 'https://huggingface.co/org/model/resolve/main/mmproj-model.gguf',
+    repoId,
+    fileName,
+    downloadUrl: `https://huggingface.co/${repoId}/resolve/${hfRevision}/${fileName}`,
     size: 1024,
     lifecycleStatus: 'available',
     matchStatus: 'matched',
@@ -192,6 +195,17 @@ describe('modelsStore', () => {
       shouldPromptForChoice: false,
     }));
 
+    expect(selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [readyProjector],
+      selectedProjectorId: readyProjector.id,
+    }))).toEqual(expect.objectContaining({
+      status: 'downloaded',
+      selectedProjector: expect.objectContaining({ id: readyProjector.id }),
+      isReady: true,
+      shouldPromptForChoice: false,
+    }));
+
     const ambiguousState = selectModelProjectorLifecycleState(createModel({
       chatModalities: ['text', 'vision'],
       projectorCandidates: [
@@ -205,6 +219,19 @@ describe('modelsStore', () => {
     }));
     expect(ambiguousState.selectedProjector).toBeUndefined();
 
+    const audioAmbiguousState = selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'audio'],
+      projectorCandidates: [
+        createProjector({ id: 'projector-a', fileName: 'mmproj-a.gguf', matchStatus: 'ambiguous' }),
+        createProjector({ id: 'projector-b', fileName: 'mmproj-b.gguf', matchStatus: 'ambiguous' }),
+      ],
+    }));
+    expect(audioAmbiguousState).toEqual(expect.objectContaining({
+      status: 'ambiguous',
+      shouldPromptForChoice: true,
+    }));
+    expect(audioAmbiguousState.selectedProjector).toBeUndefined();
+
     expect(selectModelProjectorLifecycleState(createModel({
       projectorCandidates: [readyProjector],
       selectedProjectorId: readyProjector.id,
@@ -212,6 +239,28 @@ describe('modelsStore', () => {
       status: 'downloaded',
       selectedProjector: expect.objectContaining({ id: readyProjector.id }),
       isReady: true,
+    }));
+  });
+
+  it('returns text-only lifecycle for an active text-only variant despite parent multimodal metadata', () => {
+    const projector = createProjector({ lifecycleStatus: 'downloaded' });
+    expect(selectModelProjectorLifecycleState(createModel({
+      chatModalities: ['text', 'vision', 'audio'],
+      activeVariantId: 'text-variant',
+      resolvedFileName: 'text.gguf',
+      variants: [{
+        variantId: 'text-variant',
+        fileName: 'text.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text'],
+      }],
+      selectedProjectorId: projector.id,
+      projectorCandidates: [projector],
+    }))).toEqual(expect.objectContaining({
+      status: 'text_only',
+      reason: 'text_only',
+      candidates: [],
     }));
   });
 
@@ -225,8 +274,32 @@ describe('modelsStore', () => {
     });
     const clearedModel = clearModelProjectorLocalState(createModel({
       chatModalities: ['text', 'vision'],
+      activeVariantId: 'model-variant',
+      resolvedFileName: 'model.gguf',
       selectedProjectorId: projector.id,
       projectorCandidates: [projector],
+      variants: [{
+        variantId: 'model-variant',
+        fileName: 'model.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1024,
+        chatModalities: ['text', 'vision'],
+        selectedProjectorId: projector.id,
+        projectorCandidates: [{ ...projector }],
+      }],
+      artifacts: [{
+        id: projector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['image'],
+        remoteFileName: projector.fileName,
+        downloadUrl: projector.downloadUrl,
+        sizeBytes: projector.size,
+        localPath: projector.localPath,
+        installState: 'installed',
+        downloadProgress: 1,
+        resumeData: 'stale-artifact-resume',
+        integrity: { kind: 'size', sizeBytes: 1024, checkedAt: 7 },
+      }],
       multimodalReadiness: {
         modelId: 'org/model',
         status: 'ready',
@@ -246,5 +319,47 @@ describe('modelsStore', () => {
       downloadProgress: undefined,
       matchStatus: 'user_selected',
     }));
+    expect(clearedModel.variants?.[0].selectedProjectorId).toBe(projector.id);
+    expect(clearedModel.variants?.[0].projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: projector.id,
+      lifecycleStatus: 'available',
+      localPath: undefined,
+      resumeData: undefined,
+      downloadProgress: undefined,
+    }));
+    expect(clearedModel.artifacts?.[0]).toEqual({
+      id: projector.id,
+      kind: 'multimodal_projector',
+      requiredFor: ['image'],
+      remoteFileName: projector.fileName,
+      downloadUrl: projector.downloadUrl,
+      sizeBytes: projector.size,
+      installState: 'remote',
+    });
+  });
+
+  it('clears artifact-only projector runtime state after storage cleanup', () => {
+    const projector = createProjector();
+    const clearedModel = clearModelProjectorLocalState(createModel({
+      artifacts: [{
+        id: projector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['audio'],
+        remoteFileName: projector.fileName,
+        downloadUrl: projector.downloadUrl,
+        sizeBytes: projector.size,
+        localPath: 'deleted-mmproj.gguf',
+        installState: 'installed',
+        downloadProgress: 1,
+      }],
+    }));
+
+    expect(clearedModel.artifacts?.[0]).toEqual(expect.objectContaining({
+      id: projector.id,
+      requiredFor: ['audio'],
+      installState: 'remote',
+    }));
+    expect(clearedModel.artifacts?.[0]?.localPath).toBeUndefined();
+    expect(clearedModel.artifacts?.[0]?.downloadProgress).toBeUndefined();
   });
 });

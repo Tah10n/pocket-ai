@@ -3314,6 +3314,86 @@ describe('useChatSession', () => {
     }));
   });
 
+  it('blocks legacy video regeneration before mutating or stripping the attachment', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this saved video.');
+    });
+
+    const activeThread = useChatStore.getState().getActiveThread();
+    const userMessageId = activeThread?.messages.find((message) => message.role === 'user')?.id ?? '';
+    expect(activeThread).toBeTruthy();
+    expect(userMessageId).toBeTruthy();
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          ...useChatStore.getState().threads,
+          [activeThread?.id ?? '']: {
+            ...activeThread!,
+            messages: activeThread!.messages.map((message) => (
+              message.id === userMessageId
+                ? {
+                    ...message,
+                    attachments: [{
+                      id: 'attachment-video-only',
+                      kind: 'video',
+                      state: 'ready',
+                      threadId: activeThread!.id,
+                      messageId: userMessageId,
+                      localUri: 'test-dir/chat-attachments/video-only.mp4',
+                      pathCategory: 'chat_attachment',
+                      fileName: 'video-only.mp4',
+                      mimeType: 'video/mp4',
+                      sizeBytes: 123_456,
+                      source: 'photo_library',
+                      createdAt: 1,
+                      video: {
+                        derivedAttachmentIds: [],
+                        samplingVersion: 1,
+                      },
+                    }],
+                  }
+                : message
+            )),
+          },
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread();
+    const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+    const replaceBranchSpy = jest.spyOn(useChatStore.getState(), 'replaceBranchFromUserMessage');
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.regenerateFromUserMessage(userMessageId, 'Edited video prompt');
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({
+        code: 'chat_attachment_unsupported_type',
+        details: {
+          attachmentKind: 'video',
+          attachmentCount: 1,
+        },
+      }));
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
+      expect(replaceBranchSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages).toEqual(threadBeforeRegenerate?.messages);
+    } finally {
+      replaceBranchSpy.mockRestore();
+    }
+  });
+
   it('removes stale audio content parts when a retained audio file is missing', async () => {
     const threadId = 'thread-audio-history';
     const userMessageId = 'message-audio-history';

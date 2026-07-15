@@ -6,7 +6,41 @@ import {
   type ModelMetadata,
   type ModelVariant,
 } from '../types/models';
+import type {
+  CapabilityEvidence,
+  ModelInputCapabilitySnapshot,
+  NativeInputModality,
+} from '../types/modelInputCapabilities';
 import type { ProjectorArtifact, ProjectorMatchStatus, VisionCapabilitySource } from '../types/multimodal';
+import {
+  buildHuggingFaceResolveUrl,
+  normalizeHuggingFaceRepoId,
+  normalizeHuggingFaceFilePath,
+  remoteProjectorIdentitiesEqual,
+  remoteProjectorIdentityKey,
+  resolveCatalogProjectorEvidenceIdentity,
+  resolveHuggingFaceRevision,
+  resolveHuggingFaceResolveIdentity,
+  resolveRemoteProjectorIdentity,
+  type RemoteProjectorIdentity,
+} from '../utils/huggingFaceUrls';
+import { buildMainModelArtifactId } from '../utils/modelArtifacts';
+import {
+  projectorArtifactMatchesCandidate,
+  projectorArtifactUsesLegacyAlias,
+} from '../utils/modelCapabilities';
+import {
+  getInputCapabilityEvidenceModalities,
+  mergeCapabilityEvidence,
+} from '../utils/modelInputCapabilities';
+import {
+  buildLegacyProjectorArtifactId,
+  buildProjectorArtifactId,
+} from '../utils/modelProjectors';
+import {
+  canonicalizeProjectorCandidateAliases,
+  getExactProjectorScopeKey,
+} from '../utils/projectorIdentity';
 import { CATALOG_SEARCH_VARIANT_LIMIT, limitModelVariants } from './ModelCatalogFileSelector';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { createStorage } from './storage';
@@ -20,6 +54,7 @@ export type CatalogCacheScope = {
   pageSize: number;
   sort: CatalogCacheSort;
   authScope: CatalogCacheAuthScope;
+  gated?: boolean | null;
 };
 
 export type CatalogCacheResult = {
@@ -49,9 +84,13 @@ type PersistedPayload<T> = {
 };
 
 type ParsedPayload<T> = {
-  status: 'empty' | 'invalid' | 'ok';
+  status: 'empty' | 'invalid' | 'oversized' | 'ok';
   entries: T[];
   needsRewrite: boolean;
+};
+
+export type ModelCatalogCacheStoreOptions = {
+  hydrateOnCreate?: boolean;
 };
 
 const STORAGE_ID = 'model-catalog-cache';
@@ -60,8 +99,9 @@ const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-const PERSISTED_CACHE_VERSION = 4;
-const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, PERSISTED_CACHE_VERSION]);
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 8;
+export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 1_500_000;
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, 7, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
@@ -71,7 +111,37 @@ const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
   'chatModalities' | 'projectorCandidates' | 'visionConfidence'
->>;
+>> & Partial<Pick<ModelMetadata, 'artifacts' | 'inputCapabilities' | 'id'>>;
+
+export type CatalogSafeNativeCapabilityContext = {
+  vision: boolean;
+  audio: boolean;
+  projectorEvidenceFileNames: ReadonlySet<string>;
+  projectorEvidenceIdentityKeys: ReadonlySet<string>;
+  projectorCandidateScopeIds: ReadonlySet<string>;
+};
+
+type CatalogSanitizationOptions = {
+  persistedVersion?: number;
+  rawModel?: unknown;
+};
+
+type CatalogProjectorIdentityAudit = {
+  identitiesByKey: ReadonlyMap<string, RemoteProjectorIdentity>;
+  candidateIdentityKeys: ReadonlySet<string>;
+  identityKeysByFoldedPath: ReadonlyMap<string, ReadonlySet<string>>;
+  identityKeysByFoldedBasename: ReadonlyMap<string, ReadonlySet<string>>;
+  candidateIdsByLegacyAlias: ReadonlyMap<string, ReadonlySet<string>>;
+  candidateScopeIdsById: ReadonlyMap<string, ReadonlySet<string>>;
+  poisonedCandidateScopeIds: ReadonlySet<string>;
+  poisonedFoldedPaths: ReadonlySet<string>;
+  poisonedFoldedBasenames: ReadonlySet<string>;
+  evidenceIdentityKeys: ReadonlySet<string>;
+};
+
+type JsonComparableValue = null | boolean | number | string | JsonComparableValue[] | {
+  [key: string]: JsonComparableValue;
+};
 
 function isPublicAnonymousModel(model: ModelMetadata): boolean {
   return model.accessState === ModelAccessState.PUBLIC
@@ -107,23 +177,540 @@ function modelHasCatalogSafeVisionSource(model: Pick<ModelMetadata, 'visionSourc
   return Boolean(model.visionSource && CATALOG_SAFE_VISION_SOURCES.has(model.visionSource));
 }
 
-function getRemoteFileNameFromDownloadUrl(downloadUrl: string): string | undefined {
-  try {
-    const url = new URL(downloadUrl);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-      return undefined;
+function modelArtifactsRequireAudioProjector(artifacts: ModelMetadata['artifacts']): boolean {
+  return artifacts?.some((artifact) => (
+    artifact.kind === 'multimodal_projector' && artifact.requiredFor.includes('audio')
+  )) === true;
+}
+
+function modelHasCatalogAudioCapabilitySignal(
+  model: Partial<Pick<ModelMetadata, 'artifacts' | 'chatModalities' | 'inputCapabilities'>>,
+): boolean {
+  return model.chatModalities?.includes('audio') === true
+    || model.inputCapabilities?.declared.audio === 'supported'
+    || modelArtifactsRequireAudioProjector(model.artifacts);
+}
+
+function modelHasCatalogSafeAudioCapabilityEvidence(
+  model: Partial<Pick<ModelMetadata, 'inputCapabilities'>>,
+): boolean {
+  return model.inputCapabilities?.evidence.some((entry) => {
+    if (entry.source === 'runtime' || entry.source === 'projector') {
+      return false;
     }
 
-    const encodedName = url.pathname.split('/').filter(Boolean).pop();
-    if (!encodedName) {
-      return undefined;
-    }
+    return getInputCapabilityEvidenceModalities(entry).includes('audio');
+  }) === true;
+}
 
-    const decodedName = decodeURIComponent(encodedName).trim();
-    return decodedName.length > 0 ? decodedName : undefined;
-  } catch {
-    return undefined;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function addIdentityToIndex(
+  index: Map<string, Set<string>>,
+  alias: string,
+  identityKey: string,
+): void {
+  const keys = index.get(alias) ?? new Set<string>();
+  keys.add(identityKey);
+  index.set(alias, keys);
+}
+
+function getFoldedProjectorBasename(filePath: string): string {
+  return filePath.split('/').pop()?.toLowerCase() ?? filePath.toLowerCase();
+}
+
+function getCatalogProjectorCandidateScopeId(
+  identity: RemoteProjectorIdentity,
+  ownerVariantId: unknown,
+  ownerModelId: string,
+): string {
+  return getExactProjectorScopeKey({
+    ownerModelId,
+    ...(typeof ownerVariantId === 'string' && ownerVariantId.trim()
+      ? { ownerVariantId: ownerVariantId.trim() }
+      : {}),
+    repoId: identity.repoId,
+    revision: identity.revision,
+    filePath: identity.filePath,
+  });
+}
+
+function normalizeConservativePoisonedProjectorPath(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
   }
+
+  const segments = value.trim()
+    .replace(/\\+/gu, '/')
+    .replace(/\/+/gu, '/')
+    .split('/')
+    .map((segment) => segment.replace(/[\u0000-\u001f\u007f]/gu, '').trim())
+    .filter((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+  return segments.length > 0 ? segments.join('/') : null;
+}
+
+function resolveCatalogProjectorArtifactIdentity(
+  artifact: Partial<ModelArtifactMetadata>,
+): RemoteProjectorIdentity | null {
+  const identity = resolveHuggingFaceResolveIdentity(artifact.downloadUrl);
+  const remoteFileName = normalizeHuggingFaceFilePath(artifact.remoteFileName);
+  if (
+    artifact.kind !== 'multimodal_projector'
+    || !identity
+    || remoteFileName !== identity.filePath
+    || resolveHuggingFaceRevision(artifact.hfRevision) !== identity.revision
+  ) {
+    return null;
+  }
+
+  return identity;
+}
+
+function resolveCatalogProjectorCandidateIdentity(
+  projector: Partial<ProjectorArtifact>,
+  ownerModelId: string,
+): RemoteProjectorIdentity | null {
+  if (projector.ownerModelId !== ownerModelId) {
+    return null;
+  }
+
+  return resolveRemoteProjectorIdentity({
+    repoId: projector.repoId,
+    revision: projector.hfRevision,
+    filePath: projector.fileName,
+    downloadUrl: projector.downloadUrl,
+  });
+}
+
+function getRawProjectorCandidates(rawModel: unknown): Partial<ProjectorArtifact>[] {
+  if (!isRecord(rawModel)) {
+    return [];
+  }
+
+  const modelCandidates = Array.isArray(rawModel.projectorCandidates)
+    ? rawModel.projectorCandidates.filter(isRecord)
+    : [];
+  const variantCandidates = Array.isArray(rawModel.variants)
+    ? rawModel.variants.filter(isRecord).flatMap((variant) => (
+      Array.isArray(variant.projectorCandidates)
+        ? variant.projectorCandidates.filter(isRecord)
+        : []
+    ))
+    : [];
+  return [...modelCandidates, ...variantCandidates] as Partial<ProjectorArtifact>[];
+}
+
+function getRawProjectorArtifacts(rawModel: unknown): Partial<ModelArtifactMetadata>[] {
+  if (!isRecord(rawModel) || !Array.isArray(rawModel.artifacts)) {
+    return [];
+  }
+
+  return rawModel.artifacts.filter((artifact) => (
+    isRecord(artifact) && artifact.kind === 'multimodal_projector'
+  )) as Partial<ModelArtifactMetadata>[];
+}
+
+function getRawProjectorEvidence(rawModel: unknown): CapabilityEvidence[] {
+  if (!isRecord(rawModel) || !isRecord(rawModel.inputCapabilities)) {
+    return [];
+  }
+
+  return Array.isArray(rawModel.inputCapabilities.evidence)
+    ? rawModel.inputCapabilities.evidence.filter(isRecord) as unknown as CapabilityEvidence[]
+    : [];
+}
+
+function buildCatalogProjectorIdentityAudit(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions,
+): CatalogProjectorIdentityAudit {
+  const rawModel = options.rawModel ?? model;
+  const owningRepoId = normalizeHuggingFaceRepoId(model.id);
+  const owningRevision = resolveHuggingFaceRevision(model.hfRevision);
+  const identitiesByKey = new Map<string, RemoteProjectorIdentity>();
+  const candidateIdentityKeys = new Set<string>();
+  const identityKeysByFoldedPath = new Map<string, Set<string>>();
+  const identityKeysByFoldedBasename = new Map<string, Set<string>>();
+  const candidateIdsByLegacyAlias = new Map<string, Set<string>>();
+  const candidateScopeIdsById = new Map<string, Set<string>>();
+  const poisonedCandidateScopeIds = new Set<string>();
+  const poisonedFoldedPaths = new Set<string>();
+  const poisonedFoldedBasenames = new Set<string>();
+
+  const recordPoisonedPath = (value: unknown): void => {
+    const filePath = normalizeHuggingFaceFilePath(value)
+      ?? normalizeConservativePoisonedProjectorPath(value);
+    if (!filePath) {
+      return;
+    }
+
+    poisonedFoldedPaths.add(filePath.toLowerCase());
+    poisonedFoldedBasenames.add(getFoldedProjectorBasename(filePath));
+  };
+  const recordIdentity = (identity: RemoteProjectorIdentity): string => {
+    const identityKey = remoteProjectorIdentityKey(identity);
+    identitiesByKey.set(identityKey, identity);
+    addIdentityToIndex(identityKeysByFoldedPath, identity.filePath.toLowerCase(), identityKey);
+    addIdentityToIndex(
+      identityKeysByFoldedBasename,
+      getFoldedProjectorBasename(identity.filePath),
+      identityKey,
+    );
+    return identityKey;
+  };
+
+  const candidateRecords: {
+    projector: ProjectorArtifact;
+    identity: RemoteProjectorIdentity;
+    currentScopeId: string;
+    currentId: string;
+    legacyId: string;
+  }[] = [];
+  for (const projector of getRawProjectorCandidates(rawModel)) {
+    const candidateRepoId = normalizeHuggingFaceRepoId(projector.repoId);
+    const belongsToOwningRepository = projector.ownerModelId === model.id
+      && owningRepoId !== null
+      && candidateRepoId === owningRepoId;
+    if (!belongsToOwningRepository) {
+      continue;
+    }
+
+    const identity = resolveCatalogProjectorCandidateIdentity(projector, model.id);
+    if (!identity) {
+      recordPoisonedPath(projector.fileName);
+      continue;
+    }
+
+    const identityKey = recordIdentity(identity);
+    if (identity.revision === owningRevision) {
+      candidateIdentityKeys.add(identityKey);
+    }
+    const idInput = {
+      repoId: identity.repoId,
+      hfRevision: identity.revision,
+      fileName: identity.filePath,
+      ...(typeof projector.ownerVariantId === 'string' && projector.ownerVariantId.trim()
+        ? { ownerVariantId: projector.ownerVariantId.trim() }
+        : {}),
+    };
+    const currentScopeId = getCatalogProjectorCandidateScopeId(
+      identity,
+      idInput.ownerVariantId,
+      model.id,
+    );
+    const currentId = buildProjectorArtifactId(idInput);
+    const legacyId = buildLegacyProjectorArtifactId(idInput);
+    addIdentityToIndex(
+      candidateIdsByLegacyAlias,
+      legacyId,
+      currentScopeId,
+    );
+    if (typeof projector.id === 'string' && projector.id.trim()) {
+      const canonicalProjector = {
+        ...projector,
+        id: projector.id.trim(),
+      } as ProjectorArtifact;
+      addIdentityToIndex(candidateScopeIdsById, canonicalProjector.id, currentScopeId);
+      addIdentityToIndex(candidateScopeIdsById, currentId, currentScopeId);
+      candidateRecords.push({
+        projector: canonicalProjector,
+        identity,
+        currentScopeId,
+        currentId,
+        legacyId,
+      });
+    }
+  }
+
+  const artifactRecords = getRawProjectorArtifacts(rawModel).map((rawArtifact) => {
+    const artifact = {
+      ...rawArtifact,
+      ...(typeof rawArtifact.id === 'string' ? { id: rawArtifact.id.trim() } : {}),
+    };
+    return {
+      artifact,
+      identity: resolveCatalogProjectorArtifactIdentity(artifact),
+    };
+  });
+  for (const candidateRecord of candidateRecords) {
+    const legacyAliasIsUnique = (candidateIdsByLegacyAlias.get(candidateRecord.legacyId)?.size ?? 0) === 1;
+    let relatedRequiredForKey: string | undefined;
+    for (const artifactRecord of artifactRecords) {
+      const artifact = artifactRecord.artifact;
+      const isRelated = artifact.id === candidateRecord.projector.id
+        || artifact.id === candidateRecord.currentId
+        || artifact.id === candidateRecord.legacyId
+        || Boolean(
+          artifactRecord.identity
+          && remoteProjectorIdentitiesEqual(artifactRecord.identity, candidateRecord.identity),
+        );
+      if (!isRelated) {
+        continue;
+      }
+
+      const normalizedRequiredFor = Array.isArray(artifact.requiredFor)
+        ? [...new Set(artifact.requiredFor.filter((entry) => entry === 'image' || entry === 'audio'))]
+          .sort()
+        : [];
+      const requiredForKey = JSON.stringify(normalizedRequiredFor);
+      if (
+        normalizedRequiredFor.length === 0
+        || (relatedRequiredForKey !== undefined && relatedRequiredForKey !== requiredForKey)
+      ) {
+        poisonedCandidateScopeIds.add(candidateRecord.currentScopeId);
+      } else {
+        relatedRequiredForKey = requiredForKey;
+      }
+
+      if (
+        (projectorArtifactUsesLegacyAlias(
+          artifact as ModelArtifactMetadata,
+          candidateRecord.projector,
+        ) && !legacyAliasIsUnique)
+        || !projectorArtifactMatchesCandidate(
+          artifact as ModelArtifactMetadata,
+          candidateRecord.projector,
+        )
+      ) {
+        poisonedCandidateScopeIds.add(candidateRecord.currentScopeId);
+      }
+    }
+  }
+
+  const isLegacyPayload = typeof options.persistedVersion === 'number'
+    && options.persistedVersion < MODEL_CATALOG_CACHE_PERSISTED_VERSION;
+  const evidenceIdentityKeys = new Set<string>();
+  for (const evidence of getRawProjectorEvidence(rawModel)) {
+    if (evidence.source !== 'projector' || typeof evidence.value !== 'string') {
+      continue;
+    }
+
+    const evidenceIdentity = resolveCatalogProjectorEvidenceIdentity(model, evidence.value);
+    if (!evidenceIdentity) {
+      continue;
+    }
+
+    if (!isLegacyPayload) {
+      const identityKey = remoteProjectorIdentityKey(evidenceIdentity);
+      if (candidateIdentityKeys.has(identityKey)) {
+        evidenceIdentityKeys.add(identityKey);
+      }
+      continue;
+    }
+
+    const normalizedPath = evidenceIdentity.filePath;
+    const isFullPathEvidence = /[\\/]/u.test(evidence.value.trim());
+    const alias = isFullPathEvidence
+      ? normalizedPath.toLowerCase()
+      : getFoldedProjectorBasename(normalizedPath);
+    const identityKeys = isFullPathEvidence
+      ? identityKeysByFoldedPath.get(alias)
+      : identityKeysByFoldedBasename.get(alias);
+    const isPoisoned = isFullPathEvidence
+      ? poisonedFoldedPaths.has(alias)
+      : poisonedFoldedBasenames.has(alias);
+    if (!isPoisoned && identityKeys?.size === 1) {
+      const identityKey = [...identityKeys][0] as string;
+      if (candidateIdentityKeys.has(identityKey)) {
+        evidenceIdentityKeys.add(identityKey);
+      }
+    }
+  }
+
+  return {
+    identitiesByKey,
+    candidateIdentityKeys,
+    identityKeysByFoldedPath,
+    identityKeysByFoldedBasename,
+    candidateIdsByLegacyAlias,
+    candidateScopeIdsById,
+    poisonedCandidateScopeIds,
+    poisonedFoldedPaths,
+    poisonedFoldedBasenames,
+    evidenceIdentityKeys,
+  };
+}
+
+function canonicalizeCatalogProjectorCandidate(
+  projector: ProjectorArtifact,
+  ownerModelId: string,
+): ProjectorArtifact | null {
+  const identity = resolveCatalogProjectorCandidateIdentity(projector, ownerModelId);
+  if (!identity) {
+    return null;
+  }
+
+  const idInput = {
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    ...(projector.ownerVariantId?.trim() ? { ownerVariantId: projector.ownerVariantId.trim() } : {}),
+  };
+  return {
+    ...projector,
+    id: projector.id.trim(),
+    ownerModelId,
+    ...(idInput.ownerVariantId ? { ownerVariantId: idInput.ownerVariantId } : { ownerVariantId: undefined }),
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    downloadUrl: buildHuggingFaceResolveUrl(identity.repoId, identity.filePath, identity.revision),
+  };
+}
+
+function artifactIsRelatedToProjector(
+  artifact: ModelArtifactMetadata,
+  projector: ProjectorArtifact,
+  identity: RemoteProjectorIdentity,
+): boolean {
+  if (artifact.kind !== 'multimodal_projector') {
+    return false;
+  }
+
+  const artifactIdentity = resolveCatalogProjectorArtifactIdentity(artifact);
+  const idInput = {
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    ownerVariantId: projector.ownerVariantId,
+  };
+  const currentId = buildProjectorArtifactId(idInput);
+  const legacyId = buildLegacyProjectorArtifactId(idInput);
+  return artifact.id === projector.id
+    || artifact.id === currentId
+    || artifact.id === legacyId
+    || Boolean(artifactIdentity && remoteProjectorIdentitiesEqual(artifactIdentity, identity));
+}
+
+function catalogProjectorRepresentationSupportsInput(
+  model: CatalogVisionRuntimeSource,
+  projector: ProjectorArtifact,
+  identity: RemoteProjectorIdentity,
+  input: 'image' | 'audio',
+  audit: CatalogProjectorIdentityAudit,
+): boolean {
+  const relatedArtifacts = model.artifacts?.filter((artifact) => (
+    artifactIsRelatedToProjector(artifact, projector, identity)
+  )) ?? [];
+  if (relatedArtifacts.length === 0) {
+    return true;
+  }
+
+  const legacyId = buildLegacyProjectorArtifactId({
+    repoId: identity.repoId,
+    hfRevision: identity.revision,
+    fileName: identity.filePath,
+    ownerVariantId: projector.ownerVariantId,
+  });
+  const currentScopeId = getCatalogProjectorCandidateScopeId(
+    identity,
+    projector.ownerVariantId,
+    projector.ownerModelId,
+  );
+  const legacyAliasIsUnique = (audit.candidateIdsByLegacyAlias.get(legacyId)?.size ?? 0) === 1;
+  const allCompatible = relatedArtifacts.every((artifact) => (
+    !(projectorArtifactUsesLegacyAlias(artifact, projector) && !legacyAliasIsUnique)
+    && (
+      projectorArtifactMatchesCandidate(artifact, projector)
+      || audit.candidateScopeIdsById.get(artifact.id)?.has(currentScopeId) === true
+    )
+  ));
+  return allCompatible && relatedArtifacts.some((artifact) => artifact.requiredFor.includes(input));
+}
+
+function createCatalogSafeNativeCapabilityContext(
+  model: CatalogVisionRuntimeSource,
+  ownerModelId: string,
+  audit: CatalogProjectorIdentityAudit,
+): CatalogSafeNativeCapabilityContext {
+  const hasExplicitChatModalities = Array.isArray(model.chatModalities);
+  const permitsVision = !hasExplicitChatModalities || model.chatModalities?.includes('vision') === true;
+  const permitsAudio = !hasExplicitChatModalities || model.chatModalities?.includes('audio') === true;
+  const vision = permitsVision && modelHasCatalogSafeVisionSource(model);
+  const hasCatalogSafeAudioSignal = permitsAudio
+    && modelHasCatalogAudioCapabilitySignal(model)
+    && modelHasCatalogSafeAudioCapabilityEvidence(model);
+  const candidates = model.projectorCandidates?.flatMap((projector) => {
+    const canonical = canonicalizeCatalogProjectorCandidate(projector, ownerModelId);
+    return canonical ? [canonical] : [];
+  }) ?? [];
+  const visionIdentityKeys = new Set<string>();
+  const audioIdentityKeys = new Set<string>();
+  const visionCandidateScopeIds = new Set<string>();
+  const audioCandidateScopeIds = new Set<string>();
+  for (const projector of candidates) {
+    const identity = resolveCatalogProjectorCandidateIdentity(projector, ownerModelId);
+    if (!identity) {
+      continue;
+    }
+
+    const identityKey = remoteProjectorIdentityKey(identity);
+    if (
+      !audit.evidenceIdentityKeys.has(identityKey)
+      || (audit.candidateScopeIdsById.get(projector.id)?.size ?? 0) !== 1
+    ) {
+      continue;
+    }
+    const currentScopeId = getCatalogProjectorCandidateScopeId(
+      identity,
+      projector.ownerVariantId,
+      ownerModelId,
+    );
+    if (audit.poisonedCandidateScopeIds.has(currentScopeId)) {
+      continue;
+    }
+    if (vision && catalogProjectorRepresentationSupportsInput(model, projector, identity, 'image', audit)) {
+      visionIdentityKeys.add(identityKey);
+      visionCandidateScopeIds.add(currentScopeId);
+    }
+    if (
+      hasCatalogSafeAudioSignal
+      && catalogProjectorRepresentationSupportsInput(model, projector, identity, 'audio', audit)
+    ) {
+      audioIdentityKeys.add(identityKey);
+      audioCandidateScopeIds.add(currentScopeId);
+    }
+  }
+  const projectorEvidenceIdentityKeys = new Set([...visionIdentityKeys, ...audioIdentityKeys]);
+  const projectorCandidateScopeIds = new Set([
+    ...visionCandidateScopeIds,
+    ...audioCandidateScopeIds,
+  ]);
+  const projectorEvidenceFileNames = new Set(
+    [...projectorEvidenceIdentityKeys].flatMap((identityKey) => {
+      const identity = audit.identitiesByKey.get(identityKey);
+      return identity ? [identity.filePath] : [];
+    }),
+  );
+  const audio = audioIdentityKeys.size > 0;
+
+  return {
+    vision,
+    audio,
+    projectorEvidenceFileNames,
+    projectorEvidenceIdentityKeys,
+    projectorCandidateScopeIds,
+  };
+}
+
+function mergeCatalogSafeNativeCapabilityContexts(
+  contexts: readonly CatalogSafeNativeCapabilityContext[],
+): CatalogSafeNativeCapabilityContext {
+  return {
+    vision: contexts.some((context) => context.vision),
+    audio: contexts.some((context) => context.audio),
+    projectorEvidenceFileNames: new Set(
+      contexts.flatMap((context) => [...context.projectorEvidenceFileNames]),
+    ),
+    projectorEvidenceIdentityKeys: new Set(
+      contexts.flatMap((context) => [...context.projectorEvidenceIdentityKeys]),
+    ),
+    projectorCandidateScopeIds: new Set(
+      contexts.flatMap((context) => [...context.projectorCandidateScopeIds]),
+    ),
+  };
 }
 
 function normalizeArtifactRequiredFor(requiredFor: ModelArtifactMetadata['requiredFor']): ModelArtifactRequiredInput[] {
@@ -132,126 +719,520 @@ function normalizeArtifactRequiredFor(requiredFor: ModelArtifactMetadata['requir
   )))];
 }
 
-function sanitizeCatalogArtifactRemoteFileName(
-  artifact: ModelArtifactMetadata,
-  model: Pick<ModelMetadata, 'resolvedFileName' | 'projectorCandidates'>,
-): string | undefined {
-  if (artifact.kind === 'main_model') {
-    return model.resolvedFileName ?? getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
-  }
+function resolveCatalogMainModelIdentity(
+  model: Pick<ModelMetadata, 'downloadUrl' | 'hfRevision' | 'id' | 'resolvedFileName'>,
+): RemoteProjectorIdentity | null {
+  return resolveRemoteProjectorIdentity({
+    repoId: model.id,
+    revision: model.hfRevision,
+    filePath: model.resolvedFileName,
+    downloadUrl: model.downloadUrl,
+  });
+}
 
-  return model.projectorCandidates?.find((projector) => (
-    projector.id === artifact.id
-    || projector.downloadUrl === artifact.downloadUrl
-    || projector.fileName === artifact.remoteFileName
-  ))?.fileName ?? getRemoteFileNameFromDownloadUrl(artifact.downloadUrl);
+function sanitizeCatalogArtifactRequiredFor(
+  artifact: ModelArtifactMetadata,
+  context: CatalogSafeNativeCapabilityContext,
+  projectorIdentity?: RemoteProjectorIdentity,
+): ModelArtifactRequiredInput[] {
+  return normalizeArtifactRequiredFor(artifact.requiredFor).filter((requiredInput) => {
+    if (requiredInput === 'text') {
+      return artifact.kind === 'main_model';
+    }
+
+    if (requiredInput === 'image') {
+      return context.vision && (
+        artifact.kind === 'main_model'
+        || Boolean(
+          projectorIdentity
+          && context.projectorEvidenceIdentityKeys.has(remoteProjectorIdentityKey(projectorIdentity)),
+        )
+      );
+    }
+
+    return context.audio && (
+      artifact.kind === 'main_model'
+      || Boolean(
+        projectorIdentity
+        && context.projectorEvidenceIdentityKeys.has(remoteProjectorIdentityKey(projectorIdentity)),
+      )
+    );
+  });
 }
 
 function sanitizeCatalogModelArtifacts(
-  model: Pick<ModelMetadata, 'artifacts' | 'metadataTrust' | 'projectorCandidates' | 'resolvedFileName' | 'visionSource'>,
+  model: ModelMetadata,
+  context: CatalogSafeNativeCapabilityContext,
+  projectorCandidates: readonly ProjectorArtifact[],
+  audit: CatalogProjectorIdentityAudit,
+  resolveProjectorContext: (projector: ProjectorArtifact) => CatalogSafeNativeCapabilityContext,
 ): ModelMetadata['artifacts'] {
-  if (!model.artifacts?.length) {
-    return undefined;
+  const artifacts: ModelArtifactMetadata[] = [];
+  const mainIdentity = resolveCatalogMainModelIdentity(model);
+  if (mainIdentity) {
+    const persistedMainArtifact = model.artifacts?.find((artifact) => artifact.kind === 'main_model');
+    const persistedMainIdentity = persistedMainArtifact
+      ? resolveRemoteProjectorIdentity({
+        repoId: model.id,
+        revision: persistedMainArtifact.hfRevision,
+        filePath: persistedMainArtifact.remoteFileName,
+        downloadUrl: persistedMainArtifact.downloadUrl,
+      })
+      : null;
+    const canonicalMainArtifact: ModelArtifactMetadata = {
+      id: buildMainModelArtifactId(model),
+      kind: 'main_model',
+      requiredFor: ['text'],
+      hfRevision: mainIdentity.revision,
+      remoteFileName: mainIdentity.filePath,
+      downloadUrl: buildHuggingFaceResolveUrl(
+        mainIdentity.repoId,
+        mainIdentity.filePath,
+        mainIdentity.revision,
+      ),
+      sizeBytes: model.size,
+      installState: 'remote',
+    };
+    const requiredForSource = persistedMainArtifact
+      && persistedMainIdentity
+      && remoteProjectorIdentitiesEqual(persistedMainIdentity, mainIdentity)
+      ? persistedMainArtifact
+      : canonicalMainArtifact;
+    const requiredFor = [
+      'text' as const,
+      ...sanitizeCatalogArtifactRequiredFor(requiredForSource, context)
+        .filter((requiredInput) => requiredInput !== 'text'),
+    ];
+    if (requiredFor.length > 0) {
+      artifacts.push({
+        id: buildMainModelArtifactId(model),
+        kind: 'main_model',
+        requiredFor,
+        hfRevision: mainIdentity.revision,
+        remoteFileName: mainIdentity.filePath,
+        downloadUrl: buildHuggingFaceResolveUrl(
+          mainIdentity.repoId,
+          mainIdentity.filePath,
+          mainIdentity.revision,
+        ),
+        sizeBytes: model.size,
+        ...(model.metadataTrust !== 'verified_local' && model.sha256 ? { sha256: model.sha256 } : {}),
+        installState: 'remote',
+      });
+    }
   }
 
-  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const artifacts = model.artifacts.flatMap((artifact): ModelArtifactMetadata[] => {
-    if (artifact.kind === 'multimodal_projector' && !hasCatalogSafeVisionSource) {
-      return [];
+  for (const artifact of model.artifacts ?? []) {
+    if (artifact.kind !== 'multimodal_projector') {
+      continue;
     }
 
-    const remoteFileName = sanitizeCatalogArtifactRemoteFileName(artifact, model);
-    const requiredFor = normalizeArtifactRequiredFor(artifact.requiredFor);
-    if (!remoteFileName || !getRemoteFileNameFromDownloadUrl(artifact.downloadUrl) || requiredFor.length === 0) {
-      return [];
+    const artifactIdentity = resolveCatalogProjectorArtifactIdentity(artifact);
+    if (!artifactIdentity) {
+      continue;
     }
 
-    return [{
-      id: artifact.id,
-      kind: artifact.kind,
+    const matchingCandidates = projectorCandidates.filter((projector) => {
+      const projectorIdentity = resolveCatalogProjectorCandidateIdentity(projector, model.id);
+      if (!projectorIdentity || !remoteProjectorIdentitiesEqual(projectorIdentity, artifactIdentity)) {
+        return false;
+      }
+
+      const legacyId = buildLegacyProjectorArtifactId({
+        repoId: projectorIdentity.repoId,
+        hfRevision: projectorIdentity.revision,
+        fileName: projectorIdentity.filePath,
+        ownerVariantId: projector.ownerVariantId,
+      });
+      const legacyAliasIsUnique = (audit.candidateIdsByLegacyAlias.get(legacyId)?.size ?? 0) === 1;
+      const candidateScopeId = getCatalogProjectorCandidateScopeId(
+        projectorIdentity,
+        projector.ownerVariantId,
+        model.id,
+      );
+      return (!projectorArtifactUsesLegacyAlias(artifact, projector) || legacyAliasIsUnique)
+        && (
+          projectorArtifactMatchesCandidate(artifact, projector)
+          || audit.candidateScopeIdsById.get(artifact.id)?.has(candidateScopeId) === true
+        );
+    });
+    if (matchingCandidates.length !== 1) {
+      continue;
+    }
+
+    const projector = matchingCandidates[0] as ProjectorArtifact;
+    const projectorContext = resolveProjectorContext(projector);
+    const requiredFor = sanitizeCatalogArtifactRequiredFor(
+      artifact,
+      projectorContext,
+      artifactIdentity,
+    );
+    if (requiredFor.length === 0) {
+      continue;
+    }
+
+    artifacts.push({
+      id: projector.id,
+      kind: 'multimodal_projector',
       requiredFor,
-      ...(artifact.hfRevision ? { hfRevision: artifact.hfRevision } : {}),
-      remoteFileName,
-      downloadUrl: artifact.downloadUrl,
-      sizeBytes: artifact.sizeBytes,
-      ...(artifact.kind !== 'main_model' || model.metadataTrust !== 'verified_local'
-        ? { ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}) }
-        : {}),
+      hfRevision: artifactIdentity.revision,
+      remoteFileName: artifactIdentity.filePath,
+      downloadUrl: buildHuggingFaceResolveUrl(
+        artifactIdentity.repoId,
+        artifactIdentity.filePath,
+        artifactIdentity.revision,
+      ),
+      sizeBytes: projector.size,
+      ...(projector.sha256 ? { sha256: projector.sha256 } : {}),
       installState: 'remote',
-    }];
-  });
+    });
+  }
 
   return artifacts.length > 0 ? artifacts : undefined;
 }
 
-function hasAnonymousArtifactRuntimeFields(model: ModelMetadata): boolean {
-  if (!model.artifacts?.length) {
-    return false;
+function isCatalogEvidenceModalitySafe(
+  modality: NativeInputModality,
+  context: CatalogSafeNativeCapabilityContext,
+): boolean {
+  return modality === 'video'
+    || (modality === 'image' && context.vision)
+    || (modality === 'audio' && context.audio);
+}
+
+function getCatalogSafeEvidenceValue(
+  source: CapabilityEvidence['source'],
+  modality: NativeInputModality,
+): string {
+  if (source === 'pipeline_tag') {
+    return modality === 'image'
+      ? 'image-text-to-text'
+      : modality === 'audio' ? 'audio-text-to-text' : 'video-text-to-text';
   }
 
-  const sanitizedArtifacts = sanitizeCatalogModelArtifacts(model);
-  return JSON.stringify(model.artifacts) !== JSON.stringify(sanitizedArtifacts ?? []);
+  return modality === 'image' ? 'vision' : modality;
 }
 
-function hasProjectorRuntimeFields(projectors: ModelMetadata['projectorCandidates']): boolean {
-  return projectors?.some((projector) => (
-    typeof projector.localPath === 'string'
-    || typeof projector.resumeData === 'string'
-    || projector.downloadProgress !== undefined
-    || projector.lifecycleStatus !== 'available'
-    || projector.matchStatus === 'failed'
-    || projector.matchStatus === 'user_selected'
-    || projector.matchReason === 'user_selected_projector'
-    || projector.matchReason === 'unselected_projector_candidate'
-  )) ?? false;
-}
-
-function hasUnsafeAnonymousVisionProvenance(model: CatalogVisionRuntimeSource): boolean {
-  const hasSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const hasVisionModality = Array.isArray(model.chatModalities) && model.chatModalities.includes('vision');
-  const hasUnsafeProjectorCandidates = Boolean(model.projectorCandidates?.length && !hasSafeVisionSource);
-  const hasCatalogVisionEvidence = hasSafeVisionSource;
-
-  return Boolean(
-    (model.visionSource && !hasSafeVisionSource)
-    || (model.visionConfidence && !hasSafeVisionSource)
-    || hasUnsafeProjectorCandidates
-    || (hasVisionModality && !hasCatalogVisionEvidence),
-  );
-}
-
-function hasAnonymousVariantRuntimeFields(variant: ModelVariant): boolean {
-  return variant.isLocal === true
-    || typeof variant.selectedProjectorId === 'string'
-    || hasUnsafeAnonymousVisionProvenance(variant)
-    || hasProjectorRuntimeFields(variant.projectorCandidates);
-}
-
-export function sanitizeCatalogProjectorRuntimeState(projectors: ModelMetadata['projectorCandidates']): ModelMetadata['projectorCandidates'] {
-  if (!projectors?.length) {
-    return projectors;
+function sanitizeCatalogCapabilityEvidence(
+  entry: CapabilityEvidence,
+  context: CatalogSafeNativeCapabilityContext,
+): CapabilityEvidence[] {
+  if (entry.source === 'runtime') {
+    return [];
   }
 
-  return projectors.map((projector) => ({
-    ...projector,
-    localPath: undefined,
-    resumeData: undefined,
-    downloadProgress: undefined,
-    lifecycleStatus: 'available' as const,
-    matchStatus: sanitizeCatalogProjectorMatchStatus(projector),
-    matchReason: sanitizeCatalogProjectorMatchReason(projector),
+  if (entry.source === 'projector') {
+    return [...context.projectorEvidenceFileNames].map((fileName) => ({
+      ...entry,
+      value: fileName,
+    }));
+  }
+
+  const modalities = getInputCapabilityEvidenceModalities(entry);
+  if (modalities.length === 0) {
+    return [entry];
+  }
+
+  const safeModalities = modalities.filter((modality) => (
+    isCatalogEvidenceModalitySafe(modality, context)
+  ));
+  if (safeModalities.length === 0) {
+    return [];
+  }
+
+  if (safeModalities.length === modalities.length) {
+    return [entry];
+  }
+
+  return safeModalities.map((modality) => ({
+    ...entry,
+    value: getCatalogSafeEvidenceValue(entry.source, modality),
   }));
 }
 
-export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMetadata {
-  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(model);
-  const projectorCandidates = hasCatalogSafeVisionSource
-    ? sanitizeCatalogProjectorRuntimeState(model.projectorCandidates)
-    : undefined;
-  const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
-  const chatModalities = Array.isArray(model.chatModalities) && !hasCatalogVisionEvidence
-    ? model.chatModalities.filter((modality) => modality !== 'vision')
-    : model.chatModalities;
+export function sanitizeCatalogInputCapabilities(
+  snapshot: ModelInputCapabilitySnapshot | undefined,
+  context: CatalogSafeNativeCapabilityContext,
+): ModelInputCapabilitySnapshot | undefined {
+  if (!snapshot) {
+    return undefined;
+  }
+
+  const evidence = mergeCapabilityEvidence(snapshot.evidence.flatMap((entry) => (
+    sanitizeCatalogCapabilityEvidence(entry, context)
+  )));
+  const hasCatalogVideoEvidence = evidence.some((entry) => (
+    entry.source !== 'runtime'
+    && getInputCapabilityEvidenceModalities(entry).includes('video')
+  ));
+  const declared: ModelInputCapabilitySnapshot['declared'] = {
+    ...snapshot.declared,
+    image: context.vision ? snapshot.declared.image : 'unknown',
+    audio: context.audio ? snapshot.declared.audio : 'unknown',
+    video: snapshot.declared.video === 'supported' && !hasCatalogVideoEvidence
+      ? 'unknown'
+      : snapshot.declared.video,
+  };
+  const hasUsefulDeclaration = Object.values(declared).some((state) => state !== 'unknown');
+  if (!hasUsefulDeclaration && evidence.length === 0) {
+    return undefined;
+  }
+
+  return {
+    detectedAt: snapshot.detectedAt,
+    declared,
+    evidence,
+  };
+}
+
+function sanitizeCatalogChatModalities(
+  chatModalities: ModelMetadata['chatModalities'],
+  context: CatalogSafeNativeCapabilityContext,
+): ModelMetadata['chatModalities'] {
+  if (!Array.isArray(chatModalities)) {
+    return chatModalities;
+  }
+
+  const sanitized = chatModalities.filter((modality) => (
+    modality === 'text'
+    || (modality === 'vision' && context.vision)
+    || (modality === 'audio' && context.audio)
+  ));
+
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
+export function sanitizeCatalogProjectorRuntimeState(
+  projectors: ModelMetadata['projectorCandidates'],
+  context: CatalogSafeNativeCapabilityContext,
+  ownerModelId: string,
+  artifacts: ModelMetadata['artifacts'],
+  resolveContext: (
+    projector: ProjectorArtifact,
+  ) => CatalogSafeNativeCapabilityContext = () => context,
+): ModelMetadata['projectorCandidates'] {
+  if (!Array.isArray(projectors)) {
+    return undefined;
+  }
+
+  if (projectors.length === 0) {
+    return [];
+  }
+
+  const sanitized = projectors.flatMap((projector): ProjectorArtifact[] => {
+    const canonicalProjector = canonicalizeCatalogProjectorCandidate(projector, ownerModelId);
+    if (!canonicalProjector) {
+      return [];
+    }
+
+    const identity = resolveCatalogProjectorCandidateIdentity(canonicalProjector, ownerModelId);
+    const projectorContext = resolveContext(canonicalProjector);
+    const candidateScopeId = identity
+      ? getCatalogProjectorCandidateScopeId(
+          identity,
+          canonicalProjector.ownerVariantId,
+          ownerModelId,
+        )
+      : null;
+    if (
+      !identity
+      || !candidateScopeId
+      || !projectorContext.projectorEvidenceIdentityKeys.has(remoteProjectorIdentityKey(identity))
+      || !projectorContext.projectorCandidateScopeIds.has(candidateScopeId)
+    ) {
+      return [];
+    }
+
+    return [{
+      ...canonicalProjector,
+      localPath: undefined,
+      resumeData: undefined,
+      downloadProgress: undefined,
+      lifecycleStatus: 'available' as const,
+      matchStatus: sanitizeCatalogProjectorMatchStatus(canonicalProjector),
+      matchReason: sanitizeCatalogProjectorMatchReason(canonicalProjector),
+    }];
+  });
+
+  if (sanitized.length === 0) {
+    return undefined;
+  }
+
+  const canonical = canonicalizeProjectorCandidateAliases(
+    sanitized,
+    artifacts,
+    { preserveRuntimeState: false },
+  );
+  return canonical.candidates.length > 0 ? canonical.candidates : undefined;
+}
+
+type CatalogSafeVariantCapability = {
+  context: CatalogSafeNativeCapabilityContext;
+  projectorCandidates: readonly ProjectorArtifact[];
+};
+
+function getVariantIdentityKeys(variant: ModelVariant): ReadonlySet<string> {
+  return new Set([variant.variantId.trim(), variant.fileName.trim()].filter(Boolean));
+}
+
+function isProjectorCompatibleWithVariant(
+  projector: ProjectorArtifact,
+  variant: ModelVariant,
+): boolean {
+  const ownerVariantId = projector.ownerVariantId?.trim();
+  return !ownerVariantId || getVariantIdentityKeys(variant).has(ownerVariantId);
+}
+
+function projectorCandidatesShareIdentity(
+  left: ProjectorArtifact,
+  right: ProjectorArtifact,
+): boolean {
+  const leftIdentity = resolveRemoteProjectorIdentity({
+    repoId: left.repoId,
+    revision: left.hfRevision,
+    filePath: left.fileName,
+    downloadUrl: left.downloadUrl,
+  });
+  const rightIdentity = resolveRemoteProjectorIdentity({
+    repoId: right.repoId,
+    revision: right.hfRevision,
+    filePath: right.fileName,
+    downloadUrl: right.downloadUrl,
+  });
+  return Boolean(
+    leftIdentity
+    && rightIdentity
+    && left.ownerModelId === right.ownerModelId
+    && left.ownerVariantId === right.ownerVariantId
+    && remoteProjectorIdentitiesEqual(leftIdentity, rightIdentity),
+  );
+}
+
+function getVariantCompatibleProjectorCandidates(
+  variant: ModelVariant,
+  model: ModelMetadata,
+): ProjectorArtifact[] {
+  const candidates = [
+    ...(variant.projectorCandidates ?? []),
+    ...(model.projectorCandidates ?? []),
+  ].filter((projector) => isProjectorCompatibleWithVariant(projector, variant));
+  const uniqueCandidates: ProjectorArtifact[] = [];
+  for (const candidate of candidates) {
+    if (!uniqueCandidates.some((entry) => projectorCandidatesShareIdentity(entry, candidate))) {
+      uniqueCandidates.push(candidate);
+    }
+  }
+
+  return uniqueCandidates;
+}
+
+function createCatalogSafeVariantCapability(
+  variant: ModelVariant,
+  model: ModelMetadata,
+  audit: CatalogProjectorIdentityAudit,
+): CatalogSafeVariantCapability {
+  const projectorCandidates = getVariantCompatibleProjectorCandidates(variant, model);
+
+  return {
+    context: createCatalogSafeNativeCapabilityContext({
+      ...variant,
+      id: model.id,
+      visionSource: variant.visionSource ?? model.visionSource,
+      artifacts: model.artifacts,
+      chatModalities: variant.chatModalities ?? model.chatModalities,
+      inputCapabilities: model.inputCapabilities,
+      projectorCandidates,
+    }, model.id, audit),
+    projectorCandidates,
+  };
+}
+
+function resolveCatalogSafeProjectorContext(
+  projector: ProjectorArtifact,
+  modelContext: CatalogSafeNativeCapabilityContext,
+  variants: readonly CatalogSafeVariantCapability[],
+): CatalogSafeNativeCapabilityContext {
+  const contexts: CatalogSafeNativeCapabilityContext[] = [];
+  if (!projector.ownerVariantId?.trim()) {
+    contexts.push(modelContext);
+  }
+
+  for (const variant of variants) {
+    if (variant.projectorCandidates.some((candidate) => (
+      projectorCandidatesShareIdentity(candidate, projector)
+    ))) {
+      contexts.push(variant.context);
+    }
+  }
+
+  return mergeCatalogSafeNativeCapabilityContexts(contexts);
+}
+
+function sanitizeCatalogVariantRuntimeState(
+  variant: ModelVariant,
+  context: CatalogSafeNativeCapabilityContext,
+  ownerModelId: string,
+  artifacts: ModelMetadata['artifacts'],
+): ModelVariant {
+  return {
+    ...variant,
+    isLocal: undefined,
+    chatModalities: sanitizeCatalogChatModalities(variant.chatModalities, context),
+    visionSource: context.vision ? variant.visionSource : undefined,
+    visionConfidence: context.vision ? variant.visionConfidence : undefined,
+    selectedProjectorId: undefined,
+    projectorCandidates: sanitizeCatalogProjectorRuntimeState(
+      variant.projectorCandidates,
+      context,
+      ownerModelId,
+      artifacts,
+    ),
+  };
+}
+
+export function sanitizeCatalogModelRuntimeState(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions = {},
+): ModelMetadata {
+  const audit = buildCatalogProjectorIdentityAudit(model, options);
+  const modelContext = createCatalogSafeNativeCapabilityContext(model, model.id, audit);
+  const variantCapabilities = model.variants?.map((variant) => (
+    createCatalogSafeVariantCapability(variant, model, audit)
+  )) ?? [];
+  const inputCapabilityContext = mergeCatalogSafeNativeCapabilityContexts([
+    modelContext,
+    ...variantCapabilities.map((variant) => variant.context),
+  ]);
+  const inputCapabilities = sanitizeCatalogInputCapabilities(
+    model.inputCapabilities,
+    inputCapabilityContext,
+  );
+  const projectorCandidates = sanitizeCatalogProjectorRuntimeState(
+    model.projectorCandidates,
+    modelContext,
+    model.id,
+    model.artifacts,
+    (projector) => resolveCatalogSafeProjectorContext(
+      projector,
+      modelContext,
+      variantCapabilities,
+    ),
+  );
+  const chatModalities = sanitizeCatalogChatModalities(model.chatModalities, modelContext);
+  const variants = model.variants?.map((variant, index) => (
+    sanitizeCatalogVariantRuntimeState(
+      variant,
+      (variantCapabilities[index] as CatalogSafeVariantCapability).context,
+      model.id,
+      model.artifacts,
+    )
+  ));
+  const allProjectorCandidates = [
+    ...(projectorCandidates ?? []),
+    ...(variants ?? []).flatMap((variant) => variant.projectorCandidates ?? []),
+  ];
+  const shouldPreserveParentVisionSource = modelHasCatalogSafeVisionSource(model)
+    && (modelContext.vision || variantCapabilities.some((variant) => variant.context.vision));
 
   return normalizePersistedModelMetadata({
     ...model,
@@ -269,43 +1250,38 @@ export function sanitizeCatalogModelRuntimeState(model: ModelMetadata): ModelMet
       sha256: undefined,
       capabilitySnapshot: undefined,
     } : {}),
-    artifacts: sanitizeCatalogModelArtifacts(model),
+    artifacts: sanitizeCatalogModelArtifacts(
+      model,
+      modelContext,
+      allProjectorCandidates,
+      audit,
+      (projector) => resolveCatalogSafeProjectorContext(
+        projector,
+        modelContext,
+        variantCapabilities,
+      ),
+    ),
     chatModalities,
-    visionSource: hasCatalogSafeVisionSource ? model.visionSource : undefined,
-    visionConfidence: hasCatalogSafeVisionSource ? model.visionConfidence : undefined,
+    inputCapabilities,
+    visionSource: shouldPreserveParentVisionSource ? model.visionSource : undefined,
+    visionConfidence: shouldPreserveParentVisionSource ? model.visionConfidence : undefined,
     selectedProjectorId: undefined,
     multimodalReadiness: undefined,
     projectorCandidates,
+    variants,
   });
 }
 
-function sanitizeCatalogVariantRuntimeState(variant: ModelVariant): ModelVariant {
-  const hasCatalogSafeVisionSource = modelHasCatalogSafeVisionSource(variant);
-  const projectorCandidates = hasCatalogSafeVisionSource
-    ? sanitizeCatalogProjectorRuntimeState(variant.projectorCandidates)
-    : undefined;
-  const hasCatalogVisionEvidence = hasCatalogSafeVisionSource;
-  const chatModalities = Array.isArray(variant.chatModalities) && !hasCatalogVisionEvidence
-    ? variant.chatModalities.filter((modality) => modality !== 'vision')
-    : variant.chatModalities;
-
-  return {
-    ...variant,
-    chatModalities,
-    visionSource: hasCatalogSafeVisionSource ? variant.visionSource : undefined,
-    visionConfidence: hasCatalogSafeVisionSource ? variant.visionConfidence : undefined,
-    selectedProjectorId: undefined,
-    projectorCandidates,
-  };
-}
-
-export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetadata | null {
+export function sanitizeAnonymousCatalogModel(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions = {},
+): ModelMetadata | null {
   if (model.isPrivate) {
     return null;
   }
 
   if (isPublicAnonymousModel(model)) {
-    return limitAnonymousCatalogModelVariants(toAnonymousPublicCatalogModel(model));
+    return limitAnonymousCatalogModelVariants(toAnonymousPublicCatalogModel(model, options));
   }
 
   return normalizePersistedModelMetadata({
@@ -320,8 +1296,11 @@ export function sanitizeAnonymousCatalogModel(model: ModelMetadata): ModelMetada
   });
 }
 
-function toAnonymousPublicCatalogModel(model: ModelMetadata): ModelMetadata {
-  return sanitizeCatalogModelRuntimeState(model);
+function toAnonymousPublicCatalogModel(
+  model: ModelMetadata,
+  options: CatalogSanitizationOptions,
+): ModelMetadata {
+  return sanitizeCatalogModelRuntimeState(model, options);
 }
 
 function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata {
@@ -330,54 +1309,25 @@ function limitAnonymousCatalogModelVariants(model: ModelMetadata): ModelMetadata
     includeFileNames: [model.resolvedFileName, model.activeVariantId],
     includeVariantIds: [model.activeVariantId],
   });
-  const hasLocalVariantMarker = variants?.some((variant) => variant.isLocal === true) ?? false;
-  const hasVariantRuntimeFields = variants?.some(hasAnonymousVariantRuntimeFields) ?? false;
-  const sanitizedVariants = variants?.map(({ isLocal: _isLocal, ...variant }) => (
-    sanitizeCatalogVariantRuntimeState(variant)
-  ));
 
-  if (variants === model.variants && !hasLocalVariantMarker && !hasVariantRuntimeFields) {
+  if (variants === model.variants) {
     return model;
   }
 
   return normalizePersistedModelMetadata({
     ...model,
-    variants: sanitizedVariants,
+    variants,
   });
 }
 
-function sanitizeAnonymousPersistedModels(models: ModelMetadata[]): ModelMetadata[] {
+function sanitizeAnonymousPersistedModels(
+  models: ModelMetadata[],
+  options: CatalogSanitizationOptions = {},
+): ModelMetadata[] {
   return models.flatMap((model) => {
-    const sanitized = sanitizeAnonymousCatalogModel(model);
+    const sanitized = sanitizeAnonymousCatalogModel(model, options);
     return sanitized ? [sanitized] : [];
   });
-}
-
-function hasAnonymousRuntimeFields(model: ModelMetadata): boolean {
-  return typeof model.localPath === 'string'
-    || typeof model.downloadedAt === 'number'
-    || model.downloadIntegrity !== undefined
-    || typeof model.resumeData === 'string'
-    || typeof model.downloadErrorAt === 'number'
-    || typeof model.downloadErrorCode === 'string'
-    || typeof model.downloadErrorMessage === 'string'
-    || model.lifecycleStatus !== LifecycleStatus.AVAILABLE
-    || model.downloadProgress !== 0
-    || model.metadataTrust === 'verified_local'
-    || (model.variants?.some(hasAnonymousVariantRuntimeFields) ?? false)
-    || hasUnsafeAnonymousVisionProvenance(model)
-    || hasAnonymousArtifactRuntimeFields(model)
-    || typeof model.selectedProjectorId === 'string'
-    || model.multimodalReadiness !== undefined
-    || hasProjectorRuntimeFields(model.projectorCandidates);
-}
-
-function needsAnonymousPersistedModelSanitization(model: ModelMetadata): boolean {
-  return !isPublicAnonymousModel(model) || hasAnonymousRuntimeFields(model);
-}
-
-function needsAnonymousPersistedModelsSanitization(models: ModelMetadata[]): boolean {
-  return models.some((model) => needsAnonymousPersistedModelSanitization(model));
 }
 
 function getTextByteLength(value: string | null | undefined) {
@@ -399,7 +1349,7 @@ function isSort(value: unknown): value is CatalogCacheSort {
     || value === 'lastModified';
 }
 
-function normalizeModels(models: unknown): ModelMetadata[] {
+function normalizeModels(models: unknown, persistedVersion?: number): ModelMetadata[] {
   if (!Array.isArray(models)) {
     return [];
   }
@@ -410,7 +1360,90 @@ function normalizeModels(models: unknown): ModelMetadata[] {
       && typeof entry === 'object'
       && typeof (entry as { id?: unknown }).id === 'string'
     ))
-    .map((entry) => normalizePersistedModelMetadata(entry));
+    .flatMap((entry) => {
+      const normalized = normalizePersistedModelMetadata(entry);
+      if (typeof persistedVersion !== 'number') {
+        return [normalized];
+      }
+
+      const sanitized = sanitizeAnonymousCatalogModel(normalized, {
+        persistedVersion,
+        rawModel: entry,
+      });
+      return sanitized ? [sanitized] : [];
+    });
+}
+
+function toJsonComparableValue(value: unknown): JsonComparableValue | undefined {
+  if (
+    value === null
+    || typeof value === 'boolean'
+    || typeof value === 'string'
+  ) {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => toJsonComparableValue(entry) ?? null);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const comparable: { [key: string]: JsonComparableValue } = {};
+  for (const key of Object.keys(value).sort()) {
+    const entry = toJsonComparableValue((value as Record<string, unknown>)[key]);
+    if (entry !== undefined) {
+      comparable[key] = entry;
+    }
+  }
+
+  return comparable;
+}
+
+function rawPersistedModelNeedsAnonymousRewrite(value: unknown): boolean {
+  const normalizedModel = normalizeModels([value])[0];
+  if (!normalizedModel) {
+    return true;
+  }
+
+  const sanitizedModel = sanitizeAnonymousCatalogModel(normalizedModel);
+  return sanitizedModel === null
+    || JSON.stringify(toJsonComparableValue(value))
+      !== JSON.stringify(toJsonComparableValue(sanitizedModel));
+}
+
+function rawSearchEntryNeedsAnonymousRewrite(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return true;
+  }
+
+  const candidate = value as { key?: unknown; scope?: unknown; result?: unknown };
+  const scope = normalizeSearchScope(candidate.scope);
+  if (!scope || candidate.key !== buildCatalogSearchKey(scope)) {
+    return true;
+  }
+
+  const result = candidate.result;
+  if (!result || typeof result !== 'object') {
+    return true;
+  }
+
+  const models = (result as { models?: unknown }).models;
+  return !Array.isArray(models) || models.some((model) => rawPersistedModelNeedsAnonymousRewrite(model));
+}
+
+function rawSnapshotEntryNeedsAnonymousRewrite(value: unknown): boolean {
+  if (!value || typeof value !== 'object') {
+    return true;
+  }
+
+  return rawPersistedModelNeedsAnonymousRewrite((value as { model?: unknown }).model);
 }
 
 function inferSnapshotAuthScope(model: ModelMetadata): CatalogCacheAuthScope {
@@ -424,7 +1457,19 @@ function buildSnapshotKey(modelId: string, authScope: CatalogCacheAuthScope): st
   return `${modelId}::${authScope}`;
 }
 
-function normalizeSearchResult(value: unknown): CatalogCacheResult | null {
+function buildCatalogSearchKey(scope: CatalogCacheScope): string {
+  const gatedKey = typeof scope.gated === 'boolean' ? String(scope.gated) : '__any__';
+  return [
+    scope.query,
+    scope.cursor ?? '__initial__',
+    scope.pageSize,
+    scope.sort ?? '__default__',
+    scope.authScope,
+    `gated:${gatedKey}`,
+  ].join('::');
+}
+
+function normalizeSearchResult(value: unknown, persistedVersion?: number): CatalogCacheResult | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -434,7 +1479,7 @@ function normalizeSearchResult(value: unknown): CatalogCacheResult | null {
     hasMore?: unknown;
     nextCursor?: unknown;
   };
-  const models = normalizeModels(candidate.models);
+  const models = normalizeModels(candidate.models, persistedVersion);
   const hasMore = candidate.hasMore === true;
   const nextCursor = typeof candidate.nextCursor === 'string' ? candidate.nextCursor : null;
 
@@ -463,10 +1508,11 @@ function normalizeSearchScope(value: unknown): CatalogCacheScope | null {
       : 20,
     sort: isSort(candidate.sort) ? candidate.sort : null,
     authScope: candidate.authScope === 'auth' ? 'auth' : 'anon',
+    gated: typeof candidate.gated === 'boolean' ? candidate.gated : null,
   };
 }
 
-function normalizeSearchEntry(value: unknown): SearchCacheEntry | null {
+function normalizeSearchEntry(value: unknown, persistedVersion?: number): SearchCacheEntry | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -478,14 +1524,14 @@ function normalizeSearchEntry(value: unknown): SearchCacheEntry | null {
     result?: unknown;
   };
   const scope = normalizeSearchScope(candidate.scope);
-  const result = normalizeSearchResult(candidate.result);
+  const result = normalizeSearchResult(candidate.result, persistedVersion);
 
   if (!scope || !result || typeof candidate.key !== 'string') {
     return null;
   }
 
   return {
-    key: candidate.key,
+    key: buildCatalogSearchKey(scope),
     timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
       ? Math.round(candidate.timestamp)
       : 0,
@@ -494,7 +1540,7 @@ function normalizeSearchEntry(value: unknown): SearchCacheEntry | null {
   };
 }
 
-function normalizeSnapshotEntry(value: unknown): SnapshotCacheEntry | null {
+function normalizeSnapshotEntry(value: unknown, persistedVersion?: number): SnapshotCacheEntry | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -511,7 +1557,7 @@ function normalizeSnapshotEntry(value: unknown): SnapshotCacheEntry | null {
     return null;
   }
 
-  const models = normalizeModels(candidate.model ? [candidate.model] : []);
+  const models = normalizeModels(candidate.model ? [candidate.model] : [], persistedVersion);
   const model = models[0];
   if (!model) {
     return null;
@@ -538,12 +1584,37 @@ export class ModelCatalogCacheStore {
   private storage = createStorage(STORAGE_ID, { tier: 'cache' });
   private searchEntries = new Map<string, SearchCacheEntry>();
   private snapshotEntries = new Map<string, SnapshotCacheEntry>();
+  private isHydrated = false;
+  private isPersistenceDisabled = false;
 
-  constructor() {
-    this.loadPersistedEntries();
+  constructor(options: ModelCatalogCacheStoreOptions = {}) {
+    if (options.hydrateOnCreate !== false) {
+      this.hydrate();
+    }
+  }
+
+  public hydrate(): void {
+    if (this.isHydrated) {
+      return;
+    }
+
+    try {
+      this.loadPersistedEntries();
+      // Only commit the state after both payloads were read successfully. A
+      // transient storage failure must remain retryable on the next safe access.
+      this.isHydrated = true;
+    } catch (error) {
+      this.searchEntries.clear();
+      this.snapshotEntries.clear();
+      throw error;
+    }
   }
 
   public getSearch(scope: CatalogCacheScope, maxAgeMs: number): CatalogCacheResult | null {
+    if (!this.isHydrated) {
+      return null;
+    }
+
     const entry = this.searchEntries.get(this.buildSearchKey(scope));
     if (!entry) {
       return null;
@@ -557,21 +1628,23 @@ export class ModelCatalogCacheStore {
   }
 
   public putSearch(scope: CatalogCacheScope, result: CatalogCacheResult): void {
+    this.hydrateForMutation();
     const key = this.buildSearchKey(scope);
-    const clonedResult = this.cloneSearchResult(result);
+    const clonedResult = scope.authScope === 'anon'
+      ? {
+        ...result,
+        models: sanitizeAnonymousPersistedModels(result.models),
+      }
+      : this.cloneSearchResult(result);
     const entry: SearchCacheEntry = {
       key,
       timestamp: Date.now(),
       scope: {
         ...scope,
         cursor: scope.cursor ?? null,
+        gated: typeof scope.gated === 'boolean' ? scope.gated : null,
       },
-      result: scope.authScope === 'anon'
-        ? {
-          ...clonedResult,
-          models: sanitizeAnonymousPersistedModels(clonedResult.models),
-        }
-        : clonedResult,
+      result: clonedResult,
     };
 
     this.searchEntries.set(key, entry);
@@ -587,6 +1660,10 @@ export class ModelCatalogCacheStore {
     authScope: CatalogCacheAuthScope,
     maxAgeMs: number,
   ): ModelMetadata | null {
+    if (!this.isHydrated) {
+      return null;
+    }
+
     const entry = this.snapshotEntries.get(buildSnapshotKey(modelId, authScope));
     if (!entry) {
       return null;
@@ -600,6 +1677,7 @@ export class ModelCatalogCacheStore {
   }
 
   public putModelSnapshots(models: ModelMetadata[], authScope: CatalogCacheAuthScope): void {
+    this.hydrateForMutation();
     const timestamp = Date.now();
     const modelsToStore = authScope === 'anon'
       ? sanitizeAnonymousPersistedModels(models)
@@ -629,6 +1707,8 @@ export class ModelCatalogCacheStore {
       return;
     }
 
+    this.hydrateForMutation();
+
     let didDelete = false;
     uniqueModelIds.forEach((modelId) => {
       didDelete = this.snapshotEntries.delete(buildSnapshotKey(modelId, authScope)) || didDelete;
@@ -644,6 +1724,8 @@ export class ModelCatalogCacheStore {
     if (uniqueModelIds.size === 0) {
       return;
     }
+
+    this.hydrateForMutation();
 
     let didPersistedAnonChange = false;
     for (const [key, entry] of this.searchEntries.entries()) {
@@ -681,6 +1763,8 @@ export class ModelCatalogCacheStore {
       return;
     }
 
+    this.hydrateForMutation();
+
     let didChange = false;
     for (const [key, entry] of this.searchEntries.entries()) {
       if (entry.scope.authScope !== 'anon') {
@@ -716,41 +1800,75 @@ export class ModelCatalogCacheStore {
   }
 
   public getPersistedSizeBytes(): number {
-    return PERSISTED_CACHE_KEYS.reduce((sum, key) => {
-      const value = this.storage.getString(key);
-      if (!value) {
-        return sum;
-      }
+    if (this.isPersistenceDisabled) {
+      return 0;
+    }
 
-      return sum + getTextByteLength(key) + getTextByteLength(value);
-    }, 0);
+    try {
+      return PERSISTED_CACHE_KEYS.reduce((sum, key) => {
+        const value = this.storage.getString(key);
+        if (!value) {
+          return sum;
+        }
+
+        return sum + getTextByteLength(key) + getTextByteLength(value);
+      }, 0);
+    } catch {
+      // Metrics are advisory. A transient read failure here must not settle a
+      // deferred hydration attempt or disable later cache reads and writes.
+      return 0;
+    }
   }
 
   public clearAll(): void {
+    this.isHydrated = true;
     this.searchEntries.clear();
     this.snapshotEntries.clear();
-    this.storage.remove(SEARCH_CACHE_KEY);
-    this.storage.remove(SNAPSHOT_CACHE_KEY);
+
+    let firstError: unknown;
+    let didFail = false;
+    for (const key of PERSISTED_CACHE_KEYS) {
+      try {
+        this.removePersistedValue(key);
+      } catch (error) {
+        if (!didFail) {
+          firstError = error;
+          didFail = true;
+        }
+      }
+    }
+
+    if (didFail) {
+      throw firstError;
+    }
   }
 
   public clearSnapshots(): void {
     this.snapshotEntries.clear();
-    this.storage.remove(SNAPSHOT_CACHE_KEY);
+    this.removePersistedValue(SNAPSHOT_CACHE_KEY);
   }
 
   public clearSnapshotsForScope(authScope: CatalogCacheAuthScope): void {
-    let didDelete = false;
+    if (!this.isHydrated) {
+      if (authScope === 'anon') {
+        this.removePersistedValue(SNAPSHOT_CACHE_KEY);
+      }
+      return;
+    }
+
     for (const [key, entry] of this.snapshotEntries.entries()) {
       if (entry.authScope !== authScope) {
         continue;
       }
 
       this.snapshotEntries.delete(key);
-      didDelete = true;
     }
 
-    if (didDelete && authScope === 'anon') {
-      this.persistSnapshotEntries();
+    if (authScope === 'anon') {
+      // Anonymous snapshots are the only snapshot scope persisted to disk, so
+      // clearing that scope must remove the payload rather than report success
+      // after a failed optional persistence operation.
+      this.removePersistedValue(SNAPSHOT_CACHE_KEY);
     }
   }
 
@@ -759,10 +1877,11 @@ export class ModelCatalogCacheStore {
     const searchPayloadResult = this.parsePayload<SearchCacheEntry>(
       this.storage.getString(SEARCH_CACHE_KEY),
       normalizeSearchEntry,
+      rawSearchEntryNeedsAnonymousRewrite,
     );
     shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
 
-    if (searchPayloadResult.status === 'invalid') {
+    if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
       this.storage.remove(SEARCH_CACHE_KEY);
     }
 
@@ -772,11 +1891,12 @@ export class ModelCatalogCacheStore {
         return;
       }
 
-      if (needsAnonymousPersistedModelsSanitization(entry.result.models)) {
+      const sanitizedModels = sanitizeAnonymousPersistedModels(entry.result.models);
+      if (sanitizedModels.length !== entry.result.models.length) {
         shouldRewriteSearchPayload = true;
       }
 
-      entry.result.models = sanitizeAnonymousPersistedModels(entry.result.models);
+      entry.result.models = sanitizedModels;
       this.searchEntries.set(entry.key, entry);
     });
 
@@ -784,10 +1904,11 @@ export class ModelCatalogCacheStore {
     const snapshotPayloadResult = this.parsePayload<SnapshotCacheEntry>(
       this.storage.getString(SNAPSHOT_CACHE_KEY),
       normalizeSnapshotEntry,
+      rawSnapshotEntryNeedsAnonymousRewrite,
     );
     shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
 
-    if (snapshotPayloadResult.status === 'invalid') {
+    if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
       this.storage.remove(SNAPSHOT_CACHE_KEY);
     }
 
@@ -795,10 +1916,6 @@ export class ModelCatalogCacheStore {
       if (entry.authScope !== 'anon') {
         shouldRewriteSnapshotPayload = true;
         return;
-      }
-
-      if (needsAnonymousPersistedModelSanitization(entry.model)) {
-        shouldRewriteSnapshotPayload = true;
       }
 
       const sanitizedModel = sanitizeAnonymousCatalogModel(entry.model);
@@ -833,10 +1950,18 @@ export class ModelCatalogCacheStore {
 
   private parsePayload<T>(
     rawValue: string | undefined,
-    normalizeEntry: (value: unknown) => T | null,
+    normalizeEntry: (value: unknown, persistedVersion: number) => T | null,
+    rawEntryNeedsRewrite: (value: unknown) => boolean = () => false,
   ): ParsedPayload<T> {
     if (!rawValue) {
       return { status: 'empty', entries: [], needsRewrite: false };
+    }
+
+    if (
+      rawValue.length > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+      || getTextByteLength(rawValue) > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+    ) {
+      return { status: 'oversized', entries: [], needsRewrite: false };
     }
 
     try {
@@ -851,14 +1976,15 @@ export class ModelCatalogCacheStore {
         return { status: 'invalid', entries: [], needsRewrite: false };
       }
 
-      const entries = parsed.entries
-        .map((entry) => normalizeEntry(entry))
-        .filter((entry): entry is T => entry !== null);
+      const normalizedEntries = parsed.entries.map((entry) => normalizeEntry(entry, parsed.version));
+      const entries = normalizedEntries.filter((entry): entry is T => entry !== null);
 
       return {
         status: 'ok',
         entries,
-        needsRewrite: parsed.version !== PERSISTED_CACHE_VERSION,
+        needsRewrite: parsed.version !== MODEL_CATALOG_CACHE_PERSISTED_VERSION
+          || normalizedEntries.some((entry) => entry === null)
+          || parsed.entries.some((entry) => rawEntryNeedsRewrite(entry)),
       };
     } catch {
       return { status: 'invalid', entries: [], needsRewrite: false };
@@ -866,19 +1992,16 @@ export class ModelCatalogCacheStore {
   }
 
   private persistSearchEntries(): void {
-    const payload: PersistedPayload<SearchCacheEntry> = {
-      version: PERSISTED_CACHE_VERSION,
-      entries: this.getSortedSearchEntries()
-        .filter((entry) => entry.scope.authScope === 'anon')
-        .map((entry) => ({
-          ...entry,
-          result: {
-            ...entry.result,
-            models: sanitizeAnonymousPersistedModels(entry.result.models),
-          },
-        })),
-    };
-    this.storage.set(SEARCH_CACHE_KEY, JSON.stringify(payload));
+    const entries = this.getSortedSearchEntries()
+      .filter((entry) => entry.scope.authScope === 'anon')
+      .map((entry) => ({
+        ...entry,
+        result: {
+          ...entry.result,
+          models: sanitizeAnonymousPersistedModels(entry.result.models),
+        },
+      }));
+    this.persistBoundedPayload(SEARCH_CACHE_KEY, entries);
   }
 
   private persistSnapshotEntries(): void {
@@ -893,11 +2016,86 @@ export class ModelCatalogCacheStore {
           }]
           : [];
       });
-    const payload: PersistedPayload<SnapshotCacheEntry> = {
-      version: PERSISTED_CACHE_VERSION,
-      entries,
-    };
-    this.storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify(payload));
+    this.persistBoundedPayload(SNAPSHOT_CACHE_KEY, entries);
+  }
+
+  private persistBoundedPayload<T>(key: typeof PERSISTED_CACHE_KEYS[number], entries: T[]): void {
+    if (this.isPersistenceDisabled) {
+      return;
+    }
+
+    const prefix = `{"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION},"entries":[`;
+    const suffix = ']}';
+    const serializedEntries: string[] = [];
+    let serializedBytes = getTextByteLength(prefix) + getTextByteLength(suffix);
+
+    for (const entry of entries) {
+      const serializedEntry = JSON.stringify(entry);
+      if (!serializedEntry) {
+        continue;
+      }
+
+      const separatorBytes = serializedEntries.length > 0 ? 1 : 0;
+      const nextBytes = serializedBytes + separatorBytes + getTextByteLength(serializedEntry);
+      if (nextBytes > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES) {
+        // Preserve smaller recent entries even if one unusually large result cannot be cached.
+        continue;
+      }
+
+      serializedEntries.push(serializedEntry);
+      serializedBytes = nextBytes;
+    }
+
+    if (serializedEntries.length === 0) {
+      this.removePersistedValue(key, { failOpen: true });
+      return;
+    }
+
+    try {
+      this.storage.set(key, `${prefix}${serializedEntries.join(',')}${suffix}`);
+    } catch {
+      // The previous payload may now describe state that memory has already
+      // removed (for example, a model that became private). Best-effort
+      // invalidation prevents that stale value from returning after restart.
+      this.removePersistedValue(key, { failOpen: true });
+      this.disablePersistence();
+    }
+  }
+
+  private hydrateForMutation(): void {
+    if (this.isHydrated) {
+      return;
+    }
+
+    try {
+      this.hydrate();
+    } catch {
+      // The catalog cache is optional. If persistence is still unavailable when
+      // fresh network data arrives, keep serving that data from memory instead
+      // of turning a successful catalog request into an error.
+      this.searchEntries.clear();
+      this.snapshotEntries.clear();
+      this.disablePersistence();
+    }
+  }
+
+  private removePersistedValue(
+    key: typeof PERSISTED_CACHE_KEYS[number],
+    options: { failOpen?: boolean } = {},
+  ): void {
+    try {
+      this.storage.remove(key);
+    } catch (error) {
+      this.disablePersistence();
+      if (options.failOpen !== true) {
+        throw error;
+      }
+    }
+  }
+
+  private disablePersistence(): void {
+    this.isPersistenceDisabled = true;
+    this.isHydrated = true;
   }
 
   private getSortedSearchEntries(): SearchCacheEntry[] {
@@ -933,12 +2131,6 @@ export class ModelCatalogCacheStore {
   }
 
   private buildSearchKey(scope: CatalogCacheScope): string {
-    return [
-      scope.query,
-      scope.cursor ?? '__initial__',
-      scope.pageSize,
-      scope.sort ?? '__default__',
-      scope.authScope,
-    ].join('::');
+    return buildCatalogSearchKey(scope);
   }
 }

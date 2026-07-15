@@ -834,11 +834,11 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
     return true;
   });
   const eligibleScopeKeys = new Set(eligibleCandidates.flatMap((candidate) => {
-    const scopeKey = getProjectorExactScopeKey(candidate);
+    const scopeKey = getProjectorExactScopeKey(candidate, activeVariantKeys);
     return scopeKey ? [scopeKey] : [];
   }));
   return canonical.candidates.filter((candidate) => {
-    const scopeKey = getProjectorExactScopeKey(candidate);
+    const scopeKey = getProjectorExactScopeKey(candidate, activeVariantKeys);
     return scopeKey !== null && eligibleScopeKeys.has(scopeKey);
   });
 }

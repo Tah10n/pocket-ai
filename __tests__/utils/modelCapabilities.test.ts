@@ -926,6 +926,63 @@ describe('modelCapabilities', () => {
     })).toEqual([]);
   });
 
+  it.each([
+    {
+      modality: 'audio' as const,
+      expectedSupport: { vision: false, audio: true },
+    },
+    {
+      modality: 'vision' as const,
+      expectedSupport: { vision: true, audio: false },
+    },
+  ])('keeps the active $modality projector scoped by its file-name alias', ({
+    modality,
+    expectedSupport,
+  }) => {
+    const modelId = `author/${modality}-variant-alias`;
+    const variantId = `${modality}-q4`;
+    const variantFileName = `model.${modality}.Q4_K_M.gguf`;
+    const projectorIdentity = {
+      repoId: modelId,
+      ownerVariantId: variantFileName,
+      fileName: `mmproj-${modality}.gguf`,
+    };
+    const projector = {
+      ...projectorIdentity,
+      id: buildProjectorArtifactId(projectorIdentity),
+      ownerModelId: modelId,
+      downloadUrl: `https://example.com/${projectorIdentity.fileName}`,
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: modelId,
+      activeVariantId: variantId,
+      resolvedFileName: variantFileName,
+      variants: [{
+        variantId,
+        fileName: variantFileName,
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', modality] as Array<'text' | 'vision' | 'audio'>,
+      }],
+      projectorCandidates: [projector],
+    };
+
+    expect(getEffectiveActiveVariantProjectorCandidates(model)).toEqual([
+      expect.objectContaining({
+        id: buildProjectorArtifactId({
+          ...projectorIdentity,
+          ownerVariantId: variantId,
+        }),
+        ownerVariantId: variantId,
+        fileName: projector.fileName,
+      }),
+    ]);
+    expect(resolveEffectiveActiveVariantNativeSupport(model)).toEqual(expectedSupport);
+  });
+
   it('treats an explicit empty active-variant projector list as authoritative', () => {
     const staleParentProjector = {
       id: 'stale-parent-projector',

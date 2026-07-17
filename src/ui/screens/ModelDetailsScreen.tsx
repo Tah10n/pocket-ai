@@ -427,7 +427,7 @@ export function ModelDetailsScreen() {
                         <Button
                           action="softPrimary"
                           size="sm"
-                          onPress={() => handleDownload(displayModel)}
+                          onPress={() => handleDownload(displayModel, { includeOptionalMtpDraft: true })}
                           testID="model-details-download-mtp-draft"
                         >
                           <MaterialSymbols name="download" size={18} className="text-primary-600 dark:text-primary-300" />

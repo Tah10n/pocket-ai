@@ -3,6 +3,7 @@ import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middl
 import { mmkvStorage } from '../lib/mmkv';
 import { ModelMetadata, LifecycleStatus, type ModelArtifactMetadata } from '../types/models';
 import type { ProjectorArtifact } from '../types/multimodal';
+import type { ModelDownloadRequestOptions } from '../types/downloads';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import {
   getCandidateCompanionArtifactDownloadFileNames,
@@ -486,11 +487,58 @@ function normalizePersistedCompanionDownloadStatesForModel(
 interface DownloadState {
   queue: ModelMetadata[];
   activeDownloadId: string | null;
+  downloadOptionsByModelId: Record<string, ModelDownloadRequestOptions>;
   
-  addToQueue: (model: ModelMetadata) => void;
+  addToQueue: (model: ModelMetadata, options?: ModelDownloadRequestOptions) => void;
   removeFromQueue: (modelId: string) => void;
   setActiveDownload: (modelId: string | null) => void;
   updateModelInQueue: (modelId: string, updates: Partial<ModelMetadata>) => void;
+}
+
+function normalizeDownloadRequestOptions(value: unknown): ModelDownloadRequestOptions | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  return (value as ModelDownloadRequestOptions).includeOptionalMtpDraft === true
+    ? { includeOptionalMtpDraft: true }
+    : undefined;
+}
+
+function updateDownloadRequestOptions(
+  current: Record<string, ModelDownloadRequestOptions>,
+  modelId: string,
+  options: ModelDownloadRequestOptions | undefined,
+  preserveExistingWhenOmitted: boolean,
+): Record<string, ModelDownloadRequestOptions> {
+  if (options === undefined && preserveExistingWhenOmitted) {
+    return current;
+  }
+
+  const normalizedOptions = normalizeDownloadRequestOptions(options);
+  const { [modelId]: _removed, ...withoutModel } = current;
+  return normalizedOptions
+    ? { ...withoutModel, [modelId]: normalizedOptions }
+    : withoutModel;
+}
+
+function normalizePersistedDownloadOptionsByModelId(
+  queue: ModelMetadata[],
+  value: unknown,
+): Record<string, ModelDownloadRequestOptions> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  const queuedModelIds = new Set(queue.map((model) => model.id));
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([modelId, options]) => {
+      const normalizedOptions = queuedModelIds.has(modelId)
+        ? normalizeDownloadRequestOptions(options)
+        : undefined;
+      return normalizedOptions ? [[modelId, normalizedOptions]] : [];
+    }),
+  );
 }
 
 export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMetadata[] {
@@ -528,8 +576,9 @@ export const useDownloadStore = create<DownloadState>()(
         return {
           queue: [],
           activeDownloadId: null,
+          downloadOptionsByModelId: {},
 
-          addToQueue: (model) => setWhenPrivateStorageWritable((state) => {
+          addToQueue: (model, options) => setWhenPrivateStorageWritable((state) => {
           const existing = state.queue.find((queued) => queued.id === model.id);
 
           if (!existing) {
@@ -541,6 +590,12 @@ export const useDownloadStore = create<DownloadState>()(
                   lifecycleStatus: LifecycleStatus.QUEUED,
                 }),
               ],
+              downloadOptionsByModelId: updateDownloadRequestOptions(
+                state.downloadOptionsByModelId,
+                model.id,
+                options,
+                false,
+              ),
             };
           }
 
@@ -552,6 +607,12 @@ export const useDownloadStore = create<DownloadState>()(
 
             return {
               queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
+              downloadOptionsByModelId: updateDownloadRequestOptions(
+                state.downloadOptionsByModelId,
+                model.id,
+                options,
+                true,
+              ),
             };
           }
 
@@ -570,6 +631,12 @@ export const useDownloadStore = create<DownloadState>()(
 
             return {
               queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
+              downloadOptionsByModelId: updateDownloadRequestOptions(
+                state.downloadOptionsByModelId,
+                model.id,
+                options,
+                true,
+              ),
             };
           }
 
@@ -577,8 +644,14 @@ export const useDownloadStore = create<DownloadState>()(
           }),
 
           removeFromQueue: (modelId) => setWhenPrivateStorageWritable((state) => ({
-          queue: state.queue.filter(m => m.id !== modelId),
-          activeDownloadId: state.activeDownloadId === modelId ? null : state.activeDownloadId
+            queue: state.queue.filter(m => m.id !== modelId),
+            activeDownloadId: state.activeDownloadId === modelId ? null : state.activeDownloadId,
+            downloadOptionsByModelId: updateDownloadRequestOptions(
+              state.downloadOptionsByModelId,
+              modelId,
+              undefined,
+              false,
+            ),
           })),
 
           setActiveDownload: (modelId) => setWhenPrivateStorageWritable({ activeDownloadId: modelId }),
@@ -599,8 +672,8 @@ export const useDownloadStore = create<DownloadState>()(
         // Do NOT persist activeDownloadId — after a restart, no real download is running.
         // Persisting it would leave the UI in a permanent "downloading" spinner state.
         // Avoid persisting volatile progress updates so downloads don't spam MMKV writes.
-        partialize: (state) => ({
-          queue: state.queue.map((model) => {
+        partialize: (state) => {
+          const queue = state.queue.map((model) => {
             const shouldZeroProgress = model.lifecycleStatus === LifecycleStatus.DOWNLOADING
               || model.lifecycleStatus === LifecycleStatus.VERIFYING;
 
@@ -608,8 +681,16 @@ export const useDownloadStore = create<DownloadState>()(
               ...model,
               downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
             }, { clearVolatileProgress: shouldZeroProgress });
-          }),
-        }),
+          });
+
+          return {
+            queue,
+            downloadOptionsByModelId: normalizePersistedDownloadOptionsByModelId(
+              queue,
+              state.downloadOptionsByModelId,
+            ),
+          };
+        },
         onRehydrateStorage: () => (state) => {
           if (!state) {
             return;
@@ -617,6 +698,10 @@ export const useDownloadStore = create<DownloadState>()(
 
           state.activeDownloadId = null;
           state.queue = normalizePersistedDownloadQueue(state.queue);
+          state.downloadOptionsByModelId = normalizePersistedDownloadOptionsByModelId(
+            state.queue,
+            state.downloadOptionsByModelId,
+          );
         },
       }
     )
@@ -641,6 +726,7 @@ export function resetDownloadStoreForPrivateStorageReset(): void {
   useDownloadStore.setState({
     queue: [],
     activeDownloadId: null,
+    downloadOptionsByModelId: {},
   });
   void useDownloadStore.persist.clearStorage();
 }

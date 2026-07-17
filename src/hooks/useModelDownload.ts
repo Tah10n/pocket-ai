@@ -6,6 +6,7 @@ import { notificationService } from '../services/NotificationService';
 import { isPrivateStorageWritable } from '../services/storage';
 import { selectModelProjectorLifecycleState } from '../store/modelsStore';
 import { ModelMetadata } from '../types/models';
+import type { ModelDownloadRequestOptions } from '../types/downloads';
 import { useShallow } from 'zustand/react/shallow';
 import i18n from '../i18n';
 
@@ -29,7 +30,10 @@ export function useModelDownload() {
   const activeDownloadId = useDownloadStore((state) => state.activeDownloadId);
   const addToQueue = useDownloadStore((state) => state.addToQueue);
 
-  const startDownload = useCallback((model: ModelMetadata) => {
+  const startDownload = useCallback((
+    model: ModelMetadata,
+    downloadOptions?: ModelDownloadRequestOptions,
+  ) => {
     void (async () => {
       let didQueueDownload = false;
       const queueDownload = () => {
@@ -42,7 +46,7 @@ export function useModelDownload() {
         }
 
         didQueueDownload = true;
-        addToQueue(model);
+        addToQueue(model, downloadOptions);
         return true;
       };
 

@@ -12,6 +12,7 @@ import {
   LifecycleStatus,
 } from '../types/models';
 import type { ProjectorArtifact, ProjectorMatchStatus } from '../types/multimodal';
+import type { ModelDownloadRequestOptions } from '../types/downloads';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
@@ -519,7 +520,15 @@ export class ModelDownloadManager {
       : null;
   }
 
-  private resolveSpeculativeDraftForDownload(model: ModelMetadata): ModelArtifactMetadata | null {
+  private resolveSpeculativeDraftForDownload(
+    model: ModelMetadata,
+    downloadOptions?: ModelDownloadRequestOptions,
+  ): ModelArtifactMetadata | null {
+    if (downloadOptions?.includeOptionalMtpDraft === true) {
+      const configuredArtifact = getConfiguredMtpDraftArtifact(model);
+      return configuredArtifact ? { ...configuredArtifact } : null;
+    }
+
     const mtpEnabledOverride = getModelLoadParametersForModel(model.id).mtpEnabled;
     const artifact = getSelectedMtpDraftArtifact(model, mtpEnabledOverride);
     return artifact ? { ...artifact } : null;
@@ -1026,7 +1035,11 @@ export class ModelDownloadManager {
       }
 
       if (options.clearQueue) {
-        setDownloadRuntimeStateForStorageStop({ queue: [], activeDownloadId: null }, 'download reset state');
+        setDownloadRuntimeStateForStorageStop({
+          queue: [],
+          activeDownloadId: null,
+          downloadOptionsByModelId: {},
+        }, 'download reset state');
       } else if (job) {
         const currentState = useDownloadStore.getState();
         setDownloadRuntimeStateForStorageStop({
@@ -1075,7 +1088,13 @@ export class ModelDownloadManager {
       return;
     }
     
-    const { queue, activeDownloadId, setActiveDownload, updateModelInQueue } = useDownloadStore.getState();
+    const {
+      queue,
+      activeDownloadId,
+      downloadOptionsByModelId,
+      setActiveDownload,
+      updateModelInQueue,
+    } = useDownloadStore.getState();
     
     // If already downloading something, stay idle
     if (activeDownloadId) return;
@@ -1128,7 +1147,7 @@ export class ModelDownloadManager {
       this.clearFailedQueueStart(next.id, jobToken);
       throw error;
     }
-    void this.runDownloadJob(next, jobToken);
+    void this.runDownloadJob(next, jobToken, downloadOptionsByModelId[next.id]);
   }
 
   private isCurrentJob(modelId: string, jobToken: number): boolean {
@@ -1199,7 +1218,11 @@ export class ModelDownloadManager {
     }
   }
 
-  private async runDownloadJob(model: ModelMetadata, jobToken: number): Promise<void> {
+  private async runDownloadJob(
+    model: ModelMetadata,
+    jobToken: number,
+    downloadOptions?: ModelDownloadRequestOptions,
+  ): Promise<void> {
     const { setActiveDownload, updateModelInQueue } = useDownloadStore.getState();
 
     try {
@@ -1217,7 +1240,7 @@ export class ModelDownloadManager {
         return;
       }
 
-      await this.downloadModel(model, jobToken);
+      await this.downloadModel(model, jobToken, downloadOptions);
     } catch (e) {
       console.error(`[ModelDownloadManager] Failed to download ${model.id}`, summarizeErrorForLog(e));
 
@@ -1294,12 +1317,16 @@ export class ModelDownloadManager {
     void this.processQueue();
   };
 
-  private async downloadModel(model: ModelMetadata, jobToken: number) {
+  private async downloadModel(
+    model: ModelMetadata,
+    jobToken: number,
+    downloadOptions?: ModelDownloadRequestOptions,
+  ) {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
     let resumable: ActiveDownloadJob['resumable'] = null;
     const modelsDir = getModelsDir();
     const selectedProjector = this.resolveProjectorForDownload(model);
-    const selectedSpeculativeDraft = this.resolveSpeculativeDraftForDownload(model);
+    const selectedSpeculativeDraft = this.resolveSpeculativeDraftForDownload(model, downloadOptions);
     let reusableModelFile: ReusableModelDownloadFile | null = null;
     let reusableProjectorFile: ReusableProjectorDownloadFile | null = null;
     let reusableSpeculativeDraftFile: ReusableModelArtifactDownloadFile | null = null;
@@ -1417,15 +1444,35 @@ export class ModelDownloadManager {
           ? selectedProjectorSizeBytes ?? 0
           : 0
       );
-      const requiredBytes = requiredModelBytes + requiredProjectorBytes + REQUIRED_DOWNLOAD_BUFFER_BYTES;
+      const selectedSpeculativeDraftSizeBytes = selectedSpeculativeDraft
+        ? normalizePositiveByteSize(selectedSpeculativeDraft.sizeBytes)
+        : null;
+      const hasUnknownSpeculativeDraftDiskRequirement = selectedSpeculativeDraft !== null
+        && !reusableSpeculativeDraftFile
+        && selectedSpeculativeDraftSizeBytes === null;
+      const requiredSpeculativeDraftBytes = speculativeDraftResumeDiskPlanning?.requiredBytes ?? (
+        selectedSpeculativeDraft && !reusableSpeculativeDraftFile
+          ? selectedSpeculativeDraftSizeBytes ?? 0
+          : 0
+      );
+      const requiredBytes = requiredModelBytes
+        + requiredProjectorBytes
+        + requiredSpeculativeDraftBytes
+        + REQUIRED_DOWNLOAD_BUFFER_BYTES;
       const hasKnownDiskRequirement = requiredModelBytes > 0
         || requiredProjectorBytes > 0
-        || hasUnknownProjectorDiskRequirement;
+        || hasUnknownProjectorDiskRequirement
+        || requiredSpeculativeDraftBytes > 0
+        || hasUnknownSpeculativeDraftDiskRequirement;
       if (hasKnownDiskRequirement && freeSpace !== undefined && freeSpace < requiredBytes) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
           details: {
             modelId: model.id,
-            ...(selectedProjector ? { artifactKind: 'projector' } : null),
+            ...(selectedProjector
+              ? { artifactKind: 'projector' }
+              : selectedSpeculativeDraft
+                ? { artifactKind: 'speculative_draft' }
+                : null),
             freeSpace,
             requiredBytes,
           },
@@ -1451,9 +1498,17 @@ export class ModelDownloadManager {
           const failedProjectorId = preflightError.code === 'download_disk_space_low'
             ? selectedProjector?.id
             : undefined;
+          const failedSpeculativeDraftId = preflightError.code === 'download_disk_space_low'
+            && !selectedProjector
+            ? selectedSpeculativeDraft?.id
+            : undefined;
           const currentFailedProjector = failedProjectorId
             ? getEffectiveActiveVariantProjectorCandidates(currentModel)
               .find((projector) => projector.id === failedProjectorId)
+            : undefined;
+          const currentFailedSpeculativeDraft = failedSpeculativeDraftId
+            ? getSpeculativeDraftArtifacts(currentModel)
+              .find((artifact) => artifact.id === failedSpeculativeDraftId)
             : undefined;
           const modelResumeDataForFailure = modelResumeDiskPlanning
             ? modelResumeDiskPlanning.resumeData
@@ -1461,9 +1516,16 @@ export class ModelDownloadManager {
           const projectorResumeDataForFailure = projectorResumeDiskPlanning
             ? projectorResumeDiskPlanning.resumeData
             : normalizeDownloadResumeData(currentFailedProjector?.resumeData);
+          const speculativeDraftResumeDataForFailure = speculativeDraftResumeDiskPlanning
+            ? speculativeDraftResumeDiskPlanning.resumeData
+            : normalizeDownloadResumeData(currentFailedSpeculativeDraft?.resumeData);
           const shouldClearInvalidModelPartialState = modelResumeDiskPlanning !== null
             && modelResumeDiskPlanning.resumeData === undefined
             && this.hasPartialResumeOrProgressState(currentModel);
+          const shouldClearInvalidSpeculativeDraftPartialState = speculativeDraftResumeDiskPlanning !== null
+            && speculativeDraftResumeDiskPlanning.resumeData === undefined
+            && currentFailedSpeculativeDraft !== undefined
+            && this.hasPartialResumeOrProgressState(currentFailedSpeculativeDraft);
           updateModelInQueue(model.id, {
             ...this.getDownloadFailureUpdates(e, modelResumeDataForFailure),
             ...(shouldClearInvalidModelPartialState ? { localPath: undefined, downloadProgress: 0 } : {}),
@@ -1473,6 +1535,17 @@ export class ModelDownloadManager {
               e,
               projectorResumeDataForFailure,
             ),
+            ...(failedSpeculativeDraftId
+              ? this.updateModelArtifactState(currentModel, failedSpeculativeDraftId, {
+                installState: 'failed',
+                resumeData: speculativeDraftResumeDataForFailure,
+                ...(shouldClearInvalidSpeculativeDraftPartialState
+                  ? { localPath: undefined, downloadProgress: 0 }
+                  : {}),
+                errorCode: preflightError.code,
+                errorMessage: preflightError.message,
+              })
+              : {}),
           });
           setActiveDownload(null);
         } catch (storageError) {

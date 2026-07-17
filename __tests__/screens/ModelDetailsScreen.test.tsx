@@ -461,6 +461,11 @@ describe('ModelDetailsScreen', () => {
       recommendedGpuLayers: 0,
       gpuLayersCeiling: 512,
     });
+    const { getModelLoadParametersForModel } = jest.requireMock('../../src/services/SettingsStore');
+    getModelLoadParametersForModel.mockReturnValue({
+      contextSize: 4096,
+      gpuLayers: null,
+    });
     mockReloadModel.mockResolvedValue(undefined);
     mockHardwareStatus.mockReturnValue({ networkType: 'wifi' });
 
@@ -792,7 +797,7 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
   });
 
-  it('offers the optional Gemma MTP draft download for an existing base-model installation', async () => {
+  it('prefetches the optional Gemma MTP draft when runtime MTP is off', async () => {
     const draftArtifactId = 'mtp-draft-gemma';
     const downloadedModel = createModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,
@@ -818,6 +823,12 @@ describe('ModelDetailsScreen', () => {
     modelCatalogService.getCachedModel.mockReturnValue(downloadedModel);
     modelCatalogService.getModelDetails.mockResolvedValue(downloadedModel);
     modelCatalogService.refreshModelMetadata.mockResolvedValue(downloadedModel);
+    const { getModelLoadParametersForModel } = jest.requireMock('../../src/services/SettingsStore');
+    getModelLoadParametersForModel.mockReturnValue({
+      contextSize: 4096,
+      gpuLayers: null,
+      mtpEnabled: false,
+    });
 
     const screen = render(<ModelDetailsScreen />);
     await act(async () => {
@@ -831,10 +842,13 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
 
-    expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
-      id: downloadedModel.id,
-      speculativeDecoding: expect.objectContaining({ mode: 'draft_model' }),
-    }));
+    expect(mockStartDownload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: downloadedModel.id,
+        speculativeDecoding: expect.objectContaining({ mode: 'draft_model' }),
+      }),
+      { includeOptionalMtpDraft: true },
+    );
   });
 
   it('shows downloaded model quantization in the selector row without a separate label', async () => {

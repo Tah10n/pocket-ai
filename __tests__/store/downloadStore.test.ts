@@ -56,7 +56,11 @@ function getCanonicalProjectorId(
 
 describe('downloadStore', () => {
   beforeEach(() => {
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    useDownloadStore.setState({
+      queue: [],
+      activeDownloadId: null,
+      downloadOptionsByModelId: {},
+    });
   });
 
   it('normalizes in-flight persisted downloads back to queued state', () => {
@@ -1196,6 +1200,30 @@ describe('downloadStore', () => {
     expect(useDownloadStore.getState().queue).toEqual([]);
   });
 
+  it('persists explicit optional-draft intent across retry and removes it with the queue entry', () => {
+    useDownloadStore.getState().addToQueue(
+      buildQueuedModel('gemma/model', LifecycleStatus.AVAILABLE),
+      { includeOptionalMtpDraft: true },
+    );
+
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({
+      'gemma/model': { includeOptionalMtpDraft: true },
+    });
+
+    useDownloadStore.getState().updateModelInQueue('gemma/model', {
+      lifecycleStatus: LifecycleStatus.FAILED,
+    });
+    useDownloadStore.getState().addToQueue(
+      buildQueuedModel('gemma/model', LifecycleStatus.AVAILABLE),
+    );
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({
+      'gemma/model': { includeOptionalMtpDraft: true },
+    });
+
+    useDownloadStore.getState().removeFromQueue('gemma/model');
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({});
+  });
+
   it('partialize zeroes progress for DOWNLOADING/VERIFYING entries only', () => {
     const options = (useDownloadStore as any).persist?.getOptions?.();
     expect(options?.partialize).toEqual(expect.any(Function));
@@ -1207,12 +1235,19 @@ describe('downloadStore', () => {
         { ...buildQueuedModel('c', LifecycleStatus.PAUSED), downloadProgress: 0.7 },
       ],
       activeDownloadId: 'a',
+      downloadOptionsByModelId: {
+        a: { includeOptionalMtpDraft: true },
+        orphan: { includeOptionalMtpDraft: true },
+      },
     };
 
     const partial = options.partialize(state);
     expect(partial.queue.find((m: any) => m.id === 'a')?.downloadProgress).toBe(0);
     expect(partial.queue.find((m: any) => m.id === 'b')?.downloadProgress).toBe(0);
     expect(partial.queue.find((m: any) => m.id === 'c')?.downloadProgress).toBe(0.7);
+    expect(partial.downloadOptionsByModelId).toEqual({
+      a: { includeOptionalMtpDraft: true },
+    });
   });
 
   it('onRehydrateStorage resets activeDownloadId and normalizes persisted in-flight entries', () => {
@@ -1222,6 +1257,11 @@ describe('downloadStore', () => {
     const persisted = {
       queue: [buildQueuedModel('d', LifecycleStatus.DOWNLOADING)],
       activeDownloadId: 'd',
+      downloadOptionsByModelId: {
+        d: { includeOptionalMtpDraft: true },
+        orphan: { includeOptionalMtpDraft: true },
+        invalid: { includeOptionalMtpDraft: 'yes' },
+      },
     };
 
     const handler = options.onRehydrateStorage();
@@ -1229,6 +1269,9 @@ describe('downloadStore', () => {
 
     expect(persisted.activeDownloadId).toBeNull();
     expect(persisted.queue[0].lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(persisted.downloadOptionsByModelId).toEqual({
+      d: { includeOptionalMtpDraft: true },
+    });
   });
 
   it('normalizes legacy queue entries with zero size to unknown size defaults', () => {

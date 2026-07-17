@@ -7,6 +7,7 @@ import { Image } from '@/components/ui/image';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import type { ChatAttachment } from '@/types/attachments';
+import type { InferenceCompletionTelemetry } from '@/types/models';
 import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ScreenBadge, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
@@ -25,6 +26,7 @@ export interface ChatMessageBubbleProps {
   errorMessage?: string;
   isStreaming?: boolean;
   tokensPerSec?: number;
+  inferenceMetrics?: InferenceCompletionTelemetry;
   canDelete?: boolean;
   canRegenerate?: boolean;
   onDelete?: (messageId: string) => void;
@@ -134,6 +136,7 @@ function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: Chat
     && prev.errorMessage === next.errorMessage
     && prev.isStreaming === next.isStreaming
     && prev.tokensPerSec === next.tokensPerSec
+    && prev.inferenceMetrics === next.inferenceMetrics
     && prev.canDelete === next.canDelete
     && prev.canRegenerate === next.canRegenerate
     && prev.onDelete === next.onDelete
@@ -179,6 +182,7 @@ const ChatMessageBubbleComponent = ({
   errorMessage,
   isStreaming,
   tokensPerSec,
+  inferenceMetrics,
   canDelete = false,
   canRegenerate = false,
   onDelete,
@@ -213,10 +217,42 @@ const ChatMessageBubbleComponent = ({
     ? sanitizedExplicitAssistantContent
     : assistantPresentation?.finalContent ?? content;
   const shouldAnimateThought = isAssistantStreaming && hasThought;
+  const displayedTokensPerSecond = typeof inferenceMetrics?.predictedPerSecond === 'number'
+    && Number.isFinite(inferenceMetrics.predictedPerSecond)
+    ? inferenceMetrics.predictedPerSecond
+    : tokensPerSec;
   const showPerformanceLabel =
     !isUser &&
-    typeof tokensPerSec === 'number' &&
-    Number.isFinite(tokensPerSec);
+    typeof displayedTokensPerSecond === 'number' &&
+    Number.isFinite(displayedTokensPerSecond);
+  const showInferenceTelemetry = !isUser && inferenceMetrics !== undefined;
+  const mtpTelemetryLabel = (() => {
+    const mtp = inferenceMetrics?.mtp;
+    if (!mtp) {
+      return null;
+    }
+
+    if (!mtp.requested) {
+      return t('chat.inferenceMetrics.mtpOff');
+    }
+
+    if (mtp.fallbackUsed || mtp.fallbackReason) {
+      return t('chat.inferenceMetrics.mtpFallback');
+    }
+
+    if (!mtp.attempted) {
+      return t('chat.inferenceMetrics.mtpNotUsed');
+    }
+
+    const acceptancePercent = typeof mtp.acceptanceRate === 'number'
+      ? Math.round(mtp.acceptanceRate * 100)
+      : 0;
+    return t('chat.inferenceMetrics.mtpAccepted', {
+      accepted: mtp.draftTokensAccepted,
+      drafted: mtp.draftTokens,
+      percent: acceptancePercent,
+    });
+  })();
   const copyableContent = isUser
     ? content
     : hasExplicitThoughtContent
@@ -228,7 +264,7 @@ const ChatMessageBubbleComponent = ({
     || (canRegenerate && Boolean(onRegenerate))
     || (canDelete && Boolean(onDelete))
   );
-  const shouldShowMetadataRow = shouldShowActionRow || showPerformanceLabel;
+  const shouldShowMetadataRow = shouldShowActionRow || showPerformanceLabel || showInferenceTelemetry;
 
   useEffect(() => {
     if (!copied) {
@@ -529,7 +565,29 @@ const ChatMessageBubbleComponent = ({
               className={appearance.classNames.chatMetadataBadgeClassName}
               textClassName="text-typography-600 dark:text-typography-300"
             >
-              {tokensPerSec?.toFixed(1)} t/s
+              {displayedTokensPerSecond?.toFixed(1)} t/s
+            </ScreenBadge>
+          ) : null}
+          {mtpTelemetryLabel ? (
+            <ScreenBadge
+              testID={`mtp-telemetry-${id}`}
+              size="micro"
+              className={appearance.classNames.chatMetadataBadgeClassName}
+              textClassName="text-typography-600 dark:text-typography-300"
+            >
+              {mtpTelemetryLabel}
+            </ScreenBadge>
+          ) : null}
+          {typeof inferenceMetrics?.timeToFirstTokenMs === 'number' ? (
+            <ScreenBadge
+              testID={`ttft-telemetry-${id}`}
+              size="micro"
+              className={appearance.classNames.chatMetadataBadgeClassName}
+              textClassName="text-typography-600 dark:text-typography-300"
+            >
+              {t('chat.inferenceMetrics.ttft', {
+                milliseconds: Math.round(inferenceMetrics.timeToFirstTokenMs),
+              })}
             </ScreenBadge>
           ) : null}
           {hasCopyableContent ? (

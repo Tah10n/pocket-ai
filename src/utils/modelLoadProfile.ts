@@ -5,9 +5,11 @@ interface PersistedLoadProfileDiffOptions {
   draftPersistedGpuLayers: number | null;
   draftKvCacheType: ModelLoadParameters['kvCacheType'];
   draftBackendPolicy: ModelLoadParameters['backendPolicy'] | null;
+  draftMtpEnabled?: boolean;
+  persistedMtpEnabled?: boolean;
   persistedLoadParams: Pick<
     ModelLoadParameters,
-    'contextSize' | 'gpuLayers' | 'kvCacheType' | 'backendPolicy'
+    'contextSize' | 'gpuLayers' | 'kvCacheType' | 'backendPolicy' | 'mtpEnabled'
   >;
 }
 
@@ -26,6 +28,8 @@ export function hasPersistedLoadProfileChanges({
   draftPersistedGpuLayers,
   draftKvCacheType,
   draftBackendPolicy,
+  draftMtpEnabled,
+  persistedMtpEnabled,
   persistedLoadParams,
 }: PersistedLoadProfileDiffOptions): boolean {
   const persistedBackendPolicy = normalizeBackendPolicy(persistedLoadParams.backendPolicy);
@@ -36,5 +40,6 @@ export function hasPersistedLoadProfileChanges({
     || draftPersistedGpuLayers !== (persistedLoadParams.gpuLayers ?? null)
     || draftKvCacheType !== persistedLoadParams.kvCacheType
     || nextBackendPolicy !== persistedBackendPolicy
+    || draftMtpEnabled !== persistedMtpEnabled
   );
 }

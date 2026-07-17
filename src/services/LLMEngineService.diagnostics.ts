@@ -2,8 +2,11 @@ import type {
   EngineBackendInitAttempt,
   EngineBackendMode,
   EngineBackendPolicy,
+  EngineSpeculativeDecodingDiagnostics,
   EngineLifecycleEvent,
   EngineState,
+  InferenceCompletionTelemetry,
+  MtpFallbackReason,
 } from '../types/models';
 import type {
   MultimodalDiagnosticsSummary,
@@ -13,6 +16,65 @@ import type {
   VisionCapabilityDiagnostic,
 } from '../types/multimodal';
 import { sanitizeMultimodalFailureCategory } from '../utils/multimodalFailureReason';
+
+function toNonNegativeInteger(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : 0;
+}
+
+function toOptionalNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function toOptionalPositiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
+}
+
+export function buildInferenceCompletionTelemetry(source: {
+  result: {
+    tokens_predicted?: unknown;
+    tokens_evaluated?: unknown;
+    draft_tokens?: unknown;
+    draft_tokens_accepted?: unknown;
+    timings?: {
+      predicted_per_second?: unknown;
+      prompt_per_second?: unknown;
+    } | null;
+  };
+  mtpRequested: boolean;
+  mtpAttempted: boolean;
+  mtpFallbackUsed: boolean;
+  fallbackReason?: MtpFallbackReason | null;
+  timeToFirstTokenMs?: number | null;
+}): InferenceCompletionTelemetry {
+  const draftTokens = toNonNegativeInteger(source.result.draft_tokens);
+  const draftTokensAccepted = toNonNegativeInteger(source.result.draft_tokens_accepted);
+  const acceptanceRate = draftTokens > 0
+    ? Math.max(0, Math.min(1, draftTokensAccepted / draftTokens))
+    : undefined;
+
+  return {
+    tokensPredicted: toNonNegativeInteger(source.result.tokens_predicted),
+    tokensEvaluated: toNonNegativeInteger(source.result.tokens_evaluated),
+    predictedPerSecond: toOptionalPositiveNumber(source.result.timings?.predicted_per_second),
+    promptPerSecond: toOptionalPositiveNumber(source.result.timings?.prompt_per_second),
+    timeToFirstTokenMs: toOptionalNonNegativeNumber(source.timeToFirstTokenMs),
+    mtp: {
+      requested: source.mtpRequested,
+      attempted: source.mtpAttempted,
+      fallbackUsed: source.mtpFallbackUsed,
+      draftTokens,
+      draftTokensAccepted,
+      acceptanceRate,
+      fallbackReason: source.fallbackReason ?? undefined,
+    },
+  };
+}
 
 function resolveVisionCapability(readiness: MultimodalReadinessState | null | undefined): VisionCapabilityDiagnostic {
   if (!readiness) {
@@ -176,6 +238,7 @@ export function buildEngineDiagnosticsSnapshot(source: {
   lastLifecycleEvent: EngineLifecycleEvent | null;
   lastLifecycleError: string | null;
   multimodalDiagnostics: MultimodalDiagnosticsSummary | null;
+  speculativeDecodingDiagnostics?: EngineSpeculativeDecodingDiagnostics | null;
 }): NonNullable<EngineState['diagnostics']> {
   return {
     backendMode: source.activeBackendMode,
@@ -212,5 +275,19 @@ export function buildEngineDiagnosticsSnapshot(source: {
     lastLifecycleEvent: source.lastLifecycleEvent ?? undefined,
     lastLifecycleError: source.lastLifecycleError ?? undefined,
     multimodal: source.multimodalDiagnostics ? { ...source.multimodalDiagnostics } : undefined,
+    speculativeDecoding: source.speculativeDecodingDiagnostics
+      ? {
+          ...source.speculativeDecodingDiagnostics,
+          memory: source.speculativeDecodingDiagnostics.memory
+            ? { ...source.speculativeDecodingDiagnostics.memory }
+            : undefined,
+          lastCompletion: source.speculativeDecodingDiagnostics.lastCompletion
+            ? {
+                ...source.speculativeDecodingDiagnostics.lastCompletion,
+                mtp: { ...source.speculativeDecodingDiagnostics.lastCompletion.mtp },
+              }
+            : undefined,
+        }
+      : undefined,
   };
 }

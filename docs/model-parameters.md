@@ -66,6 +66,10 @@ They affect native initialization and memory-fit estimation:
 - `contextSize`
 - `gpuLayers`
 - `kvCacheType` (`auto | f16 | q8_0 | q4_0`)
+- `mtpEnabled` (`boolean | undefined`)
+  - stored per model when the user changes the MTP control
+  - `undefined` keeps the model catalog default
+  - changing it requires `Apply & reload` for the active model
 - `backendPolicy` (`auto | cpu | gpu | npu`)
   - `auto` may reuse a saved stable backend profile from autotune when one exists
   - explicit `cpu` / `gpu` / `npu` bypass Auto selection heuristics
@@ -145,6 +149,22 @@ The primary UI for changing these settings lives in:
 
 GGUF file/quantization selection is separate from load profiles. The catalog and model-details flow selects the active file variant before download/load, while Model Controls continue to manage runtime settings for that selected file.
 
+## MTP speculative decoding
+
+Pocket AI automatically recognizes compatible multi-token prediction (MTP) metadata and filenames:
+
+- Embedded-MTP GGUFs are selectable model variants. When a repository also offers a conventional GGUF, the conventional variant remains the automatic default and MTP can be selected explicitly.
+- Gemma models can publish a separate MTP draft GGUF. The draft is treated as an optional companion artifact and is included in download, verification, storage, and RAM estimates when enabled.
+- Text generation uses `draft-mtp` speculative decoding. Image and audio requests explicitly disable speculation for that request.
+- If the draft is missing, its download fails, or MTP initialization fails, the base model stays available and Pocket AI falls back to ordinary generation.
+- Model Controls shows an `Off / On` MTP control only for MTP-capable models. The preference is stored in the model's load profile and never leaks to another model.
+- For the active model, MTP changes use the existing transactional reload flow: the new preference is persisted only after the replacement context loads successfully. Failed or cancelled reloads leave the previous preference intact.
+- Runtime status distinguishes `Active`, `Disabled`, `Memory fallback`, `Initialization fallback`, a missing companion, and a pending reload.
+- Each completed assistant response records native llama.rn telemetry: predicted tokens/sec, time to first token, proposed draft tokens, accepted draft tokens, and acceptance rate. `draftTokens > 0` proves that the native draft loop ran; accepted tokens and stable native throughput are required before claiming a speedup.
+- Model Controls also reports app/PSS memory snapshots captured before model load, after model initialization, and after the first generated token when the platform exposes them.
+
+Model details shows whether MTP is embedded, ready, downloading, or needs a companion download. MTP draft-token limits are selected conservatively from the active quantization; the user-facing load-profile control enables or disables the resolved MTP configuration rather than editing that native token limit.
+
 Advanced runtime controls, backend autotune, and runtime diagnostics are shown only when `showAdvancedInferenceControls` is enabled in settings.
 
 When a conversation has switched models in-chat, Model Controls target the thread's current active model so the sheet can correctly choose between `Save load profile` for inactive models and `Apply & reload` for the active chat model.
@@ -153,6 +173,7 @@ Guideline:
 
 - Treat `seed` as a generation parameter (no reload).
 - Treat `kvCacheType` as a load parameter (reload required for the active model).
+- Treat `mtpEnabled` as a per-model load parameter (reload required for the active model).
 
 ## Checklist when adding a new model parameter
 

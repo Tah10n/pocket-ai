@@ -7,10 +7,14 @@ const {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  captureSettledScenarioScreenshot,
+  activateClearedCatalogFilterOption,
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
+  clearCatalogFiltersIfPresent,
   clearFocusedTextInput,
   DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
+  dismissTransientSurfaceWithBack,
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
@@ -29,6 +33,7 @@ const {
   getBottomTabTapPoint,
   goToHome,
   goToModelCatalog,
+  inputFocusedTextAndConfirm,
   isAppForegroundSnapshot,
   openFirstVisibleVariantPicker,
   parseCliOptions,
@@ -46,8 +51,14 @@ const {
   isPreparedAssistantResponseLabel,
   ScenarioSkipFailureError,
   serializeReportResults,
+  setCatalogFilterPanelOpen,
   shouldAppendRunnerFailure,
+  tapBottomTabUntilVisible,
+  tapBoundsUntilAnyNode,
   waitForAnyNode,
+  waitForEnabledAnyNode,
+  waitForModelWarmupToSettleIfPresent,
+  waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
 
 const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
@@ -312,6 +323,28 @@ describe('android-scenarios screenshot capture', () => {
       fs.rmSync(tempDir, { force: true, recursive: true });
     }
   });
+
+  it('waits for the rendered surface before capturing a passed scenario', async () => {
+    const events = [];
+    const delayFn = jest.fn(async (delayMs) => {
+      events.push(`wait:${delayMs}`);
+    });
+    const context = {
+      captureScreenshot: jest.fn((fileName) => {
+        events.push(`capture:${fileName}`);
+        return fileName;
+      }),
+    };
+
+    await expect(captureSettledScenarioScreenshot(context, 'bottom-tabs.png', {
+      delayFn,
+      settleDelayMs: 25,
+    })).resolves.toBe('bottom-tabs.png');
+
+    expect(delayFn).toHaveBeenCalledWith(25);
+    expect(context.captureScreenshot).toHaveBeenCalledWith('bottom-tabs.png');
+    expect(events).toEqual(['wait:25', 'capture:bottom-tabs.png']);
+  });
 });
 
 describe('android-scenarios focused text clearing', () => {
@@ -426,6 +459,333 @@ describe('android-scenarios focused text clearing', () => {
       );
       jest.dontMock('child_process');
     });
+  });
+});
+
+describe('android-scenarios asynchronous interaction settlement', () => {
+  const immediateDelay = jest.fn().mockResolvedValue(undefined);
+
+  function composerSnapshot(text, sendEnabled = false) {
+    return parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="${text}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node text="" content-desc="Send message" clickable="true" enabled="${sendEnabled ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `);
+  }
+
+  it('retries the full ADB prompt when the first injected character is lost', async () => {
+    const prompt = 'Text fallback smoke 123 456';
+    let typedValue = '';
+    let inputAttempts = 0;
+    const runCommand = jest.fn((_adbPath, args) => {
+      if (args.includes('text')) {
+        inputAttempts += 1;
+        const decoded = args[args.length - 1].replace(/%s/g, ' ');
+        typedValue = inputAttempts === 1 ? decoded.slice(1) : decoded;
+      }
+    });
+
+    await inputFocusedTextAndConfirm('adb', 'device-1', prompt, {
+      maxAttempts: 2,
+      confirmTimeoutMs: 0,
+      focusSettleMs: 0,
+      retryDelayMs: 0,
+      runCommand,
+      clearInput: jest.fn(),
+      createSnapshot: () => composerSnapshot(typedValue, true),
+      delayFn: immediateDelay,
+    });
+
+    expect(inputAttempts).toBe(2);
+    expect(typedValue).toBe(prompt);
+    expect(runCommand).toHaveBeenLastCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'text', escapeAdbInputText(prompt)],
+      expect.objectContaining({ timeout: 5_000 })
+    );
+  });
+
+  it('waits for the send action to become enabled instead of trusting a stale snapshot', async () => {
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(composerSnapshot('Prompt', false))
+      .mockReturnValue(composerSnapshot('Prompt', true));
+
+    const match = await waitForEnabledAnyNode('adb', 'device-1', ['Send message'], {
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      createSnapshot,
+      delayFn: immediateDelay,
+    });
+
+    expect(match.node.enabled).toBe(true);
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps polling after the attachment menu tap until the sheet action appears', async () => {
+    const closedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
+      </hierarchy>
+    `);
+    const openSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(closedSnapshot)
+      .mockReturnValueOnce(closedSnapshot)
+      .mockReturnValue(openSnapshot);
+    const tap = jest.fn();
+    const dismissMenu = jest.fn();
+
+    const match = await waitForSettledAttachImageAction('adb', 'device-1', {
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      afterMenuOpenDelayMs: 0,
+      afterMenuDismissDelayMs: 0,
+      createSnapshot,
+      tapBounds: tap,
+      dismissAttachmentMenu: dismissMenu,
+      delayFn: immediateDelay,
+    });
+
+    expect(match.node.resourceId).toBe('chat-attach-image-button');
+    expect(tap).toHaveBeenCalledTimes(1);
+    expect(dismissMenu).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the model warmup banner to disappear before chat interaction', async () => {
+    let warmingUp = true;
+    const createSnapshot = () => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        ${warmingUp ? '<node resource-id="model-warmup-banner-container" text="Initializing" content-desc="" clickable="false" enabled="true" bounds="[40,200][1040,400]" />' : ''}
+      </hierarchy>
+    `);
+    const delayFn = jest.fn(async () => {
+      warmingUp = false;
+    });
+
+    const waited = await waitForModelWarmupToSettleIfPresent('adb', 'device-1', {
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      createSnapshot,
+      delayFn,
+    });
+
+    expect(waited).toBe(true);
+    expect(warmingUp).toBe(false);
+    expect(delayFn).toHaveBeenCalled();
+  });
+
+  it('observes a warmup marker that appears after the first Home snapshot', async () => {
+    let phase = 0;
+    const createSnapshot = () => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        ${phase === 1 ? '<node text="WARMING UP MODEL..." content-desc="" clickable="false" enabled="true" bounds="[40,200][1040,400]" />' : ''}
+      </hierarchy>
+    `);
+    const delayFn = jest.fn(async () => {
+      phase += 1;
+    });
+
+    const waited = await waitForModelWarmupToSettleIfPresent('adb', 'device-1', {
+      detectionTimeoutMs: 1_000,
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      createSnapshot,
+      delayFn,
+    });
+
+    expect(waited).toBe(true);
+    expect(phase).toBeGreaterThanOrEqual(2);
+    expect(delayFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries stable catalog testID taps until the requested filter state is observable', async () => {
+    let panelOpen = false;
+    let hasActiveFilter = true;
+    let panelTapAttempts = 0;
+    let clearTapAttempts = 0;
+    let optionTapAttempts = 0;
+    const createSnapshot = () => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="models-filter-toggle" text="Filters" content-desc="Filters" clickable="true" enabled="true" bounds="[40,100][520,200]" />
+        ${panelOpen ? '<node resource-id="models-filter-panel" text="" content-desc="" clickable="false" enabled="true" bounds="[40,220][1040,1200]" />' : ''}
+        ${panelOpen ? '<node resource-id="filter-option-no-token-required" text="No token required" content-desc="" clickable="true" enabled="true" bounds="[60,400][1020,500]" />' : ''}
+        ${panelOpen && hasActiveFilter ? '<node resource-id="models-filter-clear" text="Clear" content-desc="" clickable="true" enabled="true" bounds="[800,240][1020,340]" />' : ''}
+      </hierarchy>
+    `);
+    const tap = jest.fn((_adbPath, _serial, bounds) => {
+      if (bounds.centerY === 150) {
+        panelTapAttempts += 1;
+        if (panelTapAttempts === 2) panelOpen = true;
+      } else if (bounds.centerY === 290) {
+        clearTapAttempts += 1;
+        if (clearTapAttempts === 2) hasActiveFilter = false;
+      } else if (bounds.centerY === 450) {
+        optionTapAttempts += 1;
+        if (optionTapAttempts === 2) hasActiveFilter = true;
+      }
+    });
+    const options = {
+      maxAttempts: 2,
+      timeoutMs: 0,
+      createSnapshot,
+      tapBounds: tap,
+      delayFn: immediateDelay,
+    };
+
+    await setCatalogFilterPanelOpen('adb', 'device-1', true, options);
+    await clearCatalogFiltersIfPresent('adb', 'device-1', options);
+    await activateClearedCatalogFilterOption('adb', 'device-1', 'filter-option-no-token-required', options);
+
+    expect(panelTapAttempts).toBe(2);
+    expect(clearTapAttempts).toBe(2);
+    expect(optionTapAttempts).toBe(2);
+    expect(hasActiveFilter).toBe(true);
+  });
+
+  it('gives catalog filter taps a quiet window before capturing the first post-tap snapshot', async () => {
+    let panelOpen = false;
+    let tapIssued = false;
+    let quietWindowObserved = false;
+    let capturedTooEarly = false;
+    const createSnapshot = () => {
+      if (tapIssued && !quietWindowObserved) {
+        capturedTooEarly = true;
+      }
+      return parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+          <node resource-id="models-filter-toggle" text="Filters" content-desc="Filters" clickable="true" enabled="true" bounds="[40,100][520,200]" />
+          ${panelOpen ? '<node resource-id="models-filter-panel" text="" content-desc="" clickable="false" enabled="true" bounds="[40,220][1040,1200]" />' : ''}
+        </hierarchy>
+      `);
+    };
+    const tapBounds = jest.fn(() => {
+      tapIssued = true;
+    });
+    const delayFn = jest.fn(async () => {
+      quietWindowObserved = true;
+      panelOpen = true;
+    });
+
+    await setCatalogFilterPanelOpen('adb', 'device-1', true, {
+      maxAttempts: 1,
+      timeoutMs: 0,
+      afterTapDelayMs: 1,
+      createSnapshot,
+      tapBounds,
+      delayFn,
+    });
+
+    expect(tapBounds).toHaveBeenCalledTimes(1);
+    expect(delayFn).toHaveBeenCalled();
+    expect(capturedTooEarly).toBe(false);
+    expect(panelOpen).toBe(true);
+  });
+
+  it('retries Back only while the transient sheet remains visible', async () => {
+    let sheetOpen = true;
+    const createSnapshot = () => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node text="${sheetOpen ? 'Choose GGUF file' : 'Model Catalog'}" content-desc="" clickable="false" enabled="true" bounds="[40,100][1040,220]" />
+      </hierarchy>
+    `);
+    const pressBack = jest.fn(async () => {
+      if (pressBack.mock.calls.length === 2) sheetOpen = false;
+    });
+    const quietDelay = jest.fn().mockResolvedValue(undefined);
+
+    await dismissTransientSurfaceWithBack(
+      { pressBack },
+      'adb',
+      'device-1',
+      ['Choose GGUF file'],
+      ['Model Catalog'],
+      {
+        maxAttempts: 2,
+        timeoutMs: 0,
+        afterBackDelayMs: 1,
+        createSnapshot,
+        delayFn: quietDelay,
+      }
+    );
+
+    expect(pressBack).toHaveBeenCalledTimes(2);
+    expect(quietDelay).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a route tap only while the source screen remains visible', async () => {
+    let detailsVisible = false;
+    let tapAttempts = 0;
+    let quietWindows = 0;
+    let capturedTooEarly = false;
+    const createSnapshot = () => {
+      if (tapAttempts > quietWindows) {
+        capturedTooEarly = true;
+      }
+      return parseUiSnapshot(`
+        <hierarchy>
+          <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+          <node text="${detailsVisible ? 'Model details' : 'Model Catalog'}" content-desc="" clickable="false" enabled="true" bounds="[40,100][1040,220]" />
+        </hierarchy>
+      `);
+    };
+    const tap = jest.fn(() => {
+      tapAttempts += 1;
+      if (tapAttempts === 2) detailsVisible = true;
+    });
+    const quietDelay = jest.fn(async () => {
+      quietWindows += 1;
+    });
+
+    await tapBoundsUntilAnyNode(
+      'adb',
+      'device-1',
+      { centerX: 900, centerY: 500 },
+      ['Model details'],
+      {
+        sourceLabels: ['Model Catalog'],
+        maxAttempts: 2,
+        timeoutMs: 0,
+        afterTapDelayMs: 1,
+        createSnapshot,
+        tapBounds: tap,
+        delayFn: quietDelay,
+      }
+    );
+
+    expect(tap).toHaveBeenCalledTimes(2);
+    expect(quietDelay).toHaveBeenCalledTimes(2);
+    expect(capturedTooEarly).toBe(false);
+  });
+
+  it('retries bottom-tab navigation when the first transition assertion times out', async () => {
+    const firstTimeout = new Error('first transition timed out');
+    const ctx = {
+      tapBottomTab: jest.fn().mockResolvedValue(undefined),
+      expectAnyText: jest.fn()
+        .mockRejectedValueOnce(firstTimeout)
+        .mockResolvedValueOnce(undefined),
+    };
+
+    await tapBottomTabUntilVisible(ctx, ['Settings'], ['Language'], {
+      maxAttempts: 2,
+      timeoutMs: 1_000,
+    });
+
+    expect(ctx.tapBottomTab).toHaveBeenCalledTimes(2);
+    expect(ctx.expectAnyText).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -581,10 +941,12 @@ describe('android-scenarios UI snapshot matching', () => {
       expectAnyText: jest.fn().mockResolvedValue(undefined),
     };
     const goHome = jest.fn().mockResolvedValue(undefined);
+    const waitForModelWarmup = jest.fn().mockResolvedValue(undefined);
 
-    await goToModelCatalog(ctx, { goToHome: goHome });
+    await goToModelCatalog(ctx, { goToHome: goHome, waitForModelWarmup });
 
     expect(goHome).toHaveBeenCalledWith(ctx);
+    expect(waitForModelWarmup).toHaveBeenCalledWith(ctx);
     expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Models']));
     expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']));
   });
@@ -928,6 +1290,42 @@ describe('android-scenarios variant picker helpers', () => {
     expect(createUiSnapshot).toHaveBeenCalledTimes(3);
   });
 
+  it('scrolls an open filter panel out of the way while looking for catalog variant rows', async () => {
+    let rowsVisible = false;
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeUp: jest.fn(async () => {
+        rowsVisible = true;
+      }),
+    };
+    const createUiSnapshot = jest.fn(() => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        ${rowsVisible
+          ? '<node text="Q4_K_M - 3.80 GB" content-desc="" clickable="true" bounds="[40,500][1040,590]" />'
+          : '<node resource-id="models-filter-panel" text="" content-desc="" clickable="false" bounds="[40,220][1040,1200]" />'}
+      </hierarchy>
+    `));
+    const tapBounds = jest.fn();
+
+    await openFirstVisibleVariantPicker(ctx, {
+      resolveAdbPath: () => 'adb',
+      findAnyNodeNow: jest.fn().mockResolvedValue(null),
+      createUiSnapshot,
+      tapBounds,
+      waitForAnyNode: jest.fn().mockResolvedValue({ label: 'Choose GGUF file' }),
+      delayFn: jest.fn().mockResolvedValue(undefined),
+      catalogReadyPollIntervalMs: 0,
+    });
+
+    expect(ctx.swipeUp).toHaveBeenCalledTimes(1);
+    expect(tapBounds).toHaveBeenCalledWith(
+      'adb',
+      'emulator-5554',
+      expect.objectContaining({ centerY: 545 })
+    );
+  });
+
   it('rethrows non-timeout errors from the post-tap picker title wait', async () => {
     const ctx = {
       serial: 'emulator-5554',
@@ -958,14 +1356,15 @@ describe('android-scenarios variant picker helpers', () => {
       expectAnyText: jest.fn().mockResolvedValue(undefined),
     };
     const findAnyNodeNow = jest.fn()
-      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } })
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ label: 'Clear' })
-      .mockResolvedValueOnce({ label: 'No token required' });
+      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } });
+    const setFilterPanelOpen = jest.fn().mockResolvedValue(undefined);
+    const clearFilters = jest.fn().mockResolvedValue(undefined);
 
     await prepareCatalogForVariantPickerSmokeScenario(ctx, {
       resolveAdbPath: () => 'adb',
       findAnyNodeNow,
+      setCatalogFilterPanelOpen: setFilterPanelOpen,
+      clearCatalogFiltersIfPresent: clearFilters,
     });
 
     expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
@@ -973,22 +1372,10 @@ describe('android-scenarios variant picker helpers', () => {
       expect.arrayContaining(['All Models']),
       expect.objectContaining({ timeoutMs: 5_000 })
     );
-    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
-      2,
-      expect.arrayContaining(['Filters']),
-      expect.objectContaining({ timeoutMs: 8_000 })
-    );
-    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
-      3,
-      expect.arrayContaining(['Clear']),
-      expect.objectContaining({ timeoutMs: 5_000 })
-    );
-    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
-      4,
-      expect.arrayContaining(['Filters']),
-      expect.objectContaining({ timeoutMs: 5_000 })
-    );
-    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['No token required']), { timeoutMs: 8_000 });
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(1, 'adb', 'emulator-5554', true);
+    expect(clearFilters).toHaveBeenCalledWith('adb', 'emulator-5554');
+    expect(setFilterPanelOpen).toHaveBeenCalledTimes(1);
+    expect(ctx.tapAnyText).toHaveBeenCalledTimes(1);
     expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']), { timeoutMs: 8_000 });
   });
 });
@@ -1328,11 +1715,11 @@ describe('android-scenarios pack selection', () => {
       await isolatedScenarios.find((scenario) => scenario.id === 'new-chat-cta').run(newChatContext);
 
       expect(newChatContext.expectResourceId).toHaveBeenCalledWith('chat-list-viewport', {
-        timeoutMs: 60_000,
+        timeoutMs: 120_000,
       });
       expect(newChatContext.expectAnyText).toHaveBeenCalledWith(
         expect.arrayContaining(['No messages yet']),
-        { timeoutMs: 60_000 }
+        { timeoutMs: 120_000 }
       );
       expect(events.indexOf('chat-viewport')).toBeLessThan(events.indexOf('empty-copy'));
 
@@ -2080,7 +2467,7 @@ describe('android-scenarios pack selection', () => {
               <node text="" content-desc="Attach an image from the photo library, busy" clickable="true" enabled="true" bounds="[40,1800][180,1940]" />
               <node text="Attached image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,500][1040,900]" />
               <node text="Remove attached image 1 of 1" content-desc="" clickable="true" bounds="[900,500][1040,640]" />
-              <node text="${preparedPrompt || ''}" content-desc="" clickable="true" bounds="[40,1900][900,2050]" />
+              <node text="${preparedPrompt || ''}" content-desc="Chat message input" clickable="true" bounds="[40,1900][900,2050]" />
               <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[920,2050][1040,2170]" />
             </hierarchy>
           `;

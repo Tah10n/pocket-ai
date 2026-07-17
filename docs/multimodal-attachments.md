@@ -1,6 +1,6 @@
 # Multimodal Attachment Architecture
 
-Last updated: 2026-06-27
+Last updated: 2026-07-16
 
 Pocket AI's multimodal attachment pipeline is designed to keep user files local while passing
 supported media to the on-device `llama.rn` runtime. The current product surface uses one shared
@@ -12,7 +12,7 @@ old persisted video metadata may still be read for chat-history compatibility.
 ## Current Runtime Contract
 
 The app pins `llama.rn` through `package.json` and validates the installed runtime declarations
-before relying on native multimodal behavior. With `llama.rn@0.12.5`, the native chat message
+before relying on native multimodal behavior. With `llama.rn@0.12.6`, the native chat message
 contract accepts:
 
 - plain text message content
@@ -68,12 +68,18 @@ projector candidates. The manifest currently represents:
 
 - the main GGUF artifact required for text chat
 - multimodal projector artifacts required for image and audio inputs
+- optional speculative-draft GGUF artifacts used by MTP models such as Gemma
 
 Legacy fields such as the selected GGUF filename, model URL, local path, integrity marker, and
 download progress remain the compatibility source for current download code. The manifest is a
 typed bridge for multi-artifact download, cleanup, storage accounting, and readiness work. Existing
 projector candidate IDs are reused for projector artifacts so selected-projector state and runtime
 readiness can be matched without inventing a second identity system.
+
+MTP speculative decoding is text-only. A compatible embedded-MTP GGUF is initialized directly;
+Gemma repositories may instead provide a separate draft GGUF that is downloaded, verified, and
+loaded beside the main model. Media requests explicitly disable speculative decoding, and failure
+to initialize or run MTP falls back to ordinary generation without blocking the base model.
 
 ## Attachment Lifecycle
 

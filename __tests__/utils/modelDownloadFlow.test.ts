@@ -6,6 +6,7 @@ import type { ProjectorArtifact } from '../../src/types/multimodal';
 const mockGetCurrentStatus = jest.fn();
 const mockRefreshModelMetadata = jest.fn();
 const mockGetSettings = jest.fn();
+const mockGetModelLoadParametersForModel = jest.fn();
 const mockGetPrivateStorageHealthSnapshot = jest.fn();
 const mockIsPrivateStorageWritable = jest.fn();
 
@@ -23,6 +24,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
 
 jest.mock('../../src/services/SettingsStore', () => ({
   getSettings: () => mockGetSettings(),
+  getModelLoadParametersForModel: (...args: unknown[]) => mockGetModelLoadParametersForModel(...args),
 }));
 
 jest.mock('../../src/services/storage', () => ({
@@ -73,6 +75,7 @@ describe('modelDownloadFlow', () => {
     mockGetCurrentStatus.mockReturnValue({ networkType: 'wifi' });
     mockRefreshModelMetadata.mockImplementation(async (model: ModelMetadata) => model);
     mockGetSettings.mockReturnValue({ allowCellularDownloads: true });
+    mockGetModelLoadParametersForModel.mockReturnValue({});
     mockGetPrivateStorageHealthSnapshot.mockReturnValue({
       status: 'ready',
       retryable: false,
@@ -431,6 +434,205 @@ describe('modelDownloadFlow', () => {
     const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
     buttons[1]?.onPress?.();
     expect(startDownload).toHaveBeenCalledWith(expect.objectContaining({ allowUnknownSizeDownload: true }));
+  });
+
+  it('requires the same explicit consent when an optional MTP draft size is unknown', async () => {
+    const startDownload = jest.fn();
+    const draftArtifactId = 'mtp-draft-unknown-size';
+    const model = createModel({
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+    await Promise.resolve();
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.unknownSizeWarningTitle',
+      'models.unknownSizeWarningMessage',
+      expect.any(Array),
+    );
+    expect(startDownload).not.toHaveBeenCalled();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    buttons[1]?.onPress?.();
+    expect(startDownload).toHaveBeenCalledWith(expect.objectContaining({
+      id: model.id,
+      allowUnknownSizeDownload: true,
+    }));
+  });
+
+  it('does not require unknown-size MTP consent when the per-model preference is off', async () => {
+    const startDownload = jest.fn();
+    const draftArtifactId = 'mtp-draft-disabled';
+    const model = createModel({
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    mockGetModelLoadParametersForModel.mockReturnValue({ mtpEnabled: false });
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+    await Promise.resolve();
+
+    expect(mockGetModelLoadParametersForModel).toHaveBeenCalledWith(model.id);
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(startDownload).toHaveBeenCalledWith(model);
+  });
+
+  it('uses explicit optional-draft intent when the runtime MTP preference is off', async () => {
+    const startDownload = jest.fn();
+    const downloadOptions = { includeOptionalMtpDraft: true } as const;
+    const draftArtifactId = 'mtp-draft-explicit-prefetch';
+    const model = createModel({
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/draft/gemma-drafter.gguf',
+        sizeBytes: 512,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    mockGetModelLoadParametersForModel.mockReturnValue({ mtpEnabled: false });
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      downloadOptions,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+    await Promise.resolve();
+
+    expect(startDownload).toHaveBeenCalledWith(model, downloadOptions);
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(mockGetModelLoadParametersForModel).not.toHaveBeenCalled();
+  });
+
+  it('applies unknown-size consent to an explicit draft even when runtime MTP is off', async () => {
+    const startDownload = jest.fn();
+    const downloadOptions = { includeOptionalMtpDraft: true } as const;
+    const draftArtifactId = 'mtp-draft-explicit-unknown-size';
+    const model = createModel({
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    mockGetModelLoadParametersForModel.mockReturnValue({ mtpEnabled: false });
+
+    startModelDownloadFlow({
+      model,
+      t: (key) => key,
+      startDownload,
+      downloadOptions,
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+    await Promise.resolve();
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.unknownSizeWarningTitle',
+      'models.unknownSizeWarningMessage',
+      expect.any(Array),
+    );
+    expect(startDownload).not.toHaveBeenCalled();
+
+    const buttons = alertSpy.mock.calls[0]?.[2] as Array<{ onPress?: () => void }>;
+    buttons[1]?.onPress?.();
+    expect(startDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ allowUnknownSizeDownload: true }),
+      downloadOptions,
+    );
+  });
+
+  it('does not degrade explicit draft intent to a base-only download after metadata refresh', async () => {
+    const startDownload = jest.fn();
+    const unresolvedModel = createModel({ requiresTreeProbe: true });
+    mockRefreshModelMetadata.mockResolvedValue(createModel());
+
+    startModelDownloadFlow({
+      model: unresolvedModel,
+      t: (key) => key,
+      startDownload,
+      downloadOptions: { includeOptionalMtpDraft: true },
+      openTokenSettings: jest.fn(),
+      openModelPage: jest.fn().mockResolvedValue(undefined),
+      onError: jest.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(alertSpy).toHaveBeenCalledWith(
+      'models.actionFailedTitle',
+      'common.errors.downloadMetadataUnavailable',
+    );
+    expect(startDownload).not.toHaveBeenCalled();
   });
 
   it('surfaces an error when metadata cannot be resolved', async () => {

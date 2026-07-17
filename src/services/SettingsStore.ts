@@ -58,6 +58,8 @@ export interface ModelLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
     kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
+    /** Per-model preference. Undefined keeps the model catalog default. */
+    mtpEnabled?: boolean;
     backendPolicy?: BackendPolicy;
     selectedBackendDevices?: string[] | null;
 
@@ -329,6 +331,9 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
                 : rawBackendPolicy === 'npu'
                   ? 'npu'
                     : undefined;
+    const normalizedMtpEnabled = typeof input?.mtpEnabled === 'boolean'
+        ? input.mtpEnabled
+        : undefined;
 
     let normalizedSelectedBackendDevices: string[] | null | undefined;
     if (input?.selectedBackendDevices === null) {
@@ -422,6 +427,10 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
 
     if (normalizedBackendPolicy) {
         sanitized.backendPolicy = normalizedBackendPolicy;
+    }
+
+    if (normalizedMtpEnabled !== undefined) {
+        sanitized.mtpEnabled = normalizedMtpEnabled;
     }
 
     if (normalizedSelectedBackendDevices !== undefined) {

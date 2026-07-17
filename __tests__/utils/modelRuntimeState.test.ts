@@ -1,5 +1,10 @@
 import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
-import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
+import {
+  LifecycleStatus,
+  ModelAccessState,
+  type ModelArtifactMetadata,
+  type ModelMetadata,
+} from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import {
   buildLegacyProjectorArtifactId,
@@ -43,6 +48,20 @@ function makeProjector(overrides: Partial<ProjectorArtifact> = {}): ProjectorArt
   };
 }
 
+function makeMtpDraft(overrides: Partial<ModelArtifactMetadata> = {}): ModelArtifactMetadata {
+  return {
+    id: 'org/model:mtp-draft',
+    kind: 'speculative_draft',
+    requiredFor: ['text'],
+    hfRevision: 'main',
+    remoteFileName: 'MTP/model-MTP-Q8_0.gguf',
+    downloadUrl: 'https://huggingface.co/org/model/resolve/main/MTP/model-MTP-Q8_0.gguf',
+    sizeBytes: 256,
+    installState: 'remote',
+    ...overrides,
+  };
+}
+
 describe('modelRuntimeState', () => {
   it('preserves incoming runtime fields when no local model is present', () => {
     const merged = mergeModelWithRuntimeState(
@@ -61,6 +80,116 @@ describe('modelRuntimeState', () => {
     expect(merged.localPath).toBe('/models/model.gguf');
     expect(merged.downloadedAt).toBe(123);
     expect(merged.resumeData).toBe(JSON.stringify({ resumeData: 'opaque' }));
+  });
+
+  it('merges installed MTP draft state from the compatible local registry model', () => {
+    const speculativeDecoding = {
+      type: 'mtp' as const,
+      mode: 'draft_model' as const,
+      enabled: true,
+      maxDraftTokens: 3,
+      draftArtifactId: 'org/model:mtp-draft',
+    };
+    const merged = mergeModelWithRuntimeState(
+      makeModel({
+        artifacts: [makeMtpDraft()],
+        speculativeDecoding,
+      }),
+      {
+        localModel: makeModel({
+          lifecycleStatus: LifecycleStatus.DOWNLOADED,
+          downloadProgress: 1,
+          localPath: 'model.gguf',
+          artifacts: [makeMtpDraft({
+            installState: 'installed',
+            localPath: 'model-mtp.gguf',
+            downloadProgress: 1,
+            integrity: {
+              kind: 'size',
+              sizeBytes: 256,
+              checkedAt: 10,
+            },
+          })],
+          speculativeDecoding,
+        }),
+      },
+    );
+
+    expect(merged.artifacts?.find((artifact) => artifact.id === 'org/model:mtp-draft')).toEqual(
+      expect.objectContaining({
+        installState: 'installed',
+        localPath: 'model-mtp.gguf',
+        downloadProgress: 1,
+      }),
+    );
+    expect(merged.speculativeDecoding).toEqual(speculativeDecoding);
+  });
+
+  it('merges resumable MTP draft queue state only across the same stable artifact identity', () => {
+    const queuedDraft = makeMtpDraft({
+      installState: 'queued',
+      localPath: 'model-mtp.partial.gguf',
+      downloadProgress: 0.4,
+      resumeData: 'mtp-resume-data',
+    });
+    const merged = mergeModelWithRuntimeState(
+      makeModel({ artifacts: [makeMtpDraft()] }),
+      {
+        queuedItem: makeModel({
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          artifacts: [queuedDraft],
+        }),
+      },
+    );
+    expect(merged.artifacts?.find((artifact) => artifact.id === queuedDraft.id)).toEqual(
+      expect.objectContaining({
+        installState: 'queued',
+        localPath: 'model-mtp.partial.gguf',
+        downloadProgress: 0.4,
+        resumeData: 'mtp-resume-data',
+      }),
+    );
+
+    const changed = mergeModelWithRuntimeState(
+      makeModel({
+        artifacts: [makeMtpDraft({
+          hfRevision: 'revision-b',
+          downloadUrl: 'https://huggingface.co/org/model/resolve/revision-b/MTP/model-MTP-Q8_0.gguf',
+        })],
+      }),
+      {
+        queuedItem: makeModel({
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          artifacts: [queuedDraft],
+        }),
+      },
+    );
+    expect(changed.artifacts?.find((artifact) => artifact.id === queuedDraft.id)).toEqual(
+      expect.objectContaining({
+        hfRevision: 'revision-b',
+        installState: 'remote',
+      }),
+    );
+    expect(changed.artifacts?.find((artifact) => artifact.id === queuedDraft.id)).not.toHaveProperty('localPath');
+
+    const replacementDraft = makeMtpDraft({
+      id: 'org/model:replacement-mtp-draft',
+      hfRevision: 'revision-b',
+      remoteFileName: 'MTP/model-MTP-Q4_0.gguf',
+      downloadUrl: 'https://huggingface.co/org/model/resolve/revision-b/MTP/model-MTP-Q4_0.gguf',
+    });
+    const replaced = mergeModelWithRuntimeState(
+      makeModel({ artifacts: [replacementDraft] }),
+      {
+        queuedItem: makeModel({
+          lifecycleStatus: LifecycleStatus.PAUSED,
+          artifacts: [queuedDraft],
+        }),
+      },
+    );
+    expect(replaced.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft')).toEqual([
+      replacementDraft,
+    ]);
   });
 
   it('preserves enriched registry metadata when the incoming model is sparse', () => {

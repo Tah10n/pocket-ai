@@ -4448,6 +4448,76 @@ describe('ChatScreen', () => {
     });
   });
 
+  it('applies the per-model MTP preference transactionally through reload', async () => {
+    const draftArtifactId = 'mtp-draft-q4';
+    registry.saveModels([{
+      id: 'author/model-q4',
+      name: 'Q4 model',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+      localPath: 'author-model-q4.gguf',
+      lifecycleStatus: 'downloaded',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP-Q8_0.gguf',
+        downloadUrl: 'https://example.com/MTP/gemma-MTP-Q8_0.gguf',
+        sizeBytes: 1024,
+        localPath: 'gemma-MTP-Q8_0.gguf',
+        installState: 'installed',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    } as any]);
+    mockLoadModel
+      .mockRejectedValueOnce(new Error('reload failed'))
+      .mockResolvedValueOnce(undefined);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(lastModelParametersSheetProps?.mtpSupported).toBe(true);
+      expect(lastModelParametersSheetProps?.mtpEnabled).toBe(true);
+    });
+
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeMtpEnabled(false);
+    });
+    expect(lastModelParametersSheetProps?.mtpHasPendingChange).toBe(true);
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(mockLoadModel).toHaveBeenNthCalledWith(1, 'author/model-q4', {
+      forceReload: true,
+      loadParamsOverride: expect.objectContaining({ mtpEnabled: false }),
+    });
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']?.mtpEnabled).toBeUndefined();
+
+    await act(async () => {
+      await lastModelParametersSheetProps.onApplyReload();
+    });
+
+    expect(mockLoadModel).toHaveBeenNthCalledWith(2, 'author/model-q4', {
+      forceReload: true,
+      loadParamsOverride: expect.objectContaining({ mtpEnabled: false }),
+    });
+    expect(getSettings().modelLoadParamsByModelId['author/model-q4']?.mtpEnabled).toBe(false);
+  });
+
   it('defers saving active load profile changes until a blocked reload is retried successfully', async () => {
     const { AppError } = require('../../src/services/AppError');
     updateSettings({

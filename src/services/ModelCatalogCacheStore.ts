@@ -38,6 +38,10 @@ import {
   buildProjectorArtifactId,
 } from '../utils/modelProjectors';
 import {
+  isExplicitMtpDraftFileName,
+  isMtpGgufFileName,
+} from '../utils/modelSpeculativeDecoding';
+import {
   canonicalizeProjectorCandidateAliases,
   getExactProjectorScopeKey,
 } from '../utils/projectorIdentity';
@@ -257,7 +261,7 @@ function resolveCatalogProjectorArtifactIdentity(
   const identity = resolveHuggingFaceResolveIdentity(artifact.downloadUrl);
   const remoteFileName = normalizeHuggingFaceFilePath(artifact.remoteFileName);
   if (
-    artifact.kind !== 'multimodal_projector'
+    (artifact.kind !== 'multimodal_projector' && artifact.kind !== 'speculative_draft')
     || !identity
     || remoteFileName !== identity.filePath
     || resolveHuggingFaceRevision(artifact.hfRevision) !== identity.revision
@@ -737,7 +741,7 @@ function sanitizeCatalogArtifactRequiredFor(
 ): ModelArtifactRequiredInput[] {
   return normalizeArtifactRequiredFor(artifact.requiredFor).filter((requiredInput) => {
     if (requiredInput === 'text') {
-      return artifact.kind === 'main_model';
+      return artifact.kind === 'main_model' || artifact.kind === 'speculative_draft';
     }
 
     if (requiredInput === 'image') {
@@ -823,6 +827,42 @@ function sanitizeCatalogModelArtifacts(
   }
 
   for (const artifact of model.artifacts ?? []) {
+    if (artifact.kind === 'speculative_draft') {
+      const artifactIdentity = resolveCatalogProjectorArtifactIdentity(artifact);
+      const owningRepoId = normalizeHuggingFaceRepoId(model.id);
+      const owningRevision = resolveHuggingFaceRevision(model.hfRevision);
+      if (
+        artifactIdentity
+        && owningRepoId
+        && artifactIdentity.repoId === owningRepoId
+        && artifactIdentity.revision === owningRevision
+        && (
+          isMtpGgufFileName(artifactIdentity.filePath)
+          || (
+            artifactIdentity.filePath.toLowerCase().endsWith('.gguf')
+            && isExplicitMtpDraftFileName(artifactIdentity.filePath)
+          )
+        )
+      ) {
+        artifacts.push({
+          id: artifact.id,
+          kind: 'speculative_draft',
+          requiredFor: ['text'],
+          hfRevision: artifactIdentity.revision,
+          remoteFileName: artifactIdentity.filePath,
+          downloadUrl: buildHuggingFaceResolveUrl(
+            artifactIdentity.repoId,
+            artifactIdentity.filePath,
+            artifactIdentity.revision,
+          ),
+          sizeBytes: artifact.sizeBytes,
+          ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}),
+          installState: 'remote',
+        });
+      }
+      continue;
+    }
+
     if (artifact.kind !== 'multimodal_projector') {
       continue;
     }

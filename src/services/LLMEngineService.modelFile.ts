@@ -4,6 +4,7 @@ import { getModelsDir } from './FileSystemSetup';
 import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
 import { AppError } from './AppError';
 import type { ProjectorArtifact } from '../types/multimodal';
+import type { ModelArtifactMetadata } from '../types/models';
 import { getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
 import { normalizeSha256Digest } from '../utils/sha256';
 
@@ -16,14 +17,14 @@ function toCandidateFileLabel(value: string): string {
     .at(-1) ?? '[unknown]';
 }
 
-async function verifyProjectorRawFileIdentity(
-  projectorPath: string,
+async function verifyFileSha256(
+  filePath: string,
   expectedSha256: string,
 ): Promise<boolean> {
   let actualSha256: string | undefined;
   try {
     actualSha256 = normalizeSha256Digest(
-      await RNFS.hash(fileUriToNativePath(projectorPath), 'sha256'),
+      await RNFS.hash(fileUriToNativePath(filePath), 'sha256'),
     );
   } catch {
     return false;
@@ -63,6 +64,72 @@ export async function resolveModelFilePathOrThrow({
   return { modelPath, fileInfo: fileInfo as ExistingFileInfo };
 }
 
+export async function resolveCompanionModelFilePathOrThrow({
+  modelId,
+  artifact,
+}: {
+  modelId: string;
+  artifact: ModelArtifactMetadata;
+}): Promise<{ artifactPath: string; localPath: string; fileInfo: ExistingFileInfo }> {
+  if (artifact.installState !== 'installed' || !isValidProjectorLocalPath(artifact.localPath)) {
+    throw new AppError('download_file_missing', 'Companion model file is not installed.', {
+      details: { modelId, artifactId: artifact.id, artifactKind: artifact.kind },
+    });
+  }
+
+  const modelsDir = getModelsDir();
+  if (!modelsDir) {
+    throw new AppError('action_failed', 'Local file system is unavailable on this platform.', {
+      details: { modelId, artifactId: artifact.id, artifactKind: artifact.kind },
+    });
+  }
+
+  const artifactPath = safeJoinModelPath(modelsDir, artifact.localPath);
+  if (!artifactPath) {
+    throw new AppError('action_failed', 'Invalid companion model file path.', {
+      details: { modelId, artifactId: artifact.id, artifactKind: artifact.kind },
+    });
+  }
+
+  const fileInfo = await FileSystem.getInfoAsync(artifactPath);
+  if (!fileInfo.exists || (fileInfo as { isDirectory?: boolean }).isDirectory === true) {
+    throw new AppError('download_file_missing', 'Companion model file is not available locally.', {
+      details: { modelId, artifactId: artifact.id, artifactKind: artifact.kind },
+    });
+  }
+
+  if (
+    typeof artifact.sizeBytes === 'number'
+    && artifact.sizeBytes > 0
+    && typeof fileInfo.size === 'number'
+    && fileInfo.size !== artifact.sizeBytes
+  ) {
+    throw new AppError('download_verification_failed', 'Companion model file size does not match metadata.', {
+      details: { modelId, artifactId: artifact.id, artifactKind: artifact.kind },
+    });
+  }
+
+  const expectedSha256 = normalizeSha256Digest(artifact.sha256);
+  const trustedIntegritySha256 = artifact.integrity?.kind === 'sha256'
+    && artifact.integrity.sizeBytes === fileInfo.size
+    ? normalizeSha256Digest(artifact.integrity.sha256)
+    : undefined;
+  if (expectedSha256 && trustedIntegritySha256 !== expectedSha256) {
+    const hasExpectedSha = await verifyFileSha256(artifactPath, expectedSha256);
+    if (!hasExpectedSha) {
+      throw new AppError('download_verification_failed', 'Companion model checksum does not match metadata.', {
+        details: { modelId, artifactId: artifact.id, artifactKind: artifact.kind },
+      });
+    }
+  }
+
+  return {
+    artifactPath,
+    localPath: artifact.localPath,
+    fileInfo: fileInfo as ExistingFileInfo,
+  };
+}
+
 export async function resolveProjectorFilePathOrThrow({
   modelId,
   projector,
@@ -96,7 +163,7 @@ export async function resolveProjectorFilePathOrThrow({
       const isRawUpstreamName = candidate === rawFileName;
       const isExplicitLocalPath = explicitLocalPath === candidate;
       if (isRawUpstreamName && expectedSha256) {
-        const isVerifiedRawFile = await verifyProjectorRawFileIdentity(
+        const isVerifiedRawFile = await verifyFileSha256(
           projectorPath,
           expectedSha256,
         );

@@ -1,17 +1,23 @@
 import { Alert } from 'react-native';
 import { hardwareListenerService } from '../services/HardwareListenerService';
 import { modelCatalogService } from '../services/ModelCatalogService';
-import { getSettings } from '../services/SettingsStore';
+import { getModelLoadParametersForModel, getSettings } from '../services/SettingsStore';
 import { isPrivateStorageWritable } from '../services/storage';
 import { selectModelProjectorLifecycleState, type ModelProjectorLifecycleState } from '../store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
+import type { ModelDownloadRequestOptions } from '../types/downloads';
+import {
+  getConfiguredMtpDraftArtifact,
+  getSelectedMtpDraftArtifact,
+} from './modelSpeculativeDecoding';
 
 type Translate = (key: string) => string;
 
 type StartModelDownloadFlowParams = {
   model: ModelMetadata;
   t: Translate;
-  startDownload: (model: ModelMetadata) => void;
+  startDownload: (model: ModelMetadata, options?: ModelDownloadRequestOptions) => void;
+  downloadOptions?: ModelDownloadRequestOptions;
   openTokenSettings: () => void;
   openModelPage: (modelId: string) => Promise<void>;
   onProjectorChoiceRequired?: (model: ModelMetadata) => void;
@@ -90,6 +96,7 @@ export function startModelDownloadFlow({
   model,
   t,
   startDownload,
+  downloadOptions,
   openTokenSettings,
   openModelPage,
   onProjectorChoiceRequired,
@@ -101,7 +108,11 @@ export function startModelDownloadFlow({
       return;
     }
 
-    startDownload(downloadModel);
+    if (downloadOptions) {
+      startDownload(downloadModel, downloadOptions);
+    } else {
+      startDownload(downloadModel);
+    }
   };
 
   const startPreparedDownload = async (options: { memoryWarningAcknowledged?: boolean } = {}) => {
@@ -173,7 +184,20 @@ export function startModelDownloadFlow({
         return;
       }
 
-      if (resolvedModel.size === null) {
+      const selectedSpeculativeDraft = downloadOptions?.includeOptionalMtpDraft === true
+        ? getConfiguredMtpDraftArtifact(resolvedModel)
+        : getSelectedMtpDraftArtifact(
+          resolvedModel,
+          getModelLoadParametersForModel(resolvedModel.id).mtpEnabled,
+        );
+      if (downloadOptions?.includeOptionalMtpDraft === true && !selectedSpeculativeDraft) {
+        Alert.alert(t('models.actionFailedTitle'), t('common.errors.downloadMetadataUnavailable'));
+        return;
+      }
+      const hasUnknownSpeculativeDraftDownloadSize = selectedSpeculativeDraft !== undefined
+        && selectedSpeculativeDraft.installState !== 'installed'
+        && selectedSpeculativeDraft.sizeBytes === null;
+      if (resolvedModel.size === null || hasUnknownSpeculativeDraftDownloadSize) {
         Alert.alert(
           t('models.unknownSizeWarningTitle'),
           t('models.unknownSizeWarningMessage'),

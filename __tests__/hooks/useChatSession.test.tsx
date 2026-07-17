@@ -41,6 +41,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     getState: jest.fn(),
     getContextSize: jest.fn(),
+    getLastCompletionTelemetry: jest.fn(),
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     assertActiveMultimodalReadyForMediaPaths: jest.fn(),
@@ -193,6 +194,7 @@ describe('useChatSession', () => {
       activeModelId: 'author/model-q4',
     });
     (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
+    (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(null);
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
         onToken?.('Hello back');
@@ -347,6 +349,32 @@ describe('useChatSession', () => {
     });
     expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
     expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+  });
+
+  it('persists native MTP completion telemetry on the assistant message', async () => {
+    const telemetry = {
+      tokensPredicted: 100,
+      tokensEvaluated: 20,
+      predictedPerSecond: 6.5,
+      timeToFirstTokenMs: 910,
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 40,
+        draftTokensAccepted: 18,
+        acceptanceRate: 0.45,
+      },
+    };
+    (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(telemetry);
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Benchmark MTP');
+    });
+
+    const assistant = useChatStore.getState().getActiveThread()?.messages.at(-1);
+    expect(assistant?.inferenceMetrics).toEqual(telemetry);
   });
 
   it('sanitizes prompt token fallback warnings without logging raw attachment paths', async () => {

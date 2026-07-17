@@ -12,10 +12,14 @@ import {
   type EngineBackendInitAttempt,
   type EngineLifecycleEvent,
   type EngineBackendPolicy,
+  type EngineSpeculativeDecodingDiagnostics,
   EngineStatus,
   EngineState,
+  type InferenceCompletionTelemetry,
+  type MtpFallbackReason,
   type ModelMemoryFitConfidence,
   type ModelMetadata,
+  type ModelSpeculativeDecodingConfig,
   type ModelThinkingCapabilitySnapshot,
 } from '../types/models';
 import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
@@ -39,7 +43,7 @@ import {
   resolveConservativeAvailableMemoryBudget,
 } from '../memory/budget';
 import { estimateAccurateMemoryFit } from '../memory/estimator';
-import type { MemoryFitResult, MemoryMetadataTrust } from '../memory/types';
+import type { EstimatorInput, MemoryFitResult, MemoryMetadataTrust } from '../memory/types';
 import {
   applyFailedCalibrationObservation,
   applySuccessfulCalibrationObservation,
@@ -70,6 +74,7 @@ import {
 } from './LLMEngineService.helpers';
 import {
   buildEngineDiagnosticsSnapshot,
+  buildInferenceCompletionTelemetry,
   buildMultimodalDiagnosticsSummary,
 } from './LLMEngineService.diagnostics';
 import {
@@ -78,9 +83,15 @@ import {
   resolveBackendTelemetry,
 } from './LLMEngineService.backend';
 import {
+  resolveCompanionModelFilePathOrThrow,
   resolveModelFilePathOrThrow,
   resolveProjectorFilePathOrThrow,
 } from './LLMEngineService.modelFile';
+import {
+  canRecalculateMemoryFitWithoutOptionalMtpDraft,
+  getConfiguredMtpDraftArtifact,
+  resolveSpeculativeDecodingWithEnabledOverride,
+} from '../utils/modelSpeculativeDecoding';
 import {
   resolveSafeLoadPolicyOrThrow,
 } from './LLMEngineService.safeLoadPolicy';
@@ -205,6 +216,13 @@ type CalibrationSession = {
   afterFirstTokenSnapshot: SystemMemorySnapshot | null;
   afterUnloadSnapshot: SystemMemorySnapshot | null;
   didRecordSuccess: boolean;
+};
+
+type SpeculativeMemorySession = {
+  modelId: string;
+  beforeLoadSnapshot: SystemMemorySnapshot | null;
+  afterModelInitSnapshot: SystemMemorySnapshot | null;
+  afterFirstTokenSnapshot: SystemMemorySnapshot | null;
 };
 
 type ModelUnloadReclaimEstimate = {
@@ -927,6 +945,12 @@ class LLMEngineService {
   private activeCalibrationSession: CalibrationSession | null = null;
   private loadedArtifactIdentity: LoadedModelArtifactIdentity | null = null;
   private activeMultimodalContext: ActiveMultimodalContext | null = null;
+  private configuredSpeculativeDecoding: ModelSpeculativeDecodingConfig | null = null;
+  private activeSpeculativeDecoding: ModelSpeculativeDecodingConfig | null = null;
+  private speculativeDecodingFallbackReason: MtpFallbackReason | null = null;
+  private speculativeDraftSizeBytes: number | null = null;
+  private speculativeMemorySession: SpeculativeMemorySession | null = null;
+  private lastCompletionTelemetry: InferenceCompletionTelemetry | null = null;
   private loadedContextDisablesContextShiftForMultimodal = false;
   private pendingMultimodalReadinessRefresh: MultimodalReadinessRefreshRequest | null = null;
   private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
@@ -1026,6 +1050,7 @@ class LLMEngineService {
   private setContext(context: LlamaContext | null): void {
     if (this.context !== context) {
       this.activeMultimodalContext = null;
+      this.activeSpeculativeDecoding = null;
       this.pendingMultimodalReadinessRefresh = null;
       this.loadedContextDisablesContextShiftForMultimodal = false;
     }
@@ -2510,31 +2535,41 @@ class LLMEngineService {
   }
 
   private async captureAfterFirstTokenSnapshotIfNeeded(): Promise<void> {
-    const activeSession = this.activeCalibrationSession;
-    if (!activeSession || activeSession.didRecordSuccess || activeSession.afterFirstTokenSnapshot !== null) {
+    const calibrationSession = this.activeCalibrationSession;
+    const speculativeMemorySession = this.speculativeMemorySession;
+    const shouldCaptureCalibration = Boolean(
+      calibrationSession
+      && !calibrationSession.didRecordSuccess
+      && calibrationSession.afterFirstTokenSnapshot === null,
+    );
+    const shouldCaptureSpeculativeMemory = Boolean(
+      speculativeMemorySession
+      && speculativeMemorySession.afterFirstTokenSnapshot === null,
+    );
+    if (!shouldCaptureCalibration && !shouldCaptureSpeculativeMemory) {
       return;
     }
-
-    const calibrationKey = activeSession.calibrationKey;
-    const modelId = activeSession.modelId;
 
     const snapshot = await getFreshMemorySnapshot(0).catch(() => null);
 
-    const currentSession = this.activeCalibrationSession;
-    if (!currentSession || currentSession.calibrationKey !== calibrationKey || currentSession.modelId !== modelId) {
-      return;
+    if (speculativeMemorySession && this.speculativeMemorySession === speculativeMemorySession) {
+      speculativeMemorySession.afterFirstTokenSnapshot = snapshot;
     }
 
-    currentSession.afterFirstTokenSnapshot = snapshot;
-    currentSession.didRecordSuccess = true;
+    if (calibrationSession && this.activeCalibrationSession === calibrationSession) {
+      calibrationSession.afterFirstTokenSnapshot = snapshot;
+      calibrationSession.didRecordSuccess = true;
 
-    this.persistCalibrationSuccess({
-      calibrationKey: currentSession.calibrationKey,
-      predictedFit: currentSession.predictedFit,
-      beforeLoadSnapshot: currentSession.beforeLoadSnapshot,
-      observedSnapshot: snapshot,
-      observedRawBudgetBytes: currentSession.observedRawBudgetBytes,
-    });
+      this.persistCalibrationSuccess({
+        calibrationKey: calibrationSession.calibrationKey,
+        predictedFit: calibrationSession.predictedFit,
+        beforeLoadSnapshot: calibrationSession.beforeLoadSnapshot,
+        observedSnapshot: snapshot,
+        observedRawBudgetBytes: calibrationSession.observedRawBudgetBytes,
+      });
+    }
+
+    this.updateState(this.state);
   }
 
   /**
@@ -2560,6 +2595,10 @@ class LLMEngineService {
 
       const forceReload = options?.forceReload === true;
       const allowUnsafeMemoryLoad = options?.allowUnsafeMemoryLoad === true;
+      const persistedLoadParams = getModelLoadParametersForModel(modelId);
+      const resolvedLoadParams = options?.loadParamsOverride
+        ? { ...persistedLoadParams, ...options.loadParamsOverride }
+        : persistedLoadParams;
       const fallbackDownloadMarker = this.resolveArtifactFallbackDownloadMarker(model);
       let resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null;
       let isCurrentLoadedArtifact = false;
@@ -2637,7 +2676,15 @@ class LLMEngineService {
         return;
       }
 
-      if (isHighConfidenceLikelyOomMemoryFit(model) && !allowUnsafeMemoryLoad) {
+      const canRetryWithoutOptionalSpeculativeDraft = canRecalculateMemoryFitWithoutOptionalMtpDraft(
+        model,
+        resolvedLoadParams.mtpEnabled,
+      );
+      if (
+        isHighConfidenceLikelyOomMemoryFit(model)
+        && !allowUnsafeMemoryLoad
+        && !canRetryWithoutOptionalSpeculativeDraft
+      ) {
         throw new AppError(
           'model_load_blocked',
           'Loading is disabled for this model because it is marked as "Won\'t fit RAM".',
@@ -2673,7 +2720,7 @@ class LLMEngineService {
         model.maxContextTokens,
         model.size ?? null,
         allowUnsafeMemoryLoad,
-        options?.loadParamsOverride,
+        resolvedLoadParams,
         options?.preferLastWorkingProfile === true,
         recentUnloadReclaim,
         fallbackDownloadMarker,
@@ -2762,6 +2809,15 @@ class LLMEngineService {
         await this.preemptBackgroundContextOperationsForCompletion();
 
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+        const activeSpeculativeConfig = this.activeSpeculativeDecoding
+          ? { ...this.activeSpeculativeDecoding }
+          : null;
+        const configuredSpeculativeDecoding = this.configuredSpeculativeDecoding
+          ? { ...this.configuredSpeculativeDecoding }
+          : null;
+        const completionStartedAtMs = Date.now();
+        let firstTokenAtMs: number | null = null;
+        let didUseSpeculativeCompletionFallback = false;
         try {
           this.assertActiveMultimodalRuntimeReadyForMediaPaths(
             requestMediaPaths,
@@ -2786,13 +2842,18 @@ class LLMEngineService {
         let hasStreamedTokens = false;
         const markTokensStreamed = () => {
           if (!hasStreamedTokens) {
+            firstTokenAtMs = Date.now();
             void this.captureAfterFirstTokenSnapshotIfNeeded();
           }
           hasStreamedTokens = true;
         };
 
         let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
-        const runCompletion = async (completionMessages: LlmChatMessage[], onTokensStreamed: () => void) => {
+        const runCompletion = async (
+          completionMessages: LlmChatMessage[],
+          onTokensStreamed: () => void,
+          disableSpeculative = false,
+        ) => {
           this.assertCompletionNotInterrupted(interruptGeneration);
           const enableThinking = params?.enable_thinking ?? false;
           const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
@@ -2828,6 +2889,15 @@ class LLMEngineService {
             reasoning_format: reasoningFormat,
             stop: resolvedStops.stopWords,
           };
+
+          if (activeSpeculativeConfig) {
+            completionParams.speculative = disableSpeculative || requestMediaInputOccurrenceCount > 0
+              ? false
+              : {
+                  type: 'draft-mtp',
+                  n_max: activeSpeculativeConfig.maxDraftTokens,
+                };
+          }
 
           if (requestMediaPaths.length > 0) {
             completionParams.media_paths = requestMediaPaths;
@@ -2867,9 +2937,69 @@ class LLMEngineService {
           });
         };
 
+        const runCompletionWithSpeculativeFallback = async (completionMessages: LlmChatMessage[]) => {
+          try {
+            return await runCompletion(completionMessages, markTokensStreamed);
+          } catch (error) {
+            if (
+              !activeSpeculativeConfig
+              || requestMediaInputOccurrenceCount > 0
+              || hasStreamedTokens
+              || isConversationAlternationError(error)
+            ) {
+              throw error;
+            }
+
+            console.warn('[LLMEngine] MTP completion failed before streaming; retrying once without speculative decoding', {
+              modelId: this.state.activeModelId,
+              mode: activeSpeculativeConfig.mode,
+              ...buildSafeErrorLogDetails(error),
+            });
+            hasStreamedTokens = false;
+            didUseSpeculativeCompletionFallback = true;
+            return runCompletion(completionMessages, markTokensStreamed, true);
+          }
+        };
+
+        const finalizeCompletionResult = (result: NativeCompletionResult): NativeCompletionResult => {
+          const telemetry = buildInferenceCompletionTelemetry({
+            result,
+            mtpRequested: configuredSpeculativeDecoding?.enabled === true,
+            mtpAttempted: activeSpeculativeConfig !== null && requestMediaInputOccurrenceCount === 0,
+            mtpFallbackUsed: didUseSpeculativeCompletionFallback,
+            fallbackReason: didUseSpeculativeCompletionFallback
+              ? 'completion_failed'
+              : this.speculativeDecodingFallbackReason,
+            timeToFirstTokenMs: firstTokenAtMs === null
+              ? null
+              : Math.max(0, firstTokenAtMs - completionStartedAtMs),
+          });
+
+          this.lastCompletionTelemetry = telemetry;
+          performanceMonitor.mark('llm.mtp.completion', {
+            requested: telemetry.mtp.requested,
+            attempted: telemetry.mtp.attempted,
+            fallbackUsed: telemetry.mtp.fallbackUsed,
+            fallbackReason: telemetry.mtp.fallbackReason,
+            draftTokens: telemetry.mtp.draftTokens,
+            draftTokensAccepted: telemetry.mtp.draftTokensAccepted,
+            acceptanceRate: telemetry.mtp.acceptanceRate,
+            tokensPredicted: telemetry.tokensPredicted,
+            tokensEvaluated: telemetry.tokensEvaluated,
+            predictedPerSecond: telemetry.predictedPerSecond,
+            promptPerSecond: telemetry.promptPerSecond,
+            timeToFirstTokenMs: telemetry.timeToFirstTokenMs,
+          });
+          this.updateState(this.state);
+
+          return result;
+        };
+
         try {
           hasStreamedTokens = false;
-          resolveCompletion(await runCompletion(requestMessages, markTokensStreamed));
+          resolveCompletion(finalizeCompletionResult(
+            await runCompletionWithSpeculativeFallback(requestMessages),
+          ));
         } catch (error) {
           if (isConversationAlternationError(error)) {
             if (hasStreamedTokens && onToken) {
@@ -2884,7 +3014,9 @@ class LLMEngineService {
               systemNormalization: strictRoleSystemNormalization,
             });
             hasStreamedTokens = false;
-            resolveCompletion(await runCompletion(normalizedMessages, markTokensStreamed));
+            resolveCompletion(finalizeCompletionResult(
+              await runCompletionWithSpeculativeFallback(normalizedMessages),
+            ));
             return;
           }
 
@@ -3459,6 +3591,74 @@ class LLMEngineService {
     this.lastModelLoadErrorScope = null;
   }
 
+  public getLastCompletionTelemetry(): InferenceCompletionTelemetry | null {
+    return this.lastCompletionTelemetry
+      ? {
+          ...this.lastCompletionTelemetry,
+          mtp: { ...this.lastCompletionTelemetry.mtp },
+        }
+      : null;
+  }
+
+  private buildSpeculativeDecodingDiagnostics(): EngineSpeculativeDecodingDiagnostics | null {
+    const configured = this.configuredSpeculativeDecoding;
+    if (!configured) {
+      return null;
+    }
+
+    const memorySession = this.speculativeMemorySession;
+    const toBytes = (value: unknown): number | undefined => (
+      typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? Math.round(value)
+        : undefined
+    );
+    const beforeLoadAppBytes = toBytes(memorySession?.beforeLoadSnapshot?.appUsedBytes);
+    const afterModelInitAppBytes = toBytes(memorySession?.afterModelInitSnapshot?.appUsedBytes);
+    const afterFirstTokenAppBytes = toBytes(memorySession?.afterFirstTokenSnapshot?.appUsedBytes);
+    const beforeLoadPssBytes = toBytes(memorySession?.beforeLoadSnapshot?.appPssBytes);
+    const afterModelInitPssBytes = toBytes(memorySession?.afterModelInitSnapshot?.appPssBytes);
+    const afterFirstTokenPssBytes = toBytes(memorySession?.afterFirstTokenSnapshot?.appPssBytes);
+    const memory = {
+      beforeLoadAppBytes,
+      afterModelInitAppBytes,
+      afterFirstTokenAppBytes,
+      ...(beforeLoadAppBytes !== undefined && afterModelInitAppBytes !== undefined
+        ? { modelInitAppDeltaBytes: afterModelInitAppBytes - beforeLoadAppBytes }
+        : null),
+      ...(beforeLoadAppBytes !== undefined && afterFirstTokenAppBytes !== undefined
+        ? { firstTokenAppDeltaBytes: afterFirstTokenAppBytes - beforeLoadAppBytes }
+        : null),
+      beforeLoadPssBytes,
+      afterModelInitPssBytes,
+      afterFirstTokenPssBytes,
+      ...(beforeLoadPssBytes !== undefined && afterModelInitPssBytes !== undefined
+        ? { modelInitPssDeltaBytes: afterModelInitPssBytes - beforeLoadPssBytes }
+        : null),
+      ...(beforeLoadPssBytes !== undefined && afterFirstTokenPssBytes !== undefined
+        ? { firstTokenPssDeltaBytes: afterFirstTokenPssBytes - beforeLoadPssBytes }
+        : null),
+    };
+    const hasMemoryTelemetry = Object.values(memory).some((value) => typeof value === 'number');
+
+    return {
+      configured: true,
+      enabled: configured.enabled,
+      active: this.activeSpeculativeDecoding !== null,
+      mode: configured.mode,
+      maxDraftTokens: configured.maxDraftTokens,
+      draftArtifactId: configured.draftArtifactId,
+      draftModelBytes: this.speculativeDraftSizeBytes ?? undefined,
+      fallbackReason: this.speculativeDecodingFallbackReason ?? undefined,
+      memory: hasMemoryTelemetry ? memory : undefined,
+      lastCompletion: this.lastCompletionTelemetry
+        ? {
+            ...this.lastCompletionTelemetry,
+            mtp: { ...this.lastCompletionTelemetry.mtp },
+          }
+        : undefined,
+    };
+  }
+
   private buildDiagnosticsSnapshot(): NonNullable<EngineState['diagnostics']> {
     return buildEngineDiagnosticsSnapshot({
       activeBackendMode: this.activeBackendMode,
@@ -3490,6 +3690,7 @@ class LLMEngineService {
       lastLifecycleEvent: this.lastLifecycleEvent,
       lastLifecycleError: this.lastLifecycleError,
       multimodalDiagnostics: this.recentMultimodalDiagnostics,
+      speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
     });
   }
 
@@ -3593,9 +3794,38 @@ class LLMEngineService {
       return false;
     }
 
+    const loadParams = getModelLoadParametersForModel(model.id);
+    const configuredSpeculativeDecoding = resolveSpeculativeDecodingWithEnabledOverride(
+      model,
+      loadParams.mtpEnabled,
+    );
+    const selectedSpeculativeDraft = getConfiguredMtpDraftArtifact(model);
+    const desiredSpeculativeDecoding = configuredSpeculativeDecoding?.enabled === true
+      && (
+        configuredSpeculativeDecoding.mode === 'embedded'
+        || (
+          selectedSpeculativeDraft?.installState === 'installed'
+          && typeof selectedSpeculativeDraft.localPath === 'string'
+          && selectedSpeculativeDraft.localPath.trim().length > 0
+        )
+      )
+      ? configuredSpeculativeDecoding
+      : null;
+    const speculativeDecodingChanged = desiredSpeculativeDecoding === null
+      ? this.activeSpeculativeDecoding !== null
+      : this.activeSpeculativeDecoding === null
+        ? this.speculativeDecodingFallbackReason !== 'memory_budget'
+          && this.speculativeDecodingFallbackReason !== 'initialization_failed'
+        : this.activeSpeculativeDecoding.type !== desiredSpeculativeDecoding.type
+          || this.activeSpeculativeDecoding.mode !== desiredSpeculativeDecoding.mode
+          || this.activeSpeculativeDecoding.maxDraftTokens !== desiredSpeculativeDecoding.maxDraftTokens
+          || this.activeSpeculativeDecoding.draftArtifactId !== desiredSpeculativeDecoding.draftArtifactId;
     const loadTimeProjector = await this.resolveLoadTimeProjectorMemoryInfo(model, projectorResolutionOperationCache);
     const shouldDisableContextShiftForMultimodal = loadTimeProjector !== null;
-    return this.loadedContextDisablesContextShiftForMultimodal !== shouldDisableContextShiftForMultimodal
+    return (
+      speculativeDecodingChanged
+      || this.loadedContextDisablesContextShiftForMultimodal !== shouldDisableContextShiftForMultimodal
+    )
       && this.context === expectedContext
       && this.state.activeModelId === model.id
       && this.state.status === EngineStatus.READY
@@ -4389,6 +4619,12 @@ class LLMEngineService {
     this.initKvUnified = null;
     this.lastLifecycleEvent = null;
     this.lastLifecycleError = null;
+    this.configuredSpeculativeDecoding = null;
+    this.activeSpeculativeDecoding = null;
+    this.speculativeDecodingFallbackReason = null;
+    this.speculativeDraftSizeBytes = null;
+    this.speculativeMemorySession = null;
+    this.lastCompletionTelemetry = null;
   }
 
   private resolveReportedLoadedGpuLayers(resolvedGpuLayers: number | null): number {
@@ -4496,7 +4732,7 @@ class LLMEngineService {
     modelMaxContextTokens?: number,
     modelSizeBytes?: number | null,
     allowUnsafeMemoryLoad = false,
-    loadParamsOverride?: Partial<ModelLoadParameters>,
+    resolvedLoadParams?: ModelLoadParameters,
     preferLastWorkingProfile = false,
     recentUnloadReclaim: ModelUnloadReclaimEstimate | null = null,
     fallbackDownloadMarker: number | null = null,
@@ -4539,10 +4775,7 @@ class LLMEngineService {
         fallbackDownloadMarker,
       });
 
-      const persistedLoadParams = getModelLoadParametersForModel(modelId);
-      const loadParams = loadParamsOverride
-        ? { ...persistedLoadParams, ...loadParamsOverride }
-        : persistedLoadParams;
+      const loadParams = resolvedLoadParams ?? getModelLoadParametersForModel(modelId);
       const rawSystemMemorySnapshot = recentUnloadReclaim?.afterUnloadSnapshot
         ?? await getFreshMemorySnapshot(recentUnloadReclaim ? 0 : 1500).catch(() => null);
       const systemMemorySnapshot = this.withRecentUnloadReclaimableBudget(
@@ -4632,11 +4865,82 @@ class LLMEngineService {
       };
 
       const cachedModel = registry.getModel(modelId);
+      const configuredSpeculativeDecoding = cachedModel
+        ? resolveSpeculativeDecodingWithEnabledOverride(cachedModel, loadParams.mtpEnabled)
+        : undefined;
+      this.configuredSpeculativeDecoding = configuredSpeculativeDecoding
+        ? { ...configuredSpeculativeDecoding }
+        : null;
+      this.speculativeMemorySession = configuredSpeculativeDecoding?.enabled === true
+        ? {
+            modelId,
+            beforeLoadSnapshot: systemMemorySnapshot,
+            afterModelInitSnapshot: null,
+            afterFirstTokenSnapshot: null,
+          }
+        : null;
+      let speculativeDecodingForLoad: ModelSpeculativeDecodingConfig | null =
+        configuredSpeculativeDecoding?.enabled === true
+          ? { ...configuredSpeculativeDecoding }
+          : null;
+      let speculativeDraftPath: string | undefined;
+      const configuredDraftArtifact = cachedModel && speculativeDecodingForLoad?.mode === 'draft_model'
+        ? getConfiguredMtpDraftArtifact(cachedModel)
+        : undefined;
+      let speculativeDraftSizeBytes: number | null = typeof configuredDraftArtifact?.sizeBytes === 'number'
+        && Number.isFinite(configuredDraftArtifact.sizeBytes)
+        && configuredDraftArtifact.sizeBytes > 0
+        ? Math.round(configuredDraftArtifact.sizeBytes)
+        : null;
+      this.speculativeDraftSizeBytes = speculativeDraftSizeBytes;
+      if (speculativeDecodingForLoad?.mode === 'draft_model' && cachedModel) {
+        const draftArtifact = configuredDraftArtifact;
+        if (!draftArtifact) {
+          this.speculativeDecodingFallbackReason = 'configured_draft_artifact_missing';
+          speculativeDecodingForLoad = null;
+        } else {
+          try {
+            const resolvedDraft = await resolveCompanionModelFilePathOrThrow({
+              modelId,
+              artifact: draftArtifact,
+            });
+            speculativeDraftPath = resolvedDraft.artifactPath;
+            speculativeDraftSizeBytes = typeof resolvedDraft.fileInfo.size === 'number'
+              && Number.isFinite(resolvedDraft.fileInfo.size)
+              && resolvedDraft.fileInfo.size > 0
+              ? Math.round(resolvedDraft.fileInfo.size)
+              : draftArtifact.sizeBytes;
+            this.speculativeDraftSizeBytes = speculativeDraftSizeBytes;
+          } catch (error) {
+            this.speculativeDecodingFallbackReason = 'draft_artifact_unavailable';
+            speculativeDecodingForLoad = null;
+            speculativeDraftSizeBytes = null;
+            this.speculativeDraftSizeBytes = null;
+            console.warn('[LLMEngine] Gemma MTP draft is unavailable; loading the base model without speculative decoding', {
+              modelId,
+              artifactKind: 'speculative_draft',
+              ...buildSafeErrorLogDetails(error),
+            });
+          }
+        }
+      }
+      initDiagnostics = {
+        ...initDiagnostics,
+        speculativeDecoding: {
+          requested: configuredSpeculativeDecoding?.enabled === true,
+          mode: configuredSpeculativeDecoding?.mode ?? null,
+          draftArtifactReady: speculativeDraftPath !== undefined,
+          maxDraftTokens: configuredSpeculativeDecoding?.maxDraftTokens ?? null,
+          fallbackReason: this.speculativeDecodingFallbackReason,
+        },
+      };
       const loadTimeProjectorMemory = await this.resolveLoadTimeProjectorMemoryInfo(
         cachedModel,
         projectorResolutionOperationCache,
       );
       const loadTimeProjectorSizeBytes = loadTimeProjectorMemory?.memoryFitSizeBytes;
+      let loadTimeCompanionSizeBytes = (loadTimeProjectorSizeBytes ?? 0)
+        + (speculativeDecodingForLoad?.mode === 'draft_model' ? (speculativeDraftSizeBytes ?? 0) : 0);
       const hasLoadTimeMmproj = loadTimeProjectorMemory !== null;
       const shouldDisableContextShiftForMultimodal = hasLoadTimeMmproj;
       const ggufMetadata = modelInfo !== null || cachedModel?.gguf
@@ -4711,21 +5015,6 @@ class LLMEngineService {
         })
         : null;
       const baseLoadProfileModelSizeBytes = verifiedFileSizeBytes ?? resolvedModelSizeBytes;
-      const loadProfileModelSizeBytes = typeof baseLoadProfileModelSizeBytes === 'number'
-        && Number.isFinite(baseLoadProfileModelSizeBytes)
-        && baseLoadProfileModelSizeBytes > 0
-        ? baseLoadProfileModelSizeBytes + (loadTimeProjectorSizeBytes ?? 0)
-        : baseLoadProfileModelSizeBytes;
-      const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
-        totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
-          ? resolvedTotalMemoryBytes
-          : null,
-        systemMemorySnapshot,
-        modelSizeBytes: loadProfileModelSizeBytes,
-        ggufMetadata,
-        modelLayerCount: stableCapability?.modelLayerCount,
-        gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
-      });
 
       const lastGoodProfile = preferLastWorkingProfile
         ? readLastGoodInferenceProfile({
@@ -4774,81 +5063,118 @@ class LLMEngineService {
         && loadParams.gpuLayers >= 0
         ? Math.round(loadParams.gpuLayers)
         : null;
-      const requestedGpuLayersCandidate = requestedBackendPolicy === 'cpu'
-        ? 0
-        : explicitGpuLayers !== null
-          ? explicitGpuLayers
-          : recommendedGpuLayers;
-      const requestedGpuLayers = Math.max(
-        0,
-        Math.min(gpuLayersCeiling, Math.round(requestedGpuLayersCandidate)),
-      );
       const metadataTrustForEstimator = modelInfo !== null
         ? 'verified_local' as const
         : cachedModel?.metadataTrust ?? 'unknown';
-      const resolvedContextSize = resolveContextWindowCeiling({
-        modelMaxContextTokens,
-        totalMemoryBytes: resolvedTotalMemoryBytes,
-        appMaxContextTokens: loadParams.contextSize,
-        input: {
-          modelSizeBytes: resolvedModelSizeBytes,
-          verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
-          ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
-          metadataTrust: metadataTrustForEstimator,
+      const resolveRequestedLoadPlan = (companionSizeBytes: number): {
+        requestedGpuLayers: number;
+        resolvedContextSize: number;
+        requestedCalibrationKey: string | null;
+        requestedEstimatorInput: EstimatorInput;
+      } => {
+        const loadProfileModelSizeBytes = typeof baseLoadProfileModelSizeBytes === 'number'
+          && Number.isFinite(baseLoadProfileModelSizeBytes)
+          && baseLoadProfileModelSizeBytes > 0
+          ? baseLoadProfileModelSizeBytes + companionSizeBytes
+          : baseLoadProfileModelSizeBytes;
+        const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
+          totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number'
+            && Number.isFinite(resolvedTotalMemoryBytes)
+            && resolvedTotalMemoryBytes > 0
+            ? resolvedTotalMemoryBytes
+            : null,
+          systemMemorySnapshot,
+          modelSizeBytes: loadProfileModelSizeBytes,
           ggufMetadata,
-          runtimeParams: {
+          modelLayerCount: stableCapability?.modelLayerCount,
+          gpuLayersCeilingOverride: stableCapability?.gpuLayersCeiling,
+        });
+        const requestedGpuLayersCandidate = requestedBackendPolicy === 'cpu'
+          ? 0
+          : explicitGpuLayers !== null
+            ? explicitGpuLayers
+            : recommendedGpuLayers;
+        const requestedGpuLayers = Math.max(
+          0,
+          Math.min(gpuLayersCeiling, Math.round(requestedGpuLayersCandidate)),
+        );
+        const resolvedContextSize = resolveContextWindowCeiling({
+          modelMaxContextTokens,
+          totalMemoryBytes: resolvedTotalMemoryBytes,
+          appMaxContextTokens: loadParams.contextSize,
+          input: {
+            modelSizeBytes: resolvedModelSizeBytes,
+            verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+            ...(companionSizeBytes > 0 ? { multimodalSizeBytes: companionSizeBytes } : null),
+            metadataTrust: metadataTrustForEstimator,
+            ggufMetadata,
+            runtimeParams: {
+              gpuLayers: requestedGpuLayers,
+              cacheTypeK,
+              cacheTypeV,
+              useMmap: requestedUseMmap,
+            },
+            snapshot: systemMemorySnapshot ?? undefined,
+          },
+        });
+        const requestedCalibrationKey = verifiedFileSizeBytes !== null
+          ? this.buildCalibrationKeyString({
+            ggufMetadata,
+            verifiedFileSizeBytes,
+            contextTokens: resolvedContextSize,
             gpuLayers: requestedGpuLayers,
             cacheTypeK,
             cacheTypeV,
             useMmap: requestedUseMmap,
+            hasMmproj: hasLoadTimeMmproj,
+            nBatch: configuredBatchParams?.nBatch,
+            nUbatch: configuredBatchParams?.nUbatch,
+          })
+          : null;
+        const requestedCalibrationRecord = requestedCalibrationKey
+          ? registry.getCalibrationRecord(requestedCalibrationKey)
+          : undefined;
+        const requestedEstimatorInput: EstimatorInput = {
+          modelSizeBytes: resolvedModelSizeBytes,
+          verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
+          ...(companionSizeBytes > 0 ? { multimodalSizeBytes: companionSizeBytes } : null),
+          metadataTrust: metadataTrustForEstimator,
+          ggufMetadata,
+          runtimeParams: {
+            contextTokens: resolvedContextSize,
+            gpuLayers: requestedGpuLayers,
+            cacheTypeK,
+            cacheTypeV,
+            useMmap: requestedUseMmap,
+            ...(configuredBatchParams
+              ? {
+                  nBatch: configuredBatchParams.nBatch,
+                  nUbatch: configuredBatchParams.nUbatch,
+                }
+              : null),
           },
           snapshot: systemMemorySnapshot ?? undefined,
-        },
-      });
+          calibrationRecord: requestedCalibrationRecord,
+        };
+
+        return {
+          requestedGpuLayers,
+          resolvedContextSize,
+          requestedCalibrationKey,
+          requestedEstimatorInput,
+        };
+      };
+      let {
+        requestedGpuLayers,
+        resolvedContextSize,
+        requestedCalibrationKey,
+        requestedEstimatorInput,
+      } = resolveRequestedLoadPlan(loadTimeCompanionSizeBytes);
 
       // Default to the requested load profile. The safe-load policy (if it runs)
       // may override these values.
       finalContextSize = resolvedContextSize;
       gpuLayers = requestedGpuLayers;
-      const requestedCalibrationKey = verifiedFileSizeBytes !== null
-        ? this.buildCalibrationKeyString({
-          ggufMetadata,
-          verifiedFileSizeBytes,
-          contextTokens: resolvedContextSize,
-          gpuLayers: requestedGpuLayers,
-          cacheTypeK,
-          cacheTypeV,
-          useMmap: requestedUseMmap,
-          hasMmproj: hasLoadTimeMmproj,
-          nBatch: configuredBatchParams?.nBatch,
-          nUbatch: configuredBatchParams?.nUbatch,
-        })
-        : null;
-      const requestedCalibrationRecord = requestedCalibrationKey
-        ? registry.getCalibrationRecord(requestedCalibrationKey)
-        : undefined;
-      const requestedEstimatorInput = {
-        modelSizeBytes: resolvedModelSizeBytes,
-        verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
-        ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
-        metadataTrust: metadataTrustForEstimator,
-        ggufMetadata,
-        runtimeParams: {
-          contextTokens: resolvedContextSize,
-          gpuLayers: requestedGpuLayers,
-          cacheTypeK,
-          cacheTypeV,
-          useMmap: requestedUseMmap,
-          ...(configuredBatchParams
-            ? {
-                nBatch: configuredBatchParams.nBatch,
-                nUbatch: configuredBatchParams.nUbatch,
-              }
-            : null),
-        },
-        snapshot: systemMemorySnapshot ?? undefined,
-        calibrationRecord: requestedCalibrationRecord,
-      };
 
       if (typeof resolvedModelSizeBytes === 'number' && Number.isFinite(resolvedModelSizeBytes) && resolvedModelSizeBytes > 0) {
         memoryFit = estimateAccurateMemoryFit({
@@ -4857,6 +5183,55 @@ class LLMEngineService {
             ? resolvedTotalMemoryBytes
             : null,
         });
+
+        if (
+          speculativeDecodingForLoad?.mode === 'draft_model'
+          && speculativeDraftSizeBytes !== null
+          && speculativeDraftSizeBytes > 0
+          && memoryFit.requiredBytes > 0
+          && (
+            !Number.isFinite(memoryFit.effectiveBudgetBytes)
+            || memoryFit.effectiveBudgetBytes <= 0
+            || memoryFit.requiredBytes > memoryFit.effectiveBudgetBytes
+          )
+        ) {
+          const projectorOnlyCompanionSizeBytes = loadTimeProjectorSizeBytes ?? 0;
+          speculativeDecodingForLoad = null;
+          this.speculativeDecodingFallbackReason = 'memory_budget';
+          loadTimeCompanionSizeBytes = projectorOnlyCompanionSizeBytes;
+          ({
+            requestedGpuLayers,
+            resolvedContextSize,
+            requestedCalibrationKey,
+            requestedEstimatorInput,
+          } = resolveRequestedLoadPlan(loadTimeCompanionSizeBytes));
+          finalContextSize = resolvedContextSize;
+          gpuLayers = requestedGpuLayers;
+          memoryFit = estimateAccurateMemoryFit({
+            input: requestedEstimatorInput,
+            totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number'
+              && Number.isFinite(resolvedTotalMemoryBytes)
+              && resolvedTotalMemoryBytes > 0
+              ? resolvedTotalMemoryBytes
+              : null,
+          });
+          initDiagnostics = {
+            ...initDiagnostics,
+            speculativeDecoding: {
+              requested: configuredSpeculativeDecoding?.enabled === true,
+              mode: configuredSpeculativeDecoding?.mode ?? null,
+              draftArtifactReady: speculativeDraftPath !== undefined,
+              maxDraftTokens: configuredSpeculativeDecoding?.maxDraftTokens ?? null,
+              fallbackReason: this.speculativeDecodingFallbackReason,
+            },
+          };
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[LLMEngine] Gemma MTP draft exceeds the safe memory budget; loading the base model without speculative decoding', {
+              modelId,
+              artifactKind: 'speculative_draft',
+            });
+          }
+        }
 
         if (initDiagnostics) {
           initDiagnostics = {
@@ -4909,7 +5284,7 @@ class LLMEngineService {
             cacheTypeK,
             cacheTypeV,
             useMmap: requestedUseMmap,
-            ...(loadTimeProjectorSizeBytes ? { multimodalSizeBytes: loadTimeProjectorSizeBytes } : null),
+            ...(loadTimeCompanionSizeBytes > 0 ? { multimodalSizeBytes: loadTimeCompanionSizeBytes } : null),
             hasMmproj: hasLoadTimeMmproj,
             preferGpuLayers: requestedBackendPolicy === 'gpu' || requestedBackendPolicy === 'npu',
           }),
@@ -5197,7 +5572,10 @@ class LLMEngineService {
           nParallel,
         } = profile;
 
-        const buildOptions = (layers: number): LlamaContextInitParams => {
+        const buildOptions = (
+          layers: number,
+          speculativeConfig: ModelSpeculativeDecodingConfig | null,
+        ): LlamaContextInitParams => {
           // llama.cpp requires Flash Attention when using quantized V cache.
           // Some candidate profiles force flashAttnType='off' (e.g., CPU fallback). When
           // combined with cache_type_v=q8_0/q4_0, llama.cpp returns a null context and
@@ -5206,6 +5584,28 @@ class LLMEngineService {
 
           return {
             model: modelPath,
+            ...(speculativeConfig
+              ? {
+                  speculative: {
+                    type: 'draft-mtp' as const,
+                    n_max: speculativeConfig.maxDraftTokens,
+                  },
+                  ...(speculativeConfig.mode === 'draft_model' && speculativeDraftPath
+                    ? {
+                        model_draft: speculativeDraftPath,
+                        // llama.rn defaults separate draft models to -1 (all GPU layers).
+                        // Keep the optional drafter inside the same backend/safe-load plan as
+                        // the target model instead of allowing an implicit full offload.
+                        spec_draft_n_gpu_layers: Math.max(0, Math.round(layers)),
+                        // Draft head dimensions are not part of the target GGUF metadata used by
+                        // our quantized-KV compatibility guard. Preserve llama.cpp's safe F16
+                        // defaults until the drafter itself can be inspected independently.
+                        spec_draft_cache_type_k: 'f16',
+                        spec_draft_cache_type_v: 'f16',
+                      }
+                    : null),
+                }
+              : null),
             n_ctx: finalContextSize,
             n_gpu_layers: layers,
             n_parallel: nParallel,
@@ -5239,12 +5639,40 @@ class LLMEngineService {
           };
         };
 
-        const initOnce = async (layers: number) => initLlamaContext(
-          buildOptions(layers),
-          (progress) => {
-            this.updateState({ ...this.state, loadProgress: progress });
-          },
-        );
+        const onProgress = (progress: number) => {
+          this.updateState({ ...this.state, loadProgress: progress });
+        };
+        const initOnce = async (layers: number): Promise<LlamaContext> => {
+          const attemptedSpeculativeConfig = speculativeDecodingForLoad;
+          if (!attemptedSpeculativeConfig) {
+            return initLlamaContext(buildOptions(layers, null), onProgress);
+          }
+
+          try {
+            return await initLlamaContext(buildOptions(layers, attemptedSpeculativeConfig), onProgress);
+          } catch (error) {
+            await releaseAllLlamaContexts().catch(() => undefined);
+            speculativeDecodingForLoad = null;
+            this.speculativeDecodingFallbackReason = 'initialization_failed';
+            initDiagnostics = {
+              ...initDiagnostics,
+              speculativeDecoding: {
+                requested: true,
+                mode: attemptedSpeculativeConfig.mode,
+                draftArtifactReady: speculativeDraftPath !== undefined,
+                maxDraftTokens: attemptedSpeculativeConfig.maxDraftTokens,
+                fallbackReason: this.speculativeDecodingFallbackReason,
+                initializationError: sanitizeErrorMessageForDiagnostics(error),
+              },
+            };
+            console.warn('[LLMEngine] MTP initialization failed; retrying the same load profile without speculative decoding', {
+              modelId,
+              mode: attemptedSpeculativeConfig.mode,
+              ...buildSafeErrorLogDetails(error),
+            });
+            return initLlamaContext(buildOptions(layers, null), onProgress);
+          }
+        };
 
         const normalizedLayers = Math.max(0, Math.round(nGpuLayers));
         if (normalizedLayers <= 0) {
@@ -5684,6 +6112,9 @@ class LLMEngineService {
           }
 
           this.setContext(context);
+          this.activeSpeculativeDecoding = speculativeDecodingForLoad
+            ? { ...speculativeDecodingForLoad }
+            : null;
           this.loadedContextDisablesContextShiftForMultimodal = shouldDisableContextShiftForMultimodal;
           gpuInitError = null;
           break;
@@ -5762,6 +6193,10 @@ class LLMEngineService {
       }
 
       const afterModelInitSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
+
+      if (this.speculativeMemorySession?.modelId === modelId) {
+        this.speculativeMemorySession.afterModelInitSnapshot = afterModelInitSnapshot;
+      }
 
       if (calibrationKeyForLoad && predictedFitForLoad) {
         this.activeCalibrationSession = {

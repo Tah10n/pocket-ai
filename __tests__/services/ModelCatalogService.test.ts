@@ -193,6 +193,143 @@ describe('ModelCatalogService', () => {
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
   });
 
+  it('preserves an installed Gemma MTP drafter across a compatible catalog refresh', () => {
+    const id = 'org/gemma-mtp-refresh';
+    const revision = 'revision-a';
+    const mainSha256 = '1'.repeat(64);
+    const draftSha256 = '2'.repeat(64);
+    const mainUrl = `https://huggingface.co/${id}/resolve/${revision}/model.Q4_K_M.gguf`;
+    const draftUrl = `https://huggingface.co/${id}/resolve/${revision}/MTP/gemma-MTP-Q8_0.gguf`;
+    const localModel: ModelMetadata = {
+      ...makeLocalModel(id),
+      downloadUrl: mainUrl,
+      hfRevision: revision,
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      sha256: mainSha256,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 1024,
+        checkedAt: 10,
+        sha256: mainSha256,
+      },
+      artifacts: [{
+        id: 'mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        hfRevision: revision,
+        remoteFileName: 'MTP/gemma-MTP-Q8_0.gguf',
+        downloadUrl: draftUrl,
+        sizeBytes: 200,
+        sha256: draftSha256,
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed',
+        downloadProgress: 1,
+        integrity: {
+          kind: 'sha256',
+          sizeBytes: 200,
+          checkedAt: 11,
+          sha256: draftSha256,
+        },
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId: 'mtp-draft',
+      },
+    };
+    const remoteModel: ModelMetadata = {
+      ...localModel,
+      localPath: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      downloadIntegrity: undefined,
+      artifacts: [{
+        ...localModel.artifacts![0],
+        localPath: undefined,
+        installState: 'remote',
+        downloadProgress: undefined,
+        integrity: undefined,
+      }],
+    };
+    mockedRegistry.getModel.mockReturnValue(localModel);
+    const service = new ModelCatalogService();
+
+    const merged = (service as unknown as {
+      mergeModelWithRegistry: (model: ModelMetadata, memoryFitContext: null) => ModelMetadata;
+    }).mergeModelWithRegistry(remoteModel, null);
+
+    expect(merged.artifacts?.find((artifact) => artifact.id === 'mtp-draft')).toEqual(
+      expect.objectContaining({
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed',
+        downloadProgress: 1,
+      }),
+    );
+    service.dispose();
+  });
+
+  it('replaces an obsolete local MTP drafter when the compatible catalog publishes a new one', () => {
+    const id = 'org/gemma-mtp-replacement';
+    const localModel: ModelMetadata = {
+      ...makeLocalModel(id),
+      resolvedFileName: 'model.Q4_K_M.gguf',
+      artifacts: [{
+        id: 'old-mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP-Q8_0.gguf',
+        downloadUrl: `https://huggingface.co/${id}/resolve/main/MTP/gemma-MTP-Q8_0.gguf`,
+        sizeBytes: 200,
+        localPath: 'old-gemma-mtp.gguf',
+        installState: 'installed',
+        downloadProgress: 1,
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId: 'old-mtp-draft',
+      },
+    };
+    const remoteModel: ModelMetadata = {
+      ...localModel,
+      localPath: undefined,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      artifacts: [{
+        id: 'new-mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP-Q4_0.gguf',
+        downloadUrl: `https://huggingface.co/${id}/resolve/main/MTP/gemma-MTP-Q4_0.gguf`,
+        sizeBytes: 150,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 1,
+        draftArtifactId: 'new-mtp-draft',
+      },
+    };
+    mockedRegistry.getModel.mockReturnValue(localModel);
+    const service = new ModelCatalogService();
+
+    const merged = (service as unknown as {
+      mergeModelWithRegistry: (model: ModelMetadata, memoryFitContext: null) => ModelMetadata;
+    }).mergeModelWithRegistry(remoteModel, null);
+
+    expect(merged.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft')).toEqual([
+      remoteModel.artifacts![0],
+    ]);
+    expect(merged.speculativeDecoding?.draftArtifactId).toBe('new-mtp-draft');
+    service.dispose();
+  });
+
   it('waits for deferred hydration before resolving an offline catalog fallback', async () => {
     const query = 'offline-ready';
     const cachedModel = makeLocalModel('org/offline-ready-model');
@@ -2891,7 +3028,7 @@ describe('ModelCatalogService', () => {
     expect(treeResponse.stopReason).toBe('preferred_found');
   });
 
-  it('falls back to preferred pagination stop when the expected tree filename is MTP', async () => {
+  it('stops at the expected embedded MTP tree filename', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -2953,13 +3090,12 @@ describe('ModelCatalogService', () => {
       { expectedFileName: 'model.NextN.Q4_K_M.gguf' },
     );
 
-    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(treeResponse.entries.map((entry: { path?: string }) => entry.path)).toEqual([
       'model.NextN.Q4_K_M.gguf',
-      'model.Q4_K_M.gguf',
     ]);
     expect(treeResponse.isComplete).toBe(false);
-    expect(treeResponse.stopReason).toBe('preferred_found');
+    expect(treeResponse.stopReason).toBe('target_found');
   });
 
   it('looks past lower-ranked GGUF files before using the preferred tree pagination stop', async () => {
@@ -4399,6 +4535,65 @@ describe('ModelCatalogService', () => {
     );
     expect(fetchCalls.some((url) => url.includes('/tree/main?recursive=true'))).toBe(false);
     expect(fetchCalls.some((url) => url.endsWith('/raw/main/README.md'))).toBe(false);
+  });
+
+  it('preserves Gemma MTP through projector-aware full-tree model details', async () => {
+    const modelId = 'unsloth/gemma-4-12b-it-GGUF';
+    const revision = 'gemma-mtp-revision';
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const entries = [
+        { path: 'gemma-4-12b-it-Q4_K_M.gguf', size: 7_000_000_000 },
+        { path: 'mmproj-gemma-4-f16.gguf', size: 800_000_000 },
+        { path: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf', size: 465_000_000 },
+      ];
+
+      if (url.includes(`/tree/${revision}?recursive=true`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve(entries),
+        });
+      }
+      if (url.endsWith(`/raw/${revision}/README.md`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          text: () => Promise.resolve('# Gemma 4\n\nProjector-aware MTP model.'),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          id: modelId,
+          sha: revision,
+          tags: ['gguf', 'gemma', 'vision'],
+          siblings: entries.map(({ path, size }) => ({ rfilename: path, size })),
+        }),
+      });
+    }) as jest.Mock;
+
+    const result = await modelCatalogService.getModelDetails(modelId);
+    const draft = result.artifacts?.find((artifact) => artifact.kind === 'speculative_draft');
+    const activeVariant = result.variants?.find((variant) => (
+      variant.fileName === 'gemma-4-12b-it-Q4_K_M.gguf'
+    ));
+
+    expect(result.projectorCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fileName: 'mmproj-gemma-4-f16.gguf' }),
+    ]));
+    expect(draft).toEqual(expect.objectContaining({
+      remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+      sizeBytes: 465_000_000,
+    }));
+    expect(activeVariant?.speculativeDecoding).toEqual(expect.objectContaining({
+      mode: 'draft_model',
+      draftArtifactId: draft?.id,
+    }));
+    expect(result.speculativeDecoding).toEqual(activeVariant?.speculativeDecoding);
   });
 
   it('URL-encodes revisions that contain slashes for tree, raw, and resolve URLs', async () => {

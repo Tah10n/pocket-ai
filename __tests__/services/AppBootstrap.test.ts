@@ -663,6 +663,64 @@ describe('AppBootstrap', () => {
     expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
   });
 
+  it('recalculates a stale high-confidence RAM decision when an optional MTP draft is disabled', async () => {
+    jest.useFakeTimers();
+    try {
+      const activeModelId = 'author/model-q4';
+      const draftArtifactId = 'mtp-draft-gemma';
+      (getSettings as jest.Mock).mockReturnValue({
+        language: 'en',
+        activePresetId: null,
+        activeModelId,
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 2048,
+        theme: 'system',
+        chatRetentionDays: null,
+        modelLoadParamsByModelId: {
+          [activeModelId]: {
+            contextSize: 4096,
+            gpuLayers: null,
+            kvCacheType: 'auto',
+            mtpEnabled: false,
+          },
+        },
+      });
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: activeModelId,
+        localPath: 'author_model-q4.gguf',
+        fitsInRam: false,
+        memoryFitDecision: 'likely_oom',
+        memoryFitConfidence: 'high',
+        artifacts: [{
+          id: draftArtifactId,
+          kind: 'speculative_draft',
+          requiredFor: ['text'],
+          remoteFileName: 'MTP/gemma-MTP.gguf',
+          downloadUrl: 'https://example.com/MTP/gemma-MTP.gguf',
+          sizeBytes: 5_000_000_000,
+          installState: 'remote',
+        }],
+        speculativeDecoding: {
+          type: 'mtp',
+          mode: 'draft_model',
+          enabled: true,
+          maxDraftTokens: 3,
+          draftArtifactId,
+        },
+      });
+
+      await expect(bootstrapAppCritical()).resolves.toEqual({ outcome: 'success' });
+      jest.runAllTimers();
+      await Promise.resolve();
+
+      expect(llmEngineService.load).toHaveBeenCalledWith(activeModelId, { preferLastWorkingProfile: true });
+      expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('does not block critical bootstrap on infrastructure setup', async () => {
     (getSettings as jest.Mock).mockReturnValue({
       language: 'en',

@@ -136,7 +136,7 @@ describe('ModelVariantPickerSheet', () => {
     expect(mockLastListPickerProps.items).toEqual([]);
   });
 
-  it('filters unsupported GGUF companion files out of the picker rows', () => {
+  it('keeps embedded MTP variants while filtering projector companion files out of the picker rows', () => {
     const model = buildModel();
     model.variants = [
       ...model.variants!,
@@ -151,6 +151,12 @@ describe('ModelVariantPickerSheet', () => {
         fileName: 'model.NextN.gguf',
         quantizationLabel: 'NextN',
         size: 512_000_000,
+        speculativeDecoding: {
+          type: 'mtp',
+          mode: 'embedded',
+          enabled: true,
+          maxDraftTokens: 3,
+        },
       },
     ];
 
@@ -166,6 +172,7 @@ describe('ModelVariantPickerSheet', () => {
     expect(mockLastListPickerProps.items.map((item: { key: string }) => item.key)).toEqual([
       'model.Q4_K_M.gguf',
       'model.Q8_0.gguf',
+      'model.NextN.gguf',
     ]);
   });
 });

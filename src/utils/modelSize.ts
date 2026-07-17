@@ -1,5 +1,5 @@
 import type { ProjectorArtifact } from '../types/multimodal';
-import type { ModelMetadata, ModelVariant } from '../types/models';
+import type { ModelArtifactMetadata, ModelMetadata, ModelVariant } from '../types/models';
 import { getActiveModelVariantKeys, resolveActiveModelVariant } from './activeModelVariant';
 import {
   filterProjectorCandidatesForEffectiveActiveVariant,
@@ -7,12 +7,13 @@ import {
   remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRuntimeState';
+import { getSelectedMtpDraftArtifact } from './modelSpeculativeDecoding';
 
 type ProjectorArtifactSizeIdentity = Pick<ProjectorArtifact, 'size'> & Partial<Pick<ProjectorArtifact, 'id' | 'localPath'>>;
 type ProjectorArtifactDisplayIdentity = ProjectorArtifactSizeIdentity & Partial<Pick<ProjectorArtifact, 'ownerVariantId'>>;
 type ModelDisplayArtifactSizeInput = Pick<ModelMetadata, 'size' | 'projectorCandidates' | 'selectedProjectorId'> & Partial<Pick<
   ModelMetadata,
-  'activeVariantId' | 'artifacts' | 'id' | 'resolvedFileName' | 'variants'
+  'activeVariantId' | 'artifacts' | 'id' | 'resolvedFileName' | 'speculativeDecoding' | 'variants'
 >>;
 type ModelDisplayProjectorCandidatesResult = {
   candidates: ModelMetadata['projectorCandidates'];
@@ -21,6 +22,7 @@ type ModelDisplayProjectorCandidatesResult = {
 
 export const DECIMAL_GIGABYTE = 1000 * 1000 * 1000;
 export const UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES = DECIMAL_GIGABYTE;
+export const UNKNOWN_SPECULATIVE_DRAFT_MEMORY_FIT_FALLBACK_BYTES = DECIMAL_GIGABYTE;
 
 export function normalizePositiveByteSize(value: number | null | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
@@ -316,21 +318,68 @@ export function getProjectorMemoryFitSizeBytes(
 }
 
 export function getModelStoredArtifactsSizeBytes(
-  model: Pick<ModelMetadata, 'size' | 'projectorCandidates'>,
+  model: Pick<ModelMetadata, 'size' | 'projectorCandidates'> & Partial<Pick<ModelMetadata, 'artifacts'>>,
 ): number {
   return (normalizePositiveByteSize(model.size) ?? 0)
-    + getStoredProjectorArtifactsSizeBytes(model.projectorCandidates);
+    + getStoredProjectorArtifactsSizeBytes(model.projectorCandidates)
+    + getInstalledSpeculativeDraftArtifactsSizeBytes(model.artifacts);
 }
 
 export function getModelStoredMemoryFitSizeBytes(
-  model: Pick<ModelMetadata, 'size' | 'projectorCandidates'>,
+  model: ModelDisplayArtifactSizeInput,
+  options: { mtpEnabledOverride?: boolean } = {},
 ): number | null {
   const normalizedModelSize = normalizePositiveByteSize(model.size);
   if (normalizedModelSize === null) {
     return null;
   }
 
-  return normalizedModelSize + getStoredProjectorMemoryFitSizeBytes(model.projectorCandidates);
+  return normalizedModelSize
+    + getStoredProjectorMemoryFitSizeBytes(model.projectorCandidates)
+    + getSpeculativeDraftMemoryFitSizeBytes(model, {
+      requireInstalled: true,
+      enabledOverride: options.mtpEnabledOverride,
+    });
+}
+
+export function getInstalledSpeculativeDraftArtifactsSizeBytes(
+  artifacts: readonly ModelArtifactMetadata[] | null | undefined,
+): number {
+  const seen = new Set<string>();
+  return (artifacts ?? []).reduce((sum, artifact, index) => {
+    if (artifact.kind !== 'speculative_draft' || artifact.installState !== 'installed') {
+      return sum;
+    }
+
+    const identity = normalizeOptionalString(artifact.localPath)
+      ? `path:${artifact.localPath!.trim()}`
+      : `id:${artifact.id || `anonymous:${index}`}`;
+    if (seen.has(identity)) {
+      return sum;
+    }
+
+    seen.add(identity);
+    return sum + (normalizePositiveByteSize(artifact.sizeBytes) ?? 0);
+  }, 0);
+}
+
+export function getSpeculativeDraftMemoryFitSizeBytes(
+  model: ModelDisplayArtifactSizeInput,
+  options: {
+    enabledOverride?: boolean;
+    includeUnknownSizeFallback?: boolean;
+    requireInstalled?: boolean;
+  } = { includeUnknownSizeFallback: true },
+): number {
+  const artifact = getSelectedMtpDraftArtifact(model, options.enabledOverride);
+  if (!artifact || (options.requireInstalled === true && artifact.installState !== 'installed')) {
+    return 0;
+  }
+
+  return normalizePositiveByteSize(artifact.sizeBytes)
+    ?? (options.includeUnknownSizeFallback !== false
+      ? UNKNOWN_SPECULATIVE_DRAFT_MEMORY_FIT_FALLBACK_BYTES
+      : 0);
 }
 
 export function getModelDisplayArtifactSizeBytes(
@@ -338,6 +387,7 @@ export function getModelDisplayArtifactSizeBytes(
   baseSizeBytes?: number | null,
   projectorCandidates?: ModelMetadata['projectorCandidates'],
   selectedProjectorId?: ModelMetadata['selectedProjectorId'],
+  mtpEnabledOverride?: boolean,
 ): number | null {
   const activeVariant = resolveActiveModelVariant(model);
   const resolvedBaseSizeBytes = baseSizeBytes !== undefined
@@ -358,7 +408,12 @@ export function getModelDisplayArtifactSizeBytes(
     displayProjectors.runtimeToDisplayProjectorIds,
   );
 
-  return normalizedBaseSize + getProjectorMemoryFitSizeBytes(displayProjectors.candidates, displaySelectedProjectorId, {
-    includeUnknownSizeFallback: false,
-  });
+  return normalizedBaseSize
+    + getProjectorMemoryFitSizeBytes(displayProjectors.candidates, displaySelectedProjectorId, {
+      includeUnknownSizeFallback: false,
+    })
+    + getSpeculativeDraftMemoryFitSizeBytes(model, {
+      includeUnknownSizeFallback: false,
+      enabledOverride: mtpEnabledOverride,
+    });
 }

@@ -57,4 +57,20 @@ describe('modelLoadProfile utilities', () => {
       },
     })).toBe(true);
   });
+
+  it('treats an MTP-only change as a pending model reload', () => {
+    expect(hasPersistedLoadProfileChanges({
+      draftContextSize: 8192,
+      draftPersistedGpuLayers: 12,
+      draftKvCacheType: 'auto',
+      draftBackendPolicy: null,
+      draftMtpEnabled: false,
+      persistedMtpEnabled: true,
+      persistedLoadParams: {
+        contextSize: 8192,
+        gpuLayers: 12,
+        kvCacheType: 'auto',
+      },
+    })).toBe(true);
+  });
 });

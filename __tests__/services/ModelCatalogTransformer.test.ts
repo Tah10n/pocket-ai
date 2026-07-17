@@ -1,10 +1,14 @@
 import {
+  buildMtpDraftArtifactFromEntries,
   buildModelMetadataFromPayload,
   createFallbackModel,
   transformHFResponse,
 } from '../../src/services/ModelCatalogTransformer';
-import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
-import { LifecycleStatus } from '../../src/types/models';
+import {
+  CATALOG_SEARCH_VARIANT_LIMIT,
+  getMtpDraftCompanionEntries,
+} from '../../src/services/ModelCatalogFileSelector';
+import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
 import {
   resolveEffectiveActiveVariantNativeSupport,
   resolveModelNativeMultimodalSupport,
@@ -50,7 +54,7 @@ describe('ModelCatalogTransformer', () => {
     }));
   });
 
-  it('filters MTP tree-probe candidates from catalog summaries', () => {
+  it('keeps MTP tree-probe candidates until their GGUF layout is resolved', () => {
     const models = transformHFResponse([
       {
         id: 'author/model-mtp-gguf',
@@ -71,15 +75,16 @@ describe('ModelCatalogTransformer', () => {
       },
     ], null, null);
 
-    expect(models).toEqual([]);
+    expect(models).toHaveLength(2);
+    expect(models.every((model) => model.requiresTreeProbe === true)).toBe(true);
   });
 
   it('exposes sorted GGUF variants and selects the default download target from catalog siblings', () => {
     const models = transformHFResponse([
       {
-        id: 'author/model-q4',
+        id: 'author/model-mtp-q4',
         author: 'author',
-        tags: ['gguf', 'chat'],
+        tags: ['gguf', 'chat', 'multi-token-prediction'],
         siblings: [
           { rfilename: 'model.mmproj.gguf', size: REMOTE_SIZE },
           { rfilename: 'model.NextN.Q4_K_M.gguf', size: REMOTE_SIZE },
@@ -109,7 +114,20 @@ describe('ModelCatalogTransformer', () => {
         quantizationLabel: 'Q8_0',
         size: 8_000_000_000,
       }),
+      expect.objectContaining({
+        variantId: 'model.NextN.Q4_K_M.gguf',
+        fileName: 'model.NextN.Q4_K_M.gguf',
+        speculativeDecoding: expect.objectContaining({
+          type: 'mtp',
+          mode: 'embedded',
+          enabled: true,
+        }),
+      }),
     ]);
+    expect(models[0].variants?.find((variant) => variant.fileName === 'model.Q4_K_M.gguf')?.speculativeDecoding)
+      .toBeUndefined();
+    expect(models[0].variants?.find((variant) => variant.fileName === 'model.Q8_0.gguf')?.speculativeDecoding)
+      .toBeUndefined();
   });
 
   it('marks vision-capable catalog models and preserves projector candidates as companions', () => {
@@ -490,7 +508,7 @@ describe('ModelCatalogTransformer', () => {
     ]);
   });
 
-  it('drops MTP-only sibling payloads instead of creating a fallback tree-probe model', () => {
+  it('exposes an embedded MTP-only sibling payload as a runnable model', () => {
     const models = transformHFResponse([
       {
         id: 'author/model-q4',
@@ -503,7 +521,177 @@ describe('ModelCatalogTransformer', () => {
       },
     ], null, null);
 
-    expect(models).toEqual([]);
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      resolvedFileName: 'model.MTP.Q4_K_M.gguf',
+      speculativeDecoding: expect.objectContaining({
+        type: 'mtp',
+        mode: 'embedded',
+        enabled: true,
+      }),
+    }));
+  });
+
+  it('attaches a Gemma MTP draft companion without offering it as a primary variant', () => {
+    const models = transformHFResponse([{
+      id: 'unsloth/gemma-4-12b-it-GGUF',
+      author: 'unsloth',
+      tags: ['gguf', 'gemma'],
+      sha: 'revision-a',
+      siblings: [
+        { rfilename: 'gemma-4-12b-it-Q4_K_M.gguf', size: 7_000_000_000 },
+        { rfilename: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf', size: 465_000_000 },
+      ],
+    }], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0].variants?.map((variant) => variant.fileName)).toEqual([
+      'gemma-4-12b-it-Q4_K_M.gguf',
+    ]);
+    const draftArtifact = models[0].artifacts?.find((artifact) => artifact.kind === 'speculative_draft');
+    expect(draftArtifact).toEqual(expect.objectContaining({
+      remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+      sizeBytes: 465_000_000,
+      installState: 'remote',
+    }));
+    expect(models[0].speculativeDecoding).toEqual(expect.objectContaining({
+      type: 'mtp',
+      mode: 'draft_model',
+      enabled: true,
+      draftArtifactId: draftArtifact?.id,
+    }));
+  });
+
+  it('ignores non-GGUF MTP ancillary files when selecting a draft companion', () => {
+    const entries = [
+      { rfilename: 'gemma-Q4_K_M.gguf', size: 7_000_000_000 },
+      { rfilename: 'MTP/config.json', size: 1_000 },
+      { rfilename: 'MTP/tokenizer.json', size: 2_000 },
+      { rfilename: 'MTP/gemma-draft.Q4_K_M.gguf', size: 465_000_000 },
+    ];
+
+    expect(getMtpDraftCompanionEntries(entries).map((entry) => entry.rfilename)).toEqual([
+      'MTP/gemma-draft.Q4_K_M.gguf',
+    ]);
+    expect(buildMtpDraftArtifactFromEntries(entries, {
+      repoId: 'unsloth/gemma-GGUF',
+      hfRevision: 'revision-a',
+    })).toEqual(expect.objectContaining({
+      remoteFileName: 'MTP/gemma-draft.Q4_K_M.gguf',
+      sizeBytes: 465_000_000,
+    }));
+  });
+
+  it('replaces a persisted MTP drafter when detailed metadata publishes a new companion', () => {
+    const fallback: ModelMetadata = {
+      ...createFallbackModel('unsloth/gemma-4-12b-it-GGUF'),
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      activeVariantId: 'gemma-4-12b-it-Q4_K_M.gguf',
+      hfRevision: 'revision-a',
+      artifacts: [
+        {
+          id: 'old-main',
+          kind: 'main_model',
+          requiredFor: ['text'],
+          hfRevision: 'revision-a',
+          remoteFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+          downloadUrl: 'https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/revision-a/gemma-4-12b-it-Q4_K_M.gguf',
+          sizeBytes: 7_000_000_000,
+          localPath: 'old-gemma-main.gguf',
+          installState: 'installed',
+          downloadProgress: 1,
+        },
+        {
+          id: 'old-mtp-draft',
+          kind: 'speculative_draft',
+          requiredFor: ['text'],
+          hfRevision: 'revision-a',
+          remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+          downloadUrl: 'https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/revision-a/MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+          sizeBytes: 465_000_000,
+          localPath: 'old-gemma-mtp.gguf',
+          installState: 'installed',
+          downloadProgress: 1,
+        },
+      ],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId: 'old-mtp-draft',
+      },
+    };
+
+    const result = buildModelMetadataFromPayload({
+      id: fallback.id,
+      sha: 'revision-b',
+      tags: ['gguf', 'gemma'],
+      siblings: [
+        { rfilename: 'gemma-4-12b-it-Q4_K_M.gguf', size: 7_000_000_000 },
+        { rfilename: 'MTP/gemma-4-12b-it-MTP-Q4_0.gguf', size: 250_000_000 },
+      ],
+    }, null, null, fallback);
+
+    const drafts = result.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft');
+    expect(drafts).toHaveLength(1);
+    expect(drafts?.[0]).toEqual(expect.objectContaining({
+      remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q4_0.gguf',
+      hfRevision: 'revision-b',
+      sizeBytes: 250_000_000,
+      installState: 'remote',
+    }));
+    expect(drafts?.[0]).not.toHaveProperty('localPath');
+    expect(result.speculativeDecoding?.draftArtifactId).toBe(drafts?.[0]?.id);
+    expect(result.artifacts?.filter((artifact) => artifact.kind === 'main_model')).toEqual([
+      expect.objectContaining({
+        hfRevision: 'revision-b',
+        remoteFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+        installState: 'remote',
+      }),
+    ]);
+  });
+
+  it('drops a stale MTP drafter when a new detail revision no longer publishes one', () => {
+    const fallback: ModelMetadata = {
+      ...createFallbackModel('unsloth/gemma-4-12b-it-GGUF'),
+      hfRevision: 'revision-a',
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      activeVariantId: 'gemma-4-12b-it-Q4_K_M.gguf',
+      artifacts: [{
+        id: 'old-mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        hfRevision: 'revision-a',
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/revision-a/MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 465_000_000,
+        localPath: 'old-gemma-mtp.gguf',
+        installState: 'installed',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId: 'old-mtp-draft',
+      },
+    };
+
+    const result = buildModelMetadataFromPayload({
+      id: fallback.id,
+      sha: 'revision-b',
+      siblings: [{
+        rfilename: 'gemma-4-12b-it-Q4_K_M.gguf',
+        size: 7_000_000_000,
+      }],
+    }, null, null, fallback);
+
+    expect(result.artifacts?.some((artifact) => artifact.kind === 'speculative_draft')).toBe(false);
+    expect(result.speculativeDecoding).toBeUndefined();
+    expect(result.variants?.find((variant) => (
+      variant.fileName === 'gemma-4-12b-it-Q4_K_M.gguf'
+    ))?.speculativeDecoding).toBeUndefined();
   });
 
   it('drops projector-only sibling payloads instead of creating a fallback model.gguf tree-probe model', () => {

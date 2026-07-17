@@ -65,6 +65,10 @@ interface ModelParametersSheetProps {
   canApplyReload: boolean;
   isApplyingReload: boolean;
   showApplyReload: boolean;
+  mtpSupported?: boolean;
+  mtpArtifactReady?: boolean;
+  mtpEnabled?: boolean;
+  mtpHasPendingChange?: boolean;
   loadedContextSize?: number | null;
   loadedGpuLayers?: number | null;
   engineDiagnostics?: EngineDiagnostics | null;
@@ -78,6 +82,7 @@ interface ModelParametersSheetProps {
   onClose: () => void;
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
+  onChangeMtpEnabled?: (enabled: boolean) => void;
   onResetParamField: (field: keyof GenerationParameters) => void;
   onResetLoadField: (field: ModelLoadProfileField) => void;
   onReset: () => void;
@@ -375,6 +380,10 @@ function formatDecimal(value: number) {
   return value.toFixed(2).replace(/\.?0+$/, '');
 }
 
+function formatMebibytes(value: number) {
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 export function ModelParametersSheet({
   visible,
   modelId,
@@ -399,6 +408,10 @@ export function ModelParametersSheet({
   canApplyReload,
   isApplyingReload,
   showApplyReload,
+  mtpSupported = false,
+  mtpArtifactReady = false,
+  mtpEnabled = false,
+  mtpHasPendingChange = false,
   loadedContextSize,
   loadedGpuLayers,
   engineDiagnostics,
@@ -412,6 +425,7 @@ export function ModelParametersSheet({
   onClose,
   onChangeParams,
   onChangeLoadParams,
+  onChangeMtpEnabled,
   onResetParamField,
   onResetLoadField,
   onReset,
@@ -442,6 +456,25 @@ export function ModelParametersSheet({
     || runtimeBackendDevicesText.includes('metal');
   const runtimeReportsAnyBackend = runtimeReportsNpuBackend || runtimeReportsGpuBackend;
   const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true && !runtimeReportsAnyBackend;
+  const mtpDiagnostics = engineDiagnostics?.speculativeDecoding;
+  const mtpStatusText = mtpHasPendingChange
+    ? t('chat.modelControls.mtpStatusPending')
+    : !mtpEnabled
+      ? t('chat.modelControls.mtpStatusDisabled')
+      : mtpDiagnostics?.fallbackReason === 'memory_budget'
+        ? t('chat.modelControls.mtpStatusMemoryFallback')
+        : mtpDiagnostics?.fallbackReason === 'initialization_failed'
+          ? t('chat.modelControls.mtpStatusInitializationFallback')
+          : mtpDiagnostics?.fallbackReason
+            ? t('chat.modelControls.mtpStatusFallback')
+            : mtpDiagnostics?.active
+              ? t('chat.modelControls.mtpStatusActive')
+              : !mtpArtifactReady
+                ? t('chat.modelControls.mtpStatusUnavailable')
+                : t('chat.modelControls.mtpStatusNextLoad');
+  const mtpLastCompletion = mtpDiagnostics?.lastCompletion;
+  const mtpMemoryDeltaBytes = mtpDiagnostics?.memory?.modelInitPssDeltaBytes
+    ?? mtpDiagnostics?.memory?.modelInitAppDeltaBytes;
   const isReasoningEffortDisabled = !supportsReasoning;
   const reasoningHelperText = !supportsReasoning
     ? t('chat.modelControls.reasoningUnsupported')
@@ -1574,6 +1607,92 @@ export function ModelParametersSheet({
                   ) : null}
 
                   <ScreenStack gap="default">
+                    {mtpSupported ? (
+                      <>
+                        <SegmentedControlRow
+                          label={t('chat.modelControls.mtp')}
+                          description={t('chat.modelControls.mtpDescription')}
+                          options={[
+                            {
+                              key: 'off',
+                              label: t('chat.modelControls.mtpOff'),
+                              testID: 'mtp-toggle-off',
+                            },
+                            {
+                              key: 'on',
+                              label: t('chat.modelControls.mtpOn'),
+                              testID: 'mtp-toggle-on',
+                            },
+                          ]}
+                          activeKey={mtpEnabled ? 'on' : 'off'}
+                          onChange={(key) => onChangeMtpEnabled?.(key === 'on')}
+                          variant="embedded"
+                          disabled={!onChangeMtpEnabled || isApplyingReload}
+                          helperText={mtpStatusText}
+                        />
+
+                        {mtpDiagnostics ? (
+                          <ScreenCard
+                            testID="mtp-runtime-telemetry-card"
+                            tone={mtpDiagnostics.fallbackReason ? 'warning' : 'default'}
+                            variant="inset"
+                            padding="compact"
+                          >
+                            <Text className={accentEyebrowClassName}>
+                              {t('chat.modelControls.mtpTelemetryTitle')}
+                            </Text>
+                            <Text
+                              testID="mtp-runtime-status"
+                              className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200"
+                            >
+                              {t('chat.modelControls.mtpStatusValue', { status: mtpStatusText })}
+                            </Text>
+                            {mtpLastCompletion ? (
+                              <Box className="mt-1 gap-1">
+                                <Text testID="mtp-runtime-draft-counters" className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                  {t('chat.modelControls.mtpDraftAcceptance', {
+                                    accepted: mtpLastCompletion.mtp.draftTokensAccepted,
+                                    drafted: mtpLastCompletion.mtp.draftTokens,
+                                    percent: typeof mtpLastCompletion.mtp.acceptanceRate === 'number'
+                                      ? Math.round(mtpLastCompletion.mtp.acceptanceRate * 100)
+                                      : 0,
+                                  })}
+                                </Text>
+                                {typeof mtpLastCompletion.predictedPerSecond === 'number' ? (
+                                  <Text testID="mtp-runtime-native-speed" className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                    {t('chat.modelControls.mtpNativeSpeed', {
+                                      speed: mtpLastCompletion.predictedPerSecond.toFixed(2),
+                                    })}
+                                  </Text>
+                                ) : null}
+                                {typeof mtpLastCompletion.timeToFirstTokenMs === 'number' ? (
+                                  <Text testID="mtp-runtime-ttft" className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                    {t('chat.modelControls.mtpTtft', {
+                                      milliseconds: Math.round(mtpLastCompletion.timeToFirstTokenMs),
+                                    })}
+                                  </Text>
+                                ) : null}
+                              </Box>
+                            ) : null}
+                            {typeof mtpMemoryDeltaBytes === 'number' ? (
+                              <Text testID="mtp-runtime-memory-delta" className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                {t('chat.modelControls.mtpMemoryDelta', {
+                                  memory: formatMebibytes(mtpMemoryDeltaBytes),
+                                })}
+                              </Text>
+                            ) : null}
+                            {typeof mtpDiagnostics.draftModelBytes === 'number' ? (
+                              <Text className="mt-1 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                {t('chat.modelControls.mtpDraftSize', {
+                                  memory: formatMebibytes(mtpDiagnostics.draftModelBytes),
+                                })}
+                              </Text>
+                            ) : null}
+                          </ScreenCard>
+                        ) : null}
+                      </>
+                    ) : null}
+
                     <SliderRow
                       label={t('chat.modelControls.contextWindow')}
                       description={t('chat.modelControls.contextWindowDescription')}

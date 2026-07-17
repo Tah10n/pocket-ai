@@ -2,12 +2,13 @@ import {
   buildCatalogModelVariants,
   CATALOG_SEARCH_VARIANT_LIMIT,
   getProjectorCompanionEntries,
+  getMtpDraftCompanionEntries,
   getFileSize,
   hasProjectorCompanionEntries,
   isEligibleGgufEntry,
   isCatalogSummarySupported,
   isProjectorFileName,
-  isUnsupportedMtpFileName,
+  isMtpFileName,
   limitModelVariants,
   selectTreeEntryForModel,
   selectPreferredGgufEntry,
@@ -52,9 +53,33 @@ describe('ModelCatalogFileSelector', () => {
     'model.MTP.Q4_K_M.gguf',
     'model.NextN.Q4_K_M.gguf',
     'subdir/model.multi-token-prediction.Q4_K_M.gguf',
-  ])('treats %s as an unsupported MTP file', (fileName) => {
-    expect(isUnsupportedMtpFileName(fileName)).toBe(true);
-    expect(isEligibleGgufEntry({ rfilename: fileName, size: largeFileSize })).toBe(false);
+  ])('keeps embedded MTP model %s eligible', (fileName) => {
+    expect(isMtpFileName(fileName)).toBe(true);
+    expect(isEligibleGgufEntry({ rfilename: fileName, size: largeFileSize })).toBe(true);
+  });
+
+  it.each([
+    'MTP/gemma-mtp.Q8_0.gguf',
+    'mtp-gemma-4-12b-it-Q8_0.gguf',
+    'draft/gemma-4-12b-it.gguf',
+  ])('classifies %s as a draft companion instead of a primary model', (fileName) => {
+    const entries = [
+      { rfilename: 'gemma-4-12b-it-Q4_K_M.gguf', size: 7_000_000_000 },
+      { rfilename: fileName, size: largeFileSize },
+    ];
+
+    expect(getMtpDraftCompanionEntries(entries).map((entry) => entry.rfilename)).toContain(fileName);
+    expect(isEligibleGgufEntry(entries[1], entries)).toBe(false);
+  });
+
+  it('recognizes a small Gemma -MTP suffix file as a draft companion while retaining the base GGUF', () => {
+    const entries = [
+      { rfilename: 'gemma-4-12b-it-Q4_K_M.gguf', size: 7_000_000_000 },
+      { rfilename: 'gemma-4-12b-it-MTP.gguf', size: 465_000_000 },
+    ];
+
+    expect(getMtpDraftCompanionEntries(entries)).toEqual([entries[1]]);
+    expect(selectPreferredGgufEntry(entries)).toBe(entries[0]);
   });
 
   it('selects the language model GGUF instead of an mmproj candidate', () => {
@@ -129,13 +154,22 @@ describe('ModelCatalogFileSelector', () => {
     })).toBe(false);
   });
 
-  it('selects the supported text GGUF instead of an MTP candidate', () => {
+  it('prefers a non-speculative variant by default while retaining the MTP candidate', () => {
     const selected = selectPreferredGgufEntry([
       { rfilename: 'model.NextN.Q4_K_M.gguf', size: largeFileSize },
       { rfilename: 'model.Q5_K_M.gguf', size: largeFileSize },
     ]);
 
     expect(selected?.rfilename).toBe('model.Q5_K_M.gguf');
+    expect(buildCatalogModelVariants([
+      { rfilename: 'model.NextN.Q4_K_M.gguf', size: largeFileSize },
+      { rfilename: 'model.Q5_K_M.gguf', size: largeFileSize },
+    ])).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fileName: 'model.NextN.Q4_K_M.gguf',
+        speculativeDecoding: expect.objectContaining({ mode: 'embedded', enabled: true }),
+      }),
+    ]));
   });
 
   it('uses the documented catalog ranking instead of the first GGUF entry', () => {
@@ -197,6 +231,19 @@ describe('ModelCatalogFileSelector', () => {
         quantizationLabel: 'Q8_0',
         size: 8_000_000_000,
         sha256: 'a'.repeat(64),
+      },
+      {
+        variantId: 'model.MTP.Q4_K_M.gguf',
+        fileName: 'model.MTP.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: largeFileSize,
+        sha256: undefined,
+        speculativeDecoding: {
+          type: 'mtp',
+          mode: 'embedded',
+          enabled: true,
+          maxDraftTokens: 1,
+        },
       },
     ]);
   });

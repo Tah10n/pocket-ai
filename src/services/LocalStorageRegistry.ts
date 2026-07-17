@@ -12,12 +12,16 @@ import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValida
 import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
 import { getModelMemoryFitInputSizeBytes } from '../utils/memoryFit';
-import { getStoredProjectorMemoryFitSizeBytes } from '../utils/modelSize';
+import {
+  getSpeculativeDraftMemoryFitSizeBytes,
+  getStoredProjectorMemoryFitSizeBytes,
+} from '../utils/modelSize';
 import { getAllModelProjectorCandidates } from '../utils/effectiveProjectorState';
 import {
   getEffectiveActiveVariantProjectorCandidates,
   projectorArtifactMatchesCandidate,
 } from '../utils/modelCapabilities';
+import { getModelLoadParametersForModel } from './SettingsStore';
 
 const REGISTRY_STORAGE_ID = 'models-registry';
 const MODEL_FILE_PRESERVATION_STORAGE_ID = 'model-file-preservation';
@@ -94,6 +98,7 @@ function cloneModelVariant(variant: ModelVariant): ModelVariant {
     ...variant,
     chatModalities: variant.chatModalities ? [...variant.chatModalities] : undefined,
     projectorCandidates: variant.projectorCandidates?.map(cloneProjectorArtifact),
+    speculativeDecoding: variant.speculativeDecoding ? { ...variant.speculativeDecoding } : undefined,
   };
 }
 
@@ -485,6 +490,7 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
       ? cloneInputCapabilities(model.inputCapabilities)
       : undefined,
     projectorCandidates: model.projectorCandidates?.map(cloneProjectorArtifact),
+    speculativeDecoding: model.speculativeDecoding ? { ...model.speculativeDecoding } : undefined,
     multimodalReadiness: model.multimodalReadiness
       ? cloneMultimodalReadinessState(model.multimodalReadiness)
       : undefined,
@@ -509,6 +515,10 @@ function getSafeLocalPathKey(localPath: unknown): string | undefined {
 
 function getMultimodalProjectorArtifacts(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifact[] {
   return (model.artifacts ?? []).filter((artifact) => artifact.kind === 'multimodal_projector');
+}
+
+function getCompanionModelArtifacts(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifact[] {
+  return (model.artifacts ?? []).filter((artifact) => artifact.kind !== 'main_model');
 }
 
 function hasProtectedProjectorArtifactState(artifact: Pick<ModelArtifact, 'installState'>): boolean {
@@ -550,7 +560,7 @@ function collectProtectedModelAssetLocalPaths(models: ModelMetadata[]): Set<stri
       }
     }
 
-    for (const artifact of getMultimodalProjectorArtifacts(model)) {
+    for (const artifact of getCompanionModelArtifacts(model)) {
       if (hasProtectedProjectorArtifactState(artifact) && isValidLocalFileName(artifact.localPath)) {
         localPaths.add(artifact.localPath);
       }
@@ -575,7 +585,7 @@ function collectProtectedProjectorLocalPaths(models: ModelMetadata[]): Set<strin
     }
 
 
-    for (const artifact of getMultimodalProjectorArtifacts(model)) {
+    for (const artifact of getCompanionModelArtifacts(model)) {
       if (hasProtectedProjectorArtifactState(artifact) && isValidLocalFileName(artifact.localPath)) {
         localPaths.add(artifact.localPath);
       }
@@ -716,6 +726,15 @@ function resetProjectorArtifactDownloadStateForModel(
   return changed || candidateChanged || readinessChanged;
 }
 
+function resetCompanionArtifactDownloadStateForModel(
+  model: ModelMetadata,
+  artifact: ModelArtifact,
+): boolean {
+  return artifact.kind === 'multimodal_projector'
+    ? resetProjectorArtifactDownloadStateForModel(model, artifact)
+    : resetProjectorArtifactDownloadState(artifact);
+}
+
 function resetProjectorDownloadStates(model: ModelMetadata): boolean {
   let changed = false;
 
@@ -725,6 +744,12 @@ function resetProjectorDownloadStates(model: ModelMetadata): boolean {
 
   for (const artifact of getMultimodalProjectorArtifacts(model)) {
     changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+  }
+
+  for (const artifact of getCompanionModelArtifacts(model)) {
+    if (artifact.kind === 'speculative_draft') {
+      changed = resetProjectorArtifactDownloadState(artifact) || changed;
+    }
   }
 
   return changed;
@@ -844,7 +869,7 @@ async function isExistingCompletedProjectorFileForPrivateReset(
   return true;
 }
 
-async function isExistingCompletedProjectorArtifactFileForPrivateReset(
+async function isExistingCompletedCompanionArtifactFileForPrivateReset(
   artifact: ModelArtifact,
   modelsDir: string,
 ): Promise<boolean> {
@@ -861,9 +886,9 @@ async function isExistingCompletedProjectorArtifactFileForPrivateReset(
   try {
     info = await FileSystem.getInfoAsync(localUri);
   } catch (error) {
-    console.warn('[LocalStorageRegistry] Failed to inspect completed projector file before private storage reset; preserving registry-owned file name', {
+    console.warn('[LocalStorageRegistry] Failed to inspect completed companion file before private storage reset; preserving registry-owned file name', {
       ...getModelStorageLogDetails('private_storage_reset_snapshot'),
-      artifactKind: 'projector',
+      artifactKind: artifact.kind,
       ...getSanitizedRegistryErrorDetails(error),
     });
     return true;
@@ -936,8 +961,8 @@ function getModelAssetFilesForRemoval(
   }
 
 
-  for (const artifact of getMultimodalProjectorArtifacts(model)) {
-    addFile(artifact.localPath, 'projector');
+  for (const artifact of getCompanionModelArtifacts(model)) {
+    addFile(artifact.localPath, artifact.kind === 'multimodal_projector' ? 'projector' : 'model');
   }
 
   return files;
@@ -1055,9 +1080,9 @@ export class LocalStorageRegistry {
           }
         }
 
-        for (const artifact of getMultimodalProjectorArtifacts(model)) {
+        for (const artifact of getCompanionModelArtifacts(model)) {
           if (
-            await isExistingCompletedProjectorArtifactFileForPrivateReset(artifact, modelsDir)
+            await isExistingCompletedCompanionArtifactFileForPrivateReset(artifact, modelsDir)
             && isValidLocalFileName(artifact.localPath)
           ) {
             preservedFileNames.add(artifact.localPath);
@@ -1365,42 +1390,42 @@ export class LocalStorageRegistry {
       }
     }
 
-    for (const artifact of getMultimodalProjectorArtifacts(model)) {
+    for (const artifact of getCompanionModelArtifacts(model)) {
       const localPath = artifact.localPath;
       const hasCompletedState = artifact.installState === 'installed';
       if (!isValidLocalFileName(localPath)) {
         if (hasCompletedState || artifact.localPath !== undefined) {
-          changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+          changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
         }
         continue;
       }
 
       const fileUri = safeJoinModelPath(modelsDir, localPath);
       if (!fileUri) {
-        console.warn('[LocalStorageRegistry] Invalid projector localPath, resetting projector to available', {
+        console.warn('[LocalStorageRegistry] Invalid companion localPath, resetting artifact to available', {
           ...getModelStorageLogDetails('projector_local_state_validation'),
-          artifactKind: 'projector',
+          artifactKind: artifact.kind,
         });
-        changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+        changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
         continue;
       }
 
       const info = await getInfo(localPath, fileUri);
       if (!info.exists) {
-        console.warn('[LocalStorageRegistry] Projector localPath missing, resetting projector to available', {
+        console.warn('[LocalStorageRegistry] Companion localPath missing, resetting artifact to available', {
           ...getModelStorageLogDetails('projector_local_state_validation'),
-          artifactKind: 'projector',
+          artifactKind: artifact.kind,
         });
-        changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+        changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
         continue;
       }
 
       if (isFileSystemDirectory(info)) {
-        console.warn('[LocalStorageRegistry] Projector localPath points to a directory, resetting projector to available', {
+        console.warn('[LocalStorageRegistry] Companion localPath points to a directory, resetting artifact to available', {
           ...getModelStorageLogDetails('projector_local_state_validation'),
-          artifactKind: 'projector',
+          artifactKind: artifact.kind,
         });
-        changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+        changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
         continue;
       }
 
@@ -1409,18 +1434,18 @@ export class LocalStorageRegistry {
           continue;
         }
 
-        changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+        changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
         continue;
       }
 
       const fileSizeBytes = getFileInfoSizeBytes(info);
       const expectedSizeBytes = getFileInfoSizeBytes({ size: artifact.sizeBytes ?? undefined });
       if (expectedSizeBytes !== null && fileSizeBytes !== null && fileSizeBytes !== expectedSizeBytes) {
-        console.warn('[LocalStorageRegistry] Projector file size mismatch, resetting projector to available', {
+        console.warn('[LocalStorageRegistry] Companion file size mismatch, resetting artifact to available', {
           ...getModelStorageLogDetails('projector_local_state_validation'),
-          artifactKind: 'projector',
+          artifactKind: artifact.kind,
         });
-        changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+        changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
         continue;
       }
 
@@ -1433,10 +1458,10 @@ export class LocalStorageRegistry {
       } catch (error) {
         if (error instanceof GgufValidationError && error.reason === 'read_failed') {
           console.warn(
-            '[LocalStorageRegistry] Projector GGUF validation could not read file, preserving downloaded projector state',
+            '[LocalStorageRegistry] Companion GGUF validation could not read file, preserving downloaded artifact state',
             {
               ...getModelStorageLogDetails('projector_local_state_validation'),
-              artifactKind: 'projector',
+              artifactKind: artifact.kind,
               ...getSanitizedRegistryErrorDetails(error),
             },
           );
@@ -1444,14 +1469,14 @@ export class LocalStorageRegistry {
         }
 
         console.warn(
-          '[LocalStorageRegistry] Projector GGUF validation failed, resetting projector to available',
+          '[LocalStorageRegistry] Companion GGUF validation failed, resetting artifact to available',
           {
             ...getModelStorageLogDetails('projector_local_state_validation'),
-            artifactKind: 'projector',
+            artifactKind: artifact.kind,
             ...getSanitizedRegistryErrorDetails(error),
           },
         );
-        changed = resetProjectorArtifactDownloadStateForModel(model, artifact) || changed;
+        changed = resetCompanionArtifactDownloadStateForModel(model, artifact) || changed;
       }
     }
 
@@ -1676,6 +1701,10 @@ export class LocalStorageRegistry {
             projectorSizeBytes: getStoredProjectorMemoryFitSizeBytes(
               getEffectiveActiveVariantProjectorCandidates(model),
             ),
+            speculativeDraftSizeBytes: getSpeculativeDraftMemoryFitSizeBytes(model, {
+              enabledOverride: getModelLoadParametersForModel(model.id).mtpEnabled,
+              requireInstalled: true,
+            }),
           }) ?? sizeBytesForFit;
           const metadataTrustForFit = hasTrustedIntegrityMarker
             ? 'verified_local' as const

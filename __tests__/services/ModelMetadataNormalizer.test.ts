@@ -1514,7 +1514,7 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.activeVariantId).toBe('legacy-q8-selection');
   });
 
-  it('rejects non-GGUF, projector, and MTP persisted variants', () => {
+  it('rejects non-GGUF and projector variants while retaining embedded MTP variants', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'author/model-q4',
       lifecycleStatus: LifecycleStatus.AVAILABLE,
@@ -1538,6 +1538,12 @@ describe('ModelMetadataNormalizer', () => {
           fileName: 'model.NextN.Q4_K_M.gguf',
           quantizationLabel: 'Q4_K_M',
           size: 4_000_000_000,
+          speculativeDecoding: {
+            type: 'mtp',
+            mode: 'embedded',
+            enabled: true,
+            maxDraftTokens: 1,
+          },
         },
         {
           variantId: 'model.Q4_K_M.gguf',
@@ -1550,6 +1556,18 @@ describe('ModelMetadataNormalizer', () => {
 
     expect(normalized.variants).toEqual([
       {
+        variantId: 'model.NextN.Q4_K_M.gguf',
+        fileName: 'model.NextN.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        speculativeDecoding: {
+          type: 'mtp',
+          mode: 'embedded',
+          enabled: true,
+          maxDraftTokens: 1,
+        },
+      },
+      {
         variantId: 'model.Q4_K_M.gguf',
         fileName: 'model.Q4_K_M.gguf',
         quantizationLabel: 'Q4_K_M',
@@ -1559,7 +1577,44 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.activeVariantId).toBeUndefined();
   });
 
-  it('drops unsupported MTP variants from persisted catalog metadata', () => {
+  it('fails malformed persisted MTP enablement closed instead of silently enabling it', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model-q4',
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'embedded',
+        enabled: 'false',
+        maxDraftTokens: 3,
+      },
+      variants: [{
+        variantId: 'model.NextN.Q4_K_M.gguf',
+        fileName: 'model.NextN.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+        speculativeDecoding: {
+          type: 'mtp',
+          mode: 'embedded',
+          enabled: 1,
+          maxDraftTokens: 3,
+        },
+      }],
+    } as any);
+
+    expect(normalized.speculativeDecoding).toEqual({
+      type: 'mtp',
+      mode: 'embedded',
+      enabled: false,
+      maxDraftTokens: 3,
+    });
+    expect(normalized.variants?.[0]?.speculativeDecoding).toEqual({
+      type: 'mtp',
+      mode: 'embedded',
+      enabled: false,
+      maxDraftTokens: 3,
+    });
+  });
+
+  it('retains embedded MTP variants and their active selection in persisted catalog metadata', () => {
     const normalized = normalizePersistedModelMetadata({
       id: 'author/model-q4',
       lifecycleStatus: LifecycleStatus.AVAILABLE,
@@ -1584,13 +1639,19 @@ describe('ModelMetadataNormalizer', () => {
 
     expect(normalized.variants).toEqual([
       {
+        variantId: 'model.NextN.Q4_K_M.gguf',
+        fileName: 'model.NextN.Q4_K_M.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 4_000_000_000,
+      },
+      {
         variantId: 'model.Q4_K_M.gguf',
         fileName: 'model.Q4_K_M.gguf',
         quantizationLabel: 'Q4_K_M',
         size: 4_000_000_000,
       },
     ]);
-    expect(normalized.activeVariantId).toBe('model.Q4_K_M.gguf');
+    expect(normalized.activeVariantId).toBe('model.NextN.Q4_K_M.gguf');
   });
 
   it('normalizes persisted resumeData to opaque native strings without auth material', () => {

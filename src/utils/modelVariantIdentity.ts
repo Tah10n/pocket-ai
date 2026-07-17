@@ -37,6 +37,7 @@ function getVariantCompletenessScore(variant: ModelVariant): number {
     + (variant.chatModalities?.includes('vision') ? 8 : 0)
     + (variant.chatModalities?.includes('audio') ? 8 : 0)
     + (variant.projectorCandidates?.length ? 4 : 0)
+    + (variant.speculativeDecoding ? 4 : 0)
     + (variant.sha256 ? 4 : 0)
     + (typeof variant.size === 'number' ? 2 : 0)
     + (variant.ramFit ? 1 : 0)
@@ -117,6 +118,7 @@ function mergeDedupeVariantMetadata(preferred: ModelVariant, fallback: ModelVari
     selectedProjectorId: preferred.selectedProjectorId ?? (
       shouldUseFallbackProjectorMetadata ? fallback.selectedProjectorId : undefined
     ),
+    speculativeDecoding: preferred.speculativeDecoding ?? fallback.speculativeDecoding,
   };
 }
 

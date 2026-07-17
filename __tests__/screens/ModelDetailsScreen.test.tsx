@@ -461,6 +461,11 @@ describe('ModelDetailsScreen', () => {
       recommendedGpuLayers: 0,
       gpuLayersCeiling: 512,
     });
+    const { getModelLoadParametersForModel } = jest.requireMock('../../src/services/SettingsStore');
+    getModelLoadParametersForModel.mockReturnValue({
+      contextSize: 4096,
+      gpuLayers: null,
+    });
     mockReloadModel.mockResolvedValue(undefined);
     mockHardwareStatus.mockReturnValue({ networkType: 'wifi' });
 
@@ -790,6 +795,108 @@ describe('ModelDetailsScreen', () => {
       await Promise.resolve();
     });
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
+  });
+
+  it('prefetches the optional Gemma MTP draft when runtime MTP is off', async () => {
+    const draftArtifactId = 'mtp-draft-gemma';
+    const downloadedModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'gemma.gguf',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 465_000_000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(downloadedModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(downloadedModel);
+    modelCatalogService.refreshModelMetadata.mockResolvedValue(downloadedModel);
+    const { getModelLoadParametersForModel } = jest.requireMock('../../src/services/SettingsStore');
+    getModelLoadParametersForModel.mockReturnValue({
+      contextSize: 4096,
+      gpuLayers: null,
+      mtpEnabled: false,
+    });
+
+    const screen = render(<ModelDetailsScreen />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.mtp.title')).toBeTruthy();
+    expect(screen.getByText('models.mtp.availableBadge')).toBeTruthy();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('model-details-download-mtp-draft'));
+      await Promise.resolve();
+    });
+
+    expect(mockStartDownload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: downloadedModel.id,
+        speculativeDecoding: expect.objectContaining({ mode: 'draft_model' }),
+      }),
+      { includeOptionalMtpDraft: true },
+    );
+  });
+
+  it.each([
+    ['downloaded', undefined, 'models.load'],
+    ['active', 'org/model', 'models.chat'],
+  ])('keeps %s base-model actions available when only the MTP draft failed', async (
+    _state,
+    activeModelId,
+    expectedAction,
+  ) => {
+    const draftArtifactId = 'mtp-draft-low-storage-failure';
+    const modelWithFailedDraft = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'gemma.gguf',
+      downloadProgress: 1,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 465_000_000,
+        installState: 'failed',
+        errorCode: 'download_disk_space_low',
+        errorMessage: 'DISK_SPACE_LOW',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(modelWithFailedDraft);
+    modelCatalogService.getModelDetails.mockResolvedValue(modelWithFailedDraft);
+    mockEngineState.activeModelId = activeModelId;
+
+    const screen = render(<ModelDetailsScreen />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.mtp.failedBadge')).toBeTruthy();
+    expect(screen.getByText('models.mtp.retryDraft')).toBeTruthy();
+    expect(screen.getByText(expectedAction)).toBeTruthy();
+    expect(screen.queryByText('models.retryDownload')).toBeNull();
   });
 
   it('shows downloaded model quantization in the selector row without a separate label', async () => {

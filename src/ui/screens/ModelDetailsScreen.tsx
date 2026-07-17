@@ -45,6 +45,10 @@ import {
 } from '@/utils/modelSize';
 import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
 import { canSelectModelVariant, getActiveModelVariant } from '@/utils/modelVariants';
+import {
+  getConfiguredMtpDraftArtifact,
+  resolveEffectiveSpeculativeDecoding,
+} from '@/utils/modelSpeculativeDecoding';
 import { selectModelProjectorLifecycleState } from '@/store/modelsStore';
 
 export function ModelDetailsScreen() {
@@ -162,6 +166,21 @@ export function ModelDetailsScreen() {
   const detailsAudioBadge = detailsPresentationModel ? getModelAudioCapabilityBadgePresentation(detailsPresentationModel) : null;
   const detailsProjectorLifecycle = detailsPresentationModel ? selectModelProjectorLifecycleState(detailsPresentationModel) : null;
   const shouldShowProjectorStatus = detailsProjectorLifecycle !== null && detailsProjectorLifecycle.status !== 'text_only';
+  const speculativeDecoding = displayModel
+    ? resolveEffectiveSpeculativeDecoding(displayModel)
+    : undefined;
+  const speculativeDraftArtifact = displayModel
+    ? getConfiguredMtpDraftArtifact(displayModel)
+    : undefined;
+  const isSpeculativeDraftBusy = speculativeDraftArtifact?.installState === 'queued'
+    || speculativeDraftArtifact?.installState === 'downloading'
+    || speculativeDraftArtifact?.installState === 'verifying';
+  const isSpeculativeDraftReady = speculativeDraftArtifact?.installState === 'installed';
+  const canDownloadSpeculativeDraft = speculativeDecoding?.mode === 'draft_model'
+    && !isSpeculativeDraftReady
+    && !isSpeculativeDraftBusy
+    && (displayModel?.lifecycleStatus === LifecycleStatus.DOWNLOADED
+      || displayModel?.lifecycleStatus === LifecycleStatus.ACTIVE);
   const shouldShowDownloadProgress = Boolean(displayModel && (
     isModelDownloading(displayModel)
     || displayModel.lifecycleStatus === LifecycleStatus.PAUSED
@@ -354,6 +373,74 @@ export function ModelDetailsScreen() {
                     {displayModel.description ?? t('models.descriptionUnavailable')}
                   </Text>
                 </SectionCard>
+
+                {speculativeDecoding ? (
+                  <SectionCard
+                    title={t('models.mtp.title')}
+                    iconName="bolt"
+                    tone="primary"
+                  >
+                    <Box className="gap-3">
+                      <Box className="flex-row flex-wrap items-center gap-2">
+                        <ScreenBadge
+                          tone={speculativeDecoding.mode === 'embedded' || isSpeculativeDraftReady
+                            ? 'success'
+                            : speculativeDraftArtifact?.installState === 'failed'
+                              ? 'warning'
+                              : 'neutral'}
+                          size="micro"
+                        >
+                          {speculativeDecoding.mode === 'embedded'
+                            ? t('models.mtp.embeddedBadge')
+                            : isSpeculativeDraftReady
+                              ? t('models.mtp.readyBadge')
+                              : isSpeculativeDraftBusy
+                                ? t('models.mtp.downloadingBadge')
+                                : speculativeDraftArtifact?.installState === 'failed'
+                                  ? t('models.mtp.failedBadge')
+                                  : t('models.mtp.availableBadge')}
+                        </ScreenBadge>
+                        <ScreenBadge tone="neutral" size="micro">
+                          {t('models.mtp.maxDraftTokens', { count: speculativeDecoding.maxDraftTokens })}
+                        </ScreenBadge>
+                      </Box>
+                      <Text className="text-sm leading-6 text-typography-700 dark:text-typography-300">
+                        {speculativeDecoding.mode === 'embedded'
+                          ? t('models.mtp.embeddedDescription')
+                          : isSpeculativeDraftReady
+                            ? t('models.mtp.readyDescription')
+                            : isSpeculativeDraftBusy
+                              ? t('models.mtp.downloadingDescription')
+                              : speculativeDraftArtifact?.installState === 'failed'
+                                ? t('models.mtp.failedDescription')
+                                : t('models.mtp.availableDescription')}
+                      </Text>
+                      {speculativeDraftArtifact ? (
+                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                          {speculativeDraftArtifact.remoteFileName} · {formatModelFileSize(
+                            speculativeDraftArtifact.sizeBytes,
+                            t('models.sizeUnknown'),
+                          )}
+                        </Text>
+                      ) : null}
+                      {canDownloadSpeculativeDraft && displayModel ? (
+                        <Button
+                          action="softPrimary"
+                          size="sm"
+                          onPress={() => handleDownload(displayModel, { includeOptionalMtpDraft: true })}
+                          testID="model-details-download-mtp-draft"
+                        >
+                          <MaterialSymbols name="download" size={18} className="text-primary-600 dark:text-primary-300" />
+                          <ButtonText>
+                            {speculativeDraftArtifact?.installState === 'failed'
+                              ? t('models.mtp.retryDraft')
+                              : t('models.mtp.downloadDraft')}
+                          </ButtonText>
+                        </Button>
+                      ) : null}
+                    </Box>
+                  </SectionCard>
+                ) : null}
 
                 <ModelDetailsMetadataSection
                   items={metadataItems}

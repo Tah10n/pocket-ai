@@ -18,6 +18,7 @@ import {
 import { projectorArtifactService } from '@/services/ProjectorArtifactService';
 import { offloadModel } from '@/services/StorageManagerService';
 import { LifecycleStatus, type ModelMetadata } from '@/types/models';
+import type { ModelDownloadRequestOptions } from '@/types/downloads';
 import { getReportedErrorMessage, toAppError } from '../services/AppError';
 import {
   buildModelDetailsHeroMetrics,
@@ -252,7 +253,10 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
   const [loading, setLoading] = useState(Boolean(modelId));
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [projectorChoiceModel, setProjectorChoiceModel] = useState<ModelMetadata | null>(null);
-  const pendingProjectorDownloadModelRef = useRef<ModelMetadata | null>(null);
+  const pendingProjectorDownloadRequestRef = useRef<{
+    model: ModelMetadata;
+    downloadOptions?: ModelDownloadRequestOptions;
+  } | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const modelsRegistryRevision = useModelRegistryRevision();
   const { startDownload, cancelDownload } = useModelDownload();
@@ -532,19 +536,25 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
   const openProjectorChoice = useCallback((targetModel?: ModelMetadata) => {
     const nextModel = targetModel ?? displayModel;
     if (nextModel) {
-      pendingProjectorDownloadModelRef.current = null;
+      pendingProjectorDownloadRequestRef.current = null;
       setProjectorChoiceModel(nextModel);
     }
   }, [displayModel]);
 
   const closeProjectorChoice = useCallback(() => {
-    pendingProjectorDownloadModelRef.current = null;
+    pendingProjectorDownloadRequestRef.current = null;
     setProjectorChoiceModel(null);
   }, []);
 
-  const handleProjectorChoiceRequired = useCallback((resolvedModel: ModelMetadata) => {
+  const handleProjectorChoiceRequired = useCallback((
+    resolvedModel: ModelMetadata,
+    downloadOptions?: ModelDownloadRequestOptions,
+  ) => {
     setModel((current) => (current ? { ...current, ...resolvedModel } : resolvedModel));
-    pendingProjectorDownloadModelRef.current = resolvedModel;
+    pendingProjectorDownloadRequestRef.current = {
+      model: resolvedModel,
+      downloadOptions,
+    };
     setProjectorChoiceModel(resolvedModel);
   }, []);
 
@@ -561,7 +571,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       return;
     }
 
-    const pendingDownloadModel = pendingProjectorDownloadModelRef.current;
+    const pendingDownloadRequest = pendingProjectorDownloadRequestRef.current;
     const persistedModelBeforeSelection = registry.getModel(sourceModel.id);
     let persistedModelAfterSelection: ModelMetadata | undefined;
     if (persistedModelBeforeSelection) {
@@ -599,7 +609,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
     }
 
     setModel((current) => (current?.id === sourceModel.id ? { ...current, ...nextModel } : current));
-    pendingProjectorDownloadModelRef.current = null;
+    pendingProjectorDownloadRequestRef.current = null;
     setProjectorChoiceModel(null);
     setRuntimeRevision((current) => current + 1);
 
@@ -611,7 +621,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       llmEngineService.requestActiveMultimodalReadinessRefresh(sourceModel.id);
     }
 
-    const shouldContinuePendingDownload = pendingDownloadModel?.id === sourceModel.id;
+    const shouldContinuePendingDownload = pendingDownloadRequest?.model.id === sourceModel.id;
     const shouldStartDetailsProjectorDownload = !shouldContinuePendingDownload
       && shouldStartProjectorDownloadAfterDetailsSelection(nextModel);
 
@@ -623,12 +633,15 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       model: nextModel,
       t,
       startDownload,
+      downloadOptions: pendingDownloadRequest?.downloadOptions,
       openTokenSettings: handleOpenTokenSettings,
       openModelPage: handleOpenModelPage,
       onResolvedModel: (resolvedModel) => {
         setModel((current) => (current ? { ...current, ...resolvedModel } : resolvedModel));
       },
-      onProjectorChoiceRequired: handleProjectorChoiceRequired,
+      onProjectorChoiceRequired: (resolvedModel) => {
+        handleProjectorChoiceRequired(resolvedModel, pendingDownloadRequest?.downloadOptions);
+      },
       onError: (error) => {
         showModelActionError('ModelDetailsScreen.handleDownload', error);
       },
@@ -646,17 +659,23 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
     t,
   ]);
 
-  const handleDownload = useCallback((targetModel: ModelMetadata) => {
+  const handleDownload = useCallback((
+    targetModel: ModelMetadata,
+    downloadOptions?: ModelDownloadRequestOptions,
+  ) => {
     startModelDownloadFlow({
       model: targetModel,
       t,
       startDownload,
+      downloadOptions,
       openTokenSettings: handleOpenTokenSettings,
       openModelPage: handleOpenModelPage,
       onResolvedModel: (resolvedModel) => {
         setModel((current) => (current ? { ...current, ...resolvedModel } : resolvedModel));
       },
-      onProjectorChoiceRequired: handleProjectorChoiceRequired,
+      onProjectorChoiceRequired: (resolvedModel) => {
+        handleProjectorChoiceRequired(resolvedModel, downloadOptions);
+      },
       onError: (error) => {
         showModelActionError('ModelDetailsScreen.handleDownload', error);
       },

@@ -56,7 +56,11 @@ function getCanonicalProjectorId(
 
 describe('downloadStore', () => {
   beforeEach(() => {
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    useDownloadStore.setState({
+      queue: [],
+      activeDownloadId: null,
+      downloadOptionsByModelId: {},
+    });
   });
 
   it('normalizes in-flight persisted downloads back to queued state', () => {
@@ -179,6 +183,56 @@ describe('downloadStore', () => {
     expect(queued[0].projectorCandidates?.[4]).not.toHaveProperty('downloadProgress');
   });
 
+  it('normalizes in-flight speculative draft state on rehydrate without disturbing installed drafts', () => {
+    const queued = normalizePersistedDownloadQueue([
+      {
+        ...buildQueuedModel('gemma/model', LifecycleStatus.DOWNLOADING),
+        artifacts: [
+          {
+            id: 'gemma/model:mtp-draft',
+            kind: 'speculative_draft',
+            requiredFor: ['text'],
+            remoteFileName: 'gemma-MTP-Q4_K_M.gguf',
+            downloadUrl: 'https://example.com/gemma-MTP-Q4_K_M.gguf',
+            sizeBytes: 512,
+            localPath: 'gemma-mtp.partial.gguf',
+            installState: 'downloading',
+            downloadProgress: 0.42,
+            resumeData: JSON.stringify({ resumeData: 'mtp-resume-data' }),
+          },
+          {
+            id: 'gemma/model:installed-mtp-draft',
+            kind: 'speculative_draft',
+            requiredFor: ['text'],
+            remoteFileName: 'gemma-MTP-F16.gguf',
+            downloadUrl: 'https://example.com/gemma-MTP-F16.gguf',
+            sizeBytes: 1024,
+            localPath: 'gemma-mtp-installed.gguf',
+            installState: 'installed',
+            downloadProgress: 1,
+          },
+        ],
+      },
+    ]);
+
+    expect(queued[0].lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    const queuedDraft = queued[0].artifacts?.find((artifact) => artifact.id === 'gemma/model:mtp-draft');
+    const installedDraft = queued[0].artifacts?.find((artifact) => (
+      artifact.id === 'gemma/model:installed-mtp-draft'
+    ));
+    expect(queuedDraft).toEqual(expect.objectContaining({
+      id: 'gemma/model:mtp-draft',
+      installState: 'queued',
+      resumeData: 'mtp-resume-data',
+    }));
+    expect(queuedDraft).not.toHaveProperty('downloadProgress');
+    expect(installedDraft).toEqual(expect.objectContaining({
+      id: 'gemma/model:installed-mtp-draft',
+      installState: 'installed',
+      downloadProgress: 1,
+    }));
+  });
+
   it('re-queues paused downloads when the user taps download again', () => {
     useDownloadStore.setState({
       queue: [
@@ -212,6 +266,76 @@ describe('downloadStore', () => {
       sizeBytes: 1024,
       checkedAt: 123,
     });
+  });
+
+  it('preserves resumable MTP draft state only for the current catalog artifact identity', () => {
+    const pausedDraft = {
+      id: 'gemma/model:mtp-draft-v1',
+      kind: 'speculative_draft' as const,
+      requiredFor: ['text' as const],
+      hfRevision: 'revision-a',
+      remoteFileName: 'MTP/gemma-MTP-Q8_0.gguf',
+      downloadUrl: 'https://huggingface.co/gemma/model/resolve/revision-a/MTP/gemma-MTP-Q8_0.gguf',
+      sizeBytes: 512,
+      localPath: 'gemma-mtp.partial.gguf',
+      installState: 'queued' as const,
+      downloadProgress: 0.41,
+      resumeData: 'mtp-resume-data',
+    };
+    useDownloadStore.setState({
+      queue: [{
+        ...buildQueuedModel('gemma/model', LifecycleStatus.PAUSED),
+        artifacts: [pausedDraft],
+      }],
+      activeDownloadId: null,
+    });
+
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('gemma/model', LifecycleStatus.AVAILABLE),
+      artifacts: [{
+        ...pausedDraft,
+        localPath: undefined,
+        installState: 'remote',
+        downloadProgress: undefined,
+        resumeData: undefined,
+      }],
+    });
+
+    const resumed = useDownloadStore.getState().queue[0].artifacts?.[0];
+    expect(resumed).toEqual(expect.objectContaining({
+      id: pausedDraft.id,
+      installState: 'queued',
+      localPath: 'gemma-mtp.partial.gguf',
+      downloadProgress: 0.41,
+      resumeData: 'mtp-resume-data',
+    }));
+
+    useDownloadStore.setState({
+      queue: [{
+        ...buildQueuedModel('gemma/model', LifecycleStatus.PAUSED),
+        artifacts: [pausedDraft],
+      }],
+      activeDownloadId: null,
+    });
+    const replacementDraft = {
+      ...pausedDraft,
+      id: 'gemma/model:mtp-draft-v2',
+      hfRevision: 'revision-b',
+      remoteFileName: 'MTP/gemma-MTP-Q4_0.gguf',
+      downloadUrl: 'https://huggingface.co/gemma/model/resolve/revision-b/MTP/gemma-MTP-Q4_0.gguf',
+      localPath: undefined,
+      installState: 'remote' as const,
+      downloadProgress: undefined,
+      resumeData: undefined,
+    };
+    useDownloadStore.getState().addToQueue({
+      ...buildQueuedModel('gemma/model', LifecycleStatus.AVAILABLE),
+      artifacts: [replacementDraft],
+    });
+
+    expect(useDownloadStore.getState().queue[0].artifacts?.filter((artifact) => (
+      artifact.kind === 'speculative_draft'
+    ))).toEqual([replacementDraft]);
   });
 
   it('preserves compatible paused projector resume state when re-queuing a catalog model', () => {
@@ -1076,6 +1200,30 @@ describe('downloadStore', () => {
     expect(useDownloadStore.getState().queue).toEqual([]);
   });
 
+  it('persists explicit optional-draft intent across retry and removes it with the queue entry', () => {
+    useDownloadStore.getState().addToQueue(
+      buildQueuedModel('gemma/model', LifecycleStatus.AVAILABLE),
+      { includeOptionalMtpDraft: true },
+    );
+
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({
+      'gemma/model': { includeOptionalMtpDraft: true },
+    });
+
+    useDownloadStore.getState().updateModelInQueue('gemma/model', {
+      lifecycleStatus: LifecycleStatus.FAILED,
+    });
+    useDownloadStore.getState().addToQueue(
+      buildQueuedModel('gemma/model', LifecycleStatus.AVAILABLE),
+    );
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({
+      'gemma/model': { includeOptionalMtpDraft: true },
+    });
+
+    useDownloadStore.getState().removeFromQueue('gemma/model');
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({});
+  });
+
   it('partialize zeroes progress for DOWNLOADING/VERIFYING entries only', () => {
     const options = (useDownloadStore as any).persist?.getOptions?.();
     expect(options?.partialize).toEqual(expect.any(Function));
@@ -1087,12 +1235,19 @@ describe('downloadStore', () => {
         { ...buildQueuedModel('c', LifecycleStatus.PAUSED), downloadProgress: 0.7 },
       ],
       activeDownloadId: 'a',
+      downloadOptionsByModelId: {
+        a: { includeOptionalMtpDraft: true },
+        orphan: { includeOptionalMtpDraft: true },
+      },
     };
 
     const partial = options.partialize(state);
     expect(partial.queue.find((m: any) => m.id === 'a')?.downloadProgress).toBe(0);
     expect(partial.queue.find((m: any) => m.id === 'b')?.downloadProgress).toBe(0);
     expect(partial.queue.find((m: any) => m.id === 'c')?.downloadProgress).toBe(0.7);
+    expect(partial.downloadOptionsByModelId).toEqual({
+      a: { includeOptionalMtpDraft: true },
+    });
   });
 
   it('onRehydrateStorage resets activeDownloadId and normalizes persisted in-flight entries', () => {
@@ -1102,6 +1257,11 @@ describe('downloadStore', () => {
     const persisted = {
       queue: [buildQueuedModel('d', LifecycleStatus.DOWNLOADING)],
       activeDownloadId: 'd',
+      downloadOptionsByModelId: {
+        d: { includeOptionalMtpDraft: true },
+        orphan: { includeOptionalMtpDraft: true },
+        invalid: { includeOptionalMtpDraft: 'yes' },
+      },
     };
 
     const handler = options.onRehydrateStorage();
@@ -1109,6 +1269,9 @@ describe('downloadStore', () => {
 
     expect(persisted.activeDownloadId).toBeNull();
     expect(persisted.queue[0].lifecycleStatus).toBe(LifecycleStatus.QUEUED);
+    expect(persisted.downloadOptionsByModelId).toEqual({
+      d: { includeOptionalMtpDraft: true },
+    });
   });
 
   it('normalizes legacy queue entries with zero size to unknown size defaults', () => {
@@ -1233,5 +1396,49 @@ describe('downloadStore', () => {
     expect(queuedFileNames).toContain('queued-mmproj-audio.gguf');
     expect(queuedFileNames).not.toContain('../bad-mmproj.gguf');
     expect(queuedFileNames).not.toContain('../bad-local-mmproj.gguf');
+  });
+
+  it('keeps queued speculative draft file names protected from quarantine scans', () => {
+    useDownloadStore.setState({
+      queue: [
+        {
+          ...buildQueuedModel('gemma/model', LifecycleStatus.PAUSED),
+          hfRevision: 'revision-1',
+          artifacts: [
+            {
+              id: 'gemma/model:mtp-draft',
+              kind: 'speculative_draft',
+              requiredFor: ['text'],
+              hfRevision: 'revision-1',
+              remoteFileName: 'gemma-MTP-Q4_K_M.gguf',
+              downloadUrl: 'https://example.com/gemma-MTP-Q4_K_M.gguf',
+              sizeBytes: 512,
+              localPath: 'queued-gemma-mtp.gguf',
+              installState: 'queued',
+            },
+            {
+              id: 'gemma/model:bad-mtp-draft',
+              kind: 'speculative_draft',
+              requiredFor: ['text'],
+              remoteFileName: '../bad-MTP.gguf',
+              downloadUrl: 'https://example.com/bad-MTP.gguf',
+              sizeBytes: 512,
+              localPath: '../bad-local-MTP.gguf',
+              installState: 'queued',
+            },
+          ],
+        },
+      ],
+      activeDownloadId: null,
+    });
+
+    const queuedFileNames = getQueuedDownloadFileNames();
+
+    expect(queuedFileNames).toContain('queued-gemma-mtp.gguf');
+    expect(
+      queuedFileNames.some((fileName) => /^model-gemma-MTP-Q4_K_M-revision-1-[a-z0-9]+\.gguf$/.test(fileName)),
+    ).toBe(true);
+    expect(queuedFileNames).not.toContain('../bad-MTP.gguf');
+    expect(queuedFileNames).not.toContain('../bad-local-MTP.gguf');
   });
 });

@@ -7,6 +7,11 @@ import { ChatMessageBubble } from '../../src/components/ui/ChatMessageBubble';
 import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
 import { copiedImageAttachment, secondCopiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
+const reactI18nextMock = jest.requireMock('react-i18next') as {
+  __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
+  __resetTranslations: () => void;
+};
+
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
   return {
@@ -85,6 +90,13 @@ jest.mock('@/components/ui/pressable', () => {
 describe('ChatMessageBubble', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    reactI18nextMock.__resetTranslations();
+    reactI18nextMock.__setTranslationOverride(
+      'chat.inferenceMetrics.mtpAccepted',
+      'MTP {{accepted}}/{{drafted}} · {{percent}}%',
+    );
+    reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.mtpNotUsed', 'MTP not used');
+    reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.ttft', 'TTFT {{milliseconds}} ms');
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
   });
 
@@ -274,6 +286,62 @@ describe('ChatMessageBubble', () => {
     expect(within(metadataRow).getByTestId('delete-message-assistant-5')).toBeTruthy();
     expect(within(metadataRow).getByTestId('performance-label-assistant-5')).toBeTruthy();
     expect(within(metadataRow).getByText('12.3 t/s')).toBeTruthy();
+  });
+
+  it('prefers native throughput and shows MTP acceptance with TTFT', () => {
+    const { getByTestId, getByText } = render(
+      <ChatMessageBubble
+        id="assistant-mtp"
+        isUser={false}
+        content="Done"
+        tokensPerSec={4.2}
+        inferenceMetrics={{
+          tokensPredicted: 100,
+          tokensEvaluated: 20,
+          predictedPerSecond: 6.5,
+          timeToFirstTokenMs: 910,
+          mtp: {
+            requested: true,
+            attempted: true,
+            fallbackUsed: false,
+            draftTokens: 40,
+            draftTokensAccepted: 18,
+            acceptanceRate: 0.45,
+          },
+        }}
+      />,
+    );
+
+    expect(getByText('6.5 t/s')).toBeTruthy();
+    expect(getByTestId('mtp-telemetry-assistant-mtp')).toBeTruthy();
+    expect(getByText('MTP 18/40 · 45%')).toBeTruthy();
+    expect(getByTestId('ttft-telemetry-assistant-mtp')).toBeTruthy();
+    expect(getByText('TTFT 910 ms')).toBeTruthy();
+  });
+
+  it('does not present zero draft counters as MTP acceptance when the request was not attempted', () => {
+    const { getByText, queryByText } = render(
+      <ChatMessageBubble
+        id="assistant-mtp-not-used"
+        isUser={false}
+        content="Done with media"
+        inferenceMetrics={{
+          tokensPredicted: 12,
+          tokensEvaluated: 8,
+          predictedPerSecond: 3.5,
+          mtp: {
+            requested: true,
+            attempted: false,
+            fallbackUsed: false,
+            draftTokens: 0,
+            draftTokensAccepted: 0,
+          },
+        }}
+      />,
+    );
+
+    expect(getByText('MTP not used')).toBeTruthy();
+    expect(queryByText('MTP 0/0 · 0%')).toBeNull();
   });
 
   it('renders regenerate and delete actions for eligible user messages', () => {

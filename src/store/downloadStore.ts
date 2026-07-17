@@ -1,10 +1,15 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
-import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { ModelMetadata, LifecycleStatus, type ModelArtifactMetadata } from '../types/models';
 import type { ProjectorArtifact } from '../types/multimodal';
+import type { ModelDownloadRequestOptions } from '../types/downloads';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
-import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
+import {
+  getCandidateCompanionArtifactDownloadFileNames,
+  getCandidateModelDownloadFileNames,
+  getCandidateProjectorDownloadFileNames,
+} from '../utils/modelFiles';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
 import {
@@ -20,6 +25,7 @@ import {
   mapModelProjectorCandidates,
 } from '../utils/effectiveProjectorState';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
+import { getSpeculativeDraftArtifacts, mergeModelArtifacts } from '../utils/modelArtifacts';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -206,6 +212,22 @@ function getEffectiveMultimodalReadiness(
 
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
+  const incomingSpeculativeDrafts = getSpeculativeDraftArtifacts(model);
+  const incomingSpeculativeDraftIds = new Set(incomingSpeculativeDrafts.map((artifact) => artifact.id));
+  const existingSpeculativeDrafts = canPreserveResumeState
+    ? getSpeculativeDraftArtifacts(existing).filter((artifact) => (
+        incomingSpeculativeDraftIds.size === 0 || incomingSpeculativeDraftIds.has(artifact.id)
+      ))
+    : undefined;
+  const speculativeDraftArtifacts = canPreserveResumeState
+    ? mergeModelArtifacts(incomingSpeculativeDrafts, existingSpeculativeDrafts, {
+        preservePersistedRuntimeState: true,
+      })
+    : incomingSpeculativeDrafts;
+  const stableArtifacts = (model.artifacts ?? existing.artifacts)?.filter((artifact) => (
+    artifact.kind !== 'speculative_draft'
+  )) ?? [];
+  const artifacts = [...stableArtifacts, ...speculativeDraftArtifacts];
   const incomingActiveVariantIds = getEffectiveActiveVariantKeys(model);
   const activeProjectorVariantIds = incomingActiveVariantIds.size > 0
     ? incomingActiveVariantIds
@@ -288,8 +310,13 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       projectorCandidates: model.projectorCandidates,
       selectedProjectorId: model.selectedProjectorId,
       variants: model.variants ?? existing.variants,
+      artifacts: artifacts.length > 0 ? artifacts : undefined,
+      speculativeDecoding: model.speculativeDecoding ?? existing.speculativeDecoding,
     }
-    : model;
+    : {
+      ...model,
+      artifacts: artifacts.length > 0 ? artifacts : undefined,
+    };
 
   const retryableModel = normalizePersistedModelMetadata({
     ...retryableBaseModel,
@@ -320,6 +347,69 @@ function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
     ...(projector.localPath && isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
     ...getCandidateProjectorDownloadFileNames(projector),
   ]);
+}
+
+function getQueuedSpeculativeDraftFileNames(model: ModelMetadata): string[] {
+  return getSpeculativeDraftArtifacts(model).flatMap((artifact) => (
+    getCandidateCompanionArtifactDownloadFileNames(model.id, artifact)
+  ));
+}
+
+function normalizePersistedModelArtifactDownloadState(
+  artifact: ModelArtifactMetadata,
+): ModelArtifactMetadata {
+  if (artifact.kind !== 'speculative_draft') {
+    return artifact;
+  }
+
+  const resumeData = normalizeDownloadResumeData(artifact.resumeData);
+  const wasInFlight = artifact.installState === 'downloading'
+    || artifact.installState === 'verifying';
+  const installState = wasInFlight ? 'queued' as const : artifact.installState;
+  const shouldNormalizeResumeData = resumeData !== artifact.resumeData;
+  const hasVolatileProgress = artifact.installState === 'queued'
+    || artifact.installState === 'downloading'
+    || artifact.installState === 'verifying'
+    || artifact.installState === 'remote';
+  const shouldClearProgress = hasVolatileProgress;
+  const shouldRebuild = shouldClearProgress
+    || shouldNormalizeResumeData
+    || installState !== artifact.installState;
+
+  if (!shouldRebuild) {
+    return artifact;
+  }
+
+  const {
+    downloadProgress: _downloadProgress,
+    resumeData: _resumeData,
+    ...withoutVolatileState
+  } = artifact;
+  return {
+    ...withoutVolatileState,
+    installState,
+    ...(resumeData !== undefined ? { resumeData } : {}),
+    ...(!shouldClearProgress && artifact.downloadProgress !== undefined
+      ? { downloadProgress: artifact.downloadProgress }
+      : {}),
+  };
+}
+
+function normalizePersistedModelArtifactDownloadStatesForModel(
+  model: ModelMetadata,
+): ModelMetadata {
+  if (!model.artifacts?.length) {
+    return model;
+  }
+
+  let didChange = false;
+  const artifacts = model.artifacts.map((artifact) => {
+    const normalized = normalizePersistedModelArtifactDownloadState(artifact);
+    didChange ||= normalized !== artifact;
+    return normalized;
+  });
+
+  return didChange ? { ...model, artifacts } : model;
 }
 
 function normalizePersistedProjectorDownloadState(
@@ -385,14 +475,70 @@ function normalizePersistedProjectorDownloadStatesForModel(
   );
 }
 
+function normalizePersistedCompanionDownloadStatesForModel(
+  model: ModelMetadata,
+  options: { clearVolatileProgress?: boolean } = {},
+): ModelMetadata {
+  return normalizePersistedModelArtifactDownloadStatesForModel(
+    normalizePersistedProjectorDownloadStatesForModel(model, options),
+  );
+}
+
 interface DownloadState {
   queue: ModelMetadata[];
   activeDownloadId: string | null;
+  downloadOptionsByModelId: Record<string, ModelDownloadRequestOptions>;
   
-  addToQueue: (model: ModelMetadata) => void;
+  addToQueue: (model: ModelMetadata, options?: ModelDownloadRequestOptions) => void;
   removeFromQueue: (modelId: string) => void;
   setActiveDownload: (modelId: string | null) => void;
   updateModelInQueue: (modelId: string, updates: Partial<ModelMetadata>) => void;
+}
+
+function normalizeDownloadRequestOptions(value: unknown): ModelDownloadRequestOptions | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  return (value as ModelDownloadRequestOptions).includeOptionalMtpDraft === true
+    ? { includeOptionalMtpDraft: true }
+    : undefined;
+}
+
+function updateDownloadRequestOptions(
+  current: Record<string, ModelDownloadRequestOptions>,
+  modelId: string,
+  options: ModelDownloadRequestOptions | undefined,
+  preserveExistingWhenOmitted: boolean,
+): Record<string, ModelDownloadRequestOptions> {
+  if (options === undefined && preserveExistingWhenOmitted) {
+    return current;
+  }
+
+  const normalizedOptions = normalizeDownloadRequestOptions(options);
+  const { [modelId]: _removed, ...withoutModel } = current;
+  return normalizedOptions
+    ? { ...withoutModel, [modelId]: normalizedOptions }
+    : withoutModel;
+}
+
+function normalizePersistedDownloadOptionsByModelId(
+  queue: ModelMetadata[],
+  value: unknown,
+): Record<string, ModelDownloadRequestOptions> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  const queuedModelIds = new Set(queue.map((model) => model.id));
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).flatMap(([modelId, options]) => {
+      const normalizedOptions = queuedModelIds.has(modelId)
+        ? normalizeDownloadRequestOptions(options)
+        : undefined;
+      return normalizedOptions ? [[modelId, normalizedOptions]] : [];
+    }),
+  );
 }
 
 export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMetadata[] {
@@ -400,7 +546,7 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
     const normalizedModel = normalizePersistedModelMetadata(model);
     const wasInFlight = normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
       || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING;
-    const modelWithNormalizedProjectors = normalizePersistedProjectorDownloadStatesForModel(
+    const modelWithNormalizedCompanions = normalizePersistedCompanionDownloadStatesForModel(
       normalizedModel,
       { clearVolatileProgress: wasInFlight },
     );
@@ -409,12 +555,12 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
       || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
     ) {
       return {
-        ...modelWithNormalizedProjectors,
+        ...modelWithNormalizedCompanions,
         lifecycleStatus: LifecycleStatus.QUEUED,
       };
     }
 
-    return modelWithNormalizedProjectors;
+    return modelWithNormalizedCompanions;
   });
 }
 
@@ -430,8 +576,9 @@ export const useDownloadStore = create<DownloadState>()(
         return {
           queue: [],
           activeDownloadId: null,
+          downloadOptionsByModelId: {},
 
-          addToQueue: (model) => setWhenPrivateStorageWritable((state) => {
+          addToQueue: (model, options) => setWhenPrivateStorageWritable((state) => {
           const existing = state.queue.find((queued) => queued.id === model.id);
 
           if (!existing) {
@@ -443,6 +590,12 @@ export const useDownloadStore = create<DownloadState>()(
                   lifecycleStatus: LifecycleStatus.QUEUED,
                 }),
               ],
+              downloadOptionsByModelId: updateDownloadRequestOptions(
+                state.downloadOptionsByModelId,
+                model.id,
+                options,
+                false,
+              ),
             };
           }
 
@@ -454,6 +607,12 @@ export const useDownloadStore = create<DownloadState>()(
 
             return {
               queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
+              downloadOptionsByModelId: updateDownloadRequestOptions(
+                state.downloadOptionsByModelId,
+                model.id,
+                options,
+                true,
+              ),
             };
           }
 
@@ -472,6 +631,12 @@ export const useDownloadStore = create<DownloadState>()(
 
             return {
               queue: state.queue.map((queued) => queued.id === model.id ? nextEntry : queued),
+              downloadOptionsByModelId: updateDownloadRequestOptions(
+                state.downloadOptionsByModelId,
+                model.id,
+                options,
+                true,
+              ),
             };
           }
 
@@ -479,8 +644,14 @@ export const useDownloadStore = create<DownloadState>()(
           }),
 
           removeFromQueue: (modelId) => setWhenPrivateStorageWritable((state) => ({
-          queue: state.queue.filter(m => m.id !== modelId),
-          activeDownloadId: state.activeDownloadId === modelId ? null : state.activeDownloadId
+            queue: state.queue.filter(m => m.id !== modelId),
+            activeDownloadId: state.activeDownloadId === modelId ? null : state.activeDownloadId,
+            downloadOptionsByModelId: updateDownloadRequestOptions(
+              state.downloadOptionsByModelId,
+              modelId,
+              undefined,
+              false,
+            ),
           })),
 
           setActiveDownload: (modelId) => setWhenPrivateStorageWritable({ activeDownloadId: modelId }),
@@ -501,17 +672,25 @@ export const useDownloadStore = create<DownloadState>()(
         // Do NOT persist activeDownloadId — after a restart, no real download is running.
         // Persisting it would leave the UI in a permanent "downloading" spinner state.
         // Avoid persisting volatile progress updates so downloads don't spam MMKV writes.
-        partialize: (state) => ({
-          queue: state.queue.map((model) => {
+        partialize: (state) => {
+          const queue = state.queue.map((model) => {
             const shouldZeroProgress = model.lifecycleStatus === LifecycleStatus.DOWNLOADING
               || model.lifecycleStatus === LifecycleStatus.VERIFYING;
 
-            return normalizePersistedProjectorDownloadStatesForModel({
+            return normalizePersistedCompanionDownloadStatesForModel({
               ...model,
               downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
             }, { clearVolatileProgress: shouldZeroProgress });
-          }),
-        }),
+          });
+
+          return {
+            queue,
+            downloadOptionsByModelId: normalizePersistedDownloadOptionsByModelId(
+              queue,
+              state.downloadOptionsByModelId,
+            ),
+          };
+        },
         onRehydrateStorage: () => (state) => {
           if (!state) {
             return;
@@ -519,6 +698,10 @@ export const useDownloadStore = create<DownloadState>()(
 
           state.activeDownloadId = null;
           state.queue = normalizePersistedDownloadQueue(state.queue);
+          state.downloadOptionsByModelId = normalizePersistedDownloadOptionsByModelId(
+            state.queue,
+            state.downloadOptionsByModelId,
+          );
         },
       }
     )
@@ -534,6 +717,7 @@ export function getQueuedDownloadFileNames(): string[] {
         ...(model.localPath && isValidLocalFileName(model.localPath) ? [model.localPath] : []),
         ...getCandidateModelDownloadFileNames(model),
         ...getQueuedProjectorFileNames(model),
+        ...getQueuedSpeculativeDraftFileNames(model),
       ]),
   ));
 }
@@ -542,6 +726,7 @@ export function resetDownloadStoreForPrivateStorageReset(): void {
   useDownloadStore.setState({
     queue: [],
     activeDownloadId: null,
+    downloadOptionsByModelId: {},
   });
   void useDownloadStore.persist.clearStorage();
 }

@@ -38,6 +38,10 @@ import {
 } from '@/utils/modelReasoningCapabilities';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
 import { getShortModelLabel } from '@/utils/modelLabel';
+import {
+  getConfiguredMtpDraftArtifact,
+  resolveEffectiveSpeculativeDecoding,
+} from '@/utils/modelSpeculativeDecoding';
 
 interface UseModelParametersSheetControllerOptions {
   getModelById: (modelId: string | null) => ModelMetadata | undefined;
@@ -216,6 +220,7 @@ export function useModelParametersSheetController({
     contextSize: DEFAULT_MODEL_LOAD_PARAMETERS.contextSize,
     gpuLayers: 0,
     kvCacheType: DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType,
+    mtpEnabled: undefined,
     backendPolicy: undefined,
   });
   const [isApplyingModelProfile, setApplyingModelProfile] = useState(false);
@@ -277,6 +282,15 @@ export function useModelParametersSheetController({
   const configurableModel = getModelById(selectedModelId);
   const configurableModelId = configurableModel?.id ?? selectedModelId;
   const persistedConfigurableModel = configurableModelId ? registry.getModel(configurableModelId) : undefined;
+  const isLoadedProfileActive = Boolean(
+    configurableModelId
+    && engineState.status === EngineStatus.READY
+    && engineState.activeModelId === configurableModelId,
+  );
+  const loadedContextSize = isLoadedProfileActive ? llmEngineService.getContextSize() : null;
+  const loadedGpuLayers = isLoadedProfileActive ? llmEngineService.getLoadedGpuLayers() : null;
+  const safeModeLoadLimits = isLoadedProfileActive ? llmEngineService.getSafeModeLoadLimits() : null;
+  const engineDiagnostics = isLoadedProfileActive ? engineState.diagnostics ?? null : null;
   const heuristicModel = useMemo(
     () => resolveHeuristicModel(configurableModel, persistedConfigurableModel),
     [
@@ -304,6 +318,41 @@ export function useModelParametersSheetController({
   );
   const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
   const defaultLoadParams = getModelLoadParametersForModel(null);
+  const persistedMtp = persistedConfigurableModel
+    ? resolveEffectiveSpeculativeDecoding(persistedConfigurableModel)
+    : undefined;
+  const configuredMtp = persistedMtp ?? (heuristicModel
+    ? resolveEffectiveSpeculativeDecoding(heuristicModel)
+    : undefined);
+  const mtpMetadataModel = persistedMtp
+    ? persistedConfigurableModel
+    : heuristicModel;
+  const runtimeMtpDiagnostics = engineDiagnostics?.speculativeDecoding;
+  const mtpSupported = configuredMtp !== undefined || runtimeMtpDiagnostics?.configured === true;
+  const defaultMtpEnabled = configuredMtp?.enabled ?? runtimeMtpDiagnostics?.enabled;
+  const persistedMtpEnabled = mtpSupported
+    ? (currentLoadParams.mtpEnabled ?? defaultMtpEnabled ?? false)
+    : undefined;
+  const draftMtpEnabled = mtpSupported
+    ? (draftLoadParams.mtpEnabled ?? persistedMtpEnabled ?? defaultMtpEnabled ?? false)
+    : undefined;
+  const configuredMtpDraftArtifact = mtpMetadataModel
+    ? getConfiguredMtpDraftArtifact(mtpMetadataModel)
+    : undefined;
+  const mtpArtifactReady = configuredMtp?.mode === 'embedded'
+    || (
+      configuredMtpDraftArtifact?.installState === 'installed'
+      && typeof configuredMtpDraftArtifact.localPath === 'string'
+      && configuredMtpDraftArtifact.localPath.trim().length > 0
+    )
+    || runtimeMtpDiagnostics?.mode === 'embedded'
+    || runtimeMtpDiagnostics?.active === true
+    || (
+      typeof runtimeMtpDiagnostics?.draftModelBytes === 'number'
+      && runtimeMtpDiagnostics.draftModelBytes > 0
+      && runtimeMtpDiagnostics.fallbackReason !== 'configured_draft_artifact_missing'
+      && runtimeMtpDiagnostics.fallbackReason !== 'draft_artifact_unavailable'
+    );
   const currentContextSize = currentLoadParams.contextSize;
   const currentGpuLayers = currentLoadParams.gpuLayers;
   const currentKvCacheType = currentLoadParams.kvCacheType;
@@ -315,15 +364,6 @@ export function useModelParametersSheetController({
     ? resolveModelCapabilitySnapshot(heuristicModel)
     : null;
   const stableGpuLayersCeiling = stableCapability?.snapshot.gpuLayersCeiling ?? UNKNOWN_MODEL_GPU_LAYERS_CEILING;
-  const isLoadedProfileActive = Boolean(
-    configurableModelId
-    && engineState.status === EngineStatus.READY
-    && engineState.activeModelId === configurableModelId,
-  );
-  const loadedContextSize = isLoadedProfileActive ? llmEngineService.getContextSize() : null;
-  const loadedGpuLayers = isLoadedProfileActive ? llmEngineService.getLoadedGpuLayers() : null;
-  const safeModeLoadLimits = isLoadedProfileActive ? llmEngineService.getSafeModeLoadLimits() : null;
-  const engineDiagnostics = isLoadedProfileActive ? engineState.diagnostics ?? null : null;
   const baseContextWindowCeiling = useMemo(() => resolveModelContextWindowCeiling({
     modelSizeBytes: heuristicModelSize,
     modelMaxContextTokens: heuristicModelMaxContextTokens,
@@ -366,12 +406,14 @@ export function useModelParametersSheetController({
     contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
     gpuLayers: currentLoadParams.gpuLayers,
     kvCacheType: currentLoadParams.kvCacheType,
+    mtpEnabled: currentLoadParams.mtpEnabled,
     backendPolicy: normalizeBackendPolicy(currentLoadParams.backendPolicy),
   };
   const effectiveDefaultLoadParams = {
     contextSize: clampContextWindowTokens(defaultLoadParams.contextSize, contextWindowCeiling),
     gpuLayers: defaultLoadParams.gpuLayers,
     kvCacheType: defaultLoadParams.kvCacheType,
+    mtpEnabled: defaultLoadParams.mtpEnabled,
     backendPolicy: normalizeBackendPolicy(defaultLoadParams.backendPolicy),
   };
   const normalizedPersistedLoadParams = {
@@ -404,6 +446,8 @@ export function useModelParametersSheetController({
       draftPersistedGpuLayers,
       draftKvCacheType: draftPersistedKvCacheType,
       draftBackendPolicy: draftPersistedBackendPolicy ?? null,
+      draftMtpEnabled,
+      persistedMtpEnabled,
       persistedLoadParams: normalizedPersistedLoadParams,
     })
     || isApplyingModelProfile
@@ -678,6 +722,9 @@ export function useModelParametersSheetController({
               ? effectiveDefaultLoadParams.backendPolicy
               : current.backendPolicy
         );
+      const nextMtpEnabled = shouldInitializeDraft
+        ? effectiveCurrentLoadParams.mtpEnabled
+        : current.mtpEnabled;
       const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
 
       if (
@@ -685,6 +732,7 @@ export function useModelParametersSheetController({
         && current.gpuLayers === clampedNextGpuLayers
         && current.kvCacheType === nextKvCacheType
         && current.backendPolicy === nextBackendPolicy
+        && current.mtpEnabled === nextMtpEnabled
       ) {
         return current;
       }
@@ -693,6 +741,7 @@ export function useModelParametersSheetController({
         contextSize: nextContextSize,
         gpuLayers: clampedNextGpuLayers,
         kvCacheType: nextKvCacheType,
+        mtpEnabled: nextMtpEnabled,
         backendPolicy: nextBackendPolicy,
       };
     });
@@ -702,6 +751,7 @@ export function useModelParametersSheetController({
     currentLoadParams.gpuLayers,
     effectiveCurrentLoadParams.contextSize,
     effectiveCurrentLoadParams.kvCacheType,
+    effectiveCurrentLoadParams.mtpEnabled,
     effectiveCurrentLoadParams.backendPolicy,
     effectiveDefaultLoadParams.contextSize,
     effectiveDefaultLoadParams.gpuLayers,
@@ -752,11 +802,13 @@ export function useModelParametersSheetController({
         // racing async recommendations and accidentally clearing explicit values.
         && clampedNextGpuLayers === null
         && nextKvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
+        && (!mtpSupported || draftLoadParams.mtpEnabled === undefined)
         && normalizedNextBackendPolicy === undefined;
       const nextLoadParams: ModelLoadParameters = {
         contextSize: nextContextSize,
         gpuLayers: clampedNextGpuLayers,
         kvCacheType: nextKvCacheType,
+        mtpEnabled: mtpSupported ? draftLoadParams.mtpEnabled : undefined,
         backendPolicy: normalizedNextBackendPolicy,
       };
       let didCommitLoadProfile = false;
@@ -834,6 +886,7 @@ export function useModelParametersSheetController({
           : loadDraftSourceRef.current.kvCacheType === 'default'
             ? effectiveDefaultLoadParams.kvCacheType
             : draftLoadParams.kvCacheType,
+        mtpEnabled: mtpSupported ? draftLoadParams.mtpEnabled : undefined,
         backendPolicy: loadDraftSourceRef.current.backendPolicy === 'current'
           ? effectiveCurrentLoadParams.backendPolicy
           : loadDraftSourceRef.current.backendPolicy === 'default'
@@ -848,6 +901,7 @@ export function useModelParametersSheetController({
         nextLoadParams.contextSize === defaultContextSize
         && nextLoadParams.gpuLayers === null
         && nextLoadParams.kvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
+        && nextLoadParams.mtpEnabled === undefined
         && nextLoadParams.backendPolicy === undefined;
       let didCommitLoadProfile = false;
       const commitLoadProfile = () => {
@@ -902,6 +956,7 @@ export function useModelParametersSheetController({
     }
   }, [
     applyReloadErrorScope,
+    mtpSupported,
     configurableModelId,
     contextWindowCeiling,
     currentLoadParams.gpuLayers,
@@ -910,6 +965,7 @@ export function useModelParametersSheetController({
     draftLoadParams.contextSize,
     draftLoadParams.gpuLayers,
     draftLoadParams.kvCacheType,
+    draftLoadParams.mtpEnabled,
     effectiveCurrentLoadParams.backendPolicy,
     effectiveDefaultLoadParams.gpuLayers,
     effectiveDefaultLoadParams.kvCacheType,
@@ -1223,6 +1279,7 @@ export function useModelParametersSheetController({
         effectiveDefaultLoadParams.gpuLayers ?? recommendedGpuLayers,
       ),
       kvCacheType: effectiveDefaultLoadParams.kvCacheType,
+      mtpEnabled: undefined,
       backendPolicy: effectiveDefaultLoadParams.backendPolicy,
     });
   }, [
@@ -1262,6 +1319,10 @@ export function useModelParametersSheetController({
       canApplyReload: Boolean(configurableModelId) && canApplyReload && !isApplyingModelProfile && !isRunningAutotune,
       isApplyingReload: isApplyingModelProfile,
       showApplyReload,
+      mtpSupported,
+      mtpArtifactReady,
+      mtpEnabled: draftMtpEnabled ?? false,
+      mtpHasPendingChange: mtpSupported && draftMtpEnabled !== persistedMtpEnabled,
       showAdvancedInferenceControls,
       canRunAutotune,
       isAutotuneRunning: isRunningAutotune,
@@ -1272,6 +1333,7 @@ export function useModelParametersSheetController({
       onClose: closeModelParameters,
       onChangeParams: handleChangeParams,
       onChangeLoadParams: handleChangeLoadParams,
+      onChangeMtpEnabled: (enabled: boolean) => handleChangeLoadParams({ mtpEnabled: enabled }),
       onResetParamField: handleResetParamField,
       onResetLoadField: handleResetLoadField,
       onReset: handleResetAll,

@@ -148,6 +148,38 @@ describe('ModelDownloadProgress', () => {
     expect(queryByText('models.multimodal.projectorQueued')).toBeNull();
   });
 
+  it('shows live MTP draft progress after the base checkpoint completes', () => {
+    const draftArtifactId = 'mtp-draft-gemma';
+    const queuedModel = buildModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADING,
+      downloadProgress: 1,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP-Q8_0.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/MTP/gemma-MTP-Q8_0.gguf',
+        sizeBytes: 512,
+        installState: 'downloading',
+        downloadProgress: 0.37,
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    useDownloadStore.setState({ queue: [queuedModel], activeDownloadId: queuedModel.id });
+
+    const { getByText, queryByText } = render(<ModelDownloadProgress model={queuedModel} />);
+
+    expect(getByText('models.mtp.draftDownloading')).toBeTruthy();
+    expect(getByText('37%')).toBeTruthy();
+    expect(queryByText('100%')).toBeNull();
+  });
+
   it('can render a compact layout for catalog cards', () => {
     const { getByTestId } = render(
       <ModelDownloadProgress density="compact" model={buildModel({ downloadProgress: 0.33 })} />,

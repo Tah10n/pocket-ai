@@ -1,6 +1,7 @@
 import {
   DECIMAL_GIGABYTE,
   UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
+  UNKNOWN_SPECULATIVE_DRAFT_MEMORY_FIT_FALLBACK_BYTES,
   formatModelFileSize,
   getModelDisplayArtifactSizeBytes,
   getModelDisplayProjectorCandidates,
@@ -16,6 +17,66 @@ import {
 import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 
 describe('modelSize', () => {
+  it('includes the enabled Gemma MTP draft in display, stored, and memory-fit sizes', () => {
+    const draftArtifactId = 'mtp-draft-gemma';
+    const model = {
+      size: 1_000,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft' as const,
+        requiredFor: ['text' as const],
+        remoteFileName: 'MTP/gemma-MTP.gguf',
+        downloadUrl: 'https://example.com/gemma-MTP.gguf',
+        sizeBytes: 400,
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed' as const,
+      }],
+      speculativeDecoding: {
+        type: 'mtp' as const,
+        mode: 'draft_model' as const,
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+
+    expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_400);
+    expect(getModelStoredArtifactsSizeBytes(model)).toBe(1_400);
+    expect(getModelStoredMemoryFitSizeBytes(model)).toBe(1_400);
+    expect(getModelDisplayArtifactSizeBytes(model, undefined, undefined, undefined, false)).toBe(1_000);
+    expect(getModelStoredArtifactsSizeBytes(model)).toBe(1_400);
+    expect(getModelStoredMemoryFitSizeBytes(model, { mtpEnabledOverride: false })).toBe(1_000);
+  });
+
+  it('uses an unknown-size MTP draft fallback only for memory fit', () => {
+    const draftArtifactId = 'mtp-draft-unknown';
+    const model = {
+      size: 1_000,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft' as const,
+        requiredFor: ['text' as const],
+        remoteFileName: 'MTP/gemma-MTP.gguf',
+        downloadUrl: 'https://example.com/gemma-MTP.gguf',
+        sizeBytes: null,
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed' as const,
+      }],
+      speculativeDecoding: {
+        type: 'mtp' as const,
+        mode: 'draft_model' as const,
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+
+    expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_000);
+    expect(getModelStoredArtifactsSizeBytes(model)).toBe(1_000);
+    expect(getModelStoredMemoryFitSizeBytes(model)).toBe(
+      1_000 + UNKNOWN_SPECULATIVE_DRAFT_MEMORY_FIT_FALLBACK_BYTES,
+    );
+  });
   it('normalizes positive byte sizes and rejects invalid values', () => {
     expect(normalizePositiveByteSize(10.4)).toBe(10);
     expect(normalizePositiveByteSize(null)).toBeNull();

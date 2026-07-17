@@ -373,3 +373,98 @@ describe('resolveProjectorFilePathOrThrow', () => {
     expect(hash).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('resolveCompanionModelFilePathOrThrow', () => {
+  afterEach(() => {
+    jest.resetModules();
+    jest.unmock('../../src/services/FileSystemSetup');
+    jest.unmock('../../src/utils/safeFilePath');
+    jest.unmock('expo-file-system/legacy');
+    jest.unmock('react-native-fs');
+  });
+
+  it('trusts the download integrity marker and avoids rehashing an unchanged MTP draft', async () => {
+    const sha256 = 'a'.repeat(64);
+    const hash = jest.fn();
+    jest.doMock('../../src/services/FileSystemSetup', () => ({
+      getModelsDir: () => 'document://models/',
+    }));
+    jest.doMock('../../src/utils/safeFilePath', () => ({
+      fileUriToNativePath: (uri: string) => uri.replace('document://', '/'),
+      safeJoinModelPath: (_modelsDir: string, candidate: string) => `document://models/${candidate}`,
+    }));
+    jest.doMock('expo-file-system/legacy', () => ({
+      getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 200 }),
+    }));
+    jest.doMock('react-native-fs', () => ({ hash }));
+
+    const { resolveCompanionModelFilePathOrThrow } = require('../../src/services/LLMEngineService.modelFile');
+
+    await expect(resolveCompanionModelFilePathOrThrow({
+      modelId: 'author/gemma',
+      artifact: {
+        id: 'mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP.gguf',
+        downloadUrl: 'https://example.com/MTP/gemma-MTP.gguf',
+        sizeBytes: 200,
+        sha256,
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed',
+        integrity: {
+          kind: 'sha256',
+          sizeBytes: 200,
+          checkedAt: 10,
+          sha256,
+        },
+      },
+    })).resolves.toEqual(expect.objectContaining({
+      artifactPath: 'document://models/gemma-mtp.gguf',
+      localPath: 'gemma-mtp.gguf',
+    }));
+    expect(hash).not.toHaveBeenCalled();
+  });
+
+  it('rehashes an MTP draft when the persisted integrity marker does not match', async () => {
+    const sha256 = 'b'.repeat(64);
+    const hash = jest.fn().mockResolvedValue(sha256);
+    jest.doMock('../../src/services/FileSystemSetup', () => ({
+      getModelsDir: () => 'document://models/',
+    }));
+    jest.doMock('../../src/utils/safeFilePath', () => ({
+      fileUriToNativePath: (uri: string) => uri.replace('document://', '/'),
+      safeJoinModelPath: (_modelsDir: string, candidate: string) => `document://models/${candidate}`,
+    }));
+    jest.doMock('expo-file-system/legacy', () => ({
+      getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 200 }),
+    }));
+    jest.doMock('react-native-fs', () => ({ hash }));
+
+    const { resolveCompanionModelFilePathOrThrow } = require('../../src/services/LLMEngineService.modelFile');
+
+    await expect(resolveCompanionModelFilePathOrThrow({
+      modelId: 'author/gemma',
+      artifact: {
+        id: 'mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP.gguf',
+        downloadUrl: 'https://example.com/MTP/gemma-MTP.gguf',
+        sizeBytes: 200,
+        sha256,
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed',
+        integrity: {
+          kind: 'sha256',
+          sizeBytes: 200,
+          checkedAt: 10,
+          sha256: 'c'.repeat(64),
+        },
+      },
+    })).resolves.toEqual(expect.objectContaining({
+      artifactPath: 'document://models/gemma-mtp.gguf',
+    }));
+    expect(hash).toHaveBeenCalledWith('/models/gemma-mtp.gguf', 'sha256');
+  });
+});

@@ -11,11 +11,30 @@ import {
   remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { applyEffectiveProjectorState } from './effectiveProjectorState';
+import { mergeModelArtifacts } from './modelArtifacts';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
   localModel?: ModelMetadata;
   queuedItem?: ModelMetadata;
+}
+
+function mergeSpeculativeDraftRuntimeArtifacts(
+  model: Pick<ModelMetadata, 'artifacts'>,
+  runtimeModel: Pick<ModelMetadata, 'artifacts'>,
+): ModelMetadata['artifacts'] {
+  const stableArtifacts = model.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? [];
+  const catalogDrafts = model.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft') ?? [];
+  const catalogDraftIds = new Set(catalogDrafts.map((artifact) => artifact.id));
+  const runtimeDrafts = runtimeModel.artifacts?.filter((artifact) => (
+    artifact.kind === 'speculative_draft'
+    && (catalogDraftIds.size === 0 || catalogDraftIds.has(artifact.id))
+  ));
+  const mergedDrafts = mergeModelArtifacts(catalogDrafts, runtimeDrafts, {
+    preservePersistedRuntimeState: true,
+  });
+  const artifacts = [...stableArtifacts, ...mergedDrafts];
+  return artifacts.length > 0 ? artifacts : undefined;
 }
 
 function hasResolvedFileNameConflict(
@@ -305,6 +324,9 @@ export function mergeModelWithRuntimeState(
     const modelWithProjectorRuntimeFields = canUseLocalRuntimeState
       ? mergeProjectorRuntimeFields(mergedModel, localModel)
       : mergedModel;
+    const artifacts = canUseLocalRuntimeState
+      ? mergeSpeculativeDraftRuntimeArtifacts(modelWithProjectorRuntimeFields, localModel)
+      : mergedModel.artifacts;
     const shouldClearLocalProjectorMemoryFit = canUseLocalMetadataFallback && (
       shouldClearProjectorScopedMemoryFit(mergedModel, modelWithProjectorRuntimeFields)
       || shouldClearProjectorScopedMemoryFit(localModel, modelWithProjectorRuntimeFields)
@@ -362,6 +384,9 @@ export function mergeModelWithRuntimeState(
       variants: modelWithProjectorRuntimeFields.variants
         ?? (canUseLocalMetadataFallback ? localModel.variants : undefined),
       activeVariantId: mergedModel.activeVariantId ?? (canUseLocalMetadataFallback ? localModel.activeVariantId : undefined),
+      artifacts,
+      speculativeDecoding: mergedModel.speculativeDecoding
+        ?? (canUseLocalMetadataFallback ? localModel.speculativeDecoding : undefined),
       projectorCandidates: modelWithProjectorRuntimeFields.projectorCandidates,
       selectedProjectorId: modelWithProjectorRuntimeFields.selectedProjectorId,
       multimodalReadiness: modelWithProjectorRuntimeFields.multimodalReadiness,
@@ -393,6 +418,9 @@ export function mergeModelWithRuntimeState(
     const modelWithProjectorRuntimeFields = canUseQueuedRuntimeState
       ? mergeProjectorRuntimeFields(mergedModel, queuedItem)
       : mergedModel;
+    const artifacts = canUseQueuedRuntimeState
+      ? mergeSpeculativeDraftRuntimeArtifacts(modelWithProjectorRuntimeFields, queuedItem)
+      : mergedModel.artifacts;
     const shouldClearQueuedProjectorMemoryFit = canUseQueuedRuntimeState && (
       shouldClearProjectorScopedMemoryFit(mergedModel, modelWithProjectorRuntimeFields)
       || shouldClearProjectorScopedMemoryFit(queuedItem, modelWithProjectorRuntimeFields)
@@ -433,6 +461,9 @@ export function mergeModelWithRuntimeState(
       variants: modelWithProjectorRuntimeFields.variants
         ?? (canUseQueuedRuntimeState ? queuedItem.variants : undefined),
       activeVariantId: mergedModel.activeVariantId ?? (canUseQueuedRuntimeState ? queuedItem.activeVariantId : undefined),
+      artifacts,
+      speculativeDecoding: mergedModel.speculativeDecoding
+        ?? (canUseQueuedRuntimeState ? queuedItem.speculativeDecoding : undefined),
       projectorCandidates: modelWithProjectorRuntimeFields.projectorCandidates,
       selectedProjectorId: modelWithProjectorRuntimeFields.selectedProjectorId,
       multimodalReadiness: modelWithProjectorRuntimeFields.multimodalReadiness,

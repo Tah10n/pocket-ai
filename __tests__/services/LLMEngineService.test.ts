@@ -182,6 +182,56 @@ function createReadyVisionModel() {
   };
 }
 
+function createDownloadedGemmaMtpModel() {
+  const draftArtifactId = 'mtp-draft-gemma';
+  return {
+    id: 'test/model',
+    localPath: 'model.gguf',
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    thinkingCapability: {
+      detectedAt: 1,
+      supportsThinking: false,
+      canDisableThinking: true,
+    },
+    artifacts: [{
+      id: draftArtifactId,
+      kind: 'speculative_draft' as const,
+      requiredFor: ['text' as const],
+      remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+      downloadUrl: 'https://huggingface.co/test/model/resolve/main/MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+      sizeBytes: 1024,
+      localPath: 'gemma-mtp-draft.gguf',
+      installState: 'installed' as const,
+    }],
+    speculativeDecoding: {
+      type: 'mtp' as const,
+      mode: 'draft_model' as const,
+      enabled: true,
+      maxDraftTokens: 3,
+      draftArtifactId,
+    },
+  };
+}
+
+function createDownloadedEmbeddedMtpModel() {
+  return {
+    id: 'test/model',
+    localPath: 'model.gguf',
+    lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    thinkingCapability: {
+      detectedAt: 1,
+      supportsThinking: false,
+      canDisableThinking: true,
+    },
+    speculativeDecoding: {
+      type: 'mtp' as const,
+      mode: 'embedded' as const,
+      enabled: true,
+      maxDraftTokens: 3,
+    },
+  };
+}
+
 type TestActiveMultimodalContext = {
   modelId: string;
   projectorId: string;
@@ -435,6 +485,39 @@ describe('LLMEngineService', () => {
     expect(serializedDiagnostics).not.toContain('test-dir/chat-attachments/image.jpg');
     expect(serializedDiagnostics).not.toContain('chat-attachments');
     expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('disables MTP per request when native image input is present', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...createDownloadedVisionModel(),
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'embedded',
+        enabled: true,
+        maxDraftTokens: 3,
+      },
+    });
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Describe this', mediaPaths: ['test-dir/chat-attachments/image.jpg'] }],
+      multimodalReadiness: createReadyMultimodalReadiness(),
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        media_paths: ['test-dir/chat-attachments/image.jpg'],
+        speculative: false,
+      }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      requested: true,
+      attempted: false,
+      fallbackUsed: false,
+      draftTokens: 0,
+      draftTokensAccepted: 0,
+    }));
   });
 
   it('rejects stale vision readiness after the active variant switches to audio-only', async () => {
@@ -3689,6 +3772,303 @@ describe('LLMEngineService', () => {
     );
     expect(llmEngineService.getContextSize()).toBe(4096);
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
+  });
+
+  it('loads a Gemma MTP companion as model_draft and enables text speculative decoding', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedGemmaMtpModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model_draft: 'test-dir/models/gemma-mtp-draft.gguf',
+        speculative: { type: 'draft-mtp', n_max: 3 },
+        spec_draft_n_gpu_layers: expect.any(Number),
+        spec_draft_cache_type_k: 'f16',
+        spec_draft_cache_type_v: 'f16',
+      }),
+      expect.any(Function),
+    );
+    const initOptions = (llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(initOptions.spec_draft_n_gpu_layers).toBe(initOptions.n_gpu_layers);
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        speculative: { type: 'draft-mtp', n_max: 3 },
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it.each([
+    ['CPU policy', { contextSize: 2048, backendPolicy: 'cpu', gpuLayers: null }, 0],
+    ['reduced GPU profile', { contextSize: 2048, backendPolicy: 'gpu', gpuLayers: 4 }, 4],
+  ] as const)('pins Gemma MTP draft layers to the %s target profile', async (_label, loadParams, expectedLayers) => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedGemmaMtpModel());
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce(loadParams);
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    expect(llamaRn.initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_gpu_layers: expectedLayers,
+        spec_draft_n_gpu_layers: expectedLayers,
+        spec_draft_cache_type_k: 'f16',
+        spec_draft_cache_type_v: 'f16',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('reloads an active base-only context when its Gemma MTP draft becomes installed', async () => {
+    const installedModel = createDownloadedGemmaMtpModel();
+    const unavailableDraftModel = {
+      ...installedModel,
+      artifacts: installedModel.artifacts.map((artifact) => ({
+        ...artifact,
+        localPath: undefined,
+        installState: 'remote' as const,
+      })),
+    };
+    let currentModel: typeof unavailableDraftModel | typeof installedModel = unavailableDraftModel;
+    (registry.getModel as jest.Mock).mockImplementation(() => currentModel);
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).not.toHaveProperty('speculative');
+
+    currentModel = installedModel;
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    llmEngineService.requestActiveMultimodalReadinessRefresh('test/model');
+    await waitForMockCall(llamaRn.initLlama as jest.Mock);
+
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      model_draft: 'test-dir/models/gemma-mtp-draft.gguf',
+      speculative: { type: 'draft-mtp', n_max: 3 },
+    }));
+  });
+
+  it('falls back to a loadable base model when the optional Gemma draft exceeds the safe memory budget', async () => {
+    const totalMemoryBytes = 8_000_000_000;
+    const baseSizeBytes = 2_000_000_000;
+    const draftSizeBytes = 5_000_000_000;
+    const model = {
+      ...createDownloadedGemmaMtpModel(),
+      size: baseSizeBytes,
+      metadataTrust: 'verified_local' as const,
+      downloadIntegrity: {
+        kind: 'size' as const,
+        sizeBytes: baseSizeBytes,
+        checkedAt: 1,
+      },
+      memoryFitDecision: 'likely_oom' as const,
+      memoryFitConfidence: 'high' as const,
+      fitsInRam: false,
+      artifacts: createDownloadedGemmaMtpModel().artifacts.map((artifact) => ({
+        ...artifact,
+        sizeBytes: draftSizeBytes,
+      })),
+    };
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(totalMemoryBytes);
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(),
+      platform: 'android',
+      totalBytes: totalMemoryBytes,
+      availableBytes: 5_800_000_000,
+      freeBytes: 5_500_000_000,
+      usedBytes: 2_200_000_000,
+      appUsedBytes: 300_000_000,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 250_000_000,
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+      exists: true,
+      size: uri.includes('gemma-mtp-draft') ? draftSizeBytes : baseSizeBytes,
+    }));
+    (registry.getModel as jest.Mock).mockReturnValue(model);
+
+    await expect(llmEngineService.load('test/model', { forceReload: true })).resolves.toBeUndefined();
+
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('speculative');
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('model_draft');
+    expect((llmEngineService as any).speculativeDecodingFallbackReason).toBe('memory_budget');
+    expect(llmEngineService.getState().diagnostics?.speculativeDecoding).toEqual(expect.objectContaining({
+      enabled: true,
+      active: false,
+      fallbackReason: 'memory_budget',
+      draftModelBytes: draftSizeBytes,
+    }));
+    expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+  });
+
+  it('recalculates RAM without the draft and keeps MTP out of native work when its preference is off', async () => {
+    const baseSizeBytes = 2_000_000_000;
+    const draftSizeBytes = 5_000_000_000;
+    const model = createDownloadedGemmaMtpModel();
+    (registry.getModel as jest.Mock).mockReturnValue({
+      ...model,
+      size: baseSizeBytes,
+      metadataTrust: 'verified_local',
+      downloadIntegrity: {
+        kind: 'size',
+        sizeBytes: baseSizeBytes,
+        checkedAt: 1,
+      },
+      fitsInRam: false,
+      memoryFitDecision: 'likely_oom',
+      memoryFitConfidence: 'high',
+      artifacts: model.artifacts.map((artifact) => ({
+        ...artifact,
+        sizeBytes: draftSizeBytes,
+      })),
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({
+      exists: true,
+      size: baseSizeBytes,
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 2048,
+      gpuLayers: null,
+      kvCacheType: 'auto',
+      mtpEnabled: false,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const initOptions = (llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(initOptions).not.toHaveProperty('speculative');
+    expect(initOptions).not.toHaveProperty('model_draft');
+    expect(llmEngineService.getState().diagnostics?.speculativeDecoding).toEqual(expect.objectContaining({
+      configured: true,
+      enabled: false,
+      active: false,
+    }));
+    expect(llmEngineService.getState().diagnostics?.speculativeDecoding?.draftModelBytes)
+      .toBeUndefined();
+
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock)
+      .toHaveBeenLastCalledWith(expect.not.objectContaining({ speculative: expect.anything() }), expect.any(Function));
+    expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      requested: false,
+      attempted: false,
+      draftTokens: 0,
+      draftTokensAccepted: 0,
+    }));
+  });
+
+  it('publishes native MTP counters, acceptance, speed, and TTFT after completion', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completionMock.mockImplementationOnce(async (_params, onToken) => {
+      onToken({ token: 'Hello' });
+      return {
+        text: 'Hello',
+        tokens_predicted: 100,
+        tokens_evaluated: 20,
+        draft_tokens: 40,
+        draft_tokens_accepted: 18,
+        timings: {
+          predicted_per_second: 6.5,
+          prompt_per_second: 14.25,
+        },
+      };
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect(llmEngineService.getLastCompletionTelemetry()).toEqual({
+      tokensPredicted: 100,
+      tokensEvaluated: 20,
+      predictedPerSecond: 6.5,
+      promptPerSecond: 14.25,
+      timeToFirstTokenMs: expect.any(Number),
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 40,
+        draftTokensAccepted: 18,
+        acceptanceRate: 0.45,
+        fallbackReason: undefined,
+      },
+    });
+    expect(llmEngineService.getState().diagnostics?.speculativeDecoding?.lastCompletion)
+      .toEqual(llmEngineService.getLastCompletionTelemetry());
+  });
+
+  it('enables embedded MTP without passing a separate draft model', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const initOptions = (llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(initOptions).toEqual(expect.objectContaining({
+      speculative: { type: 'draft-mtp', n_max: 3 },
+    }));
+    expect(initOptions).not.toHaveProperty('model_draft');
+  });
+
+  it('falls back to a normal context when MTP initialization fails', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+    const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+      if (options?.speculative) {
+        throw new Error('MTP init failed');
+      }
+      return baseInitImplementation?.(options);
+    });
+
+    await expect(llmEngineService.load('test/model', { forceReload: true })).resolves.toBeUndefined();
+
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
+      speculative: { type: 'draft-mtp', n_max: 3 },
+    }));
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[1][0]).not.toHaveProperty('speculative');
+    expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+  });
+
+  it('retries a pre-stream MTP completion once with speculative decoding disabled', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+    await llmEngineService.load('test/model', { forceReload: true });
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completionMock
+      .mockRejectedValueOnce(new Error('MTP completion failed'))
+      .mockResolvedValueOnce({ text: 'Recovered without MTP' });
+
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+    })).resolves.toEqual({ text: 'Recovered without MTP' });
+
+    expect(completionMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ speculative: { type: 'draft-mtp', n_max: 3 } }),
+      expect.any(Function),
+    );
+    expect(completionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ speculative: false }),
+      expect.any(Function),
+    );
+    expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      requested: true,
+      attempted: true,
+      fallbackUsed: true,
+      fallbackReason: 'completion_failed',
+    }));
   });
 
   it('keeps llama.rn context shifting at the default for text-only model loads', async () => {

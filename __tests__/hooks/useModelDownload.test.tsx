@@ -109,7 +109,11 @@ describe('useModelDownload', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    useDownloadStore.setState({
+      queue: [],
+      activeDownloadId: null,
+      downloadOptionsByModelId: {},
+    });
     mockIsPrivateStorageWritable.mockReturnValue(true);
     mockNotificationService.canStartForegroundServiceNotifications.mockResolvedValue(true);
     mockNotificationService.requestPermissions.mockResolvedValue(true);
@@ -197,5 +201,30 @@ describe('useModelDownload', () => {
       projectorCandidates: [expect.objectContaining({ id: projector.id, localPath: 'mmproj-model.gguf' })],
     }));
     expect(getCurrentValue()?.getProjectorLifecycleState(useDownloadStore.getState().queue[0]).isReady).toBe(true);
+  });
+
+  it('queues explicit optional-draft intent independently of runtime MTP settings', async () => {
+    const { getCurrentValue } = renderHookHarness();
+
+    await waitFor(() => {
+      expect(getCurrentValue()).not.toBeNull();
+    });
+
+    await act(async () => {
+      getCurrentValue()?.startDownload(
+        createModel(),
+        { includeOptionalMtpDraft: true },
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useDownloadStore.getState().queue[0]).toEqual(expect.objectContaining({
+      id: 'org/model',
+      lifecycleStatus: LifecycleStatus.QUEUED,
+    }));
+    expect(useDownloadStore.getState().downloadOptionsByModelId).toEqual({
+      'org/model': { includeOptionalMtpDraft: true },
+    });
   });
 });

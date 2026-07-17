@@ -30,6 +30,7 @@ import { stopPrivateRuntimeWorkForStorageBlocked } from './PrivateStorageRecover
 import { EngineStatus } from '../types/models';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import { safeJoinModelPath } from '../utils/safeFilePath';
+import { canRecalculateMemoryFitWithoutOptionalMtpDraft } from '../utils/modelSpeculativeDecoding';
 import {
   ChatMessage,
   ChatThread,
@@ -516,7 +517,11 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
         console.warn('[bootstrapApp] Failed to validate active model file, skipping cleanup', e);
       }
 
-      if (isHighConfidenceLikelyOomMemoryFit(activeModel)) {
+      const mtpEnabledOverride = settings.modelLoadParamsByModelId?.[activeModelId]?.mtpEnabled;
+      if (
+        isHighConfidenceLikelyOomMemoryFit(activeModel)
+        && !canRecalculateMemoryFitWithoutOptionalMtpDraft(activeModel, mtpEnabledOverride)
+      ) {
         outcome = 'active_model_blocked';
         return { outcome };
       }

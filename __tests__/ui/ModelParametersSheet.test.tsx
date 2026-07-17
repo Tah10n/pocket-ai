@@ -143,6 +143,14 @@ describe('ModelParametersSheet', () => {
     reactI18nextMock.__setTranslationOverride('chat.modelControls.gpuLayersDisabledDescription', 'GPU layers disabled on CPU');
     reactI18nextMock.__setTranslationOverride('chat.modelControls.runtimeLoadedValue', 'Loaded context {{contextSize}} gpu {{gpuLayers}}');
     reactI18nextMock.__setTranslationOverride('chat.modelControls.backendBenchmarkProgressLoading', 'Loading {{backend}} {{index}}/{{total}}');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpStatusNextLoad', 'Enabled for next load');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpStatusActive', 'Active');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpStatusMemoryFallback', 'Memory fallback');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpStatusValue', 'Status: {{status}}');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpDraftAcceptance', 'Accepted {{accepted}}/{{drafted}} ({{percent}}%)');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpNativeSpeed', 'Native {{speed}} tok/s');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpTtft', 'TTFT {{milliseconds}} ms');
+    reactI18nextMock.__setTranslationOverride('chat.modelControls.mtpMemoryDelta', 'Memory {{memory}}');
   });
 
   it('shows backend policy controls on GPU-only devices', () => {
@@ -169,6 +177,89 @@ describe('ModelParametersSheet', () => {
         'Saved separately for Test Model. Sampling changes apply immediately, while load settings use Save load profile.',
       ),
     ).toBeTruthy();
+  });
+
+  it('shows the MTP control only for supported models and forwards On/Off changes', () => {
+    const onChangeMtpEnabled = jest.fn();
+    const screen = renderSheet({
+      mtpSupported: true,
+      mtpArtifactReady: true,
+      mtpEnabled: true,
+      onChangeMtpEnabled,
+    });
+
+    expect(screen.getByTestId('mtp-toggle-on')).toBeTruthy();
+    expect(screen.getByText('Enabled for next load')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('mtp-toggle-off'));
+    expect(onChangeMtpEnabled).toHaveBeenCalledWith(false);
+
+    const unsupported = renderSheet({ mtpSupported: false });
+    expect(unsupported.queryByTestId('mtp-toggle-on')).toBeNull();
+  });
+
+  it('renders native MTP counters, throughput, TTFT, and measured memory delta', () => {
+    const screen = renderSheet({
+      mtpSupported: true,
+      mtpArtifactReady: true,
+      mtpEnabled: true,
+      onChangeMtpEnabled: jest.fn(),
+      engineDiagnostics: {
+        backendMode: 'cpu',
+        backendDevices: [],
+        speculativeDecoding: {
+          configured: true,
+          enabled: true,
+          active: true,
+          mode: 'draft_model',
+          maxDraftTokens: 3,
+          memory: {
+            modelInitPssDeltaBytes: 64 * 1024 * 1024,
+          },
+          lastCompletion: {
+            tokensPredicted: 100,
+            tokensEvaluated: 20,
+            predictedPerSecond: 6.5,
+            timeToFirstTokenMs: 910,
+            mtp: {
+              requested: true,
+              attempted: true,
+              fallbackUsed: false,
+              draftTokens: 40,
+              draftTokensAccepted: 18,
+              acceptanceRate: 0.45,
+            },
+          },
+        },
+      },
+    });
+
+    expect(screen.getByTestId('mtp-runtime-status')).toHaveTextContent('Status: Active');
+    expect(screen.getByTestId('mtp-runtime-draft-counters')).toHaveTextContent('Accepted 18/40 (45%)');
+    expect(screen.getByTestId('mtp-runtime-native-speed')).toHaveTextContent('Native 6.50 tok/s');
+    expect(screen.getByTestId('mtp-runtime-ttft')).toHaveTextContent('TTFT 910 ms');
+    expect(screen.getByTestId('mtp-runtime-memory-delta')).toHaveTextContent('Memory 64.0 MiB');
+  });
+
+  it('reports a memory fallback instead of claiming MTP is active', () => {
+    const screen = renderSheet({
+      mtpSupported: true,
+      mtpArtifactReady: true,
+      mtpEnabled: true,
+      onChangeMtpEnabled: jest.fn(),
+      engineDiagnostics: {
+        backendMode: 'cpu',
+        backendDevices: [],
+        speculativeDecoding: {
+          configured: true,
+          enabled: true,
+          active: false,
+          fallbackReason: 'memory_budget',
+        },
+      },
+    });
+
+    expect(screen.getByTestId('mtp-runtime-status')).toHaveTextContent('Status: Memory fallback');
   });
 
   it('disables reasoning controls when the model does not support reasoning', () => {

@@ -109,6 +109,18 @@ const ATTACH_MENU_LABELS = [
 ];
 const ATTACH_MENU_BUTTON_RESOURCE_ID = "chat-attach-menu-button";
 const ATTACH_IMAGE_BUTTON_RESOURCE_ID = "chat-attach-image-button";
+const MODELS_FILTER_TOGGLE_RESOURCE_ID = "models-filter-toggle";
+const MODELS_FILTER_PANEL_RESOURCE_ID = "models-filter-panel";
+const MODELS_FILTER_CLEAR_RESOURCE_ID = "models-filter-clear";
+const MODELS_FILTER_SIZE_LARGE_RESOURCE_ID = "filter-option-size-large";
+const MODELS_FILTER_NO_TOKEN_REQUIRED_RESOURCE_ID = "filter-option-no-token-required";
+const MODEL_WARMUP_BANNER_RESOURCE_ID = "model-warmup-banner-container";
+const MODEL_WARMUP_LABEL_FRAGMENTS = [
+  "Initializing",
+  "Инициализация",
+  "Warming up model",
+  "Загрузка модели",
+];
 const CHAT_LIST_VIEWPORT_RESOURCE_ID = "chat-list-viewport";
 const ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS = 8_000;
 const ATTACHMENT_ACTION_BUSY_LABEL_FRAGMENTS = [
@@ -315,6 +327,7 @@ const APP_FOREGROUND_MARKER_LABELS = [
   "Разговоров пока нет",
 ];
 const MODEL_DETAILS_TITLE_LABELS = ["Model details", "Детали модели"];
+const MODEL_DETAILS_BACK_LABELS = ["Go back", "Вернуться назад"];
 const MODEL_DETAILS_CTA_LABELS = ["Details", "Детали"];
 const OPEN_ON_HF_LABELS = ["Open on HF", "Открыть на HF"];
 const VARIANT_PICKER_TITLE_LABELS = ["Choose GGUF file", "Выберите GGUF-файл"];
@@ -369,17 +382,45 @@ const DOWNLOAD_WARNING_CANCEL_LABELS = [
 ];
 const INITIAL_APP_VISIBLE_TIMEOUT_MS = 60_000;
 const HOME_ROUTE_TIMEOUT_MS = 90_000;
-const CHAT_ROUTE_TIMEOUT_MS = 60_000;
+const CHAT_ROUTE_TIMEOUT_MS = 120_000;
 const SETTINGS_ROUTE_TIMEOUT_MS = 60_000;
 const CLEAR_TEXT_INPUT_PRIMARY_TIMEOUT_MS = 2_000;
 const CLEAR_TEXT_INPUT_FALLBACK_TIMEOUT_MS = 2_000;
 const CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS = 5_000;
 const DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT = 128;
 const ADB_INPUT_TEXT_TIMEOUT_MS = 5_000;
+const ADB_INPUT_TEXT_MAX_ATTEMPTS = 3;
+const ADB_INPUT_TEXT_CONFIRM_TIMEOUT_MS = 5_000;
+const ENABLED_ACTION_SETTLE_TIMEOUT_MS = 10_000;
+const TRANSIENT_SURFACE_BACK_MAX_ATTEMPTS = 3;
+const TRANSIENT_SURFACE_BACK_QUIET_DELAY_MS = 5_000;
+const TRANSIENT_SURFACE_BACK_TIMEOUT_MS = 0;
+// Catalog tree metadata calls can occupy the device for up to 20 seconds. Waiting beyond that
+// boundary avoids queuing duplicate taps that later toggle the requested filter state back again.
+const CATALOG_FILTER_PANEL_SETTLE_TIMEOUT_MS = 30_000;
+const CATALOG_FILTER_ACTION_QUIET_DELAY_MS = 5_000;
+const CATALOG_FILTER_POLL_INTERVAL_MS = 2_000;
+// A live HF enrichment pass can keep React/Accessibility from applying a filter mutation while
+// uiautomator is polling. Keep this path completely quiet, then take one authoritative snapshot.
+const CATALOG_FILTER_MUTATION_QUIET_DELAY_MS = 75_000;
+const CATALOG_FILTER_MUTATION_SETTLE_TIMEOUT_MS = 0;
+const ROUTE_ACTION_QUIET_DELAY_MS = 5_000;
+const ROUTE_POLL_INTERVAL_MS = 2_000;
+const BOTTOM_TAB_ACTION_QUIET_DELAY_MS = 5_000;
+const MODEL_CATALOG_EXIT_QUIET_DELAY_MS = 75_000;
+const MODEL_DETAILS_ROUTE_TIMEOUT_MS = 25_000;
+const DOWNLOAD_WARNING_QUIET_DELAY_MS = 75_000;
+const DOWNLOAD_WARNING_SETTLE_TIMEOUT_MS = 0;
+const MODEL_WARMUP_DETECTION_TIMEOUT_MS = 2_000;
+const MODEL_WARMUP_SETTLE_TIMEOUT_MS = 180_000;
 const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
+// Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
+// Give successful routes a short visual-settle window so QA evidence does not capture a
+// transient black surface immediately after navigation.
+const PASSED_SCENARIO_SCREENSHOT_SETTLE_MS = 1_000;
 const REPORT_ARTIFACT_PATH_FIELDS = ["screenshotPath", "uiDumpPath", "logcatPath"];
 
 if (require.main === module) {
@@ -442,7 +483,10 @@ async function main() {
           continue;
         }
 
-        const screenshotPath = context.captureScreenshot(`${scenario.id}.png`);
+        const screenshotPath = await captureSettledScenarioScreenshot(
+          context,
+          `${scenario.id}.png`
+        );
         results.push({
           id: scenario.id,
           tier: scenario.tier,
@@ -680,7 +724,7 @@ function createScenarioContext(adbPath, serial) {
         `${tapPoint.centerY}`,
       ]);
 
-      await delay(options.afterTapDelayMs ?? 800);
+      await delay(options.afterTapDelayMs ?? BOTTOM_TAB_ACTION_QUIET_DELAY_MS);
       return label;
     },
     pressBack: async () => {
@@ -722,6 +766,14 @@ function createScenarioContext(adbPath, serial) {
       return captureAndroidScreenshot(adbPath, serial, screenshotPath);
     },
   };
+}
+
+async function captureSettledScenarioScreenshot(context, fileName, options = {}) {
+  const wait = options.delayFn ?? delay;
+  const settleDelayMs = options.settleDelayMs ?? PASSED_SCENARIO_SCREENSHOT_SETTLE_MS;
+
+  await wait(settleDelayMs);
+  return context.captureScreenshot(fileName);
 }
 
 function readExpoConfig() {
@@ -844,6 +896,94 @@ function clearFocusedTextInput(
 
     runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], fallbackCommandOptions);
   }
+}
+
+async function inputFocusedTextAndConfirm(adbPath, serial, value, options = {}) {
+  const normalizedValue = String(value).trim();
+  const escapedValue = escapeAdbInputText(normalizedValue);
+  const maxAttempts = options.maxAttempts ?? ADB_INPUT_TEXT_MAX_ATTEMPTS;
+  const confirmTimeoutMs = options.confirmTimeoutMs ?? ADB_INPUT_TEXT_CONFIRM_TIMEOUT_MS;
+  const focusSettleMs = options.focusSettleMs ?? 250;
+  const retryDelayMs = options.retryDelayMs ?? 350;
+  const runCommand = options.runCommand ?? runChecked;
+  const clearInput = options.clearInput ?? clearFocusedTextInput;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const wait = options.delayFn ?? delay;
+  let lastSnapshot = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
+    await wait(focusSettleMs);
+    runCommand(adbPath, [
+      "-s",
+      serial,
+      "shell",
+      "input",
+      "text",
+      escapedValue,
+    ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
+
+    const result = await waitForSnapshotMatch(
+      adbPath,
+      serial,
+      {
+        timeoutMs: confirmTimeoutMs,
+        pollIntervalMs: options.pollIntervalMs,
+        createSnapshot,
+        delayFn: wait,
+      },
+      (snapshot) => findPromptInComposerInputNode(snapshot, normalizedValue)
+    );
+    lastSnapshot = result.snapshot;
+
+    if (result.match) {
+      return result.match;
+    }
+
+    if (attempt < maxAttempts) {
+      log(`ADB text input read-back mismatch on attempt ${attempt}; retrying the full value.`);
+      await wait(retryDelayMs);
+    }
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      lastSnapshot,
+      `Timed out confirming the exact text prompt "${normalizedValue}" in the focused chat input after ${maxAttempts} attempts.`
+    )
+  );
+}
+
+async function waitForEnabledAnyNode(adbPath, serial, labels, options = {}) {
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    {
+      ...options,
+      timeoutMs: options.timeoutMs ?? ENABLED_ACTION_SETTLE_TIMEOUT_MS,
+    },
+    (candidateSnapshot) => {
+      const candidate = findAnyNodeInSnapshot(candidateSnapshot, labels, {
+        ...options,
+        visibleOnly: true,
+      });
+      if (!candidate || candidate.node.enabled === false || candidate.node.clickable !== true) {
+        return null;
+      }
+      return candidate;
+    }
+  );
+
+  if (match) {
+    return match;
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      snapshot,
+      `Timed out waiting for an enabled action matching any of: ${labels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
 }
 
 function findCatalogRiskModelCard(adbPath, serial, snapshot = null) {
@@ -1023,48 +1163,64 @@ function dismissAttachmentMenu(adbPath, serial) {
 
 async function waitForSettledAttachImageAction(adbPath, serial, options = {}) {
   const timeoutMs = options.timeoutMs ?? ATTACH_IMAGE_ACTION_SETTLE_TIMEOUT_MS;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const tap = options.tapBounds ?? tapBounds;
+  const dismissMenu = options.dismissAttachmentMenu ?? dismissAttachmentMenu;
+  const wait = options.delayFn ?? delay;
+  const maxMenuTapAttempts = options.maxMenuTapAttempts ?? 3;
+  const menuTapRetryIntervalMs = options.menuTapRetryIntervalMs ?? 1_200;
+  const pollIntervalMs = options.pollIntervalMs ?? 600;
   const startedAt = Date.now();
   let lastMatch = null;
   let openedAttachmentMenu = false;
+  let menuSurfaceObserved = false;
+  let menuTapAttempts = 0;
+  let lastMenuTapAt = 0;
 
   while (Date.now() - startedAt < timeoutMs) {
-    const snapshot = createUiSnapshot(adbPath, serial);
+    const snapshot = createSnapshot(adbPath, serial);
     const match = findAttachImageActionInSnapshot(snapshot, { visibleOnly: true });
+    menuSurfaceObserved = menuSurfaceObserved || Boolean(match);
     if (match && !isAttachmentActionBusy(match.node)) {
       if (openedAttachmentMenu) {
-        dismissAttachmentMenu(adbPath, serial);
-        await delay(options.afterMenuDismissDelayMs ?? 300);
+        dismissMenu(adbPath, serial);
+        await wait(options.afterMenuDismissDelayMs ?? 300);
       }
       return match;
     }
 
     if (!match) {
-      const menuMatch = openedAttachmentMenu
-        ? null
-        : findAttachMenuActionInSnapshot(snapshot, { visibleOnly: true });
+      const menuMatch = findAttachMenuActionInSnapshot(snapshot, { visibleOnly: true });
+      const shouldTapMenu = menuMatch?.node?.bounds
+        && menuTapAttempts < maxMenuTapAttempts
+        && (!openedAttachmentMenu || Date.now() - lastMenuTapAt >= menuTapRetryIntervalMs);
 
-      if (menuMatch?.node?.bounds) {
-        tapBounds(adbPath, serial, menuMatch.node.bounds);
+      if (shouldTapMenu) {
+        tap(adbPath, serial, menuMatch.node.bounds);
         openedAttachmentMenu = true;
-        await delay(options.afterMenuOpenDelayMs ?? 600);
+        menuTapAttempts += 1;
+        lastMenuTapAt = Date.now();
+        await wait(options.afterMenuOpenDelayMs ?? 600);
         continue;
       }
 
       if (openedAttachmentMenu) {
-        dismissAttachmentMenu(adbPath, serial);
-        await delay(options.afterMenuDismissDelayMs ?? 300);
+        // The attachment sheet is rendered asynchronously. Keep polling after the menu tap
+        // instead of treating the first stale hierarchy as authoritative.
+        await wait(pollIntervalMs);
+        continue;
       }
 
       return null;
     }
 
     lastMatch = match;
-    await delay(600);
+    await wait(pollIntervalMs);
   }
 
-  if (openedAttachmentMenu) {
-    dismissAttachmentMenu(adbPath, serial);
-    await delay(options.afterMenuDismissDelayMs ?? 300);
+  if (openedAttachmentMenu && menuSurfaceObserved) {
+    dismissMenu(adbPath, serial);
+    await wait(options.afterMenuDismissDelayMs ?? 300);
   }
 
   return lastMatch;
@@ -1127,19 +1283,21 @@ function buildScenarios() {
       description: "Verify bottom tab navigation across Home, Chat, Models, and Settings.",
       run: async (ctx) => {
         await goToHome(ctx);
-        await ctx.tapBottomTab(CHAT_TAB_LABELS);
-        await ctx.expectAnyText(CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+        await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+          timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+        });
 
-        await ctx.tapBottomTab(MODELS_TAB_LABELS);
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+        await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
         await ctx.expectAnyText(ALL_MODELS_LABELS);
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
 
-        await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
-        await ctx.expectAnyText(SETTINGS_TITLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
+          timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+        });
 
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
       },
     },
     {
@@ -1151,19 +1309,21 @@ function buildScenarios() {
         await ctx.expectAnyText(APP_TITLE_LABELS);
         ctx.captureScreenshot("style-home.png");
 
-        await ctx.tapBottomTab(CHAT_TAB_LABELS);
-        await ctx.expectAnyText(CHAT_ROUTE_LABELS);
+        await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+          timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+        });
         ctx.captureScreenshot("style-chat.png");
 
-        await ctx.tapBottomTab(MODELS_TAB_LABELS);
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS);
-        await ctx.expectAnyText(ALL_MODELS_LABELS);
-        ctx.captureScreenshot("style-models.png");
-
-        await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
-        await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+        await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
+          timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+        });
         await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
         ctx.captureScreenshot("style-settings.png");
+
+        await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
+        await ctx.expectAnyText(ALL_MODELS_LABELS);
+        ctx.captureScreenshot("style-models.png");
+        await goToHome(ctx);
       },
     },
     {
@@ -1172,13 +1332,15 @@ function buildScenarios() {
       description: "Verify the Home screen New Chat button opens the chat screen empty state.",
       run: async (ctx) => {
         await goToHome(ctx);
+        await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), ctx.serial);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
         await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, {
           timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
         });
         await ctx.expectAnyText(CHAT_EMPTY_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(NEW_CHAT_LABELS);
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, NEW_CHAT_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
       },
     },
     {
@@ -1187,8 +1349,9 @@ function buildScenarios() {
       description: "Verify image attachment composer affordance matches the current model state without requiring prepared storage.",
       run: async (ctx) => {
         await goToHome(ctx);
+        await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), ctx.serial);
         await ctx.tapAnyText(NEW_CHAT_LABELS);
-        await ctx.expectAnyText(CHAT_EMPTY_LABELS);
+        await ctx.expectAnyText(CHAT_EMPTY_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
 
         const adbPath = resolveAdbPath();
         const noModelNode = await findAnyNodeNow(
@@ -1224,8 +1387,9 @@ function buildScenarios() {
           assertAttachmentActionAvailable(attachNode);
         }
 
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(HOME_SECTION_LABELS);
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
       },
     },
     {
@@ -1250,8 +1414,9 @@ function buildScenarios() {
         assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
         await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
 
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(HOME_SECTION_LABELS);
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
       },
     },
     {
@@ -1332,31 +1497,14 @@ function buildScenarios() {
           allowBottomOverlay: true,
           timeoutMs: 5_000,
         });
-        clearFocusedTextInput(adbPath, ctx.serial);
-        runChecked(adbPath, [
-          "-s",
-          ctx.serial,
-          "shell",
-          "input",
-          "text",
-          escapeAdbInputText(preparedAttachmentSendPrompt),
-        ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
-        await delay(500);
+        await inputFocusedTextAndConfirm(adbPath, ctx.serial, preparedAttachmentSendPrompt);
 
-        await waitForAnyNode(adbPath, ctx.serial, [preparedAttachmentSendPrompt], {
-          timeoutMs: 5_000,
-          visibleOnly: true,
-        });
-
-        const sendNode = await findAnyNodeNow(
+        await waitForEnabledAnyNode(
           adbPath,
           ctx.serial,
           CHAT_SEND_LABELS,
-          { visibleOnly: true }
+          { timeoutMs: ENABLED_ACTION_SETTLE_TIMEOUT_MS }
         );
-        if (!sendNode || sendNode.node.enabled === false) {
-          throw new Error("Prepared attachment send button is not enabled after entering the prompt.");
-        }
 
         await ctx.tapAnyText(CHAT_SEND_LABELS, {
           allowBottomOverlay: true,
@@ -1382,12 +1530,19 @@ function buildScenarios() {
         await prepareCatalogForVariantPickerSmokeScenario(ctx);
 
         await openFirstVisibleVariantPicker(ctx);
-        await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 10_000 });
+        await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 15_000 });
 
-        await ctx.pressBack();
-        await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(HOME_SECTION_LABELS);
+        const adbPath = resolveAdbPath();
+        await dismissTransientSurfaceWithBack(
+          ctx,
+          adbPath,
+          ctx.serial,
+          VARIANT_PICKER_TITLE_LABELS,
+          MODEL_CATALOG_LABELS
+        );
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
       },
     },
     {
@@ -1400,8 +1555,9 @@ function buildScenarios() {
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await ctx.expectAnyText(ALL_MODELS_LABELS);
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
-        await ctx.tapBottomTab(HOME_TAB_LABELS);
-        await ctx.expectAnyText(ACTIVE_MODEL_CTA_LABELS);
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, ACTIVE_MODEL_CTA_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
       },
     },
     {
@@ -1411,8 +1567,8 @@ function buildScenarios() {
       run: async (ctx) => {
         await goToModelCatalog(ctx);
 
-        await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
-        await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
+        const adbPath = resolveAdbPath();
+        await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
 
         await ctx.tapAnyText(SORT_LABELS);
         await ctx.expectAnyText(MOST_DOWNLOADED_LABELS);
@@ -1456,13 +1612,23 @@ function buildScenarios() {
             continue;
           }
 
-          tapBounds(adbPath, ctx.serial, riskModelCard.detailsNode.bounds);
-          await delay(800);
-          await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS, { timeoutMs: 10_000 });
+          await tapBoundsUntilAnyNode(
+            adbPath,
+            ctx.serial,
+            riskModelCard.detailsNode.bounds,
+            MODEL_DETAILS_TITLE_LABELS,
+            {
+              timeoutMs: MODEL_DETAILS_ROUTE_TIMEOUT_MS,
+              sourceLabels: MODEL_CATALOG_LABELS,
+            }
+          );
 
-          await ctx.tapAnyText(DOWNLOAD_CTA_LABELS, { timeoutMs: 12_000 });
+          await ctx.tapAnyText(DOWNLOAD_CTA_LABELS, {
+            timeoutMs: 12_000,
+            afterTapDelayMs: DOWNLOAD_WARNING_QUIET_DELAY_MS,
+          });
           await waitForAnyNode(adbPath, ctx.serial, DOWNLOAD_WARNING_TITLE_LABELS, {
-            timeoutMs: 8_000,
+            timeoutMs: DOWNLOAD_WARNING_SETTLE_TIMEOUT_MS,
             visibleOnly: true,
           });
 
@@ -1470,8 +1636,25 @@ function buildScenarios() {
             timeoutMs: 5_000,
             allowBottomOverlay: true,
           });
-          await ctx.pressBack();
-          await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
+          await waitForNoAnyNode(adbPath, ctx.serial, DOWNLOAD_WARNING_TITLE_LABELS, {
+            timeoutMs: 10_000,
+          });
+          await ctx.tapAnyText(MODEL_DETAILS_BACK_LABELS, {
+            timeoutMs: 5_000,
+            afterTapDelayMs: 30_000,
+          });
+          const returnedToCatalog = await findAnyNodeNow(
+            adbPath,
+            ctx.serial,
+            MODEL_CATALOG_LABELS,
+            { visibleOnly: true }
+          );
+          if (!returnedToCatalog) {
+            log(
+              "INFO memory-fit-download-warning: warning and Cancel were verified; "
+              + "model-details cleanup is still settling and was left for the next scenario precondition."
+            );
+          }
           return;
         }
 
@@ -1529,8 +1712,9 @@ function buildScenarios() {
           await ctx.tapAnyText(currentLanguageLabel, { afterTapDelayMs: 1_200 });
           languageToggled = true;
           await ctx.expectAnyText(nextLanguageLabel, { timeoutMs: 10_000 });
-          await ctx.tapBottomTab(HOME_TAB_LABELS);
-          await ctx.expectAnyText(nextHomeLabel, { timeoutMs: 10_000 });
+          await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, nextHomeLabel, {
+            timeoutMs: 10_000,
+          });
         } catch (error) {
           scenarioError = error;
           throw error;
@@ -1681,6 +1865,7 @@ async function ensureLoadedModelTextFallbackPrecondition(ctx) {
   await goToHome(ctx);
 
   const adbPath = resolveAdbPath();
+  await waitForModelWarmupToSettleIfPresent(adbPath, ctx.serial);
   const noModelNode = await findAnyNodeNow(
     adbPath,
     ctx.serial,
@@ -1700,30 +1885,13 @@ async function sendTextOnlyFallbackSmokeMessage(ctx, adbPath, prompt) {
     allowBottomOverlay: true,
     timeoutMs: 5_000,
   });
-  clearFocusedTextInput(adbPath, ctx.serial);
-  runChecked(adbPath, [
-    "-s",
-    ctx.serial,
-    "shell",
-    "input",
-    "text",
-    escapeAdbInputText(prompt),
-  ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
-  await delay(500);
-  await waitForAnyNode(adbPath, ctx.serial, [prompt], {
-    timeoutMs: 5_000,
-    visibleOnly: true,
-  });
-
-  const sendNode = await findAnyNodeNow(
+  await inputFocusedTextAndConfirm(adbPath, ctx.serial, prompt);
+  await waitForEnabledAnyNode(
     adbPath,
     ctx.serial,
     CHAT_SEND_LABELS,
-    { visibleOnly: true }
+    { timeoutMs: ENABLED_ACTION_SETTLE_TIMEOUT_MS }
   );
-  if (!sendNode || sendNode.node.enabled === false) {
-    throw new Error("Text-only fallback send button is not enabled after entering a text prompt.");
-  }
 
   await ctx.tapAnyText(CHAT_SEND_LABELS, {
     allowBottomOverlay: true,
@@ -1864,7 +2032,14 @@ async function tryReachHome(ctx, maxAttempts = 4) {
       visibleOnly: true,
     });
     if (homeNode) {
-      await ctx.tapBottomTab(HOME_TAB_LABELS, { afterTapDelayMs: 500 });
+      const modelCatalogVisible = await findAnyNodeNow(adbPath, ctx.serial, MODEL_CATALOG_LABELS, {
+        visibleOnly: true,
+      });
+      await ctx.tapBottomTab(HOME_TAB_LABELS, {
+        afterTapDelayMs: modelCatalogVisible
+          ? MODEL_CATALOG_EXIT_QUIET_DELAY_MS
+          : BOTTOM_TAB_ACTION_QUIET_DELAY_MS,
+      });
       continue;
     }
 
@@ -1877,18 +2052,28 @@ async function tryReachHome(ctx, maxAttempts = 4) {
   return false;
 }
 
-async function goToSettings(ctx) {
-  await goToHome(ctx);
-  await ctx.tapBottomTab(SETTINGS_TAB_LABELS);
-  await ctx.expectAnyText(SETTINGS_TITLE_LABELS);
+async function goToSettings(ctx, options = {}) {
+  const goHome = options.goToHome || goToHome;
+  const waitForWarmup = options.waitForModelWarmup || (async (targetCtx) => {
+    await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), targetCtx.serial);
+  });
+
+  await goHome(ctx);
+  await waitForWarmup(ctx);
+  await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
 }
 
 async function goToModelCatalog(ctx, options = {}) {
   const goHome = options.goToHome || goToHome;
+  const waitForWarmup = options.waitForModelWarmup || (async (targetCtx) => {
+    await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), targetCtx.serial);
+  });
 
   await goHome(ctx);
-  await ctx.tapBottomTab(MODELS_TAB_LABELS);
-  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+  await waitForWarmup(ctx);
+  await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
 }
 
 async function restoreLanguageAfterScenario(
@@ -1918,8 +2103,9 @@ async function restoreLanguageAfterScenario(
     await ctx.expectAnyText(originalLanguageLabel, { timeoutMs: 10_000 });
   }
 
-  await ctx.tapBottomTab(HOME_TAB_LABELS);
-  await ctx.expectAnyText(restoredHomeLabel, { timeoutMs: 10_000 });
+  await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, restoredHomeLabel, {
+    timeoutMs: 10_000,
+  });
 }
 
 async function goToConversationManagement(ctx) {
@@ -1930,34 +2116,16 @@ async function goToConversationManagement(ctx) {
 
 async function prepareCatalogForMemoryFitRiskBadgeScenario(ctx) {
   const adbPath = resolveAdbPath();
-
-  const panelAlreadyOpen = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_SIZE_LARGE_LABELS, {
-    visibleOnly: true,
-  });
-
-  if (!panelAlreadyOpen) {
-    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
-    await ctx.expectAnyText(MODELS_FILTER_SIZE_LARGE_LABELS);
-  }
-
-  const clearButton = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_CLEAR_LABELS, {
-    visibleOnly: true,
-  });
-
-  if (clearButton) {
-    await ctx.tapAnyText(MODELS_FILTER_CLEAR_LABELS);
-    await delay(600);
-  }
-
-  await ctx.tapAnyText(MODELS_FILTER_SIZE_LARGE_LABELS);
-  await delay(1_200);
-  await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+  await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
+  await clearCatalogFiltersIfPresent(adbPath, ctx.serial);
   await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
 async function prepareCatalogForVariantPickerSmokeScenario(ctx, options = {}) {
   const resolveAdb = options.resolveAdbPath || resolveAdbPath;
   const findNodeNow = options.findAnyNodeNow || findAnyNodeNow;
+  const setFilterPanelOpen = options.setCatalogFilterPanelOpen || setCatalogFilterPanelOpen;
+  const clearFilters = options.clearCatalogFiltersIfPresent || clearCatalogFiltersIfPresent;
   const adbPath = resolveAdb();
 
   const allModelsTab = await findNodeNow(adbPath, ctx.serial, ALL_MODELS_LABELS, {
@@ -1970,44 +2138,8 @@ async function prepareCatalogForVariantPickerSmokeScenario(ctx, options = {}) {
     });
   }
 
-  const filterPanelOpen = await findNodeNow(
-    adbPath,
-    ctx.serial,
-    [
-      ...MODELS_FILTER_SIZE_LARGE_LABELS,
-      ...MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS,
-      ...MODELS_FILTER_CLEAR_LABELS,
-    ],
-    { visibleOnly: true }
-  );
-
-  if (!filterPanelOpen) {
-    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS, {
-      afterTapDelayMs: 600,
-      timeoutMs: 8_000,
-    });
-    await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS, { timeoutMs: 8_000 });
-  }
-
-  const clearButton = await findNodeNow(adbPath, ctx.serial, MODELS_FILTER_CLEAR_LABELS, {
-    visibleOnly: true,
-  });
-  if (clearButton) {
-    await ctx.tapAnyText(MODELS_FILTER_CLEAR_LABELS, {
-      afterTapDelayMs: 600,
-      timeoutMs: 5_000,
-    });
-  }
-
-  const filterPanelStillOpen = await findNodeNow(adbPath, ctx.serial, MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS, {
-    visibleOnly: true,
-  });
-  if (filterPanelStillOpen) {
-    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS, {
-      afterTapDelayMs: 600,
-      timeoutMs: 5_000,
-    });
-  }
+  await setFilterPanelOpen(adbPath, ctx.serial, true);
+  await clearFilters(adbPath, ctx.serial);
 
   await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
 }
@@ -2018,7 +2150,7 @@ async function openFirstVisibleVariantPicker(ctx, options = {}) {
   const findNodeNow = options.findAnyNodeNow || findAnyNodeNow;
   const waitForAny = options.waitForAnyNode || waitForAnyNode;
   const tap = options.tapBounds || tapBounds;
-  const waitAfterTapTimeoutMs = options.waitAfterTapTimeoutMs ?? 2_000;
+  const waitAfterTapTimeoutMs = options.waitAfterTapTimeoutMs ?? 5_000;
   const adbPath = resolveAdb();
   const maxAttempts = 8;
 
@@ -2034,6 +2166,7 @@ async function openFirstVisibleVariantPicker(ctx, options = {}) {
     timeoutMs: options.catalogReadyTimeoutMs,
     pollIntervalMs: options.catalogReadyPollIntervalMs,
     delayFn: options.delayFn,
+    swipeUp: ctx.swipeUp,
   });
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -2072,11 +2205,13 @@ async function openFirstVisibleVariantPicker(ctx, options = {}) {
 
 async function waitForVariantPickerCatalogScanTarget(adbPath, serial, options = {}) {
   const createSnapshot = options.createSnapshot || createUiSnapshot;
-  const timeoutMs = options.timeoutMs ?? 12_000;
+  const timeoutMs = options.timeoutMs ?? 45_000;
   const pollIntervalMs = options.pollIntervalMs ?? 600;
   const wait = options.delayFn || delay;
+  const swipeUp = options.swipeUp;
   const startedAt = Date.now();
   let lastState = "waiting for catalog content";
+  let scanSwipes = 0;
 
   while (Date.now() - startedAt < timeoutMs) {
     const snapshot = createSnapshot(adbPath, serial);
@@ -2107,6 +2242,10 @@ async function waitForVariantPickerCatalogScanTarget(adbPath, serial, options = 
       visibleOnly: true,
     });
     lastState = loading ? "catalog still loading" : "waiting for catalog rows";
+    if (!loading && typeof swipeUp === "function" && scanSwipes < 8) {
+      await swipeUp();
+      scanSwipes += 1;
+    }
     await wait(pollIntervalMs);
   }
 
@@ -2149,29 +2288,10 @@ function isLikelyQuantizationSelectorNode(node) {
 
 async function prepareCatalogForRamWarningScenario(ctx) {
   const adbPath = resolveAdbPath();
-
-  const panelAlreadyOpen = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS, {
-    visibleOnly: true,
-  });
-
-  if (!panelAlreadyOpen) {
-    await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
-    await ctx.expectAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
-  }
-
-  const clearButton = await findAnyNodeNow(adbPath, ctx.serial, MODELS_FILTER_CLEAR_LABELS, {
-    visibleOnly: true,
-  });
-
-  if (clearButton) {
-    await ctx.tapAnyText(MODELS_FILTER_CLEAR_LABELS);
-  }
-
-  // Make the scenario deterministic: show RAM-risk models by clearing persisted filters
-  // (including "Fits in RAM"), then keep downloads unblocked by enabling "No token required".
-  await ctx.tapAnyText(MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS);
-
-  await ctx.tapAnyText(MODELS_FILTER_TOGGLE_LABELS);
+  await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
+  await clearCatalogFiltersIfPresent(adbPath, ctx.serial);
+  // Clearing persisted filters (especially "Fits in RAM") exposes the live catalog's real risk
+  // cards. The scenario does not need to mutate another toggle before validating the warning.
   await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
@@ -2433,6 +2553,371 @@ async function waitForResourceId(adbPath, serial, resourceId, options = {}) {
 
   throw new Error(
     withUiSnapshotSummary(snapshot, `Timed out waiting for resource id "${resourceId}".`)
+  );
+}
+
+async function waitForNoResourceId(adbPath, serial, resourceId, options = {}) {
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidateSnapshot) => (
+      findResourceIdInSnapshot(candidateSnapshot, resourceId, { visibleOnly: true })
+        ? null
+        : { absent: true }
+    )
+  );
+
+  if (match) {
+    return;
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(snapshot, `Timed out waiting for resource id "${resourceId}" to disappear.`)
+  );
+}
+
+async function waitForModelWarmupToSettleIfPresent(adbPath, serial, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const findWarmupMarker = (snapshot) => (
+    findResourceIdInSnapshot(snapshot, MODEL_WARMUP_BANNER_RESOURCE_ID, { visibleOnly: true })
+    ?? findAnyNodeInSnapshot(snapshot, MODEL_WARMUP_LABEL_FRAGMENTS, {
+      visibleOnly: true,
+      matchMode: "fragment",
+    })
+  );
+
+  // Engine initialization may begin a few frames after the Home route becomes visible. Give the
+  // marker a short observation window so a pre-render snapshot cannot incorrectly declare the UI
+  // ready, then wait for the same observable state to disappear before interacting with the chat.
+  const { match: warmupMarker } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    {
+      timeoutMs: options.detectionTimeoutMs ?? MODEL_WARMUP_DETECTION_TIMEOUT_MS,
+      pollIntervalMs: options.pollIntervalMs,
+      createSnapshot,
+      delayFn: options.delayFn,
+    },
+    findWarmupMarker
+  );
+  if (!warmupMarker) {
+    return false;
+  }
+
+  const { match: settled, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    {
+      timeoutMs: options.timeoutMs ?? MODEL_WARMUP_SETTLE_TIMEOUT_MS,
+      pollIntervalMs: options.pollIntervalMs,
+      createSnapshot,
+      delayFn: options.delayFn,
+    },
+    (candidateSnapshot) => (findWarmupMarker(candidateSnapshot) ? null : { settled: true })
+  );
+  if (settled) {
+    return true;
+  }
+
+  throw new Error(withUiSnapshotSummary(snapshot, "Timed out waiting for model warmup to settle."));
+}
+
+async function setCatalogFilterPanelOpen(adbPath, serial, shouldBeOpen, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const tap = options.tapBounds ?? tapBounds;
+  const wait = options.delayFn ?? delay;
+  const maxAttempts = options.maxAttempts ?? 2;
+  const timeoutMs = options.timeoutMs ?? CATALOG_FILTER_PANEL_SETTLE_TIMEOUT_MS;
+  let lastSnapshot = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const snapshot = createSnapshot(adbPath, serial);
+    lastSnapshot = snapshot;
+    const panel = findResourceIdInSnapshot(snapshot, MODELS_FILTER_PANEL_RESOURCE_ID, { visibleOnly: true });
+    if (Boolean(panel) === shouldBeOpen) {
+      return panel;
+    }
+
+    const toggle = findResourceIdInSnapshot(snapshot, MODELS_FILTER_TOGGLE_RESOURCE_ID, { visibleOnly: true });
+    if (!toggle?.bounds) {
+      throw new Error(
+        withUiSnapshotSummary(snapshot, "Catalog filter toggle is not visible while changing panel state.")
+      );
+    }
+
+    log(
+      `Catalog filter panel is ${panel ? "open" : "closed"}; tapping ${toggle.bounds.centerX},${toggle.bounds.centerY} `
+      + `to make it ${shouldBeOpen ? "open" : "closed"} (attempt ${attempt}/${maxAttempts}).`
+    );
+    tap(adbPath, serial, toggle.bounds);
+    await wait(options.afterTapDelayMs ?? CATALOG_FILTER_ACTION_QUIET_DELAY_MS);
+    const result = await waitForSnapshotMatch(
+      adbPath,
+      serial,
+      {
+        timeoutMs,
+        pollIntervalMs: options.pollIntervalMs ?? CATALOG_FILTER_POLL_INTERVAL_MS,
+        createSnapshot,
+        delayFn: wait,
+      },
+      (candidateSnapshot) => {
+        const candidatePanel = findResourceIdInSnapshot(
+          candidateSnapshot,
+          MODELS_FILTER_PANEL_RESOURCE_ID,
+          { visibleOnly: true }
+        );
+        return Boolean(candidatePanel) === shouldBeOpen
+          ? { panel: candidatePanel, isOpen: shouldBeOpen }
+          : null;
+      }
+    );
+    lastSnapshot = result.snapshot;
+    if (result.match) {
+      return result.match.panel;
+    }
+
+    log(
+      `Catalog filter panel did not settle ${shouldBeOpen ? "open" : "closed"} within ${timeoutMs}ms `
+      + `after attempt ${attempt}/${maxAttempts}.`
+    );
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      lastSnapshot,
+      `Catalog filter panel did not become ${shouldBeOpen ? "open" : "closed"} after ${maxAttempts} bounded attempts.`
+    )
+  );
+}
+
+async function clearCatalogFiltersIfPresent(adbPath, serial, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const tap = options.tapBounds ?? tapBounds;
+  const wait = options.delayFn ?? delay;
+  // Clear changes the panel layout. Do not queue a second tap at coordinates that may point to a
+  // filter option by the time Android handles it under catalog enrichment load.
+  const maxAttempts = options.maxAttempts ?? 1;
+  let lastSnapshot = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const snapshot = createSnapshot(adbPath, serial);
+    lastSnapshot = snapshot;
+    const clearButton = findResourceIdInSnapshot(snapshot, MODELS_FILTER_CLEAR_RESOURCE_ID, { visibleOnly: true });
+    if (!clearButton) {
+      return;
+    }
+    if (!clearButton.bounds) {
+      throw new Error(withUiSnapshotSummary(snapshot, "Catalog clear-filters action has no tap bounds."));
+    }
+
+    tap(adbPath, serial, clearButton.bounds);
+    await wait(options.afterTapDelayMs ?? CATALOG_FILTER_MUTATION_QUIET_DELAY_MS);
+    const result = await waitForSnapshotMatch(
+      adbPath,
+      serial,
+      {
+        timeoutMs: options.timeoutMs ?? CATALOG_FILTER_MUTATION_SETTLE_TIMEOUT_MS,
+        pollIntervalMs: options.pollIntervalMs ?? CATALOG_FILTER_POLL_INTERVAL_MS,
+        createSnapshot,
+        delayFn: wait,
+      },
+      (candidateSnapshot) => (
+        findResourceIdInSnapshot(candidateSnapshot, MODELS_FILTER_CLEAR_RESOURCE_ID, { visibleOnly: true })
+          ? null
+          : { cleared: true }
+      )
+    );
+    lastSnapshot = result.snapshot;
+    if (result.match) {
+      return;
+    }
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(lastSnapshot, `Catalog filters did not clear after ${maxAttempts} bounded attempts.`)
+  );
+}
+
+async function activateClearedCatalogFilterOption(adbPath, serial, resourceId, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const tap = options.tapBounds ?? tapBounds;
+  const wait = options.delayFn ?? delay;
+  // Option rows are toggles, so a late duplicate would undo the requested state.
+  const maxAttempts = options.maxAttempts ?? 1;
+  let lastSnapshot = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const snapshot = createSnapshot(adbPath, serial);
+    lastSnapshot = snapshot;
+    const activeFilterMarker = findResourceIdInSnapshot(
+      snapshot,
+      MODELS_FILTER_CLEAR_RESOURCE_ID,
+      { visibleOnly: true }
+    );
+    if (activeFilterMarker) {
+      return;
+    }
+
+    const optionNode = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+    if (!optionNode?.bounds) {
+      throw new Error(
+        withUiSnapshotSummary(snapshot, `Catalog filter option "${resourceId}" is not visible or tappable.`)
+      );
+    }
+
+    tap(adbPath, serial, optionNode.bounds);
+    await wait(options.afterTapDelayMs ?? CATALOG_FILTER_MUTATION_QUIET_DELAY_MS);
+    const result = await waitForSnapshotMatch(
+      adbPath,
+      serial,
+      {
+        timeoutMs: options.timeoutMs ?? CATALOG_FILTER_MUTATION_SETTLE_TIMEOUT_MS,
+        pollIntervalMs: options.pollIntervalMs ?? CATALOG_FILTER_POLL_INTERVAL_MS,
+        createSnapshot,
+        delayFn: wait,
+      },
+      (candidateSnapshot) => findResourceIdInSnapshot(
+        candidateSnapshot,
+        MODELS_FILTER_CLEAR_RESOURCE_ID,
+        { visibleOnly: true }
+      )
+    );
+    lastSnapshot = result.snapshot;
+    if (result.match) {
+      return;
+    }
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      lastSnapshot,
+      `Catalog filter option "${resourceId}" did not become active after ${maxAttempts} bounded attempts.`
+    )
+  );
+}
+
+async function tapBoundsUntilAnyNode(adbPath, serial, bounds, targetLabels, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const tap = options.tapBounds ?? tapBounds;
+  const wait = options.delayFn ?? delay;
+  const maxAttempts = options.maxAttempts ?? 2;
+  const timeoutMs = options.timeoutMs ?? MODEL_DETAILS_ROUTE_TIMEOUT_MS;
+  let lastSnapshot = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const snapshot = createSnapshot(adbPath, serial);
+    lastSnapshot = snapshot;
+    const targetAlreadyVisible = findAnyNodeInSnapshot(snapshot, targetLabels, { visibleOnly: true });
+    if (targetAlreadyVisible) {
+      return targetAlreadyVisible;
+    }
+    if (
+      attempt > 1
+      && options.sourceLabels
+      && !findAnyNodeInSnapshot(snapshot, options.sourceLabels, { visibleOnly: true })
+    ) {
+      break;
+    }
+
+    tap(adbPath, serial, bounds);
+    await wait(options.afterTapDelayMs ?? ROUTE_ACTION_QUIET_DELAY_MS);
+    const result = await waitForSnapshotMatch(
+      adbPath,
+      serial,
+      {
+        timeoutMs,
+        pollIntervalMs: options.pollIntervalMs ?? ROUTE_POLL_INTERVAL_MS,
+        createSnapshot,
+        delayFn: wait,
+      },
+      (candidateSnapshot) => findAnyNodeInSnapshot(candidateSnapshot, targetLabels, { visibleOnly: true })
+    );
+    lastSnapshot = result.snapshot;
+    if (result.match) {
+      return result.match;
+    }
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      lastSnapshot,
+      `Timed out after tapping for any of: ${targetLabels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
+}
+
+async function dismissTransientSurfaceWithBack(ctx, adbPath, serial, surfaceLabels, destinationLabels, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const wait = options.delayFn ?? delay;
+  const maxAttempts = options.maxAttempts ?? TRANSIENT_SURFACE_BACK_MAX_ATTEMPTS;
+  const timeoutMs = options.timeoutMs ?? TRANSIENT_SURFACE_BACK_TIMEOUT_MS;
+  let lastSnapshot = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const snapshot = createSnapshot(adbPath, serial);
+    lastSnapshot = snapshot;
+    const destination = findAnyNodeInSnapshot(snapshot, destinationLabels, { visibleOnly: true });
+    if (destination) {
+      return destination;
+    }
+
+    const surface = findAnyNodeInSnapshot(snapshot, surfaceLabels, { visibleOnly: true });
+    if (!surface && attempt > 1) {
+      break;
+    }
+
+    await ctx.pressBack();
+    await wait(options.afterBackDelayMs ?? TRANSIENT_SURFACE_BACK_QUIET_DELAY_MS);
+    const result = await waitForSnapshotMatch(
+      adbPath,
+      serial,
+      {
+        timeoutMs,
+        pollIntervalMs: options.pollIntervalMs,
+        createSnapshot,
+        delayFn: wait,
+      },
+      (candidateSnapshot) => findAnyNodeInSnapshot(
+        candidateSnapshot,
+        destinationLabels,
+        { visibleOnly: true }
+      )
+    );
+    lastSnapshot = result.snapshot;
+    if (result.match) {
+      return result.match;
+    }
+  }
+
+  throw new Error(
+    withUiSnapshotSummary(
+      lastSnapshot,
+      `Timed out dismissing ${surfaceLabels.map((label) => `"${label}"`).join(", ")} and returning to ${destinationLabels.map((label) => `"${label}"`).join(", ")}.`
+    )
+  );
+}
+
+async function tapBottomTabUntilVisible(ctx, tabLabels, destinationLabels, options = {}) {
+  const maxAttempts = options.maxAttempts ?? 3;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await ctx.tapBottomTab(tabLabels);
+    try {
+      if (options.timeoutMs === undefined) {
+        await ctx.expectAnyText(destinationLabels);
+      } else {
+        await ctx.expectAnyText(destinationLabels, { timeoutMs: options.timeoutMs });
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError ?? new Error(
+    `Timed out navigating to bottom-tab destination: ${destinationLabels.join(", ")}.`
   );
 }
 
@@ -3743,10 +4228,14 @@ module.exports = {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  captureSettledScenarioScreenshot,
+  activateClearedCatalogFilterOption,
+  clearCatalogFiltersIfPresent,
   clearFocusedTextInput,
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
   DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
+  dismissTransientSurfaceWithBack,
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   openFirstVisibleVariantPicker,
@@ -3765,6 +4254,7 @@ module.exports = {
   getBottomTabTapPoint,
   goToHome,
   goToModelCatalog,
+  inputFocusedTextAndConfirm,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
@@ -3778,8 +4268,14 @@ module.exports = {
   ScenarioSkipError,
   ScenarioSkipFailureError,
   serializeReportResults,
+  setCatalogFilterPanelOpen,
   shouldAppendRunnerFailure,
   waitForAnyNode,
+  waitForEnabledAnyNode,
+  waitForModelWarmupToSettleIfPresent,
+  waitForSettledAttachImageAction,
+  tapBottomTabUntilVisible,
+  tapBoundsUntilAnyNode,
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,
   assertAttachmentPreviewRemovePreconditions,

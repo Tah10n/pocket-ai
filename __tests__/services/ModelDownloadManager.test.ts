@@ -6,6 +6,7 @@ import {
 import { useDownloadStore } from '../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, ModelMetadata } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
+import type { ModelDownloadRequestOptions } from '../../src/types/downloads';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
 import DeviceInfo from 'react-native-device-info';
@@ -15,7 +16,10 @@ import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
-import { updateSettings } from '../../src/services/SettingsStore';
+import {
+  updateModelLoadParametersForModel,
+  updateSettings,
+} from '../../src/services/SettingsStore';
 import { notificationService } from '../../src/services/NotificationService';
 import { AppError } from '../../src/services/AppError';
 import {
@@ -45,7 +49,10 @@ const mockValidGgufHeaderBase64 = Buffer.from([
 const VALID_SHA256 = 'a'.repeat(64);
 const OTHER_VALID_SHA256 = 'b'.repeat(64);
 
-function runDownloadModel(overrides: Partial<ModelMetadata>) {
+function runDownloadModel(
+  overrides: Partial<ModelMetadata>,
+  downloadOptions?: ModelDownloadRequestOptions,
+) {
   const jobToken = 1;
   const model: ModelMetadata = {
     ...mockModel,
@@ -53,7 +60,7 @@ function runDownloadModel(overrides: Partial<ModelMetadata>) {
   };
 
   (modelDownloadManager as any).activeJob = { modelId: model.id, jobToken, resumable: null };
-  return (modelDownloadManager as any).downloadModel(model, jobToken);
+  return (modelDownloadManager as any).downloadModel(model, jobToken, downloadOptions);
 }
 
 function stringifyMockCalls(spy: jest.SpyInstance): string {
@@ -244,8 +251,15 @@ describe('ModelDownloadManager Basic', () => {
       lastUpdatedAt: 1,
     });
     (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
-    updateSettings({ allowCellularDownloads: false });
-    useDownloadStore.setState({ queue: [], activeDownloadId: null });
+    updateSettings({
+      allowCellularDownloads: false,
+      modelLoadParamsByModelId: {},
+    });
+    useDownloadStore.setState({
+      queue: [],
+      activeDownloadId: null,
+      downloadOptionsByModelId: {},
+    });
     (modelDownloadManager as any).isProcessing = false;
     (modelDownloadManager as any).activeJob = null;
     await backgroundTaskService.stopBackgroundTask();
@@ -264,6 +278,293 @@ describe('ModelDownloadManager Basic', () => {
       progressPercent: 0,
     });
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+  });
+
+  it('downloads and installs a Gemma MTP draft companion after the base model', async () => {
+    const draftArtifactId = 'mtp-draft-gemma';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const jobToken = 91;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(2);
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+      expect.objectContaining({
+        kind: 'speculative_draft',
+        installState: 'installed',
+        downloadProgress: 1,
+        sizeBytes: 1000,
+      }),
+    );
+    expect(llmEngineService.requestActiveMultimodalReadinessRefresh).toHaveBeenCalledWith(mtpModel.id);
+  });
+
+  it('downloads only the base model when the per-model MTP preference is off', async () => {
+    const draftArtifactId = 'mtp-draft-disabled';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    updateModelLoadParametersForModel(mtpModel.id, { mtpEnabled: false });
+    const jobToken = 95;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(1);
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)?.installState)
+      .toBe('remote');
+  });
+
+  it('downloads an explicitly requested MTP draft when the runtime preference is off', async () => {
+    const draftArtifactId = 'mtp-draft-explicit-prefetch';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    updateModelLoadParametersForModel(mtpModel.id, { mtpEnabled: false });
+    const jobToken = 96;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(
+      mtpModel,
+      jobToken,
+      { includeOptionalMtpDraft: true },
+    );
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(2);
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+      expect.objectContaining({
+        installState: 'installed',
+        downloadProgress: 1,
+      }),
+    );
+  });
+
+  it('blocks an unknown-size MTP draft until limited-verification consent is persisted', async () => {
+    const draftArtifactId = 'mtp-draft-unknown-size';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'http://example.com/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const jobToken = 93;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await expect((modelDownloadManager as any).downloadModel(mtpModel, jobToken)).rejects.toMatchObject({
+      code: 'download_size_unknown',
+      details: expect.objectContaining({
+        artifactKind: 'speculative_draft',
+        artifactId: draftArtifactId,
+      }),
+    });
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
+  it('does not fabricate size integrity after an explicitly accepted unknown-size MTP download', async () => {
+    const draftArtifactId = 'mtp-draft-unverified-size';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      allowUnknownSizeDownload: true,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'http://example.com/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const jobToken = 94;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    const installedDraft = completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId);
+    expect(installedDraft).toEqual(expect.objectContaining({
+      installState: 'installed',
+      sizeBytes: 1000,
+    }));
+    expect(installedDraft?.integrity).toBeUndefined();
+  });
+
+  it('keeps the base model downloaded when the optional Gemma MTP draft fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const draftArtifactId = 'mtp-draft-gemma-failure';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const baseResumable = { downloadAsync: jest.fn().mockResolvedValue({ status: 200 }) };
+    const draftResumable = { downloadAsync: jest.fn().mockRejectedValue(new Error('draft offline')) };
+    (FileSystem.createDownloadResumable as jest.Mock)
+      .mockReturnValueOnce(baseResumable)
+      .mockReturnValueOnce(draftResumable);
+    const jobToken = 92;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    try {
+      await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+      const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+      expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+      expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+        expect.objectContaining({
+          installState: 'failed',
+          errorMessage: 'draft offline',
+        }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('does not start queued downloads while private storage is blocked', async () => {
@@ -1855,6 +2156,279 @@ describe('ModelDownloadManager Basic', () => {
     }));
   });
 
+  it('keeps an installed base and reusable projector available after draft-only low-storage preflight', async () => {
+    const draftArtifactId = 'mtp-draft-resume-low-storage';
+    const installedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      lifecycleStatus: 'active',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    };
+    const draftOnlyModel: ModelMetadata = {
+      ...mockModel,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      projectorCandidates: [installedProjector],
+      selectedProjectorId: installedProjector.id,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 2000,
+        localPath: 'partial-mtp-draft.gguf',
+        installState: 'queued',
+        downloadProgress: 0.25,
+        resumeData: 'draft-resume-data',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+      if (uri === 'test-dir/models/mmproj-model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+      if (uri === 'test-dir/models/partial-mtp-draft.gguf') {
+        return { exists: true, size: 500 };
+      }
+
+      return uri.startsWith('test-dir/models/')
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 1000 };
+    });
+    (FileSystem.getFreeDiskStorageAsync as jest.Mock).mockResolvedValueOnce(1_000_001_500 - 1);
+    updateModelLoadParametersForModel(draftOnlyModel.id, { mtpEnabled: false });
+    useDownloadStore.setState({
+      queue: [{ ...draftOnlyModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: draftOnlyModel.id,
+    });
+
+    await expect(
+      runDownloadModel({
+        localPath: draftOnlyModel.localPath,
+        downloadProgress: 1,
+        projectorCandidates: draftOnlyModel.projectorCandidates,
+        selectedProjectorId: draftOnlyModel.selectedProjectorId,
+        artifacts: draftOnlyModel.artifacts,
+        speculativeDecoding: draftOnlyModel.speculativeDecoding,
+      }, { includeOptionalMtpDraft: true }),
+    ).rejects.toMatchObject({
+      code: 'download_disk_space_low',
+      details: expect.objectContaining({
+        requiredBytes: 1_000_001_500,
+        artifactKind: 'speculative_draft',
+      }),
+    });
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(FileSystem.getFreeDiskStorageAsync).toHaveBeenCalledTimes(1);
+    const entry = useDownloadStore.getState().queue.find((model) => model.id === draftOnlyModel.id);
+    expect(entry).toBeUndefined();
+    const persistedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(persistedModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.downloadErrorCode).toBeUndefined();
+    expect(persistedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: installedProjector.id,
+      lifecycleStatus: 'active',
+      matchStatus: 'matched',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.kind === 'main_model')).toEqual(
+      expect.objectContaining({
+        installState: 'installed',
+        localPath: 'model.gguf',
+      }),
+    );
+    expect(persistedModel.artifacts?.find((artifact) => (
+      artifact.kind === 'multimodal_projector' && artifact.id === installedProjector.id
+    ))).toEqual(expect.objectContaining({
+      installState: 'installed',
+      localPath: 'mmproj-model.gguf',
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+      expect.objectContaining({
+        installState: 'failed',
+        resumeData: 'draft-resume-data',
+        downloadProgress: 0.25,
+        errorCode: 'download_disk_space_low',
+      }),
+    );
+  });
+
+  it('keeps an installed base and reusable projector available after draft-only unknown-size preflight', async () => {
+    const draftArtifactId = 'mtp-draft-unknown-size-without-consent';
+    const installedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      lifecycleStatus: 'active',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    };
+    const draftOnlyModel: ModelMetadata = {
+      ...mockModel,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      projectorCandidates: [installedProjector],
+      selectedProjectorId: installedProjector.id,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/model.gguf' || uri === 'test-dir/models/mmproj-model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      return uri.startsWith('test-dir/models/')
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 1000 };
+    });
+    updateModelLoadParametersForModel(draftOnlyModel.id, { mtpEnabled: false });
+    useDownloadStore.setState({
+      queue: [{ ...draftOnlyModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: draftOnlyModel.id,
+    });
+
+    await expect(
+      runDownloadModel({
+        localPath: draftOnlyModel.localPath,
+        downloadProgress: 1,
+        projectorCandidates: draftOnlyModel.projectorCandidates,
+        selectedProjectorId: draftOnlyModel.selectedProjectorId,
+        artifacts: draftOnlyModel.artifacts,
+        speculativeDecoding: draftOnlyModel.speculativeDecoding,
+      }, { includeOptionalMtpDraft: true }),
+    ).rejects.toMatchObject({
+      code: 'download_size_unknown',
+      details: expect.objectContaining({
+        artifactKind: 'speculative_draft',
+        artifactId: draftArtifactId,
+      }),
+    });
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(FileSystem.getFreeDiskStorageAsync).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === draftOnlyModel.id)).toBeUndefined();
+    const persistedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(persistedModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.downloadErrorCode).toBeUndefined();
+    expect(persistedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: installedProjector.id,
+      lifecycleStatus: 'active',
+      matchStatus: 'matched',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.kind === 'main_model')).toEqual(
+      expect.objectContaining({
+        installState: 'installed',
+        localPath: 'model.gguf',
+      }),
+    );
+    expect(persistedModel.artifacts?.find((artifact) => (
+      artifact.kind === 'multimodal_projector' && artifact.id === installedProjector.id
+    ))).toEqual(expect.objectContaining({
+      installState: 'installed',
+      localPath: 'mmproj-model.gguf',
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+      expect.objectContaining({
+        installState: 'failed',
+        errorCode: 'download_size_unknown',
+        errorMessage: 'MODEL_SIZE_UNKNOWN',
+      }),
+    );
+  });
+
+  it('checks the required buffer for an accepted unknown-size draft-only download', async () => {
+    const draftArtifactId = 'mtp-draft-unknown-size-low-storage';
+    const draftOnlyModel: ModelMetadata = {
+      ...mockModel,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+      allowUnknownSizeDownload: true,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-dir/models/model.gguf'
+        ? { exists: true, size: 1000 }
+        : uri.startsWith('test-dir/models/')
+          ? { exists: false, size: 0 }
+          : { exists: true, size: 1000 }
+    ));
+    (FileSystem.getFreeDiskStorageAsync as jest.Mock).mockResolvedValueOnce(1_000_000_000 - 1);
+    updateModelLoadParametersForModel(draftOnlyModel.id, { mtpEnabled: false });
+    useDownloadStore.setState({
+      queue: [{ ...draftOnlyModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: draftOnlyModel.id,
+    });
+
+    await expect(
+      runDownloadModel({
+        localPath: draftOnlyModel.localPath,
+        downloadProgress: 1,
+        allowUnknownSizeDownload: true,
+        artifacts: draftOnlyModel.artifacts,
+        speculativeDecoding: draftOnlyModel.speculativeDecoding,
+      }, { includeOptionalMtpDraft: true }),
+    ).rejects.toMatchObject({
+      code: 'download_disk_space_low',
+      details: expect.objectContaining({
+        requiredBytes: 1_000_000_000,
+        artifactKind: 'speculative_draft',
+      }),
+    });
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
   it('checks known projector bytes for unknown-size base downloads', async () => {
     (FileSystem.getFreeDiskStorageAsync as jest.Mock).mockResolvedValueOnce(1_000_000_000 + 1_000 - 1);
     useDownloadStore.setState({
@@ -1934,6 +2508,20 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === mockModel.id)).toBeUndefined();
+    const persistedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(persistedModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.downloadErrorCode).toBeUndefined();
+    expect(persistedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: unknownSizeProjector.id,
+      lifecycleStatus: 'failed',
+      matchStatus: 'failed',
+      matchReason: 'download_disk_space_low',
+    }));
   });
 
   it('uses remaining model bytes and preserves valid resume data on low-storage preflight failure', async () => {

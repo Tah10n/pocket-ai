@@ -20,6 +20,7 @@ type ModelVariantSelectionSource = Pick<ModelMetadata, 'activeVariantId' | 'reso
   | 'resumeData'
   | 'sha256'
   | 'size'
+  | 'speculativeDecoding'
   | 'variants'
 >>;
 
@@ -93,6 +94,9 @@ function buildFallbackVariant(
     ...(selection.sha256 ? { sha256: selection.sha256 } : {}),
     ...(selection.memoryFitDecision ? { ramFit: selection.memoryFitDecision } : {}),
     ...(selection.memoryFitConfidence ? { ramFitConfidence: selection.memoryFitConfidence } : {}),
+    ...(matchingActiveVariant?.speculativeDecoding ?? selection.speculativeDecoding
+      ? { speculativeDecoding: matchingActiveVariant?.speculativeDecoding ?? selection.speculativeDecoding }
+      : {}),
   };
 }
 
@@ -277,6 +281,7 @@ export function applyModelVariantSelectionIfAvailable(
       ? selection.sha256 ?? (!isDifferentFile ? model.sha256 : undefined)
       : !isDifferentFile ? model.sha256 : undefined,
     activeVariantId: fallbackVariant.variantId,
+    speculativeDecoding: fallbackVariant.speculativeDecoding,
     metadataTrust: canUseSelectionFileMetadata
       ? selection.metadataTrust ?? (!isDifferentFile ? model.metadataTrust : undefined)
       : !isDifferentFile ? model.metadataTrust : undefined,
@@ -387,6 +392,7 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
     resolvedFileName: variant.fileName,
     sha256: variant.sha256 ?? (!isDifferentFile ? model.sha256 : undefined),
     activeVariantId: variant.variantId,
+    speculativeDecoding: variant.speculativeDecoding,
     metadataTrust: !isDifferentFile && model.metadataTrust
       ? model.metadataTrust
       : selectedSize !== null ? 'trusted_remote' : undefined,

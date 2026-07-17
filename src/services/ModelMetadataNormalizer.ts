@@ -56,6 +56,7 @@ import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
 import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
 import { normalizeMultimodalReadinessState as normalizeReadinessSupport } from '../utils/multimodalReadiness';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
+import { normalizeModelSpeculativeDecodingConfig } from '../utils/modelSpeculativeDecoding';
 import {
   canonicalizeProjectorCandidateAliases,
   getProjectorExactScopeKey,
@@ -64,7 +65,6 @@ import {
 import {
   isProjectorFileName,
   isSupportedGgufFileName,
-  isUnsupportedMtpFileName,
 } from './ModelCatalogFileSelector';
 
 type PersistedModelMetadata = Partial<ModelMetadata> & {
@@ -555,6 +555,7 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
     : undefined;
   const projectorCandidates = normalizeProjectorArtifacts(record.projectorCandidates);
   const selectedProjectorId = normalizeNonEmptyString(record.selectedProjectorId);
+  const speculativeDecoding = normalizeModelSpeculativeDecodingConfig(record.speculativeDecoding);
 
   return {
     variantId,
@@ -571,6 +572,7 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
     ...(visionConfidence ? { visionConfidence } : {}),
     ...(projectorCandidates ? { projectorCandidates } : {}),
     ...(selectedProjectorId ? { selectedProjectorId } : {}),
+    ...(speculativeDecoding ? { speculativeDecoding } : {}),
   };
 }
 
@@ -584,7 +586,7 @@ function isSupportedOpaqueActiveVariantId(value: string): boolean {
     return isSupportedGgufFileName(normalized);
   }
 
-  return !isProjectorFileName(normalized) && !isUnsupportedMtpFileName(normalized);
+  return !isProjectorFileName(normalized);
 }
 
 function resolveActiveVariantId(
@@ -687,6 +689,9 @@ export function normalizePersistedModelMetadata(
   const normalizedModelType = normalizeNonEmptyString(model.modelType);
   const normalizedArchitectures = normalizeStringArray(model.architectures);
   const normalizedTags = normalizeStringArray(model.tags);
+  const normalizedModelSpeculativeDecoding = normalizeModelSpeculativeDecodingConfig(
+    (model as PersistedModelMetadata & { speculativeDecoding?: unknown }).speculativeDecoding,
+  );
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
   );
@@ -1057,6 +1062,31 @@ export function normalizePersistedModelMetadata(
           : artifact;
       })
     : persistedArtifacts;
+  const isSpeculativeConfigBackedByArtifact = (
+    config: NonNullable<ModelMetadata['speculativeDecoding']>,
+  ): boolean => config.mode === 'embedded' || reconciledPersistedArtifacts?.some((artifact) => (
+    artifact.kind === 'speculative_draft' && artifact.id === config.draftArtifactId
+  )) === true;
+  const variantsWithValidSpeculativeDecoding = variants?.map((variant) => {
+    if (!variant.speculativeDecoding || isSpeculativeConfigBackedByArtifact(variant.speculativeDecoding)) {
+      return variant;
+    }
+
+    const { speculativeDecoding: _invalidSpeculativeDecoding, ...variantWithoutSpeculativeDecoding } = variant;
+    return variantWithoutSpeculativeDecoding;
+  });
+  const activeVariantWithValidSpeculativeDecoding = resolveActiveModelVariant({
+    activeVariantId,
+    resolvedFileName: normalizedResolvedFileName,
+    variants: variantsWithValidSpeculativeDecoding,
+  });
+  const speculativeDecodingCandidate = activeVariantWithValidSpeculativeDecoding
+    ? activeVariantWithValidSpeculativeDecoding.speculativeDecoding
+    : normalizedModelSpeculativeDecoding;
+  const speculativeDecoding = speculativeDecodingCandidate
+    && isSpeculativeConfigBackedByArtifact(speculativeDecodingCandidate)
+    ? speculativeDecodingCandidate
+    : undefined;
   const artifacts = deriveArtifactsFromLegacyModel({
     artifacts: reconciledPersistedArtifacts,
     downloadErrorAt,
@@ -1138,7 +1168,7 @@ export function normalizePersistedModelMetadata(
     likes: normalizeNullableCount(model.likes),
     tags: normalizedTags,
     description: normalizeNonEmptyString(model.description),
-    variants,
+    variants: variantsWithValidSpeculativeDecoding,
     activeVariantId,
     ...(chatModalities !== undefined ? { chatModalities } : {}),
     ...(shouldPersistArtifacts ? { artifacts } : {}),
@@ -1149,5 +1179,6 @@ export function normalizePersistedModelMetadata(
     ...(projectorCandidates !== undefined ? { projectorCandidates } : {}),
     ...(selectedProjectorId !== undefined ? { selectedProjectorId } : {}),
     ...(multimodalReadiness !== undefined ? { multimodalReadiness } : {}),
+    ...(speculativeDecoding !== undefined ? { speculativeDecoding } : {}),
   };
 }

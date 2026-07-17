@@ -3,6 +3,7 @@ import type {
   ChatImageAttachment,
   MultimodalReadinessState,
 } from './multimodal';
+import type { InferenceCompletionTelemetry } from './models';
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from './attachments';
 import { normalizeReasoningEffort, type ReasoningEffort } from './reasoning';
 
@@ -45,6 +46,7 @@ export interface ChatMessage {
   createdAt: number;
   state: ChatMessageState;
   tokensPerSec?: number;
+  inferenceMetrics?: InferenceCompletionTelemetry;
   errorCode?: string;
   errorMessage?: string;
   regeneratesMessageId?: string;

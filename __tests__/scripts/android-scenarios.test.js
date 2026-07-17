@@ -7,6 +7,7 @@ const {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  captureSettledScenarioScreenshot,
   activateClearedCatalogFilterOption,
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
   clearCatalogFiltersIfPresent,
@@ -321,6 +322,28 @@ describe('android-scenarios screenshot capture', () => {
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });
     }
+  });
+
+  it('waits for the rendered surface before capturing a passed scenario', async () => {
+    const events = [];
+    const delayFn = jest.fn(async (delayMs) => {
+      events.push(`wait:${delayMs}`);
+    });
+    const context = {
+      captureScreenshot: jest.fn((fileName) => {
+        events.push(`capture:${fileName}`);
+        return fileName;
+      }),
+    };
+
+    await expect(captureSettledScenarioScreenshot(context, 'bottom-tabs.png', {
+      delayFn,
+      settleDelayMs: 25,
+    })).resolves.toBe('bottom-tabs.png');
+
+    expect(delayFn).toHaveBeenCalledWith(25);
+    expect(context.captureScreenshot).toHaveBeenCalledWith('bottom-tabs.png');
+    expect(events).toEqual(['wait:25', 'capture:bottom-tabs.png']);
   });
 });
 

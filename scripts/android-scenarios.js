@@ -417,6 +417,10 @@ const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
+// Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
+// Give successful routes a short visual-settle window so QA evidence does not capture a
+// transient black surface immediately after navigation.
+const PASSED_SCENARIO_SCREENSHOT_SETTLE_MS = 1_000;
 const REPORT_ARTIFACT_PATH_FIELDS = ["screenshotPath", "uiDumpPath", "logcatPath"];
 
 if (require.main === module) {
@@ -479,7 +483,10 @@ async function main() {
           continue;
         }
 
-        const screenshotPath = context.captureScreenshot(`${scenario.id}.png`);
+        const screenshotPath = await captureSettledScenarioScreenshot(
+          context,
+          `${scenario.id}.png`
+        );
         results.push({
           id: scenario.id,
           tier: scenario.tier,
@@ -759,6 +766,14 @@ function createScenarioContext(adbPath, serial) {
       return captureAndroidScreenshot(adbPath, serial, screenshotPath);
     },
   };
+}
+
+async function captureSettledScenarioScreenshot(context, fileName, options = {}) {
+  const wait = options.delayFn ?? delay;
+  const settleDelayMs = options.settleDelayMs ?? PASSED_SCENARIO_SCREENSHOT_SETTLE_MS;
+
+  await wait(settleDelayMs);
+  return context.captureScreenshot(fileName);
 }
 
 function readExpoConfig() {
@@ -4213,6 +4228,7 @@ module.exports = {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  captureSettledScenarioScreenshot,
   activateClearedCatalogFilterOption,
   clearCatalogFiltersIfPresent,
   clearFocusedTextInput,

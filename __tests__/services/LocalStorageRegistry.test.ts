@@ -709,6 +709,55 @@ describe('LocalStorageRegistry', () => {
     }));
   });
 
+  it('resets an installed Gemma MTP drafter when its local file is missing', async () => {
+    const model = createMockModel({
+      artifacts: [{
+        id: 'test/model:mtp-draft',
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-MTP-Q8_0.gguf',
+        downloadUrl: 'https://example.com/MTP/gemma-MTP-Q8_0.gguf',
+        sizeBytes: 200,
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed',
+        downloadProgress: 1,
+        resumeData: 'stale-resume-data',
+        errorCode: 'STALE_ERROR',
+        errorMessage: 'stale failure',
+        updatedAt: 123,
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId: 'test/model:mtp-draft',
+      },
+    });
+    (registry.getModels as jest.Mock) = jest.fn().mockReturnValue([model]);
+    (registry.saveModels as jest.Mock) = jest.fn();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri.endsWith('/model.gguf')
+        ? { exists: true, size: 1000 }
+        : { exists: false }
+    ));
+
+    await registry.validateRegistry();
+
+    const updatedModel = (registry.saveModels as jest.Mock).mock.calls[0][0][0] as ModelMetadata;
+    expect(updatedModel.artifacts?.find((artifact) => artifact.id === 'test/model:mtp-draft')).toEqual(
+      expect.objectContaining({
+        installState: 'missing',
+        localPath: undefined,
+        downloadProgress: undefined,
+        resumeData: undefined,
+        errorCode: undefined,
+        errorMessage: undefined,
+        updatedAt: undefined,
+      }),
+    );
+  });
+
   it('validates case-distinct Android projector paths independently', async () => {
     const upperProjector = createProjector({
       id: 'test/model:upper-projector',

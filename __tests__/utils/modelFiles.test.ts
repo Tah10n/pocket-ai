@@ -1,5 +1,7 @@
 import {
   getCandidateModelDownloadFileNames,
+  getCandidateCompanionArtifactDownloadFileNames,
+  getCompanionArtifactDownloadFileName,
   getCandidateProjectorDownloadFileNames,
   getLegacyModelDownloadFileName,
   getModelDownloadFileName,
@@ -115,6 +117,21 @@ describe('modelFiles', () => {
     expect(getCandidateProjectorDownloadFileNames(projector)).toEqual([
       fileName,
       'mmproj-model.gguf',
+    ]);
+  });
+
+  it('builds a safe collision-resistant filename for a nested Gemma MTP companion', () => {
+    const artifact = {
+      id: 'mtp-draft-a',
+      remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+      hfRevision: 'revision-a',
+      localPath: '../unsafe.gguf',
+    };
+    const fileName = getCompanionArtifactDownloadFileName('unsloth/gemma-4-12b-it-GGUF', artifact);
+
+    expect(fileName).toMatch(/^gemma-4-12b-it-GGUF-gemma-4-12b-it-MTP-Q8_0-revision-a-[a-z0-9]+\.gguf$/);
+    expect(getCandidateCompanionArtifactDownloadFileNames('unsloth/gemma-4-12b-it-GGUF', artifact)).toEqual([
+      fileName,
     ]);
   });
 });

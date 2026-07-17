@@ -413,7 +413,7 @@ function hasTrackableProjectorArtifactLocalFile(
     );
 }
 
-async function resolveStoredProjectorArtifacts(
+async function resolveStoredCompanionArtifacts(
   model: ModelMetadata,
   statLimiter: DirectoryStatLimiter,
   localSizeByPath: Map<string, Promise<number | null>>,
@@ -424,7 +424,7 @@ async function resolveStoredProjectorArtifacts(
 
   const resolvedByArtifact = new Map<ModelArtifactMetadata, ModelArtifactMetadata>();
   await Promise.all(model.artifacts.map(async (artifact) => {
-    if (artifact.kind !== 'multimodal_projector') {
+    if (artifact.kind === 'main_model') {
       return;
     }
 
@@ -468,7 +468,7 @@ async function resolveStoredArtifactSizes(
   const [resolvedModelSize, modelWithResolvedProjectors, resolvedArtifacts] = await Promise.all([
     resolveStoredModelSize(model, statLimiter),
     resolveStoredProjectorCandidates(model, statLimiter, localSizeByPath),
-    resolveStoredProjectorArtifacts(model, statLimiter, localSizeByPath),
+    resolveStoredCompanionArtifacts(model, statLimiter, localSizeByPath),
   ]);
 
   const shouldUpdateModelSize = resolvedModelSize !== null && resolvedModelSize !== model.size;
@@ -680,7 +680,7 @@ function getDownloadedModelsStoredBytes(downloadedModels: ModelMetadata[]): numb
     }, 0);
 
     const artifactProjectorSizeBytes = (model.artifacts ?? []).reduce((projectorSum, artifact) => {
-      if (artifact.kind !== 'multimodal_projector') {
+      if (artifact.kind === 'main_model') {
         return projectorSum;
       }
 

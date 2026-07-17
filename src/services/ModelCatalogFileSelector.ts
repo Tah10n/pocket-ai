@@ -8,6 +8,11 @@ import type {
 import {
   isProjectorFileName,
 } from '../utils/modelProjectors';
+import {
+  buildEmbeddedMtpConfig,
+  isExplicitMtpDraftFileName,
+  isMtpGgufFileName,
+} from '../utils/modelSpeculativeDecoding';
 import { normalizeSha256Digest } from '../utils/sha256';
 
 export { isProjectorFileName } from '../utils/modelProjectors';
@@ -98,22 +103,6 @@ const EXCLUDED_CATALOG_SIGNAL_FRAGMENTS = [
   'flux',
 ];
 
-const UNSUPPORTED_MTP_SIGNAL_PATTERNS = [
-  /(?:^|[^a-z0-9])mtp(?:$|[^a-z0-9])/i,
-  /(?:^|[^a-z0-9])next[-_ ]?n(?:$|[^a-z0-9])/i,
-  /multi[-_ ]?token[-_ ]?prediction/i,
-] as const;
-
-const UNSUPPORTED_MTP_METADATA_KEYS = [
-  'nextn_predict_layers',
-  'next_n_predict_layers',
-  'num_nextn_predict_layers',
-  'num_next_n_predict_layers',
-  'mtp_depth',
-  'mtp_layers',
-  'mtp_num_layers',
-] as const;
-
 export function filterCatalogSearchModels(models: ModelMetadata[]): ModelMetadata[] {
   return models.filter((model) => isCatalogModelSupported(model));
 }
@@ -161,13 +150,6 @@ function hasUnsupportedCatalogSignals(options: {
     return true;
   }
 
-  if (
-    hasUnsupportedMtpConfig(options.config)
-    || hasUnsupportedMtpMetadata(options.ggufMetadata)
-  ) {
-    return true;
-  }
-
   const signals = [
     ...normalizeCatalogSignals(options.identifiers),
     ...normalizeCatalogSignals(options.tags),
@@ -179,7 +161,6 @@ function hasUnsupportedCatalogSignals(options: {
     isExcludedCatalogPipelineSignal(signal, options.allowMultimodalChatPipelineTag)
     || EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES.has(signal)
     || EXCLUDED_CATALOG_SIGNAL_FRAGMENTS.some((fragment) => signal.includes(fragment))
-    || hasUnsupportedMtpSignal(signal)
   ));
 }
 
@@ -207,65 +188,10 @@ function normalizeCatalogSignals(values: (string | undefined)[] | undefined): st
     .filter((value): value is string => value !== null);
 }
 
-function hasUnsupportedMtpSignal(value: string): boolean {
-  return UNSUPPORTED_MTP_SIGNAL_PATTERNS.some((pattern) => pattern.test(value));
-}
-
-function hasPositiveNumericValue(value: unknown): boolean {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0;
-  }
-
-  if (typeof value === 'string') {
-    const normalized = Number(value.trim());
-    return Number.isFinite(normalized) && normalized > 0;
-  }
-
-  return false;
-}
-
-function normalizeMetadataKey(value: string): string {
-  return value.trim().toLowerCase().replace(/[.\- ]/g, '_');
-}
-
-function isUnsupportedMtpMetadataKey(key: string): boolean {
-  const normalizedKey = normalizeMetadataKey(key);
-  return UNSUPPORTED_MTP_METADATA_KEYS.some((candidate) => (
-    normalizedKey === candidate || normalizedKey.endsWith(`_${candidate}`)
-  ));
-}
-
-function hasUnsupportedMtpMetadata(metadata: Record<string, unknown> | undefined): boolean {
-  if (!metadata) {
-    return false;
-  }
-
-  return Object.entries(metadata).some(([key, value]) => (
-    isUnsupportedMtpMetadataKey(key) && hasPositiveNumericValue(value)
-  ));
-}
-
-function hasUnsupportedMtpConfig(
-  config: HuggingFaceModelConfig | undefined,
-  seen: Set<HuggingFaceModelConfig> = new Set(),
-): boolean {
-  if (!config || seen.has(config)) {
-    return false;
-  }
-
-  seen.add(config);
-
-  if (hasUnsupportedMtpMetadata(config as Record<string, unknown>)) {
-    return true;
-  }
-
-  return hasUnsupportedMtpConfig(config.text_config, seen);
-}
-
 export function selectTreeEntryForModel(model: ModelMetadata, entries: HuggingFaceTreeEntry[]): HuggingFaceTreeEntry | undefined {
   if (model.resolvedFileName) {
     const exactMatch = entries.find((entry) => getFileName(entry) === model.resolvedFileName);
-    if (exactMatch && isEligibleGgufEntry(exactMatch)) {
+    if (exactMatch && isEligibleGgufEntry(exactMatch, entries)) {
       return exactMatch;
     }
   }
@@ -299,7 +225,7 @@ export function buildCatalogModelVariants(
 
 export function rankCatalogGgufEntries<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(entries: T[]): T[] {
   return entries
-    .filter((entry) => isEligibleGgufEntry(entry))
+    .filter((entry) => isEligibleGgufEntry(entry, entries))
     .sort(compareCatalogGgufEntries);
 }
 
@@ -337,7 +263,7 @@ export function buildCatalogModelVariantsFromRankedEntries(
   },
 ): ModelVariant[] {
   const variants = rankedEntries
-    .filter((entry) => isEligibleGgufEntry(entry))
+    .filter((entry) => isEligibleGgufEntry(entry, rankedEntries))
     .map((entry) => {
       const fileName = getFileName(entry);
       return {
@@ -346,6 +272,9 @@ export function buildCatalogModelVariantsFromRankedEntries(
         quantizationLabel: resolveQuantizationLabel(fileName) ?? 'GGUF',
         size: getFileSize(entry),
         sha256: getFileSha(entry),
+        ...(isMtpGgufFileName(fileName)
+          ? { speculativeDecoding: buildEmbeddedMtpConfig(fileName) }
+          : {}),
       };
     });
 
@@ -463,20 +392,68 @@ export function resolveQuantizationLabel(fileName: string): string | null {
   return null;
 }
 
-export function isUnsupportedMtpFileName(fileName: string): boolean {
-  return hasUnsupportedMtpSignal(fileName.trim());
+export function isMtpFileName(fileName: string): boolean {
+  return isMtpGgufFileName(fileName);
+}
+
+export function isMtpDraftCompanionFileName(fileName: string): boolean {
+  return isExplicitMtpDraftFileName(fileName);
 }
 
 export function isSupportedGgufFileName(fileName: string): boolean {
   const normalized = fileName.trim();
   return normalized.toLowerCase().endsWith('.gguf')
     && !isProjectorFileName(normalized)
-    && !isUnsupportedMtpFileName(normalized);
+    && !isMtpDraftCompanionFileName(normalized);
 }
 
-export function isEligibleGgufEntry(entry: HuggingFaceSibling | HuggingFaceTreeEntry): boolean {
+export function isMtpDraftCompanionEntry<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(
+  entry: T,
+  entries: readonly T[],
+): boolean {
+  const fileName = getFileName(entry);
+  if (isMtpDraftCompanionFileName(fileName)) {
+    return true;
+  }
+  if (!isMtpGgufFileName(fileName)) {
+    return false;
+  }
+
+  const nonMtpMainSizes = entries.flatMap((candidate) => {
+    const candidateFileName = getFileName(candidate);
+    if (
+      !candidateFileName.toLowerCase().endsWith('.gguf')
+      || isProjectorFileName(candidateFileName)
+      || isMtpGgufFileName(candidateFileName)
+    ) {
+      return [];
+    }
+
+    const size = getFileSize(candidate);
+    return size !== null && size >= MIN_GGUF_BYTES ? [size] : [];
+  });
+  const entrySize = getFileSize(entry);
+  const smallestMainSize = nonMtpMainSizes.length > 0 ? Math.min(...nonMtpMainSizes) : null;
+  const hasDraftSuffix = /(?:^|[-_.])mtp(?=\.gguf$)/iu.test(fileName.trim());
+
+  return hasDraftSuffix
+    && entrySize !== null
+    && smallestMainSize !== null
+    && entrySize < smallestMainSize * 0.5;
+}
+
+export function getMtpDraftCompanionEntries<T extends HuggingFaceSibling | HuggingFaceTreeEntry>(
+  entries: T[],
+): T[] {
+  return entries.filter((entry) => isMtpDraftCompanionEntry(entry, entries));
+}
+
+export function isEligibleGgufEntry(
+  entry: HuggingFaceSibling | HuggingFaceTreeEntry,
+  entries: readonly (HuggingFaceSibling | HuggingFaceTreeEntry)[] = [entry],
+): boolean {
   const name = getFileName(entry);
-  if (!isSupportedGgufFileName(name)) {
+  if (!isSupportedGgufFileName(name) || isMtpDraftCompanionEntry(entry, entries)) {
     return false;
   }
 
@@ -511,6 +488,14 @@ function compareCatalogGgufEntries(
 ): number {
   const leftName = getFileName(left);
   const rightName = getFileName(right);
+  const leftIsMtp = isMtpGgufFileName(leftName);
+  const rightIsMtp = isMtpGgufFileName(rightName);
+  if (leftIsMtp !== rightIsMtp) {
+    // Keep the mature non-speculative variant as the automatic default whenever
+    // a repository offers both. MTP stays selectable and is the default in
+    // MTP-only repositories.
+    return leftIsMtp ? 1 : -1;
+  }
   const leftRank = getDefaultQuantizationRank(resolveQuantizationLabel(leftName));
   const rightRank = getDefaultQuantizationRank(resolveQuantizationLabel(rightName));
   if (leftRank !== rightRank) {

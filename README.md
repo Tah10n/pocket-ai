@@ -64,6 +64,7 @@
 - Per-model generation controls: temperature, top-p/k, min-p, repetition penalty, seed
 - Load profiles for GPU layers, context window, and KV cache precision
 - Hardware acceleration when available (Android OpenCL GPU, Android Hexagon/HTP NPU (experimental) via [`llama.rn`](https://github.com/mybigday/llama.rn)). Pocket AI uses backend discovery to decide what is safe to attempt; if discovery is unavailable, it forces CPU for stability.
+- MTP speculative decoding for compatible GGUF models, including embedded MTP models and Gemma models that publish a separate MTP draft GGUF
 - RAM-aware safety checks that block loading models that won't fit
 - Context window bounded by model metadata and estimated device RAM headroom
 
@@ -81,6 +82,7 @@
 - Storage manager for unloading, offloading, and clearing model data
 - Per-model settings survive model removal for easy re-download
 - Downloads track the selected GGUF file variant so verification and re-download target the same file
+- Optional Gemma MTP draft files use the same resumable download, verification, cleanup, and storage-accounting lifecycle as other model artifacts
 - Bounded local cache for catalog results with online revalidation
 - Background model downloads with a persistent progress notification on Android
 - Explicit confirmation before downloading models with unverified file sizes

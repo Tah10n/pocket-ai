@@ -15,7 +15,10 @@ import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
-import { updateSettings } from '../../src/services/SettingsStore';
+import {
+  updateModelLoadParametersForModel,
+  updateSettings,
+} from '../../src/services/SettingsStore';
 import { notificationService } from '../../src/services/NotificationService';
 import { AppError } from '../../src/services/AppError';
 import {
@@ -244,7 +247,10 @@ describe('ModelDownloadManager Basic', () => {
       lastUpdatedAt: 1,
     });
     (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
-    updateSettings({ allowCellularDownloads: false });
+    updateSettings({
+      allowCellularDownloads: false,
+      modelLoadParamsByModelId: {},
+    });
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     (modelDownloadManager as any).isProcessing = false;
     (modelDownloadManager as any).activeJob = null;
@@ -264,6 +270,243 @@ describe('ModelDownloadManager Basic', () => {
       progressPercent: 0,
     });
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+  });
+
+  it('downloads and installs a Gemma MTP draft companion after the base model', async () => {
+    const draftArtifactId = 'mtp-draft-gemma';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const jobToken = 91;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(2);
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+      expect.objectContaining({
+        kind: 'speculative_draft',
+        installState: 'installed',
+        downloadProgress: 1,
+        sizeBytes: 1000,
+      }),
+    );
+    expect(llmEngineService.requestActiveMultimodalReadinessRefresh).toHaveBeenCalledWith(mtpModel.id);
+  });
+
+  it('downloads only the base model when the per-model MTP preference is off', async () => {
+    const draftArtifactId = 'mtp-draft-disabled';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    updateModelLoadParametersForModel(mtpModel.id, { mtpEnabled: false });
+    const jobToken = 95;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(1);
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)?.installState)
+      .toBe('remote');
+  });
+
+  it('blocks an unknown-size MTP draft until limited-verification consent is persisted', async () => {
+    const draftArtifactId = 'mtp-draft-unknown-size';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'http://example.com/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const jobToken = 93;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await expect((modelDownloadManager as any).downloadModel(mtpModel, jobToken)).rejects.toMatchObject({
+      code: 'download_size_unknown',
+      details: expect.objectContaining({
+        artifactKind: 'speculative_draft',
+        artifactId: draftArtifactId,
+      }),
+    });
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+  });
+
+  it('does not fabricate size integrity after an explicitly accepted unknown-size MTP download', async () => {
+    const draftArtifactId = 'mtp-draft-unverified-size';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      allowUnknownSizeDownload: true,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'draft/gemma-drafter.gguf',
+        downloadUrl: 'http://example.com/draft/gemma-drafter.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const jobToken = 94;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+    const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    const installedDraft = completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId);
+    expect(installedDraft).toEqual(expect.objectContaining({
+      installState: 'installed',
+      sizeBytes: 1000,
+    }));
+    expect(installedDraft?.integrity).toBeUndefined();
+  });
+
+  it('keeps the base model downloaded when the optional Gemma MTP draft fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const draftArtifactId = 'mtp-draft-gemma-failure';
+    const mtpModel: ModelMetadata = {
+      ...mockModel,
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 1000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    const baseResumable = { downloadAsync: jest.fn().mockResolvedValue({ status: 200 }) };
+    const draftResumable = { downloadAsync: jest.fn().mockRejectedValue(new Error('draft offline')) };
+    (FileSystem.createDownloadResumable as jest.Mock)
+      .mockReturnValueOnce(baseResumable)
+      .mockReturnValueOnce(draftResumable);
+    const jobToken = 92;
+    useDownloadStore.setState({
+      queue: [{ ...mtpModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: mtpModel.id,
+    });
+    (modelDownloadManager as any).activeJob = {
+      modelId: mtpModel.id,
+      jobToken,
+      resumable: null,
+      stopReason: null,
+    };
+
+    try {
+      await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+
+      const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+      expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+      expect(completedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+        expect.objectContaining({
+          installState: 'failed',
+          errorMessage: 'draft offline',
+        }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('does not start queued downloads while private storage is blocked', async () => {

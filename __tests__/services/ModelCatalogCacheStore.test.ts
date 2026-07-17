@@ -1824,6 +1824,53 @@ describe('ModelCatalogCacheStore', () => {
     }
   });
 
+  it('keeps an explicit same-repository draft directory as remote anonymous MTP metadata', () => {
+    const id = 'unsloth/gemma-4-12b-it-GGUF';
+    const draftArtifactId = 'mtp-draft-gemma';
+    const model = buildModel({
+      id,
+      size: 7_000_000_000,
+      resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
+      downloadUrl: buildHuggingFaceResolveUrl(id, 'gemma-4-12b-it-Q4_K_M.gguf', 'main'),
+      hfRevision: 'main',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        hfRevision: 'main',
+        remoteFileName: 'draft/gemma-4-12b-it-Q8_0.gguf',
+        downloadUrl: buildHuggingFaceResolveUrl(id, 'draft/gemma-4-12b-it-Q8_0.gguf', 'main'),
+        sizeBytes: 465_000_000,
+        localPath: 'private-gemma-mtp.gguf',
+        installState: 'installed',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+
+    for (const cached of roundTripAnonymousModel(model)) {
+      const cachedDraft = cached.artifacts?.find((artifact) => artifact.kind === 'speculative_draft');
+      expect(cachedDraft).toEqual(
+        expect.objectContaining({
+          id: draftArtifactId,
+          remoteFileName: 'draft/gemma-4-12b-it-Q8_0.gguf',
+          installState: 'remote',
+        }),
+      );
+      expect(cachedDraft).not.toHaveProperty('localPath');
+      expect(cached.speculativeDecoding).toEqual(expect.objectContaining({
+        mode: 'draft_model',
+        draftArtifactId,
+      }));
+    }
+  });
+
   it('drops local-only main artifacts even when a resolved filename is present', () => {
     const sanitized = sanitizeCatalogModelRuntimeState(buildModel({
       id: 'matrix/local-main-artifact',

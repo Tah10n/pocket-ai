@@ -792,6 +792,51 @@ describe('ModelDetailsScreen', () => {
     expect(screen.getByText('model-parameters-sheet')).toBeTruthy();
   });
 
+  it('offers the optional Gemma MTP draft download for an existing base-model installation', async () => {
+    const draftArtifactId = 'mtp-draft-gemma';
+    const downloadedModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'gemma.gguf',
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'https://huggingface.co/org/model/resolve/main/MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: 465_000_000,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    });
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(downloadedModel);
+    modelCatalogService.getModelDetails.mockResolvedValue(downloadedModel);
+    modelCatalogService.refreshModelMetadata.mockResolvedValue(downloadedModel);
+
+    const screen = render(<ModelDetailsScreen />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('models.mtp.title')).toBeTruthy();
+    expect(screen.getByText('models.mtp.availableBadge')).toBeTruthy();
+    await act(async () => {
+      fireEvent.press(screen.getByTestId('model-details-download-mtp-draft'));
+      await Promise.resolve();
+    });
+
+    expect(mockStartDownload).toHaveBeenCalledWith(expect.objectContaining({
+      id: downloadedModel.id,
+      speculativeDecoding: expect.objectContaining({ mode: 'draft_model' }),
+    }));
+  });
+
   it('shows downloaded model quantization in the selector row without a separate label', async () => {
     const downloadedModel = createModel({
       lifecycleStatus: LifecycleStatus.DOWNLOADED,

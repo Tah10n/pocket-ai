@@ -38,6 +38,68 @@ export type ModelMemoryFitDecision =
 
 export type ModelMemoryFitConfidence = 'high' | 'medium' | 'low';
 
+export type ModelSpeculativeDecodingMode = 'embedded' | 'draft_model';
+
+export interface ModelSpeculativeDecodingConfig {
+  type: 'mtp';
+  mode: ModelSpeculativeDecodingMode;
+  enabled: boolean;
+  maxDraftTokens: number;
+  draftArtifactId?: string;
+}
+
+export type MtpFallbackReason =
+  | 'configured_draft_artifact_missing'
+  | 'draft_artifact_unavailable'
+  | 'memory_budget'
+  | 'initialization_failed'
+  | 'completion_failed';
+
+export interface MtpCompletionTelemetry {
+  requested: boolean;
+  attempted: boolean;
+  fallbackUsed: boolean;
+  draftTokens: number;
+  draftTokensAccepted: number;
+  acceptanceRate?: number;
+  fallbackReason?: MtpFallbackReason;
+}
+
+export interface InferenceCompletionTelemetry {
+  tokensPredicted: number;
+  tokensEvaluated: number;
+  predictedPerSecond?: number;
+  promptPerSecond?: number;
+  timeToFirstTokenMs?: number;
+  mtp: MtpCompletionTelemetry;
+}
+
+export interface EngineSpeculativeDecodingMemoryDiagnostics {
+  beforeLoadAppBytes?: number;
+  afterModelInitAppBytes?: number;
+  afterFirstTokenAppBytes?: number;
+  modelInitAppDeltaBytes?: number;
+  firstTokenAppDeltaBytes?: number;
+  beforeLoadPssBytes?: number;
+  afterModelInitPssBytes?: number;
+  afterFirstTokenPssBytes?: number;
+  modelInitPssDeltaBytes?: number;
+  firstTokenPssDeltaBytes?: number;
+}
+
+export interface EngineSpeculativeDecodingDiagnostics {
+  configured: boolean;
+  enabled: boolean;
+  active: boolean;
+  mode?: ModelSpeculativeDecodingMode;
+  maxDraftTokens?: number;
+  draftArtifactId?: string;
+  draftModelBytes?: number;
+  fallbackReason?: MtpFallbackReason;
+  memory?: EngineSpeculativeDecodingMemoryDiagnostics;
+  lastCompletion?: InferenceCompletionTelemetry;
+}
+
 export interface ModelGgufMetadata {
   [key: string]: string | number | undefined;
   totalBytes?: number;
@@ -79,6 +141,7 @@ export interface ModelVariant {
   visionConfidence?: VisionCapabilityConfidence;
   projectorCandidates?: ProjectorArtifact[];
   selectedProjectorId?: string;
+  speculativeDecoding?: ModelSpeculativeDecodingConfig;
 }
 
 export interface ModelThinkingCapabilitySnapshot {
@@ -98,7 +161,8 @@ export interface ModelFileIntegrityMarker {
 
 export type ModelArtifactKind =
   | 'main_model'
-  | 'multimodal_projector';
+  | 'multimodal_projector'
+  | 'speculative_draft';
 
 export type ModelArtifactRequiredInput = 'text' | 'image' | 'audio';
 
@@ -187,6 +251,7 @@ export interface ModelMetadata {
   projectorCandidates?: ProjectorArtifact[];
   selectedProjectorId?: string;
   multimodalReadiness?: MultimodalReadinessState;
+  speculativeDecoding?: ModelSpeculativeDecodingConfig;
 }
 
 export enum EngineStatus {
@@ -245,6 +310,7 @@ export interface EngineDiagnostics {
   lastLifecycleEvent?: EngineLifecycleEvent;
   lastLifecycleError?: string;
   multimodal?: MultimodalDiagnosticsSummary;
+  speculativeDecoding?: EngineSpeculativeDecodingDiagnostics;
 }
 
 export interface EngineState {

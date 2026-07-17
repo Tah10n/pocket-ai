@@ -1,10 +1,11 @@
 import { Alert } from 'react-native';
 import { hardwareListenerService } from '../services/HardwareListenerService';
 import { modelCatalogService } from '../services/ModelCatalogService';
-import { getSettings } from '../services/SettingsStore';
+import { getModelLoadParametersForModel, getSettings } from '../services/SettingsStore';
 import { isPrivateStorageWritable } from '../services/storage';
 import { selectModelProjectorLifecycleState, type ModelProjectorLifecycleState } from '../store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
+import { getSelectedMtpDraftArtifact } from './modelSpeculativeDecoding';
 
 type Translate = (key: string) => string;
 
@@ -173,7 +174,14 @@ export function startModelDownloadFlow({
         return;
       }
 
-      if (resolvedModel.size === null) {
+      const selectedSpeculativeDraft = getSelectedMtpDraftArtifact(
+        resolvedModel,
+        getModelLoadParametersForModel(resolvedModel.id).mtpEnabled,
+      );
+      const hasUnknownSpeculativeDraftDownloadSize = selectedSpeculativeDraft !== undefined
+        && selectedSpeculativeDraft.installState !== 'installed'
+        && selectedSpeculativeDraft.sizeBytes === null;
+      if (resolvedModel.size === null || hasUnknownSpeculativeDraftDownloadSize) {
         Alert.alert(
           t('models.unknownSizeWarningTitle'),
           t('models.unknownSizeWarningMessage'),

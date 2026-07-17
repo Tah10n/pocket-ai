@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatThread, LlmContentPart } from '../types/chat';
 import type { ChatAttachment } from '../types/attachments';
+import type { InferenceCompletionTelemetry, MtpFallbackReason } from '../types/models';
 import {
   CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
   type ChatImageAttachment,
@@ -376,10 +377,126 @@ function sanitizePersistedChatMessageContentParts(message: ChatMessage): LlmCont
   return contentParts.length > 0 ? contentParts : undefined;
 }
 
+const MTP_FALLBACK_REASONS = new Set<MtpFallbackReason>([
+  'configured_draft_artifact_missing',
+  'draft_artifact_unavailable',
+  'memory_budget',
+  'initialization_failed',
+  'completion_failed',
+]);
+
+function sanitizeInferenceCompletionTelemetry(value: unknown): InferenceCompletionTelemetry | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const mtp = record.mtp;
+  if (!mtp || typeof mtp !== 'object') {
+    return undefined;
+  }
+
+  const mtpRecord = mtp as Record<string, unknown>;
+  if (
+    typeof mtpRecord.requested !== 'boolean'
+    || typeof mtpRecord.attempted !== 'boolean'
+    || typeof mtpRecord.fallbackUsed !== 'boolean'
+  ) {
+    return undefined;
+  }
+
+  const toNonNegativeInteger = (entry: unknown): number | undefined => (
+    typeof entry === 'number' && Number.isFinite(entry) && entry >= 0
+      ? Math.round(entry)
+      : undefined
+  );
+  const toOptionalNonNegativeNumber = (entry: unknown): number | undefined => (
+    typeof entry === 'number' && Number.isFinite(entry) && entry >= 0
+      ? entry
+      : undefined
+  );
+  const tokensPredicted = toNonNegativeInteger(record.tokensPredicted);
+  const tokensEvaluated = toNonNegativeInteger(record.tokensEvaluated);
+  const draftTokens = toNonNegativeInteger(mtpRecord.draftTokens);
+  const draftTokensAccepted = toNonNegativeInteger(mtpRecord.draftTokensAccepted);
+  if (
+    tokensPredicted === undefined
+    || tokensEvaluated === undefined
+    || draftTokens === undefined
+    || draftTokensAccepted === undefined
+  ) {
+    return undefined;
+  }
+
+  const fallbackReason = typeof mtpRecord.fallbackReason === 'string'
+    && MTP_FALLBACK_REASONS.has(mtpRecord.fallbackReason as MtpFallbackReason)
+    ? mtpRecord.fallbackReason as MtpFallbackReason
+    : undefined;
+  const acceptanceRate = toOptionalNonNegativeNumber(mtpRecord.acceptanceRate);
+
+  const sanitized: InferenceCompletionTelemetry = {
+    tokensPredicted,
+    tokensEvaluated,
+    predictedPerSecond: toOptionalNonNegativeNumber(record.predictedPerSecond),
+    promptPerSecond: toOptionalNonNegativeNumber(record.promptPerSecond),
+    timeToFirstTokenMs: toOptionalNonNegativeNumber(record.timeToFirstTokenMs),
+    mtp: {
+      requested: mtpRecord.requested,
+      attempted: mtpRecord.attempted,
+      fallbackUsed: mtpRecord.fallbackUsed,
+      draftTokens,
+      draftTokensAccepted,
+      acceptanceRate: acceptanceRate === undefined ? undefined : Math.min(1, acceptanceRate),
+      fallbackReason,
+    },
+  };
+
+  const allowedTopLevelKeys = new Set([
+    'tokensPredicted',
+    'tokensEvaluated',
+    'predictedPerSecond',
+    'promptPerSecond',
+    'timeToFirstTokenMs',
+    'mtp',
+  ]);
+  const allowedMtpKeys = new Set([
+    'requested',
+    'attempted',
+    'fallbackUsed',
+    'draftTokens',
+    'draftTokensAccepted',
+    'acceptanceRate',
+    'fallbackReason',
+  ]);
+  const isAlreadySanitized = Object.keys(record).every((key) => allowedTopLevelKeys.has(key))
+    && Object.keys(mtpRecord).every((key) => allowedMtpKeys.has(key))
+    && record.tokensPredicted === sanitized.tokensPredicted
+    && record.tokensEvaluated === sanitized.tokensEvaluated
+    && record.predictedPerSecond === sanitized.predictedPerSecond
+    && record.promptPerSecond === sanitized.promptPerSecond
+    && record.timeToFirstTokenMs === sanitized.timeToFirstTokenMs
+    && mtpRecord.requested === sanitized.mtp.requested
+    && mtpRecord.attempted === sanitized.mtp.attempted
+    && mtpRecord.fallbackUsed === sanitized.mtp.fallbackUsed
+    && mtpRecord.draftTokens === sanitized.mtp.draftTokens
+    && mtpRecord.draftTokensAccepted === sanitized.mtp.draftTokensAccepted
+    && mtpRecord.acceptanceRate === sanitized.mtp.acceptanceRate
+    && mtpRecord.fallbackReason === sanitized.mtp.fallbackReason;
+
+  return isAlreadySanitized
+    ? value as InferenceCompletionTelemetry
+    : sanitized;
+}
+
 function sanitizeChatMessageForPersistence(message: ChatMessage, threadId: string): ChatMessage {
   const attachments = sanitizePersistedChatMessageAttachments(message, threadId);
   const contentParts = sanitizePersistedChatMessageContentParts(message);
-  if (attachments === message.attachments && contentParts === message.contentParts) {
+  const inferenceMetrics = sanitizeInferenceCompletionTelemetry(message.inferenceMetrics);
+  if (
+    attachments === message.attachments
+    && contentParts === message.contentParts
+    && inferenceMetrics === message.inferenceMetrics
+  ) {
     return message;
   }
 
@@ -387,6 +504,7 @@ function sanitizeChatMessageForPersistence(message: ChatMessage, threadId: strin
     ...message,
     ...(attachments ? { attachments } : { attachments: undefined }),
     ...(contentParts ? { contentParts } : { contentParts: undefined }),
+    ...(inferenceMetrics ? { inferenceMetrics } : { inferenceMetrics: undefined }),
   };
 }
 

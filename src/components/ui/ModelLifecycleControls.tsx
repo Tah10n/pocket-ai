@@ -9,6 +9,9 @@ import { joinClassNames, ScreenActionPill, ScreenIconButton, ScreenIconTile, Scr
 import { getThemeActionContentClassName } from '../../utils/themeTokens';
 import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 import { Text } from './text';
+import { getSelectedMtpDraftArtifact } from '../../utils/modelSpeculativeDecoding';
+
+type ModelSpeculativeDraftDownloadStatus = 'queued' | 'downloading' | 'paused' | 'verifying';
 
 interface ModelLifecycleActionRowProps {
   model: ModelMetadata;
@@ -150,12 +153,29 @@ function ModelDownloadProgressInner({
   const hasCompletedBaseProgress = typeof displayModel.downloadProgress === 'number'
     && displayModel.downloadProgress >= 1;
   const shouldShowProjectorProgress = Boolean(projectorDownloadStatus && hasCompletedBaseProgress);
+  const speculativeDraft = getSelectedMtpDraftArtifact(displayModel);
+  const speculativeDraftDownloadStatus: ModelSpeculativeDraftDownloadStatus | undefined = (() => {
+    if (speculativeDraft?.installState === 'queued') {
+      return lifecycleStatus === LifecycleStatus.PAUSED ? 'paused' : 'queued';
+    }
+    if (speculativeDraft?.installState === 'downloading' || speculativeDraft?.installState === 'verifying') {
+      return speculativeDraft.installState;
+    }
+    return undefined;
+  })();
+  const shouldShowSpeculativeDraftProgress = Boolean(
+    !shouldShowProjectorProgress
+    && speculativeDraftDownloadStatus
+    && hasCompletedBaseProgress,
+  );
   const projectorDownloadProgress = projectorState.isDownloading
     ? projectorState.selectedProjector?.downloadProgress
     : undefined;
   const downloadProgress = shouldShowProjectorProgress
     ? (typeof projectorDownloadProgress === 'number' ? projectorDownloadProgress : 0)
-    : displayModel.downloadProgress;
+    : shouldShowSpeculativeDraftProgress
+      ? (typeof speculativeDraft?.downloadProgress === 'number' ? speculativeDraft.downloadProgress : 0)
+      : displayModel.downloadProgress;
 
   const rawProgressPercent = Number.isFinite(downloadProgress)
     ? Math.round(downloadProgress * 100)
@@ -165,6 +185,7 @@ function ModelDownloadProgressInner({
     lifecycleStatus,
     t,
     shouldShowProjectorProgress ? projectorDownloadStatus : undefined,
+    shouldShowSpeculativeDraftProgress ? speculativeDraftDownloadStatus : undefined,
   );
   const progressTone = progressPresentation.progressTone === 'primary' ? 'accent' : progressPresentation.progressTone;
   const progressToneClassNames = appearance.classNames.toneClassNameByTone[progressTone];
@@ -220,6 +241,7 @@ function getDownloadProgressPresentation(
   lifecycleStatus: LifecycleStatus,
   t: (key: string) => string,
   projectorDownloadStatus?: Extract<ModelProjectorLifecycleStatus, 'queued' | 'downloading' | 'paused'>,
+  speculativeDraftDownloadStatus?: ModelSpeculativeDraftDownloadStatus,
 ): {
   iconName: MaterialSymbolName;
   label: string;
@@ -236,6 +258,30 @@ function getDownloadProgressPresentation(
       iconName: projectorDownloadStatus === 'paused' ? 'pause-circle-outline' : 'download',
       label: t(labelKey),
       progressTone: projectorDownloadStatus === 'paused' ? 'warning' : 'primary',
+    };
+  }
+
+  if (speculativeDraftDownloadStatus) {
+    const labelKey = speculativeDraftDownloadStatus === 'queued'
+      ? 'models.mtp.draftQueued'
+      : speculativeDraftDownloadStatus === 'paused'
+        ? 'models.mtp.draftPaused'
+        : speculativeDraftDownloadStatus === 'verifying'
+          ? 'models.mtp.draftVerifying'
+          : 'models.mtp.draftDownloading';
+
+    return {
+      iconName: speculativeDraftDownloadStatus === 'paused'
+        ? 'pause-circle-outline'
+        : speculativeDraftDownloadStatus === 'verifying'
+          ? 'check-circle'
+          : 'download',
+      label: t(labelKey),
+      progressTone: speculativeDraftDownloadStatus === 'paused'
+        ? 'warning'
+        : speculativeDraftDownloadStatus === 'verifying'
+          ? 'success'
+          : 'primary',
     };
   }
 

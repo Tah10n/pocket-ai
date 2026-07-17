@@ -13,6 +13,7 @@ import {
   getTotalInstalledModelBytes,
   isMainArtifactReady,
   isMultimodalArtifactReady,
+  mergeModelArtifacts,
   normalizePersistedModelArtifacts,
   syncLegacyMainArtifactFields,
 } from '../../src/utils/modelArtifacts';
@@ -636,6 +637,90 @@ describe('modelArtifacts', () => {
       artifacts: [main, selected, other],
       selectedProjectorId: selected.id,
     })).toEqual([main, selected]);
+  });
+
+  it('adds the enabled Gemma MTP draft to required download artifacts', () => {
+    const main: ModelArtifactMetadata = {
+      id: 'main-model',
+      kind: 'main_model',
+      requiredFor: ['text'],
+      remoteFileName: 'gemma.gguf',
+      downloadUrl: 'https://example.com/gemma.gguf',
+      sizeBytes: 1_000,
+      installState: 'remote',
+    };
+    const draft: ModelArtifactMetadata = {
+      id: 'mtp-draft',
+      kind: 'speculative_draft',
+      requiredFor: ['text'],
+      remoteFileName: 'MTP/gemma-MTP.gguf',
+      downloadUrl: 'https://example.com/gemma-MTP.gguf',
+      sizeBytes: 200,
+      installState: 'remote',
+    };
+
+    const model = {
+      artifacts: [main, draft],
+      speculativeDecoding: {
+        type: 'mtp' as const,
+        mode: 'draft_model' as const,
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId: draft.id,
+      },
+    };
+
+    expect(getRequiredDownloadArtifacts(model)).toEqual([main, draft]);
+    expect(getRequiredDownloadArtifacts(model, false)).toEqual([main]);
+  });
+
+  it('preserves installed MTP draft runtime state only while remote identity is unchanged', () => {
+    const remoteDraft: ModelArtifactMetadata = {
+      id: 'mtp-draft',
+      kind: 'speculative_draft',
+      requiredFor: ['text'],
+      hfRevision: 'revision-a',
+      remoteFileName: 'MTP/gemma-MTP.gguf',
+      downloadUrl: 'https://example.com/MTP/gemma-MTP.gguf',
+      sizeBytes: 200,
+      installState: 'remote',
+    };
+    const installedDraft: ModelArtifactMetadata = {
+      ...remoteDraft,
+      localPath: 'gemma-mtp.gguf',
+      installState: 'installed',
+      downloadProgress: 1,
+      integrity: {
+        kind: 'size',
+        sizeBytes: 200,
+        checkedAt: 10,
+      },
+    };
+
+    expect(mergeModelArtifacts([remoteDraft], [installedDraft], {
+      preferDerivedRuntimeState: true,
+    })).toEqual([
+      expect.objectContaining({
+        id: 'mtp-draft',
+        localPath: 'gemma-mtp.gguf',
+        installState: 'installed',
+        downloadProgress: 1,
+      }),
+    ]);
+
+    expect(mergeModelArtifacts([{
+      ...remoteDraft,
+      hfRevision: 'revision-b',
+      downloadUrl: 'https://example.com/revision-b/MTP/gemma-MTP.gguf',
+    }], [installedDraft], {
+      preferDerivedRuntimeState: true,
+    })).toEqual([
+      expect.objectContaining({
+        id: 'mtp-draft',
+        hfRevision: 'revision-b',
+        installState: 'remote',
+      }),
+    ]);
   });
 
   it('normalizes persisted artifacts and drops unsafe local paths', () => {

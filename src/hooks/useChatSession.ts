@@ -2179,6 +2179,14 @@ export const useChatSession = () => {
 
       flushAssistantPatch();
       const finalThoughtContent = completion.reasoning_content || currentThoughtText || undefined;
+      const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
+        ? llmEngineService.getLastCompletionTelemetry()
+        : null;
+      if (completionTelemetry) {
+        patchAssistantMessage(threadId, assistantMessageId, {
+          inferenceMetrics: completionTelemetry,
+        });
+      }
       finalizeAssistantMessage(
         threadId,
         assistantMessageId,

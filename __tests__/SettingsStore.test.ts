@@ -116,6 +116,21 @@ describe('SettingsStore', () => {
     expect(getModelLoadParametersForModel('author/model-q4').backendPolicy).toBeUndefined();
   });
 
+  it('persists MTP preferences independently for each model', () => {
+    updateModelLoadParametersForModel('author/model-q4', { mtpEnabled: false });
+    updateModelLoadParametersForModel('author/model-q8', { mtpEnabled: true });
+
+    expect(getModelLoadParametersForModel('author/model-q4').mtpEnabled).toBe(false);
+    expect(getModelLoadParametersForModel('author/model-q8').mtpEnabled).toBe(true);
+    expect(getModelLoadParametersForModel('author/model-q6').mtpEnabled).toBeUndefined();
+  });
+
+  it('drops invalid persisted MTP preferences', () => {
+    updateModelLoadParametersForModel('author/model-q4', { mtpEnabled: 'yes' as any });
+
+    expect(getModelLoadParametersForModel('author/model-q4').mtpEnabled).toBeUndefined();
+  });
+
   it('keeps parallel slots at one until parallel decoding is supported', () => {
     updateModelLoadParametersForModel('author/model-q4', {
       parallelSlots: 4,

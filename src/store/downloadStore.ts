@@ -1,10 +1,14 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middleware';
 import { mmkvStorage } from '../lib/mmkv';
-import { ModelMetadata, LifecycleStatus } from '../types/models';
+import { ModelMetadata, LifecycleStatus, type ModelArtifactMetadata } from '../types/models';
 import type { ProjectorArtifact } from '../types/multimodal';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
-import { getCandidateModelDownloadFileNames, getCandidateProjectorDownloadFileNames } from '../utils/modelFiles';
+import {
+  getCandidateCompanionArtifactDownloadFileNames,
+  getCandidateModelDownloadFileNames,
+  getCandidateProjectorDownloadFileNames,
+} from '../utils/modelFiles';
 import { isValidLocalFileName } from '../utils/safeFilePath';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
 import {
@@ -20,6 +24,7 @@ import {
   mapModelProjectorCandidates,
 } from '../utils/effectiveProjectorState';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
+import { getSpeculativeDraftArtifacts, mergeModelArtifacts } from '../utils/modelArtifacts';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -206,6 +211,22 @@ function getEffectiveMultimodalReadiness(
 
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
+  const incomingSpeculativeDrafts = getSpeculativeDraftArtifacts(model);
+  const incomingSpeculativeDraftIds = new Set(incomingSpeculativeDrafts.map((artifact) => artifact.id));
+  const existingSpeculativeDrafts = canPreserveResumeState
+    ? getSpeculativeDraftArtifacts(existing).filter((artifact) => (
+        incomingSpeculativeDraftIds.size === 0 || incomingSpeculativeDraftIds.has(artifact.id)
+      ))
+    : undefined;
+  const speculativeDraftArtifacts = canPreserveResumeState
+    ? mergeModelArtifacts(incomingSpeculativeDrafts, existingSpeculativeDrafts, {
+        preservePersistedRuntimeState: true,
+      })
+    : incomingSpeculativeDrafts;
+  const stableArtifacts = (model.artifacts ?? existing.artifacts)?.filter((artifact) => (
+    artifact.kind !== 'speculative_draft'
+  )) ?? [];
+  const artifacts = [...stableArtifacts, ...speculativeDraftArtifacts];
   const incomingActiveVariantIds = getEffectiveActiveVariantKeys(model);
   const activeProjectorVariantIds = incomingActiveVariantIds.size > 0
     ? incomingActiveVariantIds
@@ -288,8 +309,13 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       projectorCandidates: model.projectorCandidates,
       selectedProjectorId: model.selectedProjectorId,
       variants: model.variants ?? existing.variants,
+      artifacts: artifacts.length > 0 ? artifacts : undefined,
+      speculativeDecoding: model.speculativeDecoding ?? existing.speculativeDecoding,
     }
-    : model;
+    : {
+      ...model,
+      artifacts: artifacts.length > 0 ? artifacts : undefined,
+    };
 
   const retryableModel = normalizePersistedModelMetadata({
     ...retryableBaseModel,
@@ -320,6 +346,69 @@ function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
     ...(projector.localPath && isValidLocalFileName(projector.localPath) ? [projector.localPath] : []),
     ...getCandidateProjectorDownloadFileNames(projector),
   ]);
+}
+
+function getQueuedSpeculativeDraftFileNames(model: ModelMetadata): string[] {
+  return getSpeculativeDraftArtifacts(model).flatMap((artifact) => (
+    getCandidateCompanionArtifactDownloadFileNames(model.id, artifact)
+  ));
+}
+
+function normalizePersistedModelArtifactDownloadState(
+  artifact: ModelArtifactMetadata,
+): ModelArtifactMetadata {
+  if (artifact.kind !== 'speculative_draft') {
+    return artifact;
+  }
+
+  const resumeData = normalizeDownloadResumeData(artifact.resumeData);
+  const wasInFlight = artifact.installState === 'downloading'
+    || artifact.installState === 'verifying';
+  const installState = wasInFlight ? 'queued' as const : artifact.installState;
+  const shouldNormalizeResumeData = resumeData !== artifact.resumeData;
+  const hasVolatileProgress = artifact.installState === 'queued'
+    || artifact.installState === 'downloading'
+    || artifact.installState === 'verifying'
+    || artifact.installState === 'remote';
+  const shouldClearProgress = hasVolatileProgress;
+  const shouldRebuild = shouldClearProgress
+    || shouldNormalizeResumeData
+    || installState !== artifact.installState;
+
+  if (!shouldRebuild) {
+    return artifact;
+  }
+
+  const {
+    downloadProgress: _downloadProgress,
+    resumeData: _resumeData,
+    ...withoutVolatileState
+  } = artifact;
+  return {
+    ...withoutVolatileState,
+    installState,
+    ...(resumeData !== undefined ? { resumeData } : {}),
+    ...(!shouldClearProgress && artifact.downloadProgress !== undefined
+      ? { downloadProgress: artifact.downloadProgress }
+      : {}),
+  };
+}
+
+function normalizePersistedModelArtifactDownloadStatesForModel(
+  model: ModelMetadata,
+): ModelMetadata {
+  if (!model.artifacts?.length) {
+    return model;
+  }
+
+  let didChange = false;
+  const artifacts = model.artifacts.map((artifact) => {
+    const normalized = normalizePersistedModelArtifactDownloadState(artifact);
+    didChange ||= normalized !== artifact;
+    return normalized;
+  });
+
+  return didChange ? { ...model, artifacts } : model;
 }
 
 function normalizePersistedProjectorDownloadState(
@@ -385,6 +474,15 @@ function normalizePersistedProjectorDownloadStatesForModel(
   );
 }
 
+function normalizePersistedCompanionDownloadStatesForModel(
+  model: ModelMetadata,
+  options: { clearVolatileProgress?: boolean } = {},
+): ModelMetadata {
+  return normalizePersistedModelArtifactDownloadStatesForModel(
+    normalizePersistedProjectorDownloadStatesForModel(model, options),
+  );
+}
+
 interface DownloadState {
   queue: ModelMetadata[];
   activeDownloadId: string | null;
@@ -400,7 +498,7 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
     const normalizedModel = normalizePersistedModelMetadata(model);
     const wasInFlight = normalizedModel.lifecycleStatus === LifecycleStatus.DOWNLOADING
       || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING;
-    const modelWithNormalizedProjectors = normalizePersistedProjectorDownloadStatesForModel(
+    const modelWithNormalizedCompanions = normalizePersistedCompanionDownloadStatesForModel(
       normalizedModel,
       { clearVolatileProgress: wasInFlight },
     );
@@ -409,12 +507,12 @@ export function normalizePersistedDownloadQueue(queue: ModelMetadata[]): ModelMe
       || normalizedModel.lifecycleStatus === LifecycleStatus.VERIFYING
     ) {
       return {
-        ...modelWithNormalizedProjectors,
+        ...modelWithNormalizedCompanions,
         lifecycleStatus: LifecycleStatus.QUEUED,
       };
     }
 
-    return modelWithNormalizedProjectors;
+    return modelWithNormalizedCompanions;
   });
 }
 
@@ -506,7 +604,7 @@ export const useDownloadStore = create<DownloadState>()(
             const shouldZeroProgress = model.lifecycleStatus === LifecycleStatus.DOWNLOADING
               || model.lifecycleStatus === LifecycleStatus.VERIFYING;
 
-            return normalizePersistedProjectorDownloadStatesForModel({
+            return normalizePersistedCompanionDownloadStatesForModel({
               ...model,
               downloadProgress: shouldZeroProgress ? 0 : model.downloadProgress,
             }, { clearVolatileProgress: shouldZeroProgress });
@@ -534,6 +632,7 @@ export function getQueuedDownloadFileNames(): string[] {
         ...(model.localPath && isValidLocalFileName(model.localPath) ? [model.localPath] : []),
         ...getCandidateModelDownloadFileNames(model),
         ...getQueuedProjectorFileNames(model),
+        ...getQueuedSpeculativeDraftFileNames(model),
       ]),
   ));
 }

@@ -38,13 +38,14 @@ import {
   getFileSize,
   isEligibleGgufEntry,
   isPreferredQuantFileName,
-  isProjectorFileName,
-  isUnsupportedMtpFileName,
+  isSupportedGgufFileName,
   limitModelVariants,
   selectTreeEntryForModel,
 } from './ModelCatalogFileSelector';
 import {
+  attachSpeculativeDecodingToVariants,
   attachMemoryFitToVariants,
+  buildMtpDraftArtifactFromEntries,
   buildProjectorCandidatesFromEntries,
   buildModelMetadataFromPayload,
   createFallbackModel,
@@ -66,7 +67,10 @@ import {
 import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
-import { getProjectorMemoryFitSizeBytes } from '../utils/modelSize';
+import {
+  getProjectorMemoryFitSizeBytes,
+  getSpeculativeDraftMemoryFitSizeBytes,
+} from '../utils/modelSize';
 import {
   inferDeclaredInputCapabilities,
   mergeInputCapabilitySnapshots,
@@ -87,6 +91,12 @@ import {
 } from '../utils/multimodalReadiness';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
 import { canonicalizeProjectorCandidateAliases } from '../utils/projectorIdentity';
+import { mergeModelArtifacts } from '../utils/modelArtifacts';
+import {
+  getConfiguredMtpDraftArtifact,
+  resolveEffectiveSpeculativeDecoding,
+} from '../utils/modelSpeculativeDecoding';
+import { getModelLoadParametersForModel } from './SettingsStore';
 import {
   getCompatibleLocalDownloadStatePatch,
   resolveVerifiedLocalShaCompatibility,
@@ -830,12 +840,7 @@ export class ModelCatalogService {
 
   private isSupportedResolvedCatalogFileName(fileName: string | undefined): boolean {
     const normalized = fileName?.trim();
-    return Boolean(
-      normalized
-      && normalized.toLowerCase().endsWith('.gguf')
-      && !isProjectorFileName(normalized)
-      && !isUnsupportedMtpFileName(normalized),
-    );
+    return Boolean(normalized && isSupportedGgufFileName(normalized));
   }
 
   private extractResolvedFileNameFromDownloadUrl(downloadUrl: string | undefined): string | undefined {
@@ -1568,6 +1573,9 @@ export class ModelCatalogService {
   ): ModelMetadata {
     const resolvedMemoryFit = resolveMemoryFitSummary(model, memoryFitContext, {
       projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes(model),
+      speculativeDraftSizeBytes: getSpeculativeDraftMemoryFitSizeBytes(model, {
+        enabledOverride: getModelLoadParametersForModel(model.id).mtpEnabled,
+      }),
     });
     const fitsInRam = resolvedMemoryFit?.fitsInRam ?? model.fitsInRam;
     const memoryFitDecision = resolvedMemoryFit?.decision ?? model.memoryFitDecision;
@@ -1752,16 +1760,43 @@ export class ModelCatalogService {
           });
         }
 
-        const variants = attachMemoryFitToVariants(buildCatalogModelVariants(treeResponse.entries, {
-          limit: CATALOG_SEARCH_VARIANT_LIMIT,
-          includeFileNames: [resolvedFileName, model.resolvedFileName, model.activeVariantId],
-          includeVariantIds: [model.activeVariantId],
-        }), memoryFitContext, {
+        const discoveredSpeculativeDraft = buildMtpDraftArtifactFromEntries(treeResponse.entries, {
+          repoId: model.id,
+          hfRevision: model.hfRevision,
+        });
+        const effectiveSpeculativeDraft = discoveredSpeculativeDraft
+          ?? (treeResponse.isComplete ? undefined : getConfiguredMtpDraftArtifact(model));
+        const variants = attachMemoryFitToVariants(attachSpeculativeDecodingToVariants(
+          buildCatalogModelVariants(treeResponse.entries, {
+            limit: CATALOG_SEARCH_VARIANT_LIMIT,
+            includeFileNames: [resolvedFileName, model.resolvedFileName, model.activeVariantId],
+            includeVariantIds: [model.activeVariantId],
+          }),
+          {
+            id: model.id,
+            modelId: model.id,
+            tags: model.tags,
+            config: {
+              model_type: model.modelType,
+              architectures: model.architectures,
+            },
+            gguf: {
+              architecture: model.gguf?.architecture,
+            },
+          },
+          effectiveSpeculativeDraft,
+          resolveEffectiveSpeculativeDecoding(model),
+        ), memoryFitContext, {
           resolveProjectorSizeBytes: (variant) => this.resolveVariantProjectorMemoryFitSizeBytes(
             treeResponse.entries,
             model.id,
             model.hfRevision,
             variant,
+          ),
+          resolveSpeculativeDraftSizeBytes: (variant) => (
+            variant.speculativeDecoding?.mode === 'draft_model'
+              ? effectiveSpeculativeDraft?.sizeBytes
+              : undefined
           ),
         });
         const discoveredProjectorCandidates = buildProjectorCandidatesFromEntries(treeResponse.entries, {
@@ -1804,9 +1839,26 @@ export class ModelCatalogService {
         const chatModalities = hasAuthoritativeEmptyProjectorResult
           ? inferredChatModalities.filter((modality) => modality !== 'audio')
           : inferredChatModalities;
-        const artifacts = hasAuthoritativeEmptyProjectorResult
+        const projectorAwareArtifacts = hasAuthoritativeEmptyProjectorResult
           ? this.clearAudioProjectorArtifactsAfterAuthoritativeTreeMiss(model.artifacts)
           : model.artifacts;
+        const persistedSpeculativeDrafts = projectorAwareArtifacts?.filter((artifact) => (
+          artifact.kind === 'speculative_draft'
+          && (
+            discoveredSpeculativeDraft
+              ? artifact.id === discoveredSpeculativeDraft.id
+              : !treeResponse.isComplete
+          )
+        ));
+        const speculativeDraftArtifacts = mergeModelArtifacts(
+          discoveredSpeculativeDraft ? [discoveredSpeculativeDraft] : [],
+          persistedSpeculativeDrafts,
+          { preferDerivedRuntimeState: true },
+        );
+        const artifacts = [
+          ...(projectorAwareArtifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+          ...speculativeDraftArtifacts,
+        ];
         const hasRefreshedVisionSupport = chatModalities.includes('vision');
         const hasFreshProjectorMetadata = projectorCandidates !== undefined;
         const shouldClearVisionMetadata = hasFreshProjectorMetadata && !hasRefreshedVisionSupport;
@@ -1899,16 +1951,22 @@ export class ModelCatalogService {
             fallbackProjectorIds,
           },
         );
+        const memoryFitModel = {
+          ...model,
+          size,
+          resolvedFileName,
+          activeVariantId: resolvedFileName,
+          variants,
+          artifacts,
+          projectorCandidates: filteredProjectorMetadataPatch.projectorCandidates,
+          selectedProjectorId: filteredProjectorMetadataPatch.selectedProjectorId,
+        };
         const resolvedMemoryFit = shouldPreserveVerifiedLocal
           ? null
           : resolveMemoryFitSummary({ size, metadataTrust, gguf }, memoryFitContext, {
-            projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
-              ...model,
-              resolvedFileName,
-              activeVariantId: resolvedFileName,
-              variants,
-              projectorCandidates: filteredProjectorMetadataPatch.projectorCandidates,
-              selectedProjectorId: filteredProjectorMetadataPatch.selectedProjectorId,
+            projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes(memoryFitModel),
+            speculativeDraftSizeBytes: getSpeculativeDraftMemoryFitSizeBytes(memoryFitModel, {
+              enabledOverride: getModelLoadParametersForModel(model.id).mtpEnabled,
             }),
           });
         const didChangeSize = size !== model.size;
@@ -3427,9 +3485,31 @@ export class ModelCatalogService {
     const fallbackProjectorIds = new Set(getEffectiveActiveVariantProjectorCandidates(localModel)
       .map((projector) => projector.id)
       .filter((projectorId) => !remoteProjectorIds.has(projectorId)));
+    const remoteSpeculativeDrafts = remoteModel.artifacts?.filter((artifact) => (
+      artifact.kind === 'speculative_draft'
+    )) ?? [];
+    const remoteSpeculativeDraftIds = new Set(
+      remoteSpeculativeDrafts.map((artifact) => artifact.id),
+    );
+    const localSpeculativeDrafts = shouldResetLocalDownloadState
+      ? undefined
+      : localModel.artifacts?.filter((artifact) => (
+          artifact.kind === 'speculative_draft'
+          && (remoteSpeculativeDraftIds.size === 0 || remoteSpeculativeDraftIds.has(artifact.id))
+        ));
+    const speculativeDraftArtifacts = mergeModelArtifacts(
+      remoteSpeculativeDrafts,
+      localSpeculativeDrafts,
+      { preferDerivedRuntimeState: true },
+    );
+    const mergedCatalogArtifacts = [
+      ...(remoteModel.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+      ...speculativeDraftArtifacts,
+    ];
     const artifactRequirements = [
-      ...(remoteModel.artifacts ?? []),
-      ...(localModel.artifacts ?? []),
+      ...(remoteModel.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+      ...(localModel.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+      ...speculativeDraftArtifacts,
     ];
     const filteredProjectorMetadataPatch = this.filterProjectorMetadataMergeForChatModalities(
       projectorMetadataPatch,
@@ -3471,12 +3551,20 @@ export class ModelCatalogService {
     const visionConfidence = mergedEffectiveNativeSupport.vision
       ? candidateVisionConfidence
       : undefined;
+    const memoryFitModel = {
+      ...remoteModel,
+      size: resolvedSize,
+      resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
+      variants: nativeVariants,
+      artifacts: artifactRequirements.length > 0 ? artifactRequirements : undefined,
+      speculativeDecoding: remoteModel.speculativeDecoding ?? localModel.speculativeDecoding,
+      projectorCandidates: filteredProjectorMetadataPatch.projectorCandidates,
+      selectedProjectorId: filteredProjectorMetadataPatch.selectedProjectorId,
+    };
     const resolvedMemoryFit = resolveMemoryFitSummary({ size: resolvedSize, metadataTrust, gguf }, memoryFitContext, {
-      projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes({
-        ...remoteModel,
-        resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,
-        projectorCandidates: filteredProjectorMetadataPatch.projectorCandidates,
-        selectedProjectorId: filteredProjectorMetadataPatch.selectedProjectorId,
+      projectorSizeBytes: this.resolveActiveVariantProjectorMemoryFitSizeBytes(memoryFitModel),
+      speculativeDraftSizeBytes: getSpeculativeDraftMemoryFitSizeBytes(memoryFitModel, {
+        enabledOverride: getModelLoadParametersForModel(remoteModel.id).mtpEnabled,
       }),
     });
     const fitsInRam = resolvedMemoryFit?.fitsInRam
@@ -3511,6 +3599,9 @@ export class ModelCatalogService {
       memoryFitDecision,
       memoryFitConfidence,
       variants,
+      artifacts: mergedCatalogArtifacts.length > 0 ? mergedCatalogArtifacts : undefined,
+      speculativeDecoding: remoteModel.speculativeDecoding
+        ?? (shouldResetLocalDownloadState ? undefined : localModel.speculativeDecoding),
       accessState: remoteModel.accessState,
       isGated: remoteModel.isGated,
       isPrivate: remoteModel.isPrivate,
@@ -3797,10 +3888,8 @@ export class ModelCatalogService {
         });
         performanceMonitor.incrementCounter('catalog.fetchHuggingFaceModelTree.calls');
 
-        let expectedTargetKnownIneligible = expectedFileName.length > 0 && (
-          isProjectorFileName(expectedFileName)
-          || isUnsupportedMtpFileName(expectedFileName)
-        );
+        let expectedTargetKnownIneligible = expectedFileName.length > 0
+          && !isSupportedGgufFileName(expectedFileName);
         let nextCursor: string | null = buildHuggingFaceTreeUrl(repoId, revision);
         const visitedCursors = new Set<string>();
         const entries: HuggingFaceTreeEntry[] = [];

@@ -614,7 +614,7 @@ describe('modelVariants', () => {
     }));
   });
 
-  it('ignores unsupported projector/MTP variant selections and stale active fallbacks', () => {
+  it('rejects projector selections while allowing embedded MTP variants and verified local fallbacks', () => {
     const model = createModel({
       variants: [
         createModel().variants![0],
@@ -629,6 +629,12 @@ describe('modelVariants', () => {
           fileName: 'model.NextN.Q4_K_M.gguf',
           quantizationLabel: 'Q4_K_M',
           size: 4_000_000_000,
+          speculativeDecoding: {
+            type: 'mtp',
+            mode: 'embedded',
+            enabled: true,
+            maxDraftTokens: 1,
+          },
         },
       ],
     });
@@ -638,9 +644,13 @@ describe('modelVariants', () => {
       resolvedFileName: 'model.mmproj.gguf',
       variants: [model.variants![1]],
     }))).toBeUndefined();
-    expect(canSelectModelVariant(model)).toBe(false);
+    expect(canSelectModelVariant(model)).toBe(true);
     expect(applyModelVariantSelection(model, 'model.mmproj.gguf')).toBe(model);
-    expect(applyModelVariantSelection(model, 'model.NextN.Q4_K_M.gguf')).toBe(model);
+    expect(applyModelVariantSelection(model, 'model.NextN.Q4_K_M.gguf')).toEqual(expect.objectContaining({
+      activeVariantId: 'model.NextN.Q4_K_M.gguf',
+      resolvedFileName: 'model.NextN.Q4_K_M.gguf',
+      speculativeDecoding: expect.objectContaining({ mode: 'embedded', enabled: true }),
+    }));
 
     const selected = applyModelVariantSelectionIfAvailable(
       createModel({
@@ -654,8 +664,8 @@ describe('modelVariants', () => {
       },
     );
 
-    expect(selected.resolvedFileName).toBe('model.Q4_K_M.gguf');
-    expect(selected.variants?.some((variant) => variant.fileName.includes('NextN'))).toBe(false);
+    expect(selected.resolvedFileName).toBe('model.NextN.Q4_K_M.gguf');
+    expect(selected.variants?.some((variant) => variant.fileName.includes('NextN'))).toBe(true);
     expect(selected.variants?.some((variant) => variant.fileName.includes('mmproj'))).toBe(false);
   });
 

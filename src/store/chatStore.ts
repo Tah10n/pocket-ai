@@ -98,7 +98,7 @@ interface CreateThreadInput {
 }
 
 type AssistantMessagePatch = Partial<
-  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'state' | 'errorCode' | 'errorMessage'>
+  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'inferenceMetrics' | 'state' | 'errorCode' | 'errorMessage'>
 >;
 
 interface ChatStoreState {

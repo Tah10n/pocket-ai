@@ -27,6 +27,7 @@ import {
 } from './projectorIdentity';
 import { isValidLocalFileName } from './safeFilePath';
 import { normalizeSha256Digest } from './sha256';
+import { getSelectedMtpDraftArtifact } from './modelSpeculativeDecoding';
 
 type LegacyModelArtifactInput = Pick<
   ModelMetadata,
@@ -54,6 +55,7 @@ type LegacyModelArtifactInput = Pick<
 
 type MergeModelArtifactsOptions = {
   preferDerivedRuntimeState?: boolean;
+  preservePersistedRuntimeState?: boolean;
 };
 
 type StableModelArtifactMetadata = Pick<
@@ -428,7 +430,9 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
 
     const record = entry as Record<string, unknown>;
     const id = normalizeOptionalString(record.id);
-    const kind: ModelArtifactMetadata['kind'] | undefined = record.kind === 'main_model' || record.kind === 'multimodal_projector'
+    const kind: ModelArtifactMetadata['kind'] | undefined = record.kind === 'main_model'
+      || record.kind === 'multimodal_projector'
+      || record.kind === 'speculative_draft'
       ? record.kind
       : undefined;
     const remoteFileName = normalizeOptionalString(record.remoteFileName);
@@ -511,14 +515,15 @@ export function mergeModelArtifacts(
       continue;
     }
     const derivedArtifact = byId.get(artifact.id);
-    byId.set(artifact.id, {
-      ...(options.preferDerivedRuntimeState === true && derivedArtifact
+    const mergedArtifact = options.preservePersistedRuntimeState === true && derivedArtifact
+      ? mergeArtifactWithPersistedRuntimeState(derivedArtifact, artifact)
+      : options.preferDerivedRuntimeState === true && derivedArtifact
         ? mergeArtifactWithDerivedRuntimeState(derivedArtifact, artifact)
         : {
-          ...derivedArtifact,
-          ...artifact,
-        }),
-    });
+            ...derivedArtifact,
+            ...artifact,
+          };
+    byId.set(artifact.id, mergedArtifact);
     persistedOrderedIds.push(artifact.id);
   }
 
@@ -649,7 +654,7 @@ function mergeArtifactWithDerivedRuntimeState(
 
   if (
     sharesStableIdentity
-    && derivedArtifact.kind === 'multimodal_projector'
+    && derivedArtifact.kind !== 'main_model'
     && persistedArtifact.installState === 'installed'
     && persistedArtifact.localPath
   ) {
@@ -669,6 +674,35 @@ function mergeArtifactWithDerivedRuntimeState(
   return merged;
 }
 
+function mergeArtifactWithPersistedRuntimeState(
+  derivedArtifact: ModelArtifactMetadata,
+  persistedArtifact: ModelArtifactMetadata,
+): ModelArtifactMetadata {
+  const sharesStableIdentity = artifactsShareStableIdentity(derivedArtifact, persistedArtifact);
+  const merged = {
+    ...getStableArtifactMetadata(persistedArtifact),
+    ...derivedArtifact,
+    sizeBytes: derivedArtifact.sizeBytes === null
+      ? persistedArtifact.sizeBytes
+      : derivedArtifact.sizeBytes,
+  };
+  if (!sharesStableIdentity || derivedArtifact.kind === 'main_model') {
+    return merged;
+  }
+
+  return {
+    ...merged,
+    localPath: persistedArtifact.localPath,
+    installState: persistedArtifact.installState,
+    downloadProgress: persistedArtifact.downloadProgress,
+    resumeData: persistedArtifact.resumeData,
+    integrity: persistedArtifact.integrity,
+    errorCode: persistedArtifact.errorCode,
+    errorMessage: persistedArtifact.errorMessage,
+    updatedAt: persistedArtifact.updatedAt,
+  };
+}
+
 export function getMainModelArtifact(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifactMetadata | undefined {
   return model.artifacts?.find((artifact) => artifact.kind === 'main_model');
 }
@@ -677,8 +711,15 @@ export function getProjectorArtifacts(model: Pick<ModelMetadata, 'artifacts'>): 
   return model.artifacts?.filter((artifact) => artifact.kind === 'multimodal_projector') ?? [];
 }
 
+export function getSpeculativeDraftArtifacts(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifactMetadata[] {
+  return model.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft') ?? [];
+}
+
 type ProjectorArtifactModelInput = Pick<ModelMetadata, 'artifacts' | 'selectedProjectorId'>
-  & Partial<Pick<ModelMetadata, 'projectorCandidates'>>;
+  & Partial<Pick<
+    ModelMetadata,
+    'activeVariantId' | 'projectorCandidates' | 'resolvedFileName' | 'speculativeDecoding' | 'variants'
+  >>;
 
 export function getSelectedProjectorArtifact(
   model: ProjectorArtifactModelInput,
@@ -701,10 +742,12 @@ export function getSelectedProjectorArtifact(
 
 export function getRequiredDownloadArtifacts(
   model: ProjectorArtifactModelInput,
+  mtpEnabledOverride?: boolean,
 ): ModelArtifactMetadata[] {
   const mainArtifact = getMainModelArtifact(model);
   const selectedProjector = getSelectedProjectorArtifact(model);
-  return [mainArtifact, selectedProjector]
+  const selectedSpeculativeDraft = getSelectedMtpDraftArtifact(model, mtpEnabledOverride);
+  return [mainArtifact, selectedProjector, selectedSpeculativeDraft]
     .filter((artifact): artifact is ModelArtifactMetadata => (
       artifact !== undefined && artifact.installState !== 'installed'
     ));
@@ -739,6 +782,13 @@ export function isMainArtifactReady(model: Pick<ModelMetadata, 'artifacts'>): bo
 
 export function isMultimodalArtifactReady(model: ProjectorArtifactModelInput): boolean {
   return getSelectedProjectorArtifact(model)?.installState === 'installed';
+}
+
+export function isSpeculativeDraftArtifactReady(
+  model: Parameters<typeof getSelectedMtpDraftArtifact>[0],
+  mtpEnabledOverride?: boolean,
+): boolean {
+  return getSelectedMtpDraftArtifact(model, mtpEnabledOverride)?.installState === 'installed';
 }
 
 export function syncLegacyMainArtifactFields(model: ModelMetadata): ModelMetadata {

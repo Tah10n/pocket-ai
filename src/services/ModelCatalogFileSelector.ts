@@ -411,7 +411,10 @@ export function isMtpDraftCompanionEntry<T extends HuggingFaceSibling | HuggingF
   entry: T,
   entries: readonly T[],
 ): boolean {
-  const fileName = getFileName(entry);
+  const fileName = getFileName(entry).trim();
+  if (!fileName.toLowerCase().endsWith('.gguf')) {
+    return false;
+  }
   if (isMtpDraftCompanionFileName(fileName)) {
     return true;
   }

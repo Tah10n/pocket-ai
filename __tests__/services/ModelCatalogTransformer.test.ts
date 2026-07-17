@@ -1,9 +1,13 @@
 import {
+  buildMtpDraftArtifactFromEntries,
   buildModelMetadataFromPayload,
   createFallbackModel,
   transformHFResponse,
 } from '../../src/services/ModelCatalogTransformer';
-import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
+import {
+  CATALOG_SEARCH_VARIANT_LIMIT,
+  getMtpDraftCompanionEntries,
+} from '../../src/services/ModelCatalogFileSelector';
 import { LifecycleStatus, type ModelMetadata } from '../../src/types/models';
 import {
   resolveEffectiveActiveVariantNativeSupport,
@@ -555,6 +559,26 @@ describe('ModelCatalogTransformer', () => {
       mode: 'draft_model',
       enabled: true,
       draftArtifactId: draftArtifact?.id,
+    }));
+  });
+
+  it('ignores non-GGUF MTP ancillary files when selecting a draft companion', () => {
+    const entries = [
+      { rfilename: 'gemma-Q4_K_M.gguf', size: 7_000_000_000 },
+      { rfilename: 'MTP/config.json', size: 1_000 },
+      { rfilename: 'MTP/tokenizer.json', size: 2_000 },
+      { rfilename: 'MTP/gemma-draft.Q4_K_M.gguf', size: 465_000_000 },
+    ];
+
+    expect(getMtpDraftCompanionEntries(entries).map((entry) => entry.rfilename)).toEqual([
+      'MTP/gemma-draft.Q4_K_M.gguf',
+    ]);
+    expect(buildMtpDraftArtifactFromEntries(entries, {
+      repoId: 'unsloth/gemma-GGUF',
+      hfRevision: 'revision-a',
+    })).toEqual(expect.objectContaining({
+      remoteFileName: 'MTP/gemma-draft.Q4_K_M.gguf',
+      sizeBytes: 465_000_000,
     }));
   });
 

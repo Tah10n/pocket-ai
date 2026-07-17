@@ -954,6 +954,28 @@ export class ModelDownloadManager {
     };
   }
 
+  private buildInstalledModelAfterCompanionFailure({
+    model,
+    companionFailureUpdates,
+    reusableModelFile,
+  }: {
+    model: ModelMetadata;
+    companionFailureUpdates: Partial<ModelMetadata>;
+    reusableModelFile: ReusableModelDownloadFile;
+  }): ModelMetadata {
+    return {
+      ...model,
+      ...companionFailureUpdates,
+      localPath: reusableModelFile.fileName,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      resumeData: undefined,
+      downloadErrorAt: undefined,
+      downloadErrorCode: undefined,
+      downloadErrorMessage: undefined,
+    };
+  }
+
   private withSynchronizedArtifacts(model: ModelMetadata): ModelMetadata {
     const activeVariant = resolveActiveModelVariant(model);
     const projectorCandidates = getEffectiveActiveVariantProjectorCandidates(model);
@@ -1455,22 +1477,29 @@ export class ModelDownloadManager {
           ? selectedSpeculativeDraftSizeBytes ?? 0
           : 0
       );
+      const projectorNeedsSpace = selectedProjector !== null
+        && !reusableProjectorFile
+        && (requiredProjectorBytes > 0 || hasUnknownProjectorDiskRequirement);
+      const speculativeDraftNeedsSpace = selectedSpeculativeDraft !== null
+        && !reusableSpeculativeDraftFile
+        && (
+          requiredSpeculativeDraftBytes > 0
+          || hasUnknownSpeculativeDraftDiskRequirement
+        );
       const requiredBytes = requiredModelBytes
         + requiredProjectorBytes
         + requiredSpeculativeDraftBytes
         + REQUIRED_DOWNLOAD_BUFFER_BYTES;
       const hasKnownDiskRequirement = requiredModelBytes > 0
-        || requiredProjectorBytes > 0
-        || hasUnknownProjectorDiskRequirement
-        || requiredSpeculativeDraftBytes > 0
-        || hasUnknownSpeculativeDraftDiskRequirement;
+        || projectorNeedsSpace
+        || speculativeDraftNeedsSpace;
       if (hasKnownDiskRequirement && freeSpace !== undefined && freeSpace < requiredBytes) {
         throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
           details: {
             modelId: model.id,
-            ...(selectedProjector
+            ...(projectorNeedsSpace
               ? { artifactKind: 'projector' }
-              : selectedSpeculativeDraft
+              : speculativeDraftNeedsSpace
                 ? { artifactKind: 'speculative_draft' }
                 : null),
             freeSpace,
@@ -1495,11 +1524,15 @@ export class ModelDownloadManager {
           assertPrivateStorageWritableForDownloadMutation();
           const currentModel = this.getQueuedModel(model.id, model);
           const preflightError = toSanitizedDownloadAppError(e);
-          const failedProjectorId = preflightError.code === 'download_disk_space_low'
+          const reportedArtifactKind = preflightError.details?.artifactKind;
+          const failedArtifactKind = reportedArtifactKind === 'projector'
+            || reportedArtifactKind === 'speculative_draft'
+            ? reportedArtifactKind
+            : undefined;
+          const failedProjectorId = failedArtifactKind === 'projector'
             ? selectedProjector?.id
             : undefined;
-          const failedSpeculativeDraftId = preflightError.code === 'download_disk_space_low'
-            && !selectedProjector
+          const failedSpeculativeDraftId = failedArtifactKind === 'speculative_draft'
             ? selectedSpeculativeDraft?.id
             : undefined;
           const currentFailedProjector = failedProjectorId
@@ -1526,27 +1559,46 @@ export class ModelDownloadManager {
             && speculativeDraftResumeDiskPlanning.resumeData === undefined
             && currentFailedSpeculativeDraft !== undefined
             && this.hasPartialResumeOrProgressState(currentFailedSpeculativeDraft);
-          updateModelInQueue(model.id, {
-            ...this.getDownloadFailureUpdates(e, modelResumeDataForFailure),
-            ...(shouldClearInvalidModelPartialState ? { localPath: undefined, downloadProgress: 0 } : {}),
-            ...this.getProjectorFailureUpdates(
-              currentModel,
-              failedProjectorId ? selectedProjector ?? undefined : undefined,
-              e,
-              projectorResumeDataForFailure,
-            ),
-            ...(failedSpeculativeDraftId
-              ? this.updateModelArtifactState(currentModel, failedSpeculativeDraftId, {
-                installState: 'failed',
-                resumeData: speculativeDraftResumeDataForFailure,
-                ...(shouldClearInvalidSpeculativeDraftPartialState
-                  ? { localPath: undefined, downloadProgress: 0 }
-                  : {}),
-                errorCode: preflightError.code,
-                errorMessage: preflightError.message,
-              })
-              : {}),
-          });
+          const projectorFailureUpdates = this.getProjectorFailureUpdates(
+            currentModel,
+            failedProjectorId ? selectedProjector ?? undefined : undefined,
+            e,
+            projectorResumeDataForFailure,
+          );
+          const speculativeDraftFailureUpdates = failedSpeculativeDraftId
+            ? this.updateModelArtifactState(currentModel, failedSpeculativeDraftId, {
+              installState: 'failed',
+              resumeData: speculativeDraftResumeDataForFailure,
+              ...(shouldClearInvalidSpeculativeDraftPartialState
+                ? { localPath: undefined, downloadProgress: 0 }
+                : {}),
+              errorCode: preflightError.code,
+              errorMessage: preflightError.message,
+            })
+            : {};
+          const companionFailedWithReusableBase = reusableModelFile !== null
+            && (failedProjectorId !== undefined || failedSpeculativeDraftId !== undefined);
+
+          if (companionFailedWithReusableBase && reusableModelFile) {
+            registry.updateModel(this.withSynchronizedArtifacts(
+              this.buildInstalledModelAfterCompanionFailure({
+                model: currentModel,
+                companionFailureUpdates: {
+                  ...projectorFailureUpdates,
+                  ...speculativeDraftFailureUpdates,
+                },
+                reusableModelFile,
+              }),
+            ));
+            removeFromQueue(model.id);
+          } else {
+            updateModelInQueue(model.id, {
+              ...this.getDownloadFailureUpdates(e, modelResumeDataForFailure),
+              ...(shouldClearInvalidModelPartialState ? { localPath: undefined, downloadProgress: 0 } : {}),
+              ...projectorFailureUpdates,
+              ...speculativeDraftFailureUpdates,
+            });
+          }
           setActiveDownload(null);
         } catch (storageError) {
           if (await this.handlePrivateStorageUnavailable(storageError)) {

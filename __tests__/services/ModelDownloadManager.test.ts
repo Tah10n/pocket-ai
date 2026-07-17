@@ -2156,12 +2156,21 @@ describe('ModelDownloadManager Basic', () => {
     }));
   });
 
-  it('accounts for remaining draft bytes in draft-only low-storage preflight', async () => {
+  it('keeps an installed base and reusable projector available after draft-only low-storage preflight', async () => {
     const draftArtifactId = 'mtp-draft-resume-low-storage';
+    const installedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      lifecycleStatus: 'active',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    };
     const draftOnlyModel: ModelMetadata = {
       ...mockModel,
       localPath: 'model.gguf',
       downloadProgress: 1,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      projectorCandidates: [installedProjector],
+      selectedProjectorId: installedProjector.id,
       artifacts: [{
         id: draftArtifactId,
         kind: 'speculative_draft',
@@ -2186,6 +2195,9 @@ describe('ModelDownloadManager Basic', () => {
       if (uri === 'test-dir/models/model.gguf') {
         return { exists: true, size: 1000 };
       }
+      if (uri === 'test-dir/models/mmproj-model.gguf') {
+        return { exists: true, size: 1000 };
+      }
       if (uri === 'test-dir/models/partial-mtp-draft.gguf') {
         return { exists: true, size: 500 };
       }
@@ -2205,6 +2217,8 @@ describe('ModelDownloadManager Basic', () => {
       runDownloadModel({
         localPath: draftOnlyModel.localPath,
         downloadProgress: 1,
+        projectorCandidates: draftOnlyModel.projectorCandidates,
+        selectedProjectorId: draftOnlyModel.selectedProjectorId,
         artifacts: draftOnlyModel.artifacts,
         speculativeDecoding: draftOnlyModel.speculativeDecoding,
       }, { includeOptionalMtpDraft: true }),
@@ -2219,14 +2233,141 @@ describe('ModelDownloadManager Basic', () => {
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
     expect(FileSystem.getFreeDiskStorageAsync).toHaveBeenCalledTimes(1);
     const entry = useDownloadStore.getState().queue.find((model) => model.id === draftOnlyModel.id);
-    expect(entry?.lifecycleStatus).toBe(LifecycleStatus.FAILED);
-    expect(entry?.downloadErrorCode).toBe('download_disk_space_low');
-    expect(entry?.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+    expect(entry).toBeUndefined();
+    const persistedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(persistedModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.downloadErrorCode).toBeUndefined();
+    expect(persistedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: installedProjector.id,
+      lifecycleStatus: 'active',
+      matchStatus: 'matched',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.kind === 'main_model')).toEqual(
+      expect.objectContaining({
+        installState: 'installed',
+        localPath: 'model.gguf',
+      }),
+    );
+    expect(persistedModel.artifacts?.find((artifact) => (
+      artifact.kind === 'multimodal_projector' && artifact.id === installedProjector.id
+    ))).toEqual(expect.objectContaining({
+      installState: 'installed',
+      localPath: 'mmproj-model.gguf',
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
       expect.objectContaining({
         installState: 'failed',
         resumeData: 'draft-resume-data',
         downloadProgress: 0.25,
         errorCode: 'download_disk_space_low',
+      }),
+    );
+  });
+
+  it('keeps an installed base and reusable projector available after draft-only unknown-size preflight', async () => {
+    const draftArtifactId = 'mtp-draft-unknown-size-without-consent';
+    const installedProjector: ProjectorArtifact = {
+      ...mockProjector,
+      lifecycleStatus: 'active',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    };
+    const draftOnlyModel: ModelMetadata = {
+      ...mockModel,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      projectorCandidates: [installedProjector],
+      selectedProjectorId: installedProjector.id,
+      artifacts: [{
+        id: draftArtifactId,
+        kind: 'speculative_draft',
+        requiredFor: ['text'],
+        remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
+        downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
+        sizeBytes: null,
+        installState: 'remote',
+      }],
+      speculativeDecoding: {
+        type: 'mtp',
+        mode: 'draft_model',
+        enabled: true,
+        maxDraftTokens: 3,
+        draftArtifactId,
+      },
+    };
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-dir/models/model.gguf' || uri === 'test-dir/models/mmproj-model.gguf') {
+        return { exists: true, size: 1000 };
+      }
+
+      return uri.startsWith('test-dir/models/')
+        ? { exists: false, size: 0 }
+        : { exists: true, size: 1000 };
+    });
+    updateModelLoadParametersForModel(draftOnlyModel.id, { mtpEnabled: false });
+    useDownloadStore.setState({
+      queue: [{ ...draftOnlyModel, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: draftOnlyModel.id,
+    });
+
+    await expect(
+      runDownloadModel({
+        localPath: draftOnlyModel.localPath,
+        downloadProgress: 1,
+        projectorCandidates: draftOnlyModel.projectorCandidates,
+        selectedProjectorId: draftOnlyModel.selectedProjectorId,
+        artifacts: draftOnlyModel.artifacts,
+        speculativeDecoding: draftOnlyModel.speculativeDecoding,
+      }, { includeOptionalMtpDraft: true }),
+    ).rejects.toMatchObject({
+      code: 'download_size_unknown',
+      details: expect.objectContaining({
+        artifactKind: 'speculative_draft',
+        artifactId: draftArtifactId,
+      }),
+    });
+
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(FileSystem.getFreeDiskStorageAsync).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === draftOnlyModel.id)).toBeUndefined();
+    const persistedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(persistedModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.downloadErrorCode).toBeUndefined();
+    expect(persistedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: installedProjector.id,
+      lifecycleStatus: 'active',
+      matchStatus: 'matched',
+      localPath: 'mmproj-model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.kind === 'main_model')).toEqual(
+      expect.objectContaining({
+        installState: 'installed',
+        localPath: 'model.gguf',
+      }),
+    );
+    expect(persistedModel.artifacts?.find((artifact) => (
+      artifact.kind === 'multimodal_projector' && artifact.id === installedProjector.id
+    ))).toEqual(expect.objectContaining({
+      installState: 'installed',
+      localPath: 'mmproj-model.gguf',
+    }));
+    expect(persistedModel.artifacts?.find((artifact) => artifact.id === draftArtifactId)).toEqual(
+      expect.objectContaining({
+        installState: 'failed',
+        errorCode: 'download_size_unknown',
+        errorMessage: 'MODEL_SIZE_UNKNOWN',
       }),
     );
   });
@@ -2367,6 +2508,20 @@ describe('ModelDownloadManager Basic', () => {
     });
 
     expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(useDownloadStore.getState().queue.find((model) => model.id === mockModel.id)).toBeUndefined();
+    const persistedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(persistedModel).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      localPath: 'model.gguf',
+      downloadProgress: 1,
+    }));
+    expect(persistedModel.downloadErrorCode).toBeUndefined();
+    expect(persistedModel.projectorCandidates?.[0]).toEqual(expect.objectContaining({
+      id: unknownSizeProjector.id,
+      lifecycleStatus: 'failed',
+      matchStatus: 'failed',
+      matchReason: 'download_disk_space_low',
+    }));
   });
 
   it('uses remaining model bytes and preserves valid resume data on low-storage preflight failure', async () => {

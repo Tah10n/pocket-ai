@@ -6,6 +6,7 @@ const net = require("net");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn, spawnSync } = require("child_process");
+const { isCompletePngBuffer } = require("./png-validation");
 
 const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
 const projectRoot = path.resolve(__dirname, "..");
@@ -40,7 +41,6 @@ const requiredNativeLibraries = ["libreactnative.so"];
 const metroStartupTimeoutMs = 90_000;
 const metroBundleTimeoutMs = 120_000;
 const deviceStartupTimeoutMs = 180_000;
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const launchDelayMs = parsePositiveInteger(
   cliOptions.launchDelayMs ?? process.env.ANDROID_SMOKE_LAUNCH_DELAY_MS ?? "4000",
   "launch delay"
@@ -1486,7 +1486,7 @@ function captureAndroidScreenshot(adbPath, serial, outputPath) {
     throw directCapture.error;
   }
 
-  if (directCapture.status === 0 && isPngBuffer(directCapture.stdout)) {
+  if (directCapture.status === 0 && isCompletePngBuffer(directCapture.stdout)) {
     fs.writeFileSync(outputPath, directCapture.stdout);
     return;
   }
@@ -1530,7 +1530,7 @@ function captureAndroidScreenshot(adbPath, serial, outputPath) {
     }
 
     const screenshotBuffer = fs.readFileSync(outputPath);
-    if (!isPngBuffer(screenshotBuffer)) {
+    if (!isCompletePngBuffer(screenshotBuffer)) {
       throw new Error("Failed to capture an Android screenshot.");
     }
   } finally {
@@ -1540,12 +1540,6 @@ function captureAndroidScreenshot(adbPath, serial, outputPath) {
       { stdio: "ignore", allowFailure: true }
     );
   }
-}
-
-function isPngBuffer(value) {
-  return Buffer.isBuffer(value)
-    && value.length >= PNG_SIGNATURE.length
-    && value.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
 }
 
 function runCapture(command, args, options = {}) {

@@ -1,9 +1,11 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { isCompletePngBuffer } = require('../../scripts/png-validation');
 
 const {
   buildScenarios,
+  buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
@@ -215,9 +217,17 @@ describe('android-scenarios command capture', () => {
 });
 
 describe('android-scenarios screenshot capture', () => {
-  const pngBuffer = Buffer.from([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
-  ]);
+  const pngBuffer = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+
+  it('requires a complete PNG stream rather than accepting the signature alone', () => {
+    expect(isCompletePngBuffer(pngBuffer)).toBe(true);
+    expect(isCompletePngBuffer(pngBuffer.subarray(0, pngBuffer.length - 1))).toBe(false);
+    expect(isCompletePngBuffer(pngBuffer.subarray(0, 9))).toBe(false);
+    expect(isCompletePngBuffer(Buffer.concat([pngBuffer, Buffer.from([0x00])]))).toBe(false);
+  });
 
   it('retries transient invalid screenshots before failing the scenario', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-screenshot-'));
@@ -2515,7 +2525,9 @@ describe('android-scenarios pack selection', () => {
         tapAnyText,
       });
 
-      expect(preparedPrompt).toMatch(/^Describe prepared image \d+ \d+$/);
+      expect(preparedPrompt).toMatch(
+        /^Read the exact text in the image and reply with the words you see ignore test id qa[a-z0-9]{10}$/,
+      );
       expect(spawnSync).toHaveBeenCalledWith(
         adbPath,
         ['-s', 'device-1', 'shell', 'input', 'text', escapeAdbInputText(preparedPrompt)],
@@ -2525,7 +2537,9 @@ describe('android-scenarios pack selection', () => {
         'tap-input',
         'clear-select-all',
         'clear-delete',
-        expect.stringMatching(/^input-text:Describe prepared image \d+ \d+$/),
+        expect.stringMatching(
+          /^input-text:Read the exact text in the image and reply with the words you see ignore test id qa[a-z0-9]{10}$/,
+        ),
         'tap-send',
       ]));
       expect(events.indexOf('tap-input')).toBeLessThan(events.indexOf('clear-select-all'));
@@ -2540,7 +2554,10 @@ describe('android-scenarios pack selection', () => {
         [preparedPrompt],
         expect.objectContaining({ timeoutMs: 10_000 })
       );
-      expect(expectAnyText).not.toHaveBeenCalledWith(['Describe prepared image'], expect.anything());
+      expect(expectAnyText).not.toHaveBeenCalledWith(
+        ['Read the exact text in the image and reply with the words you see ignore test id'],
+        expect.anything(),
+      );
       expect(hierarchyReads).toBeGreaterThanOrEqual(6);
     } finally {
       jest.dontMock('child_process');
@@ -2566,6 +2583,9 @@ describe('android-scenarios pack selection', () => {
     expect(isPreparedAssistantResponseLabel('The current model is unloading. Wait a moment and try again.', 'Describe prepared image 123')).toBe(false);
     expect(isPreparedAssistantResponseLabel('Engine not ready', 'Describe prepared image 123')).toBe(false);
     expect(isPreparedAssistantResponseLabel('Загрузите локальную модель, прежде чем продолжить.', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('12969972853', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('123.45', 'Describe prepared image 123')).toBe(false);
+    expect(isPreparedAssistantResponseLabel('OK', 'Describe prepared image 123')).toBe(false);
     expect(isPreparedAssistantResponseLabel('Native runtime aborted unexpectedly', 'Describe prepared image 123')).toBe(true);
     expect(isPreparedAssistantResponseLabel('The photo shows a small red car.', 'Describe prepared image 123')).toBe(true);
 
@@ -2627,6 +2647,15 @@ describe('android-scenarios pack selection', () => {
     expect(findPreparedAssistantResponseNode(answerSnapshot, sentContext, prompt)).toEqual(expect.objectContaining({
       text: 'The photo shows a small red car.',
     }));
+  });
+
+  it('builds a natural prepared vision prompt with a short unique id', () => {
+    const prompt = buildPreparedAttachmentSendPrompt();
+
+    expect(prompt).toMatch(
+      /^Read the exact text in the image and reply with the words you see ignore test id qa[a-z0-9]{10}$/,
+    );
+    expect(prompt).not.toMatch(/\b\d{7,}\b/);
   });
 
   it('signals unmet prepared attachment preview/remove preconditions as skips', () => {

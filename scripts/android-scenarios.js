@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { isCompletePngBuffer } = require("./png-validation");
 const DEFAULT_SCENARIO_PACK = "core";
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX = 220;
@@ -137,7 +138,8 @@ const MESSAGE_ATTACHMENT_PREVIEW_LABELS = [
   "Предпросмотр изображения 1 из 1 в сообщении",
 ];
 const CHAT_SEND_LABELS = ["Send message", "Отправить сообщение"];
-const PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX = "Describe prepared image";
+const PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX =
+  "Read the exact text in the image and reply with the words you see ignore test id";
 const TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX = "Text fallback smoke";
 const REMOVE_ATTACHMENT_LABELS = [
   "Remove attached image 1 of 1",
@@ -414,7 +416,6 @@ const DOWNLOAD_WARNING_SETTLE_TIMEOUT_MS = 0;
 const MODEL_WARMUP_DETECTION_TIMEOUT_MS = 2_000;
 const MODEL_WARMUP_SETTLE_TIMEOUT_MS = 180_000;
 const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
 // Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
@@ -845,7 +846,9 @@ function escapeAdbInputText(value) {
 }
 
 function buildPreparedAttachmentSendPrompt() {
-  return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
+  const timestampSuffix = Date.now().toString(36).slice(-6);
+  const randomSuffix = Math.floor(Math.random() * (36 ** 4)).toString(36).padStart(4, "0");
+  return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} qa${timestampSuffix}${randomSuffix}`;
 }
 
 function buildTextOnlyFallbackSendPrompt() {
@@ -3016,7 +3019,7 @@ async function waitForPreparedAssistantResponse(adbPath, serial, sentContext, pr
     withUiSummary(
       adbPath,
       serial,
-      `Timed out waiting for a non-empty assistant response after prepared image prompt "${prompt}".`
+      `Timed out waiting for a meaningful assistant response after prepared image prompt "${prompt}".`
     )
   );
 }
@@ -3120,6 +3123,11 @@ function isPreparedAssistantResponseLabel(value, prompt) {
   }
 
   if (/^\d+(?:\.\d+)?\s*t\/s$/iu.test(label)) {
+    return false;
+  }
+
+  const letters = label.match(/\p{L}/gu) ?? [];
+  if (letters.length < 4 || !/\p{L}{2,}/u.test(label)) {
     return false;
   }
 
@@ -4057,12 +4065,14 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
         throw directCapture.error;
       }
 
-      if (directCapture.status === 0 && isPngBuffer(directCapture.stdout)) {
+      if (directCapture.status === 0 && isCompletePngBuffer(directCapture.stdout)) {
         fs.writeFileSync(screenshotPath, directCapture.stdout);
         return screenshotPath;
       }
 
-      failures.push(describeSpawnResult("exec-out screencap", directCapture));
+      failures.push(directCapture.status === 0
+        ? `exec-out screencap returned an incomplete or invalid PNG (${directCapture.stdout?.length ?? 0} bytes)`
+        : describeSpawnResult("exec-out screencap", directCapture));
       sawAdbDeviceUnavailable = isAdbDeviceUnavailableResult(directCapture);
       log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
 
@@ -4109,11 +4119,11 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
         }
 
         const screenshotBuffer = fs.readFileSync(screenshotPath);
-        if (isPngBuffer(screenshotBuffer)) {
+        if (isCompletePngBuffer(screenshotBuffer)) {
           return screenshotPath;
         }
 
-        failures.push(`pulled screenshot was not a PNG (${screenshotBuffer.length} bytes)`);
+        failures.push(`pulled screenshot was incomplete or invalid (${screenshotBuffer.length} bytes)`);
       } finally {
         runSpawnSync(
           adbPath,
@@ -4184,12 +4194,6 @@ function waitForAdbDevice(adbPath, serial, runSpawnSync = spawnSync) {
   );
 }
 
-function isPngBuffer(value) {
-  return Buffer.isBuffer(value)
-    && value.length >= PNG_SIGNATURE.length
-    && value.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
-}
-
 function isEmulatorSerial(serial) {
   return serial.startsWith("emulator-");
 }
@@ -4225,6 +4229,7 @@ function sleepSync(ms) {
 
 module.exports = {
   buildScenarios,
+  buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,

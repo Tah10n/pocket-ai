@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-04-23
+Last updated: 2026-07-18
 
 ## Purpose
 
@@ -24,12 +24,13 @@ This repository uses **Release Please** to automate:
 
 - `app.json -> expo.version`
 - `package.json -> version`
+- `.release-please-manifest.json` release state
 - [`CHANGELOG.md`](../CHANGELOG.md)
 
 If you're cutting a user-facing store release:
 
-- Merge the Release Please **Release PR** (it updates versions + changelog).
-- Avoid manual edits to the version/changelog files in the normal flow.
+- Merge the Release Please **Release PR** (it updates versions, release state, and changelog).
+- Avoid manual edits to the version, manifest, or changelog files in the normal flow.
 - After the local production build, if `app.json` reserves the next Android `versionCode`, carry that change in a small follow-up commit/PR. Do not expect to add it to the already-merged Release PR.
 
 Notes:
@@ -38,6 +39,12 @@ Notes:
 - If `main` requires status checks, configure a PAT secret (for example `RELEASE_PLEASE_TOKEN`) so CI runs on Release PRs.
 
 ## Pre-flight checks
+
+Install the exact dependency state from the committed lockfile:
+
+```bash
+npm ci
+```
 
 Run the local verification gate before cutting a build:
 
@@ -176,6 +183,21 @@ keyPassword=your-key-password
 - With the model active, apply a changed load profile and confirm the model reloads successfully with the updated settings.
 - Unload the model and confirm the UI returns to the unloaded state.
 
+### Multimodal attachments and MTP
+
+- Load a known image-capable model with its matching projector and confirm the composer exposes image attachment only after runtime vision support is ready.
+- Select an image through the system picker, confirm preview and remove both work, then send it and verify the local model returns a grounded response.
+- Load a known audio-capable model with its matching projector and confirm WAV/MP3 attachment is available only after runtime audio support is ready; send one fixture and verify a grounded response.
+- Attach a supported local text document and a text-based PDF, confirm bounded local extraction reaches the model, then verify a scanned/textless PDF reports the specific no-extractable-text recovery message.
+- Confirm an unsupported model, missing or mismatched projector, or failed multimodal initialization keeps text-only chat available without exposing an attachment action that cannot succeed.
+- Relaunch after a successful attachment send and confirm the message preview and attachment metadata restore with the conversation.
+- Delete an attachment message or conversation and confirm its app-owned attachment file is removed when cleanup runs.
+- Confirm new video attachment is unavailable and the UI does not claim direct-video or sampled-frame support.
+- With an embedded-MTP model, confirm Model Controls exposes the MTP toggle, the model loads with MTP enabled, and a text response completes without affecting image/audio requests.
+- With a compatible Gemma model that uses a separate MTP draft GGUF, confirm the companion download, verification, storage accounting, and model-detail readiness state stay aligned.
+- Force a missing draft, failed draft download, or MTP initialization failure and confirm the base model remains usable through ordinary generation.
+- Toggle MTP for the active model and confirm the transactional reload either commits the new setting after a successful load or preserves the prior setting after failure/cancellation.
+
 ### Chat and history
 
 - Open `Chat` and send a prompt with a loaded model.
@@ -227,9 +249,12 @@ When release behavior or product messaging changes, check these files together:
 - [`CHANGELOG.md`](../CHANGELOG.md)
 - [`app.json`](../app.json)
 - [`package.json`](../package.json)
+- [`.release-please-manifest.json`](../.release-please-manifest.json)
 - [`plugins/withAndroidReleaseConfig.js`](../plugins/withAndroidReleaseConfig.js)
 - [`scripts/build-android-release.js`](../scripts/build-android-release.js)
 - [`eas.json`](../eas.json)
+- [`docs/model-parameters.md`](./model-parameters.md)
+- [`docs/multimodal-attachments.md`](./multimodal-attachments.md)
 - [`docs/privacy-disclosures.md`](./privacy-disclosures.md)
 
 ## Notes

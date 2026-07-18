@@ -75,7 +75,7 @@ Pocket AI is a native Expo / React Native project. A native development environm
 
 ### Prerequisites
 
-- Node.js and npm
+- Node.js 20+ and npm
 - Android Studio for Android work
 - Xcode for iOS work
 - A working native toolchain for Expo native builds

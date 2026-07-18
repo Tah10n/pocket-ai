@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.6.0](https://github.com/Tah10n/pocket-ai/compare/v1.5.0...v1.6.0) (2026-07-17)
+
+
+### Features
+
+* add guarded MTP speculative decoding ([#129](https://github.com/Tah10n/pocket-ai/issues/129)) ([d0f7a0e](https://github.com/Tah10n/pocket-ai/commit/d0f7a0ead009683dba737e5298d4fbd48c197b67))
+* **multimodal:** add local attachment pipeline ([#119](https://github.com/Tah10n/pocket-ai/issues/119)) ([17ebd17](https://github.com/Tah10n/pocket-ai/commit/17ebd172942897b2d0e692c0fc2f4a5a5589071c))
+
+
+### Bug Fixes
+
+* harden model parameters sheet layout ([4c568da](https://github.com/Tah10n/pocket-ai/commit/4c568da0cf9ca53acf59558104fa3d0c63786d0f))
+* harden multimodal readiness and catalog loading ([#121](https://github.com/Tah10n/pocket-ai/issues/121)) ([26e0b3b](https://github.com/Tah10n/pocket-ai/commit/26e0b3b8710dc17e64865d7547049507cf82d8aa))
+
 ## [1.5.0](https://github.com/Tah10n/pocket-ai/compare/v1.4.0...v1.5.0) (2026-05-24)
 
 

@@ -1,7 +1,7 @@
 {
   "name": "pocket-ai",
   "main": "expo-router/entry",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "license": "MIT",
   "description": "Offline-first local AI assistant for discovering, downloading, and chatting with GGUF models on-device.",
   "repository": {
@@ -142,11 +142,11 @@
     "@react-native-community/cli": "^20.1.2",
     "@testing-library/react-native": "^13.3.3",
     "@types/jest": "29.5.14",
-    "@types/node": "~24.12.4",
+    "@types/node": "~24.13.3",
     "@types/pako": "^2.0.4",
     "@types/react": "~19.2.10",
     "babel-preset-expo": "~55.0.24",
-    "eslint": "^9.25.0",
+    "eslint": "^9.39.5",
     "eslint-config-expo": "~55.0.1",
     "jest-expo": "~55.0.20",
     "react-test-renderer": "19.2.0",

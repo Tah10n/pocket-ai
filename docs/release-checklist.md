@@ -146,7 +146,7 @@ keyPassword=your-key-password
 - Search the Hugging Face catalog while online.
 - Confirm `All Models` and `Downloaded` render as one segmented control inside the same page, not as two separate standalone buttons.
 - On first catalog open with no Hugging Face token configured, confirm guided discovery defaults to RAM-friendly public models and offers `Show full catalog`.
-- Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows a resolved size or `Unknown`, never `0.00 GB`.
+- Search for a public GGUF model whose list metadata does not expose a reliable size and confirm the card shows `Loading size…` while metadata is resolving, then a resolved size or `Unknown`, never `0.00 GB`.
 - Confirm size labels use decimal units (1 GB = 1,000,000,000 bytes).
 - For a model with multiple GGUF files, open the variant picker from a catalog card and confirm each option shows quantization, file name, size, and RAM-fit status.
 - Select a non-default variant and confirm the catalog card updates its size and RAM-fit label without losing access state or jumping the list.

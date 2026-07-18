@@ -763,6 +763,8 @@
     "loadFailed": "Failed to load models",
     "sizeUnknown": "Unknown",
     "sizeUnknownBadge": "Size unknown",
+    "sizeResolving": "Loading size…",
+    "sizeResolvingBadge": "Loading size",
     "download": "Download",
     "retryDownload": "Retry",
     "cancel": "Cancel",

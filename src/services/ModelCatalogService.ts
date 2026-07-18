@@ -68,6 +68,7 @@ import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import {
+  getModelDisplayArtifactSizeBytes,
   getProjectorMemoryFitSizeBytes,
   getSpeculativeDraftMemoryFitSizeBytes,
 } from '../utils/modelSize';
@@ -592,14 +593,17 @@ export class ModelCatalogService {
         this.sanitizeCachedCatalogModelsResolvedFiles(cached.result.models),
       ).map((model) => this.toSearchResultModel(model));
       const memoryFitContext = await memoryFitContextPromise;
+      const mergedCachedModels = this.mergeSearchModelsWithRegistry(
+        filteredCachedModels,
+        this.getAuthScope(catalogSearchHasAuthScope),
+        memoryFitContext,
+        metadataResolution,
+      );
       return {
         ...this.sanitizeSearchResultCursor(cached.result),
-        models: this.mergeSearchModelsWithRegistry(
-          filteredCachedModels,
-          this.getAuthScope(catalogSearchHasAuthScope),
-          memoryFitContext,
-          metadataResolution,
-        ),
+        models: metadataResolution === 'deferred'
+          ? this.copySizeResolutionStates(filteredCachedModels, mergedCachedModels)
+          : mergedCachedModels,
       };
     }
 
@@ -683,7 +687,11 @@ export class ModelCatalogService {
         );
         this.assertRequestContextIsCurrent(requestContext);
         const filteredModels = filterCatalogSearchModels(fetched.models);
-        const searchResultModels = filteredModels.map((model) => this.toSearchResultModel(model));
+        const searchResultModels = filteredModels
+          .map((model) => this.toSearchResultModel(model))
+          .map((model) => metadataResolution === 'deferred'
+            ? this.withPendingSizeResolution(model, requestContext)
+            : model);
         const result = {
           models: searchResultModels,
           hasMore: fetched.nextCursor !== null,
@@ -717,9 +725,12 @@ export class ModelCatalogService {
           memoryFitContext,
           metadataResolution,
         );
+        const displayModels = metadataResolution === 'deferred'
+          ? this.copySizeResolutionStates(result.models, mergedModels)
+          : mergedModels;
 
-        if (catalogSearchHasAuthScope && mergedModels.length > 0) {
-          this.reconcileAnonymousModelVisibility(mergedModels);
+        if (catalogSearchHasAuthScope && displayModels.length > 0) {
+          this.reconcileAnonymousModelVisibility(displayModels);
         }
 
         if (metadataResolution === 'deferred') {
@@ -741,7 +752,7 @@ export class ModelCatalogService {
 
         return {
           ...result,
-          models: mergedModels,
+          models: displayModels,
         };
       } catch (e) {
         if (e instanceof StaleCatalogAuthError) {
@@ -1202,9 +1213,52 @@ export class ModelCatalogService {
       return model;
     }
 
-    return normalizePersistedModelMetadata({
+    const normalized = normalizePersistedModelMetadata({
       ...model,
       variants,
+    });
+    return model.sizeResolutionState
+      ? { ...normalized, sizeResolutionState: model.sizeResolutionState }
+      : normalized;
+  }
+
+  private hasKnownDisplaySize(model: ModelMetadata): boolean {
+    const size = getModelDisplayArtifactSizeBytes(model);
+    return typeof size === 'number' && Number.isFinite(size) && size > 0;
+  }
+
+  private withPendingSizeResolution(
+    model: ModelMetadata,
+    requestContext: CatalogRequestContext,
+  ): ModelMetadata {
+    if (this.hasKnownDisplaySize(model) || !this.shouldResolveDeferredMetadata(model, requestContext)) {
+      return model;
+    }
+
+    return { ...model, sizeResolutionState: 'resolving' };
+  }
+
+  private withCompletedSizeResolution(model: ModelMetadata): ModelMetadata {
+    return {
+      ...model,
+      sizeResolutionState: this.hasKnownDisplaySize(model) ? 'resolved' : 'unavailable',
+    };
+  }
+
+  private copySizeResolutionStates(
+    sources: ModelMetadata[],
+    targets: ModelMetadata[],
+  ): ModelMetadata[] {
+    const states = new Map(sources.flatMap((model) => (
+      model.sizeResolutionState ? [[model.id, model.sizeResolutionState] as const] : []
+    )));
+    if (states.size === 0) {
+      return targets;
+    }
+
+    return targets.map((model) => {
+      const sizeResolutionState = states.get(model.id);
+      return sizeResolutionState ? { ...model, sizeResolutionState } : model;
     });
   }
 
@@ -2212,6 +2266,9 @@ export class ModelCatalogService {
       });
     } catch (error) {
       outcome = error instanceof StaleCatalogAuthError ? 'stale' : 'error';
+      if (!(error instanceof StaleCatalogAuthError)) {
+        this.completeUnresolvedSizeStatesAfterFailure(input);
+      }
       throw error;
     } finally {
       span.end({ outcome });
@@ -2236,7 +2293,10 @@ export class ModelCatalogService {
     const mergedModels = filterCatalogSearchModels(resolvedModels).map((model) => (
       this.mergeModelWithRegistry(model, input.memoryFitContext) ?? model
     ));
-    const replacements = new Map(mergedModels.map((model) => [model.id, this.toSearchResultModel(model)]));
+    const completedModels = mergedModels.map((model) => (
+      this.withCompletedSizeResolution(this.toSearchResultModel(model))
+    ));
+    const replacements = new Map(completedModels.map((model) => [model.id, model]));
     const requestedIds = new Set(requestedModelIds);
     const removedModelIds = requestedModelIds.filter((modelId) => !replacements.has(modelId));
 
@@ -2277,9 +2337,30 @@ export class ModelCatalogService {
       query: input.query,
       sort: input.sort,
       gated: input.gated,
-      models: mergedModels,
+      models: completedModels,
       removedModelIds,
     });
+  }
+
+  private completeUnresolvedSizeStatesAfterFailure(input: DeferredMetadataResolutionInput): void {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (!currentEntry || currentEntry.requestId !== input.cacheRequestId || this.isDisposed) {
+      return;
+    }
+
+    const requestedIds = new Set(input.models.map((model) => model.id));
+    const unresolvedModels = currentEntry.result.models.filter((model) => (
+      requestedIds.has(model.id) && model.sizeResolutionState === 'resolving'
+    ));
+    if (unresolvedModels.length === 0) {
+      return;
+    }
+
+    this.applyDeferredMetadataBatch(
+      input,
+      unresolvedModels.map((model) => model.id),
+      unresolvedModels,
+    );
   }
 
   private async fetchCatalogBatch(

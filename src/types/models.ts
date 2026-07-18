@@ -28,6 +28,7 @@ export enum ModelAccessState {
 }
 
 export type ModelMetadataTrust = 'verified_local' | 'trusted_remote' | 'inferred' | 'unknown';
+export type ModelSizeResolutionState = 'resolving' | 'resolved' | 'unavailable';
 
 export type ModelMemoryFitDecision =
   | 'fits_high_confidence'
@@ -199,6 +200,8 @@ export interface ModelMetadata {
   name: string;
   author: string;
   size: number | null;
+  /** Runtime-only catalog state; intentionally omitted from persistent normalization. */
+  sizeResolutionState?: ModelSizeResolutionState;
   downloadUrl: string; // HF resolve URL
   allowUnknownSizeDownload?: boolean;
   requiresTreeProbe?: boolean;

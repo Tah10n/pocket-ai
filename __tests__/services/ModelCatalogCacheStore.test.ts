@@ -839,6 +839,57 @@ describe('ModelCatalogCacheStore', () => {
     parseSpy.mockRestore();
   });
 
+  it('drops retired v8 payloads before JSON parsing', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(SEARCH_CACHE_KEY, '{"version":8,"entries":[]}');
+    const parseSpy = jest.spyOn(JSON, 'parse');
+
+    new ModelCatalogCacheStore();
+
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    parseSpy.mockRestore();
+  });
+
+  it('fails closed when a marked current payload is no longer anonymous-public', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'org/marked-private-model';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const unsafeModel = buildModel({
+      id,
+      accessState: ModelAccessState.AUTHORIZED,
+      isPrivate: true,
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      sanitized: true,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`,
+        timestamp: Date.now(),
+        scope,
+        result: { models: [unsafeModel], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      sanitized: true,
+      entries: [{
+        key: `${id}::anon`,
+        id,
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: unsafeModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+
+    expect(store.getSearch(scope, 1000)).toBeNull();
+    expect(store.getModelSnapshot(id, 'anon', 1000)).toBeNull();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
+  });
+
   it('bounds persisted payload bytes without evicting smaller recent entries from memory', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const store = new ModelCatalogCacheStore();
@@ -2135,7 +2186,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBe(rewrittenSnapshot);
   });
 
-  it('rewrites current v7 search and snapshot payloads after field-level sanitization', () => {
+  it('rewrites unmarked current-version search and snapshot payloads after field-level sanitization', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const id = 'rewrite/current-version-runtime-state';
     const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
@@ -2186,7 +2237,9 @@ describe('ModelCatalogCacheStore', () => {
 
     for (const key of [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY]) {
       const raw = storage.getString(key) as string;
-      expect(JSON.parse(raw).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+      const persisted = JSON.parse(raw);
+      expect(persisted.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+      expect(persisted.sanitized).toBe(true);
       expect(raw).not.toContain('private-current-version-model.gguf');
       expect(raw).not.toContain('private-current-version-resume-token');
       expect(raw).not.toContain('"source":"runtime"');

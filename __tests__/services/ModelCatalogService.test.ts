@@ -974,10 +974,18 @@ describe('ModelCatalogService', () => {
         id: 'org/deferred-catalog-model',
         size: null,
         requiresTreeProbe: true,
+        sizeResolutionState: 'resolving',
       }));
       expect(metadataListener).not.toHaveBeenCalled();
       const firstUrl = String((global.fetch as jest.Mock).mock.calls[0][0]);
       expect(firstUrl).toContain('limit=1');
+
+      const cachedWhileResolving = await service.searchModels('phi', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      });
+      expect(cachedWhileResolving.models[0]?.sizeResolutionState).toBe('resolving');
 
       await waitForMockCallCount(global.fetch as jest.Mock, 2);
       treeResponse.resolve({
@@ -1000,6 +1008,7 @@ describe('ModelCatalogService', () => {
           id: 'org/deferred-catalog-model',
           size: 2 * 1024 * 1024 * 1024,
           requiresTreeProbe: false,
+          sizeResolutionState: 'resolved',
         })],
         removedModelIds: [],
       });
@@ -1010,8 +1019,54 @@ describe('ModelCatalogService', () => {
       })?.models[0]).toEqual(expect.objectContaining({
         size: 2 * 1024 * 1024 * 1024,
         requiresTreeProbe: false,
+        sizeResolutionState: 'resolved',
       }));
       await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it('finishes deferred size resolution as unavailable when tree metadata cannot provide a size', async () => {
+    const service = new ModelCatalogService();
+    const metadataListener = jest.fn();
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({ ok: false, status: 404 });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/unavailable-size-model')]),
+      });
+    }) as jest.Mock;
+
+    try {
+      const result = await service.searchModels('missing-size', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      });
+
+      expect(result.models[0]?.sizeResolutionState).toBe('resolving');
+      await waitForMockCallCount(metadataListener, 1);
+
+      expect(metadataListener).toHaveBeenCalledWith(expect.objectContaining({
+        models: [expect.objectContaining({
+          id: 'org/unavailable-size-model',
+          size: null,
+          sizeResolutionState: 'unavailable',
+        })],
+      }));
+      expect(service.getCachedSearchResult('missing-size', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      })?.models[0]?.sizeResolutionState).toBe('unavailable');
     } finally {
       service.dispose();
     }

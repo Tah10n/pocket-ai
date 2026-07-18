@@ -777,6 +777,8 @@
     "loadFailed": "Не удалось загрузить модели",
     "sizeUnknown": "Неизвестно",
     "sizeUnknownBadge": "Размер неизвестен",
+    "sizeResolving": "Загрузка размера…",
+    "sizeResolvingBadge": "Загрузка размера",
     "download": "Скачать",
     "retryDownload": "Повторить",
     "cancel": "Отмена",

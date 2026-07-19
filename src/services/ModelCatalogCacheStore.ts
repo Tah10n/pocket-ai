@@ -3,6 +3,7 @@ import {
   ModelAccessState,
   type ModelArtifactMetadata,
   type ModelArtifactRequiredInput,
+  type ModelGgufMetadata,
   type ModelMetadata,
   type ModelVariant,
 } from '../types/models';
@@ -101,20 +102,43 @@ export type ModelCatalogCacheStoreOptions = {
 const STORAGE_ID = 'model-catalog-cache';
 const SEARCH_CACHE_KEY = 'catalog-search-cache-v1';
 const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
+const CACHE_MAINTENANCE_VERSION_KEY = 'catalog-cache-maintenance-version';
+const CACHE_MAINTENANCE_VERSION = 1;
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 9;
-export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 512_000;
-// v8 payloads could grow large enough that their repeated migration audit
-// blocked the JS thread for minutes on memory-constrained Android devices. Drop
-// that optional cache before parsing; older compact payloads still migrate.
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 10;
+export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 192_000;
+// v8/v9 payloads could retain the full GGUF metadata map (including large chat
+// templates) and block the JS thread during startup normalization. Drop those
+// optional generations before parsing; older compact payloads still migrate.
 const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, 7, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
+const INCREMENTAL_HYDRATION_MODELS_PER_BATCH = 4;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
 const CATALOG_SAFE_VISION_SOURCES = new Set<VisionCapabilitySource>(['catalog_metadata', 'tree_probe']);
 const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput>(['text', 'image', 'audio']);
+const PERSISTED_GGUF_DIRECT_KEYS = [
+  'architecture',
+  'sizeLabel',
+  'size_label',
+  'totalBytes',
+  'total',
+  'contextLengthTokens',
+  'context_length',
+  'slidingWindowTokens',
+  'sliding_window',
+  'nLayers',
+  'n_layers',
+  'n_layer',
+  'block_count',
+  'nHeadKv',
+  'nEmbdHeadK',
+  'nEmbdHeadV',
+  'general.architecture',
+  'general.type',
+] as const;
 
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
@@ -128,6 +152,41 @@ export type CatalogSafeNativeCapabilityContext = {
   projectorEvidenceIdentityKeys: ReadonlySet<string>;
   projectorCandidateScopeIds: ReadonlySet<string>;
 };
+
+function compactPersistedGgufMetadata(
+  gguf: ModelGgufMetadata | undefined,
+): ModelGgufMetadata | undefined {
+  if (!gguf) {
+    return undefined;
+  }
+
+  const compact = PERSISTED_GGUF_DIRECT_KEYS.reduce<ModelGgufMetadata>((result, key) => {
+    const value = gguf[key];
+    if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'string') {
+      (result as Record<string, string | number | undefined>)[key] = value;
+    }
+    return result;
+  }, {});
+  const architecture = typeof compact.architecture === 'string'
+    ? compact.architecture.trim().toLowerCase()
+    : typeof compact['general.architecture'] === 'string'
+      ? compact['general.architecture'].trim().toLowerCase()
+      : '';
+  const architecturePrefixes = new Set([
+    architecture,
+    architecture.replace(/\d+$/u, ''),
+  ].filter((value) => value.length > 0));
+
+  architecturePrefixes.forEach((prefix) => {
+    const key = `${prefix}.block_count`;
+    const value = gguf[key];
+    if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'string') {
+      compact[key] = value;
+    }
+  });
+
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
 
 type CatalogSanitizationOptions = {
   persistedVersion?: number;
@@ -1290,6 +1349,10 @@ export function sanitizeCatalogModelRuntimeState(
     downloadErrorAt: undefined,
     downloadErrorCode: undefined,
     downloadErrorMessage: undefined,
+    // Catalog cards and runtime heuristics need only this compact digest. Raw
+    // GGUF maps can contain multi-kilobyte tokenizer templates and thousands of
+    // scalar keys that are expensive to parse and normalize during app launch.
+    gguf: compactPersistedGgufMetadata(model.gguf),
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
     metadataTrust: model.metadataTrust === 'verified_local' ? undefined : model.metadataTrust,
@@ -1412,19 +1475,76 @@ function normalizeModels(
       && typeof (entry as { id?: unknown }).id === 'string'
     ))
     .flatMap((entry) => {
-      const normalized = normalizePersistedModelMetadata(entry);
-      if (typeof persistedVersion !== 'number' || payloadAlreadySanitized) {
-        return payloadAlreadySanitized && !hasSafeAnonymousPersistedAccessState(normalized)
-          ? []
-          : [normalized];
-      }
-
-      const sanitized = sanitizeAnonymousCatalogModel(normalized, {
-        persistedVersion,
-        rawModel: entry,
-      });
-      return sanitized ? [sanitized] : [];
+      const normalized = normalizeModelEntry(entry, persistedVersion, payloadAlreadySanitized);
+      return normalized ? [normalized] : [];
     });
+}
+
+function normalizeModelEntry(
+  entry: Partial<ModelMetadata> & { id: string },
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): ModelMetadata | null {
+  const normalized = normalizePersistedModelMetadata(entry);
+  if (typeof persistedVersion !== 'number' || payloadAlreadySanitized) {
+    return payloadAlreadySanitized && !hasSafeAnonymousPersistedAccessState(normalized)
+      ? null
+      : normalized;
+  }
+
+  return sanitizeAnonymousCatalogModel(normalized, {
+    persistedVersion,
+    rawModel: entry,
+  });
+}
+
+function yieldToUiThread(): Promise<void> {
+  return new Promise((resolve) => {
+    const setImmediateIfAvailable = (globalThis as typeof globalThis & {
+      setImmediate?: (callback: () => void) => unknown;
+    }).setImmediate;
+    if (typeof setImmediateIfAvailable === 'function') {
+      setImmediateIfAvailable(resolve);
+      return;
+    }
+
+    setTimeout(resolve, 0);
+  });
+}
+
+async function normalizeModelsIncrementally(
+  models: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): Promise<ModelMetadata[]> {
+  if (!Array.isArray(models)) {
+    return [];
+  }
+
+  const normalizedModels: ModelMetadata[] = [];
+  const entries = models.filter((entry): entry is Partial<ModelMetadata> & { id: string } => (
+    Boolean(entry)
+    && typeof entry === 'object'
+    && typeof (entry as { id?: unknown }).id === 'string'
+  ));
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index] as Partial<ModelMetadata> & { id: string };
+    const normalized = normalizeModelEntry(entry, persistedVersion, payloadAlreadySanitized);
+    if (normalized) {
+      normalizedModels.push(normalized);
+    }
+
+    // Keep each Hermes work quantum bounded without flooding the JS timer queue
+    // with one callback per model on a busy device.
+    if (
+      index < entries.length - 1
+      && (index + 1) % INCREMENTAL_HYDRATION_MODELS_PER_BATCH === 0
+    ) {
+      await yieldToUiThread();
+    }
+  }
+
+  return normalizedModels;
 }
 
 function inferSnapshotAuthScope(model: ModelMetadata): CatalogCacheAuthScope {
@@ -1540,6 +1660,61 @@ function normalizeSearchEntry(
   };
 }
 
+async function normalizeSearchEntryIncrementally(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): Promise<SearchCacheEntry | null> {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as {
+    key?: unknown;
+    timestamp?: unknown;
+    scope?: unknown;
+    result?: unknown;
+  };
+  if (!candidate.result || typeof candidate.result !== 'object') {
+    return null;
+  }
+
+  const scope = normalizeSearchScope(candidate.scope);
+  const rawResult = candidate.result as {
+    models?: unknown;
+    hasMore?: unknown;
+    nextCursor?: unknown;
+  };
+  const models = await normalizeModelsIncrementally(
+    rawResult.models,
+    persistedVersion,
+    payloadAlreadySanitized,
+  );
+  if (
+    !scope
+    || typeof candidate.key !== 'string'
+    || (
+      payloadAlreadySanitized
+      && (!Array.isArray(rawResult.models) || rawResult.models.length !== models.length)
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    key: buildCatalogSearchKey(scope),
+    timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
+      ? Math.round(candidate.timestamp)
+      : 0,
+    scope,
+    result: {
+      models,
+      hasMore: rawResult.hasMore === true,
+      nextCursor: typeof rawResult.nextCursor === 'string' ? rawResult.nextCursor : null,
+    },
+  };
+}
+
 function normalizeSnapshotEntry(
   value: unknown,
   persistedVersion?: number,
@@ -1588,12 +1763,59 @@ function normalizeSnapshotEntry(
   };
 }
 
+async function normalizeSnapshotEntryIncrementally(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): Promise<SnapshotCacheEntry | null> {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as {
+    key?: unknown;
+    id?: unknown;
+    authScope?: unknown;
+    timestamp?: unknown;
+    model?: unknown;
+  };
+  if (typeof candidate.id !== 'string') {
+    return null;
+  }
+
+  const models = await normalizeModelsIncrementally(
+    candidate.model ? [candidate.model] : [],
+    persistedVersion,
+    payloadAlreadySanitized,
+  );
+  const model = models[0];
+  if (!model) {
+    return null;
+  }
+
+  const authScope = candidate.authScope === 'auth' || candidate.authScope === 'anon'
+    ? candidate.authScope
+    : inferSnapshotAuthScope(model);
+  return {
+    key: typeof candidate.key === 'string'
+      ? candidate.key
+      : buildSnapshotKey(candidate.id, authScope),
+    id: candidate.id,
+    authScope,
+    timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
+      ? Math.round(candidate.timestamp)
+      : 0,
+    model,
+  };
+}
+
 export class ModelCatalogCacheStore {
   private storage = createStorage(STORAGE_ID, { tier: 'cache' });
   private searchEntries = new Map<string, SearchCacheEntry>();
   private snapshotEntries = new Map<string, SnapshotCacheEntry>();
   private isHydrated = false;
   private isPersistenceDisabled = false;
+  private incrementalHydrationPromise: Promise<void> | null = null;
 
   constructor(options: ModelCatalogCacheStoreOptions = {}) {
     if (options.hydrateOnCreate !== false) {
@@ -1849,6 +2071,8 @@ export class ModelCatalogCacheStore {
     if (didFail) {
       throw firstError;
     }
+
+    this.trimPersistedStorageBestEffort();
   }
 
   public clearSnapshots(): void {
@@ -1881,6 +2105,11 @@ export class ModelCatalogCacheStore {
   }
 
   private loadPersistedEntries(): void {
+    // Older builds may already have removed the retired keys while leaving the
+    // dedicated MMKV data file at its previous multi-megabyte size. Detect that
+    // keyless tombstone state too, otherwise those users keep paying the scan
+    // cost forever and never reach the invalid-payload branch again.
+    let shouldTrimPersistedStorage = this.persistedStorageNeedsTrim();
     let shouldRewriteSearchPayload = false;
     const searchPayloadResult = this.parsePayload<SearchCacheEntry>(
       this.storage.getString(SEARCH_CACHE_KEY),
@@ -1890,6 +2119,7 @@ export class ModelCatalogCacheStore {
 
     if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
       this.storage.remove(SEARCH_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
     }
 
     searchPayloadResult.entries.forEach((entry) => {
@@ -1910,6 +2140,7 @@ export class ModelCatalogCacheStore {
 
     if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
       this.storage.remove(SNAPSHOT_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
     }
 
     snapshotPayloadResult.entries.forEach((entry) => {
@@ -1939,6 +2170,176 @@ export class ModelCatalogCacheStore {
 
     if (shouldRewriteSnapshotPayload) {
       this.persistSnapshotEntries();
+    }
+
+    if (shouldTrimPersistedStorage) {
+      // MMKV does not shrink its backing file when keys are removed. Without an
+      // explicit trim, retired multi-megabyte catalog payloads are scanned again
+      // on every app launch even though both cache keys are already gone.
+      this.trimPersistedStorageBestEffort();
+    }
+  }
+
+  private async loadPersistedEntriesIncrementally(): Promise<void> {
+    let shouldTrimPersistedStorage = this.persistedStorageNeedsTrim();
+    let shouldRewriteSearchPayload = false;
+    const searchPayloadResult = await this.parsePayloadIncrementally<SearchCacheEntry>(
+      this.storage.getString(SEARCH_CACHE_KEY),
+      normalizeSearchEntryIncrementally,
+    );
+    shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
+
+    if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
+      this.storage.remove(SEARCH_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
+    }
+
+    searchPayloadResult.entries.forEach((entry) => {
+      if (entry.scope.authScope !== 'anon') {
+        shouldRewriteSearchPayload = true;
+        return;
+      }
+      this.searchEntries.set(entry.key, entry);
+    });
+
+    const snapshotPayloadResult = await this.parsePayloadIncrementally<SnapshotCacheEntry>(
+      this.storage.getString(SNAPSHOT_CACHE_KEY),
+      normalizeSnapshotEntryIncrementally,
+    );
+    let shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
+
+    if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
+      this.storage.remove(SNAPSHOT_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
+    }
+
+    snapshotPayloadResult.entries.forEach((entry) => {
+      if (entry.authScope !== 'anon') {
+        shouldRewriteSnapshotPayload = true;
+        return;
+      }
+      this.snapshotEntries.set(entry.key, entry);
+    });
+
+    const searchEntriesBeforePrune = this.searchEntries.size;
+    this.pruneSearchEntries();
+    if (searchEntriesBeforePrune !== this.searchEntries.size) {
+      shouldRewriteSearchPayload = true;
+    }
+
+    const snapshotEntriesBeforePrune = this.snapshotEntries.size;
+    this.pruneSnapshotEntries();
+    if (snapshotEntriesBeforePrune !== this.snapshotEntries.size) {
+      shouldRewriteSnapshotPayload = true;
+    }
+
+    if (shouldRewriteSearchPayload) {
+      this.persistSearchEntries();
+    }
+    if (shouldRewriteSnapshotPayload) {
+      this.persistSnapshotEntries();
+    }
+    if (shouldTrimPersistedStorage) {
+      this.trimPersistedStorageBestEffort();
+    }
+  }
+
+  public hydrateIncrementally(): Promise<void> {
+    if (this.isHydrated) {
+      return Promise.resolve();
+    }
+
+    if (this.incrementalHydrationPromise) {
+      return this.incrementalHydrationPromise;
+    }
+
+    const hydrationPromise = this.loadPersistedEntriesIncrementally()
+      .then(() => {
+        this.isHydrated = true;
+      })
+      .catch((error) => {
+        this.searchEntries.clear();
+        this.snapshotEntries.clear();
+        throw error;
+      })
+      .finally(() => {
+        if (this.incrementalHydrationPromise === hydrationPromise) {
+          this.incrementalHydrationPromise = null;
+        }
+      });
+    this.incrementalHydrationPromise = hydrationPromise;
+    return hydrationPromise;
+  }
+
+  private async parsePayloadIncrementally<T>(
+    rawValue: string | undefined,
+    normalizeEntry: (
+      value: unknown,
+      persistedVersion: number,
+      payloadAlreadySanitized: boolean,
+    ) => Promise<T | null>,
+  ): Promise<ParsedPayload<T>> {
+    if (!rawValue) {
+      return { status: 'empty', entries: [], needsRewrite: false };
+    }
+
+    const versionMatch = /^\s*\{\s*"version"\s*:\s*(\d+)/.exec(rawValue.slice(0, 128));
+    if (versionMatch && !SUPPORTED_PERSISTED_CACHE_VERSIONS.has(Number(versionMatch[1]))) {
+      return { status: 'invalid', entries: [], needsRewrite: false };
+    }
+
+    if (
+      rawValue.length > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+      || getTextByteLength(rawValue) > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+    ) {
+      return { status: 'oversized', entries: [], needsRewrite: false };
+    }
+
+    try {
+      const parsed = JSON.parse(rawValue) as PersistedPayload<unknown>;
+      if (
+        !parsed
+        || typeof parsed !== 'object'
+        || typeof parsed.version !== 'number'
+        || !SUPPORTED_PERSISTED_CACHE_VERSIONS.has(parsed.version)
+        || !Array.isArray(parsed.entries)
+      ) {
+        return { status: 'invalid', entries: [], needsRewrite: false };
+      }
+
+      const payloadAlreadySanitized = parsed.version === MODEL_CATALOG_CACHE_PERSISTED_VERSION
+        && parsed.sanitized === true;
+      const entries: T[] = [];
+      let discardedEntry = false;
+      for (let index = 0; index < parsed.entries.length; index += 1) {
+        const normalized = await normalizeEntry(
+          parsed.entries[index],
+          parsed.version,
+          payloadAlreadySanitized,
+        );
+        if (normalized) {
+          entries.push(normalized);
+        } else {
+          discardedEntry = true;
+        }
+
+        if (
+          index < parsed.entries.length - 1
+          && (index + 1) % INCREMENTAL_HYDRATION_MODELS_PER_BATCH === 0
+        ) {
+          await yieldToUiThread();
+        }
+      }
+
+      return {
+        status: 'ok',
+        entries,
+        needsRewrite: parsed.version !== MODEL_CATALOG_CACHE_PERSISTED_VERSION
+          || parsed.sanitized !== true
+          || discardedEntry,
+      };
+    } catch {
+      return { status: 'invalid', entries: [], needsRewrite: false };
     }
   }
 
@@ -2083,6 +2484,36 @@ export class ModelCatalogCacheStore {
       if (options.failOpen !== true) {
         throw error;
       }
+    }
+  }
+
+  private trimPersistedStorageBestEffort(): void {
+    try {
+      this.storage.trim();
+      // MMKV exposes the logical live-data size, not the physical backing-file
+      // size. Persist a dedicated maintenance marker only after trim succeeds
+      // so keyless legacy files are compacted once without paying this cost on
+      // every subsequent launch.
+      this.storage.set(CACHE_MAINTENANCE_VERSION_KEY, CACHE_MAINTENANCE_VERSION);
+    } catch {
+      // Compaction is a performance maintenance step. Cache deletion already
+      // succeeded, so a trim failure must not turn optional cache hydration or
+      // an explicit clear into an app-start failure.
+    }
+  }
+
+  private persistedStorageNeedsTrim(): boolean {
+    try {
+      if (this.storage.getNumber(CACHE_MAINTENANCE_VERSION_KEY) !== CACHE_MAINTENANCE_VERSION) {
+        return true;
+      }
+
+      const byteSize = this.storage.byteSize;
+      return typeof byteSize === 'number'
+        && Number.isFinite(byteSize)
+        && byteSize > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES;
+    } catch {
+      return false;
     }
   }
 

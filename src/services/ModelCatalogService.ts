@@ -266,6 +266,7 @@ export class ModelCatalogService {
   private persistentCacheHydrationAttemptPromise: Promise<void>;
   private resolvePersistentCacheHydrationAttempt: (() => void) | undefined;
   private persistentCacheHydrationFailOpenTimer: ReturnType<typeof setTimeout> | undefined;
+  private incrementalPersistentCacheHydrationPromise: Promise<void> | null = null;
   private readonly unsubscribeFromTokenService: () => void;
   private isDisposed = false;
 
@@ -333,6 +334,38 @@ export class ModelCatalogService {
       span.end({ outcome: 'error' });
       throw error;
     }
+  }
+
+  public hydratePersistentCacheIncrementally(): Promise<void> {
+    if (this.persistentCacheHydrated) {
+      this.completePersistentCacheHydrationAttempt();
+      return Promise.resolve();
+    }
+
+    if (this.incrementalPersistentCacheHydrationPromise) {
+      return this.incrementalPersistentCacheHydrationPromise;
+    }
+
+    const span = performanceMonitor.startSpan('catalog.hydratePersistentCache');
+    const hydrationPromise = this.persistentCache.hydrateIncrementally()
+      .then(() => {
+        this.persistentCacheHydrated = true;
+        this.completePersistentCacheHydrationAttempt();
+        span.end({ outcome: 'success' });
+        this.emitCacheInvalidation('hydrate');
+      })
+      .catch((error) => {
+        this.completePersistentCacheHydrationAttempt();
+        span.end({ outcome: 'error' });
+        throw error;
+      })
+      .finally(() => {
+        if (this.incrementalPersistentCacheHydrationPromise === hydrationPromise) {
+          this.incrementalPersistentCacheHydrationPromise = null;
+        }
+      });
+    this.incrementalPersistentCacheHydrationPromise = hydrationPromise;
+    return hydrationPromise;
   }
 
   private completePersistentCacheHydrationAttempt(): void {

@@ -62,6 +62,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     getState: jest.fn(),
     load: jest.fn().mockResolvedValue(undefined),
+    subscribe: jest.fn().mockReturnValue(jest.fn()),
   },
 }));
 
@@ -75,6 +76,7 @@ const mockHydrateModelCatalogCache = jest.fn();
 jest.mock('../../src/services/ModelCatalogService', () => ({
   modelCatalogService: {
     hydratePersistentCache: (...args: unknown[]) => mockHydrateModelCatalogCache(...args),
+    hydratePersistentCacheIncrementally: (...args: unknown[]) => mockHydrateModelCatalogCache(...args),
   },
 }));
 
@@ -177,6 +179,7 @@ describe('AppBootstrap', () => {
       loadProgress: 0,
       lastError: undefined,
     });
+    (llmEngineService.subscribe as jest.Mock).mockReturnValue(jest.fn());
   });
 
   it('returns a storage-blocked critical outcome and skips hydration when private storage is already blocked', async () => {
@@ -846,6 +849,45 @@ describe('AppBootstrap', () => {
       jest.advanceTimersByTime(800);
       await Promise.resolve();
 
+      expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(1);
+    } finally {
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      jest.useRealTimers();
+    }
+  });
+
+  it('waits for active-model initialization before hydrating the catalog cache', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    let engineListener: ((state: { status: EngineStatus }) => void) | undefined;
+    const unsubscribe = jest.fn();
+
+    jest.useFakeTimers();
+
+    try {
+      (process.env as any).NODE_ENV = 'production';
+      globalThis.requestAnimationFrame = jest.fn((cb: any) => cb(0));
+      (llmEngineService.getState as jest.Mock).mockReturnValue({
+        status: EngineStatus.INITIALIZING,
+        activeModelId: 'org/boot-model',
+      });
+      (llmEngineService.subscribe as jest.Mock).mockImplementation((listener) => {
+        engineListener = listener;
+        return unsubscribe;
+      });
+
+      scheduleModelCatalogCacheHydrationAfterFirstFrame();
+      jest.advanceTimersByTime(800);
+      await Promise.resolve();
+
+      expect(mockHydrateModelCatalogCache).not.toHaveBeenCalled();
+      expect(engineListener).toBeDefined();
+
+      engineListener?.({ status: EngineStatus.READY });
+      await Promise.resolve();
+
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
       expect(mockHydrateModelCatalogCache).toHaveBeenCalledTimes(1);
     } finally {
       (process.env as any).NODE_ENV = originalNodeEnv;

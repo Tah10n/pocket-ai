@@ -167,6 +167,8 @@ const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS = 512;
 const MAX_NATIVE_LOG_LINES = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
+const MODEL_LOAD_PROGRESS_MIN_PERCENT_DELTA = 2;
+const MODEL_LOAD_PROGRESS_MAX_PUBLISH_INTERVAL_MS = 250;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS = 5000;
 const CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE = 'Timed out waiting for active context operations during unload';
@@ -5639,8 +5641,29 @@ class LLMEngineService {
           };
         };
 
+        let lastPublishedProgress = 0;
+        let lastPublishedProgressAtMs = Date.now();
         const onProgress = (progress: number) => {
-          this.updateState({ ...this.state, loadProgress: progress });
+          if (
+            !Number.isFinite(progress)
+            || this.state.status !== EngineStatus.INITIALIZING
+            || this.state.activeModelId !== modelId
+          ) {
+            return;
+          }
+
+          const normalizedProgress = Math.max(lastPublishedProgress, Math.min(100, progress));
+          const nowMs = Date.now();
+          const shouldPublish = normalizedProgress >= 100
+            || normalizedProgress - lastPublishedProgress >= MODEL_LOAD_PROGRESS_MIN_PERCENT_DELTA
+            || nowMs - lastPublishedProgressAtMs >= MODEL_LOAD_PROGRESS_MAX_PUBLISH_INTERVAL_MS;
+          if (!shouldPublish || normalizedProgress === lastPublishedProgress) {
+            return;
+          }
+
+          lastPublishedProgress = normalizedProgress;
+          lastPublishedProgressAtMs = nowMs;
+          this.updateState({ ...this.state, loadProgress: normalizedProgress });
         };
         const initOnce = async (layers: number): Promise<LlamaContext> => {
           const attemptedSpeculativeConfig = speculativeDecodingForLoad;

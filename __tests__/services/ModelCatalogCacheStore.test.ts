@@ -29,6 +29,7 @@ import {
 const STORAGE_ID = 'model-catalog-cache';
 const SEARCH_CACHE_KEY = 'catalog-search-cache-v1';
 const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
+const CACHE_MAINTENANCE_VERSION_KEY = 'catalog-cache-maintenance-version';
 
 function clearCacheStorage() {
   createStorage(STORAGE_ID, { tier: 'cache' }).clearAll();
@@ -134,7 +135,7 @@ function getCurrentProjectorId(
 
 function hydrateLegacyAnonymousModel(
   model: ModelMetadata,
-  persistedVersion = MODEL_CATALOG_CACHE_PERSISTED_VERSION - 1,
+  persistedVersion = 7,
 ): [ModelMetadata | undefined, ModelMetadata | null] {
   const storage = createStorage(STORAGE_ID, { tier: 'cache' });
   const scope = {
@@ -830,25 +831,131 @@ describe('ModelCatalogCacheStore', () => {
         MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES,
       )}"}`,
     );
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
     const parseSpy = jest.spyOn(JSON, 'parse');
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
 
-    new ModelCatalogCacheStore();
+    store.hydrate();
 
     expect(parseSpy).not.toHaveBeenCalled();
     expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    trimSpy.mockRestore();
     parseSpy.mockRestore();
   });
 
-  it('drops retired v8 payloads before JSON parsing', () => {
-    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
-    storage.set(SEARCH_CACHE_KEY, '{"version":8,"entries":[]}');
-    const parseSpy = jest.spyOn(JSON, 'parse');
+  it('hydrates persisted models incrementally and shares one in-flight attempt', async () => {
+    const scope = { query: 'incremental', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [
+        buildModel({ id: 'org/incremental-a' }),
+        buildModel({ id: 'org/incremental-b' }),
+        buildModel({ id: 'org/incremental-c' }),
+        buildModel({ id: 'org/incremental-d' }),
+        buildModel({ id: 'org/incremental-e' }),
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const immediateSpy = jest.spyOn(globalThis, 'setImmediate');
 
-    new ModelCatalogCacheStore();
+    const firstAttempt = deferredStore.hydrateIncrementally();
+    const sharedAttempt = deferredStore.hydrateIncrementally();
+
+    expect(sharedAttempt).toBe(firstAttempt);
+    expect(deferredStore.getSearch(scope, 1000)).toBeNull();
+    await jest.runAllTimersAsync();
+    await firstAttempt;
+
+    expect(immediateSpy).toHaveBeenCalled();
+    expect(deferredStore.getSearch(scope, 1000)?.models.map((model) => model.id)).toEqual([
+      'org/incremental-a',
+      'org/incremental-b',
+      'org/incremental-c',
+      'org/incremental-d',
+      'org/incremental-e',
+    ]);
+    immediateSpy.mockRestore();
+  });
+
+  it.each([8, 9])('drops retired v%s payloads before JSON parsing', (retiredVersion) => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(SEARCH_CACHE_KEY, `{"version":${retiredVersion},"entries":[]}`);
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const parseSpy = jest.spyOn(JSON, 'parse');
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
+
+    store.hydrate();
 
     expect(parseSpy).not.toHaveBeenCalled();
     expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    trimSpy.mockRestore();
     parseSpy.mockRestore();
+  });
+
+  it('keeps retired-payload hydration fail-open when MMKV compaction fails', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(SEARCH_CACHE_KEY, '{"version":9,"entries":[]}');
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const trimSpy = jest.spyOn(storeStorage, 'trim').mockImplementation(() => {
+      throw new Error('trim failed');
+    });
+
+    expect(() => store.hydrate()).not.toThrow();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(storage.getNumber(CACHE_MAINTENANCE_VERSION_KEY)).toBeUndefined();
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    trimSpy.mockRestore();
+  });
+
+  it('does not compact an already maintained current bounded payload during hydration', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(CACHE_MAINTENANCE_VERSION_KEY, 1);
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      sanitized: true,
+      entries: [],
+    }));
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
+
+    store.hydrate();
+
+    expect(trimSpy).not.toHaveBeenCalled();
+    trimSpy.mockRestore();
+  });
+
+  it('compacts an oversized keyless MMKV file left by an earlier migration', () => {
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    Object.defineProperty(storeStorage, 'byteSize', {
+      configurable: true,
+      value: MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES + 1,
+    });
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
+
+    store.hydrate();
+
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getNumber(CACHE_MAINTENANCE_VERSION_KEY)).toBe(1);
+    trimSpy.mockRestore();
   });
 
   it('fails closed when a marked current payload is no longer anonymous-public', () => {
@@ -915,6 +1022,44 @@ describe('ModelCatalogCacheStore', () => {
     expect(raw).toContain('org/small-cache-model');
     expect(raw).not.toContain('org/oversized-cache-model');
     expect(store.getSearch(largeScope, 1000)?.models[0]?.id).toBe('org/oversized-cache-model');
+  });
+
+  it('persists a compact GGUF digest instead of raw tokenizer metadata', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const store = new ModelCatalogCacheStore();
+    const scope = { query: 'compact-gguf', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id: 'org/compact-gguf-model',
+      gguf: {
+        architecture: 'qwen3',
+        sizeLabel: 'Q4_K_M',
+        totalBytes: 1024,
+        contextLengthTokens: 32_768,
+        'general.architecture': 'qwen3',
+        'general.type': 'model',
+        'qwen3.block_count': 36,
+        'tokenizer.chat_template': 'large-template-that-must-not-reach-startup-storage',
+        'tokenizer.ggml.model': 'gpt2',
+      },
+    });
+
+    store.putSearch(scope, { models: [model], hasMore: false, nextCursor: null });
+
+    const raw = storage.getString(SEARCH_CACHE_KEY) as string;
+    const persistedModel = JSON.parse(raw).entries[0].result.models[0] as ModelMetadata;
+    expect(persistedModel.gguf).toEqual({
+      architecture: 'qwen3',
+      sizeLabel: 'Q4_K_M',
+      totalBytes: 1024,
+      contextLengthTokens: 32_768,
+      'general.architecture': 'qwen3',
+      'general.type': 'model',
+      'qwen3.block_count': 36,
+    });
+    expect(raw).not.toContain('large-template-that-must-not-reach-startup-storage');
+    expect(raw).not.toContain('tokenizer.ggml.model');
+    expect(new ModelCatalogCacheStore().getSearch(scope, 1000)?.models[0]?.gguf)
+      .toEqual(persistedModel.gguf);
   });
 
   it('preserves an explicit empty projector result across search and snapshot cache round-trips', () => {

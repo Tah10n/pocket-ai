@@ -421,6 +421,45 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('coalesces noisy native model-load progress before notifying UI subscribers', async () => {
+    const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
+    if (!baseInitImplementation) {
+      throw new Error('Expected the llama.rn init mock to have an implementation.');
+    }
+
+    (llamaRn.initLlama as jest.Mock).mockImplementationOnce(async (options, onProgress) => {
+      for (let progress = 0; progress <= 100; progress += 0.1) {
+        onProgress?.(progress);
+      }
+      onProgress?.(100);
+      return baseInitImplementation(options, onProgress);
+    });
+
+    const observedProgress: number[] = [];
+    const unsubscribe = llmEngineService.subscribe((state) => {
+      if (state.status === EngineStatus.INITIALIZING && state.loadProgress > 0) {
+        observedProgress.push(state.loadProgress);
+      }
+    });
+
+    try {
+      await llmEngineService.load('test/model', { forceReload: true });
+    } finally {
+      unsubscribe();
+    }
+
+    expect(observedProgress.length).toBeGreaterThan(0);
+    expect(observedProgress.length).toBeLessThanOrEqual(51);
+    expect(observedProgress.at(-1)).toBe(100);
+    expect(observedProgress.every((progress, index) => (
+      index === 0 || progress >= observedProgress[index - 1]
+    ))).toBe(true);
+    expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+      status: EngineStatus.READY,
+      loadProgress: 1,
+    }));
+  });
+
   it('forwards ready image media paths to llama.rn completion', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
 

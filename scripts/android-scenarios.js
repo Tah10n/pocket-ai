@@ -4048,35 +4048,134 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
   const retryDelayMs = options.retryDelayMs ?? SCREENSHOT_CAPTURE_RETRY_DELAY_MS;
   const runSpawnSync = options.spawnSync ?? spawnSync;
   const runSleepSync = options.sleepSync ?? sleepSync;
+  const preferRemoteFile = options.preferRemoteFile ?? !isEmulatorSerial(serial);
+  const copyRemoteFileInChunks = options.copyRemoteFileInChunks ?? preferRemoteFile;
+  const remoteChunkSizeBytes = options.remoteChunkSizeBytes ?? 32 * 1024;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    let sawAdbDeviceUnavailable = false;
+  const copyRemoteScreenshotInChunks = (remotePath) => {
+    const statResult = runSpawnSync(
+      adbPath,
+      ["-s", serial, "shell", "stat", "-c", "%s", remotePath],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+    const remoteSizeBytes = Number.parseInt(String(statResult.stdout || "").trim(), 10);
+    if (statResult.error || statResult.status !== 0 || !Number.isSafeInteger(remoteSizeBytes) || remoteSizeBytes <= 0) {
+      return {
+        ok: false,
+        deviceUnavailable: isAdbDeviceUnavailableResult(statResult),
+        failure: statResult.error
+          ? describeSpawnError("stat remote screenshot", statResult.error)
+          : describeSpawnResult("stat remote screenshot", statResult),
+      };
+    }
+
+    const chunks = [];
+    const chunkCount = Math.ceil(remoteSizeBytes / remoteChunkSizeBytes);
+    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+      const expectedChunkBytes = Math.min(
+        remoteChunkSizeBytes,
+        remoteSizeBytes - chunkIndex * remoteChunkSizeBytes
+      );
+      let chunkBuffer = null;
+      let lastChunkFailure = null;
+      let sawChunkDeviceUnavailable = false;
+
+      for (let chunkAttempt = 1; chunkAttempt <= 3; chunkAttempt += 1) {
+        const chunkResult = runSpawnSync(
+          adbPath,
+          [
+            "-s",
+            serial,
+            "exec-out",
+            "dd",
+            `if=${remotePath}`,
+            `bs=${remoteChunkSizeBytes}`,
+            `skip=${chunkIndex}`,
+            "count=1",
+            "status=none",
+          ],
+          { maxBuffer: remoteChunkSizeBytes * 2 }
+        );
+
+        if (!chunkResult.error && chunkResult.status === 0 && chunkResult.stdout?.length === expectedChunkBytes) {
+          chunkBuffer = chunkResult.stdout;
+          break;
+        }
+
+        sawChunkDeviceUnavailable = isAdbDeviceUnavailableResult(chunkResult);
+        lastChunkFailure = chunkResult.error
+          ? describeSpawnError(`read screenshot chunk ${chunkIndex + 1}/${chunkCount}`, chunkResult.error)
+          : chunkResult.status === 0
+            ? `read screenshot chunk ${chunkIndex + 1}/${chunkCount} returned ${chunkResult.stdout?.length ?? 0}/${expectedChunkBytes} bytes`
+            : describeSpawnResult(`read screenshot chunk ${chunkIndex + 1}/${chunkCount}`, chunkResult);
+
+        if (sawChunkDeviceUnavailable) {
+          waitForAdbDevice(adbPath, serial, runSpawnSync);
+        }
+        if (chunkAttempt < 3) {
+          runSleepSync(retryDelayMs);
+        }
+      }
+
+      if (!chunkBuffer) {
+        return {
+          ok: false,
+          deviceUnavailable: sawChunkDeviceUnavailable,
+          failure: lastChunkFailure || `Failed to read screenshot chunk ${chunkIndex + 1}/${chunkCount}`,
+        };
+      }
+      chunks.push(chunkBuffer);
+    }
+
+    const screenshotBuffer = Buffer.concat(chunks, remoteSizeBytes);
+    fs.writeFileSync(screenshotPath, screenshotBuffer);
+    if (isCompletePngBuffer(screenshotBuffer)) {
+      return { ok: true, deviceUnavailable: false };
+    }
+
+    return {
+      ok: false,
+      deviceUnavailable: false,
+      failure: `chunked screenshot was incomplete or invalid (${screenshotBuffer.length} bytes)`,
+    };
+  };
+
+  const captureDirect = () => {
+    const result = runSpawnSync(
+      adbPath,
+      ["-s", serial, "exec-out", "screencap", "-p"],
+      { maxBuffer: 20 * 1024 * 1024 }
+    );
+
+    if (result.error) {
+      return {
+        ok: false,
+        deviceUnavailable: false,
+        failure: describeSpawnError("exec-out screencap", result.error),
+      };
+    }
+
+    if (result.status === 0 && isCompletePngBuffer(result.stdout)) {
+      fs.writeFileSync(screenshotPath, result.stdout);
+      return { ok: true, deviceUnavailable: false };
+    }
+
+    return {
+      ok: false,
+      deviceUnavailable: isAdbDeviceUnavailableResult(result),
+      failure: result.status === 0
+        ? `exec-out screencap returned an incomplete or invalid PNG (${result.stdout?.length ?? 0} bytes)`
+        : describeSpawnResult("exec-out screencap", result),
+    };
+  };
+
+  const captureViaRemoteFile = (attempt) => {
+    const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}-${attempt}.png`;
 
     try {
-      fs.rmSync(screenshotPath, { force: true });
-
-      const directCapture = runSpawnSync(
-        adbPath,
-        ["-s", serial, "exec-out", "screencap", "-p"],
-        { maxBuffer: 20 * 1024 * 1024 }
-      );
-
-      if (directCapture.error) {
-        throw directCapture.error;
-      }
-
-      if (directCapture.status === 0 && isCompletePngBuffer(directCapture.stdout)) {
-        fs.writeFileSync(screenshotPath, directCapture.stdout);
-        return screenshotPath;
-      }
-
-      failures.push(directCapture.status === 0
-        ? `exec-out screencap returned an incomplete or invalid PNG (${directCapture.stdout?.length ?? 0} bytes)`
-        : describeSpawnResult("exec-out screencap", directCapture));
-      sawAdbDeviceUnavailable = isAdbDeviceUnavailableResult(directCapture);
-      log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
-
-      const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}-${attempt}.png`;
       const remoteCapture = runSpawnSync(
         adbPath,
         ["-s", serial, "shell", "screencap", "-p", remotePath],
@@ -4087,49 +4186,95 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
       );
 
       if (remoteCapture.error) {
-        throw remoteCapture.error;
+        return {
+          ok: false,
+          deviceUnavailable: false,
+          failure: describeSpawnError("remote screencap", remoteCapture.error),
+        };
       }
 
-      try {
-        if (remoteCapture.status !== 0) {
-          const failure = describeSpawnResult("remote screencap", remoteCapture);
-          failures.push(failure);
-          sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(remoteCapture);
-          throw new Error(failure);
+      if (remoteCapture.status !== 0) {
+        return {
+          ok: false,
+          deviceUnavailable: isAdbDeviceUnavailableResult(remoteCapture),
+          failure: describeSpawnResult("remote screencap", remoteCapture),
+        };
+      }
+
+      if (copyRemoteFileInChunks) {
+        return copyRemoteScreenshotInChunks(remotePath);
+      }
+
+      const pullResult = runSpawnSync(
+        adbPath,
+        ["-s", serial, "pull", remotePath, screenshotPath],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
         }
+      );
 
-        const pullResult = runSpawnSync(
-          adbPath,
-          ["-s", serial, "pull", remotePath, screenshotPath],
-          {
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "pipe"],
-          }
-        );
+      if (pullResult.error) {
+        return {
+          ok: false,
+          deviceUnavailable: false,
+          failure: describeSpawnError("adb pull screenshot", pullResult.error),
+        };
+      }
 
-        if (pullResult.error) {
-          throw pullResult.error;
-        }
+      if (pullResult.status !== 0) {
+        return {
+          ok: false,
+          deviceUnavailable: isAdbDeviceUnavailableResult(pullResult),
+          failure: describeSpawnResult("adb pull screenshot", pullResult),
+        };
+      }
 
-        if (pullResult.status !== 0) {
-          const failure = describeSpawnResult("adb pull screenshot", pullResult);
-          failures.push(failure);
-          sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || isAdbDeviceUnavailableResult(pullResult);
-          throw new Error(failure);
-        }
+      const screenshotBuffer = fs.readFileSync(screenshotPath);
+      if (isCompletePngBuffer(screenshotBuffer)) {
+        return { ok: true, deviceUnavailable: false };
+      }
 
-        const screenshotBuffer = fs.readFileSync(screenshotPath);
-        if (isCompletePngBuffer(screenshotBuffer)) {
+      return {
+        ok: false,
+        deviceUnavailable: false,
+        failure: `pulled screenshot was incomplete or invalid (${screenshotBuffer.length} bytes)`,
+      };
+    } finally {
+      runSpawnSync(
+        adbPath,
+        ["-s", serial, "shell", "rm", "-f", remotePath],
+        { stdio: "ignore" }
+      );
+    }
+  };
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let sawAdbDeviceUnavailable = false;
+
+    try {
+      fs.rmSync(screenshotPath, { force: true });
+      const strategies = preferRemoteFile
+        ? [captureViaRemoteFile, captureDirect]
+        : [captureDirect, captureViaRemoteFile];
+
+      for (let strategyIndex = 0; strategyIndex < strategies.length; strategyIndex += 1) {
+        const result = strategies[strategyIndex](attempt);
+        if (result.ok) {
           return screenshotPath;
         }
 
-        failures.push(`pulled screenshot was incomplete or invalid (${screenshotBuffer.length} bytes)`);
-      } finally {
-        runSpawnSync(
-          adbPath,
-          ["-s", serial, "shell", "rm", "-f", remotePath],
-          { stdio: "ignore" }
-        );
+        failures.push(result.failure);
+        sawAdbDeviceUnavailable = sawAdbDeviceUnavailable || result.deviceUnavailable;
+        if (result.deviceUnavailable) {
+          break;
+        }
+
+        if (strategyIndex === 0) {
+          log(preferRemoteFile
+            ? "Remote-file screencap failed; retrying direct screenshot capture."
+            : "Direct screencap failed; retrying screenshot capture via a temporary device file.");
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

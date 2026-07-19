@@ -257,6 +257,7 @@ describe('android-scenarios screenshot capture', () => {
 
     try {
       expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        copyRemoteFileInChunks: false,
         maxAttempts: 2,
         retryDelayMs: 1,
         sleepSync,
@@ -276,6 +277,7 @@ describe('android-scenarios screenshot capture', () => {
     const screenshotPath = path.join(tempDir, 'capture.png');
     const sleepSync = jest.fn();
     let directAttempts = 0;
+    let remoteAttempts = 0;
     const spawn = jest.fn((_command, args) => {
       if (args.includes('wait-for-device')) {
         return {
@@ -287,25 +289,30 @@ describe('android-scenarios screenshot capture', () => {
 
       if (args.includes('exec-out')) {
         directAttempts += 1;
-        return directAttempts === 1
+        return {
+          status: 0,
+          stdout: pngBuffer,
+          stderr: '',
+        };
+      }
+
+      if (args.includes('screencap')) {
+        remoteAttempts += 1;
+        return remoteAttempts === 1
           ? {
               status: 1,
-              stdout: Buffer.alloc(0),
-              stderr: "error: device 'device-1' not found",
+              stdout: '',
+              stderr: 'adb.exe: device offline',
             }
           : {
               status: 0,
-              stdout: pngBuffer,
+              stdout: '',
               stderr: '',
             };
       }
 
-      if (args.includes('screencap')) {
-        return {
-          status: 1,
-          stdout: '',
-          stderr: 'adb.exe: device offline',
-        };
+      if (args.includes('pull')) {
+        fs.writeFileSync(screenshotPath, pngBuffer);
       }
 
       return {
@@ -317,6 +324,7 @@ describe('android-scenarios screenshot capture', () => {
 
     try {
       expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        copyRemoteFileInChunks: false,
         maxAttempts: 2,
         retryDelayMs: 1,
         sleepSync,
@@ -328,7 +336,43 @@ describe('android-scenarios screenshot capture', () => {
         ['-s', 'device-1', 'wait-for-device'],
         expect.objectContaining({ timeout: 15000 })
       );
+      expect(remoteAttempts).toBe(2);
+      expect(directAttempts).toBe(0);
       expect(fs.readFileSync(screenshotPath).subarray(0, 8)).toEqual(pngBuffer.subarray(0, 8));
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('copies physical-device screenshots in bounded chunks instead of one large adb pull', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-screenshot-'));
+    const screenshotPath = path.join(tempDir, 'capture.png');
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('stat')) {
+        return { status: 0, stdout: `${pngBuffer.length}\n`, stderr: '' };
+      }
+
+      if (args.includes('dd')) {
+        return { status: 0, stdout: pngBuffer, stderr: '' };
+      }
+
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    try {
+      expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        maxAttempts: 1,
+        spawnSync: spawn,
+      })).toBe(screenshotPath);
+
+      expect(spawn.mock.calls.some(([, args]) => args.includes('pull'))).toBe(false);
+      expect(spawn.mock.calls.some(([, args]) => args.includes('exec-out') && args.includes('screencap'))).toBe(false);
+      expect(spawn).toHaveBeenCalledWith(
+        'adb',
+        expect.arrayContaining(['exec-out', 'dd', 'bs=32768', 'skip=0', 'count=1', 'status=none']),
+        expect.objectContaining({ maxBuffer: 65536 })
+      );
+      expect(fs.readFileSync(screenshotPath)).toEqual(pngBuffer);
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });
     }

@@ -36,11 +36,12 @@ import {
   CHAT_THREAD_STORAGE_KEY_PREFIX,
   LEGACY_CHAT_STORE_STORAGE_KEY,
 } from '../store/chatPersistence';
+import { getAppCacheDirectorySizeBytes } from './SystemMetricsService';
 
 const CHAT_STORE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
 const MIN_ESTIMATED_CONTEXT_BYTES = 64 * 1024 * 1024;
-const DIRECTORY_SIZE_CACHE_TTL_MS = 5000;
+const DIRECTORY_SIZE_CACHE_TTL_MS = 60_000;
 const DIRECTORY_SIZE_MAX_CONCURRENT_STATS = 8;
 
 type PersistedChatStorePayload = {
@@ -237,6 +238,33 @@ async function getDirectorySizeBytes(
     });
     return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
   }
+}
+
+async function getCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise<number> {
+  const normalizedDirectoryUri = normalizeDirectoryUri(cacheDirectoryUri);
+  const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
+  if (cachedSize !== null) {
+    return cachedSize;
+  }
+
+  try {
+    const nativeSizeBytes = await getAppCacheDirectorySizeBytes();
+    if (nativeSizeBytes !== null) {
+      directorySizeCache.set(normalizedDirectoryUri, {
+        measuredAt: Date.now(),
+        sizeBytes: nativeSizeBytes,
+      });
+      return nativeSizeBytes;
+    }
+  } catch (error) {
+    console.warn('[StorageManagerService] Failed to read native cache size', {
+      pathCategory: 'cache_storage',
+      scope: 'native_directory_size',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
+  }
+
+  return getDirectorySizeBytes(normalizedDirectoryUri);
 }
 
 export function __resetStorageManagerDirectorySizeCacheForTests(): void {
@@ -717,13 +745,13 @@ export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {
     await refreshModelFileQuarantine();
   }
 
-  const downloadedModels = await getDownloadedModelsWithResolvedSizes();
-  const modelsBytes = getDownloadedModelsStoredBytes(downloadedModels);
   const cacheDir = getCacheDir();
-  const [quarantinedModelFiles, cacheDirectoryBytes] = await Promise.all([
+  const [downloadedModels, quarantinedModelFiles, cacheDirectoryBytes] = await Promise.all([
+    getDownloadedModelsWithResolvedSizes(),
     getQuarantinedModelFilesMetrics(),
-    cacheDir ? getDirectorySizeBytes(cacheDir) : Promise.resolve(0),
+    cacheDir ? getCacheDirectorySizeBytes(cacheDir) : Promise.resolve(0),
   ]);
+  const modelsBytes = getDownloadedModelsStoredBytes(downloadedModels);
   const cacheBytes = cacheDirectoryBytes + modelCatalogService.getPersistentCacheBytes();
   const chatHistoryBytes = getPersistedChatStoreBytes() + getLegacyChatHistoryBytes();
   const settingsBytes = getSettingsBytes();

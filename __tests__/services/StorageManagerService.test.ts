@@ -88,6 +88,7 @@ import { getQueuedDownloadFileNames } from '../../src/store/downloadStore';
 import { storage as appStorage } from '../../src/store/storage';
 import { CHAT_PERSISTENCE_INDEX_KEY, getChatThreadStorageKey } from '../../src/store/chatPersistence';
 import * as FileSystem from 'expo-file-system/legacy';
+import { NativeModules, Platform } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
@@ -166,6 +167,7 @@ describe('StorageManagerService', () => {
       return { exists: false };
     });
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue([]);
+    NativeModules.SystemMetrics = undefined;
   });
 
   it('interrupts active completions before clearing persisted chat history', async () => {
@@ -586,6 +588,32 @@ describe('StorageManagerService', () => {
 
     expect(metrics.cacheBytes).toBe(1536);
     expect(metrics.appFilesBytes).toBe(1548);
+  });
+
+  it('uses one native Android cache measurement instead of walking every cache entry over the bridge', async () => {
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', {
+      configurable: true,
+      value: 'android',
+    });
+    NativeModules.SystemMetrics = {
+      getMemorySnapshot: jest.fn(),
+      getCacheDirectorySize: jest.fn().mockResolvedValue(42_000_000),
+    };
+
+    try {
+      const metrics = await getAppStorageMetrics();
+
+      expect(metrics.cacheBytes).toBe(42_000_000);
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(1);
+      expect(FileSystem.readDirectoryAsync).not.toHaveBeenCalled();
+    } finally {
+      NativeModules.SystemMetrics = undefined;
+      Object.defineProperty(Platform, 'OS', {
+        configurable: true,
+        value: originalPlatform,
+      });
+    }
   });
 
   it('includes quarantined model files in app file metrics without counting them as downloaded models', async () => {

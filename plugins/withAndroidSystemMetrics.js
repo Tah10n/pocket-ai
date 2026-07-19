@@ -27,10 +27,14 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class ${SYSTEM_METRICS_MODULE_NAME}Module(
   reactContext: ReactApplicationContext
 ) : ReactContextBaseJavaModule(reactContext) {
+
+  private val storageMetricsExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
   override fun getName(): String = "${SYSTEM_METRICS_MODULE_NAME}"
 
@@ -80,6 +84,37 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     }
 
     return reflectedFreeBytes ?: readProcMemInfoBytes("MemFree:")
+  }
+
+  private fun readDirectorySizeBytes(root: File): Long {
+    if (!root.exists() || !root.isDirectory) {
+      return 0L
+    }
+
+    var totalBytes = 0L
+    root.walkTopDown().forEach { entry ->
+      if (entry.isFile) {
+        val entryBytes = entry.length().coerceAtLeast(0L)
+        totalBytes = if (Long.MAX_VALUE - totalBytes < entryBytes) {
+          Long.MAX_VALUE
+        } else {
+          totalBytes + entryBytes
+        }
+      }
+    }
+    return totalBytes
+  }
+
+  @ReactMethod
+  fun getCacheDirectorySize(promise: Promise) {
+    storageMetricsExecutor.execute {
+      try {
+        val cacheBytes = readDirectorySizeBytes(reactApplicationContext.cacheDir)
+        promise.resolve(cacheBytes.toDouble())
+      } catch (error: Exception) {
+        promise.reject("E_SYSTEM_METRICS", "Failed to read Android app cache size", error)
+      }
+    }
   }
 
   @ReactMethod
@@ -144,6 +179,11 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     } catch (error: Exception) {
       promise.reject("E_SYSTEM_METRICS", "Failed to read Android system memory metrics", error)
     }
+  }
+
+  override fun invalidate() {
+    storageMetricsExecutor.shutdownNow()
+    super.invalidate()
   }
 }
 `;

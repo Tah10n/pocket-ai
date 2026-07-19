@@ -22,6 +22,7 @@ export interface SystemMemorySnapshot {
 
 interface NativeSystemMetricsModule {
   getMemorySnapshot(): Promise<Partial<SystemMemorySnapshot>>;
+  getCacheDirectorySize?: () => Promise<unknown>;
 }
 
 function toSafeByteCount(value: unknown) {
@@ -173,4 +174,18 @@ export async function getFreshMemorySnapshot(maxAgeMs: number): Promise<SystemMe
 
 export async function getSystemMemorySnapshot(): Promise<SystemMemorySnapshot | null> {
   return getFreshMemorySnapshot(0);
+}
+
+export async function getAppCacheDirectorySizeBytes(): Promise<number | null> {
+  if (Platform.OS !== 'android') {
+    return null;
+  }
+
+  const nativeModule = resolveSystemMetricsModule();
+  if (!nativeModule || typeof nativeModule.getCacheDirectorySize !== 'function') {
+    return null;
+  }
+
+  const sizeBytes = await nativeModule.getCacheDirectorySize();
+  return toOptionalByteCount(sizeBytes) ?? null;
 }

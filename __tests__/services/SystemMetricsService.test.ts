@@ -1,5 +1,8 @@
 import { NativeModules, Platform } from 'react-native';
-import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
+import {
+  getAppCacheDirectorySizeBytes,
+  getSystemMemorySnapshot,
+} from '../../src/services/SystemMetricsService';
 
 describe('SystemMetricsService', () => {
   beforeEach(() => {
@@ -214,5 +217,16 @@ describe('SystemMetricsService', () => {
     await expect(getSystemMemorySnapshot()).resolves.toEqual(expect.objectContaining({
       platform: 'unknown',
     }));
+  });
+
+  it('reads app cache size through the Android native metrics module', async () => {
+    NativeModules.SystemMetrics.getCacheDirectorySize = jest.fn().mockResolvedValue(42_500_000);
+
+    await expect(getAppCacheDirectorySizeBytes()).resolves.toBe(42_500_000);
+    expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not invent an Android cache size when the native method is unavailable', async () => {
+    await expect(getAppCacheDirectorySizeBytes()).resolves.toBeNull();
   });
 });

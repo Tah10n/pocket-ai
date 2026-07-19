@@ -235,7 +235,8 @@ keyPassword=your-key-password
 
 ### Storage and cleanup
 
-- Open `Storage Manager`.
+- Open `Storage Manager` on a device that already has chats, downloaded models, and a populated HTTP cache. Confirm it shows an explicit calculating state instead of false zero or empty values, resolves the real values promptly, and remains responsive while measuring cache usage.
+- Rapidly tap the routed back affordance twice and confirm only one navigation occurs without leaving the app or logging an unhandled `GO_BACK` action.
 - Remove a downloaded model with `Delete and keep settings` and confirm the file is removed while its saved per-model settings remain available after downloading the same model again.
 - Remove a downloaded model with `Delete and reset settings` and confirm both the file and the saved per-model settings are cleared.
 - Clear chat history and confirm saved threads are removed.

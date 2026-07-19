@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StorageManagerScreen } from '../../src/ui/screens/StorageManagerScreen';
@@ -113,8 +113,9 @@ describe('StorageManagerScreen', () => {
   it('navigates back when possible', async () => {
     const { getByTestId } = await renderScreen();
 
-    expect(mockGetAppStorageMetrics).toHaveBeenCalledWith({ refreshModelFileQuarantine: true });
+    expect(mockGetAppStorageMetrics).toHaveBeenCalledWith();
 
+    fireEvent.press(getByTestId('storage-manager-back-button'));
     fireEvent.press(getByTestId('storage-manager-back-button'));
 
     expect(mockBack).toHaveBeenCalledTimes(1);
@@ -128,6 +129,81 @@ describe('StorageManagerScreen', () => {
     fireEvent.press(getByTestId('storage-manager-back-button'));
 
     expect(mockReplace).toHaveBeenCalledWith('/(tabs)/models');
+  });
+
+  it('checks the current back-stack state when the user presses back', async () => {
+    const { getByTestId } = await renderScreen();
+    mockCanGoBack = false;
+
+    fireEvent.press(getByTestId('storage-manager-back-button'));
+
+    expect(mockBack).not.toHaveBeenCalled();
+    expect(mockReplace).toHaveBeenCalledWith('/(tabs)/models');
+  });
+
+  it('shows a loading state instead of false zero values while metrics are pending', async () => {
+    let resolveMetrics!: (metrics: Awaited<ReturnType<typeof getAppStorageMetrics>>) => void;
+    mockGetAppStorageMetrics.mockReturnValue(new Promise((resolve) => {
+      resolveMetrics = resolve;
+    }));
+
+    const result = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <StorageManagerScreen />
+      </SafeAreaProvider>,
+    );
+
+    expect(result.getByTestId('storage-manager-metrics-status')).toHaveTextContent('storageManager.metricsLoading');
+    expect(result.queryByText('storageManager.emptyModelsTitle')).toBeNull();
+    expect(result.queryByText('0 MB')).toBeNull();
+    expect(result.getByTestId('storage-manager-clear-cache')).toBeDisabled();
+    expect(result.getByTestId('storage-manager-clear-chat')).toBeDisabled();
+
+    await act(async () => {
+      resolveMetrics({
+        downloadedModels: [],
+        modelsBytes: 0,
+        quarantinedModelFiles: { fileNames: [], count: 0, bytes: 0 },
+        cacheBytes: 12_000_000,
+        chatHistoryBytes: 4_000_000,
+        settingsBytes: 1024,
+        appFilesBytes: 16_001_024,
+        activeModelEstimateBytes: 0,
+        activeModelId: null,
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.queryByTestId('storage-manager-metrics-status')).toBeNull();
+      expect(result.getByText('storageManager.emptyModelsTitle')).toBeTruthy();
+      expect(result.getByText('12 MB')).toBeTruthy();
+      expect(result.getByText('4.0 MB')).toBeTruthy();
+    });
+  });
+
+  it('offers a retry when metrics fail instead of rendering empty storage', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockGetAppStorageMetrics.mockRejectedValueOnce(new Error('storage probe failed'));
+    try {
+      const result = await renderScreen();
+
+      expect(result.getByTestId('storage-manager-metrics-status')).toHaveTextContent('storageManager.metricsLoadError');
+      expect(result.queryByText('storageManager.emptyModelsTitle')).toBeNull();
+
+      fireEvent.press(result.getByTestId('storage-manager-retry-metrics'));
+
+      await waitFor(() => {
+        expect(mockGetAppStorageMetrics).toHaveBeenCalledTimes(2);
+        expect(result.getByText('storageManager.emptyModelsTitle')).toBeTruthy();
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('confirms and clears the active cache', async () => {

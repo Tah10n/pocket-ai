@@ -10,6 +10,9 @@ describe('SystemMetrics config plugins', () => {
     expect(source).toContain('readProcMemInfoBytes("MemFree:")');
     expect(source).toContain('putDouble("advertisedMemoryBytes", advertisedMemoryBytes.toDouble())');
     expect(source).toContain('hasPressureRatio && pressureRatio <= 0.15 -> "warning"');
+    expect(source).toContain('fun getCacheDirectorySize(promise: Promise)');
+    expect(source).toContain('storageMetricsExecutor.execute');
+    expect(source).toContain('readDirectorySizeBytes(reactApplicationContext.cacheDir)');
   });
 
   it('generates iOS metrics code with a process-specific availability signal', () => {

@@ -20,11 +20,12 @@ import {
     resetAppSettings,
     type AppStorageMetrics,
 } from '../../services/StorageManagerService';
-import { getReportedErrorMessage } from '../../services/AppError';
+import { getReportedErrorMessage, reportError } from '../../services/AppError';
 import { formatModelFileSize } from '../../utils/modelSize';
 import { toTestIdSegment } from '../../utils/testIds';
 
 type BusyAction = 'cache' | 'quarantine' | 'chat' | 'settings' | `offload:${string}` | `offload:${string}:reset` | null;
+type MetricsLoadState = 'loading' | 'ready' | 'error';
 
 function formatBytes(value: number) {
     if (!Number.isFinite(value) || value <= 0) return '0 MB';
@@ -93,23 +94,44 @@ export function StorageManagerScreen() {
     const insets = useSafeAreaInsets();
     const router = useRouter();
     const [appMetrics, setAppMetrics] = useState<AppStorageMetrics | null>(null);
+    const [metricsLoadState, setMetricsLoadState] = useState<MetricsLoadState>('loading');
     const [hardwareStatus, setHardwareStatus] = useState<HardwareStatus>(hardwareListenerService.getCurrentStatus());
     const [busyAction, setBusyAction] = useState<BusyAction>(null);
     const mountedRef = useRef(true);
-    const canGoBack = router.canGoBack();
+    const metricsRequestIdRef = useRef(0);
+    const backNavigationPendingRef = useRef(false);
     const handleBack = useCallback(() => {
-        if (canGoBack) {
+        if (backNavigationPendingRef.current) {
+            return;
+        }
+
+        backNavigationPendingRef.current = true;
+        if (router.canGoBack()) {
             router.back();
             return;
         }
 
         router.replace('/(tabs)/models');
-    }, [canGoBack, router]);
+    }, [router]);
 
     const loadAppMetrics = useCallback(async () => {
-        const next = await getAppStorageMetrics({ refreshModelFileQuarantine: true });
+        const requestId = metricsRequestIdRef.current + 1;
+        metricsRequestIdRef.current = requestId;
         if (mountedRef.current) {
-            setAppMetrics(next);
+            setMetricsLoadState('loading');
+        }
+
+        try {
+            const next = await getAppStorageMetrics();
+            if (mountedRef.current && metricsRequestIdRef.current === requestId) {
+                setAppMetrics(next);
+                setMetricsLoadState('ready');
+            }
+        } catch (error) {
+            reportError('StorageManagerScreen.loadAppMetrics', error);
+            if (mountedRef.current && metricsRequestIdRef.current === requestId) {
+                setMetricsLoadState('error');
+            }
         }
     }, []);
 
@@ -128,7 +150,12 @@ export function StorageManagerScreen() {
 
     useFocusEffect(
         useCallback(() => {
+            backNavigationPendingRef.current = false;
             void refreshAll();
+
+            return () => {
+                metricsRequestIdRef.current += 1;
+            };
         }, [refreshAll]),
     );
 
@@ -265,6 +292,9 @@ export function StorageManagerScreen() {
     }, [i18n, runBusyAction, t]);
 
     const downloadedModels = appMetrics?.downloadedModels ?? [];
+    const isInitialMetricsLoading = appMetrics === null && metricsLoadState === 'loading';
+    const hasMetricsLoadError = appMetrics === null && metricsLoadState === 'error';
+    const pendingMetricLabel = isInitialMetricsLoading ? t('common.loading') : t('common.unknown');
 
     return (
         <ScreenRoot>
@@ -299,9 +329,9 @@ export function StorageManagerScreen() {
                                 <ActionCard
                                     title={t('storageManager.clearCacheTitle')}
                                     description={t('storageManager.clearCacheDescription')}
-                                    meta={formatBytes(appMetrics?.cacheBytes ?? 0)}
+                                    meta={appMetrics ? formatBytes(appMetrics.cacheBytes) : pendingMetricLabel}
                                     busy={busyAction === 'cache'}
-                                    disabled={busyAction !== null}
+                                    disabled={busyAction !== null || appMetrics === null}
                                     buttonLabel={busyAction === 'cache' ? t('common.loading') : t('common.clear')}
                                     buttonTestID="storage-manager-clear-cache"
                                     onPress={handleClearCache}
@@ -309,10 +339,12 @@ export function StorageManagerScreen() {
                                 <ActionCard
                                     title={t('storageManager.clearQuarantineTitle')}
                                     description={t('storageManager.clearQuarantineDescription')}
-                                    meta={t('storageManager.clearQuarantineMeta', {
-                                        count: quarantineCount,
-                                        size: quarantineSizeLabel,
-                                    })}
+                                    meta={appMetrics
+                                        ? t('storageManager.clearQuarantineMeta', {
+                                            count: quarantineCount,
+                                            size: quarantineSizeLabel,
+                                        })
+                                        : pendingMetricLabel}
                                     busy={busyAction === 'quarantine'}
                                     disabled={busyAction !== null || quarantineCount <= 0}
                                     buttonLabel={busyAction === 'quarantine'
@@ -324,9 +356,9 @@ export function StorageManagerScreen() {
                                 <ActionCard
                                     title={t('storageManager.clearChatHistoryTitle')}
                                     description={t('storageManager.clearChatHistoryDescription')}
-                                    meta={formatBytes(appMetrics?.chatHistoryBytes ?? 0)}
+                                    meta={appMetrics ? formatBytes(appMetrics.chatHistoryBytes) : pendingMetricLabel}
                                     busy={busyAction === 'chat'}
-                                    disabled={busyAction !== null}
+                                    disabled={busyAction !== null || appMetrics === null}
                                     buttonLabel={busyAction === 'chat' ? t('common.loading') : t('common.clear')}
                                     buttonTestID="storage-manager-clear-chat"
                                     onPress={handleClearChatHistory}
@@ -345,14 +377,39 @@ export function StorageManagerScreen() {
 
                         <ScreenCard padding="compact">
                             <ScreenSectionLabel>
-                                {t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })}
+                                {appMetrics
+                                    ? t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })
+                                    : t('storageManager.downloadedModelsLoadingTitle')}
                             </ScreenSectionLabel>
                             <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
                                 {t('storageManager.downloadedModelsDescription')}
                             </Text>
 
                             <ScreenStack className="mt-3" gap="compact">
-                                {downloadedModels.length === 0 ? (
+                                {appMetrics === null ? (
+                                    <ScreenCard variant="inset" padding="compact" className="items-center">
+                                        <Text
+                                            testID="storage-manager-metrics-status"
+                                            className="text-center text-sm leading-5 text-typography-500 dark:text-typography-400"
+                                        >
+                                            {hasMetricsLoadError
+                                                ? t('storageManager.metricsLoadError')
+                                                : t('storageManager.metricsLoading')}
+                                        </Text>
+                                        {hasMetricsLoadError ? (
+                                            <Button
+                                                size="sm"
+                                                testID="storage-manager-retry-metrics"
+                                                onPress={() => {
+                                                    void refreshAll();
+                                                }}
+                                                className="mt-3"
+                                            >
+                                                <ButtonText>{t('common.retry')}</ButtonText>
+                                            </Button>
+                                        ) : null}
+                                    </ScreenCard>
+                                ) : downloadedModels.length === 0 ? (
                                     <ScreenCard variant="inset" padding="compact" className="items-center">
                                         <Text className="text-center text-base font-semibold text-typography-900 dark:text-typography-100">
                                             {t('storageManager.emptyModelsTitle')}

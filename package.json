@@ -37,7 +37,7 @@
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
-    "android": "expo run:android",
+    "android": "node ./scripts/run-android-dev.js",
     "android:smoke": "node ./scripts/android-smoke.js",
     "android:emulator": "node ./scripts/android-smoke.js --emulator --screenshot artifacts/android-emulator-smoke.png",
     "android:scenarios": "node ./scripts/android-scenarios.js --pack core",

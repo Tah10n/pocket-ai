@@ -4,6 +4,7 @@ const {
   evaluateApkReuse,
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
+  parseCliOptions,
   parseApkVariant,
   parseDumpsysPackageOutput,
   parsePackagePathOutput,
@@ -79,6 +80,21 @@ describe('android-smoke APK variant parsing', () => {
 
   it('rejects unsupported APK variants', () => {
     expect(() => parseApkVariant('qa')).toThrow('Invalid Android APK variant');
+  });
+});
+
+describe('android-smoke development Metro lifecycle', () => {
+  it('keeps an owned Metro attached only when explicitly requested', () => {
+    expect(parseCliOptions(['--keep-metro-foreground'])).toEqual(
+      expect.objectContaining({
+        keepMetroForeground: true,
+      })
+    );
+    expect(parseCliOptions([])).toEqual(
+      expect.objectContaining({
+        keepMetroForeground: false,
+      })
+    );
   });
 });
 

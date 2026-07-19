@@ -132,7 +132,9 @@ async function main() {
     throw new Error(`Expected Android ${apkVariant} APK at ${apkPath}, but it was not found.`);
   }
 
-  const metro = shouldUseEmbeddedBundle ? null : await ensureMetroServer();
+  const metro = shouldUseEmbeddedBundle
+    ? null
+    : await ensureMetroServer({ foreground: cliOptions.keepMetroForeground });
   if (metro) {
     await prewarmMetroBundle(metro.port, appPackage);
   } else {
@@ -178,6 +180,11 @@ async function main() {
 
   if (screenshotPath) {
     log(`Saved screenshot to ${screenshotPath}.`);
+  }
+
+  if (metro?.started && cliOptions.keepMetroForeground) {
+    log('Metro remains attached for development. Press Ctrl+C to stop it.');
+    await waitForAttachedMetroExit(metro.process);
   }
 }
 
@@ -802,7 +809,9 @@ async function waitForBootCompletion(adbPath, serial, timeoutMs) {
   throw new Error(`Timed out while waiting for ${serial} to finish booting.`);
 }
 
-async function ensureMetroServer() {
+async function ensureMetroServer(options = {}) {
+  const foreground = options.foreground === true;
+
   for (let port = preferredPort; port <= maxPort; port += 1) {
     if (await isMetroRunning(port)) {
       return { port, started: false };
@@ -811,11 +820,13 @@ async function ensureMetroServer() {
     if (await isPortFree(port)) {
       log(`Starting Metro on port ${port}...`);
 
-      const metroProcess = startMetroProcess(port);
+      const metroProcess = startMetroProcess(port, { foreground });
 
-      metroProcess.unref();
+      if (!foreground) {
+        metroProcess.unref();
+      }
       await waitForMetro(port, metroStartupTimeoutMs);
-      return { port, started: true };
+      return { port, started: true, process: foreground ? metroProcess : null };
     }
   }
 
@@ -844,22 +855,33 @@ function withDnsResultOrderIpv4First(currentValue) {
   return `${normalized} ${flag}`.trim();
 }
 
-function startMetroProcess(port) {
+function startMetroProcess(port, options = {}) {
+  const foreground = options.foreground === true;
   const env = {
     ...process.env,
-    CI: process.env.CI || "1",
-    EXPO_NO_INTERACTIVE: "1",
     NODE_ENV: process.env.NODE_ENV || "development",
   };
+
+  if (foreground) {
+    delete env.CI;
+    delete env.EXPO_NO_INTERACTIVE;
+  } else {
+    env.CI = process.env.CI || "1";
+    env.EXPO_NO_INTERACTIVE = "1";
+  }
 
   // On Windows, `--localhost` can cause Expo/Metro to bind to ::1 only, while the
   // smoke runner expects the /status endpoint on 127.0.0.1. Prefer IPv4 for
   // deterministic local connectivity and adb reverse behavior.
   env.NODE_OPTIONS = withDnsResultOrderIpv4First(env.NODE_OPTIONS);
 
-  fs.mkdirSync(artifactsRoot, { recursive: true });
-  const metroLogPath = path.join(artifactsRoot, `metro-${port}.log`);
-  const metroLogFd = fs.openSync(metroLogPath, "w");
+  let stdio = "inherit";
+  if (!foreground) {
+    fs.mkdirSync(artifactsRoot, { recursive: true });
+    const metroLogPath = path.join(artifactsRoot, `metro-${port}.log`);
+    const metroLogFd = fs.openSync(metroLogPath, "w");
+    stdio = ["ignore", metroLogFd, metroLogFd];
+  }
 
   if (process.platform === "win32") {
     const command = `npm run start -- --dev-client --localhost --port ${port}`;
@@ -868,10 +890,10 @@ function startMetroProcess(port) {
       ["/d", "/s", "/c", command],
       {
         cwd: projectRoot,
-        detached: true,
-        stdio: ["ignore", metroLogFd, metroLogFd],
+        detached: !foreground,
+        stdio,
         env,
-        windowsHide: true,
+        windowsHide: !foreground,
       }
     );
   }
@@ -881,11 +903,33 @@ function startMetroProcess(port) {
     ["run", "start", "--", "--dev-client", "--localhost", "--port", `${port}`],
     {
       cwd: projectRoot,
-      detached: true,
-      stdio: ["ignore", metroLogFd, metroLogFd],
+      detached: !foreground,
+      stdio,
       env,
     }
   );
+}
+
+function waitForAttachedMetroExit(metroProcess) {
+  if (!metroProcess) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    metroProcess.once("error", reject);
+    metroProcess.once("exit", (code, signal) => {
+      if (code === 0 || signal === "SIGINT" || signal === "SIGTERM") {
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          `Attached Metro exited unexpectedly${signal ? ` after ${signal}` : ` with code ${code}`}.`
+        )
+      );
+    });
+  });
 }
 
 async function waitForMetro(port, timeoutMs) {
@@ -1589,6 +1633,7 @@ function parseCliOptions(argv) {
     port: null,
     launchDelayMs: null,
     apkVariant: null,
+    keepMetroForeground: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -1601,6 +1646,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--skip-build") {
       options.skipBuild = true;
+      continue;
+    }
+
+    if (arg === "--keep-metro-foreground") {
+      options.keepMetroForeground = true;
       continue;
     }
 
@@ -1669,6 +1719,7 @@ function printHelp() {
   console.log("  --serial <serial>          Target a specific connected device");
   console.log("  --port <number>            First Metro port to probe");
   console.log("  --skip-build               Reuse the existing APK");
+  console.log("  --keep-metro-foreground    Keep an owned Metro attached until Ctrl+C");
   console.log("  --apk-variant <variant>    Install debug or release APK (default: debug)");
   console.log("  --screenshot [path]        Save a screenshot after launch");
   console.log("  --launch-delay-ms <ms>     Wait time before saving a screenshot");
@@ -1726,6 +1777,7 @@ module.exports = {
   evaluateInstallReuse,
   isInsufficientStorageInstallFailure,
   parseDumpsysPackageOutput,
+  parseCliOptions,
   parseApkVariant,
   parsePackagePathOutput,
   sanitizeForFileName,

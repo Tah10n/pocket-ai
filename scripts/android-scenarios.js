@@ -3,6 +3,11 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const {
+  ensureMetroServer,
+  stopOwnedMetroProcessOrThrow,
+  stopOwnedProcessTreeByPid,
+} = require("./android-smoke");
 const { isCompletePngBuffer } = require("./png-validation");
 const DEFAULT_SCENARIO_PACK = "core";
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
@@ -21,6 +26,9 @@ const CORE_SCENARIOS = [
 const CATALOG_SCENARIOS = [
   "variant-picker-smoke",
 ];
+const STORAGE_SCENARIOS = [
+  "storage-cache-clear",
+];
 const ATTACHMENT_SCENARIOS = [
   "chat-attachment-current-state-smoke",
 ];
@@ -36,6 +44,7 @@ const PREPARED_ATTACHMENT_SEND_SCENARIOS = [
 const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
+  storage: STORAGE_SCENARIOS,
   attachments: ATTACHMENT_SCENARIOS,
   "attachments-preconditioned": PRECONDITIONED_ATTACHMENT_SCENARIOS,
   "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
@@ -67,7 +76,9 @@ const projectRoot = path.resolve(__dirname, "..");
 const appConfigPath = path.join(projectRoot, "app.json");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
-const appPackageName = readExpoConfig().packageName;
+const expoConfig = readExpoConfig();
+const appPackageName = expoConfig.packageName;
+const appSchemeName = expoConfig.scheme;
 const homeLauncherLabel = "Pocket AI";
 const APP_TITLE_LABELS = ["Pocket AI"];
 const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
@@ -266,6 +277,7 @@ const PREPARED_ASSISTANT_RESPONSE_NON_ANSWER_LABEL_FRAGMENTS = [
   "Чат с изображениями не готов",
 ].map(normalizeUiLabel).filter(Boolean);
 const ASSISTANT_MESSAGE_CONTENT_RESOURCE_ID_FRAGMENT = "assistant-message-content-";
+const ASSISTANT_MESSAGE_COMPLETE_RESOURCE_ID_FRAGMENT = "assistant-message-state-complete-";
 const NO_MODEL_STATE_LABELS = [
   "NO MODEL LOADED",
   "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
@@ -296,7 +308,11 @@ const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
 const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
 const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
-const PERFORMANCE_ROW_LABELS = ["Performance", "Производительность"];
+const CLEAR_ACTIVE_CACHE_LABELS = ["Clear Active Cache", "Очистить активный кэш"];
+const STORAGE_CLEAR_CACHE_RESOURCE_ID = "storage-manager-clear-cache";
+const ANDROID_DIALOG_POSITIVE_BUTTON_RESOURCE_ID = "android:id/button1";
+const STORAGE_CACHE_QA_DIRECTORY = "cache/pocket-ai-storage-qa";
+const STORAGE_CACHE_QA_SENTINEL = `${STORAGE_CACHE_QA_DIRECTORY}/sentinel.bin`;
 const PERFORMANCE_COPY_TRACE_LABELS = ["Copy trace", "Копировать трассу"];
 const PERFORMANCE_DUMP_TO_LOGCAT_LABELS = ["Dump to logcat", "Выгрузить в logcat"];
 const PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS = ["Enable instrumentation", "Включить инструментацию"];
@@ -416,6 +432,7 @@ const DOWNLOAD_WARNING_SETTLE_TIMEOUT_MS = 0;
 const MODEL_WARMUP_DETECTION_TIMEOUT_MS = 2_000;
 const MODEL_WARMUP_SETTLE_TIMEOUT_MS = 180_000;
 const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
+const ADB_COMMAND_TIMEOUT_MS = 15_000;
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
 // Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
@@ -453,17 +470,33 @@ async function main() {
 
   const adbPath = resolveAdbPath();
   const launchPlan = buildScenarioLaunchPlan(cliOptions, () => resolveTargetSerial(adbPath, cliOptions));
-
-  if (launchPlan.shouldLaunch) {
-    launchApp(launchPlan.serialBeforeLaunch);
-  }
-
-  const serial = launchPlan.serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
-  const context = createScenarioContext(adbPath, serial);
-  const results = [];
+  let scenarioMetro = null;
+  let removeMetroSignalHandlers = () => {};
+  let mainError = null;
 
   try {
-    await context.ensureAppVisible();
+    if (launchPlan.shouldLaunch) {
+      if (shouldPrepareMetroForScenarioLaunch()) {
+        scenarioMetro = await ensureMetroServer({
+          foreground: false,
+          preferredPort: cliOptions.port ?? undefined,
+        });
+        if (scenarioMetro.started) {
+          scenarioMetro.removeSignalHandlers?.();
+          removeMetroSignalHandlers = installScenarioOwnedMetroSignalHandlers(
+            () => scenarioMetro
+          );
+        }
+      }
+      launchApp(launchPlan.serialBeforeLaunch, scenarioMetro?.port ?? cliOptions.port);
+    }
+
+    const serial = launchPlan.serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
+    const context = createScenarioContext(adbPath, serial);
+    const results = [];
+
+    try {
+      await context.ensureAppVisible();
     await dismissDebuggerBannerIfPresent(adbPath, serial);
 
     for (const scenario of selectedScenarios) {
@@ -481,6 +514,7 @@ async function main() {
             reason: outcome.reason,
             context,
           });
+          writeReport(results);
           continue;
         }
 
@@ -496,6 +530,7 @@ async function main() {
           screenshotPath,
         });
         log(`PASS ${scenario.id}`);
+        writeReport(results);
       } catch (error) {
         if (error instanceof ScenarioSkipFailureError) {
           throw error;
@@ -509,6 +544,7 @@ async function main() {
             reason: error.message,
             context,
           });
+          writeReport(results);
           continue;
         }
 
@@ -528,10 +564,10 @@ async function main() {
 
     writeReport(results);
     log(`Completed ${results.length} basic scenario(s).`);
-  } catch (error) {
-    if (!shouldAppendRunnerFailure(error)) {
-      throw error;
-    }
+    } catch (error) {
+      if (!shouldAppendRunnerFailure(error)) {
+        throw error;
+      }
 
     try {
       const screenshotPath = context.captureScreenshot("run-failed.png");
@@ -565,7 +601,24 @@ async function main() {
       writeReport(results);
     }
 
+      throw error;
+    }
+  } catch (error) {
+    mainError = error;
     throw error;
+  } finally {
+    removeMetroSignalHandlers();
+    try {
+      cleanupScenarioOwnedMetro(scenarioMetro);
+    } catch (cleanupError) {
+      if (!mainError) {
+        throw cleanupError;
+      }
+      throw new AggregateError(
+        [mainError, cleanupError],
+        `Android scenario run failed (${mainError.message}) and Metro cleanup also failed (${cleanupError.message}).`
+      );
+    }
   }
 }
 
@@ -784,7 +837,32 @@ function readExpoConfig() {
 
   return {
     packageName: expo.android && expo.android.package,
+    scheme: expo.scheme,
   };
+}
+
+function buildAppRouteDeepLinkArgs(serial, route, options = {}) {
+  const packageName = options.packageName || appPackageName;
+  const scheme = options.scheme || appSchemeName;
+  const normalizedRoute = `${route || ""}`.replace(/^\/+/, "");
+
+  if (!serial || !packageName || !scheme || !normalizedRoute) {
+    throw new Error("Android route deep links require a serial, package, scheme, and route.");
+  }
+
+  return [
+    "-s",
+    serial,
+    "shell",
+    "am",
+    "start",
+    "-W",
+    "-a",
+    "android.intent.action.VIEW",
+    "-d",
+    `${scheme}://${normalizedRoute}`,
+    packageName,
+  ];
 }
 
 async function dismissBlockingSystemDialogIfPresent(adbPath, serial) {
@@ -1330,6 +1408,67 @@ function buildScenarios() {
       },
     },
     {
+      id: "storage-cache-clear",
+      tier: "secondary",
+      description: "Verify Storage Manager removes a real private-cache file through the user-facing flow.",
+      run: async (ctx) => {
+        await goToHome(ctx);
+        await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
+          timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+        });
+
+        const adbPath = resolveAdbPath();
+        seedPrivateStorageCacheSentinel(adbPath, ctx.serial);
+        if (!appPrivatePathExists(adbPath, ctx.serial, STORAGE_CACHE_QA_SENTINEL)) {
+          throw new Error("Failed to prepare the private-cache sentinel before opening Storage Manager.");
+        }
+
+        await scrollToAnyText(ctx, STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await ctx.tapAnyText(STORAGE_MANAGER_LABELS);
+        await ctx.expectAnyText(STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await ctx.expectAnyText(CLEAR_ACTIVE_CACHE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+
+        const clearButton = await waitForResourceId(
+          adbPath,
+          ctx.serial,
+          STORAGE_CLEAR_CACHE_RESOURCE_ID,
+          { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS, visibleOnly: true }
+        );
+        if (!clearButton.bounds) {
+          throw new Error("The Storage Manager cache-clear control has no tap bounds.");
+        }
+        tapBounds(adbPath, ctx.serial, clearButton.bounds);
+        await delay(500);
+        const confirmButton = await waitForResourceId(
+          adbPath,
+          ctx.serial,
+          ANDROID_DIALOG_POSITIVE_BUTTON_RESOURCE_ID,
+          { timeoutMs: 5_000, visibleOnly: true }
+        );
+        if (!confirmButton.bounds) {
+          throw new Error("The Android cache-clear confirmation has no tap bounds.");
+        }
+        tapBounds(adbPath, ctx.serial, confirmButton.bounds);
+
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (!appPrivatePathExists(adbPath, ctx.serial, STORAGE_CACHE_QA_SENTINEL)) {
+            break;
+          }
+          await delay(500);
+        }
+        if (appPrivatePathExists(adbPath, ctx.serial, STORAGE_CACHE_QA_SENTINEL)) {
+          throw new Error("Storage Manager reported success but the private-cache sentinel still exists.");
+        }
+
+        await ctx.expectAnyText(STORAGE_MANAGER_LABELS, { timeoutMs: 5_000 });
+        await ctx.pressBack();
+        await ctx.expectAnyText(SETTINGS_TITLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
+          timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+        });
+      },
+    },
+    {
       id: "new-chat-cta",
       tier: "core",
       description: "Verify the Home screen New Chat button opens the chat screen empty state.",
@@ -1571,6 +1710,12 @@ function buildScenarios() {
         await goToModelCatalog(ctx);
 
         const adbPath = resolveAdbPath();
+        const catalogResultsStartedAt = Date.now();
+        await waitForAnyTappableNode(adbPath, ctx.serial, MODEL_DETAILS_CTA_LABELS, {
+          timeoutMs: 12_000,
+        });
+        log(`Catalog model cards became interactive in ${Date.now() - catalogResultsStartedAt}ms.`);
+
         await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
 
         await ctx.tapAnyText(SORT_LABELS);
@@ -1578,7 +1723,7 @@ function buildScenarios() {
         await ctx.expectAnyText(MOST_POPULAR_LABELS);
         await ctx.tapAnyText(SORT_LABELS);
 
-        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 15_000 });
+        await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 5_000 });
         await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
         await ctx.expectAnyText(OPEN_ON_HF_LABELS);
       },
@@ -1754,13 +1899,12 @@ function buildScenarios() {
       tier: "optional",
       description: "Verify the Performance screen can dump a trace to logcat in dev builds.",
       run: async (ctx) => {
-        await goToSettings(ctx);
-        await scrollToAnyText(ctx, PERFORMANCE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-
-        await ctx.tapAnyText(PERFORMANCE_ROW_LABELS);
+        const adbPath = resolveAdbPath();
+        runChecked(adbPath, buildAppRouteDeepLinkArgs(ctx.serial, "performance"), {
+          stdio: "ignore",
+        });
         await ctx.expectAnyText(PERFORMANCE_COPY_TRACE_LABELS);
 
-        const adbPath = resolveAdbPath();
         const enableInstrumentation = await findAnyNodeNow(adbPath, ctx.serial, PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS, {
           visibleOnly: true,
         });
@@ -1807,11 +1951,12 @@ function selectScenarios(scenarios, options) {
   if (requestedPack === "all") {
     // Prepared scenarios depend on in-memory app state set up manually by the tester, so keep
     // them out of broad automated packs. They remain available by direct id or pack name.
-    const manualPreparedScenarioIds = new Set([
+    const explicitStateMutationScenarioIds = new Set([
       ...PREPARED_ATTACHMENT_SCENARIOS,
       ...PREPARED_ATTACHMENT_SEND_SCENARIOS,
+      ...STORAGE_SCENARIOS,
     ]);
-    return scenarios.filter((scenario) => !manualPreparedScenarioIds.has(scenario.id));
+    return scenarios.filter((scenario) => !explicitStateMutationScenarioIds.has(scenario.id));
   }
 
   const scenarioIds = SCENARIO_PACK_SCENARIOS[requestedPack];
@@ -2346,8 +2491,86 @@ async function scrollToAnyText(ctx, labels, options = {}) {
   );
 }
 
-function launchApp(resolvedSerial) {
-  const args = buildSmokeLaunchArgs(cliOptions, resolvedSerial);
+function seedPrivateStorageCacheSentinel(adbPath, serial) {
+  runChecked(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "run-as",
+    appPackageName,
+    "mkdir",
+    "-p",
+    STORAGE_CACHE_QA_DIRECTORY,
+  ], { stdio: "ignore" });
+  runChecked(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "run-as",
+    appPackageName,
+    "dd",
+    "if=/dev/zero",
+    `of=${STORAGE_CACHE_QA_SENTINEL}`,
+    "bs=1024",
+    "count=64",
+  ], { stdio: "ignore" });
+}
+
+function appPrivatePathExists(adbPath, serial, relativePath, options = {}) {
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const result = runSpawnSync(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "run-as",
+    appPackageName,
+    "ls",
+    "-d",
+    relativePath,
+  ], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: options.timeout ?? ADB_COMMAND_TIMEOUT_MS,
+  });
+
+  if (result.error) {
+    throw new Error(
+      `Could not verify private path ${relativePath}: ${result.error.message || String(result.error)}`
+    );
+  }
+
+  const stdout = result.stdout || "";
+  const stderr = result.stderr || "";
+  if (result.status === 0) {
+    if (stdout.split(/\r?\n/u).some((line) => line.trim() === relativePath)) {
+      return true;
+    }
+    throw new Error(`Could not verify private path ${relativePath}: adb returned an unexpected response.`);
+  }
+
+  const failureOutput = `${stdout}\n${stderr}`.trim();
+  if (/no such file or directory|cannot access .+: no such file/iu.test(failureOutput)) {
+    return false;
+  }
+
+  throw new Error(
+    `Could not verify private path ${relativePath}: ${failureOutput || `adb exited with status ${result.status}`}`
+  );
+}
+
+function shouldPrepareMetroForScenarioLaunch(env = process.env) {
+  const apkVariant = (env.ANDROID_SMOKE_APK_VARIANT ?? "debug").trim().toLowerCase();
+  return env.ANDROID_SMOKE_SKIP_METRO !== "1" && apkVariant !== "release";
+}
+
+function launchApp(resolvedSerial, metroPort) {
+  const args = buildSmokeLaunchArgs({
+    ...cliOptions,
+    port: metroPort === null || metroPort === undefined
+      ? cliOptions.port
+      : String(metroPort),
+  }, resolvedSerial);
 
   const result = spawnSync(process.execPath, args, {
     cwd: projectRoot,
@@ -2362,6 +2585,129 @@ function launchApp(resolvedSerial) {
   if (result.status !== 0) {
     throw new Error("Failed to launch the Android app before running scenarios.");
   }
+}
+
+function cleanupScenarioOwnedMetro(metro, options = {}) {
+  if (!metro?.started) {
+    return;
+  }
+
+  metro.removeSignalHandlers?.();
+  if (!metro.lifecycle) {
+    throw new Error("Scenario-owned Metro is missing its process lifecycle.");
+  }
+
+  const stopMetro = options.stopOwnedMetroProcessOrThrow ?? stopOwnedMetroProcessOrThrow;
+  stopMetro(metro.lifecycle);
+}
+
+function installScenarioOwnedMetroSignalHandlers(
+  getMetro,
+  processRef = process,
+  options = {}
+) {
+  let isHandlingSignal = false;
+  const cleanupMetro = options.cleanupScenarioOwnedMetro ?? cleanupScenarioOwnedMetro;
+  const remove = () => {
+    processRef.removeListener("SIGINT", onSigint);
+    processRef.removeListener("SIGTERM", onSigterm);
+  };
+  const handle = (signal) => {
+    if (isHandlingSignal) {
+      return;
+    }
+    isHandlingSignal = true;
+    try {
+      cleanupMetro(getMetro());
+    } catch (error) {
+      console.error(`[android-scenarios] Metro cleanup after ${signal} failed: ${error.message}`);
+    } finally {
+      remove();
+      processRef.kill(processRef.pid, signal);
+    }
+  };
+  const onSigint = () => handle("SIGINT");
+  const onSigterm = () => handle("SIGTERM");
+  processRef.once("SIGINT", onSigint);
+  processRef.once("SIGTERM", onSigterm);
+  return remove;
+}
+
+function readTransferredMetroOwnership(ownershipPath) {
+  if (!ownershipPath || !fs.existsSync(ownershipPath)) {
+    return null;
+  }
+
+  const ownership = JSON.parse(fs.readFileSync(ownershipPath, "utf8"));
+  if (!Number.isSafeInteger(ownership.pid) || ownership.pid <= 0) {
+    throw new Error("Android smoke returned an invalid Metro ownership record.");
+  }
+  if (!ownership.processIdentity?.startMarker) {
+    throw new Error("Android smoke returned a Metro ownership record without process identity.");
+  }
+  if (
+    !Array.isArray(ownership.processTreeIdentities)
+    || !ownership.processTreeIdentities.some((identity) => (
+      identity?.pid === ownership.pid
+      && identity?.startMarker === ownership.processIdentity.startMarker
+      && identity?.depth === 0
+    ))
+  ) {
+    throw new Error("Android smoke returned a Metro ownership record without a valid process-tree identity snapshot.");
+  }
+  const expectedOwnershipBoundary = process.platform === "win32"
+    ? "windows-job"
+    : "posix-process-group";
+  if (ownership.ownershipBoundary !== expectedOwnershipBoundary) {
+    throw new Error(
+      `Android smoke returned an incompatible Metro ownership boundary: ${ownership.ownershipBoundary || "missing"}.`
+    );
+  }
+
+  return { ...ownership, ownershipPath };
+}
+
+function installTransferredMetroSignalHandlers(getOwnership, processRef = process) {
+  let isHandlingSignal = false;
+  const remove = () => {
+    processRef.removeListener("SIGINT", onSigint);
+    processRef.removeListener("SIGTERM", onSigterm);
+  };
+  const handle = (signal) => {
+    if (isHandlingSignal) {
+      return;
+    }
+    isHandlingSignal = true;
+    try {
+      cleanupTransferredMetroOwnership(getOwnership());
+    } catch (error) {
+      console.error(`[android-scenarios] Metro cleanup after ${signal} failed: ${error.message}`);
+    } finally {
+      remove();
+      processRef.kill(processRef.pid, signal);
+    }
+  };
+  const onSigint = () => handle("SIGINT");
+  const onSigterm = () => handle("SIGTERM");
+  processRef.once("SIGINT", onSigint);
+  processRef.once("SIGTERM", onSigterm);
+  return remove;
+}
+
+function cleanupTransferredMetroOwnership(ownership, options = {}) {
+  if (!ownership) {
+    return;
+  }
+
+  const stopProcessTree = options.stopProcessTree ?? stopOwnedProcessTreeByPid;
+  if (!stopProcessTree(ownership.pid, {
+    expectedIdentity: ownership.processIdentity,
+    expectedProcessTreeIdentities: ownership.processTreeIdentities,
+    ownershipBoundary: ownership.ownershipBoundary,
+  })) {
+    throw new Error(`Failed to stop scenario-owned Metro process tree ${ownership.pid}.`);
+  }
+  fs.rmSync(ownership.ownershipPath, { force: true });
 }
 
 function buildSmokeLaunchArgs(options, resolvedSerial) {
@@ -2393,6 +2739,10 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
 
   if (options.port) {
     args.push("--port", options.port);
+  }
+
+  if (options.transferMetroOwnership) {
+    args.push("--transfer-metro-ownership", options.transferMetroOwnership);
   }
 
   return args;
@@ -3055,8 +3405,18 @@ function isInsidePreparedAssistantResponseContent(snapshot, node, sentBottom) {
     return false;
   }
 
-  return snapshot.nodes.some((container) => (
+  const isInsideContentContainer = snapshot.nodes.some((container) => (
     isPreparedAssistantResponseContentContainerNode(container)
+    && container.bounds
+    && container.bounds.top > sentBottom
+    && containsBounds(container.bounds, node.bounds)
+  ));
+  if (!isInsideContentContainer) {
+    return false;
+  }
+
+  return snapshot.nodes.some((container) => (
+    isPreparedAssistantCompleteMessageContainerNode(container)
     && container.bounds
     && container.bounds.top > sentBottom
     && containsBounds(container.bounds, node.bounds)
@@ -3067,6 +3427,12 @@ function isPreparedAssistantResponseContentContainerNode(node) {
   return [node.resourceId, node.contentDesc]
     .map(normalizeUiLabel)
     .some((label) => label.includes(ASSISTANT_MESSAGE_CONTENT_RESOURCE_ID_FRAGMENT));
+}
+
+function isPreparedAssistantCompleteMessageContainerNode(node) {
+  return [node.resourceId, node.contentDesc]
+    .map(normalizeUiLabel)
+    .some((label) => label.includes(ASSISTANT_MESSAGE_COMPLETE_RESOURCE_ID_FRAGMENT));
 }
 
 function containsBounds(containerBounds, childBounds) {
@@ -4016,6 +4382,7 @@ function runCapture(command, args, options = {}) {
     cwd: projectRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: options.timeout ?? ADB_COMMAND_TIMEOUT_MS,
   });
 
   if (result.error) {
@@ -4051,6 +4418,7 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
   const preferRemoteFile = options.preferRemoteFile ?? !isEmulatorSerial(serial);
   const copyRemoteFileInChunks = options.copyRemoteFileInChunks ?? preferRemoteFile;
   const remoteChunkSizeBytes = options.remoteChunkSizeBytes ?? 32 * 1024;
+  const commandTimeoutMs = options.commandTimeoutMs ?? ADB_COMMAND_TIMEOUT_MS;
 
   const copyRemoteScreenshotInChunks = (remotePath) => {
     const statResult = runSpawnSync(
@@ -4059,6 +4427,7 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: commandTimeoutMs,
       }
     );
     const remoteSizeBytes = Number.parseInt(String(statResult.stdout || "").trim(), 10);
@@ -4097,7 +4466,10 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
             "count=1",
             "status=none",
           ],
-          { maxBuffer: remoteChunkSizeBytes * 2 }
+          {
+            maxBuffer: remoteChunkSizeBytes * 2,
+            timeout: commandTimeoutMs,
+          }
         );
 
         if (!chunkResult.error && chunkResult.status === 0 && chunkResult.stdout?.length === expectedChunkBytes) {
@@ -4147,7 +4519,10 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
     const result = runSpawnSync(
       adbPath,
       ["-s", serial, "exec-out", "screencap", "-p"],
-      { maxBuffer: 20 * 1024 * 1024 }
+      {
+        maxBuffer: 20 * 1024 * 1024,
+        timeout: commandTimeoutMs,
+      }
     );
 
     if (result.error) {
@@ -4182,6 +4557,7 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
+          timeout: commandTimeoutMs,
         }
       );
 
@@ -4211,6 +4587,7 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
+          timeout: commandTimeoutMs,
         }
       );
 
@@ -4244,7 +4621,7 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
       runSpawnSync(
         adbPath,
         ["-s", serial, "shell", "rm", "-f", remotePath],
-        { stdio: "ignore" }
+        { stdio: "ignore", timeout: commandTimeoutMs }
       );
     }
   };
@@ -4348,7 +4725,7 @@ function runChecked(command, args, options = {}) {
     cwd: options.cwd || projectRoot,
     stdio: options.stdio || "inherit",
     env: options.env || process.env,
-    timeout: options.timeout,
+    timeout: options.timeout ?? ADB_COMMAND_TIMEOUT_MS,
   });
 
   if (result.error) {
@@ -4373,13 +4750,17 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  buildAppRouteDeepLinkArgs,
   buildScenarios,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
+  cleanupScenarioOwnedMetro,
+  cleanupTransferredMetroOwnership,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
   activateClearedCatalogFilterOption,
+  appPrivatePathExists,
   clearCatalogFiltersIfPresent,
   clearFocusedTextInput,
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
@@ -4405,6 +4786,7 @@ module.exports = {
   goToHome,
   goToModelCatalog,
   inputFocusedTextAndConfirm,
+  installScenarioOwnedMetroSignalHandlers,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
@@ -4412,6 +4794,7 @@ module.exports = {
   selectScenarios,
   parseCliOptions,
   parseUiSnapshot,
+  readTransferredMetroOwnership,
   restoreLanguageAfterScenario,
   runCapture,
   runChecked,
@@ -4419,6 +4802,7 @@ module.exports = {
   ScenarioSkipFailureError,
   serializeReportResults,
   setCatalogFilterPanelOpen,
+  shouldPrepareMetroForScenarioLaunch,
   shouldAppendRunnerFailure,
   waitForAnyNode,
   waitForEnabledAnyNode,

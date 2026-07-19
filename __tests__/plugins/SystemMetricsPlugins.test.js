@@ -12,7 +12,8 @@ describe('SystemMetrics config plugins', () => {
     expect(source).toContain('hasPressureRatio && pressureRatio <= 0.15 -> "warning"');
     expect(source).toContain('fun getCacheDirectorySize(promise: Promise)');
     expect(source).toContain('storageMetricsExecutor.execute');
-    expect(source).toContain('readDirectorySizeBytes(reactApplicationContext.cacheDir)');
+    expect(source).toContain('readClearableCacheDirectorySizeBytes(reactApplicationContext.cacheDir)');
+    expect(source).toContain('val protectedRootNames = setOf("http-cache")');
   });
 
   it('generates iOS metrics code with a process-specific availability signal', () => {

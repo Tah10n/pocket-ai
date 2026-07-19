@@ -2,7 +2,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
 import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { storage as appStorage } from '../store/storage';
-import { getCacheDir, getModelsDir } from './FileSystemSetup';
+import { getAppCacheRootDir, getCacheDir, getModelsDir } from './FileSystemSetup';
 import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { modelCatalogService } from './ModelCatalogService';
@@ -43,6 +43,7 @@ const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
 const MIN_ESTIMATED_CONTEXT_BYTES = 64 * 1024 * 1024;
 const DIRECTORY_SIZE_CACHE_TTL_MS = 60_000;
 const DIRECTORY_SIZE_MAX_CONCURRENT_STATS = 8;
+const PROTECTED_ACTIVE_CACHE_ENTRY_NAMES = new Set(['http-cache']);
 
 type PersistedChatStorePayload = {
   state?: {
@@ -117,6 +118,11 @@ function getSanitizedStorageManagerErrorDetails(error: unknown): { errorName: st
 }
 
 function getDirectoryPathCategory(directoryUri: string): 'cache_storage' | 'model_storage' | 'app_storage' {
+  const appCacheRootDir = getAppCacheRootDir();
+  if (appCacheRootDir && directoryUri.startsWith(appCacheRootDir)) {
+    return 'cache_storage';
+  }
+
   const cacheDir = getCacheDir();
   if (cacheDir && directoryUri.startsWith(cacheDir)) {
     return 'cache_storage';
@@ -240,7 +246,7 @@ async function getDirectorySizeBytes(
   }
 }
 
-async function getCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise<number> {
+async function getClearableCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise<number> {
   const normalizedDirectoryUri = normalizeDirectoryUri(cacheDirectoryUri);
   const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
   if (cachedSize !== null) {
@@ -264,7 +270,40 @@ async function getCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise<nu
     });
   }
 
-  return getDirectorySizeBytes(normalizedDirectoryUri);
+  try {
+    const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
+    if (!info.exists) {
+      return 0;
+    }
+
+    const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
+    const statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS);
+    const entrySizes = await Promise.all(entries
+      .filter((entryName) => !PROTECTED_ACTIVE_CACHE_ENTRY_NAMES.has(entryName.toLowerCase()))
+      .map(async (entryName) => {
+        const entryUri = joinDirectoryEntryUri(normalizedDirectoryUri, entryName);
+        const entryInfo = await statLimiter(() => FileSystem.getInfoAsync(entryUri));
+        if (!entryInfo.exists) {
+          return 0;
+        }
+        return isFileSystemDirectory(entryInfo)
+          ? getDirectorySizeBytes(entryUri, statLimiter)
+          : typeof entryInfo.size === 'number' ? entryInfo.size : 0;
+      }));
+    const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
+    directorySizeCache.set(normalizedDirectoryUri, {
+      measuredAt: Date.now(),
+      sizeBytes,
+    });
+    return sizeBytes;
+  } catch (error) {
+    console.warn('[StorageManagerService] Failed to read clearable cache size', {
+      pathCategory: 'cache_storage',
+      scope: 'clearable_directory_size',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
+    return 0;
+  }
 }
 
 export function __resetStorageManagerDirectorySizeCacheForTests(): void {
@@ -745,11 +784,11 @@ export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {
     await refreshModelFileQuarantine();
   }
 
-  const cacheDir = getCacheDir();
+  const cacheDir = getAppCacheRootDir();
   const [downloadedModels, quarantinedModelFiles, cacheDirectoryBytes] = await Promise.all([
     getDownloadedModelsWithResolvedSizes(),
     getQuarantinedModelFilesMetrics(),
-    cacheDir ? getCacheDirectorySizeBytes(cacheDir) : Promise.resolve(0),
+    cacheDir ? getClearableCacheDirectorySizeBytes(cacheDir) : Promise.resolve(0),
   ]);
   const modelsBytes = getDownloadedModelsStoredBytes(downloadedModels);
   const cacheBytes = cacheDirectoryBytes + modelCatalogService.getPersistentCacheBytes();
@@ -787,6 +826,20 @@ export async function offloadModel(modelId: string, options?: OffloadModelOption
 export async function clearActiveCache() {
   directorySizeCache.clear();
 
+  let firstError: unknown = null;
+  try {
+    // Stop catalog work before removing files so an in-flight response cannot
+    // repopulate the cache while this explicit user action is still running.
+    modelCatalogService.clearCache('manual');
+  } catch (error) {
+    console.warn('[StorageManagerService] Failed to clear catalog cache', {
+      pathCategory: 'cache_storage',
+      scope: 'catalog_cache_clear',
+      ...getSanitizedStorageManagerErrorDetails(error),
+    });
+    firstError = error;
+  }
+
   const deleteWithRetry = async (uri: string) => {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -806,8 +859,7 @@ export async function clearActiveCache() {
 
   let clearedEntries = 0;
   let failedCacheEntryDeletes = 0;
-  let firstError: unknown = null;
-  const cacheDir = getCacheDir();
+  const cacheDir = getAppCacheRootDir();
 
   try {
     if (cacheDir) {
@@ -815,8 +867,11 @@ export async function clearActiveCache() {
       if (cacheInfo.exists) {
         const entries = await FileSystem.readDirectoryAsync(cacheDir);
         for (const entryName of entries) {
+          if (PROTECTED_ACTIVE_CACHE_ENTRY_NAMES.has(entryName.toLowerCase())) {
+            continue;
+          }
           try {
-            await deleteWithRetry(`${cacheDir}${entryName}`);
+            await deleteWithRetry(joinDirectoryEntryUri(cacheDir, entryName));
             clearedEntries += 1;
           } catch (error) {
             failedCacheEntryDeletes += 1;
@@ -843,16 +898,7 @@ export async function clearActiveCache() {
     });
   }
 
-  try {
-    modelCatalogService.clearCache('manual');
-  } catch (error) {
-    console.warn('[StorageManagerService] Failed to clear catalog cache', {
-      pathCategory: 'cache_storage',
-      scope: 'catalog_cache_clear',
-      ...getSanitizedStorageManagerErrorDetails(error),
-    });
-    firstError ??= error;
-  }
+  directorySizeCache.clear();
 
   if (firstError) {
     throw firstError;

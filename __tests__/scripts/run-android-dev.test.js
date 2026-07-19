@@ -1,7 +1,9 @@
 const path = require('path');
 const { EventEmitter } = require('events');
+const { stopOwnedProcessTreeByPid } = require('../../scripts/android-smoke');
 
 const {
+  attachAndroidDevLifecycle,
   buildAndroidDevEnvironment,
   buildAndroidDevInvocation,
   startAndroidDev,
@@ -54,6 +56,7 @@ describe('Android development launcher', () => {
     expect(invocation.args).toEqual([
       path.join(root, 'scripts', 'android-smoke.js'),
       '--keep-metro-foreground',
+      '--auto-target',
       '--serial',
       'phone-1',
       '--port',
@@ -63,7 +66,21 @@ describe('Android development launcher', () => {
 
   it('spawns the attached Android launcher with the hardened environment', () => {
     const child = new EventEmitter();
-    const spawnImpl = jest.fn(() => child);
+    child.pid = 4242;
+    child.kill = jest.fn();
+    const ownershipBoundary = process.platform === 'win32'
+      ? 'windows-job'
+      : 'posix-process-group';
+    child.pocketAiOwnershipBoundary = ownershipBoundary;
+    const spawnOwnedProcessImpl = jest.fn(() => child);
+    const ownershipSnapshot = {
+      processIdentity: { startMarker: 'owned-start' },
+      processTreeIdentities: [
+        { pid: 4242, parentPid: null, startMarker: 'owned-start', depth: 0 },
+      ],
+      ownershipBoundary,
+    };
+    const captureOwnedProcessOwnership = jest.fn(() => ownershipSnapshot);
     const root = path.resolve(__dirname, '..', '..');
 
     expect(
@@ -72,15 +89,17 @@ describe('Android development launcher', () => {
         appConfig,
         environment: { KEEP_ME: 'yes' },
         extraArgs: ['--serial', 'phone-1'],
-        spawnImpl,
+        spawnOwnedProcessImpl,
+        captureOwnedProcessOwnership,
       })
     ).toBe(child);
 
-    expect(spawnImpl).toHaveBeenCalledWith(
+    expect(spawnOwnedProcessImpl).toHaveBeenCalledWith(
       process.execPath,
       [
         path.join(root, 'scripts', 'android-smoke.js'),
         '--keep-metro-foreground',
+        '--auto-target',
         '--serial',
         'phone-1',
       ],
@@ -96,5 +115,79 @@ describe('Android development launcher', () => {
         }),
       })
     );
+    expect(captureOwnedProcessOwnership).toHaveBeenCalledWith(4242, {
+      platform: process.platform,
+      ownershipBoundary,
+    });
+    expect(child.pocketAiOwnershipSnapshot).toBe(ownershipSnapshot);
+  });
+
+  it('forwards wrapper termination signals to the owned launcher', () => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.kill = jest.fn();
+    child.pocketAiOwnershipBoundary = 'posix-process-group';
+    child.pocketAiOwnershipSnapshot = {
+      processIdentity: { startMarker: 'owned-start' },
+      processTreeIdentities: [
+        { pid: 4242, parentPid: null, startMarker: 'owned-start', depth: 0 },
+      ],
+      ownershipBoundary: 'posix-process-group',
+    };
+    const processRef = new EventEmitter();
+    processRef.exitCode = undefined;
+    const stopProcessTree = jest.fn(() => true);
+    attachAndroidDevLifecycle(child, processRef, { stopProcessTree });
+
+    processRef.emit('SIGINT');
+
+    expect(stopProcessTree).toHaveBeenCalledWith(4242, expect.objectContaining({
+      expectedIdentity: { startMarker: 'owned-start' },
+      ownershipBoundary: 'posix-process-group',
+      gracefulTimeoutMs: 15_000,
+      trustedChildHandle: true,
+      killRoot: expect.any(Function),
+    }));
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(processRef.exitCode).toBe(130);
+    child.emit('exit', 1, null);
+    expect(processRef.exitCode).toBe(130);
+    expect(processRef.listenerCount('SIGTERM')).toBe(0);
+  });
+
+  it('falls back to the trusted Windows Job handle when native stop fails', () => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.kill = jest.fn(() => true);
+    child.pocketAiOwnershipBoundary = 'windows-job';
+    child.pocketAiOwnershipSnapshot = {
+      processIdentity: { startMarker: '638885000000000000' },
+      processTreeIdentities: [
+        {
+          pid: 4242,
+          parentPid: null,
+          startMarker: '638885000000000000',
+          depth: 0,
+        },
+      ],
+      ownershipBoundary: 'windows-job',
+    };
+    const processRef = new EventEmitter();
+    processRef.exitCode = undefined;
+    const spawnSync = jest.fn(() => ({ status: 42 }));
+    const stopProcessTree = (processId, options) => stopOwnedProcessTreeByPid(processId, {
+      ...options,
+      platform: 'win32',
+      spawnSync,
+    });
+
+    attachAndroidDevLifecycle(child, processRef, { stopProcessTree });
+    processRef.emit('SIGTERM');
+
+    expect(spawnSync).toHaveBeenCalledTimes(1);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(processRef.exitCode).toBe(143);
+    child.emit('exit', 1, null);
+    expect(processRef.exitCode).toBe(143);
   });
 });

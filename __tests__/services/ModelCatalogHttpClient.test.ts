@@ -110,4 +110,23 @@ describe('ModelCatalogHttpClient', () => {
       (globalThis as any).AbortController = originalAbortController;
     }
   });
+
+  it('keeps timeout classification when fetch rejects immediately on abort', async () => {
+    jest.spyOn(globalThis as any, 'fetch').mockImplementation((...args: unknown[]) => (
+      new Promise((_resolve, reject) => {
+        const init = args[1] as RequestInit | undefined;
+        init?.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('native abort'), { name: 'AbortError' }));
+        });
+      })
+    ));
+
+    const promise = fetchWithTimeout('https://example.com', {}, 1000);
+    jest.advanceTimersByTime(1000);
+
+    await expect(promise).rejects.toMatchObject({
+      name: 'ModelCatalogError',
+      code: 'timeout',
+    });
+  });
 });

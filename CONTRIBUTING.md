@@ -75,7 +75,7 @@ Pocket AI is a native Expo / React Native project. A native development environm
 
 ### Prerequisites
 
-- Node.js 20+ and npm
+- Node.js 20.19.4+ and npm
 - Android Studio for Android work
 - Xcode for iOS work
 - A working native toolchain for Expo native builds
@@ -107,6 +107,10 @@ npm start
 ```bash
 npm run android
 ```
+
+The Android launcher prefers a connected phone and falls back to a running or available
+emulator when no phone is connected. Pass `--emulator` to force emulator use or
+`--serial <serial>` to select an exact target.
 
 ```bash
 npm run ios
@@ -150,12 +154,13 @@ npm run verify:mobile-change:android
 
 This command expects a connected Android phone by default and runs the fast `core` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
 
-Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state/storage dependency changes, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation:
+Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The state-mutating `storage` pack is intentionally excluded from `all`:
 
 ```bash
 npm run android:scenarios -- --pack catalog
 npm run android:scenarios -- --pack dependency-ui
 npm run android:scenarios -- --pack runtime
+npm run android:scenarios:storage -- --skip-build
 npm run android:scenarios -- --pack native
 ```
 

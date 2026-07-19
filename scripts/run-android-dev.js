@@ -3,10 +3,16 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const {
+  captureOwnedProcessOwnership,
+  spawnOwnedProcess,
+  stopOwnedProcessTreeByPid,
+} = require('./android-smoke');
 
 const projectRoot = path.resolve(__dirname, '..');
 const appConfigPath = path.join(projectRoot, 'app.json');
 const androidSmokePath = path.join(projectRoot, 'scripts', 'android-smoke.js');
+const androidDevGracefulTerminationTimeoutMs = 15_000;
 
 function readAppConfig(configPath = appConfigPath) {
   return JSON.parse(fs.readFileSync(configPath, 'utf8'));
@@ -42,7 +48,12 @@ function buildAndroidDevEnvironment(baseEnvironment, appConfig) {
 function buildAndroidDevInvocation(extraArgs = [], root = projectRoot) {
   return {
     command: process.execPath,
-    args: [path.join(root, 'scripts', 'android-smoke.js'), '--keep-metro-foreground', ...extraArgs],
+    args: [
+      path.join(root, 'scripts', 'android-smoke.js'),
+      '--keep-metro-foreground',
+      '--auto-target',
+      ...extraArgs,
+    ],
   };
 }
 
@@ -52,6 +63,8 @@ function startAndroidDev(options = {}) {
   const environment = buildAndroidDevEnvironment(options.environment || process.env, config);
   const invocation = buildAndroidDevInvocation(options.extraArgs || [], root);
   const spawnImpl = options.spawnImpl || spawn;
+  const platform = options.platform || process.platform;
+  const spawnOwnedProcessImpl = options.spawnOwnedProcessImpl || spawnOwnedProcess;
 
   if (!fs.existsSync(options.androidSmokePath || invocation.args[0])) {
     throw new Error('Android launcher is missing from scripts/android-smoke.js.');
@@ -61,12 +74,97 @@ function startAndroidDev(options = {}) {
     `[android-dev] Using USB Metro loopback with app version ${environment.POCKET_AI_VERSION_NAME} (${environment.POCKET_AI_VERSION_CODE}).`
   );
 
-  return spawnImpl(invocation.command, invocation.args, {
+  const child = spawnOwnedProcessImpl(invocation.command, invocation.args, {
     cwd: root,
     env: environment,
     stdio: 'inherit',
     windowsHide: false,
+    detached: platform !== 'win32',
+    platform,
+    spawnImpl,
   });
+  const expectedOwnershipBoundary = platform === 'win32'
+    ? 'windows-job'
+    : 'posix-process-group';
+  if (child.pocketAiOwnershipBoundary !== expectedOwnershipBoundary) {
+    child.kill?.('SIGTERM');
+    throw new Error('Android launcher did not start inside the required ownership boundary.');
+  }
+  const captureOwnership = options.captureOwnedProcessOwnership || captureOwnedProcessOwnership;
+  const ownershipSnapshot = captureOwnership(child.pid, {
+    platform,
+    ownershipBoundary: expectedOwnershipBoundary,
+  });
+  if (!ownershipSnapshot) {
+    child.kill?.('SIGTERM');
+    throw new Error(`Could not capture Android launcher ownership for PID ${child.pid}.`);
+  }
+  child.pocketAiOwnershipSnapshot = ownershipSnapshot;
+  return child;
+}
+
+function attachAndroidDevLifecycle(child, processRef = process, options = {}) {
+  let didSettle = false;
+  let didForwardTerminationSignal = false;
+  const removeSignalHandlers = () => {
+    processRef.removeListener('SIGINT', onSigint);
+    processRef.removeListener('SIGTERM', onSigterm);
+  };
+  const forwardSignal = (signal, exitCode) => {
+    if (didSettle) {
+      return;
+    }
+    didForwardTerminationSignal = true;
+    processRef.exitCode = exitCode;
+    try {
+      const stopProcessTree = options.stopProcessTree ?? stopOwnedProcessTreeByPid;
+      const ownershipSnapshot = child.pocketAiOwnershipSnapshot;
+      const didStop = stopProcessTree(child.pid, {
+        expectedIdentity: ownershipSnapshot?.processIdentity,
+        expectedProcessTreeIdentities: ownershipSnapshot?.processTreeIdentities,
+        ownershipBoundary:
+          ownershipSnapshot?.ownershipBoundary ?? child.pocketAiOwnershipBoundary,
+        gracefulTimeoutMs:
+          options.gracefulTimeoutMs ?? androidDevGracefulTerminationTimeoutMs,
+        trustedChildHandle: true,
+        killRoot: () => child.kill(signal),
+      });
+      if (!didStop) {
+        throw new Error(`could not stop launcher process tree ${child.pid}`);
+      }
+    } catch (error) {
+      console.error(`[android-dev] Failed to forward ${signal}: ${error.message}`);
+      processRef.exitCode = 1;
+    }
+  };
+  const onSigint = () => forwardSignal('SIGINT', 130);
+  const onSigterm = () => forwardSignal('SIGTERM', 143);
+
+  processRef.once('SIGINT', onSigint);
+  processRef.once('SIGTERM', onSigterm);
+  child.once('error', (error) => {
+    didSettle = true;
+    removeSignalHandlers();
+    console.error(`[android-dev] Failed to start Expo: ${error.message}`);
+    processRef.exitCode = 1;
+  });
+  child.once('exit', (code, signal) => {
+    didSettle = true;
+    removeSignalHandlers();
+    if (typeof code === 'number') {
+      if (!didForwardTerminationSignal) {
+        processRef.exitCode = code;
+      }
+      return;
+    }
+
+    if (signal && !processRef.exitCode) {
+      console.error(`[android-dev] Expo stopped after signal ${signal}.`);
+      processRef.exitCode = 1;
+    }
+  });
+
+  return removeSignalHandlers;
 }
 
 function main() {
@@ -80,22 +178,7 @@ function main() {
     return;
   }
 
-  child.once('error', (error) => {
-    console.error(`[android-dev] Failed to start Expo: ${error.message}`);
-    process.exitCode = 1;
-  });
-
-  child.once('exit', (code, signal) => {
-    if (typeof code === 'number') {
-      process.exitCode = code;
-      return;
-    }
-
-    if (signal) {
-      console.error(`[android-dev] Expo stopped after signal ${signal}.`);
-    }
-    process.exitCode = 1;
-  });
+  attachAndroidDevLifecycle(child);
 }
 
 if (require.main === module) {
@@ -105,5 +188,6 @@ if (require.main === module) {
 module.exports = {
   buildAndroidDevEnvironment,
   buildAndroidDevInvocation,
+  attachAndroidDevLifecycle,
   startAndroidDev,
 };

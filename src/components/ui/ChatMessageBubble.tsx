@@ -7,6 +7,7 @@ import { Image } from '@/components/ui/image';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import type { ChatAttachment } from '@/types/attachments';
+import type { ChatMessageState } from '@/types/chat';
 import type { InferenceCompletionTelemetry } from '@/types/models';
 import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
@@ -25,6 +26,7 @@ export interface ChatMessageBubbleProps {
   thoughtContent?: string;
   errorMessage?: string;
   isStreaming?: boolean;
+  messageState?: ChatMessageState;
   tokensPerSec?: number;
   inferenceMetrics?: InferenceCompletionTelemetry;
   canDelete?: boolean;
@@ -135,6 +137,7 @@ function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: Chat
     && prev.thoughtContent === next.thoughtContent
     && prev.errorMessage === next.errorMessage
     && prev.isStreaming === next.isStreaming
+    && prev.messageState === next.messageState
     && prev.tokensPerSec === next.tokensPerSec
     && prev.inferenceMetrics === next.inferenceMetrics
     && prev.canDelete === next.canDelete
@@ -181,6 +184,7 @@ const ChatMessageBubbleComponent = ({
   thoughtContent: explicitThoughtContent,
   errorMessage,
   isStreaming,
+  messageState,
   tokensPerSec,
   inferenceMetrics,
   canDelete = false,
@@ -204,6 +208,8 @@ const ChatMessageBubbleComponent = ({
           isStreaming: Boolean(isStreaming),
         });
   const isAssistantStreaming = !isUser && Boolean(isStreaming);
+  const assistantMessageState = messageState
+    ?? (isStreaming ? 'streaming' : errorMessage ? 'error' : 'complete');
   const thoughtContent = hasExplicitThoughtContent
     ? explicitThoughtContent ?? ''
     : assistantPresentation?.thoughtContent ?? '';
@@ -368,7 +374,11 @@ const ChatMessageBubbleComponent = ({
   };
 
   return (
-    <Box className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`} onLayout={onLayout}>
+    <Box
+      testID={isUser ? undefined : `assistant-message-state-${assistantMessageState}-${id}`}
+      className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`}
+      onLayout={onLayout}
+    >
       <Box className={`w-full flex-row ${isUser ? 'items-end justify-end pl-8' : 'items-start justify-start pr-8'}`}>
         <ScreenSurface
           testID={`message-bubble-shell-${id}`}

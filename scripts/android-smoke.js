@@ -41,6 +41,14 @@ const requiredNativeLibraries = ["libreactnative.so"];
 const metroStartupTimeoutMs = 90_000;
 const metroBundleTimeoutMs = 120_000;
 const deviceStartupTimeoutMs = 180_000;
+const screenshotAdbCommandTimeoutMs = 15_000;
+const appJsReadyTimeoutMs = 60_000;
+const appJsReadyPollIntervalMs = 1_000;
+const uiHierarchyCommandTimeoutMs = 5_000;
+const metroTreeTerminationTimeoutMs = 10_000;
+const metroGracefulTerminationTimeoutMs = 2_000;
+const windowsJobOwnershipBoundary = "windows-job";
+const posixProcessGroupOwnershipBoundary = "posix-process-group";
 const launchDelayMs = parsePositiveInteger(
   cliOptions.launchDelayMs ?? process.env.ANDROID_SMOKE_LAUNCH_DELAY_MS ?? "4000",
   "launch delay"
@@ -50,7 +58,6 @@ const preferredPort = parsePositiveInteger(
   "Metro port"
 );
 const defaultDeviceMetroPort = 8081;
-const maxPort = preferredPort + 9;
 const screenshotTarget =
   cliOptions.screenshot ?? process.env.ANDROID_SMOKE_SCREENSHOT ?? null;
 const screenshotPath = screenshotTarget
@@ -60,7 +67,9 @@ const screenshotPath = screenshotTarget
 if (require.main === module) {
   main().catch((error) => {
     console.error(`[android-smoke] ${error.message}`);
-    process.exit(1);
+    if (!process.exitCode) {
+      process.exitCode = 1;
+    }
   });
 }
 
@@ -99,6 +108,18 @@ async function main() {
         requestedSerial,
         requestedAvd,
       });
+    } else if (cliOptions.autoTarget && !requestedSerial) {
+      device = pickConnectedDevice(tools.adb, {
+        requestedSerial: null,
+        forceEmulator: true,
+      });
+      if (!device) {
+        log("No Android phone is connected; falling back to an emulator.");
+        device = await startEmulatorAndWait(tools, {
+          requestedSerial: null,
+          requestedAvd,
+        });
+      }
     } else {
       throw new Error("Connect a phone and try again. No physical Android device is connected.");
     }
@@ -132,59 +153,121 @@ async function main() {
     throw new Error(`Expected Android ${apkVariant} APK at ${apkPath}, but it was not found.`);
   }
 
-  const metro = shouldUseEmbeddedBundle
-    ? null
-    : await ensureMetroServer({ foreground: cliOptions.keepMetroForeground });
-  if (metro) {
-    await prewarmMetroBundle(metro.port, appPackage);
-  } else {
-    log(`Using embedded JS bundle from the ${apkVariant} APK; Metro startup is not required.`);
-  }
+  let metro = null;
+  let removeMetroSignalHandlers = () => {};
+  let didTransferMetroOwnership = false;
+  let mainError = null;
+  try {
+    metro = shouldUseEmbeddedBundle
+      ? null
+      : await ensureMetroServer({
+          foreground: cliOptions.keepMetroForeground,
+          clearCache: cliOptions.clearMetroCache,
+        });
+    if (metro?.lifecycle) {
+      removeMetroSignalHandlers = metro.removeSignalHandlers
+        ?? installOwnedMetroSignalHandlers(metro.lifecycle);
+    }
+    if (metro) {
+      await prewarmMetroBundle(metro.port, appPackage);
+    } else {
+      log(`Using embedded JS bundle from the ${apkVariant} APK; Metro startup is not required.`);
+    }
 
-  installDebugApk(tools.adb, device.serial, appPackage, {
-    allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
-    didBuildDebugApk,
-  });
-  if (metro) {
-    reverseMetroPort(tools.adb, device.serial, metro.port);
-  }
+    installDebugApk(tools.adb, device.serial, appPackage, {
+      allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
+      didBuildDebugApk,
+    });
+    if (metro) {
+      reverseMetroPort(tools.adb, device.serial, metro.port);
+    }
 
-  runCapture(tools.adb, ["-s", device.serial, "logcat", "-c"], { allowFailure: true });
-  if (metro) {
-    launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
-  } else {
-    launchInstalledApp(tools.adb, device.serial, appPackage);
-  }
+    runCapture(tools.adb, ["-s", device.serial, "logcat", "-c"], { allowFailure: true });
+    if (metro) {
+      launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
+    } else {
+      launchInstalledApp(tools.adb, device.serial, appPackage);
+    }
+    await waitForAppJsReady(tools.adb, device.serial, appPackage, {
+      lifecycle: metro?.lifecycle,
+    });
 
-  if (screenshotPath) {
-    await delay(launchDelayMs);
-    wakeAndUnlockDevice(tools.adb, device.serial);
-    saveScreenshot(tools.adb, device.serial, screenshotPath);
+    if (screenshotPath) {
+      await delay(launchDelayMs);
+      wakeAndUnlockDevice(tools.adb, device.serial);
+      saveScreenshot(tools.adb, device.serial, screenshotPath);
 
-    const logcatPath = path.join(path.dirname(screenshotPath), "bootstrap-logcat.txt");
-    saveLogcat(tools.adb, device.serial, logcatPath);
-  }
+      const logcatPath = path.join(path.dirname(screenshotPath), "bootstrap-logcat.txt");
+      saveLogcat(tools.adb, device.serial, logcatPath);
+    }
 
-  log(
-    metro
-      ? `Android smoke check finished on ${device.serial} using Metro port ${metro.port}.`
-      : `Android smoke check finished on ${device.serial} using the embedded ${apkVariant} APK bundle.`
-  );
-  if (metro) {
     log(
-      metro.started
-        ? `Started Metro in the background on port ${metro.port}.`
-        : `Reused an existing Metro server on port ${metro.port}.`
+      metro
+        ? `Android smoke check finished on ${device.serial} using Metro port ${metro.port}.`
+        : `Android smoke check finished on ${device.serial} using the embedded ${apkVariant} APK bundle.`
     );
-  }
+    if (metro) {
+      log(
+        metro.started
+          ? cliOptions.keepMetroForeground
+            ? `Started an attached Metro on port ${metro.port}.`
+            : `Started a temporary Metro on port ${metro.port}; it will stop with this smoke run.`
+          : `Reused an existing Metro server on port ${metro.port}.`
+      );
+    }
 
-  if (screenshotPath) {
-    log(`Saved screenshot to ${screenshotPath}.`);
-  }
+    if (screenshotPath) {
+      log(`Saved screenshot to ${screenshotPath}.`);
+    }
 
-  if (metro?.started && cliOptions.keepMetroForeground) {
-    log('Metro remains attached for development. Press Ctrl+C to stop it.');
-    await waitForAttachedMetroExit(metro.process);
+    if (metro?.started && cliOptions.transferMetroOwnership) {
+      const ownershipPath = path.resolve(projectRoot, cliOptions.transferMetroOwnership);
+      const temporaryOwnershipPath = `${ownershipPath}.tmp-${process.pid}`;
+      const metroProcessId = metro.lifecycle.process.pid;
+      const ownershipSnapshot = captureOwnedProcessOwnership(metroProcessId, {
+        ownershipBoundary: metro.lifecycle.process.pocketAiOwnershipBoundary,
+      });
+      if (!ownershipSnapshot) {
+        throw new Error(`Could not capture the owned Metro process identity for PID ${metroProcessId}.`);
+      }
+      metro.lifecycle.setOwnershipSnapshot(ownershipSnapshot);
+      fs.mkdirSync(path.dirname(ownershipPath), { recursive: true });
+      try {
+        fs.writeFileSync(temporaryOwnershipPath, JSON.stringify({
+          pid: metroProcessId,
+          port: metro.port,
+          ...ownershipSnapshot,
+        }));
+        fs.renameSync(temporaryOwnershipPath, ownershipPath);
+        didTransferMetroOwnership = true;
+      } finally {
+        fs.rmSync(temporaryOwnershipPath, { force: true });
+      }
+      log(`Transferred temporary Metro ownership to ${ownershipPath}.`);
+    }
+
+    if (metro?.started && cliOptions.keepMetroForeground) {
+      log('Metro remains attached for development. Press Ctrl+C to stop it.');
+      await waitForAttachedMetroExit(metro.lifecycle);
+    }
+  } catch (error) {
+    mainError = error;
+    throw error;
+  } finally {
+    removeMetroSignalHandlers();
+    if (!didTransferMetroOwnership && metro?.lifecycle) {
+      try {
+        stopOwnedMetroProcessOrThrow(metro.lifecycle);
+      } catch (cleanupError) {
+        if (!mainError) {
+          throw cleanupError;
+        }
+        console.error(`[android-smoke] ${cleanupError.message}`);
+        if (!process.exitCode) {
+          process.exitCode = 1;
+        }
+      }
+    }
   }
 }
 
@@ -811,27 +894,75 @@ async function waitForBootCompletion(adbPath, serial, timeoutMs) {
 
 async function ensureMetroServer(options = {}) {
   const foreground = options.foreground === true;
+  const clearCache = options.clearCache === true;
+  const firstPort = parsePositiveInteger(options.preferredPort ?? preferredPort, "Metro port");
+  const lastPort = firstPort + 9;
 
-  for (let port = preferredPort; port <= maxPort; port += 1) {
+  for (let port = firstPort; port <= lastPort; port += 1) {
     if (await isMetroRunning(port)) {
+      if (clearCache) {
+        log(`Metro is already running on port ${port}; using a fresh port for the cache reset.`);
+        continue;
+      }
       return { port, started: false };
     }
 
     if (await isPortFree(port)) {
       log(`Starting Metro on port ${port}...`);
 
-      const metroProcess = startMetroProcess(port, { foreground });
+      const metroProcess = startMetroProcess(port, { foreground, clearCache });
+      // Every Metro started by this command is owned, even when its stdio is in
+      // the background. The lifecycle is required so normal completion and
+      // startup failures can both tear down the complete process tree.
+      const lifecycle = createOwnedMetroProcessLifecycle(metroProcess);
+      const removeSignalHandlers = installOwnedMetroSignalHandlers(lifecycle);
 
       if (!foreground) {
         metroProcess.unref();
       }
-      await waitForMetro(port, metroStartupTimeoutMs);
-      return { port, started: true, process: foreground ? metroProcess : null };
+
+      try {
+        if (process.platform === "win32") {
+          const initialOwnershipSnapshot = captureOwnedProcessOwnership(metroProcess.pid, {
+            ownershipBoundary: metroProcess.pocketAiOwnershipBoundary,
+          });
+          if (!initialOwnershipSnapshot) {
+            throw new Error(`Could not capture the new Metro process tree for PID ${metroProcess.pid}.`);
+          }
+          lifecycle.setOwnershipSnapshot(initialOwnershipSnapshot);
+        }
+        const readinessResult = await Promise.race([
+          waitForMetro(port, metroStartupTimeoutMs).then(() => ({ type: "ready" })),
+          lifecycle.outcomePromise.then((outcome) => ({ type: "exit", outcome })),
+        ]);
+        if (readinessResult.type === "exit") {
+          throw createUnexpectedMetroExitError(readinessResult.outcome, " before becoming ready");
+        }
+        if (process.platform === "win32") {
+          const ownershipSnapshot = captureOwnedProcessOwnership(metroProcess.pid, {
+            ownershipBoundary: metroProcess.pocketAiOwnershipBoundary,
+          });
+          if (!ownershipSnapshot) {
+            throw new Error(`Could not capture the owned Metro process tree for PID ${metroProcess.pid}.`);
+          }
+          lifecycle.setOwnershipSnapshot(ownershipSnapshot);
+        }
+      } catch (error) {
+        cleanupOwnedMetroAfterStartupFailure(lifecycle, removeSignalHandlers, error);
+      }
+
+      return {
+        port,
+        started: true,
+        process: foreground ? metroProcess : null,
+        lifecycle,
+        removeSignalHandlers,
+      };
     }
   }
 
   throw new Error(
-    `Could not find a reusable or free Metro port in the ${preferredPort}-${maxPort} range.`
+    `Could not find a reusable or free Metro port in the ${firstPort}-${lastPort} range.`
   );
 }
 
@@ -855,8 +986,115 @@ function withDnsResultOrderIpv4First(currentValue) {
   return `${normalized} ${flag}`.trim();
 }
 
+function cleanupOwnedMetroAfterStartupFailure(
+  lifecycle,
+  removeSignalHandlers,
+  startupError,
+  options = {}
+) {
+  removeSignalHandlers();
+  try {
+    stopOwnedMetroProcessOrThrow(lifecycle, options);
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [startupError, cleanupError],
+      `Metro startup failed (${startupError.message}) and owned-process cleanup also failed (${cleanupError.message}).`
+    );
+  }
+  throw startupError;
+}
+
+function quoteWindowsProcessArgument(value) {
+  const normalized = String(value);
+  if (normalized.length === 0) {
+    return '""';
+  }
+  if (!/[\s"]/u.test(normalized)) {
+    return normalized;
+  }
+
+  let quoted = '"';
+  let backslashCount = 0;
+  for (const character of normalized) {
+    if (character === "\\") {
+      backslashCount += 1;
+      continue;
+    }
+    if (character === '"') {
+      quoted += "\\".repeat(backslashCount * 2 + 1) + '"';
+      backslashCount = 0;
+      continue;
+    }
+    quoted += "\\".repeat(backslashCount) + character;
+    backslashCount = 0;
+  }
+  return `${quoted}${"\\".repeat(backslashCount * 2)}"`;
+}
+
+function buildWindowsProcessCommandLine(command, args = []) {
+  return [command, ...args].map(quoteWindowsProcessArgument).join(" ");
+}
+
+function spawnWindowsJobProcess(command, args, options = {}) {
+  const runSpawn = options.spawnImpl ?? spawn;
+  const commandLine = buildWindowsProcessCommandLine(command, args);
+  const jobHostPath = path.join(__dirname, "windows-job-process-host.ps1");
+  if (!fs.existsSync(jobHostPath)) {
+    throw new Error(`Windows Job host is missing: ${jobHostPath}`);
+  }
+  const payloadBase64 = Buffer.from(JSON.stringify({
+    applicationPath: command,
+    commandLine,
+    currentDirectory: options.cwd || process.cwd(),
+  }), "utf8").toString("base64");
+  const child = runSpawn(
+    options.powershellPath ?? "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      jobHostPath,
+      "-PayloadBase64",
+      payloadBase64,
+    ],
+    {
+      cwd: options.cwd,
+      // Hidden detached Windows PowerShell can exit successfully without
+      // executing its script. The Job boundary provides lifecycle isolation,
+      // so the host must stay non-detached.
+      detached: false,
+      stdio: options.stdio,
+      env: options.env,
+      windowsHide: options.windowsHide === true,
+    }
+  );
+  child.pocketAiOwnershipBoundary = windowsJobOwnershipBoundary;
+  return child;
+}
+
+function spawnOwnedProcess(command, args, options = {}) {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    return spawnWindowsJobProcess(command, args, options);
+  }
+
+  const child = (options.spawnImpl ?? spawn)(command, args, {
+    cwd: options.cwd,
+    detached: options.detached === true,
+    stdio: options.stdio,
+    env: options.env,
+    windowsHide: options.windowsHide === true,
+  });
+  child.pocketAiOwnershipBoundary = posixProcessGroupOwnershipBoundary;
+  return child;
+}
+
 function startMetroProcess(port, options = {}) {
   const foreground = options.foreground === true;
+  const metroArgs = buildMetroStartArgs(port, { clearCache: options.clearCache === true });
+  const expoCliPath = require.resolve("expo/bin/cli");
   const env = {
     ...process.env,
     NODE_ENV: process.env.NODE_ENV || "development",
@@ -883,53 +1121,595 @@ function startMetroProcess(port, options = {}) {
     stdio = ["ignore", metroLogFd, metroLogFd];
   }
 
-  if (process.platform === "win32") {
-    const command = `npm run start -- --dev-client --localhost --port ${port}`;
-    return spawn(
-      process.env.ComSpec || process.env.COMSPEC || "cmd.exe",
-      ["/d", "/s", "/c", command],
-      {
-        cwd: projectRoot,
-        detached: !foreground,
-        stdio,
-        env,
-        windowsHide: !foreground,
-      }
-    );
-  }
-
-  return spawn(
-    "npm",
-    ["run", "start", "--", "--dev-client", "--localhost", "--port", `${port}`],
+  return spawnOwnedProcess(
+    process.execPath,
+    [expoCliPath, ...metroArgs],
     {
       cwd: projectRoot,
-      detached: !foreground,
+      // POSIX process-group termination requires a dedicated group. Windows
+      // uses a Job Object; keeping its PowerShell host non-detached also avoids
+      // Windows PowerShell's silent no-op behavior in hidden detached mode.
+      detached: process.platform !== "win32",
       stdio,
       env,
+      windowsHide: !foreground,
     }
   );
 }
 
-function waitForAttachedMetroExit(metroProcess) {
-  if (!metroProcess) {
-    return Promise.resolve();
+function buildMetroStartArgs(port, options = {}) {
+  const args = ["start", "--dev-client", "--localhost", "--port", `${port}`];
+
+  if (options.clearCache === true) {
+    args.push("--clear");
   }
 
-  return new Promise((resolve, reject) => {
-    metroProcess.once("error", reject);
-    metroProcess.once("exit", (code, signal) => {
-      if (code === 0 || signal === "SIGINT" || signal === "SIGTERM") {
-        resolve();
-        return;
-      }
+  return args;
+}
 
-      reject(
-        new Error(
-          `Attached Metro exited unexpectedly${signal ? ` after ${signal}` : ` with code ${code}`}.`
-        )
-      );
-    });
+function createOwnedMetroProcessLifecycle(metroProcess) {
+  let outcome = null;
+  let stopRequested = false;
+  let stopResult = null;
+  let ownershipSnapshot = null;
+  let resolveOutcome;
+  const outcomePromise = new Promise((resolve) => {
+    resolveOutcome = resolve;
   });
+  const settle = (nextOutcome) => {
+    if (outcome) {
+      return;
+    }
+    outcome = nextOutcome;
+    resolveOutcome(nextOutcome);
+  };
+
+  metroProcess.once("error", (error) => settle({ type: "error", error }));
+  metroProcess.once("exit", (code, signal) => settle({ type: "exit", code, signal }));
+
+  return {
+    process: metroProcess,
+    outcomePromise,
+    getOutcome: () => outcome,
+    isStopRequested: () => stopRequested,
+    getStopResult: () => stopResult,
+    setStopResult: (result) => {
+      stopResult = result === true;
+    },
+    getOwnershipSnapshot: () => ownershipSnapshot,
+    setOwnershipSnapshot: (snapshot) => {
+      ownershipSnapshot = snapshot;
+    },
+    requestStop: () => {
+      if (stopRequested && stopResult !== false) {
+        return false;
+      }
+      stopRequested = true;
+      stopResult = null;
+      return true;
+    },
+  };
+}
+
+function createUnexpectedMetroExitError(outcome, suffix = "") {
+  if (outcome?.type === "error") {
+    return new Error(`Attached Metro failed${suffix}: ${outcome.error.message}`);
+  }
+
+  const detail = outcome?.signal
+    ? ` after ${outcome.signal}`
+    : ` with code ${outcome?.code}`;
+  return new Error(`Attached Metro exited unexpectedly${suffix}${detail}.`);
+}
+
+async function waitForAttachedMetroExit(lifecycle) {
+  if (!lifecycle) {
+    return;
+  }
+
+  const outcome = await lifecycle.outcomePromise;
+  if (lifecycle.isStopRequested()) {
+    return;
+  }
+  if (outcome.type === "error") {
+    throw outcome.error;
+  }
+  if (outcome.code === 0 || outcome.signal === "SIGINT" || outcome.signal === "SIGTERM") {
+    return;
+  }
+
+  throw createUnexpectedMetroExitError(outcome);
+}
+
+function readProcessIdentity(processId, options = {}) {
+  if (!Number.isSafeInteger(processId) || processId <= 0) {
+    return null;
+  }
+
+  const platform = options.platform ?? process.platform;
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  if (platform === "win32") {
+    const script = [
+      `$targetProcess = Get-Process -Id ${processId} -ErrorAction Stop`,
+      "$startMarker = $targetProcess.StartTime.ToUniversalTime().Ticks.ToString()",
+      "$executablePath = $targetProcess.Path",
+      "[Console]::Out.Write($startMarker + '|' + $executablePath)",
+    ].join("; ");
+    const result = runSpawnSync(
+      options.powershellPath ?? "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: options.timeoutMs ?? metroTreeTerminationTimeoutMs,
+        windowsHide: true,
+      }
+    );
+    if (result.error || result.status !== 0) {
+      return null;
+    }
+
+    const output = (result.stdout || "").trim();
+    const separatorIndex = output.indexOf("|");
+    if (separatorIndex <= 0) {
+      return null;
+    }
+    return {
+      startMarker: output.slice(0, separatorIndex),
+      executablePath: output.slice(separatorIndex + 1),
+    };
+  }
+
+  if (platform === "linux") {
+    try {
+      const procRoot = options.procRoot ?? "/proc";
+      const stat = fs.readFileSync(path.join(procRoot, String(processId), "stat"), "utf8");
+      const commandEnd = stat.lastIndexOf(") ");
+      if (commandEnd < 0) {
+        return null;
+      }
+      const fieldsAfterCommand = stat.slice(commandEnd + 2).trim().split(/\s+/);
+      const startTimeTicks = fieldsAfterCommand[19];
+      if (!startTimeTicks) {
+        return null;
+      }
+      let executablePath = "";
+      try {
+        executablePath = fs.realpathSync(path.join(procRoot, String(processId), "exe"));
+      } catch {
+        // The kernel start-time marker is authoritative even when /proc/<pid>/exe is restricted.
+      }
+      return { startMarker: startTimeTicks, executablePath };
+    } catch {
+      return null;
+    }
+  }
+
+  const result = runSpawnSync(
+    "ps",
+    ["-p", String(processId), "-o", "lstart=", "-o", "command="],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }
+  );
+  const output = result.error || result.status !== 0 ? "" : (result.stdout || "").trim();
+  return output ? { startMarker: output, executablePath: "" } : null;
+}
+
+function normalizeOwnedProcessTreeIdentities(records, processId, processIdentity) {
+  if (!Array.isArray(records) || records.length === 0) {
+    return null;
+  }
+
+  const normalized = [];
+  const seenProcessIds = new Set();
+  for (const record of records) {
+    const pid = Number(record?.pid);
+    const parentPid = record?.parentPid === null || record?.parentPid === undefined
+      ? null
+      : Number(record.parentPid);
+    const depth = Number(record?.depth);
+    const startMarker = typeof record?.startMarker === "string"
+      ? record.startMarker
+      : String(record?.startMarker ?? "");
+    if (
+      !Number.isSafeInteger(pid)
+      || pid <= 0
+      || seenProcessIds.has(pid)
+      || (parentPid !== null && (!Number.isSafeInteger(parentPid) || parentPid <= 0))
+      || !Number.isSafeInteger(depth)
+      || depth < 0
+      || !/^\d+$/.test(startMarker)
+    ) {
+      return null;
+    }
+    seenProcessIds.add(pid);
+    normalized.push({ pid, parentPid, startMarker, depth });
+  }
+
+  const rootRecord = normalized.find((record) => record.pid === processId && record.depth === 0);
+  if (!rootRecord || rootRecord.startMarker !== processIdentity?.startMarker) {
+    return null;
+  }
+  return normalized;
+}
+
+
+const windowsNativeProcessInfoSourceBase64 = Buffer.from(`
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace PocketAi {
+  public static class NativeProcessInfo {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessBasicInformation {
+      public IntPtr Reserved1;
+      public IntPtr PebBaseAddress;
+      public IntPtr Reserved2_0;
+      public IntPtr Reserved2_1;
+      public IntPtr UniqueProcessId;
+      public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+      IntPtr processHandle,
+      int processInformationClass,
+      ref ProcessBasicInformation processInformation,
+      int processInformationLength,
+      out int returnLength
+    );
+
+    public static int GetParentProcessId(Process process) {
+      var information = new ProcessBasicInformation();
+      int returnLength;
+      int status = NtQueryInformationProcess(
+        process.Handle,
+        0,
+        ref information,
+        Marshal.SizeOf(information),
+        out returnLength
+      );
+      if (status != 0) {
+        throw new Win32Exception(status);
+      }
+      return information.InheritedFromUniqueProcessId.ToInt32();
+    }
+  }
+}
+`, "utf16le").toString("base64");
+
+function buildWindowsProcessSnapshotPowerShellStatements() {
+  return [
+    `$nativeProcessInfoSource = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${windowsNativeProcessInfoSourceBase64}'))`,
+    "if ($null -eq ('PocketAi.NativeProcessInfo' -as [type])) { Add-Type -TypeDefinition $nativeProcessInfoSource -ErrorAction Stop }",
+    "$allProcesses = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $candidateProcess = $_; try { [PSCustomObject]@{ ProcessId = [int]$candidateProcess.Id; ParentProcessId = [PocketAi.NativeProcessInfo]::GetParentProcessId($candidateProcess); StartMarker = [Int64]$candidateProcess.StartTime.ToUniversalTime().Ticks } } catch { } })",
+  ];
+}
+
+function readWindowsProcessTreeIdentities(processId, processIdentity, options = {}) {
+  if (
+    !Number.isSafeInteger(processId)
+    || processId <= 0
+    || !/^\d+$/.test(processIdentity?.startMarker ?? "")
+  ) {
+    return null;
+  }
+
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const expectedStartMarker = escapePowerShellSingleQuotedString(processIdentity.startMarker);
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$targetProcessId = ${processId}`,
+    `$expectedStartMarker = [Int64]${expectedStartMarker}`,
+    "$targetProcess = Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue",
+    "if ($null -eq $targetProcess -or [Int64]$targetProcess.StartTime.ToUniversalTime().Ticks -ne $expectedStartMarker) { exit 41 }",
+    ...buildWindowsProcessSnapshotPowerShellStatements(),
+    "$pending = [System.Collections.Generic.Queue[int]]::new()",
+    "$pending.Enqueue($targetProcessId)",
+    "$visited = [System.Collections.Generic.HashSet[int]]::new()",
+    "$null = $visited.Add($targetProcessId)",
+    "$startMarkers = @{}",
+    "$startMarkers[$targetProcessId] = $expectedStartMarker",
+    "$depths = @{}",
+    "$depths[$targetProcessId] = 0",
+    "$records = [System.Collections.Generic.List[object]]::new()",
+    "$records.Add([PSCustomObject]@{ pid = $targetProcessId; parentPid = $null; startMarker = $expectedStartMarker.ToString(); depth = 0 })",
+    "while ($pending.Count -gt 0) { $parentProcessId = $pending.Dequeue(); $parentStartMarker = [Int64]$startMarkers[$parentProcessId]; $parentDepth = [int]$depths[$parentProcessId]; foreach ($candidate in $allProcesses) { $candidateProcessId = [int]$candidate.ProcessId; if ([int]$candidate.ParentProcessId -ne $parentProcessId -or $visited.Contains($candidateProcessId)) { continue }; $candidateStartMarker = [Int64]$candidate.StartMarker; if ($candidateStartMarker -lt $parentStartMarker) { continue }; $candidateProcess = Get-Process -Id $candidateProcessId -ErrorAction SilentlyContinue; if ($null -eq $candidateProcess -or [Int64]$candidateProcess.StartTime.ToUniversalTime().Ticks -ne $candidateStartMarker) { continue }; $null = $visited.Add($candidateProcessId); $startMarkers[$candidateProcessId] = $candidateStartMarker; $depths[$candidateProcessId] = $parentDepth + 1; $pending.Enqueue($candidateProcessId); $records.Add([PSCustomObject]@{ pid = $candidateProcessId; parentPid = $parentProcessId; startMarker = $candidateStartMarker.ToString(); depth = $parentDepth + 1 }) } }",
+    "[Console]::Out.Write((ConvertTo-Json -InputObject @($records) -Compress -Depth 3))",
+  ].join("; ");
+  const result = runSpawnSync(
+    options.powershellPath ?? "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: options.timeoutMs ?? metroTreeTerminationTimeoutMs,
+      windowsHide: true,
+    }
+  );
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse((result.stdout || "").trim());
+    return normalizeOwnedProcessTreeIdentities(parsed, processId, processIdentity);
+  } catch {
+    return null;
+  }
+}
+
+function captureOwnedProcessOwnership(processId, options = {}) {
+  const identityReader = options.readProcessIdentity ?? readProcessIdentity;
+  const processIdentity = identityReader(processId, options);
+  if (!processIdentity?.startMarker) {
+    return null;
+  }
+
+  const platform = options.platform ?? process.platform;
+  const ownershipBoundary = options.ownershipBoundary
+    ?? (platform === "win32" ? null : posixProcessGroupOwnershipBoundary);
+  const rootIdentity = {
+    pid: processId,
+    parentPid: null,
+    startMarker: processIdentity.startMarker,
+    depth: 0,
+  };
+  if (platform !== "win32") {
+    return {
+      processIdentity,
+      processTreeIdentities: [rootIdentity],
+      ownershipBoundary,
+    };
+  }
+
+  if (ownershipBoundary === windowsJobOwnershipBoundary) {
+    return {
+      processIdentity,
+      processTreeIdentities: [rootIdentity],
+      ownershipBoundary,
+    };
+  }
+
+  const treeReader = options.readWindowsProcessTreeIdentities ?? readWindowsProcessTreeIdentities;
+  const processTreeIdentities = treeReader(processId, processIdentity, options);
+  if (!processTreeIdentities) {
+    return null;
+  }
+  return {
+    processIdentity,
+    processTreeIdentities,
+    ownershipBoundary: "windows-process-tree-snapshot",
+  };
+}
+
+function processIdentityMatches(actual, expected) {
+  return Boolean(
+    actual
+    && expected
+    && actual.startMarker
+    && actual.startMarker === expected.startMarker
+  );
+}
+
+function waitForPosixProcessGroupExit(processId, timeoutMs, signalProcessGroup = process.kill) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      signalProcessGroup(-processId, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") {
+        return true;
+      }
+      if (error?.code !== "EPERM") {
+        return false;
+      }
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  return false;
+}
+
+function isPosixProcessAlive(processId, signalProcess = process.kill) {
+  try {
+    signalProcess(processId, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function isPosixProcessGroupAlive(processId, signalProcessGroup = process.kill) {
+  try {
+    signalProcessGroup(-processId, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function escapePowerShellSingleQuotedString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function stopOwnedMetroProcess(lifecycle, options = {}) {
+  if (!lifecycle?.requestStop()) {
+    return lifecycle?.getStopResult?.() === true;
+  }
+
+  const metroProcess = lifecycle.process;
+  const ownershipSnapshot = lifecycle.getOwnershipSnapshot?.();
+  const didStop = stopOwnedProcessTreeByPid(metroProcess.pid, {
+    ...options,
+    expectedIdentity: options.expectedIdentity ?? ownershipSnapshot?.processIdentity,
+    expectedProcessTreeIdentities:
+      options.expectedProcessTreeIdentities ?? ownershipSnapshot?.processTreeIdentities,
+    ownershipBoundary:
+      options.ownershipBoundary
+      ?? ownershipSnapshot?.ownershipBoundary
+      ?? metroProcess.pocketAiOwnershipBoundary,
+    trustedChildHandle: true,
+    killRoot: () => lifecycle.getOutcome?.() ? true : metroProcess.kill("SIGTERM"),
+  });
+  lifecycle.setStopResult?.(didStop);
+  return didStop;
+}
+
+function stopOwnedMetroProcessOrThrow(lifecycle, options = {}) {
+  if (!lifecycle) {
+    return;
+  }
+  const stopProcess = options.stopProcess ?? stopOwnedMetroProcess;
+  if (!stopProcess(lifecycle, options)) {
+    throw new Error(`Failed to stop owned Metro process tree ${lifecycle.process?.pid ?? "unknown"}.`);
+  }
+}
+
+function stopOwnedProcessTreeByPid(processId, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const identityReader = options.readProcessIdentity ?? readProcessIdentity;
+  let ownedIdentity = options.expectedIdentity ?? null;
+
+  if (options.expectedIdentity && platform !== "win32") {
+    const actualIdentity = identityReader(processId, options);
+    if (!processIdentityMatches(actualIdentity, options.expectedIdentity)) {
+      const rootIsAlive = (options.isProcessAlive ?? isPosixProcessAlive)(
+        processId,
+        options.killProcess ?? process.kill,
+      );
+      if (rootIsAlive) {
+        return false;
+      }
+      const groupIsAlive = (options.isProcessGroupAlive ?? isPosixProcessGroupAlive)(
+        processId,
+        options.killProcessGroup ?? process.kill,
+      );
+      if (!groupIsAlive) {
+        return true;
+      }
+      // The authenticated leader has exited, but its dedicated process group
+      // still exists. Signal the group rather than treating the stale root as
+      // a reason to orphan its descendants.
+    }
+  }
+
+  if (platform === "win32" && options.ownershipBoundary === windowsJobOwnershipBoundary) {
+    const stopViaTrustedChildHandle = () => {
+      if (options.trustedChildHandle !== true || typeof options.killRoot !== "function") {
+        return false;
+      }
+      try {
+        return options.killRoot() === true;
+      } catch {
+        return false;
+      }
+    };
+    if (!/^\d+$/.test(ownedIdentity?.startMarker ?? "")) {
+      return stopViaTrustedChildHandle();
+    }
+    const stopScriptPath = path.join(__dirname, "windows-job-process-stop.ps1");
+    if (!fs.existsSync(stopScriptPath)) {
+      return stopViaTrustedChildHandle();
+    }
+    const powershellResult = runSpawnSync(
+      options.powershellPath ?? "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        stopScriptPath,
+        "-ProcessId",
+        String(processId),
+        "-StartMarker",
+        ownedIdentity.startMarker,
+      ],
+      {
+        stdio: "ignore",
+        timeout: options.timeoutMs ?? metroTreeTerminationTimeoutMs,
+        windowsHide: true,
+      }
+    );
+    if (!powershellResult.error && powershellResult.status === 0) {
+      return true;
+    }
+    return stopViaTrustedChildHandle();
+  }
+
+  if (platform === "win32") {
+    // A PID/PPID snapshot cannot prove ownership after a parent exits and its
+    // PID is reused. Refuse non-Job-Object tree cleanup instead of risking an
+    // unrelated process or claiming that late descendants were removed.
+    return false;
+  }
+
+
+  if (platform !== "win32" && Number.isSafeInteger(processId)) {
+    const signalProcessGroup = options.killProcessGroup ?? process.kill;
+    try {
+      signalProcessGroup(-processId, "SIGTERM");
+    } catch {
+      // Fall through to the child-process handle as a last-resort root cleanup.
+      try {
+        return options.killRoot?.() === true;
+      } catch {
+        return false;
+      }
+    }
+
+    const didExit = (options.waitForProcessTreeExit ?? waitForPosixProcessGroupExit)(
+      processId,
+      options.gracefulTimeoutMs ?? metroGracefulTerminationTimeoutMs,
+      signalProcessGroup,
+    );
+    if (didExit) {
+      return true;
+    }
+    try {
+      signalProcessGroup(-processId, "SIGKILL");
+      const didExitAfterKill = (options.waitForProcessTreeExit ?? waitForPosixProcessGroupExit)(
+        processId,
+        options.forcefulTimeoutMs ?? metroGracefulTerminationTimeoutMs,
+        signalProcessGroup,
+      );
+      if (didExitAfterKill) {
+        return true;
+      }
+    } catch {
+      // Fall through to the child handle when group escalation is unavailable.
+    }
+  }
+
+  try {
+    return options.killRoot?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+function installOwnedMetroSignalHandlers(lifecycle, processRef = process) {
+  const onSigint = () => {
+    processRef.exitCode = 130;
+    if (!stopOwnedMetroProcess(lifecycle)) {
+      console.error("[android-smoke] Failed to stop owned Metro after SIGINT; cleanup will be retried.");
+    }
+  };
+  const onSigterm = () => {
+    processRef.exitCode = 143;
+    if (!stopOwnedMetroProcess(lifecycle)) {
+      console.error("[android-smoke] Failed to stop owned Metro after SIGTERM; cleanup will be retried.");
+    }
+  };
+  processRef.once("SIGINT", onSigint);
+  processRef.once("SIGTERM", onSigterm);
+
+  return () => {
+    processRef.removeListener("SIGINT", onSigint);
+    processRef.removeListener("SIGTERM", onSigterm);
+  };
 }
 
 async function waitForMetro(port, timeoutMs) {
@@ -1490,6 +2270,114 @@ function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
   );
 }
 
+const appJsReadyResourceIds = [
+  "home-screen-content",
+  "models-screen-content",
+  "settings-screen-content",
+  "chat-list-viewport",
+  "storage-recovery-screen",
+  "conversation-search-input",
+];
+
+const appJsReadyTextLabels = [
+  "Recent Conversations",
+  "Недавние разговоры",
+  "Active model",
+  "Активная модель",
+  "Model details",
+  "Детали модели",
+];
+
+function isAppJsReadyUiHierarchy(xml, appPackage) {
+  if (
+    typeof xml !== "string"
+    || !xml.includes("<hierarchy")
+    || !xml.includes(`package="${appPackage}"`)
+  ) {
+    return false;
+  }
+
+  return appJsReadyResourceIds.some((resourceId) => (
+    xml.includes(`resource-id="${resourceId}"`)
+    || xml.includes(`resource-id="${appPackage}:id/${resourceId}"`)
+  )) || appJsReadyTextLabels.some((label) => xml.includes(`text="${label}"`));
+}
+
+function readAndroidUiHierarchy(adbPath, serial, options = {}) {
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const remotePath = options.remotePath ?? `/sdcard/pocket-ai-smoke-ready-${process.pid}.xml`;
+  const commandTimeoutMs = options.commandTimeoutMs ?? uiHierarchyCommandTimeoutMs;
+  const spawnOptions = {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: commandTimeoutMs,
+  };
+  try {
+    const dumpResult = runSpawnSync(
+      adbPath,
+      ["-s", serial, "shell", "uiautomator", "dump", remotePath],
+      spawnOptions,
+    );
+    if (dumpResult.error || dumpResult.status !== 0) {
+      return null;
+    }
+
+    const readResult = runSpawnSync(
+      adbPath,
+      ["-s", serial, "exec-out", "cat", remotePath],
+      { ...spawnOptions, maxBuffer: 10 * 1024 * 1024 },
+    );
+    if (
+      readResult.error
+      || readResult.status !== 0
+      || typeof readResult.stdout !== "string"
+      || !readResult.stdout.includes("<hierarchy")
+    ) {
+      return null;
+    }
+    return readResult.stdout;
+  } finally {
+    runSpawnSync(
+      adbPath,
+      ["-s", serial, "shell", "rm", "-f", remotePath],
+      { stdio: "ignore", timeout: commandTimeoutMs },
+    );
+  }
+}
+
+async function waitForAppJsReady(adbPath, serial, appPackage, options = {}) {
+  const timeoutMs = options.timeoutMs ?? appJsReadyTimeoutMs;
+  const pollIntervalMs = options.pollIntervalMs ?? appJsReadyPollIntervalMs;
+  const readUiHierarchy = options.readUiHierarchy ?? readAndroidUiHierarchy;
+  const wait = options.delay ?? delay;
+  const startedAt = Date.now();
+
+  do {
+    if (options.lifecycle?.isStopRequested?.()) {
+      throw new Error("Android smoke was interrupted while waiting for the app JS surface.");
+    }
+    const metroOutcome = options.lifecycle?.getOutcome?.();
+    if (metroOutcome) {
+      throw createUnexpectedMetroExitError(metroOutcome, " while waiting for the app JS surface");
+    }
+
+    const hierarchy = readUiHierarchy(adbPath, serial, options);
+    if (isAppJsReadyUiHierarchy(hierarchy, appPackage)) {
+      log("Confirmed that the app JS surface is visible.");
+      return;
+    }
+
+    if (Date.now() - startedAt >= timeoutMs) {
+      break;
+    }
+    await wait(pollIntervalMs);
+  } while (true);
+
+  throw new Error(
+    `Timed out while waiting for ${appPackage} to render its JS surface after launch.`
+  );
+}
+
 function hasExpoDevClientDependency() {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
   return Boolean(
@@ -1515,14 +2403,17 @@ function saveLogcat(adbPath, serial, outputPath) {
   log(`Saved logcat to ${outputPath}.`);
 }
 
-function captureAndroidScreenshot(adbPath, serial, outputPath) {
+function captureAndroidScreenshot(adbPath, serial, outputPath, options = {}) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const commandTimeoutMs = options.commandTimeoutMs ?? screenshotAdbCommandTimeoutMs;
 
-  const directCapture = spawnSync(
+  const directCapture = runSpawnSync(
     adbPath,
     ["-s", serial, "exec-out", "screencap", "-p"],
     {
       maxBuffer: 20 * 1024 * 1024,
+      timeout: commandTimeoutMs,
     }
   );
 
@@ -1538,12 +2429,13 @@ function captureAndroidScreenshot(adbPath, serial, outputPath) {
   log("Direct screencap failed; retrying screenshot capture via a temporary device file.");
 
   const remotePath = `/data/local/tmp/pocket-ai-qa-${process.pid}-${Date.now()}.png`;
-  const remoteCapture = spawnSync(
+  const remoteCapture = runSpawnSync(
     adbPath,
     ["-s", serial, "shell", "screencap", "-p", remotePath],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: commandTimeoutMs,
     }
   );
 
@@ -1556,12 +2448,13 @@ function captureAndroidScreenshot(adbPath, serial, outputPath) {
       throw new Error("Failed to capture an Android screenshot.");
     }
 
-    const pullResult = spawnSync(
+    const pullResult = runSpawnSync(
       adbPath,
       ["-s", serial, "pull", remotePath, outputPath],
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: commandTimeoutMs,
       }
     );
 
@@ -1578,10 +2471,10 @@ function captureAndroidScreenshot(adbPath, serial, outputPath) {
       throw new Error("Failed to capture an Android screenshot.");
     }
   } finally {
-    runChecked(
+    runSpawnSync(
       adbPath,
       ["-s", serial, "shell", "rm", "-f", remotePath],
-      { stdio: "ignore", allowFailure: true }
+      { stdio: "ignore", timeout: commandTimeoutMs }
     );
   }
 }
@@ -1634,6 +2527,9 @@ function parseCliOptions(argv) {
     launchDelayMs: null,
     apkVariant: null,
     keepMetroForeground: false,
+    clearMetroCache: false,
+    autoTarget: false,
+    transferMetroOwnership: null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -1644,6 +2540,11 @@ function parseCliOptions(argv) {
       continue;
     }
 
+    if (arg === "--auto-target") {
+      options.autoTarget = true;
+      continue;
+    }
+
     if (arg === "--skip-build") {
       options.skipBuild = true;
       continue;
@@ -1651,6 +2552,16 @@ function parseCliOptions(argv) {
 
     if (arg === "--keep-metro-foreground") {
       options.keepMetroForeground = true;
+      continue;
+    }
+
+    if (arg === "--clear-metro-cache") {
+      options.clearMetroCache = true;
+      continue;
+    }
+
+    if (arg === "--transfer-metro-ownership") {
+      options.transferMetroOwnership = readCliValue(argv, ++index, "--transfer-metro-ownership");
       continue;
     }
 
@@ -1698,6 +2609,15 @@ function parseCliOptions(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
+  if (options.keepMetroForeground && options.transferMetroOwnership) {
+    throw new Error("--keep-metro-foreground cannot be combined with --transfer-metro-ownership.");
+  }
+  if (process.platform === "win32" && options.transferMetroOwnership) {
+    throw new Error(
+      "--transfer-metro-ownership is not supported on Windows; the parent runner must own Metro directly."
+    );
+  }
+
   return options;
 }
 
@@ -1715,11 +2635,14 @@ function printHelp() {
   console.log("");
   console.log("Options:");
   console.log("  --emulator                 Use an Android emulator instead of a connected phone");
+  console.log("  --auto-target              Prefer a phone, then reuse or start an emulator");
   console.log("  --avd <name>               Use a specific AVD when launching an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
   console.log("  --port <number>            First Metro port to probe");
   console.log("  --skip-build               Reuse the existing APK");
   console.log("  --keep-metro-foreground    Keep an owned Metro attached until Ctrl+C");
+  console.log("  --clear-metro-cache        Start a fresh Metro and reset its disk cache");
+  console.log("  --transfer-metro-ownership <path> Internal: hand an owned Metro PID to a parent runner");
   console.log("  --apk-variant <variant>    Install debug or release APK (default: debug)");
   console.log("  --screenshot [path]        Save a screenshot after launch");
   console.log("  --launch-delay-ms <ms>     Wait time before saving a screenshot");
@@ -1773,12 +2696,30 @@ function wakeAndUnlockDevice(adbPath, serial) {
 module.exports = {
   buildMetroBundlePath,
   buildMetroReverseSpecs,
+  buildMetroStartArgs,
+  buildWindowsProcessCommandLine,
+  captureOwnedProcessOwnership,
+  captureAndroidScreenshot,
+  cleanupOwnedMetroAfterStartupFailure,
+  createOwnedMetroProcessLifecycle,
   evaluateApkReuse,
   evaluateInstallReuse,
+  ensureMetroServer,
   isInsufficientStorageInstallFailure,
+  isAppJsReadyUiHierarchy,
   parseDumpsysPackageOutput,
   parseCliOptions,
   parseApkVariant,
   parsePackagePathOutput,
+  readProcessIdentity,
+  readAndroidUiHierarchy,
+  readWindowsProcessTreeIdentities,
   sanitizeForFileName,
+  spawnOwnedProcess,
+  spawnWindowsJobProcess,
+  stopOwnedMetroProcess,
+  stopOwnedMetroProcessOrThrow,
+  stopOwnedProcessTreeByPid,
+  waitForAppJsReady,
+  waitForAttachedMetroExit,
 };

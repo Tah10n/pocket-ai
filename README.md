@@ -111,7 +111,7 @@
 
 ### Prerequisites
 
-- Node.js 20+ and npm
+- Node.js 20.19.4+ and npm
 - Android Studio (Android) or Xcode (iOS)
 
 ### Quick start
@@ -123,6 +123,20 @@ npm run android    # Run on Android
 npm run ios        # Run on iOS
 ```
 
+`npm run android` prefers a connected phone. When no phone is available, it reuses a
+running emulator or starts an available AVD; pass `--emulator` to force emulator use or
+`--serial <serial>` to select an exact target.
+
+If Metro reports `Unable to deserialize cloned data`, or a connected debug build keeps
+showing behavior from an older bundle, restart through the cache-reset path:
+
+```bash
+npm run android -- --clear-metro-cache
+```
+
+The launcher avoids reusing an already-running Metro for this explicit reset and connects
+the device to a fresh instance.
+
 For release builds and signing setup, see the [Android Build Guide](docs/android-build.md) and [iOS Build Guide](docs/ios-build.md).
 
 ## Tests and coverage
@@ -130,6 +144,14 @@ For release builds and signing setup, see the [Android Build Guide](docs/android
 ```bash
 npm test
 ```
+
+With a connected Android debug device, the explicit Storage Manager cache-clear flow can be verified against a real private-cache sentinel:
+
+```bash
+npm run android:scenarios:storage -- --skip-build
+```
+
+This check clears rebuildable app cache data and is intentionally not part of the default or `all` scenario packs.
 
 Generate a Jest coverage report locally:
 
@@ -166,7 +188,6 @@ Auto-generated from open GitHub issues labeled `roadmap:*`.
 <!-- ROADMAP:START -->
 ### Now
 
-- [\[Feature\]: Multimodal (vision) models — attach images in chat](https://github.com/Tah10n/pocket-ai/issues/29) (#29)
 - [\[Feature\]: Chat UI — document attachments (picker, preview, remove)](https://github.com/Tah10n/pocket-ai/issues/43) (#43)
 
 ### Next

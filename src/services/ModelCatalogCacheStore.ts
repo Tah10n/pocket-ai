@@ -1815,7 +1815,8 @@ export class ModelCatalogCacheStore {
   private snapshotEntries = new Map<string, SnapshotCacheEntry>();
   private isHydrated = false;
   private isPersistenceDisabled = false;
-  private incrementalHydrationPromise: Promise<void> | null = null;
+  private incrementalHydrationPromise: Promise<boolean> | null = null;
+  private hydrationGeneration = 0;
 
   constructor(options: ModelCatalogCacheStoreOptions = {}) {
     if (options.hydrateOnCreate !== false) {
@@ -1828,6 +1829,11 @@ export class ModelCatalogCacheStore {
       return;
     }
 
+    // A synchronous hydration is also a write barrier: callers use it before
+    // mutating the cache. Invalidate any incremental parser that may already
+    // have captured the previous persisted payload so it cannot commit after
+    // the fresh mutation.
+    this.hydrationGeneration += 1;
     try {
       this.loadPersistedEntries();
       // Only commit the state after both payloads were read successfully. A
@@ -2051,6 +2057,10 @@ export class ModelCatalogCacheStore {
   }
 
   public clearAll(): void {
+    // Invalidate any incremental read that already captured the old payload.
+    // The parser deliberately yields between batches, so clearing memory and
+    // MMKV alone is not enough to stop that stale payload from being applied.
+    this.hydrationGeneration += 1;
     this.isHydrated = true;
     this.searchEntries.clear();
     this.snapshotEntries.clear();
@@ -2076,16 +2086,23 @@ export class ModelCatalogCacheStore {
   }
 
   public clearSnapshots(): void {
+    // Preserve search entries while making this operation authoritative over
+    // an in-flight incremental hydration. hydrateForMutation() synchronously
+    // loads the search tier and invalidates the older parser generation.
+    this.hydrateForMutation();
     this.snapshotEntries.clear();
     this.removePersistedValue(SNAPSHOT_CACHE_KEY);
   }
 
   public clearSnapshotsForScope(authScope: CatalogCacheAuthScope): void {
     if (!this.isHydrated) {
-      if (authScope === 'anon') {
-        this.removePersistedValue(SNAPSHOT_CACHE_KEY);
+      // Incremental hydration only restores persisted anonymous snapshots.
+      // There cannot be an auth-scoped entry to clear until hydration settles.
+      if (authScope === 'auth') {
+        return;
       }
-      return;
+
+      this.hydrateForMutation();
     }
 
     for (const [key, entry] of this.snapshotEntries.entries()) {
@@ -2180,7 +2197,7 @@ export class ModelCatalogCacheStore {
     }
   }
 
-  private async loadPersistedEntriesIncrementally(): Promise<void> {
+  private async loadPersistedEntriesIncrementally(hydrationGeneration: number): Promise<boolean> {
     let shouldTrimPersistedStorage = this.persistedStorageNeedsTrim();
     let shouldRewriteSearchPayload = false;
     const searchPayloadResult = await this.parsePayloadIncrementally<SearchCacheEntry>(
@@ -2188,6 +2205,22 @@ export class ModelCatalogCacheStore {
       normalizeSearchEntryIncrementally,
     );
     shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
+
+    if (hydrationGeneration !== this.hydrationGeneration) {
+      return false;
+    }
+
+    const snapshotPayloadResult = await this.parsePayloadIncrementally<SnapshotCacheEntry>(
+      this.storage.getString(SNAPSHOT_CACHE_KEY),
+      normalizeSnapshotEntryIncrementally,
+    );
+    let shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
+
+    // Do not apply or rewrite payloads captured before an explicit clear. No
+    // async work occurs after this guard until both maps have been committed.
+    if (hydrationGeneration !== this.hydrationGeneration) {
+      return false;
+    }
 
     if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
       this.storage.remove(SEARCH_CACHE_KEY);
@@ -2201,12 +2234,6 @@ export class ModelCatalogCacheStore {
       }
       this.searchEntries.set(entry.key, entry);
     });
-
-    const snapshotPayloadResult = await this.parsePayloadIncrementally<SnapshotCacheEntry>(
-      this.storage.getString(SNAPSHOT_CACHE_KEY),
-      normalizeSnapshotEntryIncrementally,
-    );
-    let shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
 
     if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
       this.storage.remove(SNAPSHOT_CACHE_KEY);
@@ -2242,22 +2269,32 @@ export class ModelCatalogCacheStore {
     if (shouldTrimPersistedStorage) {
       this.trimPersistedStorageBestEffort();
     }
+
+    return true;
   }
 
-  public hydrateIncrementally(): Promise<void> {
+  public hydrateIncrementally(): Promise<boolean> {
     if (this.isHydrated) {
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
 
     if (this.incrementalHydrationPromise) {
       return this.incrementalHydrationPromise;
     }
 
-    const hydrationPromise = this.loadPersistedEntriesIncrementally()
-      .then(() => {
-        this.isHydrated = true;
+    const hydrationGeneration = this.hydrationGeneration;
+    const hydrationPromise = this.loadPersistedEntriesIncrementally(hydrationGeneration)
+      .then((didApplyHydration) => {
+        const didCommitHydration = didApplyHydration && hydrationGeneration === this.hydrationGeneration;
+        if (didCommitHydration) {
+          this.isHydrated = true;
+        }
+        return didCommitHydration;
       })
       .catch((error) => {
+        if (hydrationGeneration !== this.hydrationGeneration) {
+          return false;
+        }
         this.searchEntries.clear();
         this.snapshotEntries.clear();
         throw error;

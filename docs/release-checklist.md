@@ -66,6 +66,10 @@ If the release affects model loading, chat, downloads, storage, or navigation be
 npm run android:smoke
 ```
 
+If Metro reports an unreadable serialized cache or the debug device appears to run a stale
+bundle, use `npm run android -- --clear-metro-cache`. The explicit flag starts a fresh Metro
+instance with its disk cache reset instead of silently reusing the running server.
+
 If the release changes shared theme, tab chrome, routed headers, localization fit, or motion behavior, also run the UI hardening gate:
 
 ```bash
@@ -75,7 +79,7 @@ node ./scripts/android-scenarios.js --skip-build --scenario hf-catalog-hardening
 node ./scripts/android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization, state, or storage behavior, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
+`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization or state behavior, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. The explicit state-mutating cache check is `npm run android:scenarios:storage -- --skip-build`; it is intentionally excluded from `all`. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
 
 For PR CI, `android-pack-catalog` selects the catalog pack. If multiple Android pack labels are applied, CI uses this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
@@ -235,7 +239,8 @@ keyPassword=your-key-password
 
 ### Storage and cleanup
 
-- Open `Storage Manager` on a device that already has chats, downloaded models, and a populated HTTP cache. Confirm it shows an explicit calculating state instead of false zero or empty values, resolves the real values promptly, and remains responsive while measuring cache usage.
+- Open `Storage Manager` on a device that already has chats, downloaded models, and rebuildable temporary files. Confirm it shows an explicit calculating state instead of false zero or empty values, resolves the real values promptly, and remains responsive while measuring cache usage. The live React Native HTTP cache is intentionally excluded because deleting it behind the active networking client can stall requests.
+- Run `npm run android:scenarios:storage -- --skip-build` and confirm the real private-cache sentinel is removed. Confirm the action does not immediately repopulate the catalog cache or surface a handled network timeout as a red-screen error.
 - Rapidly tap the routed back affordance twice and confirm only one navigation occurs without leaving the app or logging an unhandled `GO_BACK` action.
 - Remove a downloaded model with `Delete and keep settings` and confirm the file is removed while its saved per-model settings remain available after downloading the same model again.
 - Remove a downloaded model with `Delete and reset settings` and confirm both the file and the saved per-model settings are cleared.

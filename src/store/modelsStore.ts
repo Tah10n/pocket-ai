@@ -14,7 +14,11 @@ export type ModelSortField = 'name' | 'lastModified' | 'downloaded' | 'downloads
 export type ModelSortDirection = 'asc' | 'desc';
 export type CatalogDiscoveryMode = 'uninitialized' | 'guided' | 'full' | 'custom';
 export type ModelsCatalogTabId = ModelsCatalogTab;
-export const MODELS_PAGE_SIZE = 20;
+// Keep the cold catalog page within one useful viewport plus a small scroll
+// buffer. HF tree metadata is resolved per card, so asking for 20 summaries at
+// once delayed the first interactive paint and kept the JS thread busy long
+// after the user opened the screen.
+export const MODELS_PAGE_SIZE = 8;
 
 export interface ModelFilterCriteria {
   fitsInRamOnly: boolean;

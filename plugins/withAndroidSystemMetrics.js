@@ -105,11 +105,38 @@ class ${SYSTEM_METRICS_MODULE_NAME}Module(
     return totalBytes
   }
 
+  private fun readClearableCacheDirectorySizeBytes(root: File): Long {
+    if (!root.exists() || !root.isDirectory) {
+      return 0L
+    }
+
+    // React Native owns this live OkHttp disk cache. Removing its files behind
+    // an active client can corrupt or stall requests, so it is neither reported
+    // nor removed by the in-app active-cache action.
+    val protectedRootNames = setOf("http-cache")
+    var totalBytes = 0L
+    root.listFiles()
+      ?.filterNot { entry -> protectedRootNames.contains(entry.name.lowercase()) }
+      ?.forEach { entry ->
+        val entryBytes = if (entry.isDirectory) {
+          readDirectorySizeBytes(entry)
+        } else {
+          entry.length().coerceAtLeast(0L)
+        }
+        totalBytes = if (Long.MAX_VALUE - totalBytes < entryBytes) {
+          Long.MAX_VALUE
+        } else {
+          totalBytes + entryBytes
+        }
+      }
+    return totalBytes
+  }
+
   @ReactMethod
   fun getCacheDirectorySize(promise: Promise) {
     storageMetricsExecutor.execute {
       try {
-        val cacheBytes = readDirectorySizeBytes(reactApplicationContext.cacheDir)
+        val cacheBytes = readClearableCacheDirectorySizeBytes(reactApplicationContext.cacheDir)
         promise.resolve(cacheBytes.toDouble())
       } catch (error: Exception) {
         promise.reject("E_SYSTEM_METRICS", "Failed to read Android app cache size", error)

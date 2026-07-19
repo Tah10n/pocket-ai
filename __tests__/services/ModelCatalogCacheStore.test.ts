@@ -883,6 +883,102 @@ describe('ModelCatalogCacheStore', () => {
     immediateSpy.mockRestore();
   });
 
+  it('does not restore a payload that was cleared while incremental hydration was yielding', async () => {
+    const scope = { query: 'clear-during-hydration', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [
+        buildModel({ id: 'org/clear-a' }),
+        buildModel({ id: 'org/clear-b' }),
+        buildModel({ id: 'org/clear-c' }),
+        buildModel({ id: 'org/clear-d' }),
+        buildModel({ id: 'org/clear-e' }),
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const persistedPayload = storage.getString(SEARCH_CACHE_KEY);
+    expect(persistedPayload).toBeDefined();
+    storage.set(
+      SEARCH_CACHE_KEY,
+      persistedPayload!
+        .replace(`"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION}`, '"version":7')
+        .replace(',"sanitized":true', ''),
+    );
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const freshScope = { ...scope, query: 'fresh-after-clear' };
+
+    const hydrationAttempt = deferredStore.hydrateIncrementally();
+    deferredStore.clearAll();
+    deferredStore.putSearch(freshScope, {
+      models: [buildModel({ id: 'org/fresh-after-clear' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    await jest.runAllTimersAsync();
+    await hydrationAttempt;
+
+    expect(deferredStore.getSearch(scope, 1000)).toBeNull();
+    expect(deferredStore.getSearch(freshScope, 1000)?.models.map((model) => model.id)).toEqual([
+      'org/fresh-after-clear',
+    ]);
+    expect(storage.getString(SEARCH_CACHE_KEY)).toContain('org/fresh-after-clear');
+    expect(storage.getString(SEARCH_CACHE_KEY)).not.toContain('org/clear-a');
+  });
+
+  it('does not overwrite a fresh mutation with an older incremental payload', async () => {
+    const scope = { query: 'mutation-during-hydration', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [
+        buildModel({ id: 'org/stale-a' }),
+        buildModel({ id: 'org/stale-b' }),
+        buildModel({ id: 'org/stale-c' }),
+        buildModel({ id: 'org/stale-d' }),
+        buildModel({ id: 'org/stale-e' }),
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+
+    const hydrationAttempt = deferredStore.hydrateIncrementally();
+    deferredStore.putSearch(scope, {
+      models: [buildModel({ id: 'org/fresh-mutation' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    await jest.runAllTimersAsync();
+    await hydrationAttempt;
+
+    expect(deferredStore.getSearch(scope, 1000)?.models.map((model) => model.id)).toEqual([
+      'org/fresh-mutation',
+    ]);
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SEARCH_CACHE_KEY)).toContain(
+      'org/fresh-mutation',
+    );
+  });
+
+  it('does not restore snapshots cleared during incremental hydration', async () => {
+    const staleModels = ['a', 'b', 'c', 'd', 'e'].map((suffix) => (
+      buildModel({ id: `org/stale-snapshot-${suffix}` })
+    ));
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putModelSnapshots(staleModels, 'anon');
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+
+    const hydrationAttempt = deferredStore.hydrateIncrementally();
+    deferredStore.clearSnapshots();
+    await jest.runAllTimersAsync();
+    await hydrationAttempt;
+
+    staleModels.forEach((model) => {
+      expect(deferredStore.getModelSnapshot(model.id, 'anon', 1000)).toBeNull();
+    });
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
+  });
+
   it.each([8, 9])('drops retired v%s payloads before JSON parsing', (retiredVersion) => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     storage.set(SEARCH_CACHE_KEY, `{"version":${retiredVersion},"entries":[]}`);

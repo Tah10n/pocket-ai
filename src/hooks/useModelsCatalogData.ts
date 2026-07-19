@@ -115,6 +115,9 @@ export function useModelsCatalogData({
       preserveExistingResults: boolean = false,
       forceRefresh: boolean = false,
     ) => {
+      if (!append) {
+        modelCatalogService.cancelPendingSearchRequests();
+      }
       const fetchId = latestFetchIdRef.current + 1;
       latestFetchIdRef.current = fetchId;
       const fetchSpan = performanceMonitor.startSpan(
@@ -226,12 +229,28 @@ export function useModelsCatalogData({
 
   useEffect(() => {
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
-      if (source !== 'manual' && source !== 'hydrate') {
+      if (source === 'manual') {
+        latestFetchIdRef.current += 1;
+        appendInFlightRef.current = false;
+        modelCatalogService.cancelPendingSearchRequests();
+        setLoading(false);
+        setIsFetchingMore(false);
+        setIsRefreshing(false);
+        setFetchState({ warningMessage: null, loadMoreError: null });
+        return;
+      }
+
+      if (source !== 'hydrate') {
         return;
       }
 
       setCacheRefreshRevision((current) => current + 1);
     });
+  }, []);
+
+  useEffect(() => () => {
+    latestFetchIdRef.current += 1;
+    modelCatalogService.cancelPendingSearchRequests();
   }, []);
 
   useEffect(() => {

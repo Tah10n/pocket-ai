@@ -1989,6 +1989,7 @@ export const ChatScreen = () => {
                 thoughtContent={msg.thoughtContent}
                 errorMessage={msg.errorMessage}
                 isStreaming={msg.state === 'streaming'}
+                messageState={msg.state}
                 tokensPerSec={msg.tokensPerSec}
                 inferenceMetrics={msg.inferenceMetrics}
                 canDelete={msg.state !== 'streaming'}

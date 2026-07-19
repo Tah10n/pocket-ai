@@ -141,6 +141,31 @@ describe('ChatMessageBubble', () => {
     expect(getByTestId('message-bubble-shell-assistant-1').props.className).toContain('px-3 py-1.5');
   });
 
+  it('exposes the assistant terminal state for native scenario verification', () => {
+    const { getByTestId, rerender } = render(
+      <ChatMessageBubble
+        id="assistant-state"
+        isUser={false}
+        content="Read"
+        isStreaming
+        messageState="streaming"
+      />,
+    );
+
+    expect(getByTestId('assistant-message-state-streaming-assistant-state')).toBeTruthy();
+
+    rerender(
+      <ChatMessageBubble
+        id="assistant-state"
+        isUser={false}
+        content="Read the prepared text"
+        isStreaming={false}
+        messageState="complete"
+      />,
+    );
+    expect(getByTestId('assistant-message-state-complete-assistant-state')).toBeTruthy();
+  });
+
   it('renders a persisted thought disclosure and copies only the final markdown', async () => {
     const content = '<think>internal chain</think>\n\n**Visible answer**\n\n- bullet';
     const finalContent = '**Visible answer**\n\n- bullet';

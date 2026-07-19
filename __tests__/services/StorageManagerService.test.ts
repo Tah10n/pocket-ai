@@ -16,6 +16,7 @@ jest.mock('../../src/store/storage', () => ({
 }));
 
 jest.mock('../../src/services/FileSystemSetup', () => ({
+  getAppCacheRootDir: () => 'test-cache/',
   getCacheDir: () => 'test-cache/',
   getModelsDir: () => 'test-models/',
 }));
@@ -200,10 +201,10 @@ describe('StorageManagerService', () => {
 
       expect(metrics.cacheBytes).toBe(0);
       expect(warnSpy).toHaveBeenCalledWith(
-        '[StorageManagerService] Failed to read directory size',
+        '[StorageManagerService] Failed to read clearable cache size',
         expect.objectContaining({
           pathCategory: 'cache_storage',
-          scope: 'directory_size',
+          scope: 'clearable_directory_size',
           errorName: 'Error',
         }),
       );
@@ -1104,6 +1105,28 @@ describe('StorageManagerService', () => {
 
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledTimes(1);
     expect(mockedModelCatalogService.clearCache).toHaveBeenCalledWith('manual');
+  });
+
+  it('does not count or delete the live React Native HTTP cache', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true, isDirectory: true };
+      }
+      if (uri === 'test-cache/temporary.bin') {
+        return { exists: true, isDirectory: false, size: 128 };
+      }
+      throw new Error(`Unexpected stat: ${uri}`);
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-cache/' ? ['http-cache', 'temporary.bin'] : []
+    ));
+
+    await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 128 }));
+    await expect(clearActiveCache()).resolves.toBe(1);
+
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-cache/http-cache');
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-cache/temporary.bin', { idempotent: true });
   });
 
   it('retries cache entry deletion once before succeeding', async () => {

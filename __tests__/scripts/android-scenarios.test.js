@@ -1,16 +1,21 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { EventEmitter } = require('events');
 const { isCompletePngBuffer } = require('../../scripts/png-validation');
 
 const {
+  buildAppRouteDeepLinkArgs,
   buildScenarios,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
+  cleanupScenarioOwnedMetro,
+  cleanupTransferredMetroOwnership,
   activateClearedCatalogFilterOption,
+  appPrivatePathExists,
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
   clearCatalogFiltersIfPresent,
   clearFocusedTextInput,
@@ -36,12 +41,14 @@ const {
   goToHome,
   goToModelCatalog,
   inputFocusedTextAndConfirm,
+  installScenarioOwnedMetroSignalHandlers,
   isAppForegroundSnapshot,
   openFirstVisibleVariantPicker,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
   prepareCatalogForVariantPickerSmokeScenario,
+  readTransferredMetroOwnership,
   selectScenarios,
   ScenarioSkipError,
   restoreLanguageAfterScenario,
@@ -54,6 +61,7 @@ const {
   ScenarioSkipFailureError,
   serializeReportResults,
   setCatalogFilterPanelOpen,
+  shouldPrepareMetroForScenarioLaunch,
   shouldAppendRunnerFailure,
   tapBottomTabUntilVisible,
   tapBoundsUntilAnyNode,
@@ -64,6 +72,224 @@ const {
 } = require('../../scripts/android-scenarios');
 
 const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
+
+describe('Android private-path verification', () => {
+  const relativePath = 'cache/storage-qa/sentinel.bin';
+
+  it('distinguishes a confirmed missing path from a successful lookup', () => {
+    const existsSpawn = jest.fn(() => ({
+      status: 0,
+      stdout: `${relativePath}\n`,
+      stderr: '',
+    }));
+    const missingSpawn = jest.fn(() => ({
+      status: 1,
+      stdout: '',
+      stderr: `ls: ${relativePath}: No such file or directory`,
+    }));
+
+    expect(appPrivatePathExists('adb', 'device-1', relativePath, { spawnSync: existsSpawn })).toBe(true);
+    expect(appPrivatePathExists('adb', 'device-1', relativePath, { spawnSync: missingSpawn })).toBe(false);
+    expect(existsSpawn.mock.calls[0][2]).toEqual(expect.objectContaining({ timeout: 15_000 }));
+  });
+
+  it('fails closed when adb cannot verify the path', () => {
+    expect(() => appPrivatePathExists('adb', 'device-1', relativePath, {
+      spawnSync: () => ({ status: 1, stdout: '', stderr: 'error: device offline' }),
+    })).toThrow('device offline');
+    expect(() => appPrivatePathExists('adb', 'device-1', relativePath, {
+      spawnSync: () => ({ error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) }),
+    })).toThrow('timed out');
+  });
+});
+
+describe('Android scenario Metro ownership', () => {
+  const ownershipBoundary = process.platform === 'win32'
+    ? 'windows-job'
+    : 'posix-process-group';
+
+  it('reads identity-bound ownership and removes only that process tree', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-metro-owner-'));
+    const ownershipPath = path.join(tempDir, 'owner.json');
+    fs.writeFileSync(ownershipPath, JSON.stringify({
+      pid: 4242,
+      port: 8081,
+      processIdentity: { startMarker: '638885000000000000' },
+      processTreeIdentities: [{
+        pid: 4242,
+        parentPid: null,
+        startMarker: '638885000000000000',
+        depth: 0,
+      }],
+      ownershipBoundary,
+    }));
+    const ownership = readTransferredMetroOwnership(ownershipPath);
+    const stopProcessTree = jest.fn(() => true);
+
+    cleanupTransferredMetroOwnership(ownership, { stopProcessTree });
+
+    expect(stopProcessTree).toHaveBeenCalledWith(4242, {
+      expectedIdentity: { startMarker: '638885000000000000' },
+      expectedProcessTreeIdentities: [{
+        pid: 4242,
+        parentPid: null,
+        startMarker: '638885000000000000',
+        depth: 0,
+      }],
+      ownershipBoundary,
+    });
+    expect(fs.existsSync(ownershipPath)).toBe(false);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('rejects ownership records without a process identity', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-metro-owner-'));
+    const ownershipPath = path.join(tempDir, 'owner.json');
+    fs.writeFileSync(ownershipPath, JSON.stringify({ pid: 4242, port: 8081 }));
+
+    expect(() => readTransferredMetroOwnership(ownershipPath)).toThrow('without process identity');
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('rejects ownership records without a matching process-tree snapshot', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-metro-owner-'));
+    const ownershipPath = path.join(tempDir, 'owner.json');
+    fs.writeFileSync(ownershipPath, JSON.stringify({
+      pid: 4242,
+      port: 8081,
+      processIdentity: { startMarker: '638885000000000000' },
+      processTreeIdentities: [],
+    }));
+
+    expect(() => readTransferredMetroOwnership(ownershipPath)).toThrow(
+      'without a valid process-tree identity snapshot',
+    );
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('rejects ownership records without the platform kernel boundary', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-metro-owner-'));
+    const ownershipPath = path.join(tempDir, 'owner.json');
+    fs.writeFileSync(ownershipPath, JSON.stringify({
+      pid: 4242,
+      port: 8081,
+      processIdentity: { startMarker: '638885000000000000' },
+      processTreeIdentities: [{
+        pid: 4242,
+        parentPid: null,
+        startMarker: '638885000000000000',
+        depth: 0,
+      }],
+    }));
+
+    expect(() => readTransferredMetroOwnership(ownershipPath)).toThrow(
+      'incompatible Metro ownership boundary: missing',
+    );
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('retains identity-bound ownership when cleanup fails so it can be retried safely', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-metro-owner-'));
+    const ownershipPath = path.join(tempDir, 'owner.json');
+    fs.writeFileSync(ownershipPath, JSON.stringify({
+      pid: 4242,
+      port: 8081,
+      processIdentity: { startMarker: '638885000000000000' },
+      processTreeIdentities: [{
+        pid: 4242,
+        parentPid: null,
+        startMarker: '638885000000000000',
+        depth: 0,
+      }],
+      ownershipBoundary,
+    }));
+    const ownership = readTransferredMetroOwnership(ownershipPath);
+
+    expect(() => cleanupTransferredMetroOwnership(ownership, {
+      stopProcessTree: () => false,
+    })).toThrow('Failed to stop scenario-owned Metro process tree 4242.');
+    expect(fs.existsSync(ownershipPath)).toBe(true);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('stops only a Metro instance started and owned by the scenario runner', () => {
+    const lifecycle = { process: { pid: 4242 } };
+    const removeSignalHandlers = jest.fn();
+    const stopOwnedMetroProcessOrThrow = jest.fn();
+
+    cleanupScenarioOwnedMetro({
+      started: true,
+      lifecycle,
+      removeSignalHandlers,
+    }, { stopOwnedMetroProcessOrThrow });
+
+    expect(removeSignalHandlers).toHaveBeenCalledTimes(1);
+    expect(stopOwnedMetroProcessOrThrow).toHaveBeenCalledWith(lifecycle);
+
+    cleanupScenarioOwnedMetro({ started: false, port: 8081 }, { stopOwnedMetroProcessOrThrow });
+    cleanupScenarioOwnedMetro(null, { stopOwnedMetroProcessOrThrow });
+    expect(stopOwnedMetroProcessOrThrow).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when an owned Metro has no lifecycle handle', () => {
+    const removeSignalHandlers = jest.fn();
+
+    expect(() => cleanupScenarioOwnedMetro({
+      started: true,
+      removeSignalHandlers,
+    })).toThrow('missing its process lifecycle');
+    expect(removeSignalHandlers).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans up a locally owned Metro before re-emitting termination signals', () => {
+    const processRef = new EventEmitter();
+    processRef.pid = 5150;
+    processRef.kill = jest.fn();
+    const metro = { started: true, lifecycle: {} };
+    const cleanup = jest.fn();
+
+    installScenarioOwnedMetroSignalHandlers(() => metro, processRef, {
+      cleanupScenarioOwnedMetro: cleanup,
+    });
+    processRef.emit('SIGTERM');
+
+    expect(cleanup).toHaveBeenCalledWith(metro);
+    expect(processRef.kill).toHaveBeenCalledWith(5150, 'SIGTERM');
+    expect(processRef.listenerCount('SIGINT')).toBe(0);
+    expect(processRef.listenerCount('SIGTERM')).toBe(0);
+  });
+
+  it('prepares Metro only for debug launches that need a development bundle', () => {
+    expect(shouldPrepareMetroForScenarioLaunch({})).toBe(true);
+    expect(shouldPrepareMetroForScenarioLaunch({ ANDROID_SMOKE_APK_VARIANT: 'release' })).toBe(false);
+    expect(shouldPrepareMetroForScenarioLaunch({ ANDROID_SMOKE_SKIP_METRO: '1' })).toBe(false);
+    expect(shouldPrepareMetroForScenarioLaunch({ ANDROID_SMOKE_APK_VARIANT: ' DEBUG ' })).toBe(true);
+  });
+});
+
+describe('Android scenario route deep links', () => {
+  it('builds a deterministic app-route intent for diagnostics screens', () => {
+    expect(
+      buildAppRouteDeepLinkArgs('device-1', '/performance', {
+        packageName: 'com.example.app',
+        scheme: 'example',
+      })
+    ).toEqual([
+      '-s',
+      'device-1',
+      'shell',
+      'am',
+      'start',
+      '-W',
+      '-a',
+      'android.intent.action.VIEW',
+      '-d',
+      'example://performance',
+      'com.example.app',
+    ]);
+  });
+});
 
 describe('app image picker configuration', () => {
   const appConfig = require('../../app.json');
@@ -162,6 +388,7 @@ describe('android-scenarios smoke bootstrap args', () => {
         '8088',
       ])
     );
+    expect(args).not.toContain('--transfer-metro-ownership');
     expect(args).not.toContain('--screenshot');
     expect(args).not.toContain('--launch-delay-ms');
     expect(args).not.toContain('--reuse-install');
@@ -227,6 +454,19 @@ describe('android-scenarios screenshot capture', () => {
     expect(isCompletePngBuffer(pngBuffer.subarray(0, pngBuffer.length - 1))).toBe(false);
     expect(isCompletePngBuffer(pngBuffer.subarray(0, 9))).toBe(false);
     expect(isCompletePngBuffer(Buffer.concat([pngBuffer, Buffer.from([0x00])]))).toBe(false);
+
+    const corruptedImageData = Buffer.from(pngBuffer);
+    let chunkOffset = 8;
+    while (chunkOffset + 12 <= corruptedImageData.length) {
+      const dataLength = corruptedImageData.readUInt32BE(chunkOffset);
+      const chunkType = corruptedImageData.toString('ascii', chunkOffset + 4, chunkOffset + 8);
+      if (chunkType === 'IDAT' && dataLength > 0) {
+        corruptedImageData[chunkOffset + 8] ^= 0x01;
+        break;
+      }
+      chunkOffset += 12 + dataLength;
+    }
+    expect(isCompletePngBuffer(corruptedImageData)).toBe(false);
   });
 
   it('retries transient invalid screenshots before failing the scenario', () => {
@@ -370,8 +610,11 @@ describe('android-scenarios screenshot capture', () => {
       expect(spawn).toHaveBeenCalledWith(
         'adb',
         expect.arrayContaining(['exec-out', 'dd', 'bs=32768', 'skip=0', 'count=1', 'status=none']),
-        expect.objectContaining({ maxBuffer: 65536 })
+        expect.objectContaining({ maxBuffer: 65536, timeout: 15000 })
       );
+      for (const [, , spawnOptions] of spawn.mock.calls) {
+        expect(spawnOptions).toEqual(expect.objectContaining({ timeout: 15000 }));
+      }
       expect(fs.readFileSync(screenshotPath)).toEqual(pngBuffer);
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });
@@ -853,6 +1096,8 @@ describe('android-scenarios npm defaults', () => {
 
   it('exposes targeted scenario packs for dependency checks', () => {
     expect(packageJson.scripts['android:scenarios:catalog']).toContain('--pack catalog');
+    expect(packageJson.scripts['android:scenarios:storage']).toContain('--pack storage');
+    expect(packageJson.scripts['android:scenarios:storage']).toContain('--fail-on-skip');
     expect(packageJson.scripts['android:scenarios:attachments']).toContain('--pack attachments');
     expect(packageJson.scripts['android:scenarios:attachments-preconditioned']).toContain('--pack attachments-preconditioned');
     expect(packageJson.scripts['android:scenarios:attachments-preconditioned']).toContain('--preserve-running-app');
@@ -2022,8 +2267,10 @@ describe('android-scenarios pack selection', () => {
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="${prompt || ''}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
-        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-fallback" clickable="false" enabled="true" bounds="[40,1380][1040,1540]">
-          <node text="Fallback text response is visible." content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-text-fallback" clickable="false" enabled="true" bounds="[40,1360][1040,1560]">
+          <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-fallback" clickable="false" enabled="true" bounds="[40,1380][1040,1540]">
+            <node text="Fallback text response is visible." content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
+          </node>
         </node>
       </hierarchy>
     `;
@@ -2153,8 +2400,10 @@ describe('android-scenarios pack selection', () => {
       <hierarchy>
         <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
         <node text="${typedPrompt}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
-        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-only" clickable="false" enabled="true" bounds="[40,1340][1040,1520]">
-          <node text="Text fallback assistant response" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-text-only" clickable="false" enabled="true" bounds="[40,1330][1040,1540]">
+          <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-only" clickable="false" enabled="true" bounds="[40,1340][1040,1520]">
+            <node text="Text fallback assistant response" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
+          </node>
         </node>
         <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="false" bounds="[900,1840][1040,1980]" />
@@ -2531,8 +2780,10 @@ describe('android-scenarios pack selection', () => {
               <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,120][1040,520]" />
               <node text="Message image 1 of 1 preview" content-desc="" clickable="false" bounds="[40,820][1040,1180]" />
               <node text="${preparedPrompt || ''}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
-              <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-prepared" clickable="false" bounds="[40,1380][1040,1540]">
-                <node text="The prepared image response is visible." content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+              <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-prepared" clickable="false" bounds="[40,1360][1040,1560]">
+                <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-prepared" clickable="false" bounds="[40,1380][1040,1540]">
+                  <node text="The prepared image response is visible." content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+                </node>
               </node>
             </hierarchy>
           `;
@@ -2649,8 +2900,21 @@ describe('android-scenarios pack selection', () => {
       <hierarchy>
         <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
         <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
-        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-assistant-1" clickable="false" bounds="[40,1380][1040,1540]">
-          <node text="The photo shows a small red car." content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-assistant-1" clickable="false" bounds="[40,1360][1040,1560]">
+          <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-assistant-1" clickable="false" bounds="[40,1380][1040,1540]">
+            <node text="The photo shows a small red car." content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+          </node>
+        </node>
+      </hierarchy>
+    `);
+    const streamingAnswerSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="${prompt}" content-desc="" clickable="false" bounds="[40,1200][1040,1320]" />
+        <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-streaming-assistant-1" clickable="false" bounds="[40,1360][1040,1560]">
+          <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-assistant-1" clickable="false" bounds="[40,1380][1040,1540]">
+            <node text="Read" content-desc="" clickable="false" bounds="[60,1400][1020,1520]" />
+          </node>
         </node>
       </hierarchy>
     `);
@@ -2688,9 +2952,16 @@ describe('android-scenarios pack selection', () => {
     expect(findPreparedAssistantResponseNode(tabChromeSnapshot, sentContext, prompt)).toBeNull();
     expect(findPreparedAssistantResponseNode(errorOnlySnapshot, sentContext, prompt)).toBeNull();
     expect(findPreparedAssistantResponseNode(unanchoredUnknownErrorSnapshot, sentContext, prompt)).toBeNull();
+    expect(findPreparedAssistantResponseNode(streamingAnswerSnapshot, sentContext, prompt)).toBeNull();
     expect(findPreparedAssistantResponseNode(answerSnapshot, sentContext, prompt)).toEqual(expect.objectContaining({
       text: 'The photo shows a small red car.',
     }));
+  });
+
+  it('keeps the real cache-clear verifier in an explicit state-mutating pack', () => {
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'storage'])).map((scenario) => scenario.id)).toEqual([
+      'storage-cache-clear',
+    ]);
   });
 
   it('builds a natural prepared vision prompt with a short unique id', () => {
@@ -2875,6 +3146,7 @@ describe('android-scenarios pack selection', () => {
       .filter((scenarioId) => ![
         'chat-attachment-preview-remove',
         'chat-attachment-prepared-send',
+        'storage-cache-clear',
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
@@ -2889,6 +3161,7 @@ describe('android-scenarios pack selection', () => {
     );
     expect(selectedIds).not.toContain('chat-attachment-preview-remove');
     expect(selectedIds).not.toContain('chat-attachment-prepared-send');
+    expect(selectedIds).not.toContain('storage-cache-clear');
   });
 });
 

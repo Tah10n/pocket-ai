@@ -24,6 +24,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
     getCachedSearchResult: jest.fn(),
     getLocalModels: jest.fn(),
     searchModels: jest.fn(),
+    cancelPendingSearchRequests: jest.fn(),
     subscribeCacheInvalidations: jest.fn(() => jest.fn()),
     subscribeMetadataUpdates: jest.fn(() => jest.fn()),
   },
@@ -128,6 +129,7 @@ describe('useModelsCatalogData', () => {
       hasMore: true,
       nextCursor: 'https://huggingface.co/api/models?cursor=page-3',
     });
+    mockCatalogService.cancelPendingSearchRequests.mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -187,6 +189,26 @@ describe('useModelsCatalogData', () => {
     expect(mockCatalogService.searchModels).not.toHaveBeenCalled();
   });
 
+  it('cancels active requests without repopulating the catalog after a manual cache clear', async () => {
+    let invalidationListener: ((revision: number, source: ModelCatalogCacheInvalidationSource) => void) | undefined;
+    mockCatalogService.subscribeCacheInvalidations.mockImplementation((listener) => {
+      invalidationListener = listener;
+      listener(0, 'replay');
+      return jest.fn();
+    });
+
+    renderHookHarness();
+    await flushMicrotasks();
+
+    await act(async () => {
+      invalidationListener?.(1, 'manual');
+      await Promise.resolve();
+    });
+
+    expect(mockCatalogService.cancelPendingSearchRequests).toHaveBeenCalledTimes(1);
+    expect(mockCatalogService.searchModels).not.toHaveBeenCalled();
+  });
+
   it('renders cold catalog summaries before deferred metadata arrives and applies updates in place', async () => {
     let metadataListener: ((update: {
       query: string;
@@ -229,7 +251,7 @@ describe('useModelsCatalogData', () => {
 
     expect(mockCatalogService.searchModels).toHaveBeenCalledWith('phi', expect.objectContaining({
       cursor: null,
-      pageSize: 20,
+      pageSize: 8,
       metadataResolution: 'deferred',
     }));
     expect(getCurrentValue()?.models).toEqual([summaryModel]);
@@ -286,7 +308,7 @@ describe('useModelsCatalogData', () => {
     expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
     expect(mockCatalogService.searchModels).toHaveBeenCalledWith('phi', expect.objectContaining({
       cursor: 'https://huggingface.co/api/models?cursor=page-2',
-      pageSize: 20,
+      pageSize: 8,
       sort: 'downloads',
     }));
 

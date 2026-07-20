@@ -2146,6 +2146,73 @@ describe('useChatSession', () => {
     );
   });
 
+  it('clears previously flushed reasoning when the authoritative cumulative snapshot ends empty', async () => {
+    const telemetry = {
+      tokensPredicted: 40,
+      tokensEvaluated: 12,
+      predictedPerSecond: 5,
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 16,
+        draftTokensAccepted: 8,
+        acceptanceRate: 0.5,
+      },
+    };
+    let thoughtAfterFirstFlush: string | undefined;
+    (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(telemetry);
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: 'reasoning',
+          reasoningContent: 'stale thought',
+          reasoningContentMode: 'cumulative',
+        });
+        thoughtAfterFirstFlush = useChatStore
+          .getState()
+          .getActiveThread()
+          ?.messages.at(-1)
+          ?.thoughtContent;
+        onToken?.({
+          token: '',
+          reasoningContent: '',
+          reasoningContentMode: 'cumulative',
+        });
+
+        return {
+          text: 'Visible answer',
+          content: 'Visible answer',
+          reasoning_content: '',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Replace the reasoning snapshot');
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thoughtAfterFirstFlush).toBe('stale thought');
+    expect(thread?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: undefined,
+        inferenceMetrics: telemetry,
+        state: 'complete',
+      }),
+    );
+    const persistedRecord = thread
+      ? storage.getString(getChatThreadStorageKey(thread.id))
+      : undefined;
+    expect(persistedRecord).toBeTruthy();
+    expect(persistedRecord).not.toContain('stale thought');
+    expect(persistedRecord).not.toContain('"thoughtContent":""');
+  });
+
   it('parses reasoning markers split across string token callbacks', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {

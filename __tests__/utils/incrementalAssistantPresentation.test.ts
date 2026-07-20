@@ -307,6 +307,17 @@ describe('IncrementalAssistantPresentationParser', () => {
     );
   });
 
+  it('clears explicit reasoning from an authoritative empty cumulative snapshot', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    const staleReasoning = 'A stale reasoning trace';
+
+    parser.applyCumulativeExplicitReasoningSnapshot(staleReasoning);
+    parser.applyCumulativeExplicitReasoningSnapshot('');
+
+    expect(parser.getPresentation()).toEqual(completedPresentation('', ''));
+    expect(parser.getProcessedCharacterCount()).toBe(staleReasoning.length);
+  });
+
   it('treats empty raw and explicit chunks as no-ops', () => {
     const parser = createIncrementalAssistantPresentationParser();
 

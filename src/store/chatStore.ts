@@ -111,8 +111,10 @@ type AssistantMessagePatch = Partial<
 >;
 
 type AssistantTurnTerminalFields = Partial<
-  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'inferenceMetrics'>
->;
+  Pick<ChatMessage, 'content' | 'tokensPerSec' | 'inferenceMetrics'>
+> & {
+  thoughtContent?: string | null;
+};
 
 export type AssistantTurnFinalization =
   | (AssistantTurnTerminalFields & { outcome: 'success' })
@@ -143,7 +145,12 @@ interface ChatStoreState {
     finalization: AssistantTurnFinalization,
   ) => boolean;
   stopAssistantMessage: (threadId: string, messageId: string) => void;
-  finalizeAssistantMessage: (threadId: string, messageId: string, content: string, thoughtContent?: string) => void;
+  finalizeAssistantMessage: (
+    threadId: string,
+    messageId: string,
+    content: string,
+    thoughtContent?: string | null,
+  ) => void;
   deleteThread: (threadId: string) => void;
   renameThread: (threadId: string, title: string) => boolean;
   deleteMessageBranch: (threadId: string, messageId: string) => boolean;
@@ -2242,9 +2249,12 @@ export const useChatStore = create<ChatStoreState>()(
 
             const completedAt = Date.now();
             const currentMessage = runtime.currentMessage;
+            const terminalThoughtContent = finalization.thoughtContent === undefined
+              ? currentMessage.thoughtContent
+              : finalization.thoughtContent || undefined;
             const terminalFields = {
               content: finalization.content ?? currentMessage.content,
-              thoughtContent: finalization.thoughtContent ?? currentMessage.thoughtContent,
+              thoughtContent: terminalThoughtContent,
               tokensPerSec: finalization.tokensPerSec ?? currentMessage.tokensPerSec,
               inferenceMetrics: finalization.inferenceMetrics ?? currentMessage.inferenceMetrics,
             };

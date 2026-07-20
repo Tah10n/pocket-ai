@@ -368,13 +368,13 @@ export class IncrementalAssistantPresentationParser {
       : this.mode === 'awaiting_open' && !hasPartialOpeningMarker
         ? trimBoundaryBlankLines(this.pendingOpen)
         : '';
-    const isThoughtStreaming = this.mode === 'reasoning'
-      || hasPartialOpeningMarker
-      || (this.hasExplicitReasoning && finalContent.length === 0);
-    const hasThought = thoughtContent.length > 0
-      || this.mode === 'reasoning'
-      || hasPartialOpeningMarker
-      || (this.hasExplicitReasoning && finalContent.length === 0);
+    const hasExplicitThought = this.hasExplicitReasoning && thoughtContent.length > 0;
+    const isThoughtStreaming = this.hasExplicitReasoning
+      ? hasExplicitThought && finalContent.length === 0
+      : this.mode === 'reasoning' || hasPartialOpeningMarker;
+    const hasThought = this.hasExplicitReasoning
+      ? hasExplicitThought
+      : thoughtContent.length > 0 || this.mode === 'reasoning' || hasPartialOpeningMarker;
 
     return {
       finalContent,

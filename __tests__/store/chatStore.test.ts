@@ -5088,6 +5088,158 @@ describe('chatStore', () => {
     }
   });
 
+  it('authoritatively clears stale thought content while retaining MTP telemetry after rehydrate', async () => {
+    const durableThread = buildThread('thread-terminal-clear-thought', 10);
+    const messageId = 'assistant-terminal-clear-thought';
+    const streamingThread: ChatThread = {
+      ...durableThread,
+      messages: [
+        ...durableThread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: 11,
+          state: 'streaming',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'generating',
+    };
+    writeChatThreadRecord(storage, durableThread, durableThread.updatedAt);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: streamingThread.id,
+      threadIds: [streamingThread.id],
+      updatedAt: durableThread.updatedAt,
+    });
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+    useChatStore.getState().patchAssistantMessage(streamingThread.id, messageId, {
+      content: 'Final visible answer',
+      thoughtContent: 'stale thought',
+    });
+    flushPendingChatPersistenceWrites('background');
+    expect(readChatStreamingProgressRecord(storage, streamingThread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        messageId,
+        thoughtContent: 'stale thought',
+      }),
+    });
+
+    const telemetry = {
+      tokensPredicted: 120,
+      tokensEvaluated: 30,
+      predictedPerSecond: 7.5,
+      timeToFirstTokenMs: 640,
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 48,
+        draftTokensAccepted: 24,
+        acceptanceRate: 0.5,
+      },
+    };
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      streamingThread.id,
+      messageId,
+      {
+        outcome: 'success',
+        thoughtContent: null,
+        inferenceMetrics: telemetry,
+      },
+    )).toBe(true);
+
+    expect(useChatStore.getState().getThread(streamingThread.id)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: 'Final visible answer',
+        thoughtContent: undefined,
+        inferenceMetrics: telemetry,
+        state: 'complete',
+      }),
+    );
+    const persistedRecord = storage.getString(getChatThreadStorageKey(streamingThread.id));
+    expect(persistedRecord).not.toContain('stale thought');
+    expect(persistedRecord).not.toContain('"thoughtContent":""');
+    expect(readChatStreamingProgressRecord(storage, streamingThread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const rehydratedMessage = useChatStore
+      .getState()
+      .getThread(streamingThread.id)
+      ?.messages.at(-1);
+    expect(rehydratedMessage).toEqual(
+      expect.objectContaining({
+        content: 'Final visible answer',
+        inferenceMetrics: telemetry,
+        state: 'complete',
+      }),
+    );
+    expect(rehydratedMessage).not.toHaveProperty('thoughtContent');
+  });
+
+  it.each(['success', 'stopped', 'error'] as const)(
+    'preserves partial thought content when %s finalization omits the field',
+    (outcome) => {
+      const thread = buildThread(`thread-terminal-preserve-thought-${outcome}`, 10);
+      const messageId = `assistant-terminal-preserve-thought-${outcome}`;
+      const streamingThread: ChatThread = {
+        ...thread,
+        messages: [
+          ...thread.messages,
+          {
+            id: messageId,
+            role: 'assistant',
+            content: 'Partial visible answer',
+            thoughtContent: 'Partial thought survives',
+            createdAt: 11,
+            state: 'streaming',
+          },
+        ],
+        status: 'generating',
+      };
+      useChatStore.setState({
+        threads: { [streamingThread.id]: streamingThread },
+        activeThreadId: streamingThread.id,
+      });
+
+      const didFinalize = outcome === 'error'
+        ? useChatStore.getState().finalizeAssistantTurn(
+            streamingThread.id,
+            messageId,
+            {
+              outcome,
+              errorCode: 'generation_failed',
+              errorMessage: 'Generation failed safely',
+            },
+          )
+        : useChatStore.getState().finalizeAssistantTurn(
+            streamingThread.id,
+            messageId,
+            { outcome },
+          );
+
+      expect(didFinalize).toBe(true);
+      expect(useChatStore.getState().getThread(streamingThread.id)?.messages.at(-1)).toEqual(
+        expect.objectContaining({
+          content: 'Partial visible answer',
+          thoughtContent: 'Partial thought survives',
+          state: outcome === 'success' ? 'complete' : outcome,
+        }),
+      );
+    },
+  );
+
   it.each([
     {
       outcome: 'success' as const,

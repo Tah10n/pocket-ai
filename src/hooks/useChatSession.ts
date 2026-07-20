@@ -1827,10 +1827,15 @@ export const useChatSession = () => {
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
       const presentation = presentationParser.getPresentation();
+      const bufferedThoughtContent = presentation.thoughtContent.length > 0
+        ? presentation.thoughtContent
+        : null;
       return finalizeAssistantTurn(threadId, assistantMessageId, {
         ...finalization,
         content: finalization.content ?? presentation.finalContent,
-        thoughtContent: finalization.thoughtContent ?? (presentation.thoughtContent || undefined),
+        thoughtContent: finalization.thoughtContent === undefined
+          ? bufferedThoughtContent
+          : finalization.thoughtContent,
         tokensPerSec: finalization.tokensPerSec ?? tokensPerSec,
       });
     };
@@ -2425,9 +2430,9 @@ export const useChatSession = () => {
       }
 
       const currentPresentation = presentationParser.getPresentation();
-      const finalThoughtContent = completion.reasoning_content
-        || currentPresentation.thoughtContent
-        || undefined;
+      const finalThoughtContent = completion.reasoning_content !== undefined
+        ? completion.reasoning_content
+        : currentPresentation.thoughtContent;
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
@@ -2440,7 +2445,7 @@ export const useChatSession = () => {
           completion.text,
           latestRawAssistantSnapshot,
         ),
-        thoughtContent: finalThoughtContent,
+        thoughtContent: finalThoughtContent.length > 0 ? finalThoughtContent : null,
         inferenceMetrics: completionTelemetry ?? undefined,
       });
       recordCompletionStats('success');

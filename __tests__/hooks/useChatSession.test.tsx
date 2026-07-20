@@ -3449,6 +3449,45 @@ describe('useChatSession', () => {
     );
   });
 
+  it('restores the previous assistant when regeneration fails before first output', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Keep the original answer if retry fails');
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread()!;
+    const originalAssistant = threadBeforeRegenerate.messages.at(-1)!;
+    const completionError = new Error('regeneration failed before first output');
+    (llmEngineService.chatCompletion as jest.Mock).mockRejectedValueOnce(completionError);
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.regenerateLastResponse();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeTruthy();
+    const restoredThread = useChatStore.getState().getActiveThread()!;
+    expect(restoredThread.status).toBe('idle');
+    expect(restoredThread.messages).toHaveLength(threadBeforeRegenerate.messages.length);
+    expect(restoredThread.messages.at(-1)).toBe(originalAssistant);
+    expect(restoredThread.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Hello back',
+      state: 'complete',
+      errorCode: undefined,
+      errorMessage: undefined,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(restoredThread.id))).toContain('Hello back');
+    expect(storage.getString(getChatThreadStorageKey(restoredThread.id))).not.toContain(
+      completionError.message,
+    );
+    expect(storage.getString(getChatStreamingProgressStorageKey(restoredThread.id))).toBeUndefined();
+  });
+
   it('appends a new assistant when the last image-only user has no following assistant', async () => {
     const readyVision = {
       modelId: 'author/model-q4',

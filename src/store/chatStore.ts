@@ -3,8 +3,6 @@ import { createJSONStorage, persist, type StateStorage } from 'zustand/middlewar
 import { getAppStorage, mmkvStorage } from '../store/storage';
 import {
   ChatMessage,
-  ChatMessageRole,
-  ChatMessageState,
   ChatSummary,
   ChatThread,
   ChatThreadStatus,
@@ -1660,8 +1658,20 @@ function canPatchAssistantMessage(
   return true;
 }
 
+type TransientAssistantRuntimeMode =
+  | {
+      kind: 'append';
+      durablePlaceholder: ChatMessage;
+    }
+  | {
+      kind: 'replace';
+      targetMessageId: string;
+      originalMessage: ChatMessage;
+    };
+
 interface TransientAssistantRuntime {
-  durablePlaceholder: ChatMessage;
+  mode: TransientAssistantRuntimeMode;
+  messageIndex: number;
   durableMessages: ChatMessage[];
   currentMessage: ChatMessage;
   presentationMessages: ChatMessage[];
@@ -1678,15 +1688,41 @@ function isTransientAssistantRuntimeValid(
   thread: ChatThread,
   messageId = runtime.currentMessage.id,
 ): boolean {
-  const durablePlaceholder = thread.messages.at(-1);
+  if (
+    thread.messages !== runtime.durableMessages
+    || runtime.messageIndex !== thread.messages.length - 1
+    || runtime.currentMessage.id !== messageId
+  ) {
+    return false;
+  }
+
+  const durableMessage = thread.messages[runtime.messageIndex];
+  if (runtime.mode.kind === 'append') {
+    return (
+      durableMessage === runtime.mode.durablePlaceholder
+      && durableMessage.id === messageId
+      && durableMessage.role === 'assistant'
+      && durableMessage.state === 'streaming'
+    );
+  }
+
   return (
-    durablePlaceholder === runtime.durablePlaceholder
-    && thread.messages === runtime.durableMessages
-    && durablePlaceholder?.id === messageId
-    && durablePlaceholder.role === 'assistant'
-    && durablePlaceholder.state === 'streaming'
-    && runtime.currentMessage.id === messageId
+    durableMessage === runtime.mode.originalMessage
+    && durableMessage.id === runtime.mode.targetMessageId
+    && durableMessage.role === 'assistant'
+    && durableMessage.state !== 'streaming'
   );
+}
+
+function createTransientPresentationThread(
+  thread: ChatThread,
+  presentationMessages: ChatMessage[],
+): ChatThread {
+  return {
+    ...thread,
+    messages: presentationMessages,
+    status: 'generating',
+  };
 }
 
 function createTransientAssistantRuntime(
@@ -1705,14 +1741,52 @@ function createTransientAssistantRuntime(
 
   const presentationMessages = thread.messages.slice();
   const runtime: TransientAssistantRuntime = {
-    durablePlaceholder,
+    mode: {
+      kind: 'append',
+      durablePlaceholder,
+    },
+    messageIndex: lastIndex,
     durableMessages: thread.messages,
     currentMessage: durablePlaceholder,
     presentationMessages,
-    presentationThread: {
-      ...thread,
-      messages: presentationMessages,
+    presentationThread: createTransientPresentationThread(thread, presentationMessages),
+    sourceThread: thread,
+    progressRevision: 0,
+    lastProgressPersistedAt: latestStreamingProgressPersistedAtById.get(thread.id) ?? 0,
+  };
+  transientAssistantRuntimes.set(thread.id, runtime);
+  return runtime;
+}
+
+function createTransientReplacementRuntime(
+  thread: ChatThread,
+  targetIndex: number,
+  replacement: ChatMessage,
+): TransientAssistantRuntime | null {
+  const originalMessage = thread.messages[targetIndex];
+  if (
+    targetIndex !== thread.messages.length - 1
+    || !originalMessage
+    || originalMessage.role !== 'assistant'
+    || originalMessage.kind === 'model_switch'
+    || originalMessage.state === 'streaming'
+  ) {
+    return null;
+  }
+
+  const presentationMessages = thread.messages.slice();
+  presentationMessages[targetIndex] = replacement;
+  const runtime: TransientAssistantRuntime = {
+    mode: {
+      kind: 'replace',
+      targetMessageId: originalMessage.id,
+      originalMessage,
     },
+    messageIndex: targetIndex,
+    durableMessages: thread.messages,
+    currentMessage: replacement,
+    presentationMessages,
+    presentationThread: createTransientPresentationThread(thread, presentationMessages),
     sourceThread: thread,
     progressRevision: 0,
     lastProgressPersistedAt: latestStreamingProgressPersistedAtById.get(thread.id) ?? 0,
@@ -1732,10 +1806,10 @@ function getTransientAssistantRuntime(
 
   if (runtime.sourceThread !== thread) {
     runtime.sourceThread = thread;
-    runtime.presentationThread = {
-      ...thread,
-      messages: runtime.presentationMessages,
-    };
+    runtime.presentationThread = createTransientPresentationThread(
+      thread,
+      runtime.presentationMessages,
+    );
   }
 
   return runtime;
@@ -2133,12 +2207,20 @@ export const useChatStore = create<ChatStoreState>()(
 
       finalizeAssistantTurn: (threadId, messageId, finalization) => {
         const existingThread = get().threads[threadId];
+        const existingRuntime = existingThread
+          ? getTransientAssistantRuntime(existingThread, messageId)
+          : null;
         const currentMessage = existingThread?.messages.at(-1);
         if (
           !existingThread
-          || currentMessage?.id !== messageId
-          || currentMessage.role !== 'assistant'
-          || currentMessage.state !== 'streaming'
+          || (
+            !existingRuntime
+            && (
+              currentMessage?.id !== messageId
+              || currentMessage.role !== 'assistant'
+              || currentMessage.state !== 'streaming'
+            )
+          )
         ) {
           return false;
         }
@@ -2166,6 +2248,12 @@ export const useChatStore = create<ChatStoreState>()(
               tokensPerSec: finalization.tokensPerSec ?? currentMessage.tokensPerSec,
               inferenceMetrics: finalization.inferenceMetrics ?? currentMessage.inferenceMetrics,
             };
+            const shouldRestoreReplacement = (
+              runtime.mode.kind === 'replace'
+              && finalization.outcome !== 'success'
+              && terminalFields.content.trim().length === 0
+              && (terminalFields.thoughtContent?.trim().length ?? 0) === 0
+            );
             const terminalMessage: ChatMessage = finalization.outcome === 'error'
               ? {
                   ...currentMessage,
@@ -2182,10 +2270,14 @@ export const useChatStore = create<ChatStoreState>()(
                   errorMessage: undefined,
                 };
             const nextMessages = durableThread.messages.slice();
-            nextMessages[nextMessages.length - 1] = terminalMessage;
-            const nextStatus: ChatThreadStatus = finalization.outcome === 'success'
-              ? 'idle'
-              : finalization.outcome;
+            if (!shouldRestoreReplacement) {
+              nextMessages[runtime.messageIndex] = terminalMessage;
+            }
+            const nextStatus: ChatThreadStatus = shouldRestoreReplacement
+              ? durableThread.status
+              : finalization.outcome === 'success'
+                ? 'idle'
+                : finalization.outcome;
             const nextThread = updateThreadMetadata({
               ...durableThread,
               messages: nextMessages,
@@ -2366,11 +2458,11 @@ export const useChatStore = create<ChatStoreState>()(
         };
         runtime.currentMessage = nextMessage;
         runtime.progressRevision += 1;
-        runtime.presentationMessages[runtime.presentationMessages.length - 1] = nextMessage;
-        runtime.presentationThread = {
-          ...existingThread,
-          messages: runtime.presentationMessages,
-        };
+        runtime.presentationMessages[runtime.messageIndex] = nextMessage;
+        runtime.presentationThread = createTransientPresentationThread(
+          existingThread,
+          runtime.presentationMessages,
+        );
         runtime.sourceThread = existingThread;
 
         chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
@@ -2386,53 +2478,37 @@ export const useChatStore = create<ChatStoreState>()(
           return null;
         }
 
-        const target = [...thread.messages].reverse().find((message) => message.role === 'assistant');
-        if (!target) {
+        const targetIndex = thread.messages.length - 1;
+        const target = thread.messages[targetIndex];
+        if (
+          !target
+          || target.role !== 'assistant'
+          || target.kind === 'model_switch'
+          || target.state === 'streaming'
+          || getTransientAssistantRuntime(thread) !== null
+        ) {
           return null;
         }
 
+        assertPrivateStorageWritable();
         const nextMessageId = createChatId('message');
-
-        setWhenPrivateStorageWritable((state) => {
-          const existingThread = state.threads[threadId];
-          if (!existingThread) {
-            return state;
-          }
-
-          const modelId = getThreadActiveModelId(existingThread);
-
-          const nextMessages = existingThread.messages.map((message): ChatMessage =>
-            message.id === target.id
-              ? {
-                  id: nextMessageId,
-                  role: 'assistant' as ChatMessageRole,
-                  content: '',
-                  thoughtContent: undefined,
-                  createdAt: Date.now(),
-                  state: 'streaming' as ChatMessageState,
-                  regeneratesMessageId: target.id,
-                  kind: 'message',
-                  modelId,
-                }
-              : message,
-          );
-
-          return {
-            threads: {
-              ...state.threads,
-              [threadId]: updateThreadMetadata({
-                ...existingThread,
-                messages: nextMessages,
-                status: 'generating',
-              }),
-            },
-          };
-        });
-
-        const nextThread = get().threads[threadId];
-        if (nextThread) {
-          createTransientAssistantRuntime(nextThread, nextMessageId);
+        const replacement: ChatMessage = {
+          id: nextMessageId,
+          role: 'assistant',
+          content: '',
+          thoughtContent: undefined,
+          createdAt: Math.max(Date.now(), target.createdAt),
+          state: 'streaming',
+          regeneratesMessageId: target.id,
+          kind: 'message',
+          modelId: getThreadActiveModelId(thread),
+        };
+        if (!createTransientReplacementRuntime(thread, targetIndex, replacement)) {
+          return null;
         }
+        set((state) => ({
+          streamingRevision: state.streamingRevision + 1,
+        }));
 
         return nextMessageId;
       },

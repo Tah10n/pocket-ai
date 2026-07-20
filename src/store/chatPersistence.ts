@@ -1058,8 +1058,13 @@ export function recoverChatThreadFromStreamingProgress(
     return { outcome: 'empty' };
   }
 
+  if (progress.regeneratesMessageId === progress.messageId) {
+    return { outcome: 'mismatched' };
+  }
+
   const matchingIndex = thread.messages.findIndex((message) => message.id === progress.messageId);
   const matchingMessage = matchingIndex >= 0 ? thread.messages[matchingIndex] : undefined;
+  let replacementTargetIndex = -1;
   if (matchingMessage) {
     if (
       matchingIndex !== thread.messages.length - 1
@@ -1067,8 +1072,28 @@ export function recoverChatThreadFromStreamingProgress(
       || (matchingMessage.state !== 'streaming' && matchingMessage.state !== 'stopped')
       || matchingMessage.createdAt !== progress.createdAt
       || (matchingMessage.modelId != null && matchingMessage.modelId !== progress.modelId)
+      || matchingMessage.regeneratesMessageId !== progress.regeneratesMessageId
     ) {
       return { outcome: 'mismatched' };
+    }
+  } else if (progress.regeneratesMessageId) {
+    replacementTargetIndex = thread.messages.findIndex(
+      (message) => message.id === progress.regeneratesMessageId,
+    );
+    const replacementTarget = replacementTargetIndex >= 0
+      ? thread.messages[replacementTargetIndex]
+      : undefined;
+    if (
+      !replacementTarget
+      || replacementTargetIndex !== thread.messages.length - 1
+      || replacementTarget.role !== 'assistant'
+      || replacementTarget.kind === 'model_switch'
+      || replacementTarget.state === 'streaming'
+    ) {
+      return { outcome: 'mismatched' };
+    }
+    if (progress.createdAt < replacementTarget.createdAt) {
+      return { outcome: 'stale' };
     }
   } else {
     const lastMessage = thread.messages.at(-1);
@@ -1098,7 +1123,11 @@ export function recoverChatThreadFromStreamingProgress(
   };
   const messages = matchingMessage
     ? thread.messages.map((message, index) => (index === matchingIndex ? recoveredMessage : message))
-    : [...thread.messages, recoveredMessage];
+    : replacementTargetIndex >= 0
+      ? thread.messages.map((message, index) => (
+          index === replacementTargetIndex ? recoveredMessage : message
+        ))
+      : [...thread.messages, recoveredMessage];
 
   return {
     outcome: 'recovered',

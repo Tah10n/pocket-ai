@@ -675,7 +675,6 @@ describe('chatPersistence', () => {
       messageId: 'assistant-progress',
       createdAt: 2,
       persistedAt: 11,
-      regeneratesMessageId: 'assistant-before-regeneration',
     });
 
     const recovered = recoverChatThreadFromStreamingProgress(thread, 10, progress, 20);
@@ -696,7 +695,6 @@ describe('chatPersistence', () => {
             thoughtContent: 'Partial reasoning',
             tokensPerSec: 12.5,
             state: 'stopped',
-            regeneratesMessageId: 'assistant-before-regeneration',
           }),
         ],
       }),
@@ -723,6 +721,137 @@ describe('chatPersistence', () => {
       21,
     );
     expect(replaced.outcome === 'recovered' ? replaced.thread.messages : []).toHaveLength(2);
+  });
+
+  it('recovers regenerated progress by replacing the original assistant answer', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-regenerated-progress'),
+      messages: [
+        {
+          id: 'user-before-regeneration',
+          role: 'user',
+          content: 'Regenerate the answer',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+        {
+          id: 'assistant-original',
+          role: 'assistant',
+          content: 'Original durable answer',
+          createdAt: 2,
+          state: 'complete',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'idle',
+    };
+    const progress = buildProgress(thread.id, {
+      messageId: 'assistant-regenerated',
+      createdAt: 3,
+      persistedAt: 11,
+      regeneratesMessageId: 'assistant-original',
+    });
+
+    const recovered = recoverChatThreadFromStreamingProgress(thread, 10, progress, 20);
+
+    expect(recovered).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        status: 'stopped',
+        messages: [
+          expect.objectContaining({
+            id: 'user-before-regeneration',
+            attachments: [copiedImageAttachment],
+          }),
+          expect.objectContaining({
+            id: 'assistant-regenerated',
+            content: 'Latest partial response',
+            state: 'stopped',
+            regeneratesMessageId: 'assistant-original',
+          }),
+        ],
+      }),
+    });
+    expect(recovered.outcome === 'recovered'
+      ? recovered.thread.messages.some((message) => message.id === 'assistant-original')
+      : true).toBe(false);
+  });
+
+  it('rejects stale regenerated progress targeting an unrelated or replaced message', () => {
+    const targetMessage = {
+      id: 'assistant-original',
+      role: 'assistant' as const,
+      content: 'Original durable answer',
+      createdAt: 2,
+      state: 'complete' as const,
+      modelId: 'author/model-q4',
+    };
+    const baseThread: ChatThread = {
+      ...buildThread('thread-regenerated-progress-rejected'),
+      messages: [targetMessage],
+      status: 'idle',
+    };
+    const progress = buildProgress(baseThread.id, {
+      messageId: 'assistant-regenerated',
+      createdAt: 3,
+      persistedAt: 11,
+      regeneratesMessageId: targetMessage.id,
+    });
+
+    expect(recoverChatThreadFromStreamingProgress(
+      { ...baseThread, messages: [] },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [
+          targetMessage,
+          {
+            id: 'unrelated-later-user',
+            role: 'user',
+            content: 'A later turn now owns the tail',
+            createdAt: 4,
+            state: 'complete',
+          },
+        ],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [{ ...targetMessage, role: 'user' }],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [{ ...targetMessage, createdAt: 4 }],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'stale' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [{
+          ...targetMessage,
+          id: progress.messageId,
+          createdAt: progress.createdAt,
+          state: 'stopped',
+          regeneratesMessageId: 'different-original',
+        }],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
   });
 
   it('refuses stale, terminal-conflicting, model-mismatched, and empty progress', () => {

@@ -51,11 +51,13 @@ invalidation, or diagnostics privacy.
 
 ### Stable history during streaming
 
-The durable thread contains the assistant placeholder and all historical messages. A
-transient runtime record owns the latest assistant content, reasoning content, token rate,
-and a stable presentation array. Updating a token changes only the transient assistant
-object and a streaming revision; it does not replace the durable thread, durable messages
-array, or historical message objects.
+For a new response, the durable thread contains the assistant placeholder and all
+historical messages. During regeneration, it instead retains the previous terminal
+assistant answer until terminal replacement succeeds. A transient runtime record owns the
+latest assistant content, reasoning content, token rate, replacement target, and a stable
+presentation array. Updating a token changes only the transient assistant object and a
+streaming revision; it does not replace the durable thread, durable messages array, or
+historical message objects.
 
 The truncation hook returns the last idle truncation state before building a new inference
 window when the thread is generating. The terminal transition invalidates that fast path
@@ -99,16 +101,18 @@ request cannot populate the cache for later work.
 ### Streaming persistence and recovery
 
 Streaming patches never enter durable-thread persistence. A debounced progress record
-contains only the active assistant output and the identity needed to match it to the
-durable placeholder. Background flush writes the latest progress immediately.
+contains only the active assistant output and the identity needed to match it to either
+the durable placeholder or the terminal assistant being regenerated. Background flush
+writes the latest progress immediately.
 
 Hydration applies a progress record only when it is valid, newer than the durable thread,
 and matches the thread. If an eligible assistant placeholder is present, its identity must
 also match. Empty streaming placeholders are intentionally omitted from durable records,
-so recovery may instead append the partial assistant as stopped when there is no newer or
-conflicting terminal assistant. Corrupt, stale, or mismatched progress is ignored and
-cleaned up. Thread deletion, retention cleanup, clear-all, and private-storage reset remove
-associated progress records.
+so ordinary recovery may instead append the partial assistant as stopped when there is no
+newer or conflicting terminal assistant. Regeneration progress must name the exact final
+assistant at the thread tail and replaces that target rather than appending a duplicate.
+Corrupt, stale, or mismatched progress is ignored and cleaned up. Thread deletion,
+retention cleanup, clear-all, and private-storage reset remove associated progress records.
 
 A terminal durable write happens before progress removal. If the durable write fails, the
 progress record remains available for recovery.

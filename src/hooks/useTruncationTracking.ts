@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { getThreadActiveModelId, type ChatThread, type LlmChatMessage } from '../types/chat';
 import { llmEngineService } from '../services/LLMEngineService';
 import { registry } from '../services/LocalStorageRegistry';
@@ -12,6 +12,13 @@ import {
 } from '../utils/inferenceWindow';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 import { performanceMonitor } from '../services/PerformanceMonitor';
+import { AppError } from '../services/AppError';
+import {
+  buildExactPromptTokenCacheKey,
+  buildPromptMultimodalReadinessIdentity,
+  exactPromptTokenCache,
+} from '../services/ExactPromptTokenCache';
+import { buildLlmInferenceMessagesSignature } from '../utils/llmInferenceMessageSignature';
 
 type TruncationState = ReturnType<typeof createTruncationState>;
 
@@ -19,6 +26,14 @@ const EMPTY_TRUNCATION_STATE: TruncationState = {
   truncatedMessageIds: [],
   shouldOfferSummary: false,
 };
+
+function subscribeToPromptContextIdentity(onStoreChange: () => void): () => void {
+  return llmEngineService.subscribe(() => onStoreChange());
+}
+
+function getPromptContextIdentitySnapshot(): string {
+  return llmEngineService.getPromptContextIdentity();
+}
 
 function computeHeuristicTruncationState(
   thread: ChatThread,
@@ -91,6 +106,11 @@ export function useTruncationTracking(
   activeThread: ChatThread | null,
   activeContextTokenBudget: number | undefined,
 ): TruncationState {
+  const promptContextIdentity = useSyncExternalStore(
+    subscribeToPromptContextIdentity,
+    getPromptContextIdentitySnapshot,
+    getPromptContextIdentitySnapshot,
+  );
   const modelRegistryRevision = useModelRegistryRevision();
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadStatus = activeThread?.status ?? null;
@@ -169,6 +189,7 @@ export function useTruncationTracking(
       activeThreadReasoningEnabled ? 1 : 0,
       activeThreadReasoningFormat,
       activeThreadModelId,
+      promptContextIdentity,
       activeThreadMultimodalReadiness?.modelId ?? null,
       activeThreadMultimodalReadiness?.status ?? null,
       activeThreadMultimodalReadiness?.projectorId ?? null,
@@ -207,19 +228,55 @@ export function useTruncationTracking(
       }
     };
 
-    const countPromptTokens = async (messages: LlmChatMessage[]) =>
-      llmEngineService.countPromptTokens({
-        messages: sanitizeTruncationProbeMessages(
-          messages,
+    const countPromptTokens = async (messages: LlmChatMessage[]) => {
+      throwIfCancelled();
+      const sanitizedMessages = sanitizeTruncationProbeMessages(
+        messages,
+        activeThreadMultimodalReadiness,
+        activeThreadModelId,
+      );
+      const promptTokenCacheKey = buildExactPromptTokenCacheKey({
+        contextIdentity: promptContextIdentity,
+        modelId: activeThreadModelId ?? 'none',
+        multimodalReadinessIdentity: buildPromptMultimodalReadinessIdentity(
           activeThreadMultimodalReadiness,
           activeThreadModelId,
         ),
-        params: tokenCountParams,
-        multimodalReadiness: activeThreadMultimodalReadiness,
-        expectedModelId: activeThreadModelId,
-        chatBlocking: false,
+        messageSignature: buildLlmInferenceMessagesSignature(sanitizedMessages),
+        enableThinking: tokenCountParams.enable_thinking,
+        reasoningFormat: tokenCountParams.reasoning_format,
         allowMediaFallback: true,
       });
+      const lookup = exactPromptTokenCache.getOrCreate(promptTokenCacheKey, () => {
+        throwIfCancelled();
+        return llmEngineService.countPromptTokens({
+          messages: sanitizedMessages,
+          params: tokenCountParams,
+          multimodalReadiness: activeThreadMultimodalReadiness,
+          expectedModelId: activeThreadModelId,
+          chatBlocking: false,
+          allowMediaFallback: true,
+        });
+      });
+      if (performanceMonitor.isEnabled()) {
+        performanceMonitor.incrementCounter(
+          lookup.hit ? 'chat.prompt.cache.hit' : 'chat.prompt.cache.miss',
+        );
+      }
+
+      let cacheOutcome: 'success' | 'discard' = 'discard';
+      try {
+        const tokens = await lookup.promise;
+        throwIfCancelled();
+        if (llmEngineService.getPromptContextIdentity() !== promptContextIdentity) {
+          throw new AppError('engine_not_ready', 'Engine context changed during prompt tokenization.');
+        }
+        cacheOutcome = 'success';
+        return tokens;
+      } finally {
+        lookup.release(cacheOutcome);
+      }
+    };
 
     const exactSpan = performanceMonitor.isEnabled()
       ? performanceMonitor.startSpan('chat.prompt.window.exact')
@@ -273,7 +330,7 @@ export function useTruncationTracking(
       isCancelled = true;
       exactSpan?.end({ outcome: 'cancelled' });
     };
-  }, [activeContextTokenBudget, activeThread, activeThreadModelId, activeThreadMultimodalReadiness, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
+  }, [activeContextTokenBudget, activeThread, activeThreadModelId, activeThreadMultimodalReadiness, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision, promptContextIdentity]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {

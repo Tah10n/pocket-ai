@@ -1,10 +1,11 @@
 import React, { useEffect } from 'react';
-import { render, waitFor } from '@testing-library/react-native';
+import { act, render, waitFor } from '@testing-library/react-native';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { useTruncationTracking } from '../../src/hooks/useTruncationTracking';
-import { type ChatThread } from '../../src/types/chat';
+import { type ChatThread, type LlmChatMessage } from '../../src/types/chat';
 import {
   buildInferenceWindowWithAccurateTokenCounts,
   createTruncationState,
@@ -27,6 +28,8 @@ jest.mock('../../src/hooks/useModelRegistryRevision', () => ({
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     countPromptTokens: jest.fn(),
+    getPromptContextIdentity: jest.fn(),
+    subscribe: jest.fn(),
   },
 }));
 
@@ -41,6 +44,8 @@ jest.mock('../../src/utils/inferenceWindow', () => {
 });
 
 describe('useTruncationTracking', () => {
+  let notifyEngineStateChange: (() => void) | undefined;
+
   function getMockModel(modelId: string) {
     if (modelId === 'author/model-q8') {
       return {
@@ -135,10 +140,26 @@ describe('useTruncationTracking', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (buildInferenceWindowWithAccurateTokenCounts as jest.Mock)
+      .mockReset()
+      .mockRejectedValue({ code: 'engine_busy' });
+    notifyEngineStateChange = undefined;
     performanceMonitor.clear();
     performanceMonitor.setEnabled(true);
+    exactPromptTokenCache.clear();
     (registry.getModel as jest.Mock).mockImplementation((modelId: string) => getMockModel(modelId));
     (llmEngineService.countPromptTokens as jest.Mock).mockResolvedValue(64);
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:1\u0001author/model-q4',
+    );
+    (llmEngineService.subscribe as jest.Mock).mockImplementation((listener: () => void) => {
+      notifyEngineStateChange = listener;
+      return () => {
+        if (notifyEngineStateChange === listener) {
+          notifyEngineStateChange = undefined;
+        }
+      };
+    });
   });
 
   it('uses the active thread model when computing truncation state', async () => {
@@ -160,6 +181,81 @@ describe('useTruncationTracking', () => {
       expect(hook.getState()).toEqual(expectedBaseState);
     });
     expect(registry.getModel).toHaveBeenCalledWith('author/model-q4');
+  });
+
+  it('recomputes accurate truncation after same-model context recreation without a thread rerender', async () => {
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    let probeRun = 0;
+    buildAccurateWindow.mockImplementation(async (
+      _thread: unknown,
+      _options: unknown,
+      countPromptTokens: (messages: LlmChatMessage[]) => Promise<number>,
+    ) => {
+      await countPromptTokens([{ role: 'user', content: 'Context identity probe' }]);
+      probeRun += 1;
+      const truncatedMessageIds = probeRun === 1
+        ? ['message-1']
+        : ['message-1', 'message-2'];
+      return { messages: [], promptTokens: 64, promptSafetyMarginTokens: 0, truncatedMessageIds };
+    });
+    const thread = buildThread('author/model-q4');
+    const hook = renderHookHarness(thread, 1600);
+
+    await waitFor(() => {
+      expect(hook.getState()).toEqual(createTruncationState(['message-1']));
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+    });
+
+    await act(async () => {
+      (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+        'context-generation:2\u0001author/model-q4',
+      );
+      notifyEngineStateChange?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(hook.getState()).toEqual(createTruncationState(['message-1', 'message-2']));
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('reuses exact passive probe counts when only thread metadata changes', async () => {
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    let probeRun = 0;
+    buildAccurateWindow.mockImplementation(async (
+      _thread: unknown,
+      _options: unknown,
+      countPromptTokens: (messages: LlmChatMessage[]) => Promise<number>,
+    ) => {
+      await countPromptTokens([{ role: 'user', content: 'Stable passive probe' }]);
+      probeRun += 1;
+      return {
+        messages: [],
+        promptTokens: 64,
+        promptSafetyMarginTokens: 0,
+        truncatedMessageIds: probeRun === 1 ? ['message-1'] : ['message-1', 'message-2'],
+      };
+    });
+    const thread = buildThread('author/model-q4');
+    const hook = renderHookHarness(thread, 1600);
+
+    await waitFor(() => {
+      expect(buildAccurateWindow).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+      expect(hook.getState()).toEqual(createTruncationState(['message-1']));
+    });
+
+    await act(async () => {
+      hook.rerender({ ...thread, updatedAt: thread.updatedAt + 1 }, 1600);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(buildAccurateWindow).toHaveBeenCalledTimes(2);
+      expect(hook.getState()).toEqual(createTruncationState(['message-1', 'message-2']));
+    });
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
   });
 
   it('marks passive accurate truncation probes as non-chat-blocking', async () => {

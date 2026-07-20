@@ -2,6 +2,11 @@ import { AppState, AppStateStatus } from 'react-native';
 import { useCallback, useEffect, useRef } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
+import {
+  buildExactPromptTokenCacheKey,
+  buildPromptMultimodalReadinessIdentity,
+  exactPromptTokenCache,
+} from '../services/ExactPromptTokenCache';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
@@ -66,7 +71,7 @@ import {
   validateChatDocumentAttachmentLimit,
   validateChatMediaAttachmentLimit,
 } from '../utils/chatAttachments';
-import { getLlmContentPartSignatureEntry } from '../utils/llmContentPartSignature';
+import { buildLlmInferenceMessagesSignature } from '../utils/llmInferenceMessageSignature';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -108,9 +113,16 @@ type PreparedInferenceRequest = {
   promptTokens: number;
   promptSafetyMarginTokens: number;
   modelId: string;
+  contextIdentity: string;
   messageSignature: string;
-  tokenCountSource: 'exact' | 'conservative';
+  tokenCountSource: 'exact' | 'conservative' | 'cache';
   attachmentResolution: PreparedAttachmentResolution;
+};
+
+type PromptTokenFormattingParams = {
+  enable_thinking: boolean;
+  reasoning_format: 'none' | 'auto' | 'deepseek';
+  add_generation_prompt?: boolean;
 };
 
 interface ActiveGenerationState {
@@ -137,19 +149,6 @@ const sharedGenerationState: { current: ActiveGenerationState | null } = {
   current: null,
 };
 
-function buildAttachmentReadinessIdentity(
-  readiness: MultimodalReadinessState | undefined,
-  expectedModelId: string | null,
-): string {
-  return [
-    expectedModelId,
-    readiness?.modelId ?? null,
-    readiness?.status ?? null,
-    readiness?.projectorId ?? null,
-    readiness?.support.join(',') ?? null,
-  ].join('\u0001');
-}
-
 function createPreparedAttachmentResolution(
   readiness: MultimodalReadinessState | undefined,
   expectedModelId: string | null,
@@ -157,7 +156,7 @@ function createPreparedAttachmentResolution(
   const fileResolutionByInputUri = new Map<string, Promise<AttachmentFileResolution>>();
   const fileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
   let cancellationCheck: () => void = () => undefined;
-  let readinessIdentity = buildAttachmentReadinessIdentity(readiness, expectedModelId);
+  let readinessIdentity = buildPromptMultimodalReadinessIdentity(readiness, expectedModelId);
   let uniqueFilesystemLookupCount = 0;
 
   return {
@@ -181,7 +180,7 @@ function createPreparedAttachmentResolution(
       cancellationCheck = check;
     },
     updateReadinessIdentity: (nextReadiness, nextExpectedModelId) => {
-      readinessIdentity = buildAttachmentReadinessIdentity(nextReadiness, nextExpectedModelId);
+      readinessIdentity = buildPromptMultimodalReadinessIdentity(nextReadiness, nextExpectedModelId);
     },
   };
 
@@ -764,54 +763,12 @@ function resolveExactMediaPromptRecountMarginTokens(messages: readonly LlmChatMe
   );
 }
 
-function getLlmInferenceMessageContentPartSignatureEntries(message: LlmChatMessage): string[] {
-  return message.contentParts?.map(getLlmContentPartSignatureEntry) ?? [];
-}
-
 function getLlmInferenceMessageContentPartMediaCount(message: LlmChatMessage): number {
   return message.contentParts?.filter((part) => part.type !== 'text').length ?? 0;
 }
 
 function getLlmInferenceMessageContentPartTextCount(message: LlmChatMessage): number {
   return message.contentParts?.filter((part) => part.type === 'text' && part.text.trim().length > 0).length ?? 0;
-}
-
-function buildLlmInferenceMessagesSignature(messages: readonly LlmChatMessage[]): string {
-  let hash = 2166136261;
-
-  for (const message of messages) {
-    hash = updateLlmInferenceSignatureHash(hash, message.role);
-    hash = updateLlmInferenceSignatureHash(hash, '\u0000');
-    hash = updateLlmInferenceSignatureHash(hash, String(message.content.length));
-    hash = updateLlmInferenceSignatureHash(hash, '\u0001');
-    hash = updateLlmInferenceSignatureHash(hash, message.content);
-    hash = updateLlmInferenceSignatureHash(hash, '\u0002');
-    const mediaPaths = getLlmInferenceMessageMediaPaths(message);
-    hash = updateLlmInferenceSignatureHash(hash, String(mediaPaths.length));
-    hash = updateLlmInferenceSignatureHash(hash, '\u0003');
-    for (const mediaPath of mediaPaths) {
-      hash = updateLlmInferenceSignatureHash(hash, mediaPath);
-      hash = updateLlmInferenceSignatureHash(hash, '\u0004');
-    }
-    const contentPartEntries = getLlmInferenceMessageContentPartSignatureEntries(message);
-    hash = updateLlmInferenceSignatureHash(hash, String(contentPartEntries.length));
-    hash = updateLlmInferenceSignatureHash(hash, '\u0005');
-    for (const contentPartEntry of contentPartEntries) {
-      hash = updateLlmInferenceSignatureHash(hash, contentPartEntry);
-      hash = updateLlmInferenceSignatureHash(hash, '\u0006');
-    }
-  }
-
-  return `${messages.length}:${hash.toString(36)}`;
-}
-
-function updateLlmInferenceSignatureHash(hash: number, value: string): number {
-  let nextHash = hash >>> 0;
-  for (let index = 0; index < value.length; index += 1) {
-    nextHash ^= value.charCodeAt(index);
-    nextHash = Math.imul(nextHash, 16777619) >>> 0;
-  }
-  return nextHash;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -1901,6 +1858,7 @@ export const useChatSession = () => {
         ?? createPreparedAttachmentResolution(effectiveMultimodalReadiness, activeModelId);
       attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
       attachmentResolution.setCancellationCheck(throwIfGenerationStopped);
+      const promptContextIdentity = llmEngineService.getPromptContextIdentity();
 
       await backgroundTaskService.startBackgroundInference(modelName);
 
@@ -1966,14 +1924,14 @@ export const useChatSession = () => {
       let messages: LlmChatMessage[] = [];
       let promptTokens = 0;
       let promptSafetyMarginTokens = 0;
-      const exactPromptTokenCache = new Map<string, Promise<number>>();
-      let selectedTokenCountParams = {
+      let selectedTokenCountParams: PromptTokenFormattingParams = {
         enable_thinking: reasoningRuntimeConfig.enableThinking,
         reasoning_format: reasoningRuntimeConfig.reasoningFormat,
       };
       let didUseHeuristicPromptTokens = false;
       let didUseEstimatedMediaPromptTokens = false;
       const preparedMessagesBySignature = new Map<string, Promise<LlmChatMessage[]>>();
+      const tokenCountSourceByCacheKey = new Map<string, 'exact' | 'cache'>();
 
       const resolvePreparedMessages = (windowMessages: LlmChatMessage[]) => {
         throwIfGenerationStopped();
@@ -2005,24 +1963,28 @@ export const useChatSession = () => {
 
       const buildPromptTokenCacheKey = (
         messagesToCount: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-      ) => [
-        params.enable_thinking ? 'thinking' : 'plain',
-        params.reasoning_format,
-        buildLlmInferenceMessagesSignature(messagesToCount),
-      ].join('\u0001');
+        params: PromptTokenFormattingParams,
+      ) => buildExactPromptTokenCacheKey({
+        contextIdentity: promptContextIdentity,
+        modelId: activeModelId,
+        multimodalReadinessIdentity: attachmentResolution.readinessIdentity,
+        messageSignature: buildLlmInferenceMessagesSignature(messagesToCount),
+        enableThinking: params.enable_thinking,
+        reasoningFormat: params.reasoning_format,
+        addGenerationPrompt: params.add_generation_prompt,
+      });
+      const resolvePromptTokenMessages = (messagesToCount: LlmChatMessage[]) => messagesToCount.map((message) => (
+        resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
+      ));
       const countExactPromptTokens = async (
         messagesToCount: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-        options: { bypassCache?: boolean } = {},
+        params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
-        const sanitizedMessagesToCount = messagesToCount.map((message) => (
-          resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
-        ));
+        const sanitizedMessagesToCount = resolvePromptTokenMessages(messagesToCount);
         const cacheKey = buildPromptTokenCacheKey(sanitizedMessagesToCount, params);
-        let cachedCount = options.bypassCache ? undefined : exactPromptTokenCache.get(cacheKey);
-        if (!cachedCount) {
+        const lookup = exactPromptTokenCache.getOrCreate(cacheKey, () => {
+          throwIfGenerationStopped();
           const tokenizeSpan = performanceMonitor.isEnabled()
             ? performanceMonitor.startSpan('chat.prompt.tokenize')
             : null;
@@ -2032,31 +1994,37 @@ export const useChatSession = () => {
             multimodalReadiness: effectiveMultimodalReadiness,
             expectedModelId: activeModelId,
           });
-          cachedCount = tokenizeSpan
+          return tokenizeSpan
             ? tokenCountPromise.then((tokens) => {
                 tokenizeSpan.end({ outcome: 'success' });
                 return tokens;
               }).catch((error) => {
                 tokenizeSpan.end({ outcome: 'error' });
-                exactPromptTokenCache.delete(cacheKey);
                 throw error;
               })
-            : tokenCountPromise.catch((error) => {
-                exactPromptTokenCache.delete(cacheKey);
-                throw error;
-              });
-          exactPromptTokenCache.set(cacheKey, cachedCount);
+            : tokenCountPromise;
+        });
+        tokenCountSourceByCacheKey.set(cacheKey, lookup.hit ? 'cache' : 'exact');
+        if (performanceMonitor.isEnabled()) {
+          performanceMonitor.incrementCounter(
+            lookup.hit ? 'chat.prompt.cache.hit' : 'chat.prompt.cache.miss',
+          );
         }
 
-        const tokens = await cachedCount;
-        throwIfGenerationStopped();
-        return tokens;
+        let cacheOutcome: 'success' | 'discard' = 'discard';
+        try {
+          const tokens = await lookup.promise;
+          throwIfGenerationStopped();
+          cacheOutcome = 'success';
+          return tokens;
+        } finally {
+          lookup.release(cacheOutcome);
+        }
       };
 
       const countResolvedPromptTokens = async (
         resolvedWindowMessages: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-        options: { bypassCache?: boolean } = {},
+        params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
 
@@ -2067,7 +2035,7 @@ export const useChatSession = () => {
           try {
             textOnlyPromptTokens = await countExactPromptTokens(textOnlyMessages, params);
           } catch {
-            return countExactPromptTokens(resolvedWindowMessages, params, options);
+            return countExactPromptTokens(resolvedWindowMessages, params);
           }
 
           didUseEstimatedMediaPromptTokens = true;
@@ -2075,12 +2043,12 @@ export const useChatSession = () => {
           return textOnlyPromptTokens + estimateLlmInferenceMediaPromptTokens(resolvedWindowMessages);
         }
 
-        return countExactPromptTokens(resolvedWindowMessages, params, options);
+        return countExactPromptTokens(resolvedWindowMessages, params);
       };
 
       const countPromptTokens = async (
         windowMessages: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+        params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
         const resolvedWindowMessages = await resolvePreparedMessages(windowMessages);
@@ -2160,7 +2128,11 @@ export const useChatSession = () => {
         const preparedMessages = await resolvePreparedMessages(messages);
         throwIfGenerationStopped();
         const messageSignature = buildLlmInferenceMessagesSignature(preparedMessages);
-        const finalPromptTokenCacheKey = buildPromptTokenCacheKey(preparedMessages, selectedTokenCountParams);
+        const finalPromptTokenMessages = resolvePromptTokenMessages(preparedMessages);
+        const finalPromptTokenCacheKey = buildPromptTokenCacheKey(
+          finalPromptTokenMessages,
+          selectedTokenCountParams,
+        );
 
         const nonSystemMessages = preparedMessages.filter((message) => message.role !== 'system');
         const lastNonSystemRole = nonSystemMessages.length > 0
@@ -2173,19 +2145,18 @@ export const useChatSession = () => {
         let tokenCountSource: PreparedInferenceRequest['tokenCountSource'] =
           didUseHeuristicPromptTokens || didUseEstimatedMediaPromptTokens
             ? 'conservative'
-            : 'exact';
+            : (tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact');
         let availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
         if (
           !didUseHeuristicPromptTokens
           && didUseEstimatedMediaPromptTokens
           && getLlmInferenceMessagesMediaPaths(preparedMessages).length > 0
           && availablePredictTokens <= resolveExactMediaPromptRecountMarginTokens(preparedMessages)
-          && !exactPromptTokenCache.has(finalPromptTokenCacheKey)
         ) {
           throwIfGenerationStopped();
           promptTokens = await countExactPromptTokens(preparedMessages, selectedTokenCountParams);
           throwIfGenerationStopped();
-          tokenCountSource = 'exact';
+          tokenCountSource = tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact';
           availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
         }
 
@@ -2204,6 +2175,7 @@ export const useChatSession = () => {
           promptTokens,
           promptSafetyMarginTokens,
           modelId: activeModelId,
+          contextIdentity: promptContextIdentity,
           messageSignature,
           tokenCountSource,
           attachmentResolution,
@@ -2241,6 +2213,13 @@ export const useChatSession = () => {
           sendOutcomeNotificationOnce('interrupted');
         }
         return;
+      }
+
+      if (llmEngineService.getPromptContextIdentity() !== preparedRequest.contextIdentity) {
+        throw new AppError(
+          'engine_not_ready',
+          'The model context changed while preparing the prompt. Try again.',
+        );
       }
 
       if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {

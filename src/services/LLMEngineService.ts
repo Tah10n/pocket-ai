@@ -7,6 +7,7 @@ import type {
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import { hardwareListenerService } from './HardwareListenerService';
+import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import {
   EngineBackendMode,
   type EngineBackendInitAttempt,
@@ -1058,6 +1059,7 @@ class LLMEngineService {
     }
     this.context = context;
     this.contextGeneration += 1;
+    exactPromptTokenCache.clear();
     this.additionalStopWordsCache.clear();
   }
 
@@ -3438,6 +3440,20 @@ class LLMEngineService {
 
   public getState(): EngineState {
     return this.state;
+  }
+
+  /**
+   * Read-only identity for the native context that owns chat formatting and
+   * tokenization. It changes on every context replacement, including same-model
+   * reloads, without exposing the mutable native context itself.
+   */
+  public getPromptContextIdentity(): string {
+    return [
+      `generation:${this.contextGeneration}`,
+      `model:${this.state.activeModelId ?? 'none'}`,
+      `context:${this.context ? 'loaded' : 'none'}`,
+      `status:${this.state.status}`,
+    ].join('\u0001');
   }
 
   public getContextSize(): number {

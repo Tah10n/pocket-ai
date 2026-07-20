@@ -36,11 +36,14 @@ import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDr
 import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/multimodal';
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
+    subscribe: jest.fn(() => () => undefined),
     getState: jest.fn(),
+    getPromptContextIdentity: jest.fn(),
     getContextSize: jest.fn(),
     getLastCompletionTelemetry: jest.fn(),
     chatCompletion: jest.fn(),
@@ -155,6 +158,7 @@ describe('useChatSession', () => {
     jest.clearAllMocks();
     performanceMonitor.clear();
     performanceMonitor.setEnabled(true);
+    exactPromptTokenCache.clear();
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',
@@ -196,6 +200,9 @@ describe('useChatSession', () => {
       status: EngineStatus.READY,
       activeModelId: 'author/model-q4',
     });
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:1\u0001author/model-q4',
+    );
     (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
     (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(null);
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
@@ -401,9 +408,281 @@ describe('useChatSession', () => {
       );
       expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
       expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments/image.jpg');
+
+      const tokenizerCallsAfterRejectedEntry = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+      await act(async () => {
+        await getSession()?.regenerateLastResponse();
+      });
+
+      expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.length).toBeGreaterThan(
+        tokenizerCallsAfterRejectedEntry,
+      );
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2);
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('reuses exact prompt counts for identical regeneration and misses after context recreation', async () => {
+    registry.saveModels([{
+      id: 'author/model-q4',
+      name: 'Qwen3-4B-Instruct-GGUF',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      downloadUrl: 'https://example.com/author/model-q4.gguf',
+      localPath: 'author-model-q4.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      modelType: 'qwen3',
+      tags: ['gguf', 'chat'],
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: true,
+        canDisableThinking: true,
+      },
+    }]);
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 512,
+      reasoningEffort: 'off',
+    }));
+    const getSession = renderHookHarness();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    const getGenerationTokenCountCallCount = () => (
+      (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+        .filter(([call]) => call.chatBlocking !== false).length
+    );
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Cache this exact prompt');
+    });
+
+    const callsAfterFirstRequest = getGenerationTokenCountCallCount();
+    expect(callsAfterFirstRequest).toBeGreaterThan(0);
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(getGenerationTokenCountCallCount()).toBe(callsAfterFirstRequest);
+    const cacheHitSnapshot = performanceMonitor.snapshot();
+    expect(cacheHitSnapshot.counters).toEqual(expect.objectContaining({
+      'chat.prompt.cache.hit': expect.any(Number),
+      'chat.prompt.cache.miss': expect.any(Number),
+    }));
+    expect(cacheHitSnapshot.events.some((event) => (
+      event.name === 'chat.prompt.total'
+      && event.meta?.outcome === 'success'
+      && event.meta?.tokenCountSource === 'cache'
+    ))).toBe(true);
+    expect(JSON.stringify(cacheHitSnapshot)).not.toContain('Cache this exact prompt');
+
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:2\u0001author/model-q4',
+    );
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsAfterFirstRequest,
+    );
+
+    const threadAfterContextMiss = useChatStore.getState().getActiveThread();
+    expect(threadAfterContextMiss).toBeTruthy();
+    const callsBeforeSystemPromptChange = getGenerationTokenCountCallCount();
+    act(() => {
+      useChatStore.getState().updateThreadPresetSnapshot(
+        threadAfterContextMiss!.id,
+        'preset-cache-system-change',
+        {
+          id: 'preset-cache-system-change',
+          name: 'Detailed Assistant',
+          systemPrompt: 'Answer with deliberate detail.',
+        },
+      );
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.presetSnapshot.systemPrompt).toBe('Answer with deliberate detail.');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsBeforeSystemPromptChange,
+    );
+
+    const callsBeforeSummaryChange = getGenerationTokenCountCallCount();
+    act(() => {
+      useChatStore.getState().setThreadSummary(threadAfterContextMiss!.id, {
+        content: 'The user asked about exact token caching.',
+        createdAt: Date.now(),
+        sourceMessageIds: [threadAfterContextMiss!.messages[0]!.id],
+      });
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.summary?.content).toBe('The user asked about exact token caching.');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsBeforeSummaryChange,
+    );
+
+    const threadWithSummary = useChatStore.getState().getActiveThread();
+    const callsBeforeReasoningChange = getGenerationTokenCountCallCount();
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 1024,
+      reasoningEffort: 'medium',
+    });
+    act(() => {
+      useChatStore.getState().updateThreadParamsSnapshot(threadWithSummary!.id, {
+        ...threadWithSummary!.paramsSnapshot,
+        reasoningEffort: 'medium',
+      });
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.paramsSnapshot.reasoningEffort).toBe('medium');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsBeforeReasoningChange,
+    );
+
+    const callsBeforeModelSwitch = getGenerationTokenCountCallCount();
+    act(() => {
+      (llmEngineService.getState as jest.Mock).mockReturnValue({
+        status: EngineStatus.READY,
+        activeModelId: 'author/model-q8',
+      });
+      (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+        'context-generation:3\u0001author/model-q8',
+      );
+      useChatStore.getState().switchThreadModel(threadWithSummary!.id, 'author/model-q8', Date.now());
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.activeModelId).toBe('author/model-q8');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(callsBeforeModelSwitch);
+  });
+
+  it('misses the exact prompt cache when a prepared attachment identity changes', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    registry.saveModels([{
+      id: 'author/model-q4',
+      name: 'Vision Model',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      downloadUrl: 'https://example.com/author/model-q4.gguf',
+      localPath: 'author-model-q4.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      tags: ['gguf', 'chat', 'vision'],
+      multimodalReadiness: readyVision,
+    }]);
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 512,
+      reasoningEffort: 'off',
+    });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(1600);
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => (
+        messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100
+      ),
+    );
+    const getSession = renderHookHarness();
+    const getGenerationTokenCountCallCount = () => (
+      (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+        .filter(([call]) => call.chatBlocking !== false).length
+    );
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    const callsAfterFirstRequest = getGenerationTokenCountCallCount();
+    expect(callsAfterFirstRequest).toBeGreaterThan(0);
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBe(callsAfterFirstRequest);
+
+    const activeThread = useChatStore.getState().getActiveThread();
+    const userMessage = activeThread?.messages.find((message) => message.role === 'user');
+    const changedAttachmentUri = 'test-dir/chat-attachments/draft-image-2.jpg';
+    expect(activeThread).toBeTruthy();
+    expect(userMessage?.attachments).toHaveLength(1);
+    act(() => {
+      useChatStore.setState((state) => {
+        const currentThread = state.threads[activeThread!.id]!;
+        return {
+          threads: {
+            ...state.threads,
+            [currentThread.id]: {
+              ...currentThread,
+              updatedAt: currentThread.updatedAt + 1,
+              messages: currentThread.messages.map((message) => (
+                message.id === userMessage!.id
+                  ? {
+                      ...message,
+                      attachments: message.attachments?.map((attachment) => ({
+                        ...attachment,
+                        localUri: changedAttachmentUri,
+                      })),
+                    }
+                  : message
+              )),
+            },
+          },
+        };
+      });
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.messages
+        .find((message) => message.id === userMessage!.id)
+        ?.attachments?.[0]?.localUri).toBe(changedAttachmentUri);
+    });
+
+    const nativeCallIndexBeforeAttachmentChange = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(getGenerationTokenCountCallCount()).toBe(callsAfterFirstRequest + 1);
+    const changedAttachmentCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+      .slice(nativeCallIndexBeforeAttachmentChange)
+      .filter(([call]) => call.chatBlocking !== false);
+    expect(changedAttachmentCalls).toHaveLength(1);
+    expect(changedAttachmentCalls[0]?.[0].messages.some((message: any) => (
+      message.mediaPaths?.includes(changedAttachmentUri)
+    ))).toBe(true);
   });
 
   it('persists copied image attachments on the user message and passes media paths to inference', async () => {

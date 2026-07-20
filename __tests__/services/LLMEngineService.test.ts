@@ -11,6 +11,7 @@ import { createStorage } from '../../src/services/storage';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../../src/utils/memoryFit';
@@ -386,6 +387,41 @@ describe('LLMEngineService', () => {
       'llama.attention.head_count': 32,
       'llama.embedding_length': 4096,
     });
+  });
+
+  it('changes the prompt context identity for context recreation and model switches', () => {
+    const service = llmEngineService as any;
+    const previousContext = service.context;
+    const previousState = service.state;
+
+    try {
+      service.state = {
+        ...previousState,
+        status: EngineStatus.READY,
+        activeModelId: 'test/model',
+      };
+      service.setContext({ id: 'context-a' });
+      const firstIdentity = llmEngineService.getPromptContextIdentity();
+      exactPromptTokenCache.getOrCreate('stale-context-entry', async () => 11);
+      expect(exactPromptTokenCache.snapshot().entryCount).toBe(1);
+
+      service.setContext({ id: 'context-b' });
+      const recreatedIdentity = llmEngineService.getPromptContextIdentity();
+
+      service.state = {
+        ...service.state,
+        activeModelId: 'other/model',
+      };
+      const switchedIdentity = llmEngineService.getPromptContextIdentity();
+
+      expect(typeof firstIdentity).toBe('string');
+      expect(recreatedIdentity).not.toBe(firstIdentity);
+      expect(switchedIdentity).not.toBe(recreatedIdentity);
+      expect(exactPromptTokenCache.snapshot()).toEqual({ entryCount: 0, approxBytes: 0 });
+    } finally {
+      service.state = previousState;
+      service.setContext(previousContext);
+    }
   });
 
   it('forwards structured messages to llama.rn completion', async () => {

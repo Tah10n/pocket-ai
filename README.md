@@ -175,6 +175,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
+| [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
 | [Android Build Guide](docs/android-build.md) | Android release signing and bundling |
 | [iOS Build Guide](docs/ios-build.md) | iOS archive, distribution, and signing |
 | [UI Architecture](docs/ui-architecture.md) | Component and layout guidelines |

@@ -107,7 +107,9 @@ type AttachmentFileResolver = (localUri: string) => Promise<AttachmentFileResolu
 type PreparedAttachmentResolution = {
   readonly readinessIdentity: string;
   readonly uniqueFilesystemLookupCount: number;
+  readonly finalFilesystemLookupCount: number;
   resolveFile: AttachmentFileResolver;
+  resolveFileForFinalValidation: AttachmentFileResolver;
   setCancellationCheck: (check: () => void) => void;
   updateReadinessIdentity: (
     readiness: MultimodalReadinessState | undefined,
@@ -163,9 +165,11 @@ function createPreparedAttachmentResolution(
 ): PreparedAttachmentResolution {
   const fileResolutionByInputUri = new Map<string, Promise<AttachmentFileResolution>>();
   const fileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
+  const finalFileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
   let cancellationCheck: () => void = () => undefined;
   let readinessIdentity = buildPromptMultimodalReadinessIdentity(readiness, expectedModelId);
   let uniqueFilesystemLookupCount = 0;
+  let finalFilesystemLookupCount = 0;
 
   return {
     get readinessIdentity() {
@@ -173,6 +177,9 @@ function createPreparedAttachmentResolution(
     },
     get uniqueFilesystemLookupCount() {
       return uniqueFilesystemLookupCount;
+    },
+    get finalFilesystemLookupCount() {
+      return finalFilesystemLookupCount;
     },
     resolveFile: (localUri) => {
       cancellationCheck();
@@ -183,6 +190,26 @@ function createPreparedAttachmentResolution(
       const resolution = resolvePreparedAttachmentFile(localUri);
       fileResolutionByInputUri.set(localUri, resolution);
       return resolution;
+    },
+    resolveFileForFinalValidation: (localUri) => {
+      cancellationCheck();
+      const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
+      if (!normalizedUri) {
+        return Promise.resolve({ normalizedUri: null, exists: false });
+      }
+
+      let lookup = finalFileExistenceByNormalizedUri.get(normalizedUri);
+      if (!lookup) {
+        finalFilesystemLookupCount += 1;
+        lookup = (async () => {
+          const exists = await doesChatAttachmentFileExist(normalizedUri);
+          cancellationCheck();
+          return exists;
+        })();
+        finalFileExistenceByNormalizedUri.set(normalizedUri, lookup);
+      }
+
+      return lookup.then((exists) => ({ normalizedUri, exists }));
     },
     setCancellationCheck: (check) => {
       cancellationCheck = check;
@@ -1681,7 +1708,11 @@ export const useChatSession = () => {
           promptPreparationSpan.end({
             outcome,
             tokenCountSource: preparedRequest?.tokenCountSource,
-            attachmentLookups: preparedRequest?.attachmentResolution.uniqueFilesystemLookupCount,
+            attachmentLookups: preparedRequest
+              ? preparedRequest.attachmentResolution.uniqueFilesystemLookupCount
+                + preparedRequest.attachmentResolution.finalFilesystemLookupCount
+              : undefined,
+            finalAttachmentRechecks: preparedRequest?.attachmentResolution.finalFilesystemLookupCount,
           });
         }
       : null;
@@ -2137,61 +2168,93 @@ export const useChatSession = () => {
         : null;
       let preparedRequest: PreparedInferenceRequest;
       try {
+        const buildPreparedRequest = async (
+          preparedMessages: LlmChatMessage[],
+          resolvedPromptTokens: number,
+        ): Promise<PreparedInferenceRequest> => {
+          const messageSignature = buildLlmInferenceMessagesSignature(preparedMessages);
+          const finalPromptTokenMessages = resolvePromptTokenMessages(preparedMessages);
+          const finalPromptTokenCacheKey = buildPromptTokenCacheKey(
+            finalPromptTokenMessages,
+            selectedTokenCountParams,
+          );
+
+          const nonSystemMessages = preparedMessages.filter((message) => message.role !== 'system');
+          const lastNonSystemRole = nonSystemMessages.length > 0
+            ? nonSystemMessages[nonSystemMessages.length - 1]?.role
+            : null;
+          if (lastNonSystemRole !== 'user') {
+            throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE);
+          }
+
+          let finalPromptTokens = resolvedPromptTokens;
+          let tokenCountSource: PreparedInferenceRequest['tokenCountSource'] =
+            didUseHeuristicPromptTokens || didUseEstimatedMediaPromptTokens
+              ? 'conservative'
+              : (tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact');
+          let availablePredictTokens = maxContextSize - finalPromptTokens - promptSafetyMarginTokens;
+          if (
+            !didUseHeuristicPromptTokens
+            && didUseEstimatedMediaPromptTokens
+            && getLlmInferenceMessagesMediaPaths(preparedMessages).length > 0
+            && availablePredictTokens <= resolveExactMediaPromptRecountMarginTokens(preparedMessages)
+          ) {
+            throwIfGenerationStopped();
+            finalPromptTokens = await countExactPromptTokens(preparedMessages, selectedTokenCountParams);
+            throwIfGenerationStopped();
+            tokenCountSource = tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact';
+            availablePredictTokens = maxContextSize - finalPromptTokens - promptSafetyMarginTokens;
+          }
+
+          if (availablePredictTokens <= 0) {
+            throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE, {
+              details: {
+                maxContextSize,
+                promptTokens: finalPromptTokens,
+                promptSafetyMarginTokens,
+              },
+            });
+          }
+
+          return {
+            messages: preparedMessages,
+            promptTokens: finalPromptTokens,
+            promptSafetyMarginTokens,
+            modelId: activeModelId,
+            contextIdentity: promptContextIdentity,
+            messageSignature,
+            tokenCountSource,
+            attachmentResolution,
+          };
+        };
+
         const preparedMessages = await resolvePreparedMessages(messages);
         throwIfGenerationStopped();
-        const messageSignature = buildLlmInferenceMessagesSignature(preparedMessages);
-        const finalPromptTokenMessages = resolvePromptTokenMessages(preparedMessages);
-        const finalPromptTokenCacheKey = buildPromptTokenCacheKey(
-          finalPromptTokenMessages,
-          selectedTokenCountParams,
-        );
+        preparedRequest = await buildPreparedRequest(preparedMessages, promptTokens);
 
-        const nonSystemMessages = preparedMessages.filter((message) => message.role !== 'system');
-        const lastNonSystemRole = nonSystemMessages.length > 0
-          ? nonSystemMessages[nonSystemMessages.length - 1]?.role
-          : null;
-        if (lastNonSystemRole !== 'user') {
-          throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE);
-        }
-
-        let tokenCountSource: PreparedInferenceRequest['tokenCountSource'] =
-          didUseHeuristicPromptTokens || didUseEstimatedMediaPromptTokens
-            ? 'conservative'
-            : (tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact');
-        let availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
-        if (
-          !didUseHeuristicPromptTokens
-          && didUseEstimatedMediaPromptTokens
-          && getLlmInferenceMessagesMediaPaths(preparedMessages).length > 0
-          && availablePredictTokens <= resolveExactMediaPromptRecountMarginTokens(preparedMessages)
-        ) {
+        const latestPreparedUserMessageIndex = getLatestUserLlmMessageIndex(preparedRequest.messages);
+        const latestPreparedUserMessage = preparedRequest.messages[latestPreparedUserMessageIndex];
+        if (latestPreparedUserMessage?.attachments?.length) {
+          const revalidatedLatestUserMessage = await resolveLlmMessageAttachmentsForInference(
+            latestPreparedUserMessage,
+            true,
+            latestUserMessageId,
+            attachmentResolution.resolveFileForFinalValidation,
+            effectiveMultimodalReadiness,
+            activeModelId,
+          );
           throwIfGenerationStopped();
-          promptTokens = await countExactPromptTokens(preparedMessages, selectedTokenCountParams);
-          throwIfGenerationStopped();
-          tokenCountSource = tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact';
-          availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
-        }
 
-        if (availablePredictTokens <= 0) {
-          throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE, {
-            details: {
-              maxContextSize,
-              promptTokens,
-              promptSafetyMarginTokens,
-            },
-          });
+          if (revalidatedLatestUserMessage !== latestPreparedUserMessage) {
+            const revalidatedMessages = [...preparedRequest.messages];
+            revalidatedMessages[latestPreparedUserMessageIndex] = revalidatedLatestUserMessage;
+            const revalidatedPromptTokens = didUseHeuristicPromptTokens
+              ? estimateLlmMessagesTokens(revalidatedMessages)
+              : await countResolvedPromptTokens(revalidatedMessages, selectedTokenCountParams);
+            throwIfGenerationStopped();
+            preparedRequest = await buildPreparedRequest(revalidatedMessages, revalidatedPromptTokens);
+          }
         }
-
-        preparedRequest = {
-          messages: preparedMessages,
-          promptTokens,
-          promptSafetyMarginTokens,
-          modelId: activeModelId,
-          contextIdentity: promptContextIdentity,
-          messageSignature,
-          tokenCountSource,
-          attachmentResolution,
-        };
       } finally {
         finalizationSpan?.end();
       }
@@ -2258,6 +2321,11 @@ export const useChatSession = () => {
           reasoning_format: reasoningFormatForRequest,
         },
         onToken: (token) => {
+          const isStreamingTraceEnabled = performanceMonitor.isEnabled();
+          if (isStreamingTraceEnabled) {
+            performanceMonitor.incrementCounter('chat.stream.nativeCallback');
+          }
+
           if (!canMutateAssistantMessage()) {
             return;
           }
@@ -2296,6 +2364,9 @@ export const useChatSession = () => {
             }
           }
 
+          if (isStreamingTraceEnabled) {
+            performanceMonitor.incrementCounter('chat.stream.presentation');
+          }
           tokensCount += 1;
           scheduleAssistantPatch({
             sentenceBoundary:

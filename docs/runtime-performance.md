@@ -65,9 +65,13 @@ and performs one fresh calculation.
 
 One generation request owns its attachment existence resolver and prepared message set.
 Token counting, prompt-window selection, and completion reuse that prepared payload. A
-stable retained URI is checked once per request. Cancellation checks remain between
-preparation stages, and a final file check is reserved for a real time-of-check/time-of-use
-boundary rather than repeated unconditionally.
+stable retained URI from earlier history is checked once per request. The newest user
+message is the only unstable attachment identity: when it still contributes attachments
+to inference, each unique URI receives one dedicated uncached check at the final
+time-of-check/time-of-use boundary before native completion. That check does not walk the
+rest of history. A changed identity rebuilds the prepared message and its token budget;
+a missing file fails with the normal latest-attachment error before the native call.
+Cancellation checks remain between preparation stages.
 
 The prompt preparation trace is split into:
 
@@ -142,9 +146,12 @@ attempt may fall back to the same base profile without MTP once; it does not mak
 attempt an unlimited retry path. Existing model-load progress throttling remains separate
 from retry selection.
 
+`model.init.total` spans cover the complete initialization lifecycle.
 `model.init.attempt` spans and marks record normalized backend/profile fields, duration,
-outcome, probable-OOM state, and a bounded failure category. Model paths and raw native
-errors are not trace metadata.
+outcome, probable-OOM state, and a bounded failure category. The
+`model.init.profileSkipped` counter covers guarded or unavailable profiles, while
+`model.init.profileDuplicate` is the subset rejected as an exact attempt duplicate. Model
+paths and raw native errors are not trace metadata.
 
 ## Catalog request ownership
 
@@ -193,10 +200,10 @@ Important trace families include:
 | Family | What it establishes |
 |---|---|
 | `chat.prompt.*` | Attachment, tokenization, window, and final preparation stages |
-| `chat.stream.patch` and `chat.stream.historyTraversal` | Streaming patch count and accidental history traversal |
+| `chat.stream.nativeCallback`, `chat.stream.presentation`, `chat.stream.patch`, and `chat.stream.historyTraversal` | Native callbacks, parser applications, streaming patches, and accidental history traversal |
 | `chat.persist.*` | Sanitization, serialization, storage writes, bytes, progress, and terminal writes |
 | `chat.turn.*` | Terminal mutation and persistence-transaction counts |
-| `model.init.attempt` | Bounded model-load attempt sequence and sanitized outcomes |
+| `model.init.total`, `model.init.attempt`, `model.init.profileSkipped`, and `model.init.profileDuplicate` | Total load lifecycle, bounded attempt sequence, guarded skips, and duplicate rejection |
 | `catalog.search.*` | Per-session lifecycle and cancellation reason |
 | `catalog.resource.*` | Shared request count, deduplication, and consumer detach |
 | `catalog.deferredMetadata.batch` | Bounded deferred-metadata batch work |
@@ -213,7 +220,7 @@ characters instead of wall-clock thresholds.
 | Area | Earlier cost or risk | Current deterministic proof |
 |---|---|---|
 | Truncation display | The inference window could be built before the generating-state fast return | 100 patches in a 1,000-message thread add 0 `getThreadInferenceWindow` calls; terminal state adds 1 |
-| Attachment preparation | Token counting and final completion could resolve the same retained URI in separate phases | A retained URI is checked once and the completion payload matches the token-counted prepared payload |
+| Attachment preparation | Token counting and final completion could resolve the same retained history repeatedly or use a newly missing file | Stable retained history is checked once; only the latest attachment receives one final TOCTOU recheck, and deletion before completion prevents the native call |
 | Prompt tokenization | Identical work in a later generation could call the native tokenizer again | Concurrent and settled identical keys produce 1 native count; every context/format/media identity change is a miss |
 | Streaming state | Every patch replaced the thread/messages path | 100 patches retain the durable thread, messages array, presentation array, and all 1,000 historical objects |
 | Streaming persistence | A streaming flush could sanitize and serialize the full thread | 100 patches produce 0 durable sanitizations, 0 durable stringifications, and 0 durable thread writes; background flush writes 1 bounded progress record |

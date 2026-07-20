@@ -4154,7 +4154,7 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
   });
 
-  it('emits complete sanitized model.init.attempt telemetry for one MTP fallback', async () => {
+  it('emits complete sanitized model init telemetry for one MTP fallback', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 2048,
@@ -4174,15 +4174,29 @@ describe('LLMEngineService', () => {
 
     performanceMonitor.setEnabled(true);
     let attemptEvents: ReturnType<typeof performanceMonitor.snapshot>['events'] = [];
+    let totalEvents: ReturnType<typeof performanceMonitor.snapshot>['events'] = [];
     try {
       await llmEngineService.load('test/model', { forceReload: true });
-      attemptEvents = performanceMonitor.snapshot().events
+      const traceSnapshot = performanceMonitor.snapshot();
+      attemptEvents = traceSnapshot.events
         .filter((event) => event.name === 'model.init.attempt');
+      totalEvents = traceSnapshot.events
+        .filter((event) => event.name === 'model.init.total');
     } finally {
       performanceMonitor.setEnabled(false);
     }
 
     expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
+    expect(totalEvents).toEqual([
+      expect.objectContaining({
+        type: 'span',
+        durationMs: expect.any(Number),
+        meta: {
+          modelId: 'test/model',
+          outcome: 'success',
+        },
+      }),
+    ]);
     expect(attemptEvents).toHaveLength(2);
     expect(attemptEvents[0]).toEqual(expect.objectContaining({
       type: 'span',
@@ -4234,6 +4248,60 @@ describe('LLMEngineService', () => {
         outcome: 'success',
       }),
     ]);
+  });
+
+  it('counts an effective duplicate as both a skipped and duplicate model init profile', async () => {
+    getBackendDevicesInfoMock().mockResolvedValueOnce([]);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'live-sha',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      backendPolicy: 'auto',
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    writeAutotuneResult({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      modelSha256: 'live-sha',
+      backendDiscoveryKnown: true,
+      bestStable: {
+        backendMode: 'cpu',
+        nGpuLayers: 0,
+      },
+      candidates: [
+        {
+          profile: { backendMode: 'cpu', nGpuLayers: 0 },
+          success: true,
+          tokensPerSec: 10,
+          actualBackendMode: 'cpu',
+          actualGpuAccelerated: false,
+        },
+      ],
+    });
+    (llamaRn.initLlama as jest.Mock).mockRejectedValue(new Error('CPU init failed'));
+
+    performanceMonitor.setEnabled(true);
+    try {
+      const thrown = await llmEngineService.load('test/model', { forceReload: true })
+        .catch((error) => error);
+
+      expect(thrown).toEqual(expect.objectContaining({ code: 'model_load_failed' }));
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+      expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+        'model.init.profileSkipped': 1,
+        'model.init.profileDuplicate': 1,
+      }));
+    } finally {
+      performanceMonitor.setEnabled(false);
+    }
   });
 
   it('retries a pre-stream MTP completion once with speculative decoding disabled', async () => {
@@ -5228,7 +5296,14 @@ describe('LLMEngineService', () => {
       androidLib: 'libOpenCL.so',
     }));
 
-    await llmEngineService.load('test/model', { forceReload: true });
+    performanceMonitor.setEnabled(true);
+    let initCounters: ReturnType<typeof performanceMonitor.snapshot>['counters'] = {};
+    try {
+      await llmEngineService.load('test/model', { forceReload: true });
+      initCounters = performanceMonitor.snapshot().counters;
+    } finally {
+      performanceMonitor.setEnabled(false);
+    }
 
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
       backendMode: 'gpu',
@@ -5241,6 +5316,9 @@ describe('LLMEngineService', () => {
         expect.objectContaining({ candidate: 'npu', outcome: 'skipped' }),
         expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: true }),
       ]),
+    }));
+    expect(initCounters).toEqual(expect.objectContaining({
+      'model.init.profileSkipped': 1,
     }));
   });
 

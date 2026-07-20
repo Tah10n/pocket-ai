@@ -715,7 +715,7 @@ describe('useChatSession', () => {
     ))).toBe(true);
   });
 
-  it('persists copied image attachments on the user message and passes media paths to inference', async () => {
+  it('persists copied image attachments and revalidates the latest file before inference', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
       modelId: 'author/model-q4',
@@ -781,7 +781,7 @@ describe('useChatSession', () => {
     expect(generationCountCalls.some(([call]) => (
       call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
     ))).toBe(false);
-    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
     expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-image-1.jpg');
   });
 
@@ -931,6 +931,48 @@ describe('useChatSession', () => {
     ))).toBe(true);
     expect(JSON.stringify(performanceSnapshot)).not.toContain('test-dir/chat-attachments');
     expect(completionCall?.params.n_predict).toBe(1024);
+  });
+
+  it('rejects a latest attachment removed after tokenization before native completion starts', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    let attachmentExists = true;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async () => ({
+      exists: attachmentExists,
+      size: 123_456,
+    }));
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => {
+        attachmentExists = false;
+        return estimateLlmMessagesTokens(messages as any);
+      },
+    );
+
+    let thrown: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Describe this image', {
+          attachmentDrafts: [copiedDraftImageAttachment],
+          multimodalReadiness: readyVision,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'chat_attachment_missing' }));
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.map(([uri]) => uri)).toEqual([
+      copiedDraftImageAttachment.localUri,
+      copiedDraftImageAttachment.localUri,
+    ]);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
   });
 
   it('stops attachment preparation without starting further tokenizer or completion work', async () => {
@@ -2128,6 +2170,10 @@ describe('useChatSession', () => {
         state: 'complete',
       }),
     );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.stream.nativeCallback': 4,
+      'chat.stream.presentation': 4,
+    }));
   });
 
   it('recovers final content from a reasoning-only accumulated snapshot', async () => {
@@ -3403,7 +3449,7 @@ describe('useChatSession', () => {
           ]),
         }),
       );
-      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
       expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(copiedDraftImageAttachment.localUri);
     } finally {
       replaceLastAssistantSpy.mockRestore();

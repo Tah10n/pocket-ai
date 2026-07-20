@@ -4776,6 +4776,8 @@ class LLMEngineService {
     resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null,
     projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map(),
   ): Promise<void> {
+    const initTotalSpan = performanceMonitor.startSpan('model.init.total', { modelId });
+    let initTotalOutcome: 'success' | 'error' = 'error';
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
     const nativeLogs: { level: string; text: string }[] = [];
     let nativeLogListener: { remove: () => void } | null = null;
@@ -5625,6 +5627,7 @@ class LLMEngineService {
         failureCategory: 'backend_unavailable' | 'known_oom_upper_bound' | 'attempt_limit',
         probableOom = false,
       ) => {
+        performanceMonitor.incrementCounter('model.init.profileSkipped');
         const speculativeEnabled = speculativeDecodingForLoad !== null;
         const attempt = createInitAttemptRecord({
           profile,
@@ -5834,6 +5837,10 @@ class LLMEngineService {
             allowBeyondLimit: allowBeyondAttemptLimit,
           });
           if (decision !== 'started') {
+            if (decision === 'duplicate') {
+              performanceMonitor.incrementCounter('model.init.profileSkipped');
+              performanceMonitor.incrementCounter('model.init.profileDuplicate');
+            }
             if (decision === 'known_oom_upper_bound' || decision === 'attempt_limit') {
               recordSkippedInitAttempt(
                 { ...profile, nGpuLayers: normalizedAttemptLayers, profileSource },
@@ -6549,6 +6556,7 @@ class LLMEngineService {
       if (shouldProbeThinkingCapability && shouldLaunchThinkingProbe) {
         this.launchThinkingCapabilityProbe(modelId);
       }
+      initTotalOutcome = 'success';
     } catch (error) {
       const baseError = toAppError(error, 'model_load_failed');
       const extraDetails: Record<string, unknown> = {
@@ -6645,6 +6653,7 @@ class LLMEngineService {
       }
 
       this.initPromise = null;
+      initTotalSpan.end({ outcome: initTotalOutcome });
     }
   }
 

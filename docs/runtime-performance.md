@@ -24,6 +24,8 @@ invalidation, or diagnostics privacy.
   input have the same identity.
 - Streaming progress is stored separately from the durable thread and is removed only
   after a successful terminal commit.
+- Editing or regenerating an earlier user turn keeps the complete old branch durable until
+  recoverable replacement output exists and the replacement can be committed atomically.
 - Success, stop, and error finalization update the message, metrics, and thread state in
   one store mutation and one logical persistence transaction.
 - Reasoning presentation parses normal delta streams in linear total character work.
@@ -40,6 +42,7 @@ invalidation, or diagnostics privacy.
 | Inference request preparation | [`useChatSession.ts`](../src/hooks/useChatSession.ts) | Resolve attachments and final messages once per request |
 | Exact prompt counts | [`ExactPromptTokenCache.ts`](../src/services/ExactPromptTokenCache.ts) | Bounded LRU keyed by context and formatting identity |
 | Transient assistant output | [`chatStore.ts`](../src/store/chatStore.ts) | Keep durable history stable during token patches |
+| Branch replacement | [`chatBranchReplacement.ts`](../src/store/chatBranchReplacement.ts) | Build and validate one canonical replacement plan for presentation, recovery, and terminal commit |
 | Streaming crash recovery | [`chatPersistence.ts`](../src/store/chatPersistence.ts) | Persist a bounded progress record, not the full thread |
 | Terminal state | [`chatStore.ts`](../src/store/chatStore.ts) | One atomic terminal mutation and persistence transaction |
 | Reasoning presentation | [`chatPresentation.ts`](../src/utils/chatPresentation.ts) | Incremental delta parser with explicit snapshot resynchronization |
@@ -51,6 +54,7 @@ invalidation, or diagnostics privacy.
 
 ### Stable history during streaming
 
+Both a direct assistant response and branch regeneration use transient assistant state.
 For a new response, the durable thread contains the assistant placeholder and all
 historical messages. During regeneration, it instead retains the previous terminal
 assistant answer until terminal replacement succeeds. A transient runtime record owns the
@@ -62,6 +66,61 @@ historical message objects.
 The truncation hook returns the last idle truncation state before building a new inference
 window when the thread is generating. The terminal transition invalidates that fast path
 and performs one fresh calculation.
+
+### Crash-consistent branch replacement
+
+Editing an earlier user message or regenerating after a trailing model switch uses a
+`BranchReplacementPlan`. The plan identifies the target user turn, preserves its supported
+attachments and content parts, captures the currently selected model parameters, inserts
+the one model-switch marker required by the surviving prefix, and clears any summary that
+described the discarded tail. The same canonical builder materializes the presented
+branch, a recovered partial branch, and every terminal branch outcome, so those paths
+cannot disagree about ordering, model metadata, title derivation, or summary removal.
+
+The store runtime mode is `replace_branch`. Starting it does not truncate or rewrite the
+durable thread. The old branch, its persistence timestamp, commit revision, message array,
+and message objects remain unchanged while prompt preparation runs and until output is
+recoverable. The UI reads a transient presentation containing the edited user turn and an
+empty streaming assistant. A token patch replaces only that assistant slot and retains the
+presentation array and every prefix object by reference; it does not sanitize, stringify,
+or persist the complete thread.
+
+The active model's current generation parameters are copied into the plan. Branch startup
+does not first synchronize those parameters into the durable thread. This avoids a
+pre-output thread or index write while ensuring presentation, recovery, and terminal
+commit all use the parameters that prepared the request.
+
+After partial output, the separate bounded progress envelope adds only the replacement
+metadata needed for recovery:
+
+- target user ID and creation timestamp;
+- base durable `persistedAt` and optional commit revision;
+- sanitized replacement user message and optional model-switch marker;
+- bounded generation-parameter snapshot;
+- transient assistant output and the existing stream identity fields.
+
+It does not copy the old tail or complete thread. Hydration accepts the envelope only when
+the durable record still has the exact base identity and target user. A missing thread, a
+clear tombstone, a newer durable mutation, malformed metadata, or a mismatched target makes
+the progress orphaned or stale; it is discarded without resurrecting or rewriting history.
+Valid partial output is materialized as a stopped branch and durably committed before the
+progress record is removed.
+
+Success, partial stop, and partial error each materialize and persist the full replacement
+in one store mutation and one logical transaction. Success, stop, or error before output
+restores the semantic old branch without a durable thread or index write when no progress
+has been persisted. If recoverable progress was persisted and later cleared, the old branch
+is recommitted with a newer durable identity before that stale progress is removed. If a
+terminal or recovery write fails, the durable old branch remains authoritative and the
+progress record remains available for a later recovery attempt; the store does not expose
+an uncommitted recovered branch. Late callbacks are rejected after replacement, deletion,
+clear-all, or a newer runtime revision.
+
+Attachments belonging only to the discarded tail are cleanup candidates, but deletion is
+deferred until the replacement has been committed successfully. A failed or empty
+replacement therefore keeps every old attachment recoverable. Cleanup runs once after a
+successful terminal or recovery commit and still preserves references shared by surviving
+messages.
 
 ### Prepared inference requests
 
@@ -237,6 +296,7 @@ characters instead of wall-clock thresholds.
 | Prompt tokenization | Identical work in a later generation could call the native tokenizer again | Concurrent and settled identical keys produce 1 native count; every context/format/media identity change is a miss |
 | Streaming state | Every patch replaced the thread/messages path | 100 patches retain the durable thread, messages array, presentation array, and all 1,000 historical objects |
 | Streaming persistence | A streaming flush could sanitize and serialize the full thread | 100 patches produce 0 durable sanitizations, 0 durable stringifications, and 0 durable thread writes; background flush writes 1 bounded progress record |
+| Branch replacement | Editing an earlier turn durably removed the old tail before the first replacement token | Over 1,000 messages, 100 replacement patches retain the durable thread, durable message array, presentation array, and surviving prefix objects; they perform 0 full-thread sanitizations/stringifications/writes, and one flush writes one bounded progress record |
 | Terminal state | Content, metrics, and status could settle through separate mutations | Success/stop/error use 1 store mutation and 1 logical terminal persistence transaction, with stale-ID and idempotency checks |
 | Reasoning parsing | Each callback could rescan accumulated output | Delta streams and 256 prefix-growing native content snapshots report processed characters exactly equal to final input length; an explicit replacement adds its length once |
 | Model initialization | Duplicate or known-bad accelerator profiles could be retried | Candidate keys are unique, GPU layers descend, known OOM upper bounds are skipped, and CPU fallback remains |

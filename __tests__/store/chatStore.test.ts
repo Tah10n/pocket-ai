@@ -11,12 +11,18 @@ import {
   CHAT_PERSISTENCE_INDEX_KEY,
   CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
   CHAT_PERSISTENCE_SCHEMA_VERSION,
+  CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+  getChatStreamingProgressStorageKey,
   getChatThreadStorageKey,
+  readChatStreamingProgressRecord,
+  readChatThreadRecord,
+  writeChatStreamingProgressRecord,
   writeChatPendingIndexCommit,
   writeChatPersistenceIndex,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
 import { getAppStorage, storage } from '../../src/store/storage';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
@@ -4298,6 +4304,453 @@ describe('chatStore', () => {
     ]);
   });
 
+  it('keeps 100 streaming patches over 1000 messages free of durable sanitize and serialization work', () => {
+    jest.useFakeTimers();
+    const durableThread = buildPerformanceThread({
+      historicalMessageCount: 1000,
+      attachments: 'mixed',
+      modelSwitchEvery: 125,
+    });
+    const messageId = 'assistant-progress-1000';
+    const streamingThread: ChatThread = {
+      ...durableThread,
+      messages: [
+        ...durableThread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: durableThread.updatedAt + 1,
+          state: 'streaming',
+          kind: 'message',
+          modelId: durableThread.activeModelId,
+        },
+      ],
+      status: 'generating',
+    };
+    writeChatThreadRecord(storage, durableThread, durableThread.updatedAt);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: durableThread.id,
+      threadIds: [durableThread.id],
+      updatedAt: durableThread.updatedAt,
+    });
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(streamingThread.id));
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
+
+    try {
+      for (let index = 1; index <= 100; index += 1) {
+        useChatStore.getState().patchAssistantMessage(streamingThread.id, messageId, {
+          content: `Latest bounded output ${index}`,
+          thoughtContent: `Reasoning ${index}`,
+          tokensPerSec: index,
+          state: 'streaming',
+        });
+      }
+
+      expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+        'chat.stream.patch': 100,
+      }));
+      expect(performanceMonitor.snapshot().counters['chat.persist.sanitize'] ?? 0).toBe(0);
+      expect(performanceMonitor.snapshot().counters['chat.persist.stringify'] ?? 0).toBe(0);
+      expect(storage.getString(getChatThreadStorageKey(streamingThread.id))).toBe(durableRecordBefore);
+
+      flushPendingChatPersistenceWrites('background');
+
+      const snapshot = performanceMonitor.snapshot();
+      const progressRaw = storage.getString(getChatStreamingProgressStorageKey(streamingThread.id));
+      expect(snapshot.counters['chat.persist.sanitize'] ?? 0).toBe(0);
+      expect(snapshot.counters['chat.persist.stringify']).toBe(1);
+      expect(snapshot.counters['chat.persist.streaming']).toBe(1);
+      expect(snapshot.events.filter((event) => event.name === 'chat.persist.stringify')).toEqual([
+        expect.objectContaining({ meta: { recordKind: 'progress' } }),
+      ]);
+      expect(storage.getString(getChatThreadStorageKey(streamingThread.id))).toBe(durableRecordBefore);
+      expect(progressRaw).not.toContain('Deterministic user message');
+      expect(progressRaw?.length ?? Number.MAX_SAFE_INTEGER).toBeLessThan(1_000);
+      expect(readChatStreamingProgressRecord(storage, streamingThread.id)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          messageId,
+          content: 'Latest bounded output 100',
+          thoughtContent: 'Reasoning 100',
+          tokensPerSec: 100,
+          revision: 100,
+          state: 'streaming',
+        }),
+      });
+    } finally {
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+      useChatStore.getState().stopAssistantMessage(streamingThread.id, messageId);
+      jest.useRealTimers();
+    }
+  });
+
+  it('recovers newer bounded progress as stopped and preserves durable attachments and history', async () => {
+    const threadId = 'thread-progress-hydration';
+    const attachment = buildStoredAttachment(threadId, 'user-1', 'recovery-kept.jpg');
+    const durableThread: ChatThread = {
+      ...buildThread(threadId, 10),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt before process death',
+          createdAt: 10,
+          state: 'complete',
+          attachments: [attachment],
+        },
+      ],
+      updatedAt: 10,
+      status: 'idle',
+    };
+    writeChatThreadRecord(storage, durableThread, 100);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: threadId,
+      threadIds: [threadId],
+      updatedAt: 100,
+    });
+    writeChatStreamingProgressRecord(storage, {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+      threadId,
+      messageId: 'assistant-recovered',
+      modelId: 'author/model-q4',
+      createdAt: 11,
+      content: 'Recovered partial answer',
+      thoughtContent: 'Recovered thought',
+      tokensPerSec: 9.5,
+      state: 'streaming',
+      persistedAt: 101,
+      revision: 7,
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(threadId)).toEqual(expect.objectContaining({
+      status: 'stopped',
+      messages: [
+        expect.objectContaining({
+          id: 'user-1',
+          attachments: [attachment],
+        }),
+        expect.objectContaining({
+          id: 'assistant-recovered',
+          content: 'Recovered partial answer',
+          thoughtContent: 'Recovered thought',
+          tokensPerSec: 9.5,
+          state: 'stopped',
+        }),
+      ],
+    }));
+    expect(storage.getString(getChatStreamingProgressStorageKey(threadId))).toBeUndefined();
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toContain('Recovered partial answer');
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toContain('recovery-kept.jpg');
+  });
+
+  it('refreshes progress after an unrelated durable thread mutation during generation', async () => {
+    const durableThread = buildThread('thread-progress-rename', 10);
+    const messageId = 'assistant-progress-rename';
+    const streamingThread: ChatThread = {
+      ...durableThread,
+      messages: [
+        ...durableThread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: 11,
+          state: 'streaming',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'generating',
+    };
+    writeChatThreadRecord(storage, durableThread, 10);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: durableThread.id,
+      threadIds: [durableThread.id],
+      updatedAt: 10,
+    });
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+    useChatStore.getState().patchAssistantMessage(streamingThread.id, messageId, {
+      content: 'Partial survives rename',
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    expect(useChatStore.getState().renameThread(streamingThread.id, 'Renamed while generating')).toBe(true);
+
+    const durableRecord = readChatThreadRecord(storage, streamingThread.id);
+    const progressRecord = readChatStreamingProgressRecord(storage, streamingThread.id);
+    expect(durableRecord.ok).toBe(true);
+    expect(progressRecord.ok).toBe(true);
+    expect(progressRecord.ok && durableRecord.ok
+      ? progressRecord.value.persistedAt
+      : 0).toBeGreaterThan(durableRecord.ok ? durableRecord.value.persistedAt : Number.MAX_SAFE_INTEGER);
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(streamingThread.id)).toEqual(expect.objectContaining({
+      title: 'Renamed while generating',
+      status: 'stopped',
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: messageId,
+          content: 'Partial survives rename',
+          state: 'stopped',
+        }),
+      ]),
+    }));
+  });
+
+  it('recovers progress when process death interrupts a nonterminal durable mutation', async () => {
+    const threadId = 'thread-progress-interrupted-mutation';
+    const durableThread = buildThread(threadId, 10);
+    const renamedThread: ChatThread = {
+      ...durableThread,
+      title: 'Renamed before process death',
+      titleSource: 'manual',
+      updatedAt: 20,
+    };
+    writeChatThreadRecord(storage, durableThread, 90, { commitRevision: 1 });
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: threadId,
+      threadIds: [threadId],
+      updatedAt: 90,
+      revision: 1,
+    });
+
+    // This is the on-disk state after progress and the changed thread were
+    // written, but before the pending mutation could publish its index.
+    writeChatStreamingProgressRecord(storage, {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+      threadId,
+      messageId: 'assistant-interrupted-mutation',
+      modelId: 'author/model-q4',
+      createdAt: 11,
+      content: 'Partial survives interrupted rename',
+      state: 'streaming',
+      persistedAt: 101,
+      revision: 4,
+    });
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 2,
+      activeThreadId: threadId,
+      threadIds: [threadId],
+      updatedAt: 100,
+      reason: 'thread_mutation',
+      changedThreadIds: [threadId],
+      requiresChangedThreadCommitRevision: true,
+    });
+    writeChatThreadRecord(storage, renamedThread, 100, { commitRevision: 2 });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(threadId))).toBeUndefined();
+    expect(useChatStore.getState().getThread(threadId)).toEqual(expect.objectContaining({
+      title: 'Renamed before process death',
+      status: 'stopped',
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'assistant-interrupted-mutation',
+          content: 'Partial survives interrupted rename',
+          state: 'stopped',
+        }),
+      ]),
+    }));
+  });
+
+  it('clears corrupt and terminal-conflicting progress without overriding durable answers', async () => {
+    const terminalThread: ChatThread = {
+      ...buildThread('thread-terminal-progress', 10),
+      messages: [
+        {
+          id: 'assistant-terminal',
+          role: 'assistant',
+          content: 'Durable final answer',
+          createdAt: 11,
+          state: 'complete',
+          modelId: 'author/model-q4',
+        },
+      ],
+    };
+    const corruptThread = buildThread('thread-corrupt-progress', 20);
+    writeChatThreadRecord(storage, terminalThread, 100);
+    writeChatThreadRecord(storage, corruptThread, 100);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: terminalThread.id,
+      threadIds: [terminalThread.id, corruptThread.id],
+      updatedAt: 100,
+    });
+    writeChatStreamingProgressRecord(storage, {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+      threadId: terminalThread.id,
+      messageId: 'assistant-terminal',
+      modelId: 'author/model-q4',
+      createdAt: 11,
+      content: 'Stale partial must not win',
+      state: 'streaming',
+      persistedAt: 101,
+      revision: 3,
+    });
+    storage.set(getChatStreamingProgressStorageKey(corruptThread.id), '{broken progress');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(terminalThread.id)?.messages).toEqual([
+      expect.objectContaining({ content: 'Durable final answer', state: 'complete' }),
+    ]);
+    expect(useChatStore.getState().getThread(corruptThread.id)).not.toBeNull();
+    expect(storage.getString(getChatStreamingProgressStorageKey(terminalThread.id))).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(corruptThread.id))).toBeUndefined();
+  });
+
+  it('removes progress on retention cleanup, delete, clear, and private-storage reset', () => {
+    const now = 20 * 24 * 60 * 60 * 1_000;
+    const oldThread = buildThread('thread-progress-expired', 1);
+    const activeThread = buildThread('thread-progress-active', now);
+    const withPlaceholder = (thread: ChatThread, messageId: string): ChatThread => ({
+      ...thread,
+      messages: [
+        ...thread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: thread.updatedAt + 1,
+          state: 'streaming',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'generating',
+    });
+    const oldStreaming = withPlaceholder(oldThread, 'assistant-old');
+    const activeStreaming = withPlaceholder(activeThread, 'assistant-active');
+    useChatStore.setState({
+      threads: {
+        [oldStreaming.id]: oldStreaming,
+        [activeStreaming.id]: activeStreaming,
+      },
+      activeThreadId: activeStreaming.id,
+    });
+    useChatStore.getState().patchAssistantMessage(oldStreaming.id, 'assistant-old', { content: 'Old partial' });
+    useChatStore.getState().patchAssistantMessage(activeStreaming.id, 'assistant-active', { content: 'Active partial' });
+    flushPendingChatPersistenceWrites('background');
+
+    expect(useChatStore.getState().pruneExpiredThreads(7, now)).toBe(1);
+    expect(storage.getString(getChatStreamingProgressStorageKey(oldStreaming.id))).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(activeStreaming.id))).toContain('Active partial');
+
+    useChatStore.getState().deleteThread(activeStreaming.id);
+    expect(storage.getString(getChatStreamingProgressStorageKey(activeStreaming.id))).toBeUndefined();
+
+    storage.set(getChatStreamingProgressStorageKey('orphan-clear'), JSON.stringify({ orphan: true }));
+    expect(useChatStore.getState().clearAllThreads()).toBe(0);
+    expect(storage.getString(getChatStreamingProgressStorageKey('orphan-clear'))).toBeUndefined();
+
+    storage.set(getChatStreamingProgressStorageKey('orphan-reset'), JSON.stringify({ orphan: true }));
+    resetChatStoreForPrivateStorageReset();
+    expect(storage.getString(getChatStreamingProgressStorageKey('orphan-reset'))).toBeUndefined();
+  });
+
+  it('retains latest progress when a terminal durable commit fails', () => {
+    const thread = buildThread('thread-progress-terminal-failure', 10);
+    const messageId = 'assistant-terminal-failure';
+    const streamingThread: ChatThread = {
+      ...thread,
+      messages: [
+        ...thread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: 11,
+          state: 'streaming',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'generating',
+    };
+    writeChatThreadRecord(storage, thread, 10);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+      updatedAt: 10,
+    });
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+    useChatStore.getState().patchAssistantMessage(thread.id, messageId, {
+      content: 'Partial that must survive',
+      thoughtContent: 'Reasoning that must survive',
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated terminal thread write failure');
+    let failed = false;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (
+        !failed
+        && key === getChatThreadStorageKey(thread.id)
+        && typeof value === 'string'
+        && value.includes('Final answer that fails')
+      ) {
+        failed = true;
+        throw writeError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => useChatStore.getState().finalizeAssistantMessage(
+        thread.id,
+        messageId,
+        'Final answer that fails',
+      )).toThrow(writeError);
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        messageId,
+        content: 'Partial that must survive',
+        thoughtContent: 'Reasoning that must survive',
+      }),
+    });
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(expect.objectContaining({
+      id: messageId,
+      content: 'Partial that must survive',
+      state: 'streaming',
+    }));
+
+    useChatStore.getState().stopAssistantMessage(thread.id, messageId);
+  });
+
   it('debounces streaming patches to the active thread without rewriting unrelated records', () => {
     jest.useFakeTimers();
     const activeThread = {
@@ -4378,9 +4831,11 @@ describe('chatStore', () => {
 
     jest.advanceTimersByTime(749);
     expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(activeThread.id))).toBeUndefined();
 
     flushPendingChatPersistenceWrites('background');
-    expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toContain('Streaming token');
+    expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(activeThread.id))).toContain('Streaming token');
     expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
     expect(storage.getString(getChatThreadStorageKey(secondArchivedThread.id))).toBe(secondArchivedRecordBefore);
 
@@ -4391,6 +4846,7 @@ describe('chatStore', () => {
     );
 
     expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toContain('Final answer');
+    expect(storage.getString(getChatStreamingProgressStorageKey(activeThread.id))).toBeUndefined();
     expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
     expect(storage.getString(getChatThreadStorageKey(secondArchivedThread.id))).toBe(secondArchivedRecordBefore);
     jest.useRealTimers();

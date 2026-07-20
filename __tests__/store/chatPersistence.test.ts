@@ -2,17 +2,26 @@ import {
   CHAT_PERSISTENCE_INDEX_KEY,
   CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
   CHAT_PERSISTENCE_SCHEMA_VERSION,
+  CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
   type ChatPersistencePendingIndexCommit,
+  type ChatStreamingProgressRecord,
+  clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,
+  getChatStreamingProgressStorageKey,
   getChatThreadStorageKey,
+  getThreadIdFromChatStreamingProgressStorageKey,
   getThreadIdFromChatThreadStorageKey,
+  parseChatStreamingProgressRecord,
   parseChatPersistenceIndex,
   parseChatPendingIndexCommit,
   parseChatThreadRecord,
+  readChatStreamingProgressRecord,
+  recoverChatThreadFromStreamingProgress,
   recoverStaleStreamingThread,
   sanitizeChatThreadForPersistence,
   writeChatPendingIndexCommit,
   writeChatPersistenceIndex,
+  writeChatStreamingProgressRecord,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
 import { storage } from '../../src/store/storage';
@@ -62,6 +71,26 @@ function buildThread(id: string): ChatThread {
   };
 }
 
+function buildProgress(
+  threadId: string,
+  overrides: Partial<ChatStreamingProgressRecord> = {},
+): ChatStreamingProgressRecord {
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+    threadId,
+    messageId: `${threadId}-assistant-progress`,
+    modelId: 'author/model-q4',
+    createdAt: 2,
+    content: 'Latest partial response',
+    thoughtContent: 'Partial reasoning',
+    tokensPerSec: 12.5,
+    state: 'streaming',
+    persistedAt: 20,
+    revision: 3,
+    ...overrides,
+  };
+}
+
 describe('chatPersistence', () => {
   beforeEach(() => {
     storage.getAllKeys().forEach((key) => storage.remove(key));
@@ -80,6 +109,60 @@ describe('chatPersistence', () => {
     expect(getThreadIdFromChatThreadStorageKey(key)).toBe(threadId);
     expect(getThreadIdFromChatThreadStorageKey('other:key')).toBeNull();
     expect(getThreadIdFromChatThreadStorageKey('chat-store:v2:thread:%E0%A4%A')).toBeNull();
+  });
+
+  it('encodes progress keys and parses only bounded streaming progress envelopes', () => {
+    const threadId = 'model/thread id/with spaces';
+    const progress = buildProgress(threadId);
+    const key = getChatStreamingProgressStorageKey(threadId);
+
+    expect(key).toBe('chat-store:progress:model%2Fthread%20id%2Fwith%20spaces');
+    expect(getThreadIdFromChatStreamingProgressStorageKey(key)).toBe(threadId);
+    expect(getThreadIdFromChatStreamingProgressStorageKey('chat-store:progress:%E0%A4%A')).toBeNull();
+    expect(parseChatStreamingProgressRecord(JSON.stringify(progress), threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({ ...progress, threadId: 'other' }), threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_shape',
+    });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({ ...progress, revision: -1 }), threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_shape',
+    });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      persistedAt: Number.MAX_VALUE,
+    }), threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_shape',
+    });
+    expect(parseChatStreamingProgressRecord('{broken', threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_json',
+    });
+  });
+
+  it('rejects stale progress writes by message revision and replaces them for a newer turn', () => {
+    const first = buildProgress('thread-progress', { revision: 5, persistedAt: 50 });
+    expect(writeChatStreamingProgressRecord(storage, first)).toBe(true);
+    expect(writeChatStreamingProgressRecord(storage, {
+      ...first,
+      content: 'Older callback',
+      revision: 4,
+      persistedAt: 60,
+    })).toBe(false);
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({ ok: true, value: first });
+
+    const nextTurn = buildProgress(first.threadId, {
+      messageId: 'assistant-new-turn',
+      createdAt: 70,
+      revision: 1,
+      persistedAt: 70,
+    });
+    expect(writeChatStreamingProgressRecord(storage, nextTurn)).toBe(true);
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({ ok: true, value: nextTurn });
   });
 
   it('parses only valid v2 index and thread record envelopes', () => {
@@ -571,6 +654,138 @@ describe('chatPersistence', () => {
         ],
       }),
     );
+  });
+
+  it('merges newer progress as a stopped assistant without duplicating durable history', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-progress-recovery'),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt with an attachment',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+      ],
+      status: 'idle',
+    };
+    const progress = buildProgress(thread.id, {
+      messageId: 'assistant-progress',
+      createdAt: 2,
+      persistedAt: 11,
+      regeneratesMessageId: 'assistant-before-regeneration',
+    });
+
+    const recovered = recoverChatThreadFromStreamingProgress(thread, 10, progress, 20);
+
+    expect(recovered).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        status: 'stopped',
+        updatedAt: 20,
+        messages: [
+          expect.objectContaining({
+            id: 'user-1',
+            attachments: [copiedImageAttachment],
+          }),
+          expect.objectContaining({
+            id: 'assistant-progress',
+            content: 'Latest partial response',
+            thoughtContent: 'Partial reasoning',
+            tokensPerSec: 12.5,
+            state: 'stopped',
+            regeneratesMessageId: 'assistant-before-regeneration',
+          }),
+        ],
+      }),
+    });
+
+    if (recovered.outcome !== 'recovered') {
+      throw new Error('Expected progress recovery');
+    }
+    const replacementProgress = buildProgress(thread.id, {
+      ...progress,
+      content: 'Newer partial response',
+      persistedAt: 12,
+      revision: 4,
+    });
+    const replaced = recoverChatThreadFromStreamingProgress(
+      {
+        ...recovered.thread,
+        messages: recovered.thread.messages.map((message) => (
+          message.id === progress.messageId ? { ...message, state: 'streaming' as const } : message
+        )),
+      },
+      11,
+      replacementProgress,
+      21,
+    );
+    expect(replaced.outcome === 'recovered' ? replaced.thread.messages : []).toHaveLength(2);
+  });
+
+  it('refuses stale, terminal-conflicting, model-mismatched, and empty progress', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-progress-rejected'),
+      messages: [
+        {
+          id: 'assistant-terminal',
+          role: 'assistant',
+          content: 'Durable final answer',
+          createdAt: 2,
+          state: 'complete',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'idle',
+    };
+
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      20,
+      buildProgress(thread.id, { persistedAt: 20 }),
+    )).toEqual({ outcome: 'stale' });
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      20,
+      buildProgress(thread.id, {
+        messageId: 'assistant-terminal',
+        createdAt: 2,
+        persistedAt: 21,
+      }),
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      20,
+      buildProgress(thread.id, { modelId: 'author/other-model', persistedAt: 21 }),
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      { ...thread, messages: [] },
+      20,
+      buildProgress(thread.id, { content: ' ', thoughtContent: '', persistedAt: 21 }),
+    )).toEqual({ outcome: 'empty' });
+  });
+
+  it('clears progress records together with v2 records and advances the clear tombstone', () => {
+    const thread = buildThread('thread-progress-clear');
+    const progress = buildProgress(thread.id, { persistedAt: 500 });
+    writeChatThreadRecord(storage, thread, 100);
+    writeChatStreamingProgressRecord(storage, progress);
+
+    clearPersistedChatRecords(storage);
+
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+    expect(parseChatPersistenceIndex(storage.getString(CHAT_PERSISTENCE_INDEX_KEY))).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        threadIds: [],
+        clearedAt: expect.any(Number),
+      }),
+    });
+    const index = parseChatPersistenceIndex(storage.getString(CHAT_PERSISTENCE_INDEX_KEY));
+    expect(index.ok ? index.value.clearedAt : 0).toBeGreaterThan(500);
   });
 
   it('drops empty streaming and stopped assistant placeholders during cold recovery', () => {

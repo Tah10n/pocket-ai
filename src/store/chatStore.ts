@@ -30,26 +30,34 @@ import {
 } from '../services/ChatAttachmentStorageService';
 import {
   CHAT_PERSISTENCE_SCHEMA_VERSION,
+  CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
   type ChatPersistenceIndex,
   type ChatPersistencePendingIndexCommit,
   type ChatPersistenceWriteReason,
+  type ChatStreamingProgressRecord,
   LEGACY_CHAT_STORE_STORAGE_KEY,
   clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,
   getChatPersistenceIndexRevision,
   getChatThreadStorageKey,
+  getThreadIdFromChatStreamingProgressStorageKey,
   getThreadIdFromChatThreadStorageKey,
+  listChatStreamingProgressStorageKeys,
   listChatThreadStorageKeys,
   readChatPersistenceIndex,
   readChatPendingIndexCommit,
+  readChatStreamingProgressRecord,
   readChatThreadRecord,
+  recoverChatThreadFromStreamingProgress,
   recoverStaleStreamingThread,
   removeChatPendingIndexCommit,
+  removeChatStreamingProgressRecord,
   removeChatThreadRecord,
   resolveNextChatPersistenceRevision,
   sanitizeChatThreadForPersistence,
   writeChatPersistenceIndex,
   writeChatPendingIndexCommit,
+  writeChatStreamingProgressRecord,
   writeChatThreadRecord,
 } from './chatPersistence';
 
@@ -63,6 +71,8 @@ const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS = 1_000;
 const HYDRATION_ATTACHMENT_RECONCILIATION_ZERO_PROGRESS_RETRY_LIMIT = 2;
+const latestDurableThreadPersistedAtById = new Map<string, number>();
+const latestStreamingProgressPersistedAtById = new Map<string, number>();
 
 const chatStoreStateStorage = createInstrumentedStateStorage(createChatStoreStateStorage(), {
   scope: 'chatStore',
@@ -809,11 +819,16 @@ function resolveThreadRecordPersistedAtForWrite(
 function writeChatThreadRecordForMutation(
   storage: ReturnType<typeof getAppStorage>,
   thread: ChatThread,
-  options?: { commitRevision?: number },
+  options?: { commitRevision?: number; persistedAt?: number },
 ) {
-  writeChatThreadRecord(storage, thread, resolveThreadRecordPersistedAtForWrite(storage), {
+  const persistedAt = options?.persistedAt ?? Math.max(
+    resolveThreadRecordPersistedAtForWrite(storage),
+    (latestStreamingProgressPersistedAtById.get(thread.id) ?? 0) + 1,
+  );
+  writeChatThreadRecord(storage, thread, persistedAt, {
     commitRevision: options?.commitRevision,
   });
+  latestDurableThreadPersistedAtById.set(thread.id, persistedAt);
 }
 
 function writeChatPersistenceSnapshotTransaction(
@@ -822,6 +837,7 @@ function writeChatPersistenceSnapshotTransaction(
   reason: ChatPersistenceWriteReason,
   options?: {
     changedThreadIds?: string[];
+    changedThreadPersistedAt?: ReadonlyMap<string, number>;
     removedThreadIds?: string[];
     migratedFromLegacyAt?: number;
     corruptThreadIds?: string[];
@@ -855,7 +871,10 @@ function writeChatPersistenceSnapshotTransaction(
   changedThreadIds.forEach((threadId) => {
     const thread = snapshot.threads[threadId];
     if (thread) {
-      writeChatThreadRecordForMutation(storage, thread, { commitRevision: revision });
+      writeChatThreadRecordForMutation(storage, thread, {
+        commitRevision: revision,
+        persistedAt: options?.changedThreadPersistedAt?.get(threadId),
+      });
     }
   });
   removedThreadIds.forEach((threadId) => {
@@ -889,6 +908,7 @@ function readHydratableChatThreadRecord(
   if (!sanitized) {
     return { ok: false, persistedAt: recordResult.value.persistedAt };
   }
+  latestDurableThreadPersistedAtById.set(threadId, recordResult.value.persistedAt);
 
   const rawAttachmentLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads([recordResult.value.thread]);
   const sanitizedAttachmentLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads([sanitized.thread]);
@@ -904,6 +924,100 @@ function readHydratableChatThreadRecord(
     commitRevision: recordResult.value.commitRevision,
     droppedAttachmentLocalUris,
   };
+}
+
+function discardStreamingProgressDuringHydration(
+  storage: ReturnType<typeof getAppStorage>,
+  threadId: string,
+): void {
+  try {
+    removeChatStreamingProgressRecord(storage, threadId);
+    latestStreamingProgressPersistedAtById.delete(threadId);
+  } catch (error) {
+    console.warn('[ChatPersistence] Failed to discard unusable streaming progress', {
+      errorName: getErrorName(error),
+    });
+  }
+}
+
+function applyStreamingProgressDuringHydration(
+  storage: ReturnType<typeof getAppStorage>,
+  record: Extract<ReturnType<typeof readHydratableChatThreadRecord>, { ok: true }>,
+  now: number,
+): Extract<ReturnType<typeof readHydratableChatThreadRecord>, { ok: true }> {
+  const progressResult = readChatStreamingProgressRecord(storage, record.thread.id);
+  if (!progressResult.ok) {
+    if (progressResult.reason !== 'missing') {
+      discardStreamingProgressDuringHydration(storage, record.thread.id);
+    }
+    return record;
+  }
+
+  const progress = progressResult.value;
+  latestStreamingProgressPersistedAtById.set(record.thread.id, progress.persistedAt);
+  const recovery = recoverChatThreadFromStreamingProgress(
+    record.thread,
+    record.persistedAt,
+    progress,
+    now,
+  );
+  if (recovery.outcome !== 'recovered') {
+    discardStreamingProgressDuringHydration(storage, record.thread.id);
+    return record;
+  }
+
+  const recoveredPersistedAt = Math.max(now, progress.persistedAt + 1);
+  try {
+    writeChatThreadRecord(storage, recovery.thread, recoveredPersistedAt, {
+      commitRevision: record.commitRevision,
+    });
+    latestDurableThreadPersistedAtById.set(record.thread.id, recoveredPersistedAt);
+    discardStreamingProgressDuringHydration(storage, record.thread.id);
+  } catch (error) {
+    console.warn('[ChatPersistence] Failed to durably commit recovered streaming progress', {
+      errorName: getErrorName(error),
+    });
+  }
+
+  return {
+    ...record,
+    thread: recovery.thread,
+    recovered: false,
+    persistedAt: recoveredPersistedAt,
+  };
+}
+
+function discardOrphanedStreamingProgressRecords(
+  storage: ReturnType<typeof getAppStorage>,
+  survivingThreadIds: ReadonlySet<string>,
+): void {
+  listChatStreamingProgressStorageKeys(storage).forEach((key) => {
+    const threadId = getThreadIdFromChatStreamingProgressStorageKey(key);
+    if (threadId && survivingThreadIds.has(threadId)) {
+      return;
+    }
+
+    try {
+      storage.remove(key);
+      if (threadId) {
+        latestStreamingProgressPersistedAtById.delete(threadId);
+      }
+    } catch (error) {
+      console.warn('[ChatPersistence] Failed to discard orphaned streaming progress', {
+        errorName: getErrorName(error),
+      });
+    }
+  });
+  latestDurableThreadPersistedAtById.forEach((_persistedAt, threadId) => {
+    if (!survivingThreadIds.has(threadId)) {
+      latestDurableThreadPersistedAtById.delete(threadId);
+    }
+  });
+  latestStreamingProgressPersistedAtById.forEach((_persistedAt, threadId) => {
+    if (!survivingThreadIds.has(threadId)) {
+      latestStreamingProgressPersistedAtById.delete(threadId);
+    }
+  });
 }
 
 function sameStringList(left: string[], right: string[]) {
@@ -1070,7 +1184,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
     try {
       storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
       discoveredThreadIds.forEach((threadId) => {
-        const record = readHydratableChatThreadRecord(storage, threadId, now);
+        let record = readHydratableChatThreadRecord(storage, threadId, now);
         const isNewerThanClear = record.persistedAt != null && record.persistedAt > clearedAt;
 
         if (!isNewerThanClear) {
@@ -1086,6 +1200,8 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
           corruptThreadIds.add(threadId);
           return;
         }
+
+        record = applyStreamingProgressDuringHydration(storage, record, now);
 
         threads[record.thread.id] = record.thread;
         corruptThreadIds.delete(record.thread.id);
@@ -1114,6 +1230,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
       candidateLocalUris: attachmentCleanupCandidates,
       referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(threads),
     });
+    discardOrphanedStreamingProgressRecords(storage, new Set(Object.keys(threads)));
 
     return {
       threads,
@@ -1127,6 +1244,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
   }
 
   if (!index && threadIds.length === 0) {
+    discardOrphanedStreamingProgressRecords(storage, new Set());
     return null;
   }
 
@@ -1135,7 +1253,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
   const attachmentCleanupCandidates = new Set<string>();
 
   threadIds.forEach((threadId) => {
-    const record = readHydratableChatThreadRecord(storage, threadId, now);
+    let record = readHydratableChatThreadRecord(storage, threadId, now);
 
     if (!record.ok) {
       collectPersistedThreadAttachmentCleanupCandidates(storage, threadId)
@@ -1143,6 +1261,8 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
       corruptThreadIds.add(threadId);
       return;
     }
+
+    record = applyStreamingProgressDuringHydration(storage, record, now);
 
     const { thread } = record;
     threads[thread.id] = thread;
@@ -1170,6 +1290,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
     candidateLocalUris: attachmentCleanupCandidates,
     referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(threads),
   });
+  discardOrphanedStreamingProgressRecords(storage, new Set(Object.keys(threads)));
 
   return { threads, activeThreadId, corruptThreadIds: corruptThreadIdList };
 }
@@ -1320,7 +1441,19 @@ function rollbackFailedChatPersistenceMutation(
           removeChatThreadRecord(storage, threadId);
         }
       });
-      chatPersistenceScheduler.cancelThreadWrite(threadId);
+      const runtime = previousThread ? getTransientAssistantRuntime(previousThread) : null;
+      if (previousThread && runtime) {
+        attemptRollbackStep(() => {
+          const progress = createStreamingProgressRecord(previousThread, runtime);
+          if (progress && writeChatStreamingProgressRecord(storage, progress)) {
+            runtime.lastProgressPersistedAt = progress.persistedAt;
+            latestStreamingProgressPersistedAtById.set(threadId, progress.persistedAt);
+          }
+        });
+        chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
+      } else {
+        chatPersistenceScheduler.cancelThreadWrite(threadId);
+      }
     });
 
     attemptRollbackStep(() => {
@@ -1340,6 +1473,51 @@ function rollbackFailedChatPersistenceMutation(
       firstErrorName: getErrorName(rollbackErrors[0]),
     });
   }
+}
+
+function removeStreamingProgressAfterDurableCommit(
+  storage: ReturnType<typeof getAppStorage>,
+  threadId: string,
+): void {
+  try {
+    removeChatStreamingProgressRecord(storage, threadId);
+    latestStreamingProgressPersistedAtById.delete(threadId);
+  } catch (error) {
+    console.warn('[ChatPersistence] Failed to remove superseded streaming progress', {
+      errorName: getErrorName(error),
+    });
+  }
+}
+
+function prepareStreamingProgressBeforeDurableThreadMutation(
+  storage: ReturnType<typeof getAppStorage>,
+  thread: ChatThread,
+): number | undefined {
+  const runtime = getTransientAssistantRuntime(thread);
+  if (!runtime) {
+    return undefined;
+  }
+
+  const progress = createStreamingProgressRecord(thread, runtime);
+  if (!progress) {
+    removeStreamingProgressAfterDurableCommit(storage, thread.id);
+    return undefined;
+  }
+
+  if (writeChatStreamingProgressRecord(storage, progress)) {
+    runtime.lastProgressPersistedAt = progress.persistedAt;
+    latestStreamingProgressPersistedAtById.set(thread.id, progress.persistedAt);
+    return progress.persistedAt - 1;
+  }
+
+  const currentResult = readChatStreamingProgressRecord(storage, thread.id);
+  if (currentResult.ok && currentResult.value.messageId === runtime.currentMessage.id) {
+    runtime.lastProgressPersistedAt = currentResult.value.persistedAt;
+    latestStreamingProgressPersistedAtById.set(thread.id, currentResult.value.persistedAt);
+    return currentResult.value.persistedAt - 1;
+  }
+
+  throw new Error('Unable to establish streaming progress ordering before durable mutation');
 }
 
 function persistChatStoreMutation(
@@ -1365,6 +1543,8 @@ function persistChatStoreMutation(
   if (nextThreadIds.length === 0) {
     chatPersistenceScheduler.cancelAllPendingWrites();
     clearPersistedChatRecords(storage);
+    latestDurableThreadPersistedAtById.clear();
+    latestStreamingProgressPersistedAtById.clear();
     scheduleChatAttachmentCleanupForSnapshots(previous, next);
     return;
   }
@@ -1382,6 +1562,8 @@ function persistChatStoreMutation(
 
     removedThreadIds.forEach((threadId) => {
       chatPersistenceScheduler.cancelThreadWrite(threadId);
+      removeStreamingProgressAfterDurableCommit(storage, threadId);
+      latestDurableThreadPersistedAtById.delete(threadId);
     });
     // Streaming patches only mutate the latest assistant text/state. Avoid
     // traversing attachment references on every token; thread removal is the
@@ -1390,13 +1572,48 @@ function persistChatStoreMutation(
     return;
   }
 
+  const changedThreadPersistedAt = new Map<string, number>();
+  if (reason !== 'terminal_state') {
+    changedThreadIds.forEach((threadId) => {
+      const thread = next.threads[threadId];
+      if (!thread) {
+        return;
+      }
+
+      const persistedAt = prepareStreamingProgressBeforeDurableThreadMutation(storage, thread);
+      if (persistedAt != null) {
+        changedThreadPersistedAt.set(threadId, persistedAt);
+      }
+    });
+  }
+
   writeChatPersistenceSnapshotTransaction(storage, next, reason, {
     changedThreadIds,
+    changedThreadPersistedAt: changedThreadPersistedAt.size > 0
+      ? changedThreadPersistedAt
+      : undefined,
     removedThreadIds,
   });
 
-  [...changedThreadIds, ...removedThreadIds].forEach((threadId) => {
+  if (reason === 'terminal_state' && performanceMonitor.isEnabled()) {
+    performanceMonitor.incrementCounter('chat.persist.terminal');
+  }
+
+  changedThreadIds.forEach((threadId) => {
     chatPersistenceScheduler.cancelThreadWrite(threadId);
+    if (reason === 'terminal_state') {
+      removeStreamingProgressAfterDurableCommit(storage, threadId);
+      return;
+    }
+
+    if (!changedThreadPersistedAt.has(threadId)) {
+      removeStreamingProgressAfterDurableCommit(storage, threadId);
+    }
+  });
+  removedThreadIds.forEach((threadId) => {
+    chatPersistenceScheduler.cancelThreadWrite(threadId);
+    removeStreamingProgressAfterDurableCommit(storage, threadId);
+    latestDurableThreadPersistedAtById.delete(threadId);
   });
   scheduleChatAttachmentCleanupForThreadChanges(previous, next, {
     changedThreadIds,
@@ -1431,6 +1648,8 @@ interface TransientAssistantRuntime {
   presentationMessages: ChatMessage[];
   presentationThread: ChatThread;
   sourceThread: ChatThread;
+  progressRevision: number;
+  lastProgressPersistedAt: number;
 }
 
 const transientAssistantRuntimes = new Map<string, TransientAssistantRuntime>();
@@ -1476,6 +1695,8 @@ function createTransientAssistantRuntime(
       messages: presentationMessages,
     },
     sourceThread: thread,
+    progressRevision: 0,
+    lastProgressPersistedAt: latestStreamingProgressPersistedAtById.get(thread.id) ?? 0,
   };
   transientAssistantRuntimes.set(thread.id, runtime);
   return runtime;
@@ -1513,17 +1734,33 @@ function getPresentedChatThread(thread: ChatThread): ChatThread {
   return getTransientAssistantRuntime(thread)?.presentationThread ?? thread;
 }
 
-function materializeTransientAssistantThread(thread: ChatThread): ChatThread {
-  const runtime = getTransientAssistantRuntime(thread);
-  if (!runtime) {
-    return thread;
+function createStreamingProgressRecord(
+  thread: ChatThread,
+  runtime: TransientAssistantRuntime,
+): ChatStreamingProgressRecord | null {
+  const message = runtime.currentMessage;
+  if (message.content.trim().length === 0 && (message.thoughtContent?.trim().length ?? 0) === 0) {
+    return null;
   }
 
-  const messages = thread.messages.slice();
-  messages[messages.length - 1] = runtime.currentMessage;
+  const persistedAt = Math.max(
+    Date.now(),
+    (latestDurableThreadPersistedAtById.get(thread.id) ?? 0) + 1,
+    runtime.lastProgressPersistedAt + 1,
+  );
   return {
-    ...thread,
-    messages,
+    schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+    threadId: thread.id,
+    messageId: message.id,
+    modelId: message.modelId ?? getThreadActiveModelId(thread),
+    createdAt: message.createdAt,
+    content: message.content,
+    thoughtContent: message.thoughtContent,
+    tokensPerSec: message.tokensPerSec,
+    state: 'streaming',
+    persistedAt,
+    revision: runtime.progressRevision,
+    regeneratesMessageId: message.regeneratesMessageId,
   };
 }
 
@@ -1698,6 +1935,8 @@ export const useChatStore = create<ChatStoreState>()(
           assertPrivateStorageWritable();
           chatPersistenceScheduler.cancelAllPendingWrites();
           transientAssistantRuntimes.clear();
+          latestDurableThreadPersistedAtById.clear();
+          latestStreamingProgressPersistedAtById.clear();
           clearPersistedChatRecords(getAppStorage());
           return 0;
         }
@@ -2003,6 +2242,7 @@ export const useChatStore = create<ChatStoreState>()(
             state: 'streaming',
           };
           runtime.currentMessage = nextMessage;
+          runtime.progressRevision += 1;
           runtime.presentationMessages[runtime.presentationMessages.length - 1] = nextMessage;
           runtime.presentationThread = {
             ...existingThread,
@@ -2312,32 +2552,32 @@ function flushChatThreadPersistence(threadId: string, reason: ChatPersistenceWri
   const state = useChatStore.getState();
   const storage = getAppStorage();
   const thread = state.threads[threadId];
-  const snapshot: ChatStoreSnapshot = {
-    threads: state.threads,
-    activeThreadId: state.activeThreadId,
-  };
+  void reason;
 
   if (!thread) {
-    writeChatPersistenceSnapshotTransaction(storage, snapshot, reason, {
-      removedThreadIds: [threadId],
-    });
+    removeChatStreamingProgressRecord(storage, threadId);
+    latestStreamingProgressPersistedAtById.delete(threadId);
     return;
   }
 
-  const materializedThread = materializeTransientAssistantThread(thread);
-  const materializedSnapshot = materializedThread === thread
-    ? snapshot
-    : {
-        ...snapshot,
-        threads: {
-          ...snapshot.threads,
-          [threadId]: materializedThread,
-        },
-      };
+  const runtime = getTransientAssistantRuntime(thread);
+  if (!runtime) {
+    removeChatStreamingProgressRecord(storage, threadId);
+    latestStreamingProgressPersistedAtById.delete(threadId);
+    return;
+  }
 
-  writeChatPersistenceSnapshotTransaction(storage, materializedSnapshot, reason, {
-    changedThreadIds: [threadId],
-  });
+  const progress = createStreamingProgressRecord(thread, runtime);
+  if (!progress) {
+    removeChatStreamingProgressRecord(storage, threadId);
+    latestStreamingProgressPersistedAtById.delete(threadId);
+    return;
+  }
+
+  if (writeChatStreamingProgressRecord(storage, progress)) {
+    runtime.lastProgressPersistedAt = progress.persistedAt;
+    latestStreamingProgressPersistedAtById.set(threadId, progress.persistedAt);
+  }
 }
 
 const chatPersistenceScheduler = createChatPersistenceWriteScheduler({
@@ -2351,6 +2591,8 @@ export function flushPendingChatPersistenceWrites(reason: ChatPersistenceWriteRe
 export function resetChatStoreForPrivateStorageReset(): void {
   chatPersistenceScheduler.cancelAllPendingWrites();
   transientAssistantRuntimes.clear();
+  latestDurableThreadPersistedAtById.clear();
+  latestStreamingProgressPersistedAtById.clear();
   useChatStore.setState({
     threads: {},
     activeThreadId: null,

@@ -8,7 +8,10 @@ import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types
 import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
 import { getAppStorage, storage } from '../../src/store/storage';
-import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
+import {
+  getChatStreamingProgressStorageKey,
+  getChatThreadStorageKey,
+} from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
@@ -4014,19 +4017,24 @@ describe('useChatSession', () => {
       expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
     });
 
+    const threadId = useChatStore.getState().activeThreadId;
+    expect(threadId).toBeTruthy();
+    const durableRecordBeforeBackground = storage.getString(getChatThreadStorageKey(threadId ?? ''));
+
     await act(async () => {
       onToken?.('Partial before background');
       emitAppState('background');
     });
 
-    const threadId = useChatStore.getState().activeThreadId;
-    expect(threadId).toBeTruthy();
-    expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toContain('Partial before background');
+    expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toBe(durableRecordBeforeBackground);
+    expect(storage.getString(getChatStreamingProgressStorageKey(threadId ?? '')))
+      .toContain('Partial before background');
 
     await act(async () => {
       resolveCompletion?.();
       await sendPromise;
     });
+    expect(storage.getString(getChatStreamingProgressStorageKey(threadId ?? ''))).toBeUndefined();
   });
 
   it('does not throw when background persistence flush hits blocked private storage', async () => {

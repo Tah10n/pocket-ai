@@ -1,4 +1,9 @@
-import type { ChatMessage, ChatThread, LlmContentPart } from '../types/chat';
+import {
+  getThreadActiveModelId,
+  type ChatMessage,
+  type ChatThread,
+  type LlmContentPart,
+} from '../types/chat';
 import type { ChatAttachment } from '../types/attachments';
 import type { InferenceCompletionTelemetry, MtpFallbackReason } from '../types/models';
 import {
@@ -17,12 +22,15 @@ import {
   toLegacyChatImageAttachment,
 } from '../utils/chatAttachments';
 import type { AppStorageFacade } from './storage';
+import { performanceMonitor } from '../services/PerformanceMonitor';
 
 export const LEGACY_CHAT_STORE_STORAGE_KEY = 'chat-store';
 export const CHAT_PERSISTENCE_SCHEMA_VERSION = 2;
 export const CHAT_PERSISTENCE_INDEX_KEY = 'chat-store:v2:index';
 export const CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY = 'chat-store:v2:index:pending';
 export const CHAT_THREAD_STORAGE_KEY_PREFIX = 'chat-store:v2:thread:';
+export const CHAT_STREAM_PROGRESS_SCHEMA_VERSION = 1;
+export const CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX = 'chat-store:progress:';
 export const DEFAULT_STREAMING_PERSISTENCE_DEBOUNCE_MS = 750;
 const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
@@ -51,6 +59,21 @@ export interface ChatThreadRecord {
   thread: ChatThread;
   persistedAt: number;
   commitRevision?: number;
+}
+
+export interface ChatStreamingProgressRecord {
+  schemaVersion: typeof CHAT_STREAM_PROGRESS_SCHEMA_VERSION;
+  threadId: string;
+  messageId: string;
+  modelId: string;
+  createdAt: number;
+  content: string;
+  thoughtContent?: string;
+  tokensPerSec?: number;
+  state: 'streaming';
+  persistedAt: number;
+  revision: number;
+  regeneratesMessageId?: string;
 }
 
 export interface ChatPersistencePendingIndexCommit {
@@ -88,6 +111,23 @@ export function getThreadIdFromChatThreadStorageKey(key: string): string | null 
   }
 }
 
+export function getChatStreamingProgressStorageKey(threadId: string): string {
+  return `${CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX}${encodeURIComponent(threadId)}`;
+}
+
+export function getThreadIdFromChatStreamingProgressStorageKey(key: string): string | null {
+  if (!key.startsWith(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX)) {
+    return null;
+  }
+
+  const encoded = key.slice(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX.length);
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return null;
+  }
+}
+
 function parseJsonObject(raw: string | null | undefined): ChatPersistenceReadResult<Record<string, unknown>> {
   if (raw == null) {
     return { ok: false, reason: 'missing' };
@@ -115,6 +155,64 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isPositiveFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function incrementChatPersistenceCounter(
+  name:
+    | 'chat.persist.streaming'
+    | 'chat.persist.terminal'
+    | 'chat.persist.sanitize'
+    | 'chat.persist.stringify'
+    | 'chat.persist.storage'
+    | 'chat.persist.bytes',
+  by = 1,
+  meta?: Record<string, unknown>,
+): void {
+  if (performanceMonitor.isEnabled()) {
+    performanceMonitor.incrementCounter(name, by, meta);
+  }
+}
+
+function getUtf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit < 0x80) {
+      bytes += 1;
+    } else if (codeUnit < 0x800) {
+      bytes += 2;
+    } else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function serializeAndWriteChatRecord(
+  storage: AppStorageFacade,
+  key: string,
+  value: unknown,
+  recordKind: 'index' | 'pending' | 'thread' | 'progress',
+): void {
+  const serialized = JSON.stringify(value);
+  if (performanceMonitor.isEnabled()) {
+    incrementChatPersistenceCounter('chat.persist.stringify', 1, { recordKind });
+    incrementChatPersistenceCounter('chat.persist.storage', 1, { recordKind });
+    incrementChatPersistenceCounter('chat.persist.bytes', getUtf8ByteLength(serialized), { recordKind });
+  }
+  storage.set(key, serialized);
 }
 
 function readRequiredString(value: unknown): string | null {
@@ -590,6 +688,59 @@ export function parseChatThreadRecord(
   };
 }
 
+export function parseChatStreamingProgressRecord(
+  raw: string | null | undefined,
+  expectedThreadId?: string,
+): ChatPersistenceReadResult<ChatStreamingProgressRecord> {
+  const parsed = parseJsonObject(raw);
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  const value = parsed.value;
+  const threadId = readRequiredString(value.threadId);
+  const messageId = readRequiredString(value.messageId);
+  const modelId = readRequiredString(value.modelId);
+  const regeneratesMessageId = value.regeneratesMessageId == null
+    ? undefined
+    : readRequiredString(value.regeneratesMessageId);
+  if (
+    value.schemaVersion !== CHAT_STREAM_PROGRESS_SCHEMA_VERSION
+    || !threadId
+    || !messageId
+    || !modelId
+    || (expectedThreadId != null && threadId !== expectedThreadId)
+    || !isNonNegativeSafeInteger(value.createdAt)
+    || typeof value.content !== 'string'
+    || (value.thoughtContent != null && typeof value.thoughtContent !== 'string')
+    || (value.tokensPerSec != null && !isNonNegativeFiniteNumber(value.tokensPerSec))
+    || value.state !== 'streaming'
+    || !isNonNegativeSafeInteger(value.persistedAt)
+    || !isNonNegativeSafeInteger(value.revision)
+    || (value.regeneratesMessageId != null && !regeneratesMessageId)
+  ) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+      threadId,
+      messageId,
+      modelId,
+      createdAt: value.createdAt,
+      content: value.content,
+      thoughtContent: typeof value.thoughtContent === 'string' ? value.thoughtContent : undefined,
+      tokensPerSec: isNonNegativeFiniteNumber(value.tokensPerSec) ? value.tokensPerSec : undefined,
+      state: 'streaming',
+      persistedAt: value.persistedAt,
+      revision: value.revision,
+      regeneratesMessageId: regeneratesMessageId ?? undefined,
+    },
+  };
+}
+
 export function parseChatPendingIndexCommit(
   raw: string | null | undefined,
 ): ChatPersistenceReadResult<ChatPersistencePendingIndexCommit> {
@@ -636,14 +787,14 @@ export function parseChatPendingIndexCommit(
 }
 
 export function writeChatPersistenceIndex(storage: AppStorageFacade, index: ChatPersistenceIndex): void {
-  storage.set(CHAT_PERSISTENCE_INDEX_KEY, JSON.stringify(index));
+  serializeAndWriteChatRecord(storage, CHAT_PERSISTENCE_INDEX_KEY, index, 'index');
 }
 
 export function writeChatPendingIndexCommit(
   storage: AppStorageFacade,
   commit: ChatPersistencePendingIndexCommit,
 ): void {
-  storage.set(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY, JSON.stringify(commit));
+  serializeAndWriteChatRecord(storage, CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY, commit, 'pending');
 }
 
 export function removeChatPendingIndexCommit(storage: AppStorageFacade): void {
@@ -656,17 +807,70 @@ export function writeChatThreadRecord(
   persistedAt = Date.now(),
   options?: { commitRevision?: number },
 ): void {
+  incrementChatPersistenceCounter('chat.persist.sanitize', 1, { recordKind: 'thread' });
   const record: ChatThreadRecord = {
     schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
     thread: sanitizeChatThreadForPersistence(thread),
     persistedAt,
     commitRevision: options?.commitRevision,
   };
-  storage.set(getChatThreadStorageKey(thread.id), JSON.stringify(record));
+  serializeAndWriteChatRecord(storage, getChatThreadStorageKey(thread.id), record, 'thread');
 }
 
 export function removeChatThreadRecord(storage: AppStorageFacade, threadId: string): void {
   storage.remove(getChatThreadStorageKey(threadId));
+}
+
+export function readChatStreamingProgressRecord(
+  storage: AppStorageFacade,
+  threadId: string,
+): ChatPersistenceReadResult<ChatStreamingProgressRecord> {
+  return parseChatStreamingProgressRecord(
+    storage.getString(getChatStreamingProgressStorageKey(threadId)) ?? null,
+    threadId,
+  );
+}
+
+export function writeChatStreamingProgressRecord(
+  storage: AppStorageFacade,
+  progress: ChatStreamingProgressRecord,
+): boolean {
+  const currentResult = readChatStreamingProgressRecord(storage, progress.threadId);
+  if (currentResult.ok) {
+    const current = currentResult.value;
+    const sameMessage = current.messageId === progress.messageId;
+    const isOlderRevision = sameMessage && current.revision > progress.revision;
+    const isOlderTimestamp = sameMessage
+      ? current.revision === progress.revision && current.persistedAt > progress.persistedAt
+      : current.createdAt > progress.createdAt
+        || (current.createdAt === progress.createdAt && current.persistedAt > progress.persistedAt);
+    if (isOlderRevision || isOlderTimestamp) {
+      return false;
+    }
+  }
+
+  incrementChatPersistenceCounter('chat.persist.streaming', 1);
+  serializeAndWriteChatRecord(
+    storage,
+    getChatStreamingProgressStorageKey(progress.threadId),
+    progress,
+    'progress',
+  );
+  return true;
+}
+
+export function removeChatStreamingProgressRecord(storage: AppStorageFacade, threadId: string): void {
+  storage.remove(getChatStreamingProgressStorageKey(threadId));
+}
+
+export function listChatStreamingProgressStorageKeys(
+  storage: Pick<AppStorageFacade, 'getAllKeys'>,
+): string[] {
+  return storage.getAllKeys().filter((key) => key.startsWith(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX));
+}
+
+export function clearChatStreamingProgressRecords(storage: AppStorageFacade): void {
+  listChatStreamingProgressStorageKeys(storage).forEach((key) => storage.remove(key));
 }
 
 function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.now()): number {
@@ -675,7 +879,7 @@ function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.no
     ? Math.max(now, indexResult.value.clearedAt)
     : now;
 
-  return listChatThreadStorageKeys(storage).reduce((timestamp, key) => {
+  const threadTimestamp = listChatThreadStorageKeys(storage).reduce((timestamp, key) => {
     const threadId = getThreadIdFromChatThreadStorageKey(key);
     if (!threadId) {
       return timestamp;
@@ -688,6 +892,18 @@ function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.no
 
     return Math.max(timestamp, recordResult.value.persistedAt + 1);
   }, baseTimestamp);
+
+  return listChatStreamingProgressStorageKeys(storage).reduce((timestamp, key) => {
+    const threadId = getThreadIdFromChatStreamingProgressStorageKey(key);
+    if (!threadId) {
+      return timestamp;
+    }
+
+    const progressResult = readChatStreamingProgressRecord(storage, threadId);
+    return progressResult.ok
+      ? Math.max(timestamp, progressResult.value.persistedAt + 1)
+      : timestamp;
+  }, threadTimestamp);
 }
 
 export function clearPersistedChatRecords(storage: AppStorageFacade): void {
@@ -704,6 +920,7 @@ export function clearPersistedChatRecords(storage: AppStorageFacade): void {
   });
   storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
   listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
+  clearChatStreamingProgressRecords(storage);
   removeChatPendingIndexCommit(storage);
 }
 
@@ -816,6 +1033,82 @@ export function recoverStaleStreamingThread(thread: ChatThread, now = Date.now()
     messages,
     status: sanitizedThread.status === 'generating' ? 'stopped' : sanitizedThread.status,
     updatedAt: Math.max(sanitizedThread.updatedAt, now),
+  };
+}
+
+export type ChatStreamingProgressRecoveryResult =
+  | { outcome: 'recovered'; thread: ChatThread }
+  | { outcome: 'stale' | 'mismatched' | 'empty' };
+
+export function recoverChatThreadFromStreamingProgress(
+  thread: ChatThread,
+  durablePersistedAt: number,
+  progress: ChatStreamingProgressRecord,
+  now = Date.now(),
+): ChatStreamingProgressRecoveryResult {
+  if (progress.threadId !== thread.id || progress.modelId !== getThreadActiveModelId(thread)) {
+    return { outcome: 'mismatched' };
+  }
+
+  if (progress.persistedAt <= durablePersistedAt) {
+    return { outcome: 'stale' };
+  }
+
+  if (progress.content.trim().length === 0 && (progress.thoughtContent?.trim().length ?? 0) === 0) {
+    return { outcome: 'empty' };
+  }
+
+  const matchingIndex = thread.messages.findIndex((message) => message.id === progress.messageId);
+  const matchingMessage = matchingIndex >= 0 ? thread.messages[matchingIndex] : undefined;
+  if (matchingMessage) {
+    if (
+      matchingIndex !== thread.messages.length - 1
+      || matchingMessage.role !== 'assistant'
+      || (matchingMessage.state !== 'streaming' && matchingMessage.state !== 'stopped')
+      || matchingMessage.createdAt !== progress.createdAt
+      || (matchingMessage.modelId != null && matchingMessage.modelId !== progress.modelId)
+    ) {
+      return { outcome: 'mismatched' };
+    }
+  } else {
+    const lastMessage = thread.messages.at(-1);
+    if (
+      (lastMessage && progress.createdAt < lastMessage.createdAt)
+      || (
+        lastMessage?.role === 'assistant'
+        && (lastMessage.state === 'complete' || lastMessage.state === 'error')
+        && lastMessage.createdAt >= progress.createdAt
+      )
+    ) {
+      return { outcome: 'stale' };
+    }
+  }
+
+  const recoveredMessage: ChatMessage = {
+    id: progress.messageId,
+    role: 'assistant',
+    kind: 'message',
+    modelId: progress.modelId,
+    content: progress.content,
+    thoughtContent: progress.thoughtContent,
+    tokensPerSec: progress.tokensPerSec,
+    createdAt: progress.createdAt,
+    state: 'stopped',
+    regeneratesMessageId: progress.regeneratesMessageId,
+  };
+  const messages = matchingMessage
+    ? thread.messages.map((message, index) => (index === matchingIndex ? recoveredMessage : message))
+    : [...thread.messages, recoveredMessage];
+
+  return {
+    outcome: 'recovered',
+    thread: {
+      ...thread,
+      messages,
+      status: 'stopped',
+      updatedAt: Math.max(thread.updatedAt, progress.persistedAt, now),
+      lastGeneratedAt: Math.max(thread.lastGeneratedAt ?? 0, progress.persistedAt, now),
+    },
   };
 }
 

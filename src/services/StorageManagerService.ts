@@ -36,7 +36,11 @@ import {
   CHAT_THREAD_STORAGE_KEY_PREFIX,
   LEGACY_CHAT_STORE_STORAGE_KEY,
 } from '../store/chatPersistence';
-import { getAppCacheDirectorySizeBytes } from './SystemMetricsService';
+import {
+  getAppCacheDirectorySizeBytes,
+  invalidateAppCacheDirectorySizeMeasurement,
+} from './SystemMetricsService';
+import { performanceMonitor } from './PerformanceMonitor';
 
 const CHAT_STORE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
@@ -85,7 +89,14 @@ type DirectorySizeCacheEntry = {
 
 type DirectoryStatLimiter = <T>(task: () => Promise<T>) => Promise<T>;
 
+type ClearableCacheDirectorySizeRequest = {
+  generation: number;
+  promise: Promise<number>;
+};
+
 const directorySizeCache = new Map<string, DirectorySizeCacheEntry>();
+const clearableCacheDirectorySizeRequests = new Map<string, ClearableCacheDirectorySizeRequest>();
+let directorySizeCacheGeneration = 0;
 
 function getTextByteLength(value: string | null | undefined) {
   if (!value) {
@@ -184,9 +195,29 @@ function getCachedDirectorySize(directoryUri: string): number | null {
   return cached.sizeBytes;
 }
 
+function cacheDirectorySizeIfCurrent(directoryUri: string, sizeBytes: number, generation: number): void {
+  if (generation !== directorySizeCacheGeneration) {
+    return;
+  }
+
+  directorySizeCache.set(directoryUri, {
+    measuredAt: Date.now(),
+    sizeBytes,
+  });
+}
+
+function invalidateDirectorySizeMeasurements(): void {
+  directorySizeCacheGeneration += 1;
+  directorySizeCache.clear();
+  clearableCacheDirectorySizeRequests.clear();
+  invalidateAppCacheDirectorySizeMeasurement();
+}
+
 async function getDirectorySizeBytes(
   directoryUri: string,
   statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS),
+  cacheGeneration = directorySizeCacheGeneration,
+  propagateErrors = false,
 ): Promise<number> {
   const normalizedDirectoryUri = normalizeDirectoryUri(directoryUri);
   const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
@@ -197,19 +228,17 @@ async function getDirectorySizeBytes(
   try {
     const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
     if (!info.exists) {
-      directorySizeCache.set(normalizedDirectoryUri, {
-        measuredAt: Date.now(),
-        sizeBytes: MIN_DIRECTORY_SIZE_FALLBACK_BYTES,
-      });
+      cacheDirectorySizeIfCurrent(
+        normalizedDirectoryUri,
+        MIN_DIRECTORY_SIZE_FALLBACK_BYTES,
+        cacheGeneration,
+      );
       return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
     }
 
     const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
     if (entries.length === 0) {
-      directorySizeCache.set(normalizedDirectoryUri, {
-        measuredAt: Date.now(),
-        sizeBytes: 0,
-      });
+      cacheDirectorySizeIfCurrent(normalizedDirectoryUri, 0, cacheGeneration);
       return 0;
     }
 
@@ -223,7 +252,7 @@ async function getDirectorySizeBytes(
         }
 
         if ((entryInfo as { isDirectory?: boolean }).isDirectory) {
-          return getDirectorySizeBytes(entryUri, statLimiter);
+          return getDirectorySizeBytes(entryUri, statLimiter, cacheGeneration, propagateErrors);
         }
 
         return typeof entryInfo.size === 'number' ? entryInfo.size : 0;
@@ -231,10 +260,7 @@ async function getDirectorySizeBytes(
     );
 
     const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
-    directorySizeCache.set(normalizedDirectoryUri, {
-      measuredAt: Date.now(),
-      sizeBytes,
-    });
+    cacheDirectorySizeIfCurrent(normalizedDirectoryUri, sizeBytes, cacheGeneration);
     return sizeBytes;
   } catch (error) {
     console.warn('[StorageManagerService] Failed to read directory size', {
@@ -242,72 +268,127 @@ async function getDirectorySizeBytes(
       scope: 'directory_size',
       ...getSanitizedStorageManagerErrorDetails(error),
     });
+    if (propagateErrors) {
+      throw error;
+    }
     return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
   }
 }
 
-async function getClearableCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise<number> {
-  const normalizedDirectoryUri = normalizeDirectoryUri(cacheDirectoryUri);
-  const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
-  if (cachedSize !== null) {
-    return cachedSize;
-  }
+async function scanClearableCacheDirectorySizeBytes(
+  normalizedDirectoryUri: string,
+  cacheGeneration: number,
+): Promise<number> {
+  const span = performanceMonitor.startSpan('storage.cacheScan', {
+    pathCategory: 'cache_storage',
+  });
+  let fallbackReason: 'native_error' | 'native_unavailable' = 'native_unavailable';
 
   try {
-    const nativeSizeBytes = await getAppCacheDirectorySizeBytes();
-    if (nativeSizeBytes !== null) {
-      directorySizeCache.set(normalizedDirectoryUri, {
-        measuredAt: Date.now(),
-        sizeBytes: nativeSizeBytes,
+    try {
+      const nativeSizeBytes = await getAppCacheDirectorySizeBytes();
+      if (nativeSizeBytes !== null) {
+        cacheDirectorySizeIfCurrent(normalizedDirectoryUri, nativeSizeBytes, cacheGeneration);
+        span.end({ outcome: 'success', source: 'native' });
+        return nativeSizeBytes;
+      }
+    } catch (error) {
+      fallbackReason = 'native_error';
+      console.warn('[StorageManagerService] Failed to read native cache size', {
+        pathCategory: 'cache_storage',
+        scope: 'native_directory_size',
+        ...getSanitizedStorageManagerErrorDetails(error),
       });
-      return nativeSizeBytes;
     }
-  } catch (error) {
-    console.warn('[StorageManagerService] Failed to read native cache size', {
-      pathCategory: 'cache_storage',
-      scope: 'native_directory_size',
-      ...getSanitizedStorageManagerErrorDetails(error),
-    });
-  }
 
-  try {
-    const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
-    if (!info.exists) {
+    performanceMonitor.incrementCounter('storage.cacheScan.jsFallback', 1, {
+      reason: fallbackReason,
+    });
+
+    try {
+      const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
+      if (!info.exists) {
+        cacheDirectorySizeIfCurrent(normalizedDirectoryUri, 0, cacheGeneration);
+        span.end({ outcome: 'success', source: 'js_fallback' });
+        return 0;
+      }
+
+      const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
+      const statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS);
+      const entrySizes = await Promise.all(entries
+        .filter((entryName) => !PROTECTED_ACTIVE_CACHE_ENTRY_NAMES.has(entryName.toLowerCase()))
+        .map(async (entryName) => {
+          const entryUri = joinDirectoryEntryUri(normalizedDirectoryUri, entryName);
+          const entryInfo = await statLimiter(() => FileSystem.getInfoAsync(entryUri));
+          if (!entryInfo.exists) {
+            return 0;
+          }
+          return isFileSystemDirectory(entryInfo)
+            ? getDirectorySizeBytes(entryUri, statLimiter, cacheGeneration, true)
+            : typeof entryInfo.size === 'number' ? entryInfo.size : 0;
+        }));
+      const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
+      cacheDirectorySizeIfCurrent(normalizedDirectoryUri, sizeBytes, cacheGeneration);
+      span.end({ outcome: 'success', source: 'js_fallback' });
+      return sizeBytes;
+    } catch (error) {
+      console.warn('[StorageManagerService] Failed to read clearable cache size', {
+        pathCategory: 'cache_storage',
+        scope: 'clearable_directory_size',
+        ...getSanitizedStorageManagerErrorDetails(error),
+      });
+      span.end({ outcome: 'error', source: 'js_fallback' });
       return 0;
     }
-
-    const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
-    const statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS);
-    const entrySizes = await Promise.all(entries
-      .filter((entryName) => !PROTECTED_ACTIVE_CACHE_ENTRY_NAMES.has(entryName.toLowerCase()))
-      .map(async (entryName) => {
-        const entryUri = joinDirectoryEntryUri(normalizedDirectoryUri, entryName);
-        const entryInfo = await statLimiter(() => FileSystem.getInfoAsync(entryUri));
-        if (!entryInfo.exists) {
-          return 0;
-        }
-        return isFileSystemDirectory(entryInfo)
-          ? getDirectorySizeBytes(entryUri, statLimiter)
-          : typeof entryInfo.size === 'number' ? entryInfo.size : 0;
-      }));
-    const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
-    directorySizeCache.set(normalizedDirectoryUri, {
-      measuredAt: Date.now(),
-      sizeBytes,
-    });
-    return sizeBytes;
   } catch (error) {
-    console.warn('[StorageManagerService] Failed to read clearable cache size', {
-      pathCategory: 'cache_storage',
-      scope: 'clearable_directory_size',
-      ...getSanitizedStorageManagerErrorDetails(error),
-    });
-    return 0;
+    span.end({ outcome: 'error', source: 'unknown' });
+    throw error;
   }
 }
 
+function getClearableCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise<number> {
+  const normalizedDirectoryUri = normalizeDirectoryUri(cacheDirectoryUri);
+  const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
+  if (cachedSize !== null) {
+    return Promise.resolve(cachedSize);
+  }
+
+  const generation = directorySizeCacheGeneration;
+  const existingRequest = clearableCacheDirectorySizeRequests.get(normalizedDirectoryUri);
+  if (existingRequest && existingRequest.generation === generation) {
+    performanceMonitor.incrementCounter('storage.cacheScan.deduped', 1, {
+      level: 'storage_manager',
+    });
+    return existingRequest.promise;
+  }
+
+  const scanRequest = scanClearableCacheDirectorySizeBytes(normalizedDirectoryUri, generation);
+  let sharedRequest!: Promise<number>;
+  const clearIfCurrent = () => {
+    if (clearableCacheDirectorySizeRequests.get(normalizedDirectoryUri)?.promise === sharedRequest) {
+      clearableCacheDirectorySizeRequests.delete(normalizedDirectoryUri);
+    }
+  };
+  sharedRequest = scanRequest.then(
+    (sizeBytes) => {
+      clearIfCurrent();
+      return sizeBytes;
+    },
+    (error) => {
+      clearIfCurrent();
+      throw error;
+    },
+  );
+  clearableCacheDirectorySizeRequests.set(normalizedDirectoryUri, {
+    generation,
+    promise: sharedRequest,
+  });
+
+  return sharedRequest;
+}
+
 export function __resetStorageManagerDirectorySizeCacheForTests(): void {
-  directorySizeCache.clear();
+  invalidateDirectorySizeMeasurements();
 }
 
 function getDownloadedModels() {
@@ -780,7 +861,7 @@ function getDownloadedModelsStoredBytes(downloadedModels: ModelMetadata[]): numb
 
 export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {}): Promise<AppStorageMetrics> {
   if (options.refreshModelFileQuarantine) {
-    directorySizeCache.clear();
+    invalidateDirectorySizeMeasurements();
     await refreshModelFileQuarantine();
   }
 
@@ -824,7 +905,7 @@ export async function offloadModel(modelId: string, options?: OffloadModelOption
 }
 
 export async function clearActiveCache() {
-  directorySizeCache.clear();
+  invalidateDirectorySizeMeasurements();
 
   let firstError: unknown = null;
   try {
@@ -898,7 +979,7 @@ export async function clearActiveCache() {
     });
   }
 
-  directorySizeCache.clear();
+  invalidateDirectorySizeMeasurements();
 
   if (firstError) {
     throw firstError;
@@ -908,7 +989,7 @@ export async function clearActiveCache() {
 }
 
 export async function cleanupQuarantinedModelFiles() {
-  directorySizeCache.clear();
+  invalidateDirectorySizeMeasurements();
   const getCurrentQueuedModelFileNames = () => getQueuedDownloadFileNames();
   await registry.validateRegistry(getCurrentQueuedModelFileNames());
 
@@ -938,7 +1019,7 @@ export async function cleanupQuarantinedModelFiles() {
     });
   }
 
-  directorySizeCache.clear();
+  invalidateDirectorySizeMeasurements();
 
   if (firstError) {
     throw firstError;

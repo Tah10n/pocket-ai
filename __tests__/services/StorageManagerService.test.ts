@@ -78,6 +78,7 @@ import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { modelCatalogService } from '../../src/services/ModelCatalogService';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import {
   clearLegacyChatHistory,
   resetAllParametersForModel,
@@ -138,6 +139,8 @@ describe('StorageManagerService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     __resetStorageManagerDirectorySizeCacheForTests();
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(true);
     mockClearAllThreads.mockReturnValue(2);
     (clearLegacyChatHistory as jest.Mock).mockReturnValue(3);
     (useChatStore.getState as jest.Mock).mockReturnValue({
@@ -169,6 +172,10 @@ describe('StorageManagerService', () => {
     });
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue([]);
     NativeModules.SystemMetrics = undefined;
+  });
+
+  afterEach(() => {
+    performanceMonitor.setEnabled(false);
   });
 
   it('interrupts active completions before clearing persisted chat history', async () => {
@@ -604,8 +611,10 @@ describe('StorageManagerService', () => {
 
     try {
       const metrics = await getAppStorageMetrics();
+      const cachedMetrics = await getAppStorageMetrics();
 
       expect(metrics.cacheBytes).toBe(42_000_000);
+      expect(cachedMetrics.cacheBytes).toBe(42_000_000);
       expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(1);
       expect(FileSystem.readDirectoryAsync).not.toHaveBeenCalled();
     } finally {
@@ -615,6 +624,87 @@ describe('StorageManagerService', () => {
         value: originalPlatform,
       });
     }
+  });
+
+  it('coalesces concurrent storage metrics into one native cache scan', async () => {
+    const originalPlatform = Platform.OS;
+    let resolveNativeScan!: (value: number) => void;
+    const nativeScan = new Promise<number>((resolve) => {
+      resolveNativeScan = resolve;
+    });
+    Object.defineProperty(Platform, 'OS', {
+      configurable: true,
+      value: 'android',
+    });
+    NativeModules.SystemMetrics = {
+      getMemorySnapshot: jest.fn(),
+      getCacheDirectorySize: jest.fn(() => nativeScan),
+    };
+
+    try {
+      const metricsRequests = Array.from({ length: 6 }, () => getAppStorageMetrics());
+
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(1);
+
+      resolveNativeScan(4096);
+
+      const metrics = await Promise.all(metricsRequests);
+      expect(metrics.map((entry) => entry.cacheBytes)).toEqual(Array(6).fill(4096));
+      expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+        'storage.cacheScan.deduped': 5,
+        'storage.cacheScan.native': 1,
+      }));
+      expect(performanceMonitor.snapshot().events.filter((event) => (
+        event.type === 'span' && event.name === 'storage.cacheScan'
+      ))).toHaveLength(1);
+    } finally {
+      NativeModules.SystemMetrics = undefined;
+      Object.defineProperty(Platform, 'OS', {
+        configurable: true,
+        value: originalPlatform,
+      });
+    }
+  });
+
+  it('coalesces concurrent JS fallback cache scans', async () => {
+    let resolveCacheRoot!: (value: { exists: boolean; isDirectory: boolean }) => void;
+    const cacheRoot = new Promise<{ exists: boolean; isDirectory: boolean }>((resolve) => {
+      resolveCacheRoot = resolve;
+    });
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return cacheRoot;
+      }
+      if (uri === 'test-cache/temporary.bin') {
+        return { exists: true, isDirectory: false, size: 512 };
+      }
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-cache/' ? ['http-cache', 'temporary.bin'] : []
+    ));
+
+    const metricsRequests = Array.from({ length: 5 }, () => getAppStorageMetrics());
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/'))
+      .toHaveLength(1);
+
+    resolveCacheRoot({ exists: true, isDirectory: true });
+
+    const metrics = await Promise.all(metricsRequests);
+    expect(metrics.map((entry) => entry.cacheBytes)).toEqual(Array(5).fill(512));
+    expect((FileSystem.readDirectoryAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/'))
+      .toHaveLength(1);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/temporary.bin'))
+      .toHaveLength(1);
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-cache/http-cache');
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'storage.cacheScan.deduped': 4,
+      'storage.cacheScan.jsFallback': 1,
+    }));
   });
 
   it('includes quarantined model files in app file metrics without counting them as downloaded models', async () => {
@@ -711,6 +801,35 @@ describe('StorageManagerService', () => {
     expect(metrics.appFilesBytes).toBe(1036);
   });
 
+  it('invalidates the cached native scan when refreshing model file quarantine', async () => {
+    const originalPlatform = Platform.OS;
+    Object.defineProperty(Platform, 'OS', {
+      configurable: true,
+      value: 'android',
+    });
+    NativeModules.SystemMetrics = {
+      getMemorySnapshot: jest.fn(),
+      getCacheDirectorySize: jest.fn()
+        .mockResolvedValueOnce(100)
+        .mockResolvedValueOnce(200),
+    };
+
+    try {
+      await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 100 }));
+      await expect(getAppStorageMetrics({ refreshModelFileQuarantine: true }))
+        .resolves.toEqual(expect.objectContaining({ cacheBytes: 200 }));
+
+      expect(mockedRegistry.validateRegistry).toHaveBeenCalledTimes(1);
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+    } finally {
+      NativeModules.SystemMetrics = undefined;
+      Object.defineProperty(Platform, 'OS', {
+        configurable: true,
+        value: originalPlatform,
+      });
+    }
+  });
+
   it('does not mutate registry validation state for default metrics callers', async () => {
     await getAppStorageMetrics();
 
@@ -776,6 +895,57 @@ describe('StorageManagerService', () => {
     );
     const queuedProvider = mockedRegistry.deleteQuarantinedModelFiles.mock.calls[0][1] as () => string[];
     expect(queuedProvider()).toEqual(['queued.gguf']);
+  });
+
+  it('prevents an in-flight cache scan from restoring measurements after quarantine cleanup', async () => {
+    const originalPlatform = Platform.OS;
+    let resolveStaleScan!: (value: number) => void;
+    let resolveFreshScan!: (value: number) => void;
+    const staleScan = new Promise<number>((resolve) => {
+      resolveStaleScan = resolve;
+    });
+    const freshScan = new Promise<number>((resolve) => {
+      resolveFreshScan = resolve;
+    });
+    Object.defineProperty(Platform, 'OS', {
+      configurable: true,
+      value: 'android',
+    });
+    NativeModules.SystemMetrics = {
+      getMemorySnapshot: jest.fn(),
+      getCacheDirectorySize: jest.fn()
+        .mockImplementationOnce(() => staleScan)
+        .mockImplementationOnce(() => freshScan),
+    };
+
+    try {
+      const staleMetrics = getAppStorageMetrics();
+
+      await expect(cleanupQuarantinedModelFiles()).resolves.toBe(0);
+
+      const freshMetrics = getAppStorageMetrics();
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+
+      resolveStaleScan(700);
+      await expect(staleMetrics).resolves.toEqual(expect.objectContaining({ cacheBytes: 700 }));
+
+      const dedupedFreshMetrics = getAppStorageMetrics();
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+
+      resolveFreshScan(300);
+      await expect(Promise.all([freshMetrics, dedupedFreshMetrics])).resolves.toEqual([
+        expect.objectContaining({ cacheBytes: 300 }),
+        expect.objectContaining({ cacheBytes: 300 }),
+      ]);
+      await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 300 }));
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+    } finally {
+      NativeModules.SystemMetrics = undefined;
+      Object.defineProperty(Platform, 'OS', {
+        configurable: true,
+        value: originalPlatform,
+      });
+    }
   });
 
   it('passes queued projector downloads into quarantine validation and deletion guards', async () => {
@@ -1047,6 +1217,75 @@ describe('StorageManagerService', () => {
       .toHaveLength(1);
     expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/cache.bin'))
       .toHaveLength(1);
+  });
+
+  it('retries a JS fallback scan after a filesystem failure', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockRejectedValueOnce(new Error('scan failed'))
+      .mockResolvedValueOnce({ exists: false });
+
+    try {
+      await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 0 }));
+      await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 0 }));
+
+      expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter((call) => call[0] === 'test-cache/'))
+        .toHaveLength(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('invalidates an in-flight cache measurement before clearing active cache', async () => {
+    const originalPlatform = Platform.OS;
+    let resolveOldScan!: (value: number) => void;
+    let resolveFreshScan!: (value: number) => void;
+    const oldScan = new Promise<number>((resolve) => {
+      resolveOldScan = resolve;
+    });
+    const freshScan = new Promise<number>((resolve) => {
+      resolveFreshScan = resolve;
+    });
+    Object.defineProperty(Platform, 'OS', {
+      configurable: true,
+      value: 'android',
+    });
+    NativeModules.SystemMetrics = {
+      getMemorySnapshot: jest.fn(),
+      getCacheDirectorySize: jest.fn()
+        .mockImplementationOnce(() => oldScan)
+        .mockImplementationOnce(() => freshScan),
+    };
+
+    try {
+      const staleMetrics = getAppStorageMetrics();
+
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(1);
+      await expect(clearActiveCache()).resolves.toBe(0);
+
+      const freshMetrics = getAppStorageMetrics();
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+
+      resolveOldScan(100);
+      await expect(staleMetrics).resolves.toEqual(expect.objectContaining({ cacheBytes: 100 }));
+
+      const dedupedFreshMetrics = getAppStorageMetrics();
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+
+      resolveFreshScan(50);
+      await expect(Promise.all([freshMetrics, dedupedFreshMetrics])).resolves.toEqual([
+        expect.objectContaining({ cacheBytes: 50 }),
+        expect.objectContaining({ cacheBytes: 50 }),
+      ]);
+      await expect(getAppStorageMetrics()).resolves.toEqual(expect.objectContaining({ cacheBytes: 50 }));
+      expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
+    } finally {
+      NativeModules.SystemMetrics = undefined;
+      Object.defineProperty(Platform, 'OS', {
+        configurable: true,
+        value: originalPlatform,
+      });
+    }
   });
 
   it('uses the actual downloaded file size when estimating active model memory usage', async () => {

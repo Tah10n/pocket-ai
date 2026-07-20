@@ -112,6 +112,19 @@ type AssistantMessagePatch = Partial<
   Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'inferenceMetrics' | 'state' | 'errorCode' | 'errorMessage'>
 >;
 
+type AssistantTurnTerminalFields = Partial<
+  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'inferenceMetrics'>
+>;
+
+export type AssistantTurnFinalization =
+  | (AssistantTurnTerminalFields & { outcome: 'success' })
+  | (AssistantTurnTerminalFields & { outcome: 'stopped' })
+  | (AssistantTurnTerminalFields & {
+      outcome: 'error';
+      errorCode: string;
+      errorMessage: string;
+    });
+
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
@@ -126,6 +139,11 @@ interface ChatStoreState {
   switchThreadModel: (threadId: string, nextModelId: string, at?: number) => string | null;
   appendMessage: (threadId: string, message: ChatMessage) => void;
   createAssistantPlaceholder: (threadId: string, modelId?: string) => string;
+  finalizeAssistantTurn: (
+    threadId: string,
+    messageId: string,
+    finalization: AssistantTurnFinalization,
+  ) => boolean;
   stopAssistantMessage: (threadId: string, messageId: string) => void;
   finalizeAssistantMessage: (threadId: string, messageId: string, content: string, thoughtContent?: string) => void;
   deleteThread: (threadId: string) => void;
@@ -149,7 +167,7 @@ interface ChatStoreState {
   getConversationIndex: () => ConversationIndexItem[];
 }
 
-function updateThreadMetadata(thread: ChatThread): ChatThread {
+function updateThreadMetadata(thread: ChatThread, updatedAt = Date.now()): ChatThread {
   const derivedTitle = deriveThreadTitle(thread.messages);
   const title =
     thread.titleSource === 'manual'
@@ -159,7 +177,7 @@ function updateThreadMetadata(thread: ChatThread): ChatThread {
   return {
     ...thread,
     title,
-    updatedAt: Date.now(),
+    updatedAt,
   };
 }
 
@@ -1597,6 +1615,7 @@ function persistChatStoreMutation(
 
   if (reason === 'terminal_state' && performanceMonitor.isEnabled()) {
     performanceMonitor.incrementCounter('chat.persist.terminal');
+    performanceMonitor.incrementCounter('chat.turn.persistenceTransactions');
   }
 
   changedThreadIds.forEach((threadId) => {
@@ -1774,6 +1793,12 @@ function reconcileTransientAssistantRuntimes(threads: Record<string, ChatThread>
 }
 
 function incrementChatStreamCounter(name: 'chat.stream.patch' | 'chat.stream.patch.skipped'): void {
+  if (performanceMonitor.isEnabled()) {
+    performanceMonitor.incrementCounter(name);
+  }
+}
+
+function incrementChatTurnCounter(name: 'chat.turn.finalize' | 'chat.turn.storeMutations'): void {
   if (performanceMonitor.isEnabled()) {
     performanceMonitor.incrementCounter(name);
   }
@@ -2106,19 +2131,94 @@ export const useChatStore = create<ChatStoreState>()(
         return messageId;
       },
 
-      stopAssistantMessage: (threadId, messageId) => {
-        get().patchAssistantMessage(threadId, messageId, {
-          state: 'stopped',
+      finalizeAssistantTurn: (threadId, messageId, finalization) => {
+        const existingThread = get().threads[threadId];
+        const currentMessage = existingThread?.messages.at(-1);
+        if (
+          !existingThread
+          || currentMessage?.id !== messageId
+          || currentMessage.role !== 'assistant'
+          || currentMessage.state !== 'streaming'
+        ) {
+          return false;
+        }
+        assertPrivateStorageWritable();
+        if (!ensureTransientAssistantRuntime(existingThread, messageId)) {
+          return false;
+        }
+
+        let didFinalize = false;
+        withChatPersistenceContext({ reason: 'terminal_state' }, () => {
+          setWhenPrivateStorageWritable((state) => {
+            const durableThread = state.threads[threadId];
+            const runtime = durableThread
+              ? getTransientAssistantRuntime(durableThread, messageId)
+              : null;
+            if (!durableThread || !runtime) {
+              return state;
+            }
+
+            const completedAt = Date.now();
+            const currentMessage = runtime.currentMessage;
+            const terminalFields = {
+              content: finalization.content ?? currentMessage.content,
+              thoughtContent: finalization.thoughtContent ?? currentMessage.thoughtContent,
+              tokensPerSec: finalization.tokensPerSec ?? currentMessage.tokensPerSec,
+              inferenceMetrics: finalization.inferenceMetrics ?? currentMessage.inferenceMetrics,
+            };
+            const terminalMessage: ChatMessage = finalization.outcome === 'error'
+              ? {
+                  ...currentMessage,
+                  ...terminalFields,
+                  state: 'error',
+                  errorCode: finalization.errorCode,
+                  errorMessage: finalization.errorMessage,
+                }
+              : {
+                  ...currentMessage,
+                  ...terminalFields,
+                  state: finalization.outcome === 'success' ? 'complete' : 'stopped',
+                  errorCode: undefined,
+                  errorMessage: undefined,
+                };
+            const nextMessages = durableThread.messages.slice();
+            nextMessages[nextMessages.length - 1] = terminalMessage;
+            const nextStatus: ChatThreadStatus = finalization.outcome === 'success'
+              ? 'idle'
+              : finalization.outcome;
+            const nextThread = updateThreadMetadata({
+              ...durableThread,
+              messages: nextMessages,
+              status: nextStatus,
+              lastGeneratedAt: completedAt,
+            }, completedAt);
+
+            didFinalize = true;
+            return {
+              threads: {
+                ...state.threads,
+                [threadId]: nextThread,
+              },
+            };
+          });
         });
+
+        if (didFinalize) {
+          incrementChatTurnCounter('chat.turn.finalize');
+          incrementChatTurnCounter('chat.turn.storeMutations');
+        }
+        return didFinalize;
+      },
+
+      stopAssistantMessage: (threadId, messageId) => {
+        get().finalizeAssistantTurn(threadId, messageId, { outcome: 'stopped' });
       },
 
       finalizeAssistantMessage: (threadId, messageId, content, thoughtContent) => {
-        get().patchAssistantMessage(threadId, messageId, {
+        get().finalizeAssistantTurn(threadId, messageId, {
+          outcome: 'success',
           content,
           thoughtContent,
-          state: 'complete',
-          errorCode: undefined,
-          errorMessage: undefined,
         });
       },
 
@@ -2222,6 +2322,31 @@ export const useChatStore = create<ChatStoreState>()(
 
       patchAssistantMessage: (threadId, messageId, updates) => {
         assertPrivateStorageWritable();
+        const isTerminalPatch = updates.state !== undefined && updates.state !== 'streaming';
+        if (isTerminalPatch) {
+          if (updates.state === 'error') {
+            get().finalizeAssistantTurn(threadId, messageId, {
+              outcome: 'error',
+              content: updates.content,
+              thoughtContent: updates.thoughtContent,
+              tokensPerSec: updates.tokensPerSec,
+              inferenceMetrics: updates.inferenceMetrics,
+              errorCode: updates.errorCode ?? 'generation_failed',
+              errorMessage: updates.errorMessage ?? 'Generation failed',
+            });
+            return;
+          }
+
+          get().finalizeAssistantTurn(threadId, messageId, {
+            outcome: updates.state === 'complete' ? 'success' : 'stopped',
+            content: updates.content,
+            thoughtContent: updates.thoughtContent,
+            tokensPerSec: updates.tokensPerSec,
+            inferenceMetrics: updates.inferenceMetrics,
+          });
+          return;
+        }
+
         const existingThread = get().threads[threadId];
         if (!existingThread) {
           incrementChatStreamCounter('chat.stream.patch.skipped');
@@ -2234,69 +2359,25 @@ export const useChatStore = create<ChatStoreState>()(
           return;
         }
 
-        const isTerminalPatch = updates.state !== undefined && updates.state !== 'streaming';
-        if (!isTerminalPatch) {
-          const nextMessage: ChatMessage = {
-            ...runtime.currentMessage,
-            ...updates,
-            state: 'streaming',
-          };
-          runtime.currentMessage = nextMessage;
-          runtime.progressRevision += 1;
-          runtime.presentationMessages[runtime.presentationMessages.length - 1] = nextMessage;
-          runtime.presentationThread = {
-            ...existingThread,
-            messages: runtime.presentationMessages,
-          };
-          runtime.sourceThread = existingThread;
+        const nextMessage: ChatMessage = {
+          ...runtime.currentMessage,
+          ...updates,
+          state: 'streaming',
+        };
+        runtime.currentMessage = nextMessage;
+        runtime.progressRevision += 1;
+        runtime.presentationMessages[runtime.presentationMessages.length - 1] = nextMessage;
+        runtime.presentationThread = {
+          ...existingThread,
+          messages: runtime.presentationMessages,
+        };
+        runtime.sourceThread = existingThread;
 
-          chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
-          set((state) => ({
-            streamingRevision: state.streamingRevision + 1,
-          }));
-          incrementChatStreamCounter('chat.stream.patch');
-          return;
-        }
-
-        withChatPersistenceContext({ reason: 'terminal_state' }, () => {
-          setWhenPrivateStorageWritable((state) => {
-            const durableThread = state.threads[threadId];
-            const currentRuntime = durableThread
-              ? getTransientAssistantRuntime(durableThread, messageId)
-              : null;
-            if (!durableThread || !currentRuntime) {
-              return state;
-            }
-
-            const nextMessages = durableThread.messages.slice();
-            nextMessages[nextMessages.length - 1] = {
-              ...currentRuntime.currentMessage,
-              ...updates,
-            };
-
-            const nextStatus =
-              updates.state === 'stopped'
-                ? 'stopped'
-                : updates.state === 'error'
-                  ? 'error'
-                  : durableThread.status === 'generating'
-                    ? 'idle'
-                    : durableThread.status;
-            const nextThread = updateThreadMetadata({
-              ...durableThread,
-              messages: nextMessages,
-              status: nextStatus,
-              lastGeneratedAt: Date.now(),
-            });
-
-            return {
-              threads: {
-                ...state.threads,
-                [threadId]: nextThread,
-              },
-            };
-          });
-        });
+        chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
+        set((state) => ({
+          streamingRevision: state.streamingRevision + 1,
+        }));
+        incrementChatStreamCounter('chat.stream.patch');
       },
 
       replaceLastAssistantMessage: (threadId) => {

@@ -381,13 +381,40 @@ describe('useChatSession', () => {
     };
     (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(telemetry);
     const getSession = renderHookHarness();
-
-    await act(async () => {
-      await getSession()?.appendUserMessage('Benchmark MTP');
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const durableWritesWithTelemetry: string[] = [];
+    appStorage.set = jest.fn(function setWithTerminalWriteCapture(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (
+        key.startsWith('chat-store:v2:thread:')
+        && typeof value === 'string'
+        && value.includes('"inferenceMetrics"')
+      ) {
+        durableWritesWithTelemetry.push(value);
+      }
+      return originalSet.call(this, key, value);
     });
 
-    const assistant = useChatStore.getState().getActiveThread()?.messages.at(-1);
-    expect(assistant?.inferenceMetrics).toEqual(telemetry);
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Benchmark MTP');
+      });
+
+      const assistant = useChatStore.getState().getActiveThread()?.messages.at(-1);
+      expect(assistant?.inferenceMetrics).toEqual(telemetry);
+      expect(durableWritesWithTelemetry).toHaveLength(1);
+      expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+        'chat.turn.finalize': 1,
+        'chat.turn.storeMutations': 1,
+        'chat.turn.persistenceTransactions': 1,
+      }));
+    } finally {
+      appStorage.set = originalSet;
+    }
   });
 
   it('sanitizes prompt token fallback warnings without logging raw attachment paths', async () => {
@@ -1868,7 +1895,8 @@ describe('useChatSession', () => {
     const generationError = new Error('native generation failed');
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
-        onToken?.('Partial before failure');
+        onToken?.('Partial ');
+        onToken?.('before failure');
         throw generationError;
       },
     );
@@ -1912,6 +1940,11 @@ describe('useChatSession', () => {
     }));
     expect(record.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(storage.getString('chat-store') ?? '').not.toContain('Partial before failure');
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.turn.finalize': 1,
+      'chat.turn.storeMutations': 1,
+      'chat.turn.persistenceTransactions': 1,
+    }));
   });
 
   it('redacts native multimodal paths from persisted and thrown assistant generation errors', async () => {
@@ -2463,10 +2496,10 @@ describe('useChatSession', () => {
     }));
   });
 
-  it('interrupts active generation when a pending flush cannot persist after storage blocks', async () => {
+  it('interrupts active generation when atomic terminal finalization cannot persist after storage blocks', async () => {
     let onToken: ((token: string) => void) | undefined;
     let resolveCompletion: (() => void) | undefined;
-    const originalPatchAssistantMessage = useChatStore.getState().patchAssistantMessage;
+    const originalFinalizeAssistantTurn = useChatStore.getState().finalizeAssistantTurn;
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const privateStorageError = new PrivateStorageUnavailableError('encrypted_open_failed', {
       status: 'blocked',
@@ -2476,15 +2509,8 @@ describe('useChatSession', () => {
       lastUpdatedAt: 1,
     });
 
-    let patchCallCount = 0;
     useChatStore.setState({
-      patchAssistantMessage: jest.fn((...args: Parameters<typeof originalPatchAssistantMessage>) => {
-        patchCallCount += 1;
-        if (patchCallCount === 1) {
-          originalPatchAssistantMessage(...args);
-          return;
-        }
-
+      finalizeAssistantTurn: jest.fn(() => {
         throw privateStorageError;
       }),
     } as Partial<ReturnType<typeof useChatStore.getState>>);
@@ -2517,7 +2543,7 @@ describe('useChatSession', () => {
       expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
       expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('pending assistant patch'),
+        expect.stringContaining('assistant turn stop'),
         privateStorageError,
       );
 
@@ -2527,7 +2553,9 @@ describe('useChatSession', () => {
       });
     } finally {
       await act(async () => {
-        useChatStore.setState({ patchAssistantMessage: originalPatchAssistantMessage } as Partial<ReturnType<typeof useChatStore.getState>>);
+        useChatStore.setState({
+          finalizeAssistantTurn: originalFinalizeAssistantTurn,
+        } as Partial<ReturnType<typeof useChatStore.getState>>);
       });
       warnSpy.mockRestore();
     }
@@ -4330,6 +4358,11 @@ describe('useChatSession', () => {
     }));
     expect(persistedRecord.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(interruptedSpy).toHaveBeenCalledTimes(1);
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.turn.finalize': 1,
+      'chat.turn.storeMutations': 1,
+      'chat.turn.persistenceTransactions': 1,
+    }));
   });
 
   it('logs rejected expiration stop without changing stopped notification flow', async () => {

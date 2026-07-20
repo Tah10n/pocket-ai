@@ -23,10 +23,16 @@ import {
 } from '../../src/store/chatPersistence';
 import { getAppStorage, storage } from '../../src/store/storage';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import * as privateStorageService from '../../src/services/storage';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
-import { captureReferenceSequence, countUnretainedItemReferences } from '../../testUtils';
+import {
+  captureReferenceSequence,
+  countUnretainedItemReferences,
+  createMutationCounter,
+  getCounterDelta,
+} from '../../testUtils';
 
 function buildThread(id: string, updatedAt: number): ChatThread {
   return {
@@ -4390,6 +4396,316 @@ describe('chatStore', () => {
       performanceMonitor.setEnabled(previousEnabled);
       useChatStore.getState().stopAssistantMessage(streamingThread.id, messageId);
       jest.useRealTimers();
+    }
+  });
+
+  it('atomically finalizes the latest buffered output and MTP telemetry in one mutation and transaction', () => {
+    const durableThread = buildPerformanceThread({
+      historicalMessageCount: 1000,
+      attachments: 'mixed',
+      modelSwitchEvery: 125,
+    });
+    const messageId = 'assistant-terminal-1000';
+    const streamingThread: ChatThread = {
+      ...durableThread,
+      messages: [
+        ...durableThread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: durableThread.updatedAt + 1,
+          state: 'streaming',
+          kind: 'message',
+          modelId: durableThread.activeModelId,
+        },
+      ],
+      status: 'generating',
+    };
+    writeChatThreadRecord(storage, durableThread, durableThread.updatedAt);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: streamingThread.id,
+      threadIds: [streamingThread.id],
+      updatedAt: durableThread.updatedAt,
+    });
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+    useChatStore.getState().patchAssistantMessage(streamingThread.id, messageId, {
+      content: 'Older flushed output',
+      thoughtContent: 'Older flushed reasoning',
+      tokensPerSec: 1,
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    const telemetry = {
+      tokensPredicted: 120,
+      tokensEvaluated: 30,
+      predictedPerSecond: 7.5,
+      timeToFirstTokenMs: 640,
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 48,
+        draftTokensAccepted: 24,
+        acceptanceRate: 0.5,
+      },
+    };
+    const observedTerminalStates: Array<{
+      messageState: string | undefined;
+      threadStatus: string | undefined;
+      inferenceMetrics: unknown;
+    }> = [];
+    const unsubscribeStateCapture = useChatStore.subscribe((state) => {
+      const thread = state.threads[streamingThread.id];
+      observedTerminalStates.push({
+        messageState: thread?.messages.at(-1)?.state,
+        threadStatus: thread?.status,
+        inferenceMetrics: thread?.messages.at(-1)?.inferenceMetrics,
+      });
+    });
+    const mutationCounter = createMutationCounter(useChatStore.subscribe);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writtenKeys: string[] = [];
+    appStorage.set = jest.fn(function setWithKeyCapture(this: unknown, key: string, value: unknown) {
+      writtenKeys.push(key);
+      return originalSet.call(this, key, value);
+    });
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        streamingThread.id,
+        messageId,
+        {
+          outcome: 'success',
+          content: 'Latest buffered final output',
+          thoughtContent: 'Latest buffered final reasoning',
+          tokensPerSec: 8.25,
+          inferenceMetrics: telemetry,
+        },
+      )).toBe(true);
+
+      const finalizedThread = useChatStore.getState().threads[streamingThread.id];
+      expect(mutationCounter.getCount()).toBe(1);
+      expect(observedTerminalStates).toEqual([{
+        messageState: 'complete',
+        threadStatus: 'idle',
+        inferenceMetrics: telemetry,
+      }]);
+      expect(finalizedThread.updatedAt).toBe(finalizedThread.lastGeneratedAt);
+      expect(finalizedThread.messages.at(-1)).toEqual(expect.objectContaining({
+        id: messageId,
+        content: 'Latest buffered final output',
+        thoughtContent: 'Latest buffered final reasoning',
+        tokensPerSec: 8.25,
+        inferenceMetrics: telemetry,
+        state: 'complete',
+        errorCode: undefined,
+        errorMessage: undefined,
+      }));
+      expect(writtenKeys.filter((key) => key === getChatThreadStorageKey(streamingThread.id))).toHaveLength(1);
+      expect(writtenKeys.filter((key) => key === CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toHaveLength(1);
+      expect(writtenKeys.filter((key) => key === CHAT_PERSISTENCE_INDEX_KEY)).toHaveLength(1);
+      expect(readChatStreamingProgressRecord(storage, streamingThread.id)).toEqual({ ok: false, reason: 'missing' });
+
+      const countersAfterCommit = performanceMonitor.snapshot().counters;
+      expect(countersAfterCommit).toEqual(expect.objectContaining({
+        'chat.turn.finalize': 1,
+        'chat.turn.storeMutations': 1,
+        'chat.turn.persistenceTransactions': 1,
+        'chat.persist.terminal': 1,
+        'chat.persist.sanitize': 1,
+      }));
+      expect(performanceMonitor.snapshot().events.filter(
+        (event) => event.name === 'chat.persist.stringify' && event.meta?.recordKind === 'thread',
+      )).toHaveLength(1);
+
+      const persistedAfterCommit = storage.getString(getChatThreadStorageKey(streamingThread.id));
+      const writeCountAfterCommit = writtenKeys.length;
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        streamingThread.id,
+        messageId,
+        { outcome: 'stopped', content: 'Duplicate terminal callback' },
+      )).toBe(false);
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        streamingThread.id,
+        'stale-assistant-id',
+        { outcome: 'error', errorCode: 'stale', errorMessage: 'Stale callback' },
+      )).toBe(false);
+
+      const countersAfterDuplicates = performanceMonitor.snapshot().counters;
+      expect(mutationCounter.getCount()).toBe(1);
+      expect(writtenKeys).toHaveLength(writeCountAfterCommit);
+      expect(storage.getString(getChatThreadStorageKey(streamingThread.id))).toBe(persistedAfterCommit);
+      expect(getCounterDelta(countersAfterCommit, countersAfterDuplicates, 'chat.turn.finalize')).toBe(0);
+      expect(getCounterDelta(
+        countersAfterCommit,
+        countersAfterDuplicates,
+        'chat.turn.persistenceTransactions',
+      )).toBe(0);
+    } finally {
+      appStorage.set = originalSet;
+      mutationCounter.unsubscribe();
+      unsubscribeStateCapture();
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+    }
+  });
+
+  it.each([
+    {
+      outcome: 'success' as const,
+      finalization: { outcome: 'success' as const, content: 'Complete answer' },
+      expectedMessageState: 'complete',
+      expectedThreadStatus: 'idle',
+      expectedErrorCode: undefined,
+    },
+    {
+      outcome: 'stopped' as const,
+      finalization: { outcome: 'stopped' as const, content: 'Partial answer' },
+      expectedMessageState: 'stopped',
+      expectedThreadStatus: 'stopped',
+      expectedErrorCode: undefined,
+    },
+    {
+      outcome: 'error' as const,
+      finalization: {
+        outcome: 'error' as const,
+        content: 'Partial answer before error',
+        errorCode: 'generation_failed',
+        errorMessage: 'Generation failed safely',
+      },
+      expectedMessageState: 'error',
+      expectedThreadStatus: 'error',
+      expectedErrorCode: 'generation_failed',
+    },
+  ])('enforces $outcome assistant and thread terminal invariants', ({
+    finalization,
+    expectedMessageState,
+    expectedThreadStatus,
+    expectedErrorCode,
+  }) => {
+    const thread = buildThread(`thread-terminal-${expectedMessageState}`, 10);
+    const streamingThread: ChatThread = {
+      ...thread,
+      messages: [
+        ...thread.messages,
+        {
+          id: `assistant-${expectedMessageState}`,
+          role: 'assistant',
+          content: 'Streaming content',
+          createdAt: 11,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      streamingThread.id,
+      `assistant-${expectedMessageState}`,
+      finalization,
+    )).toBe(true);
+
+    const finalized = useChatStore.getState().threads[streamingThread.id];
+    expect(finalized.status).toBe(expectedThreadStatus);
+    expect(finalized.updatedAt).toBe(finalized.lastGeneratedAt);
+    expect(finalized.messages.at(-1)).toEqual(expect.objectContaining({
+      state: expectedMessageState,
+      errorCode: expectedErrorCode,
+    }));
+  });
+
+  it('keeps stale and duplicate terminal callbacks as no-ops when private storage is blocked', () => {
+    const completedThread = buildThread('thread-terminal-duplicate-blocked', 10);
+    const completedMessageId = 'assistant-terminal-completed';
+    const completedStreamingThread: ChatThread = {
+      ...completedThread,
+      messages: [
+        ...completedThread.messages,
+        {
+          id: completedMessageId,
+          role: 'assistant',
+          content: 'Completed before storage blocked',
+          createdAt: 11,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+    const replacementThread = buildThread('thread-terminal-stale-blocked', 20);
+    const currentMessageId = 'assistant-current-streaming';
+    const replacementStreamingThread: ChatThread = {
+      ...replacementThread,
+      messages: [
+        ...replacementThread.messages,
+        {
+          id: currentMessageId,
+          role: 'assistant',
+          content: 'Current response',
+          createdAt: 21,
+          state: 'streaming',
+        },
+      ],
+      status: 'generating',
+    };
+    useChatStore.setState({
+      threads: {
+        [completedStreamingThread.id]: completedStreamingThread,
+        [replacementStreamingThread.id]: replacementStreamingThread,
+      },
+      activeThreadId: replacementStreamingThread.id,
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      completedStreamingThread.id,
+      completedMessageId,
+      { outcome: 'success', content: 'Completed before storage blocked' },
+    )).toBe(true);
+
+    const blockedError = new Error('private storage blocked');
+    const writabilitySpy = jest
+      .spyOn(privateStorageService, 'assertPrivateStorageWritable')
+      .mockImplementation(() => {
+        throw blockedError;
+      });
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        completedStreamingThread.id,
+        completedMessageId,
+        { outcome: 'stopped' },
+      )).toBe(false);
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        replacementStreamingThread.id,
+        'assistant-replaced-stale',
+        { outcome: 'error', errorCode: 'stale', errorMessage: 'Stale callback' },
+      )).toBe(false);
+      expect(writabilitySpy).not.toHaveBeenCalled();
+
+      expect(() => useChatStore.getState().finalizeAssistantTurn(
+        replacementStreamingThread.id,
+        currentMessageId,
+        { outcome: 'stopped' },
+      )).toThrow(blockedError);
+      expect(writabilitySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      writabilitySpy.mockRestore();
+      useChatStore.getState().finalizeAssistantTurn(
+        replacementStreamingThread.id,
+        currentMessageId,
+        { outcome: 'stopped' },
+      );
     }
   });
 

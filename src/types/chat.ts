@@ -127,6 +127,7 @@ export interface LlmChatCompletionOptions {
     token: string;
     content?: string;
     reasoningContent?: string;
+    reasoningContentMode?: 'snapshot' | 'delta';
     accumulatedText?: string;
   }) => void;
   params?: {

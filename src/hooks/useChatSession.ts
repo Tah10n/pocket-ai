@@ -45,7 +45,11 @@ import {
   resolveThreadInferenceWindowOptions,
   type InferenceBudgetOptions,
 } from '../utils/inferenceWindow';
-import { getVisibleAssistantContent } from '../utils/chatPresentation';
+import {
+  createIncrementalAssistantPresentationParser,
+  doesAssistantContentEndAtSentenceBoundary,
+  getVisibleAssistantContent,
+} from '../utils/chatPresentation';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
@@ -84,7 +88,6 @@ export const DEFAULT_STREAM_PATCH_INTERVAL_MS = 140;
 export const LONG_STREAM_PATCH_INTERVAL_MS = 320;
 export const LONG_STREAM_PATCH_TOKEN_THRESHOLD = 64;
 export const LONG_STREAM_PATCH_CHAR_THRESHOLD = 1200;
-const STREAM_BOUNDARY_PATTERN = /[.!?。！？](?:["')\]}]|[\s])*$/;
 const ATTACHMENT_FILE_CHECK_CONCURRENCY = 8;
 const ESTIMATED_MEDIA_PROMPT_TOKENS_PER_INPUT = 576;
 const EXACT_MEDIA_PROMPT_RECOUNT_MARGIN_TOKENS_PER_INPUT = 1024;
@@ -434,7 +437,7 @@ export function resolveAssistantStreamPatchInterval({
 }
 
 export function shouldFlushAssistantStreamPatchOnBoundary(content: string) {
-  return STREAM_BOUNDARY_PATTERN.test(content.trimEnd());
+  return doesAssistantContentEndAtSentenceBoundary(content);
 }
 
 export function resetSharedGenerationStateForTests() {
@@ -1683,9 +1686,7 @@ export const useChatSession = () => {
         }
       : null;
 
-    let currentText = '';
-    let currentRawText = '';
-    let currentThoughtText = '';
+    const presentationParser = createIncrementalAssistantPresentationParser();
     let tokensCount = 0;
     let hasMarkedFirstToken = false;
     const startTime = Date.now();
@@ -1694,23 +1695,8 @@ export const useChatSession = () => {
     let unsubscribeExpiration: (() => void) | null = null;
     let sentBackgroundOutcomeNotification: 'interrupted' | 'error' | null = null;
     let hasFlushedFirstAssistantPatch = false;
-    let lastFlushedVisibleContent = '';
-
-    let needsVisibleRefresh = false;
-
-    const refreshVisibleAssistantContent = () => {
-      if (!needsVisibleRefresh) {
-        return;
-      }
-
-      if (currentRawText.length === 0) {
-        needsVisibleRefresh = false;
-        return;
-      }
-
-      currentText = getVisibleAssistantContent(currentRawText, { isStreaming: true });
-      needsVisibleRefresh = false;
-    };
+    let lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
+    let latestRawAssistantSnapshot = '';
 
     const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
       const elapsedSec = (Date.now() - startTime) / 1000;
@@ -1739,11 +1725,10 @@ export const useChatSession = () => {
       && (options?.allowStopped === true || !generationState.stopRequested)
     );
 
-    const hasBufferedAssistantContent = () => (
-      currentRawText.length > 0 ||
-      currentText.length > 0 ||
-      currentThoughtText.length > 0
-    );
+    const hasBufferedAssistantContent = () => {
+      const presentation = presentationParser.getPresentation();
+      return presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0;
+    };
 
     const cancelScheduledAssistantPatch = () => {
       if (flushTimeout) {
@@ -1760,14 +1745,13 @@ export const useChatSession = () => {
         return;
       }
 
-      refreshVisibleAssistantContent();
-
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+      const presentation = presentationParser.getPresentation();
 
       const updates: Partial<ChatMessage> = {
-        content: currentText,
-        thoughtContent: currentThoughtText || undefined,
+        content: presentation.finalContent,
+        thoughtContent: presentation.thoughtContent || undefined,
         tokensPerSec,
       };
 
@@ -1776,9 +1760,9 @@ export const useChatSession = () => {
       }
 
       patchAssistantMessage(threadId, assistantMessageId, updates);
-      if (hasBufferedAssistantContent()) {
+      if (presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0) {
         hasFlushedFirstAssistantPatch = true;
-        lastFlushedVisibleContent = currentText || currentRawText;
+        lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
       }
     };
 
@@ -1791,13 +1775,13 @@ export const useChatSession = () => {
         return false;
       }
 
-      refreshVisibleAssistantContent();
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+      const presentation = presentationParser.getPresentation();
       return finalizeAssistantTurn(threadId, assistantMessageId, {
         ...finalization,
-        content: finalization.content ?? currentText,
-        thoughtContent: finalization.thoughtContent ?? (currentThoughtText || undefined),
+        content: finalization.content ?? presentation.finalContent,
+        thoughtContent: finalization.thoughtContent ?? (presentation.thoughtContent || undefined),
         tokensPerSec: finalization.tokensPerSec ?? tokensPerSec,
       });
     };
@@ -1813,10 +1797,11 @@ export const useChatSession = () => {
         return;
       }
 
+      const presentation = presentationParser.getPresentation();
       const delayMs = resolveAssistantStreamPatchInterval({
         tokensCount,
-        visibleCharCount: Math.max(currentText.length, currentRawText.length),
-        thoughtCharCount: currentThoughtText.length,
+        visibleCharCount: presentation.finalContent.length,
+        thoughtCharCount: presentation.thoughtContent.length,
       });
 
       if (flushTimeout) {
@@ -2283,60 +2268,39 @@ export const useChatSession = () => {
           }
 
           if (typeof token === 'string') {
-            if (currentRawText.length === 0 && currentText.length > 0) {
-              currentRawText = currentText;
-            }
-            currentRawText += token;
-            needsVisibleRefresh = true;
+            presentationParser.appendDelta(token);
           } else {
             const hasReasoningUpdate = token.reasoningContent !== undefined;
-
-            if (token.content !== undefined) {
-              currentText = getVisibleAssistantContent(token.content);
-              needsVisibleRefresh = false;
-              if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
-                currentRawText = token.accumulatedText;
-              } else {
-                currentRawText = token.content;
-              }
-            } else if (hasReasoningUpdate) {
-              // When the engine is still producing reasoning (no parsed `content` yet), never derive
-              // the visible assistant message from raw accumulated text. Some templates use non-<think>
-              // markers (e.g. [THINK] or <|channel>thought) which would otherwise leak into the main bubble.
-              if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
-                currentRawText = token.accumulatedText;
-              }
-              needsVisibleRefresh = false;
-            } else if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
-              currentRawText = token.accumulatedText;
-              needsVisibleRefresh = true;
-            } else {
-              if (currentRawText.length === 0 && currentText.length > 0) {
-                currentRawText = currentText;
-              }
-              currentRawText += token.token;
-              needsVisibleRefresh = true;
+            if (typeof token.accumulatedText === 'string') {
+              latestRawAssistantSnapshot = token.accumulatedText;
             }
 
-            if (token.reasoningContent !== undefined) {
-              const nextReasoning = token.reasoningContent;
+            if (token.content !== undefined) {
+              presentationParser.applySnapshot(token.content);
+            } else if (!hasReasoningUpdate) {
+              if (typeof token.accumulatedText === 'string') {
+                presentationParser.applySnapshot(token.accumulatedText);
+              } else {
+                presentationParser.appendDelta(token.token);
+              }
+            }
+            // Reasoning-only native updates intentionally ignore raw accumulated text. Its
+            // template-specific markers must never leak into the visible assistant bubble.
 
-              // `reasoningContent` may be streamed either as an accumulated buffer or as deltas.
-              // Prefer treating it as accumulated when it prefixes the existing buffer.
-              currentThoughtText = nextReasoning.startsWith(currentThoughtText)
-                ? nextReasoning
-                : (currentThoughtText + nextReasoning);
+            if (token.reasoningContent !== undefined) {
+              if (token.reasoningContentMode === 'delta') {
+                presentationParser.appendExplicitReasoningDelta(token.reasoningContent);
+              } else {
+                presentationParser.applyExplicitReasoningSnapshot(token.reasoningContent);
+              }
             }
           }
 
           tokensCount += 1;
-          const boundaryCandidate = needsVisibleRefresh
-            ? currentRawText
-            : (currentText || currentRawText);
           scheduleAssistantPatch({
             sentenceBoundary:
-              boundaryCandidate !== lastFlushedVisibleContent &&
-              shouldFlushAssistantStreamPatchOnBoundary(boundaryCandidate),
+              presentationParser.getVisibleContentRevision() !== lastFlushedVisibleRevision &&
+              presentationParser.doesVisibleContentEndAtSentenceBoundary(),
           });
         },
       });
@@ -2351,7 +2315,10 @@ export const useChatSession = () => {
         return;
       }
 
-      const finalThoughtContent = completion.reasoning_content || currentThoughtText || undefined;
+      const currentPresentation = presentationParser.getPresentation();
+      const finalThoughtContent = completion.reasoning_content
+        || currentPresentation.thoughtContent
+        || undefined;
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
@@ -2360,9 +2327,9 @@ export const useChatSession = () => {
         content: resolveVisibleAssistantContentFromCandidates(
           '',
           completion.content,
-          currentText,
+          currentPresentation.finalContent,
           completion.text,
-          currentRawText,
+          latestRawAssistantSnapshot,
         ),
         thoughtContent: finalThoughtContent,
         inferenceMetrics: completionTelemetry ?? undefined,

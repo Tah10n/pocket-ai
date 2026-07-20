@@ -2933,7 +2933,14 @@ class LLMEngineService {
                 onToken?.({
                   token: data.token ?? '',
                   content: data.content,
-                  reasoningContent: data.reasoning_content,
+                  // llama.rn parses reasoning_content from its accumulated text on every
+                  // callback, so make those snapshot semantics explicit downstream.
+                  ...(data.reasoning_content !== undefined
+                    ? {
+                        reasoningContent: data.reasoning_content,
+                        reasoningContentMode: 'snapshot' as const,
+                      }
+                    : {}),
                   accumulatedText: data.accumulated_text,
                 });
               }

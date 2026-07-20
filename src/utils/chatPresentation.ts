@@ -120,6 +120,31 @@ export interface AssistantPresentation {
   isThoughtStreaming: boolean;
 }
 
+const MAX_INCREMENTAL_MARKER_LOOKAHEAD = 256;
+const STREAM_BOUNDARY_PUNCTUATION = '.!?。！？';
+const STREAM_BOUNDARY_CLOSERS = `"')]}`;
+const WHITESPACE_CHARACTER_REGEX = /\s/;
+
+function updateStreamBoundaryState(currentState: boolean, content: string): boolean {
+  let nextState = currentState;
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (STREAM_BOUNDARY_PUNCTUATION.includes(character)) {
+      nextState = true;
+    } else if (
+      !STREAM_BOUNDARY_CLOSERS.includes(character)
+      && !WHITESPACE_CHARACTER_REGEX.test(character)
+    ) {
+      nextState = false;
+    }
+  }
+  return nextState;
+}
+
+export function doesAssistantContentEndAtSentenceBoundary(content: string): boolean {
+  return updateStreamBoundaryState(false, content);
+}
+
 function trimBoundaryBlankLines(content: string) {
   return content
     .replace(/^\n+/, '')
@@ -151,6 +176,307 @@ function findDelimiterCloseTag(content: string, cursor: number, closeTag: string
     index: closeIndex,
     length: closeTag.length,
   };
+}
+
+class BoundaryNewlineTrimAccumulator {
+  private content = '';
+  private pendingTrailingNewlineCount = 0;
+  private hasStarted = false;
+
+  append(content: string): void {
+    if (!content) {
+      return;
+    }
+
+    let contentStart = 0;
+    if (!this.hasStarted) {
+      while (content[contentStart] === '\n') {
+        contentStart += 1;
+      }
+      if (contentStart === content.length) {
+        return;
+      }
+    }
+
+    let contentEnd = content.length;
+    while (contentEnd > contentStart && content[contentEnd - 1] === '\n') {
+      contentEnd -= 1;
+    }
+
+    if (contentEnd === contentStart) {
+      this.pendingTrailingNewlineCount += content.length;
+      return;
+    }
+
+    const pendingNewlines = this.pendingTrailingNewlineCount > 0
+      ? '\n'.repeat(this.pendingTrailingNewlineCount)
+      : '';
+    this.content += pendingNewlines + content.slice(contentStart, contentEnd);
+    this.pendingTrailingNewlineCount = content.length - contentEnd;
+    this.hasStarted = true;
+  }
+
+  reset(): void {
+    this.content = '';
+    this.pendingTrailingNewlineCount = 0;
+    this.hasStarted = false;
+  }
+
+  getValue(): string {
+    return this.content;
+  }
+}
+
+type IncrementalParserMode = 'awaiting_open' | 'reasoning' | 'visible';
+
+type AwaitingOpenClassification =
+  | { kind: 'open'; match: ReasoningOpenMatch }
+  | { kind: 'partial' }
+  | { kind: 'whitespace' }
+  | { kind: 'visible' };
+
+function classifyIncrementalReasoningOpen(content: string): AwaitingOpenClassification {
+  const openMatch = matchLeadingReasoningOpenTag(content);
+  if (openMatch) {
+    return { kind: 'open', match: openMatch };
+  }
+
+  if (content.trimStart().length === 0) {
+    return content.length > MAX_INCREMENTAL_MARKER_LOOKAHEAD
+      ? { kind: 'visible' }
+      : { kind: 'whitespace' };
+  }
+
+  if (
+    content.length <= MAX_INCREMENTAL_MARKER_LOOKAHEAD
+    && isPartialLeadingReasoningOpenTagPrefix(content)
+  ) {
+    return { kind: 'partial' };
+  }
+
+  return { kind: 'visible' };
+}
+
+/**
+ * Stateful streaming parser. Delta characters are consumed once; only the
+ * bounded marker lookahead and close-tag suffix are revisited. Full snapshots
+ * intentionally rebuild raw presentation state to provide deterministic
+ * resynchronization.
+ */
+export class IncrementalAssistantPresentationParser {
+  private mode: IncrementalParserMode = 'awaiting_open';
+  private pendingOpen = '';
+  private closeTag = '';
+  private pendingClose = '';
+  private visibleContent = new BoundaryNewlineTrimAccumulator();
+  private visibleContentRevision = 0;
+  private visibleContentEndsAtSentenceBoundary = false;
+  private currentThought = new BoundaryNewlineTrimAccumulator();
+  private derivedThoughtContent = '';
+  private currentThoughtHasContent = false;
+  private explicitReasoningRaw = '';
+  private hasExplicitReasoning = false;
+  private processedCharacterCount = 0;
+
+  appendDelta(delta: string): void {
+    if (!delta) {
+      return;
+    }
+
+    this.processRawCharacters(delta);
+  }
+
+  applySnapshot(snapshot: string): void {
+    this.resetRawPresentationState();
+    if (!snapshot) {
+      return;
+    }
+
+    this.processRawCharacters(snapshot);
+  }
+
+  applyExplicitReasoningSnapshot(reasoning: string): void {
+    this.hasExplicitReasoning = true;
+    this.explicitReasoningRaw = reasoning;
+    if (!reasoning) {
+      return;
+    }
+
+    this.processedCharacterCount += reasoning.length;
+  }
+
+  appendExplicitReasoningDelta(delta: string): void {
+    if (!delta) {
+      return;
+    }
+
+    this.hasExplicitReasoning = true;
+    this.explicitReasoningRaw += delta;
+    this.processedCharacterCount += delta.length;
+  }
+
+  getPresentation(): AssistantPresentation {
+    const hasPartialOpeningMarker = this.mode === 'awaiting_open'
+      && this.pendingOpen.trimStart().length > 0;
+    const derivedThoughtContent = this.getDerivedThoughtContent();
+    const thoughtContent = this.hasExplicitReasoning
+      ? this.explicitReasoningRaw
+      : derivedThoughtContent;
+    const finalContent = this.mode === 'visible'
+      ? this.visibleContent.getValue()
+      : this.mode === 'awaiting_open' && !hasPartialOpeningMarker
+        ? trimBoundaryBlankLines(this.pendingOpen)
+        : '';
+    const isThoughtStreaming = this.mode === 'reasoning'
+      || hasPartialOpeningMarker
+      || (this.hasExplicitReasoning && finalContent.length === 0);
+    const hasThought = thoughtContent.length > 0
+      || this.mode === 'reasoning'
+      || hasPartialOpeningMarker
+      || (this.hasExplicitReasoning && finalContent.length === 0);
+
+    return {
+      finalContent,
+      thoughtContent,
+      hasThought,
+      isThoughtStreaming,
+    };
+  }
+
+  /** Source UTF-16 code units consumed by parser operations, excluding bounded marker-state checks. */
+  getProcessedCharacterCount(): number {
+    return this.processedCharacterCount;
+  }
+
+  getVisibleContentRevision(): number {
+    return this.visibleContentRevision;
+  }
+
+  doesVisibleContentEndAtSentenceBoundary(): boolean {
+    return this.visibleContentEndsAtSentenceBoundary;
+  }
+
+  private resetRawPresentationState(): void {
+    this.mode = 'awaiting_open';
+    this.pendingOpen = '';
+    this.closeTag = '';
+    this.pendingClose = '';
+    this.visibleContent.reset();
+    this.visibleContentRevision += 1;
+    this.visibleContentEndsAtSentenceBoundary = false;
+    this.currentThought.reset();
+    this.derivedThoughtContent = '';
+    this.currentThoughtHasContent = false;
+  }
+
+  private processRawCharacters(content: string): void {
+    let cursor = 0;
+    const stableThoughtCharacters: string[] = [];
+    const flushStableThoughtCharacters = () => {
+      if (stableThoughtCharacters.length === 0) {
+        return;
+      }
+
+      this.appendCurrentThought(stableThoughtCharacters.join(''));
+      stableThoughtCharacters.length = 0;
+    };
+
+    while (cursor < content.length) {
+      if (this.mode === 'visible') {
+        this.processedCharacterCount += content.length - cursor;
+        this.appendVisibleContent(content.slice(cursor));
+        return;
+      }
+
+      if (this.mode === 'awaiting_open') {
+        this.pendingOpen += content[cursor];
+        cursor += 1;
+        this.processedCharacterCount += 1;
+        const classification = classifyIncrementalReasoningOpen(this.pendingOpen);
+        if (classification.kind === 'open') {
+          this.mode = 'reasoning';
+          this.closeTag = classification.match.closeTag.toLowerCase();
+          this.pendingOpen = '';
+          this.pendingClose = '';
+          this.currentThought.reset();
+          this.currentThoughtHasContent = false;
+        } else if (classification.kind === 'visible') {
+          this.mode = 'visible';
+          this.appendVisibleContent(this.pendingOpen);
+          this.pendingOpen = '';
+        }
+        continue;
+      }
+
+      this.pendingClose += content[cursor];
+      cursor += 1;
+      this.processedCharacterCount += 1;
+      while (
+        this.pendingClose.length > 0
+        && !this.closeTag.startsWith(this.pendingClose.toLowerCase())
+      ) {
+        stableThoughtCharacters.push(this.pendingClose[0]);
+        this.pendingClose = this.pendingClose.slice(1);
+      }
+
+      if (this.pendingClose.toLowerCase() === this.closeTag) {
+        flushStableThoughtCharacters();
+        this.completeCurrentThought();
+      }
+    }
+
+    flushStableThoughtCharacters();
+  }
+
+  private appendVisibleContent(content: string): void {
+    const previousLength = this.visibleContent.getValue().length;
+    this.visibleContent.append(content);
+    const nextVisibleContent = this.visibleContent.getValue();
+    if (nextVisibleContent.length === previousLength) {
+      return;
+    }
+
+    const stableVisibleAppend = nextVisibleContent.slice(previousLength);
+    this.visibleContentEndsAtSentenceBoundary = updateStreamBoundaryState(
+      this.visibleContentEndsAtSentenceBoundary,
+      stableVisibleAppend,
+    );
+    this.visibleContentRevision += 1;
+  }
+
+  private appendCurrentThought(content: string): void {
+    const previousLength = this.currentThought.getValue().length;
+    this.currentThought.append(content);
+    const nextThoughtContent = this.currentThought.getValue();
+    if (nextThoughtContent.length === previousLength) {
+      return;
+    }
+
+    if (!this.currentThoughtHasContent) {
+      if (this.derivedThoughtContent) {
+        this.derivedThoughtContent += '\n\n';
+      }
+      this.currentThoughtHasContent = true;
+    }
+    this.derivedThoughtContent += nextThoughtContent.slice(previousLength);
+  }
+
+  private completeCurrentThought(): void {
+    this.mode = 'awaiting_open';
+    this.pendingOpen = '';
+    this.closeTag = '';
+    this.pendingClose = '';
+    this.currentThought.reset();
+    this.currentThoughtHasContent = false;
+  }
+
+  private getDerivedThoughtContent(): string {
+    return this.derivedThoughtContent;
+  }
+}
+
+export function createIncrementalAssistantPresentationParser() {
+  return new IncrementalAssistantPresentationParser();
 }
 
 export function getAssistantPresentation(

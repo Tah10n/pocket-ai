@@ -2100,6 +2100,72 @@ describe('useChatSession', () => {
     );
   });
 
+  it('parses reasoning markers split across string token callbacks', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('<thi');
+        onToken?.('nk>Plan the answer</th');
+        onToken?.('ink>Visible ');
+        onToken?.('answer');
+
+        return {
+          text: '<think>Plan the answer</think>Visible answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Plan the answer',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('recovers final content from a reasoning-only accumulated snapshot', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: any) => void }) => {
+        onToken?.({
+          token: 'reasoning',
+          reasoningContent: 'Plan the answer',
+          accumulatedText: '<think>Plan the answer',
+        });
+        onToken?.({
+          token: 'answer',
+          reasoningContent: 'Plan the answer',
+          accumulatedText: '<think>Plan the answer</think>Visible answer',
+        });
+
+        return {
+          reasoning_content: 'Plan the answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Plan the answer',
+        state: 'complete',
+      }),
+    );
+  });
+
   it('keeps raw think tags out of the visible answer when accumulatedText still includes reasoning', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: any) => void }) => {
@@ -2320,16 +2386,18 @@ describe('useChatSession', () => {
     expect(call?.params.thinking_budget_tokens).toBeUndefined();
   });
 
-  it('accumulates streamed reasoning deltas when reasoning_content is not returned', async () => {
+  it('accumulates explicitly tagged reasoning deltas even when a delta extends the current prefix', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: any) => void }) => {
         onToken?.({
           token: 'reason-1',
-          reasoningContent: 'Think ',
+          reasoningContent: 'Plan',
+          reasoningContentMode: 'delta',
         });
         onToken?.({
           token: 'reason-2',
-          reasoningContent: 'through',
+          reasoningContent: 'Plan more',
+          reasoningContentMode: 'delta',
         });
         onToken?.({
           token: 'answer-1',
@@ -2337,7 +2405,7 @@ describe('useChatSession', () => {
         });
 
         return {
-          text: '<think>Think through</think>Visible answer',
+          text: '<think>PlanPlan more</think>Visible answer',
           content: 'Visible answer',
         };
       },
@@ -2355,7 +2423,7 @@ describe('useChatSession', () => {
       expect.objectContaining({
         role: 'assistant',
         content: 'Visible answer',
-        thoughtContent: 'Think through',
+        thoughtContent: 'PlanPlan more',
         state: 'complete',
       }),
     );

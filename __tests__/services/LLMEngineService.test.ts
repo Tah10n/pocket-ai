@@ -457,6 +457,44 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('marks llama.rn reasoning callbacks as accumulated snapshots', async () => {
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completionMock.mockImplementationOnce(async (_params, onToken) => {
+      onToken({
+        token: '',
+        content: '',
+        reasoning_content: 'Plan carefully',
+        accumulated_text: '<think>Plan carefully',
+      });
+      onToken({
+        token: 'answer',
+        content: 'Visible answer',
+        accumulated_text: '<think>Plan carefully</think>Visible answer',
+      });
+      return { text: '<think>Plan carefully</think>Visible answer' };
+    });
+    const onToken = jest.fn();
+
+    await llmEngineService.load('test/model');
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Explain this' }],
+      onToken,
+    });
+
+    expect(onToken).toHaveBeenNthCalledWith(1, {
+      token: '',
+      content: '',
+      reasoningContent: 'Plan carefully',
+      reasoningContentMode: 'snapshot',
+      accumulatedText: '<think>Plan carefully',
+    });
+    expect(onToken).toHaveBeenNthCalledWith(2, {
+      token: 'answer',
+      content: 'Visible answer',
+      accumulatedText: '<think>Plan carefully</think>Visible answer',
+    });
+  });
+
   it('coalesces noisy native model-load progress before notifying UI subscribers', async () => {
     const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
     if (!baseInitImplementation) {

@@ -27,6 +27,7 @@ import * as privateStorageService from '../../src/services/storage';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
+import { MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH } from '../../src/store/chatBranchReplacement';
 import {
   captureReferenceSequence,
   countUnretainedItemReferences,
@@ -1675,6 +1676,47 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(threadId)).toBe(beforeEmptyEdit);
   });
 
+  it('rejects oversized branch content before runtime creation while preserving the recoverable boundary', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-content-limit');
+    seedPersistedChatThread(thread, 100);
+    const rawThread = useChatStore.getState().threads[thread.id];
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(thread.id));
+
+    expect(useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'x'.repeat(MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH + 1),
+    )).toBeNull();
+    expect(useChatStore.getState().threads[thread.id]).toBe(rawThread);
+    expect(useChatStore.getState().getThread(thread.id)).toBe(rawThread);
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'x'.repeat(MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH),
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Recoverable output at the branch content boundary',
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    const progress = readChatStreamingProgressRecord(storage, thread.id);
+    expect(progress.ok).toBe(true);
+    if (!progress.ok) {
+      throw new Error('Expected boundary-sized branch progress to remain parseable');
+    }
+    const persistedReplacementContent = progress.value.branchReplacement
+      ?.replacementUserMessage.content;
+    expect(persistedReplacementContent).toHaveLength(MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH);
+    expect(persistedReplacementContent?.startsWith('x')).toBe(true);
+    expect(persistedReplacementContent?.endsWith('x')).toBe(true);
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+
+    useChatStore.getState().stopAssistantMessage(thread.id, assistantId);
+  });
+
   it('preserves image-only user attachments when regenerating a branch with empty text', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -2061,7 +2103,9 @@ describe('chatStore', () => {
       });
       const rawProgress = storage.getString(getChatStreamingProgressStorageKey(thread.id))!;
       expect(rawProgress.length).toBeLessThan(durableRecordBefore.length);
+      expect(rawProgress).not.toContain('message-history-0');
       expect(rawProgress).not.toContain('Deterministic assistant message 999');
+      expect(rawProgress).not.toContain('message-history-999');
     } finally {
       useChatStore.getState().stopAssistantMessage(
         thread.id,
@@ -2217,6 +2261,136 @@ describe('chatStore', () => {
     });
   });
 
+  it('recovers attachment-bearing branch progress without losing sanitized metadata or document content', async () => {
+    const threadId = 'thread-branch-attachment-recovery';
+    const targetMessageId = `${threadId}-user-1`;
+    const retainedImageAttachment = buildStoredAttachment(
+      threadId,
+      targetMessageId,
+      'target-image.jpg',
+    );
+    const retainedAttachments: NonNullable<ChatThread['messages'][number]['attachments']> = [
+      retainedImageAttachment,
+      {
+        id: 'target-audio',
+        kind: 'audio',
+        state: 'ready',
+        threadId,
+        messageId: targetMessageId,
+        localUri: 'test-dir/chat-attachments/target-audio.mp3',
+        pathCategory: 'chat_attachment',
+        fileName: 'target-audio.mp3',
+        mimeType: 'audio/mpeg',
+        sizeBytes: 4_096,
+        source: 'document_picker',
+        createdAt: 11,
+        audio: { format: 'mp3', durationMs: 2_000 },
+      },
+      {
+        id: 'target-document',
+        kind: 'document',
+        state: 'ready',
+        threadId,
+        messageId: targetMessageId,
+        localUri: 'test-dir/chat-attachments/target-document.txt',
+        pathCategory: 'chat_attachment',
+        fileName: 'target-document.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 512,
+        source: 'document_picker',
+        createdAt: 12,
+        document: {
+          processorId: 'document-text',
+          processorVersion: 1,
+          contentHash: 'target-document-hash',
+          extractedCharCount: 42,
+          isScanned: false,
+        },
+      },
+    ];
+    const retainedContentParts: NonNullable<ChatThread['messages'][number]['contentParts']> = [{
+      type: 'text',
+      text: 'Recovered document extract with exact content.',
+    }];
+    const removedTailAttachment = buildStoredAttachment(
+      threadId,
+      `${threadId}-user-tail`,
+      'removed-tail.jpg',
+    );
+    const base = buildTrailingModelSwitchThread(threadId, {
+      oldTailAttachment: removedTailAttachment,
+    });
+    const thread: ChatThread = {
+      ...base,
+      messages: base.messages.map((message) => (
+        message.id === targetMessageId
+          ? {
+              ...message,
+              attachments: retainedAttachments,
+              contentParts: retainedContentParts,
+            }
+          : message
+      )),
+    };
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      targetMessageId,
+      'Edited prompt with retained multimodal context',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Recovered attachment-aware partial branch',
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    const progress = readChatStreamingProgressRecord(storage, thread.id);
+    expect(progress).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        branchReplacement: expect.objectContaining({
+          replacementUserMessage: expect.objectContaining({
+            id: targetMessageId,
+            attachments: retainedAttachments,
+            contentParts: retainedContentParts,
+          }),
+        }),
+      }),
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+    await flushAttachmentCleanup(8);
+
+    const recovered = useChatStore.getState().getThread(thread.id)!;
+    const recoveredReplacementUser = recovered.messages.find(
+      (message) => message.id === targetMessageId,
+    );
+    expect(recoveredReplacementUser).toEqual(expect.objectContaining({
+      content: 'Edited prompt with retained multimodal context',
+      attachments: retainedAttachments,
+      contentParts: retainedContentParts,
+    }));
+    expect(recovered.messages.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Recovered attachment-aware partial branch',
+      state: 'stopped',
+    }));
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
+      ([localUri]) => localUri === removedTailAttachment.localUri,
+    )).toHaveLength(1);
+    retainedAttachments.forEach((attachment) => {
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+        attachment.localUri,
+        expect.anything(),
+      );
+    });
+  });
+
   it('retains branch progress and the old branch when recovery durable write fails', async () => {
     const thread = buildTrailingModelSwitchThread('thread-branch-recovery-write-failure');
     seedPersistedChatThread(thread, 100);
@@ -2363,6 +2537,10 @@ describe('chatStore', () => {
       expect(capture.setKeys.filter((key) => key === CHAT_PERSISTENCE_INDEX_KEY)).toHaveLength(1);
       expect(capture.removedKeys.filter((key) => key === getChatStreamingProgressStorageKey(thread.id))).toHaveLength(1);
       const committed = useChatStore.getState().threads[thread.id];
+      expect(committed).toEqual(expect.objectContaining({
+        title: 'Atomically edited prompt',
+        titleSource: 'derived',
+      }));
       expect(committed.messages).toHaveLength(2);
       expect(committed.messages.map((message) => message.id)).not.toContain(`${thread.id}-assistant-old`);
       expect(committed.messages.at(-1)).toEqual(expect.objectContaining({
@@ -2379,6 +2557,30 @@ describe('chatStore', () => {
       mutationCounter.unsubscribe();
       capture.restore();
     }
+  });
+
+  it('preserves a normalized manual title across branch replacement', () => {
+    const base = buildTrailingModelSwitchThread('thread-branch-manual-title');
+    const thread: ChatThread = {
+      ...base,
+      title: '  Project   Atlas  ',
+      titleSource: 'manual',
+    };
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt must not replace the manual title',
+    )!;
+
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Completed branch with manual title',
+    })).toBe(true);
+    expect(useChatStore.getState().threads[thread.id]).toEqual(expect.objectContaining({
+      title: 'Project Atlas',
+      titleSource: 'manual',
+    }));
   });
 
   it('restores the old branch on stopped branch regeneration before output', () => {
@@ -4790,6 +4992,67 @@ describe('chatStore', () => {
         callbacks.shift()?.();
         await flushAttachmentCleanup();
       }
+      warnSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('stops retrying persistently failed attachment cleanup after bounded exponential backoff', async () => {
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cleanupSpy = jest
+      .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
+      .mockRejectedValue(new Error('cleanup permanently unavailable'));
+    const attachment = buildStoredAttachment(
+      'thread-cleanup-retry-exhausted',
+      'user-1',
+      'cleanup-retry-exhausted.jpg',
+    );
+    const removedThread: ChatThread = {
+      ...buildThread('thread-cleanup-retry-exhausted', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Permanently failed cleanup image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [attachment],
+      }],
+    };
+
+    try {
+      useChatStore.setState({
+        threads: { [removedThread.id]: removedThread },
+        activeThreadId: removedThread.id,
+      });
+
+      useChatStore.getState().deleteThread(removedThread.id);
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(delays).toEqual([1_000]);
+      expect(callbacks).toHaveLength(1);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(2);
+      expect(delays).toEqual([1_000, 2_000]);
+      expect(callbacks).toHaveLength(1);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup(8);
+
+      expect(cleanupSpy).toHaveBeenCalledTimes(3);
+      expect(callbacks).toHaveLength(0);
+      expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      cleanupSpy.mockRestore();
       warnSpy.mockRestore();
       setTimeoutSpy.mockRestore();
     }

@@ -5138,6 +5138,12 @@ describe('useChatSession', () => {
       resolvePromptCount?.();
       await regenerationPromise;
     });
+
+    const afterLatePromptPreparation = useChatStore.getState().getActiveThread()!;
+    expect(afterLatePromptPreparation.status).toBe('idle');
+    expect(afterLatePromptPreparation.messages.map((message) => message.id)).toEqual(originalMessageIds);
+    expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
   it('prompt preparation error before first token restores the previous branch', async () => {
@@ -5218,11 +5224,23 @@ describe('useChatSession', () => {
       modelId: 'author/model-q8',
     }));
     expect(stopped.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+    const stoppedMessageIds = stopped.messages.map((message) => message.id);
+    const completionCallCount = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
 
     await act(async () => {
       resolveCompletion?.();
       await regenerationPromise;
     });
+
+    const afterLateCompletion = useChatStore.getState().getActiveThread()!;
+    expect(afterLateCompletion.status).toBe('stopped');
+    expect(afterLateCompletion.messages.map((message) => message.id)).toEqual(stoppedMessageIds);
+    expect(afterLateCompletion.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Partial branch output',
+      state: 'stopped',
+    }));
+    expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallCount);
   });
 
   it('does not finalize a branch twice when the terminal durable write fails', async () => {

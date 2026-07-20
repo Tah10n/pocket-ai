@@ -9,6 +9,8 @@ import {
   type GenerationParamsSnapshot,
 } from '../types/chat';
 
+export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH = 200_000;
+
 export interface ChatBranchBaseIdentity {
   durablePersistedAt: number;
   commitRevision?: number;
@@ -108,7 +110,10 @@ export function buildChatBranchReplacementPlan({
   }
 
   const content = nextUserContent.trim();
-  if (!content && (target.attachments?.length ?? 0) === 0) {
+  if (
+    content.length > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH
+    || (!content && (target.attachments?.length ?? 0) === 0)
+  ) {
     return null;
   }
 

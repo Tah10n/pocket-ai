@@ -27,6 +27,7 @@ import { performanceMonitor } from '../services/PerformanceMonitor';
 import {
   createChatBranchReplacementPlanFromProgress,
   materializeChatBranchReplacementThread,
+  MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH,
   type ChatBranchReplacementProgress,
 } from './chatBranchReplacement';
 
@@ -811,7 +812,7 @@ function parseBranchReplacementUserMessage({
     || value.role !== 'user'
     || value.kind !== 'message'
     || typeof value.content !== 'string'
-    || value.content.length > 200_000
+    || value.content.length > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH
     || value.createdAt !== targetUserCreatedAt
     || value.state !== 'complete'
     || value.modelId !== modelId

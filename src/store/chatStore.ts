@@ -74,6 +74,7 @@ const FALLBACK_REPETITION_PENALTY = 1;
 const CHAT_STORE_STORAGE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES = 16;
 const UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS = 1_000;
+const UNREFERENCED_ATTACHMENT_CLEANUP_FAILURE_RETRY_LIMIT = 2;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS = 1_000;
@@ -98,6 +99,7 @@ type HydrationAttachmentDirectoryReconciliationRequest = {
 type UnreferencedAttachmentCleanupRequest = {
   candidateLocalUris: Set<string>;
   referencedLocalUris: Set<string>;
+  failureRetryCount: number;
 };
 
 interface ChatStoreHydrationResult {
@@ -234,6 +236,7 @@ function mergeUnreferencedAttachmentCleanupRequest(
   return {
     candidateLocalUris: new Set([...current.candidateLocalUris, ...next.candidateLocalUris]),
     referencedLocalUris: new Set([...current.referencedLocalUris, ...next.referencedLocalUris]),
+    failureRetryCount: Math.max(current.failureRetryCount, next.failureRetryCount),
   };
 }
 
@@ -252,7 +255,12 @@ function takeQueuedUnreferencedAttachmentCleanupRequest(): UnreferencedAttachmen
   return request;
 }
 
-function scheduleQueuedUnreferencedAttachmentCleanupRetry(): void {
+function getUnreferencedAttachmentCleanupRetryDelay(failureRetryCount: number): number {
+  return UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS
+    * (2 ** Math.max(0, failureRetryCount - 1));
+}
+
+function scheduleQueuedUnreferencedAttachmentCleanupRetry(failureRetryCount: number): void {
   if (unreferencedAttachmentCleanupRetryTimeout !== null) {
     return;
   }
@@ -260,7 +268,7 @@ function scheduleQueuedUnreferencedAttachmentCleanupRetry(): void {
   unreferencedAttachmentCleanupRetryTimeout = setTimeout(() => {
     unreferencedAttachmentCleanupRetryTimeout = null;
     runQueuedUnreferencedAttachmentCleanup();
-  }, UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS);
+  }, getUnreferencedAttachmentCleanupRetryDelay(failureRetryCount));
 }
 
 function runQueuedUnreferencedAttachmentCleanup(): void {
@@ -309,6 +317,7 @@ function runQueuedUnreferencedAttachmentCleanup(): void {
                 ...remainingCandidates,
               ]),
               referencedLocalUris: request.referencedLocalUris,
+              failureRetryCount: request.failureRetryCount + 1,
             };
             throw new Error('Incomplete unreferenced attachment cleanup');
           }
@@ -316,6 +325,7 @@ function runQueuedUnreferencedAttachmentCleanup(): void {
           retryRequestAfterFailure ??= {
             candidateLocalUris: new Set([...batchCandidates, ...remainingCandidates]),
             referencedLocalUris: request.referencedLocalUris,
+            failureRetryCount: request.failureRetryCount + 1,
           };
           throw error;
         }
@@ -325,6 +335,7 @@ function runQueuedUnreferencedAttachmentCleanup(): void {
         queueUnreferencedAttachmentCleanup({
           candidateLocalUris: new Set(remainingCandidates),
           referencedLocalUris: request.referencedLocalUris,
+          failureRetryCount: 0,
         });
       }
     })
@@ -335,9 +346,13 @@ function runQueuedUnreferencedAttachmentCleanup(): void {
     })
     .finally(() => {
       unreferencedAttachmentCleanupInFlight = false;
-      if (retryRequestAfterFailure?.candidateLocalUris.size) {
+      if (
+        retryRequestAfterFailure?.candidateLocalUris.size
+        && retryRequestAfterFailure.failureRetryCount
+          <= UNREFERENCED_ATTACHMENT_CLEANUP_FAILURE_RETRY_LIMIT
+      ) {
         queueUnreferencedAttachmentCleanup(retryRequestAfterFailure);
-        scheduleQueuedUnreferencedAttachmentCleanupRetry();
+        scheduleQueuedUnreferencedAttachmentCleanupRetry(retryRequestAfterFailure.failureRetryCount);
         return;
       }
 
@@ -362,6 +377,7 @@ function scheduleUnreferencedChatAttachmentCleanup({
   queueUnreferencedAttachmentCleanup({
     candidateLocalUris: new Set(candidates),
     referencedLocalUris: new Set(referencedLocalUris),
+    failureRetryCount: 0,
   });
   runQueuedUnreferencedAttachmentCleanup();
 }

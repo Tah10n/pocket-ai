@@ -112,7 +112,7 @@
     "expo-symbols": "~55.0.9",
     "expo-system-ui": "~55.0.20",
     "expo-web-browser": "~55.0.18",
-    "i18next": "^26.0.8",
+    "i18next": "^26.3.6",
     "jest": "~29.7.0",
     "llama.rn": "0.12.6",
     "nativewind": "^4.2.4",

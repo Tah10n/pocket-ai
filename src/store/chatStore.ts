@@ -208,12 +208,6 @@ function createModelSwitchMessage({
   };
 }
 
-function clearPersistedChatStoreIfEmpty(threads: Record<string, ChatThread>) {
-  if (Object.keys(threads).length === 0) {
-    clearPersistedChatRecords(getAppStorage());
-  }
-}
-
 let unreferencedAttachmentCleanupInFlight = false;
 let queuedUnreferencedAttachmentCleanupRequest: UnreferencedAttachmentCleanupRequest | null = null;
 let unreferencedAttachmentCleanupRetryTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -2008,14 +2002,11 @@ export const useChatStore = create<ChatStoreState>()(
           return 0;
         }
 
-        let nextThreadsSnapshot: Record<string, ChatThread> | null = null;
-
         setWhenPrivateStorageWritable((state) => {
           const nextThreads = { ...state.threads };
           expiredThreadIds.forEach((threadId) => {
             delete nextThreads[threadId];
           });
-          nextThreadsSnapshot = nextThreads;
 
           const nextActiveThreadId =
             state.activeThreadId && nextThreads[state.activeThreadId]
@@ -2027,10 +2018,6 @@ export const useChatStore = create<ChatStoreState>()(
             activeThreadId: nextActiveThreadId,
           };
         });
-
-        if (nextThreadsSnapshot) {
-          clearPersistedChatStoreIfEmpty(nextThreadsSnapshot);
-        }
 
         return expiredThreadIds.length;
         },
@@ -2051,7 +2038,6 @@ export const useChatStore = create<ChatStoreState>()(
           threads: {},
           activeThreadId: null,
         });
-        clearPersistedChatRecords(getAppStorage());
 
         return threadCount;
         },
@@ -2325,8 +2311,6 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       deleteThread: (threadId) => {
-        let nextThreadsSnapshot: Record<string, ChatThread> | null = null;
-
         setWhenPrivateStorageWritable((state) => {
           if (!state.threads[threadId]) {
             return state;
@@ -2334,7 +2318,6 @@ export const useChatStore = create<ChatStoreState>()(
 
           const nextThreads = { ...state.threads };
           delete nextThreads[threadId];
-          nextThreadsSnapshot = nextThreads;
 
           const nextActiveThreadId =
             state.activeThreadId !== threadId
@@ -2346,10 +2329,6 @@ export const useChatStore = create<ChatStoreState>()(
             activeThreadId: nextActiveThreadId,
           };
         });
-
-        if (nextThreadsSnapshot) {
-          clearPersistedChatStoreIfEmpty(nextThreadsSnapshot);
-        }
       },
 
       renameThread: (threadId, title) => {

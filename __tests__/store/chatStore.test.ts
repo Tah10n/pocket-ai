@@ -119,6 +119,45 @@ function expectPersistedChatClearTombstone() {
   expect(index.updatedAt).toBe(index.clearedAt);
 }
 
+type CapturedClearIndexWrite = {
+  threadIds?: unknown[];
+  revision?: number;
+  clearedAt?: number;
+};
+
+function captureClearIndexWrites(options?: {
+  throwOnClearWrite?: number;
+  error?: Error;
+}) {
+  const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+  const originalSet = appStorage.set;
+  const writes: CapturedClearIndexWrite[] = [];
+  appStorage.set = jest.fn(function setWithClearIndexCapture(
+    this: unknown,
+    key: string,
+    value: unknown,
+  ) {
+    if (key === CHAT_PERSISTENCE_INDEX_KEY && typeof value === 'string') {
+      const parsed = JSON.parse(value) as CapturedClearIndexWrite;
+      if (typeof parsed.clearedAt === 'number') {
+        writes.push(parsed);
+        if (writes.length === options?.throwOnClearWrite) {
+          throw options.error ?? new Error('simulated clear index write failure');
+        }
+      }
+    }
+
+    return originalSet.call(this, key, value);
+  });
+
+  return {
+    writes,
+    restore: () => {
+      appStorage.set = originalSet;
+    },
+  };
+}
+
 function buildStoredAttachment(threadId: string, messageId: string, fileName: string) {
   return {
     ...copiedImageAttachment,
@@ -2689,6 +2728,200 @@ describe('chatStore', () => {
     expectPersistedChatClearTombstone();
   });
 
+  it('clearAllThreads writes one clear tombstone and cancels pending progress', () => {
+    jest.useFakeTimers();
+    const thread = buildThread('thread-single-clear-all', 10);
+    seedPersistedChatThread(thread, 100);
+    const messageId = useChatStore.getState().createAssistantPlaceholder(thread.id);
+    useChatStore.getState().patchAssistantMessage(thread.id, messageId, {
+      content: 'Pending partial before clear',
+    });
+    const streamingMessage = useChatStore.getState().getThread(thread.id)?.messages.at(-1);
+    writeChatStreamingProgressRecord(storage, {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+      threadId: thread.id,
+      messageId,
+      modelId: 'author/model-q4',
+      createdAt: streamingMessage?.createdAt ?? 11,
+      content: 'Persisted partial before clear',
+      state: 'streaming',
+      persistedAt: 101,
+      revision: 1,
+    });
+    const revisionBefore = Number(readPersistedChatIndex().revision ?? 0);
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: revisionBefore + 1,
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+      updatedAt: 102,
+      reason: 'thread_mutation',
+      changedThreadIds: [thread.id],
+      requiresChangedThreadCommitRevision: true,
+    });
+    const capture = captureClearIndexWrites();
+
+    try {
+      expect(useChatStore.getState().clearAllThreads()).toBe(1);
+
+      expect(capture.writes).toEqual([
+        expect.objectContaining({
+          threadIds: [],
+          revision: revisionBefore + 1,
+          clearedAt: expect.any(Number),
+        }),
+      ]);
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBeUndefined();
+      expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+      expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+
+      jest.advanceTimersByTime(10_000);
+
+      expect(capture.writes).toHaveLength(1);
+      expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+    } finally {
+      capture.restore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('deleting the final thread performs one persistence clear', () => {
+    const thread = buildThread('thread-single-clear-delete', 10);
+    seedPersistedChatThread(thread, 100);
+    const revisionBefore = Number(readPersistedChatIndex().revision ?? 0);
+    const capture = captureClearIndexWrites();
+
+    try {
+      useChatStore.getState().deleteThread(thread.id);
+
+      expect(capture.writes).toEqual([
+        expect.objectContaining({
+          threadIds: [],
+          revision: revisionBefore + 1,
+          clearedAt: expect.any(Number),
+        }),
+      ]);
+      expect(useChatStore.getState().getThread(thread.id)).toBeNull();
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBeUndefined();
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('retention pruning the final threads performs one persistence clear', () => {
+    const now = 100 * 24 * 60 * 60 * 1000;
+    const staleThread = buildThread(
+      'thread-single-clear-retention',
+      now - 95 * 24 * 60 * 60 * 1000,
+    );
+    seedPersistedChatThread(staleThread, 100);
+    useChatStore.setState({ activeThreadId: null });
+    const revisionBefore = Number(readPersistedChatIndex().revision ?? 0);
+    const capture = captureClearIndexWrites();
+
+    try {
+      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+
+      expect(capture.writes).toEqual([
+        expect.objectContaining({
+          threadIds: [],
+          revision: revisionBefore + 1,
+          clearedAt: expect.any(Number),
+        }),
+      ]);
+      expect(useChatStore.getState().getThread(staleThread.id)).toBeNull();
+      expect(storage.getString(getChatThreadStorageKey(staleThread.id))).toBeUndefined();
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('clearing an already-empty store cleans corrupt and orphaned records once', () => {
+    const orphanThreadId = 'thread-orphaned-empty-clear';
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: null,
+      threadIds: [orphanThreadId],
+      updatedAt: 40,
+      revision: 7,
+    });
+    storage.set(getChatThreadStorageKey(orphanThreadId), '{broken thread');
+    storage.set(getChatStreamingProgressStorageKey(orphanThreadId), '{broken progress');
+    storage.set('chat-store', JSON.stringify({ stale: true }));
+    writeChatPendingIndexCommit(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      revision: 8,
+      activeThreadId: null,
+      threadIds: [],
+      updatedAt: 41,
+      reason: 'thread_mutation',
+      removedThreadIds: [orphanThreadId],
+    });
+    const capture = captureClearIndexWrites();
+
+    try {
+      expect(useChatStore.getState().clearAllThreads()).toBe(0);
+
+      expect(capture.writes).toEqual([
+        expect.objectContaining({
+          threadIds: [],
+          revision: 8,
+          clearedAt: expect.any(Number),
+        }),
+      ]);
+      expect(storage.getString(getChatThreadStorageKey(orphanThreadId))).toBeUndefined();
+      expect(storage.getString(getChatStreamingProgressStorageKey(orphanThreadId))).toBeUndefined();
+      expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+      expect(storage.getString('chat-store')).toBeUndefined();
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('does not run a second clear that can fail after the first clear succeeded', () => {
+    const thread = buildThread('thread-no-second-clear-failure', 10);
+    seedPersistedChatThread(thread, 100);
+    const secondClearError = new Error('simulated second clear failure');
+    const capture = captureClearIndexWrites({
+      throwOnClearWrite: 2,
+      error: secondClearError,
+    });
+
+    try {
+      expect(useChatStore.getState().clearAllThreads()).toBe(1);
+      expect(capture.writes).toHaveLength(1);
+      expect(useChatStore.getState().getThread(thread.id)).toBeNull();
+      expectPersistedChatClearTombstone();
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('rolls back an empty-store transition when its single clear write fails', () => {
+    const thread = buildThread('thread-single-clear-rollback', 10);
+    seedPersistedChatThread(thread, 100);
+    const clearError = new Error('simulated first clear failure');
+    const capture = captureClearIndexWrites({
+      throwOnClearWrite: 1,
+      error: clearError,
+    });
+
+    try {
+      expect(() => useChatStore.getState().clearAllThreads()).toThrow(clearError);
+    } finally {
+      capture.restore();
+    }
+
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(thread);
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toContain(thread.title);
+    const rolledBackIndex = readPersistedChatIndex();
+    expect(rolledBackIndex).toEqual(expect.objectContaining({
+      activeThreadId: thread.id,
+      threadIds: [thread.id],
+    }));
+    expect(rolledBackIndex).not.toHaveProperty('clearedAt');
+  });
+
   it('cleans attachment files when clearing all chat history', async () => {
     const attachment = buildStoredAttachment('thread-clear-cleanup', 'user-1', 'clear-history.jpg');
     const thread: ChatThread = {
@@ -2716,6 +2949,7 @@ describe('chatStore', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith(attachment.localUri, {
       idempotent: true,
     });
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
   });
 
   it('leaves a clear tombstone when resetting chat state for private storage recovery', () => {

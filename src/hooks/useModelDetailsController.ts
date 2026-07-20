@@ -275,6 +275,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       };
     }
 
+    const requestController = new AbortController();
     setLoading(true);
     setErrorMessage(null);
     const previousModelId = previousModelIdRef.current;
@@ -285,7 +286,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
       setModel(applyVariantSelectionIfAllowed(cachedModel, normalizedInitialVariantId));
     }
 
-    void modelCatalogService.getModelDetails(modelId)
+    void modelCatalogService.getModelDetails(modelId, { signal: requestController.signal })
       .then((resolvedModel) => {
         if (cancelled) {
           return;
@@ -331,6 +332,7 @@ export function useModelDetailsController(modelId: string, initialVariantId?: st
 
     return () => {
       cancelled = true;
+      requestController.abort();
     };
   }, [missingModelMessage, modelId, normalizedInitialVariantId]);
 

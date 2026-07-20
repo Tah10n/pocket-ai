@@ -14,6 +14,7 @@ import { REQUEST_AUTH_POLICY } from '../../src/types/huggingFace';
 import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFileSelector';
 import { ModelCatalogCacheStore } from '../../src/services/ModelCatalogCacheStore';
 import { createStorage } from '../../src/services/storage';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -178,6 +179,31 @@ async function waitForMockCallCount(mockFn: jest.Mock, expectedCallCount: number
   }
 
   expect(mockFn.mock.calls.length).toBeGreaterThanOrEqual(expectedCallCount);
+}
+
+async function waitForCatalogRequestMapsToSettle(service: ModelCatalogService): Promise<void> {
+  const requestMaps = service as unknown as {
+    activeNetworkRequestControllers: Map<unknown, unknown>;
+    searchRequestCache: Map<unknown, unknown>;
+    deferredMetadataRequestCache: Map<unknown, unknown>;
+    treeRequestCache: Map<unknown, unknown>;
+    readmeRequestCache: Map<unknown, unknown>;
+    resolvedFileProbeCache: Map<unknown, unknown>;
+  };
+  const getActiveCount = () => (
+    requestMaps.activeNetworkRequestControllers.size
+    + requestMaps.searchRequestCache.size
+    + requestMaps.deferredMetadataRequestCache.size
+    + requestMaps.treeRequestCache.size
+    + requestMaps.readmeRequestCache.size
+    + requestMaps.resolvedFileProbeCache.size
+  );
+
+  for (let attempt = 0; attempt < 50 && getActiveCount() > 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  expect(getActiveCount()).toBe(0);
 }
 
 describe('ModelCatalogService', () => {
@@ -1160,6 +1186,7 @@ describe('ModelCatalogService', () => {
     const treeResponse = createDeferred<any>();
     const service = new ModelCatalogService();
     const metadataListener = jest.fn();
+    const startSpanSpy = jest.spyOn(performanceMonitor, 'startSpan');
     service.subscribeMetadataUpdates(metadataListener);
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -1220,6 +1247,11 @@ describe('ModelCatalogService', () => {
       });
       await waitForMockCallCount(metadataListener, 1);
 
+      expect(startSpanSpy).toHaveBeenCalledWith('catalog.deferredMetadata.batch', {
+        requested: 1,
+        batchSize: 4,
+      });
+
       expect(metadataListener).toHaveBeenCalledWith({
         query: 'phi',
         sort: null,
@@ -1254,6 +1286,7 @@ describe('ModelCatalogService', () => {
         size: 2 * 1024 * 1024 * 1024,
       }));
     } finally {
+      startSpanSpy.mockRestore();
       service.dispose();
     }
   });
@@ -1385,6 +1418,620 @@ describe('ModelCatalogService', () => {
       name: 'ModelCatalogError',
       code: 'cancelled',
     });
+    service.dispose();
+  });
+
+  it('does not abort an independent catalog search when another consumer cancels', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    const requestA = createDeferred<Response>();
+    const requestB = createDeferred<Response>();
+    const abortA = jest.fn(() => requestA.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    const abortB = jest.fn(() => requestB.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const isConsumerA = String(input).includes('search=consumer-a');
+      init?.signal?.addEventListener('abort', isConsumerA ? abortA : abortB, { once: true });
+      return isConsumerA ? requestA.promise : requestB.promise;
+    }) as jest.Mock;
+
+    const pendingA = service.searchModels('consumer-a', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    const pendingB = service.searchModels('consumer-b', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    const handledA = pendingA.catch(() => undefined);
+    const handledB = pendingB.catch(() => undefined);
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+    sessionA.cancelPendingRequests('superseded');
+    await Promise.resolve();
+
+    expect(abortA).toHaveBeenCalledTimes(1);
+    expect(abortB).not.toHaveBeenCalled();
+
+    requestB.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeRepo('org/consumer-b-model')]),
+    } as unknown as Response);
+    await Promise.all([handledA, handledB]);
+    sessionA.dispose();
+    sessionB.dispose();
+    service.dispose();
+  });
+
+  it('emits bounded catalog ownership telemetry without request URLs', async () => {
+    const service = new ModelCatalogService();
+    const session = service.createSearchSession();
+    const startSpanSpy = jest.spyOn(performanceMonitor, 'startSpan');
+    const incrementCounterSpy = jest.spyOn(performanceMonitor, 'incrementCounter');
+    global.fetch = jest.fn(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeRepo('org/telemetry-model')]),
+    })) as jest.Mock;
+
+    try {
+      await service.searchModels('telemetry-private-query', {
+        pageSize: 1,
+        metadataResolution: 'deferred',
+      }, session);
+      session.cancelPendingRequests('superseded');
+
+      expect(startSpanSpy).toHaveBeenCalledWith('catalog.search.session', expect.objectContaining({
+        sessionId: expect.any(Number),
+        generation: expect.any(Number),
+        pageSize: 1,
+      }));
+      const resourceRequestCall = incrementCounterSpy.mock.calls.find(([name]) => (
+        name === 'catalog.resource.request'
+      ));
+      expect(resourceRequestCall).toEqual([
+        'catalog.resource.request',
+        1,
+        expect.objectContaining({
+          scope: 'search',
+          authScope: 'anon',
+          activeRequests: expect.any(Number),
+        }),
+      ]);
+      expect(JSON.stringify(resourceRequestCall?.[2])).not.toContain('telemetry-private-query');
+      expect(JSON.stringify(resourceRequestCall?.[2])).not.toContain('huggingface.co');
+      expect(incrementCounterSpy).toHaveBeenCalledWith(
+        'catalog.search.cancel',
+        1,
+        { reason: 'superseded' },
+      );
+    } finally {
+      startSpanSpy.mockRestore();
+      incrementCounterSpy.mockRestore();
+      session.dispose();
+      service.dispose();
+    }
+  });
+
+  it('keeps model-details work alive when a catalog query session is superseded', async () => {
+    const service = new ModelCatalogService();
+    const searchSession = service.createSearchSession();
+    const searchRequest = createDeferred<Response>();
+    const detailsRequest = createDeferred<Response>();
+    const searchAbort = jest.fn(() => searchRequest.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    const detailsAbort = jest.fn(() => detailsRequest.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const isDetailsRequest = String(input).includes('details-b');
+      init?.signal?.addEventListener('abort', isDetailsRequest ? detailsAbort : searchAbort, { once: true });
+      return isDetailsRequest ? detailsRequest.promise : searchRequest.promise;
+    }) as jest.Mock;
+
+    const pendingSearch = service.searchModels('query-a', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, searchSession);
+    const pendingDetails = service.getModelDetails('org/details-b');
+    const handledSearch = pendingSearch.catch(() => undefined);
+    const handledDetails = pendingDetails.catch(() => undefined);
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+    searchSession.cancelPendingRequests('superseded');
+    await Promise.resolve();
+
+    expect(searchAbort).toHaveBeenCalledTimes(1);
+    expect(detailsAbort).not.toHaveBeenCalled();
+
+    service.clearCache('manual');
+    await Promise.all([handledSearch, handledDetails]);
+    expect(detailsAbort).toHaveBeenCalledTimes(1);
+    searchSession.dispose();
+    service.dispose();
+  });
+
+  it('removes consumer abort listeners after model-details resources settle', async () => {
+    const service = new ModelCatalogService();
+    const controller = new AbortController();
+    const addListenerSpy = jest.spyOn(controller.signal, 'addEventListener');
+    const removeListenerSpy = jest.spyOn(controller.signal, 'removeEventListener');
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(makeRepo('org/listener-cleanup-model')),
+      });
+    }) as jest.Mock;
+
+    try {
+      await service.getModelDetails('org/listener-cleanup-model', {
+        signal: controller.signal,
+      });
+
+      const abortListenerAdds = addListenerSpy.mock.calls.filter(([eventName]) => eventName === 'abort').length;
+      const abortListenerRemovals = removeListenerSpy.mock.calls.filter(([eventName]) => eventName === 'abort').length;
+      expect(abortListenerAdds).toBeGreaterThan(0);
+      expect(abortListenerRemovals).toBe(abortListenerAdds);
+      await waitForCatalogRequestMapsToSettle(service);
+    } finally {
+      addListenerSpy.mockRestore();
+      removeListenerSpy.mockRestore();
+      service.dispose();
+    }
+  });
+
+  it('manual cache clear cancels every search owner and blocks stale cache repopulation', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    const requestA = createDeferred<Response>();
+    const requestB = createDeferred<Response>();
+    const abortA = jest.fn();
+    const abortB = jest.fn();
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const isConsumerA = String(input).includes('manual-a');
+      init?.signal?.addEventListener('abort', isConsumerA ? abortA : abortB, { once: true });
+      return isConsumerA ? requestA.promise : requestB.promise;
+    }) as jest.Mock;
+
+    const pendingA = service.searchModels('manual-a', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    const pendingB = service.searchModels('manual-b', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    const handledA = pendingA.catch(() => undefined);
+    const handledB = pendingB.catch(() => undefined);
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+    service.clearCache('manual');
+    await Promise.all([handledA, handledB]);
+
+    expect(abortA).toHaveBeenCalledTimes(1);
+    expect(abortB).toHaveBeenCalledTimes(1);
+
+    const response = (id: string) => ({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeRepo(id)]),
+    } as unknown as Response);
+    requestA.resolve(response('org/stale-manual-a'));
+    requestB.resolve(response('org/stale-manual-b'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(service.getCachedSearchResult('manual-a', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    })).toBeNull();
+    expect(service.getCachedSearchResult('manual-b', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    })).toBeNull();
+    await waitForCatalogRequestMapsToSettle(service);
+    sessionA.dispose();
+    sessionB.dispose();
+    service.dispose();
+  });
+
+  it('shares deferred resource work until the last search consumer detaches', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    const metadataListener = jest.fn();
+    const treeRequest = createDeferred<Response>();
+    const treeAbort = jest.fn(() => treeRequest.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        init?.signal?.addEventListener('abort', treeAbort, { once: true });
+        return treeRequest.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/shared-deferred-model')]),
+      });
+    }) as jest.Mock;
+
+    await service.searchModels('shared-deferred', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+    await service.searchModels('shared-deferred', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    expect((global.fetch as jest.Mock).mock.calls.filter(([url]) => (
+      String(url).includes('/tree/main?recursive=true')
+    ))).toHaveLength(1);
+
+    sessionA.cancelPendingRequests('unmount');
+    await Promise.resolve();
+    expect(treeAbort).not.toHaveBeenCalled();
+
+    sessionB.cancelPendingRequests('unmount');
+    await waitForMockCallCount(treeAbort, 1);
+    await waitForCatalogRequestMapsToSettle(service);
+
+    expect(metadataListener).not.toHaveBeenCalled();
+    expect(service.getCachedSearchResult('shared-deferred', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    })).toBeNull();
+    sessionA.dispose();
+    sessionB.dispose();
+    service.dispose();
+  });
+
+  it('finishes shared deferred metadata when the first search consumer detaches', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    const metadataListener = jest.fn();
+    const treeRequest = createDeferred<Response>();
+    const treeAbort = jest.fn();
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        init?.signal?.addEventListener('abort', treeAbort, { once: true });
+        return treeRequest.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/shared-deferred-survivor')]),
+      });
+    }) as jest.Mock;
+
+    await service.searchModels('shared-deferred-survivor', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+    await service.searchModels('shared-deferred-survivor', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    sessionA.cancelPendingRequests('unmount');
+    await Promise.resolve();
+    expect(treeAbort).not.toHaveBeenCalled();
+
+    treeRequest.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([{
+        path: 'model.Q4_K_M.gguf',
+        size: 2 * 1024 * 1024 * 1024,
+        lfs: { oid: `sha256:${TREE_SHA256}` },
+      }]),
+    } as unknown as Response);
+    await waitForMockCallCount(metadataListener, 1);
+
+    expect(treeAbort).not.toHaveBeenCalled();
+    expect((global.fetch as jest.Mock).mock.calls.filter(([url]) => (
+      String(url).includes('/tree/main?recursive=true')
+    ))).toHaveLength(1);
+    expect(metadataListener).toHaveBeenCalledWith(expect.objectContaining({
+      query: 'shared-deferred-survivor',
+      models: [expect.objectContaining({
+        id: 'org/shared-deferred-survivor',
+        size: 2 * 1024 * 1024 * 1024,
+        requiresTreeProbe: false,
+        sizeResolutionState: 'resolved',
+      })],
+    }));
+    expect(service.getCachedSearchResult('shared-deferred-survivor', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    })?.models[0]).toEqual(expect.objectContaining({
+      size: 2 * 1024 * 1024 * 1024,
+      requiresTreeProbe: false,
+      sizeResolutionState: 'resolved',
+    }));
+    await waitForCatalogRequestMapsToSettle(service);
+    sessionA.dispose();
+    sessionB.dispose();
+    service.dispose();
+  });
+
+  it('evicts deferred cache state when its only owner cancels before enrichment starts', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    let listRequestCount = 0;
+    let treeRequestCount = 0;
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        treeRequestCount += 1;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([]),
+        });
+      }
+
+      listRequestCount += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/pre-enrichment-cancel')]),
+      });
+    }) as jest.Mock;
+
+    await service.searchModels('pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    sessionA.cancelPendingRequests('unmount');
+    await waitForCatalogRequestMapsToSettle(service);
+
+    expect(treeRequestCount).toBe(0);
+    expect(service.getCachedSearchResult('pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    })).toBeNull();
+
+    await service.searchModels('pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    expect(listRequestCount).toBe(2);
+    sessionA.dispose();
+    sessionB.dispose();
+    service.dispose();
+  });
+
+  it('evicts shared deferred cache when every owner cancels before enrichment starts', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    let listRequestCount = 0;
+    let treeRequestCount = 0;
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        treeRequestCount += 1;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([]),
+        });
+      }
+
+      listRequestCount += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/shared-pre-enrichment-cancel')]),
+      });
+    }) as jest.Mock;
+
+    await service.searchModels('shared-pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    await service.searchModels('shared-pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionB);
+
+    sessionA.cancelPendingRequests('unmount');
+    sessionB.cancelPendingRequests('unmount');
+    await waitForCatalogRequestMapsToSettle(service);
+
+    expect(treeRequestCount).toBe(0);
+    expect(service.getCachedSearchResult('shared-pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    })).toBeNull();
+
+    await service.searchModels('shared-pre-enrichment-cancel', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    expect(listRequestCount).toBe(2);
+    sessionA.dispose();
+    sessionB.dispose();
+    service.dispose();
+  });
+
+  it('refetches immediately instead of joining an aborted deferred request', async () => {
+    const service = new ModelCatalogService();
+    const sessionA = service.createSearchSession();
+    const sessionB = service.createSearchSession();
+    const replacementSession = service.createSearchSession();
+    const metadataListener = jest.fn();
+    let listRequestCount = 0;
+    let treeRequestCount = 0;
+    service.subscribeMetadataUpdates(metadataListener);
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        treeRequestCount += 1;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([{
+            path: 'model.Q4_K_M.gguf',
+            size: 2 * 1024 * 1024 * 1024,
+            lfs: { oid: `sha256:${TREE_SHA256}` },
+          }]),
+        });
+      }
+
+      listRequestCount += 1;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/immediate-deferred-replacement')]),
+      });
+    }) as jest.Mock;
+
+    await service.searchModels('immediate-deferred-replacement', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionA);
+    await service.searchModels('immediate-deferred-replacement', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, sessionB);
+    sessionA.cancelPendingRequests('unmount');
+    sessionB.cancelPendingRequests('unmount');
+
+    const replacementResult = await service.searchModels('immediate-deferred-replacement', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    }, replacementSession);
+
+    expect(listRequestCount).toBe(2);
+    expect(replacementResult.models[0]).toEqual(expect.objectContaining({
+      id: 'org/immediate-deferred-replacement',
+      sizeResolutionState: 'resolving',
+    }));
+    await waitForMockCallCount(metadataListener, 1);
+    expect(treeRequestCount).toBe(1);
+    expect(service.getCachedSearchResult('immediate-deferred-replacement', {
+      pageSize: 1,
+      gated: false,
+      metadataResolution: 'deferred',
+    })?.models[0]).toEqual(expect.objectContaining({
+      size: 2 * 1024 * 1024 * 1024,
+      requiresTreeProbe: false,
+      sizeResolutionState: 'resolved',
+    }));
+    await waitForCatalogRequestMapsToSettle(service);
+    sessionA.dispose();
+    sessionB.dispose();
+    replacementSession.dispose();
+    service.dispose();
+  });
+
+  it('cancels only auth-incompatible work when the token epoch changes', async () => {
+    const service = new ModelCatalogService();
+    const anonymousSession = service.createSearchSession();
+    const authenticatedSession = service.createSearchSession();
+    const anonymousRequest = createDeferred<Response>();
+    const firstAuthenticatedRequest = createDeferred<Response>();
+    const anonymousAbort = jest.fn(() => anonymousRequest.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    const authenticatedAbort = jest.fn(() => firstAuthenticatedRequest.reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    let authenticatedRequestCount = 0;
+    global.fetch = jest.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      if (!authorization) {
+        init?.signal?.addEventListener('abort', anonymousAbort, { once: true });
+        return anonymousRequest.promise;
+      }
+
+      authenticatedRequestCount += 1;
+      if (authenticatedRequestCount === 1) {
+        init?.signal?.addEventListener('abort', authenticatedAbort, { once: true });
+        return firstAuthenticatedRequest.promise;
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepo('org/fresh-auth-epoch')]),
+      });
+    }) as jest.Mock;
+
+    const pendingAnonymous = service.searchModels('anonymous-epoch', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, anonymousSession);
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+
+    await huggingFaceTokenService.saveToken('hf_token_a');
+    expect(anonymousAbort).not.toHaveBeenCalled();
+
+    const pendingAuthenticated = service.searchModels('authenticated-epoch', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    }, authenticatedSession);
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+
+    await huggingFaceTokenService.saveToken('hf_token_b');
+    await waitForMockCallCount(authenticatedAbort, 1);
+    expect(anonymousAbort).not.toHaveBeenCalled();
+
+    anonymousRequest.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeRepo('org/compatible-anonymous-epoch')]),
+    } as unknown as Response);
+
+    await expect(pendingAnonymous).resolves.toEqual(expect.objectContaining({
+      models: [expect.objectContaining({ id: 'org/compatible-anonymous-epoch' })],
+    }));
+    await expect(pendingAuthenticated).resolves.toEqual(expect.objectContaining({
+      models: [expect.objectContaining({ id: 'org/fresh-auth-epoch' })],
+    }));
+    expect(authenticatedRequestCount).toBe(2);
+    anonymousSession.dispose();
+    authenticatedSession.dispose();
     service.dispose();
   });
 
@@ -6499,6 +7146,117 @@ describe('ModelCatalogService', () => {
     service.dispose();
   });
 
+  it('does not retry model details across a manual clear after the token changes', async () => {
+    await huggingFaceTokenService.saveToken('hf_token_a');
+    const firstDetails = createDeferred<Response>();
+    const service = new ModelCatalogService();
+    let detailsRequestCount = 0;
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/raw/main/README.md')) {
+        return Promise.resolve({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve(''),
+        });
+      }
+      if (url.includes('/tree/main?recursive=true')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([]),
+        });
+      }
+
+      detailsRequestCount += 1;
+      if (detailsRequestCount === 1) {
+        return firstDetails.promise;
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve(makeRepo('org/details-auth-clear-race')),
+      });
+    }) as jest.Mock;
+
+    const pendingDetails = service.getModelDetails('org/details-auth-clear-race');
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    await huggingFaceTokenService.saveToken('hf_token_b');
+    service.clearCache('manual');
+    firstDetails.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve(makeRepo('org/details-auth-clear-race')),
+    } as unknown as Response);
+
+    await expect(pendingDetails).rejects.toMatchObject({ code: 'cancelled' });
+    expect(detailsRequestCount).toBe(1);
+    expect(service.getCachedModel('org/details-auth-clear-race')).toBeNull();
+    service.dispose();
+  });
+
+  it('does not retry metadata refresh across a manual clear after the token changes', async () => {
+    await huggingFaceTokenService.saveToken('hf_token_a');
+    const firstTree = createDeferred<Response>();
+    const service = new ModelCatalogService();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/refresh-auth-clear-race',
+      name: 'refresh-auth-clear-race',
+      author: 'org',
+      size: null,
+      downloadUrl: 'https://huggingface.co/org/refresh-auth-clear-race/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      requiresTreeProbe: true,
+      hasVerifiedContextWindow: true,
+    };
+    let treeRequestCount = 0;
+    global.fetch = jest.fn(() => {
+      treeRequestCount += 1;
+      if (treeRequestCount === 1) {
+        return firstTree.promise;
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          path: 'model.gguf',
+          size: 2 * 1024 * 1024 * 1024,
+        }]),
+      });
+    }) as jest.Mock;
+
+    const pendingRefresh = service.refreshModelMetadata(refreshTarget, {
+      includeDetails: false,
+    });
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    await huggingFaceTokenService.saveToken('hf_token_b');
+    service.clearCache('manual');
+    firstTree.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([{
+        path: 'model.gguf',
+        size: 1 * 1024 * 1024 * 1024,
+      }]),
+    } as unknown as Response);
+
+    await expect(pendingRefresh).rejects.toMatchObject({ code: 'cancelled' });
+    expect(treeRequestCount).toBe(1);
+    expect(service.getCachedModel(refreshTarget.id)).toBeNull();
+    service.dispose();
+  });
+
   it('hydrates recent model details from persisted snapshots across service instances', async () => {
     global.fetch = jest.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -6883,6 +7641,71 @@ describe('ModelCatalogService', () => {
     service.dispose();
   });
 
+  it('replaces an aborted shared tree probe before its loader settles', async () => {
+    const service = new ModelCatalogService();
+    const firstTreeResponse = createDeferred<Response>();
+    const firstController = new AbortController();
+    const replacementController = new AbortController();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/tree-abort-replacement',
+      name: 'tree-abort-replacement',
+      author: 'org',
+      size: null,
+      downloadUrl: 'https://huggingface.co/org/tree-abort-replacement/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      fitsInRam: null,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      requiresTreeProbe: true,
+      hasVerifiedContextWindow: true,
+    };
+    let treeRequestCount = 0;
+    global.fetch = jest.fn(() => {
+      treeRequestCount += 1;
+      if (treeRequestCount === 1) {
+        return firstTreeResponse.promise;
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([{
+          path: 'model.gguf',
+          size: 2 * 1024 * 1024 * 1024,
+        }]),
+      });
+    }) as jest.Mock;
+
+    const firstPending = service.refreshModelMetadata(refreshTarget, {
+      signal: firstController.signal,
+    });
+    const handledFirst = firstPending.catch(() => undefined);
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    firstController.abort();
+
+    const replacement = await service.refreshModelMetadata(refreshTarget, {
+      signal: replacementController.signal,
+    });
+
+    expect(treeRequestCount).toBe(2);
+    expect(replacement.size).toBe(2 * 1024 * 1024 * 1024);
+    firstTreeResponse.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([{
+        path: 'model.gguf',
+        size: 1 * 1024 * 1024 * 1024,
+      }]),
+    } as unknown as Response);
+    await handledFirst;
+    await waitForCatalogRequestMapsToSettle(service);
+    service.dispose();
+  });
+
   it('preserves an explicit selected variant while refreshing tree-probed metadata', async () => {
     const service = new ModelCatalogService();
     const refreshTarget: ModelMetadata = {
@@ -7021,6 +7844,44 @@ describe('ModelCatalogService', () => {
     expect(right.accessState).toBe(ModelAccessState.AUTHORIZED);
     expect(global.fetch).toHaveBeenCalledTimes(1);
 
+    service.dispose();
+  });
+
+  it('does not repopulate probe state when manual clear follows a resolved fetch', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    const service = new ModelCatalogService();
+    const headResponse = createDeferred<Response>();
+    const refreshTarget: ModelMetadata = {
+      id: 'org/probe-clear-race',
+      name: 'probe-clear-race',
+      author: 'org',
+      size: 2 * 1024 * 1024 * 1024,
+      downloadUrl: 'https://huggingface.co/org/probe-clear-race/resolve/main/model.gguf',
+      resolvedFileName: 'model.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.AUTH_REQUIRED,
+      isGated: true,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+      maxContextTokens: 8192,
+      hasVerifiedContextWindow: true,
+    };
+    global.fetch = jest.fn(() => headResponse.promise) as jest.Mock;
+
+    const pendingRefresh = service.refreshModelMetadata(refreshTarget);
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    headResponse.resolve({
+      ok: true,
+      status: 200,
+    } as Response);
+    service.clearCache('manual');
+
+    await expect(pendingRefresh).rejects.toMatchObject({ code: 'cancelled' });
+    expect((service as unknown as {
+      resolvedFileProbeStateCache: Map<string, unknown>;
+    }).resolvedFileProbeStateCache.size).toBe(0);
+    await waitForCatalogRequestMapsToSettle(service);
     service.dispose();
   });
 

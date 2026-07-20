@@ -182,6 +182,22 @@ export type ModelCatalogSearchOptions = {
   metadataResolution?: CatalogMetadataResolution;
 };
 
+export type CatalogSearchCancellationReason =
+  | 'superseded'
+  | 'unmount'
+  | 'manual_clear'
+  | 'dispose'
+  | 'consumer';
+
+export interface CatalogSearchSession {
+  cancelPendingRequests(reason?: CatalogSearchCancellationReason): void;
+  dispose(): void;
+}
+
+export type CatalogRequestOptions = {
+  signal?: AbortSignal;
+};
+
 export type ModelCatalogMetadataUpdate = {
   query: string;
   sort: CatalogServerSort | null;
@@ -192,6 +208,7 @@ export type ModelCatalogMetadataUpdate = {
 
 type RefreshModelMetadataOptions = {
   includeDetails?: boolean;
+  signal?: AbortSignal;
 };
 
 type ResolveMissingModelMetadataOptions = {
@@ -204,14 +221,28 @@ type ResolveMissingModelMetadataOptions = {
     models: ModelMetadata[];
   }) => void;
   shouldContinue?: () => boolean;
-  searchGeneration?: number;
+  signal?: AbortSignal;
 };
 
 type FetchModelTreeOptions = {
   expectedFileName?: string;
   allowTargetEarlyStop?: boolean;
   maxPages?: number;
-  searchGeneration?: number;
+  signal?: AbortSignal;
+};
+
+type CatalogSearchSessionState = {
+  id: number;
+  generation: number;
+  controller: AbortController;
+  disposed: boolean;
+};
+
+type CatalogSearchRequestScope = {
+  session: CatalogSearchSession;
+  sessionId: number;
+  generation: number;
+  signal: AbortSignal;
 };
 
 type CatalogMemoryFitContext = {
@@ -234,7 +265,8 @@ type ModelCatalogServiceOptions = {
 type DeferredMetadataResolutionInput = {
   cacheKey: string;
   cacheRequestId: number;
-  searchGeneration: number;
+  cacheOperationGeneration: number;
+  signal: AbortSignal;
   query: string;
   normalizedQuery: string;
   cursor: string | null;
@@ -256,15 +288,29 @@ type PersistAnonymousSearchInput = Pick<
 
 type ActiveCatalogRequest = {
   scope: 'search' | 'background';
-  searchGeneration?: number;
+  authScope: CatalogCacheAuthScope;
+  authVersion: number;
 };
 
 type CatalogResourceFetchOptions<T> = {
   scope?: ActiveCatalogRequest['scope'];
-  searchGeneration?: number;
   timeoutMs?: number;
   requestContext?: CatalogRequestContext;
   consume?: (response: Response) => Promise<T> | T;
+};
+
+type SharedCatalogRequestConsumer = {
+  signal?: AbortSignal;
+  abortListener?: () => void;
+};
+
+type SharedCatalogRequestEntry<T> = {
+  promise: Promise<T>;
+  controller: AbortController;
+  consumers: Map<number, SharedCatalogRequestConsumer>;
+  settled: boolean;
+  authScope: CatalogCacheAuthScope;
+  authVersion: number;
 };
 
 type CatalogResponseBody<T> = {
@@ -274,7 +320,7 @@ type CatalogResponseBody<T> = {
 
 type ModelCatalogSearchCacheEntry = CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>> & {
   deferredMetadataPending?: boolean;
-  deferredSearchGeneration?: number;
+  deferredMetadataRequestKey?: string;
 };
 
 export class ModelCatalogService {
@@ -290,12 +336,16 @@ export class ModelCatalogService {
   private cacheInvalidationRevision = 0;
   private cacheInvalidationListeners: Set<CacheInvalidationListener> = new Set();
   private metadataUpdateListeners: Set<MetadataUpdateListener> = new Set();
-  private deferredMetadataRequestCache: Map<string, Promise<void>> = new Map();
-  private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
-  private readmeRequestCache: Map<string, Promise<ReadmeModelData | undefined>> = new Map();
-  private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
+  private deferredMetadataRequestCache: Map<string, SharedCatalogRequestEntry<void>> = new Map();
+  private treeRequestCache: Map<string, SharedCatalogRequestEntry<HuggingFaceTreeResponse>> = new Map();
+  private readmeRequestCache: Map<string, SharedCatalogRequestEntry<ReadmeModelData | undefined>> = new Map();
+  private resolvedFileProbeCache: Map<string, SharedCatalogRequestEntry<ModelAccessState | null>> = new Map();
   private resolvedFileProbeStateCache: Map<string, ResolvedFileProbeCacheEntry> = new Map();
   private activeNetworkRequestControllers: Map<AbortController, ActiveCatalogRequest> = new Map();
+  private catalogSearchSessions: Map<CatalogSearchSession, CatalogSearchSessionState> = new Map();
+  private defaultCatalogSearchSession: CatalogSearchSession | null = null;
+  private catalogSearchSessionSequence = 0;
+  private sharedRequestConsumerSequence = 0;
   private catalogSearchGeneration = 0;
   private cacheOperationGeneration = 0;
   private persistentCacheHydrationGeneration = 0;
@@ -327,24 +377,29 @@ export class ModelCatalogService {
       }
 
       this.authCacheVersion += 1;
+      this.invalidateAuthScopedCatalogState();
       if (source === 'mutation') {
-        this.clearCache('token');
+        this.persistentCache.clearSnapshots();
       } else {
-        this.clearVolatileCache('token', { emit: false });
         this.persistentCache.clearSnapshotsForScope('auth');
-        this.emitCacheInvalidation('token');
       }
+      this.emitCacheInvalidation('token');
     });
   }
 
   public dispose(): void {
     this.isDisposed = true;
     this.persistentCacheHydrationGeneration += 1;
-    this.cancelAllPendingNetworkRequests();
+    this.cancelAllPendingNetworkRequests('dispose');
+    for (const state of this.catalogSearchSessions.values()) {
+      state.controller.abort();
+      state.disposed = true;
+    }
+    this.catalogSearchSessions.clear();
+    this.defaultCatalogSearchSession = null;
     this.completePersistentCacheHydrationAttempt();
     this.cacheInvalidationListeners.clear();
     this.metadataUpdateListeners.clear();
-    this.deferredMetadataRequestCache.clear();
     this.unsubscribeFromTokenService();
   }
 
@@ -477,14 +532,17 @@ export class ModelCatalogService {
   public clearCache(
     source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
   ): void {
+    if (source === 'token') {
+      this.invalidateAuthScopedCatalogState();
+      this.persistentCache.clearSnapshots();
+      this.emitCacheInvalidation(source);
+      return;
+    }
+
     this.clearVolatileCache(source, { emit: false });
     this.persistentCacheHydrationGeneration += 1;
 
-    if (source === 'token') {
-      this.persistentCache.clearSnapshots();
-    } else {
-      this.persistentCache.clearAll();
-    }
+    this.persistentCache.clearAll();
 
     // Both clear paths leave the store synchronously hydrated: clearAll starts
     // from an empty state, while clearSnapshots preserves search entries via a
@@ -499,7 +557,7 @@ export class ModelCatalogService {
     source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
     options: { emit?: boolean } = {},
   ): void {
-    this.cancelAllPendingNetworkRequests();
+    this.cancelAllPendingNetworkRequests(source === 'manual' ? 'manual_clear' : 'consumer');
     this.bufferedCursorSequence = 0;
     this.searchCache.clear();
     this.searchRequestCache.clear();
@@ -622,19 +680,19 @@ export class ModelCatalogService {
   }
 
   private assertRequestContextIsCurrent(requestContext: CatalogRequestContext): void {
-    if (this.authCacheVersion !== requestContext.authVersion) {
+    if (requestContext.hasAuthToken && this.authCacheVersion !== requestContext.authVersion) {
       throw new StaleCatalogAuthError();
-    }
-  }
-
-  private assertCatalogSearchIsCurrent(generation: number): void {
-    if (this.isDisposed || generation !== this.catalogSearchGeneration) {
-      throw new StaleCatalogRequestError();
     }
   }
 
   private assertCacheOperationIsCurrent(generation: number): void {
     if (this.isDisposed || generation !== this.cacheOperationGeneration) {
+      throw new StaleCatalogRequestError();
+    }
+  }
+
+  private assertRequestSignalIsCurrent(signal?: AbortSignal): void {
+    if (this.isDisposed || signal?.aborted) {
       throw new StaleCatalogRequestError();
     }
   }
@@ -645,18 +703,33 @@ export class ModelCatalogService {
   public async searchModels(
     query: string = 'gguf',
     options?: ModelCatalogSearchOptions,
+    session?: CatalogSearchSession,
   ): Promise<ModelCatalogSearchResult> {
-    const searchGeneration = this.catalogSearchGeneration;
+    const searchScope = this.captureCatalogSearchRequestScope(session);
+    const span = performanceMonitor.startSpan('catalog.search.session', {
+      sessionId: searchScope.sessionId,
+      generation: searchScope.generation,
+      cursorType: options?.cursor ? 'cursor' : 'initial',
+      pageSize: options?.pageSize ?? 20,
+      metadataResolution: options?.metadataResolution ?? 'blocking',
+    });
+    let outcome: 'success' | 'cancelled' | 'error' = 'success';
 
     try {
       await this.waitForPersistentCacheHydrationAttempt();
-      this.assertCatalogSearchIsCurrent(searchGeneration);
-      return await this.searchModelsInternal(query, options, 0, searchGeneration);
+      this.assertCatalogSearchIsCurrent(searchScope);
+      return await this.searchModelsInternal(query, options, 0, searchScope);
     } catch (error) {
       if (error instanceof StaleCatalogRequestError) {
+        outcome = 'cancelled';
         throw new ModelCatalogError('cancelled', 'Catalog request was cancelled');
       }
+      outcome = error instanceof ModelCatalogError && error.code === 'cancelled'
+        ? 'cancelled'
+        : 'error';
       throw error;
+    } finally {
+      span.end({ outcome });
     }
   }
 
@@ -664,10 +737,10 @@ export class ModelCatalogService {
     query: string,
     options: ModelCatalogSearchOptions | undefined,
     retryCount: number,
-    searchGeneration: number,
+    searchScope: CatalogSearchRequestScope,
   ): Promise<ModelCatalogSearchResult> {
     const requestContext = await this.createRequestContext();
-    this.assertCatalogSearchIsCurrent(searchGeneration);
+    this.assertCatalogSearchIsCurrent(searchScope);
     const memoryFitContextPromise = this.getCurrentMemoryFitContext();
     const rawCursor = options?.cursor ?? null;
     const cursor = this.normalizeCatalogSearchCursor(rawCursor);
@@ -717,19 +790,32 @@ export class ModelCatalogService {
         this.sanitizeCachedCatalogModelsResolvedFiles(cached.result.models),
       ).map((model) => this.toSearchResultModel(model));
       const memoryFitContext = await memoryFitContextPromise;
-      this.assertCatalogSearchIsCurrent(searchGeneration);
-      const mergedCachedModels = this.mergeSearchModelsWithRegistry(
-        filteredCachedModels,
-        this.getAuthScope(catalogSearchHasAuthScope),
-        memoryFitContext,
-        metadataResolution,
+      this.assertCatalogSearchIsCurrent(searchScope);
+      const attachedDeferredRequest = !cached.deferredMetadataPending || Boolean(
+        cached.deferredMetadataRequestKey
+        && this.attachDeferredMetadataConsumer(
+          cached.deferredMetadataRequestKey,
+          searchScope.signal,
+        ),
       );
-      return {
-        ...this.sanitizeSearchResultCursor(cached.result),
-        models: metadataResolution === 'deferred'
-          ? this.copySizeResolutionStates(filteredCachedModels, mergedCachedModels)
-          : mergedCachedModels,
-      };
+      if (!attachedDeferredRequest) {
+        if (this.searchCache.get(cacheKey) === cached) {
+          this.searchCache.delete(cacheKey);
+        }
+      } else {
+        const mergedCachedModels = this.mergeSearchModelsWithRegistry(
+          filteredCachedModels,
+          this.getAuthScope(catalogSearchHasAuthScope),
+          memoryFitContext,
+          metadataResolution,
+        );
+        return {
+          ...this.sanitizeSearchResultCursor(cached.result),
+          models: metadataResolution === 'deferred'
+            ? this.copySizeResolutionStates(filteredCachedModels, mergedCachedModels)
+            : mergedCachedModels,
+        };
+      }
     }
 
     if (isBufferedCursor) {
@@ -745,7 +831,7 @@ export class ModelCatalogService {
       }
 
       const memoryFitContext = await memoryFitContextPromise;
-      this.assertCatalogSearchIsCurrent(searchGeneration);
+      this.assertCatalogSearchIsCurrent(searchScope);
       const cachedSearch = (
         this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
         ?? (catalogSearchHasAuthScope
@@ -779,7 +865,7 @@ export class ModelCatalogService {
 
       if (cursor === null) {
         const memoryFitContext = await memoryFitContextPromise;
-        this.assertCatalogSearchIsCurrent(searchGeneration);
+        this.assertCatalogSearchIsCurrent(searchScope);
         const fallback = (
           this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
           ?? (catalogSearchHasAuthScope
@@ -797,11 +883,12 @@ export class ModelCatalogService {
       throw rateLimitError;
     }
 
-    const inFlight = this.searchRequestCache.get(cacheKey);
+    const searchRequestKey = `${cacheKey}::session:${searchScope.sessionId}:${searchScope.generation}`;
+    const inFlight = this.searchRequestCache.get(searchRequestKey);
     const requestPromise = inFlight ?? (async (): Promise<ModelCatalogSearchResult> => {
       try {
         const memoryFitContext = await memoryFitContextPromise;
-        this.assertCatalogSearchIsCurrent(searchGeneration);
+        this.assertCatalogSearchIsCurrent(searchScope);
         const fetched = await this.fetchCatalogBatch(
           normalizedQuery,
           pageSize,
@@ -812,10 +899,10 @@ export class ModelCatalogService {
           gated,
           catalogSearchAuthPolicy,
           metadataResolution,
-          searchGeneration,
+          searchScope,
         );
         this.assertRequestContextIsCurrent(requestContext);
-        this.assertCatalogSearchIsCurrent(searchGeneration);
+        this.assertCatalogSearchIsCurrent(searchScope);
         const prepareResultsSpan = performanceMonitor.startSpan('catalog.prepareSearchResults', {
           fetchedModels: fetched.models.length,
           metadataResolution,
@@ -836,6 +923,7 @@ export class ModelCatalogService {
         const cacheTimestamp = Date.now();
         this.searchRequestSequence += 1;
         const cacheRequestId = this.searchRequestSequence;
+        const deferredMetadataRequestKey = `${cacheKey}::request:${cacheRequestId}`;
         this.searchCache.set(cacheKey, {
           result,
           timestamp: cacheTimestamp,
@@ -843,7 +931,7 @@ export class ModelCatalogService {
           requestId: cacheRequestId,
           ...(metadataResolution === 'deferred' ? {
             deferredMetadataPending: true,
-            deferredSearchGeneration: searchGeneration,
+            deferredMetadataRequestKey,
           } : {}),
         });
         this.pruneSearchCache();
@@ -890,7 +978,8 @@ export class ModelCatalogService {
           this.scheduleDeferredMetadataResolution({
             cacheKey,
             cacheRequestId,
-            searchGeneration,
+            cacheOperationGeneration: this.cacheOperationGeneration,
+            signal: searchScope.signal,
             query,
             normalizedQuery,
             cursor,
@@ -927,7 +1016,7 @@ export class ModelCatalogService {
         if (e instanceof ModelCatalogError) {
           if (cursor === null) {
             const memoryFitContext = await memoryFitContextPromise;
-            this.assertCatalogSearchIsCurrent(searchGeneration);
+            this.assertCatalogSearchIsCurrent(searchScope);
             const fallback = (
               this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
               ?? (catalogSearchHasAuthScope
@@ -948,7 +1037,7 @@ export class ModelCatalogService {
         const networkError = new ModelCatalogError('network', 'Model catalog request failed');
         if (cursor === null) {
           const memoryFitContext = await memoryFitContextPromise;
-          this.assertCatalogSearchIsCurrent(searchGeneration);
+          this.assertCatalogSearchIsCurrent(searchScope);
           const fallback = (
             this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
             ?? (catalogSearchHasAuthScope
@@ -968,15 +1057,15 @@ export class ModelCatalogService {
     })();
 
     if (!inFlight) {
-      this.searchRequestCache.set(cacheKey, requestPromise);
+      this.searchRequestCache.set(searchRequestKey, requestPromise);
     }
 
     try {
       return await requestPromise;
     } catch (e) {
       if (e instanceof StaleCatalogAuthError) {
-        if (this.searchRequestCache.get(cacheKey) === requestPromise) {
-          this.searchRequestCache.delete(cacheKey);
+        if (this.searchRequestCache.get(searchRequestKey) === requestPromise) {
+          this.searchRequestCache.delete(searchRequestKey);
         }
 
         if (cursor === null && retryCount < 1) {
@@ -984,7 +1073,7 @@ export class ModelCatalogService {
             query,
             options,
             retryCount + 1,
-            this.catalogSearchGeneration,
+            searchScope,
           );
         }
 
@@ -997,8 +1086,8 @@ export class ModelCatalogService {
 
       throw e;
     } finally {
-      if (!inFlight && this.searchRequestCache.get(cacheKey) === requestPromise) {
-        this.searchRequestCache.delete(cacheKey);
+      if (!inFlight && this.searchRequestCache.get(searchRequestKey) === requestPromise) {
+        this.searchRequestCache.delete(searchRequestKey);
       }
     }
   }
@@ -1390,34 +1479,192 @@ export class ModelCatalogService {
       : normalized;
   }
 
-  public cancelPendingSearchRequests(): void {
+  public createSearchSession(): CatalogSearchSession {
+    let session!: CatalogSearchSession;
+    session = {
+      cancelPendingRequests: (reason = 'consumer') => {
+        this.cancelPendingSearchRequests(session, reason);
+      },
+      dispose: () => {
+        this.disposeCatalogSearchSession(session);
+      },
+    };
+
+    this.catalogSearchSessionSequence += 1;
     this.catalogSearchGeneration += 1;
-    for (const [controller, request] of this.activeNetworkRequestControllers.entries()) {
-      if (request.scope === 'search' || request.searchGeneration !== undefined) {
-        controller.abort();
-        this.activeNetworkRequestControllers.delete(controller);
-      }
+    this.catalogSearchSessions.set(session, {
+      id: this.catalogSearchSessionSequence,
+      generation: this.catalogSearchGeneration,
+      controller: new AbortController(),
+      disposed: false,
+    });
+    return session;
+  }
+
+  private getDefaultSearchSession(): CatalogSearchSession {
+    if (!this.defaultCatalogSearchSession) {
+      this.defaultCatalogSearchSession = this.createSearchSession();
     }
-    this.searchRequestCache.clear();
-    this.deferredMetadataRequestCache.clear();
-    for (const [cacheKey, entry] of this.searchCache.entries()) {
-      if (entry.deferredMetadataPending) {
-        this.searchCache.delete(cacheKey);
+    return this.defaultCatalogSearchSession;
+  }
+
+  private captureCatalogSearchRequestScope(
+    session: CatalogSearchSession | undefined,
+  ): CatalogSearchRequestScope {
+    const resolvedSession = session ?? this.getDefaultSearchSession();
+    const state = this.catalogSearchSessions.get(resolvedSession);
+    if (!state || state.disposed || state.controller.signal.aborted) {
+      throw new ModelCatalogError('cancelled', 'Catalog search session is no longer active');
+    }
+
+    return {
+      session: resolvedSession,
+      sessionId: state.id,
+      generation: state.generation,
+      signal: state.controller.signal,
+    };
+  }
+
+  private assertCatalogSearchIsCurrent(scope: CatalogSearchRequestScope): void {
+    const state = this.catalogSearchSessions.get(scope.session);
+    if (
+      this.isDisposed
+      || scope.signal.aborted
+      || !state
+      || state.disposed
+      || state.generation !== scope.generation
+    ) {
+      throw new StaleCatalogRequestError();
+    }
+  }
+
+  public cancelPendingSearchRequests(
+    session?: CatalogSearchSession,
+    reason: CatalogSearchCancellationReason = 'consumer',
+  ): void {
+    const targetSession = session ?? this.defaultCatalogSearchSession;
+    if (!targetSession) {
+      return;
+    }
+
+    const state = this.catalogSearchSessions.get(targetSession);
+    if (!state || state.disposed) {
+      return;
+    }
+
+    state.controller.abort();
+    this.catalogSearchGeneration += 1;
+    state.generation = this.catalogSearchGeneration;
+    state.controller = new AbortController();
+    performanceMonitor.incrementCounter('catalog.search.cancel', 1, { reason });
+  }
+
+  private disposeCatalogSearchSession(session: CatalogSearchSession): void {
+    const state = this.catalogSearchSessions.get(session);
+    if (!state || state.disposed) {
+      return;
+    }
+
+    state.controller.abort();
+    state.disposed = true;
+    this.catalogSearchSessions.delete(session);
+    if (this.defaultCatalogSearchSession === session) {
+      this.defaultCatalogSearchSession = null;
+    }
+    performanceMonitor.incrementCounter('catalog.search.cancel', 1, { reason: 'unmount' });
+  }
+
+  private abortSharedCatalogRequests(
+    requestMap: Map<string, SharedCatalogRequestEntry<unknown>>,
+    predicate: (entry: SharedCatalogRequestEntry<unknown>) => boolean = () => true,
+  ): void {
+    for (const entry of requestMap.values()) {
+      if (predicate(entry)) {
+        entry.controller.abort();
       }
     }
   }
 
-  private cancelAllPendingNetworkRequests(): void {
+  private cancelAllPendingNetworkRequests(reason: CatalogSearchCancellationReason): void {
     this.catalogSearchGeneration += 1;
     this.cacheOperationGeneration += 1;
+    for (const state of this.catalogSearchSessions.values()) {
+      if (state.disposed) {
+        continue;
+      }
+      state.controller.abort();
+      this.catalogSearchGeneration += 1;
+      state.generation = this.catalogSearchGeneration;
+      state.controller = new AbortController();
+    }
+    performanceMonitor.incrementCounter('catalog.search.cancel', 1, { reason, scope: 'all' });
+
+    this.abortSharedCatalogRequests(
+      this.deferredMetadataRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    this.abortSharedCatalogRequests(
+      this.treeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    this.abortSharedCatalogRequests(
+      this.readmeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    this.abortSharedCatalogRequests(
+      this.resolvedFileProbeCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
     for (const controller of this.activeNetworkRequestControllers.keys()) {
       controller.abort();
     }
     this.activeNetworkRequestControllers.clear();
   }
 
+  private invalidateAuthScopedCatalogState(): void {
+    const isStaleAuthEntry = (entry: SharedCatalogRequestEntry<unknown>) => (
+      entry.authScope === 'auth' && entry.authVersion !== this.authCacheVersion
+    );
+    this.abortSharedCatalogRequests(
+      this.deferredMetadataRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+    this.abortSharedCatalogRequests(
+      this.treeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+    this.abortSharedCatalogRequests(
+      this.readmeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+    this.abortSharedCatalogRequests(
+      this.resolvedFileProbeCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+
+    for (const [controller, request] of this.activeNetworkRequestControllers.entries()) {
+      if (request.authScope === 'auth' && request.authVersion !== this.authCacheVersion) {
+        controller.abort();
+      }
+    }
+    for (const key of this.searchCache.keys()) {
+      if (key.includes('::auth::')) {
+        this.searchCache.delete(key);
+      }
+    }
+    for (const key of this.searchRequestCache.keys()) {
+      if (key.includes('::auth::')) {
+        this.searchRequestCache.delete(key);
+      }
+    }
+    // Anonymous snapshots can contain token-derived visibility reconciliation,
+    // so invalidate snapshot state without cancelling compatible anonymous work.
+    this.modelSnapshotCache.clear();
+    this.resolvedFileProbeStateCache.clear();
+    this.rateLimitUntilByAuthScope.auth = 0;
+    this.rateLimitBackoffMsByAuthScope.auth = 0;
+  }
+
   private createInterruptedCatalogRequestError(requestContext?: CatalogRequestContext): Error {
-    return requestContext && requestContext.authVersion !== this.authCacheVersion
+    return requestContext
+      && requestContext.hasAuthToken
+      && requestContext.authVersion !== this.authCacheVersion
       ? new StaleCatalogAuthError()
       : new StaleCatalogRequestError();
   }
@@ -1428,20 +1675,25 @@ export class ModelCatalogService {
     options: CatalogResourceFetchOptions<T> = {},
   ): Promise<T> {
     if (typeof AbortController === 'undefined') {
-      return fetchWithTimeout(url, init, options.timeoutMs, options.consume);
+      const result = await fetchWithTimeout(url, init, options.timeoutMs, options.consume);
+      if (init.signal?.aborted) {
+        throw this.createInterruptedCatalogRequestError(options.requestContext);
+      }
+      return result;
     }
 
     const controller = new AbortController();
     const externalSignal = init.signal;
     const abortListener = () => controller.abort();
+    let controllerAbortListener: (() => void) | undefined;
     const interruptedRequestPromise = new Promise<never>((_resolve, reject) => {
-      const rejectInterruptedRequest = () => reject(
+      controllerAbortListener = () => reject(
         this.createInterruptedCatalogRequestError(options.requestContext),
       );
       if (controller.signal.aborted) {
-        rejectInterruptedRequest();
+        controllerAbortListener();
       } else {
-        controller.signal.addEventListener('abort', rejectInterruptedRequest, { once: true });
+        controller.signal.addEventListener('abort', controllerAbortListener, { once: true });
       }
     });
     if (externalSignal) {
@@ -1452,12 +1704,17 @@ export class ModelCatalogService {
       }
     }
 
-    this.activeNetworkRequestControllers.set(controller, {
-      scope: options.scope ?? 'background',
-      searchGeneration: options.searchGeneration,
+    const authScope = this.getAuthScope(options.requestContext?.hasAuthToken === true);
+    const authVersion = options.requestContext?.authVersion ?? this.authCacheVersion;
+    const requestScope = options.scope ?? 'background';
+    this.activeNetworkRequestControllers.set(controller, { scope: requestScope, authScope, authVersion });
+    performanceMonitor.incrementCounter('catalog.resource.request', 1, {
+      scope: requestScope,
+      authScope,
+      activeRequests: this.activeNetworkRequestControllers.size,
     });
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         fetchWithTimeout(
           url,
           { ...init, signal: controller.signal },
@@ -1466,6 +1723,10 @@ export class ModelCatalogService {
         ),
         interruptedRequestPromise,
       ]);
+      if (controller.signal.aborted || externalSignal?.aborted) {
+        throw this.createInterruptedCatalogRequestError(options.requestContext);
+      }
+      return result;
     } catch (error) {
       if (
         controller.signal.aborted
@@ -1476,6 +1737,9 @@ export class ModelCatalogService {
       throw error;
     } finally {
       this.activeNetworkRequestControllers.delete(controller);
+      if (controllerAbortListener) {
+        controller.signal.removeEventListener('abort', controllerAbortListener);
+      }
       if (externalSignal && typeof externalSignal.removeEventListener === 'function') {
         externalSignal.removeEventListener('abort', abortListener);
       }
@@ -1550,12 +1814,21 @@ export class ModelCatalogService {
     });
   }
 
-  public async getModelDetails(modelId: string): Promise<ModelMetadata> {
+  public async getModelDetails(
+    modelId: string,
+    options: CatalogRequestOptions = {},
+  ): Promise<ModelMetadata> {
     const cacheOperationGeneration = this.cacheOperationGeneration;
     try {
       await this.waitForPersistentCacheHydrationAttempt();
       this.assertCacheOperationIsCurrent(cacheOperationGeneration);
-      return await this.getModelDetailsInternal(modelId, 0, cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
+      return await this.getModelDetailsInternal(
+        modelId,
+        0,
+        cacheOperationGeneration,
+        options.signal,
+      );
     } catch (error) {
       if (error instanceof StaleCatalogRequestError) {
         throw new ModelCatalogError('cancelled', 'Catalog request was cancelled');
@@ -1568,11 +1841,14 @@ export class ModelCatalogService {
     modelId: string,
     retryCount: number,
     cacheOperationGeneration: number,
+    signal?: AbortSignal,
   ): Promise<ModelMetadata> {
     const requestContext = await this.createRequestContext();
     this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+    this.assertRequestSignalIsCurrent(signal);
     const memoryFitContext = await this.getCurrentMemoryFitContext(cacheOperationGeneration);
     this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+    this.assertRequestSignalIsCurrent(signal);
 
     try {
       const cachedModel = this.getCachedModel(modelId);
@@ -1584,6 +1860,7 @@ export class ModelCatalogService {
       let detailsAuthToken: string | null = null;
       let detailsResponse = await this.fetchCatalogJson<HuggingFaceModelSummary>(detailsUrl, {
         headers: buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
+        signal,
       }, {
         requestContext,
       });
@@ -1598,6 +1875,7 @@ export class ModelCatalogService {
         detailsAuthToken = requestContext.authToken;
         detailsResponse = await this.fetchCatalogJson<HuggingFaceModelSummary>(detailsUrl, {
           headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+          signal,
         }, {
           requestContext,
         });
@@ -1625,7 +1903,7 @@ export class ModelCatalogService {
           [detailedModel],
           memoryFitContext,
           requestContext,
-          { treeProbeMode: 'full' },
+          { treeProbeMode: 'full', signal },
         );
         if (!resolvedModel && detailedModel.requiresTreeProbe === true) {
           this.assertCacheOperationIsCurrent(cacheOperationGeneration);
@@ -1662,6 +1940,7 @@ export class ModelCatalogService {
         requestContext,
         {
           retryNotFoundWithAuth: this.isAuthRestrictedModel(detailedModel),
+          signal,
         },
       ).catch((error) => {
         if (error instanceof StaleCatalogAuthError || error instanceof StaleCatalogRequestError) {
@@ -1722,6 +2001,7 @@ export class ModelCatalogService {
 
       this.assertRequestContextIsCurrent(requestContext);
       this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(signal);
       if (detailsAuthToken) {
         this.upsertModelSnapshots([detailedModel], 'auth');
         this.reconcileAnonymousModelVisibility([detailedModel]);
@@ -1737,7 +2017,14 @@ export class ModelCatalogService {
       return this.syncRegistryModelIfPresent(detailedModel);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
-        return this.getModelDetailsInternal(modelId, retryCount + 1, this.cacheOperationGeneration);
+        this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+        this.assertRequestSignalIsCurrent(signal);
+        return this.getModelDetailsInternal(
+          modelId,
+          retryCount + 1,
+          cacheOperationGeneration,
+          signal,
+        );
       }
 
       throw error;
@@ -1752,8 +2039,10 @@ export class ModelCatalogService {
     try {
       await this.waitForPersistentCacheHydrationAttempt();
       this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options?.signal);
       return await this.refreshModelMetadataInternal(model, 0, {
         includeDetails: options?.includeDetails !== false,
+        signal: options?.signal,
       }, cacheOperationGeneration);
     } catch (error) {
       if (error instanceof StaleCatalogRequestError) {
@@ -1766,11 +2055,12 @@ export class ModelCatalogService {
   private async refreshModelMetadataInternal(
     model: ModelMetadata,
     retryCount: number,
-    options: { includeDetails: boolean },
+    options: { includeDetails: boolean; signal?: AbortSignal },
     cacheOperationGeneration: number,
   ): Promise<ModelMetadata> {
     const requestContext = await this.createRequestContext();
     this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+    this.assertRequestSignalIsCurrent(options.signal);
     try {
       const canRefreshDetailsForContextWindow = (
         model.hasVerifiedContextWindow !== true
@@ -1781,16 +2071,24 @@ export class ModelCatalogService {
       );
 
       if (options.includeDetails && canRefreshDetailsForContextWindow) {
-        return this.getModelDetailsInternal(model.id, retryCount, cacheOperationGeneration);
+        return this.getModelDetailsInternal(
+          model.id,
+          retryCount,
+          cacheOperationGeneration,
+          options.signal,
+        );
       }
 
       const memoryFitContext = await this.getCurrentMemoryFitContext(cacheOperationGeneration);
       this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
       const [resolved] = await this.resolveMissingModelMetadata([model], memoryFitContext, requestContext, {
         treeProbeMode: options.includeDetails ? 'full' : 'bounded',
+        signal: options.signal,
       });
       this.assertRequestContextIsCurrent(requestContext);
       this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
       if (!resolved && model.requiresTreeProbe === true) {
         return this.finalizeUnresolvedTreeProbeMissModel(model);
       }
@@ -1808,11 +2106,13 @@ export class ModelCatalogService {
       return this.syncRegistryModelIfPresent(refreshed);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
+        this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+        this.assertRequestSignalIsCurrent(options.signal);
         return this.refreshModelMetadataInternal(
           model,
           retryCount + 1,
           options,
-          this.cacheOperationGeneration,
+          cacheOperationGeneration,
         );
       }
 
@@ -2030,6 +2330,7 @@ export class ModelCatalogService {
     performanceMonitor.incrementCounter('catalog.resolveMissingModelMetadata.calls');
 
     const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata | null> => {
+      this.assertRequestSignalIsCurrent(options.signal);
       const hasKnownSize = typeof model.size === 'number' && model.size > 0;
       const shouldCollectProjectorCandidates = this.isProjectorAwareModel(model);
       const requiresAuthValidation = requestContext.hasAuthToken && (
@@ -2054,7 +2355,7 @@ export class ModelCatalogService {
         && (!shouldCollectProjectorCandidates || options.resolveProjectorAwareModels === false)
       ) {
         const probedAccessState = await this.probeResolvedModelAccess(model, requestContext, {
-          searchGeneration: options.searchGeneration,
+          signal: options.signal,
         });
         if (probedAccessState) {
           return normalizePersistedModelMetadata({
@@ -2087,7 +2388,7 @@ export class ModelCatalogService {
               ? HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES
               : options.treeProbeMaxPages
                 ?? (useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES),
-            searchGeneration: options.searchGeneration,
+            signal: options.signal,
           },
         );
         const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
@@ -2464,13 +2765,25 @@ export class ModelCatalogService {
 
     try {
       for (let index = 0; index < models.length; index += batchSize) {
+        this.assertRequestSignalIsCurrent(options.signal);
         if (options.shouldContinue?.() === false) {
           outcome = 'stale';
           break;
         }
         const batch = models.slice(index, index + batchSize);
-        const batchResults = await Promise.all(batch.map(resolveModel));
-        const resolvedBatch = batchResults.filter((model): model is ModelMetadata => model !== null);
+        const batchSpan = options.onBatchResolved
+          ? performanceMonitor.startSpan('catalog.deferredMetadata.batch', {
+            requested: batch.length,
+            batchSize,
+          })
+          : null;
+        let resolvedBatch: ModelMetadata[] = [];
+        try {
+          const batchResults = await Promise.all(batch.map(resolveModel));
+          resolvedBatch = batchResults.filter((model): model is ModelMetadata => model !== null);
+        } finally {
+          batchSpan?.end({ resolved: resolvedBatch.length });
+        }
         results.push(...resolvedBatch);
         options.onBatchResolved?.({
           requestedModelIds: batch.map((model) => model.id),
@@ -2532,57 +2845,81 @@ export class ModelCatalogService {
 
   private scheduleDeferredMetadataResolution(input: DeferredMetadataResolutionInput): void {
     const models = input.models.filter((model) => this.shouldResolveDeferredMetadata(model, input.requestContext));
-    if (this.isDisposed || input.searchGeneration !== this.catalogSearchGeneration) {
+    if (!this.isDeferredMetadataInputCurrent(input)) {
       return;
     }
 
     const requestKey = `${input.cacheKey}::request:${input.cacheRequestId}`;
-    if (this.deferredMetadataRequestCache.has(requestKey)) {
-      return;
-    }
+    void this.withInFlightDedup(
+      this.deferredMetadataRequestCache,
+      requestKey,
+      async (sharedSignal) => {
+        const sharedInput = { ...input, signal: sharedSignal, models };
+        try {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          if (!this.isDeferredMetadataInputCurrent(sharedInput)) {
+            throw new StaleCatalogRequestError();
+          }
 
-    const requestPromise = new Promise<void>((resolve) => {
-      setTimeout(() => {
-        if (this.isDisposed || input.searchGeneration !== this.catalogSearchGeneration) {
-          resolve();
-          return;
-        }
+          if (models.length === 0) {
+            this.completeDeferredSearchWithoutEnrichment(sharedInput);
+            return;
+          }
 
-        if (models.length === 0) {
-          this.completeDeferredSearchWithoutEnrichment(input);
-          resolve();
-          return;
-        }
-
-        void this.runDeferredMetadataResolution({ ...input, models })
-          .catch((error) => {
+          await this.runDeferredMetadataResolution(sharedInput);
+        } catch (error) {
+          const isStale = sharedSignal.aborted
+            || error instanceof StaleCatalogAuthError
+            || error instanceof StaleCatalogRequestError;
+          if (isStale) {
+            this.discardCancelledDeferredSearch(sharedInput);
             if (
               !(error instanceof StaleCatalogAuthError)
               && !(error instanceof StaleCatalogRequestError)
-              && process.env.NODE_ENV !== 'test'
             ) {
-              console.warn('[ModelCatalogService] Deferred catalog metadata resolution failed', error);
+              throw new StaleCatalogRequestError();
             }
-          })
-          .finally(() => resolve());
-      }, 0);
-    });
+            throw error;
+          }
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn('[ModelCatalogService] Deferred catalog metadata resolution failed', error);
+          }
+          throw error;
+        }
+      },
+      {
+        signal: input.signal,
+        authScope: this.getAuthScope(input.catalogSearchHasAuthScope),
+        authVersion: input.requestContext.authVersion,
+      },
+    ).catch(() => undefined);
+  }
 
-    this.deferredMetadataRequestCache.set(requestKey, requestPromise);
-    void requestPromise.finally(() => {
-      if (this.deferredMetadataRequestCache.get(requestKey) === requestPromise) {
-        this.deferredMetadataRequestCache.delete(requestKey);
-      }
+  private attachDeferredMetadataConsumer(requestKey: string, signal: AbortSignal): boolean {
+    const entry = this.deferredMetadataRequestCache.get(requestKey);
+    if (!entry || entry.settled || entry.controller.signal.aborted) {
+      return false;
+    }
+
+    performanceMonitor.incrementCounter('catalog.resource.dedupHit', 1, {
+      authScope: entry.authScope,
+      resource: 'deferred_metadata',
     });
+    void this.attachSharedCatalogRequestConsumer(entry, signal).catch(() => undefined);
+    return true;
+  }
+
+  private isDeferredMetadataInputCurrent(input: DeferredMetadataResolutionInput): boolean {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    return !this.isDisposed
+      && !input.signal.aborted
+      && input.cacheOperationGeneration === this.cacheOperationGeneration
+      && currentEntry?.requestId === input.cacheRequestId;
   }
 
   private completeDeferredSearchWithoutEnrichment(input: DeferredMetadataResolutionInput): void {
     const currentEntry = this.searchCache.get(input.cacheKey);
-    if (
-      this.isDisposed
-      || input.searchGeneration !== this.catalogSearchGeneration
-      || currentEntry?.requestId !== input.cacheRequestId
-    ) {
+    if (!this.isDeferredMetadataInputCurrent(input) || currentEntry?.requestId !== input.cacheRequestId) {
       return;
     }
 
@@ -2611,7 +2948,15 @@ export class ModelCatalogService {
     this.searchCache.set(input.cacheKey, {
       ...currentEntry,
       deferredMetadataPending: false,
+      deferredMetadataRequestKey: undefined,
     });
+  }
+
+  private discardCancelledDeferredSearch(input: DeferredMetadataResolutionInput): void {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (currentEntry?.requestId === input.cacheRequestId && currentEntry.deferredMetadataPending) {
+      this.searchCache.delete(input.cacheKey);
+    }
   }
 
   private async runDeferredMetadataResolution(input: DeferredMetadataResolutionInput): Promise<void> {
@@ -2633,20 +2978,16 @@ export class ModelCatalogService {
           treeProbeMaxPages: DEFERRED_METADATA_TREE_MAX_PAGES,
           resolveProjectorAwareModels: false,
           batchSize: DEFERRED_METADATA_BATCH_SIZE,
-          searchGeneration: input.searchGeneration,
+          signal: input.signal,
           onBatchResolved: ({ requestedModelIds, models }) => {
             this.applyDeferredMetadataBatch(input, requestedModelIds, models);
           },
-          shouldContinue: () => {
-            const currentEntry = this.searchCache.get(input.cacheKey);
-            return !this.isDisposed
-              && input.searchGeneration === this.catalogSearchGeneration
-              && currentEntry?.requestId === input.cacheRequestId;
-          },
+          shouldContinue: () => this.isDeferredMetadataInputCurrent(input),
         },
       );
       this.assertRequestContextIsCurrent(input.requestContext);
-      this.assertCatalogSearchIsCurrent(input.searchGeneration);
+      this.assertRequestSignalIsCurrent(input.signal);
+      this.assertCacheOperationIsCurrent(input.cacheOperationGeneration);
 
       const currentEntry = this.searchCache.get(input.cacheKey);
       if (!currentEntry || currentEntry.requestId !== input.cacheRequestId || this.isDisposed) {
@@ -2670,9 +3011,13 @@ export class ModelCatalogService {
       });
       this.markDeferredMetadataComplete(input);
     } catch (error) {
-      const isStale = error instanceof StaleCatalogAuthError || error instanceof StaleCatalogRequestError;
+      const isStale = input.signal.aborted
+        || error instanceof StaleCatalogAuthError
+        || error instanceof StaleCatalogRequestError;
       outcome = isStale ? 'stale' : 'error';
-      if (!isStale) {
+      if (isStale) {
+        this.discardCancelledDeferredSearch(input);
+      } else {
         this.completeUnresolvedSizeStatesAfterFailure(input);
         this.markDeferredMetadataComplete(input);
       }
@@ -2688,7 +3033,7 @@ export class ModelCatalogService {
     resolvedModels: ModelMetadata[],
   ): void {
     this.assertRequestContextIsCurrent(input.requestContext);
-    if (this.isDisposed || input.searchGeneration !== this.catalogSearchGeneration) {
+    if (!this.isDeferredMetadataInputCurrent(input)) {
       return;
     }
 
@@ -2780,7 +3125,7 @@ export class ModelCatalogService {
     gated: boolean | undefined,
     catalogAuthPolicy: RequestAuthPolicy = REQUEST_AUTH_POLICY.ANONYMOUS,
     metadataResolution: CatalogMetadataResolution = 'blocking',
-    searchGeneration?: number,
+    searchScope?: CatalogSearchRequestScope,
   ): Promise<CatalogBatchResult> {
     const catalogAuthToken = resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
     const hasAuthToken = Boolean(catalogAuthToken);
@@ -2806,6 +3151,9 @@ export class ModelCatalogService {
 
     try {
       while (models.length < resolvedPageSize && !exhausted) {
+        if (searchScope) {
+          this.assertCatalogSearchIsCurrent(searchScope);
+        }
         pagesFetched += 1;
         const requestedCursor = nextCursor;
         if (requestedCursor !== null) {
@@ -2820,6 +3168,7 @@ export class ModelCatalogService {
           requestedCursor,
           sort,
           gated,
+          searchScope?.signal,
         );
         const transformSpan = performanceMonitor.startSpan('catalog.transformSearchSummaries', {
           items: page.items.length,
@@ -2839,10 +3188,17 @@ export class ModelCatalogService {
             requestContext,
             {
               treeProbeMode: 'bounded',
-              searchGeneration,
-              shouldContinue: searchGeneration === undefined
+              signal: searchScope?.signal,
+              shouldContinue: searchScope === undefined
                 ? undefined
-                : () => !this.isDisposed && searchGeneration === this.catalogSearchGeneration,
+                : () => {
+                  try {
+                    this.assertCatalogSearchIsCurrent(searchScope);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
             },
           );
         // Merge with the local registry so downloaded entries don't disappear just because the
@@ -2989,6 +3345,7 @@ export class ModelCatalogService {
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
     gated?: boolean,
+    signal?: AbortSignal,
   ): Promise<HuggingFaceModelsPage> {
     const cursorType = nextCursor ? 'cursor' : 'initial';
     const authToken = resolveRequestAuthToken(authPolicy, requestContext.authToken);
@@ -3012,6 +3369,7 @@ export class ModelCatalogService {
     try {
       const { response, body } = await this.fetchCatalogJson<HuggingFaceModelSummary[]>(url, {
         headers: buildHeaders(authPolicy, authToken),
+        signal,
       }, {
         scope: 'search',
         timeoutMs: CATALOG_SEARCH_REQUEST_TIMEOUT_MS,
@@ -4376,10 +4734,8 @@ export class ModelCatalogService {
       ? `target:${encodeURIComponent(expectedFileName)}`
       : 'target:__none__';
     const targetEarlyStopCacheSegment = allowTargetEarlyStop ? 'target-stop:early' : 'target-stop:full';
-    const searchGenerationCacheSegment = options?.searchGeneration === undefined
-      ? 'consumer:shared'
-      : `consumer:search-${options.searchGeneration}`;
-    const treeCacheSegment = `${expectedFileNameCacheSegment}:${targetEarlyStopCacheSegment}:max-pages:${maxPages}:${searchGenerationCacheSegment}`;
+    const treeCacheSegment = `${expectedFileNameCacheSegment}:${targetEarlyStopCacheSegment}:max-pages:${maxPages}`;
+    const requestAuthScope = this.resolveRequestAuthScope(authPolicy, requestContext.authToken);
 
     return this.withInFlightDedup(
       this.treeRequestCache,
@@ -4391,7 +4747,7 @@ export class ModelCatalogService {
         authPolicy,
         treeCacheSegment,
       ),
-      async () => {
+      async (sharedSignal) => {
         const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModelTree', {
           repoId,
           revision: revision ?? 'main',
@@ -4413,6 +4769,7 @@ export class ModelCatalogService {
 
         try {
           while (nextCursor !== null) {
+            this.assertRequestSignalIsCurrent(sharedSignal);
             if (pageCount >= maxPages) {
               isComplete = false;
               stopReason = 'max_pages';
@@ -4425,9 +4782,9 @@ export class ModelCatalogService {
 
             const { response, body } = await this.fetchCatalogJson<HuggingFaceTreeEntry[]>(requestedCursor, {
               headers: buildHeaders(authPolicy, requestContext.authToken),
+              signal: sharedSignal,
             }, {
               requestContext,
-              searchGeneration: options?.searchGeneration,
             });
             status = response.status;
             this.assertRequestContextIsCurrent(requestContext);
@@ -4445,7 +4802,7 @@ export class ModelCatalogService {
                   revision,
                   requestContext,
                   REQUEST_AUTH_POLICY.REQUIRED_AUTH,
-                  options,
+                  { ...options, signal: sharedSignal },
                 );
               }
 
@@ -4561,6 +4918,11 @@ export class ModelCatalogService {
           });
         }
       },
+      {
+        signal: options?.signal,
+        authScope: requestAuthScope,
+        authVersion: requestContext.authVersion,
+      },
     );
   }
 
@@ -4568,12 +4930,13 @@ export class ModelCatalogService {
     repoId: string,
     revision: string | undefined,
     requestContext: CatalogRequestContext,
-    options?: { retryNotFoundWithAuth?: boolean },
+    options?: { retryNotFoundWithAuth?: boolean; signal?: AbortSignal },
   ): Promise<ReadmeModelData | undefined> {
     const authPolicy = requestContext.hasAuthToken
       ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
       : REQUEST_AUTH_POLICY.ANONYMOUS;
     const retryNotFoundWithAuth = options?.retryNotFoundWithAuth === true;
+    const requestAuthScope = this.resolveRequestAuthScope(authPolicy, requestContext.authToken);
     return this.withInFlightDedup(
       this.readmeRequestCache,
       this.buildRequestCacheKey(
@@ -4584,10 +4947,11 @@ export class ModelCatalogService {
         authPolicy,
         retryNotFoundWithAuth ? 'hidden-404-auth-retry' : 'default',
       ),
-      async () => {
+      async (sharedSignal) => {
         const readmeUrl = buildHuggingFaceRawUrl(repoId, 'README.md', revision);
         let readmeResponse = await this.fetchCatalogText(readmeUrl, {
           headers: buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
+          signal: sharedSignal,
         }, {
           requestContext,
         });
@@ -4605,6 +4969,7 @@ export class ModelCatalogService {
         ) {
           readmeResponse = await this.fetchCatalogText(readmeUrl, {
             headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+            signal: sharedSignal,
           }, {
             requestContext,
           });
@@ -4629,13 +4994,18 @@ export class ModelCatalogService {
           ? readmeData
           : undefined;
       },
+      {
+        signal: options?.signal,
+        authScope: requestAuthScope,
+        authVersion: requestContext.authVersion,
+      },
     );
   }
 
   private async probeResolvedModelAccess(
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'accessState' | 'isGated' | 'isPrivate'>,
     requestContext: CatalogRequestContext,
-    options: { searchGeneration?: number } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<ModelAccessState | null> {
     const resolvedFileName = model.resolvedFileName;
     if (!requestContext.authToken || !resolvedFileName) {
@@ -4648,9 +5018,7 @@ export class ModelCatalogService {
       model.hfRevision,
       requestContext,
       REQUEST_AUTH_POLICY.REQUIRED_AUTH,
-      `${model.resolvedFileName}:${options.searchGeneration === undefined
-        ? 'consumer:shared'
-        : `consumer:search-${options.searchGeneration}`}`,
+      model.resolvedFileName,
     );
     const cachedState = this.getCachedResolvedFileProbeState(cacheKey);
     if (cachedState !== undefined) {
@@ -4660,13 +5028,15 @@ export class ModelCatalogService {
     return this.withInFlightDedup(
       this.resolvedFileProbeCache,
       cacheKey,
-      async () => {
+      async (sharedSignal) => {
         const probeUrl = buildHuggingFaceResolveUrl(
           model.id,
           resolvedFileName,
           model.hfRevision,
         );
         const cacheResolvedProbeState = (state: ModelAccessState | null): ModelAccessState | null => {
+          this.assertRequestContextIsCurrent(requestContext);
+          this.assertRequestSignalIsCurrent(sharedSignal);
           if (state === ModelAccessState.AUTHORIZED && this.isAuthRestrictedModel(model)) {
             this.resolvedFileProbeStateCache.delete(cacheKey);
             return state;
@@ -4680,9 +5050,9 @@ export class ModelCatalogService {
           const headResponse = await this.fetchCatalogResource(probeUrl, {
             method: 'HEAD',
             headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+            signal: sharedSignal,
           }, {
             requestContext,
-            searchGeneration: options.searchGeneration,
           });
           this.assertRequestContextIsCurrent(requestContext);
           const headState = this.resolveResolvedFileProbeState(
@@ -4708,9 +5078,9 @@ export class ModelCatalogService {
               ...(buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken) ?? {}),
               Range: 'bytes=0-0',
             },
+            signal: sharedSignal,
           }, {
             requestContext,
-            searchGeneration: options.searchGeneration,
           });
           this.assertRequestContextIsCurrent(requestContext);
           const getState = this.resolveResolvedFileProbeState(
@@ -4730,6 +5100,11 @@ export class ModelCatalogService {
 
           return cacheResolvedProbeState(null);
         }
+      },
+      {
+        signal: options.signal,
+        authScope: 'auth',
+        authVersion: requestContext.authVersion,
       },
     );
   }
@@ -4796,23 +5171,121 @@ export class ModelCatalogService {
   }
 
   private async withInFlightDedup<T>(
-    requestMap: Map<string, Promise<T>>,
+    requestMap: Map<string, SharedCatalogRequestEntry<T>>,
     key: string,
-    load: () => Promise<T>,
+    load: (signal: AbortSignal) => Promise<T>,
+    options: {
+      signal?: AbortSignal;
+      authScope: CatalogCacheAuthScope;
+      authVersion: number;
+    },
   ): Promise<T> {
-    const cachedPromise = requestMap.get(key);
-    if (cachedPromise) {
-      return cachedPromise;
-    }
-
-    const requestPromise = load().finally(() => {
-      if (requestMap.get(key) === requestPromise) {
+    let entry = requestMap.get(key);
+    if (entry && (entry.settled || entry.controller.signal.aborted)) {
+      if (requestMap.get(key) === entry) {
         requestMap.delete(key);
       }
-    });
+      entry = undefined;
+    }
+    if (entry) {
+      performanceMonitor.incrementCounter('catalog.resource.dedupHit', 1, {
+        authScope: entry.authScope,
+      });
+      return this.attachSharedCatalogRequestConsumer(entry, options.signal);
+    }
 
-    requestMap.set(key, requestPromise);
-    return requestPromise;
+    const controller = new AbortController();
+    const requestPromise = Promise.resolve().then(() => load(controller.signal));
+    entry = {
+      promise: requestPromise,
+      controller,
+      consumers: new Map(),
+      settled: false,
+      authScope: options.authScope,
+      authVersion: options.authVersion,
+    };
+    const createdEntry = entry;
+    requestMap.set(key, createdEntry);
+    void requestPromise.then(
+      () => {
+        createdEntry.settled = true;
+        if (requestMap.get(key) === createdEntry) {
+          requestMap.delete(key);
+        }
+      },
+      () => {
+        createdEntry.settled = true;
+        if (requestMap.get(key) === createdEntry) {
+          requestMap.delete(key);
+        }
+      },
+    );
+
+    return this.attachSharedCatalogRequestConsumer(createdEntry, options.signal);
+  }
+
+  private attachSharedCatalogRequestConsumer<T>(
+    entry: SharedCatalogRequestEntry<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (entry.settled || entry.controller.signal.aborted) {
+      return Promise.reject(new StaleCatalogRequestError());
+    }
+    if (signal?.aborted) {
+      if (entry.consumers.size === 0 && !entry.settled) {
+        entry.controller.abort();
+      }
+      return Promise.reject(new StaleCatalogRequestError());
+    }
+
+    this.sharedRequestConsumerSequence += 1;
+    const consumerId = this.sharedRequestConsumerSequence;
+
+    return new Promise<T>((resolve, reject) => {
+      let completed = false;
+      const detach = (cancelledByConsumer: boolean) => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        const consumer = entry.consumers.get(consumerId);
+        if (consumer?.signal && consumer.abortListener) {
+          consumer.signal.removeEventListener('abort', consumer.abortListener);
+        }
+        entry.consumers.delete(consumerId);
+        if (cancelledByConsumer) {
+          performanceMonitor.incrementCounter('catalog.resource.consumerDetached', 1, {
+            authScope: entry.authScope,
+          });
+        }
+        if (entry.consumers.size === 0 && !entry.settled) {
+          entry.controller.abort();
+        }
+      };
+      const abortListener = () => {
+        detach(true);
+        reject(new StaleCatalogRequestError());
+      };
+      entry.consumers.set(consumerId, { signal, abortListener: signal ? abortListener : undefined });
+      signal?.addEventListener('abort', abortListener, { once: true });
+
+      void entry.promise.then(
+        (value) => {
+          if (completed) {
+            return;
+          }
+          detach(false);
+          resolve(value);
+        },
+        (error) => {
+          if (completed) {
+            return;
+          }
+          detach(false);
+          reject(error);
+        },
+      );
+    });
   }
 
   private resolveNextCatalogCursor(

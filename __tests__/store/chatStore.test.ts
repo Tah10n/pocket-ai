@@ -19,6 +19,8 @@ import {
 import { getAppStorage, storage } from '../../src/store/storage';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
+import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
+import { captureReferenceSequence, countUnretainedItemReferences } from '../../testUtils';
 
 function buildThread(id: string, updatedAt: number): ChatThread {
   return {
@@ -467,6 +469,128 @@ describe('chatStore', () => {
         state: 'complete',
       }),
     );
+  });
+
+  it('keeps durable history and presentation references stable across 100 streaming patches', () => {
+    const fixtureThread = buildPerformanceThread({
+      historicalMessageCount: 1000,
+      attachments: 'mixed',
+      modelSwitchEvery: 125,
+    });
+    useChatStore.setState({
+      threads: { [fixtureThread.id]: fixtureThread },
+      activeThreadId: fixtureThread.id,
+    });
+
+    const assistantId = useChatStore.getState().createAssistantPlaceholder(
+      fixtureThread.id,
+      fixtureThread.activeModelId,
+    );
+    const durableThreads = useChatStore.getState().threads;
+    const durableThread = durableThreads[fixtureThread.id];
+    const durableMessages = durableThread.messages;
+    const durablePlaceholder = durableMessages.at(-1);
+    const presentedAfterPlaceholder = useChatStore.getState().getThread(fixtureThread.id)!;
+    const presentationReferences = captureReferenceSequence(presentedAfterPlaceholder.messages);
+    const historicalReferences = presentationReferences.items.slice(0, -1);
+    const initialRevision = useChatStore.getState().streamingRevision;
+    let previousTransientAssistant = presentedAfterPlaceholder.messages.at(-1);
+
+    for (let patchIndex = 1; patchIndex <= 100; patchIndex += 1) {
+      useChatStore.getState().patchAssistantMessage(fixtureThread.id, assistantId, {
+        content: `Partial response ${patchIndex}`,
+        thoughtContent: `Reasoning ${patchIndex}`,
+        tokensPerSec: patchIndex / 10,
+        state: 'streaming',
+      });
+
+      const presentedThread = useChatStore.getState().getThread(fixtureThread.id)!;
+      const nextTransientAssistant = presentedThread.messages.at(-1);
+      expect(presentedThread.messages).toBe(presentationReferences.array);
+      expect(nextTransientAssistant).not.toBe(previousTransientAssistant);
+      expect(nextTransientAssistant).toEqual(expect.objectContaining({
+        id: assistantId,
+        modelId: fixtureThread.activeModelId,
+        content: `Partial response ${patchIndex}`,
+        thoughtContent: `Reasoning ${patchIndex}`,
+        tokensPerSec: patchIndex / 10,
+        state: 'streaming',
+      }));
+      previousTransientAssistant = nextTransientAssistant;
+    }
+
+    const stateAfterPatches = useChatStore.getState();
+    const presentedAfterPatches = stateAfterPatches.getThread(fixtureThread.id)!;
+    expect(stateAfterPatches.threads).toBe(durableThreads);
+    expect(stateAfterPatches.threads[fixtureThread.id]).toBe(durableThread);
+    expect(stateAfterPatches.threads[fixtureThread.id].messages).toBe(durableMessages);
+    expect(stateAfterPatches.threads[fixtureThread.id].messages.at(-1)).toBe(durablePlaceholder);
+    expect(durablePlaceholder).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: '',
+      state: 'streaming',
+    }));
+    expect(stateAfterPatches.threads[fixtureThread.id].title).toBe(durableThread.title);
+    expect(stateAfterPatches.threads[fixtureThread.id].updatedAt).toBe(durableThread.updatedAt);
+    expect(stateAfterPatches.streamingRevision - initialRevision).toBe(100);
+    expect(countUnretainedItemReferences(
+      historicalReferences,
+      presentedAfterPatches.messages.slice(0, -1),
+    )).toBe(0);
+
+    useChatStore.getState().stopAssistantMessage(fixtureThread.id, assistantId);
+
+    const stoppedThread = useChatStore.getState().getThread(fixtureThread.id)!;
+    expect(stoppedThread.status).toBe('stopped');
+    expect(stoppedThread.messages).not.toBe(durableMessages);
+    expect(countUnretainedItemReferences(
+      historicalReferences,
+      stoppedThread.messages.slice(0, -1),
+    )).toBe(0);
+    expect(stoppedThread.messages.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      modelId: fixtureThread.activeModelId,
+      content: 'Partial response 100',
+      thoughtContent: 'Reasoning 100',
+      tokensPerSec: 10,
+      state: 'stopped',
+    }));
+  });
+
+  it('materializes visible partial output when a transient assistant enters the error state', () => {
+    const thread = buildPerformanceThread({ historicalMessageCount: 20 });
+    useChatStore.setState({
+      threads: { [thread.id]: thread },
+      activeThreadId: thread.id,
+    });
+    const assistantId = useChatStore.getState().createAssistantPlaceholder(thread.id);
+
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Visible partial answer',
+      thoughtContent: 'Partial reasoning',
+      tokensPerSec: 4.5,
+    });
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      state: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'Native completion failed',
+    });
+
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+      status: 'error',
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: assistantId,
+          modelId: thread.activeModelId,
+          content: 'Visible partial answer',
+          thoughtContent: 'Partial reasoning',
+          tokensPerSec: 4.5,
+          state: 'error',
+          errorCode: 'generation_failed',
+          errorMessage: 'Native completion failed',
+        }),
+      ]),
+    }));
   });
 
   it('keeps an empty assistant placeholder in memory but out of durable records before the first token', () => {

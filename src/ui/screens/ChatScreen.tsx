@@ -588,6 +588,7 @@ export const ChatScreen = () => {
     const {
         activeThread,
         messages,
+        messageListRevision,
         isGenerating,
         shouldOfferSummary,
         truncatedMessageCount,
@@ -864,8 +865,8 @@ export const ChatScreen = () => {
     const hasMessages = displayMessages.length > 0;
     const lastMessage = messages[messages.length - 1];
     const lastMessageSignature = lastMessage
-        ? `${lastMessage.id}:${lastMessage.state}:${lastMessage.content.length}:${lastMessage.tokensPerSec ?? -1}`
-        : 'empty';
+        ? `${lastMessage.id}:${lastMessage.state}:${lastMessage.content.length}:${lastMessage.tokensPerSec ?? -1}:${messageListRevision}`
+        : `empty:${messageListRevision}`;
     const modelLabel = displayedChatActiveModelId
         ? (getShortModelLabel(displayedChatActiveModelId) || displayedChatActiveModelId)
         : t('chat.modelUnavailable');

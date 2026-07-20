@@ -1546,6 +1546,7 @@ export function getThreadTruncationState(thread: ChatThread, options?: Inference
 
 export const useChatSession = () => {
   const activeThread = useChatStore((state) => state.getActiveThread());
+  const messageListRevision = useChatStore((state) => state.streamingRevision);
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
@@ -2835,6 +2836,7 @@ export const useChatSession = () => {
   return {
     activeThread,
     messages: activeThread?.messages ?? [],
+    messageListRevision,
     isGenerating: activeThread?.status === 'generating',
     shouldOfferSummary: truncationState.shouldOfferSummary,
     truncatedMessageCount: truncationState.truncatedMessageIds.length,

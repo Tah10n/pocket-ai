@@ -120,6 +120,7 @@ function createMockChatSession(overrides: Partial<ChatSessionState> = {}): ChatS
   return {
     activeThread: null,
     messages: [],
+    messageListRevision: 0,
     isGenerating: false,
     shouldOfferSummary: false,
     truncatedMessageCount: 0,

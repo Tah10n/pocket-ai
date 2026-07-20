@@ -22,6 +22,7 @@ import {
 import { normalizeReasoningEffort } from '../types/reasoning';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
+import { performanceMonitor } from '../services/PerformanceMonitor';
 import {
   chatAttachmentStorageService,
   collectChatAttachmentLocalUrisFromUnknownThreadRecord,
@@ -104,6 +105,7 @@ type AssistantMessagePatch = Partial<
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
+  streamingRevision: number;
   createThread: (input: CreateThreadInput) => string;
   mergeImportedThreads: (threads: ChatThread[]) => number;
   pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
@@ -1422,6 +1424,124 @@ function canPatchAssistantMessage(
   return true;
 }
 
+interface TransientAssistantRuntime {
+  durablePlaceholder: ChatMessage;
+  durableMessages: ChatMessage[];
+  currentMessage: ChatMessage;
+  presentationMessages: ChatMessage[];
+  presentationThread: ChatThread;
+  sourceThread: ChatThread;
+}
+
+const transientAssistantRuntimes = new Map<string, TransientAssistantRuntime>();
+
+function isTransientAssistantRuntimeValid(
+  runtime: TransientAssistantRuntime,
+  thread: ChatThread,
+  messageId = runtime.currentMessage.id,
+): boolean {
+  const durablePlaceholder = thread.messages.at(-1);
+  return (
+    durablePlaceholder === runtime.durablePlaceholder
+    && thread.messages === runtime.durableMessages
+    && durablePlaceholder?.id === messageId
+    && durablePlaceholder.role === 'assistant'
+    && durablePlaceholder.state === 'streaming'
+    && runtime.currentMessage.id === messageId
+  );
+}
+
+function createTransientAssistantRuntime(
+  thread: ChatThread,
+  messageId: string,
+): TransientAssistantRuntime | null {
+  const lastIndex = thread.messages.length - 1;
+  if (lastIndex < 0 || !canPatchAssistantMessage(thread.messages, lastIndex)) {
+    return null;
+  }
+
+  const durablePlaceholder = thread.messages[lastIndex];
+  if (durablePlaceholder.id !== messageId) {
+    return null;
+  }
+
+  const presentationMessages = thread.messages.slice();
+  const runtime: TransientAssistantRuntime = {
+    durablePlaceholder,
+    durableMessages: thread.messages,
+    currentMessage: durablePlaceholder,
+    presentationMessages,
+    presentationThread: {
+      ...thread,
+      messages: presentationMessages,
+    },
+    sourceThread: thread,
+  };
+  transientAssistantRuntimes.set(thread.id, runtime);
+  return runtime;
+}
+
+function getTransientAssistantRuntime(
+  thread: ChatThread,
+  messageId?: string,
+): TransientAssistantRuntime | null {
+  const runtime = transientAssistantRuntimes.get(thread.id);
+  if (!runtime || !isTransientAssistantRuntimeValid(runtime, thread, messageId)) {
+    return null;
+  }
+
+  if (runtime.sourceThread !== thread) {
+    runtime.sourceThread = thread;
+    runtime.presentationThread = {
+      ...thread,
+      messages: runtime.presentationMessages,
+    };
+  }
+
+  return runtime;
+}
+
+function ensureTransientAssistantRuntime(
+  thread: ChatThread,
+  messageId: string,
+): TransientAssistantRuntime | null {
+  return getTransientAssistantRuntime(thread, messageId)
+    ?? createTransientAssistantRuntime(thread, messageId);
+}
+
+function getPresentedChatThread(thread: ChatThread): ChatThread {
+  return getTransientAssistantRuntime(thread)?.presentationThread ?? thread;
+}
+
+function materializeTransientAssistantThread(thread: ChatThread): ChatThread {
+  const runtime = getTransientAssistantRuntime(thread);
+  if (!runtime) {
+    return thread;
+  }
+
+  const messages = thread.messages.slice();
+  messages[messages.length - 1] = runtime.currentMessage;
+  return {
+    ...thread,
+    messages,
+  };
+}
+
+function reconcileTransientAssistantRuntimes(threads: Record<string, ChatThread>): void {
+  transientAssistantRuntimes.forEach((runtime, threadId) => {
+    const thread = threads[threadId];
+    if (!thread || !isTransientAssistantRuntimeValid(runtime, thread)) {
+      transientAssistantRuntimes.delete(threadId);
+    }
+  });
+}
+
+function incrementChatStreamCounter(name: 'chat.stream.patch' | 'chat.stream.patch.skipped'): void {
+  if (performanceMonitor.isEnabled()) {
+    performanceMonitor.incrementCounter(name);
+  }
+}
+
 export const useChatStore = create<ChatStoreState>()(
   persist(
     (set, get) => {
@@ -1439,6 +1559,7 @@ export const useChatStore = create<ChatStoreState>()(
         };
         try {
           persistChatStoreMutation(previous, next, chatPersistenceContext?.reason ?? 'thread_mutation');
+          reconcileTransientAssistantRuntimes(next.threads);
         } catch (error) {
           rollbackFailedChatPersistenceMutation(previous, next, previousPersistenceIndex);
           (set as any)({
@@ -1453,6 +1574,7 @@ export const useChatStore = create<ChatStoreState>()(
       return {
         threads: {},
         activeThreadId: null,
+        streamingRevision: 0,
 
         createThread: ({ modelId, presetId, presetSnapshot, paramsSnapshot, title }) => {
         const id = createChatId('thread');
@@ -1574,6 +1696,8 @@ export const useChatStore = create<ChatStoreState>()(
         const threadCount = Object.keys(get().threads).length;
         if (threadCount === 0) {
           assertPrivateStorageWritable();
+          chatPersistenceScheduler.cancelAllPendingWrites();
+          transientAssistantRuntimes.clear();
           clearPersistedChatRecords(getAppStorage());
           return 0;
         }
@@ -1736,6 +1860,10 @@ export const useChatStore = create<ChatStoreState>()(
             modelId: resolvedModelId,
           });
         });
+        const nextThread = get().threads[threadId];
+        if (nextThread) {
+          createTransientAssistantRuntime(nextThread, messageId);
+        }
         return messageId;
       },
 
@@ -1853,75 +1981,83 @@ export const useChatStore = create<ChatStoreState>()(
         return true;
       },
 
-      patchAssistantMessage: (threadId, messageId, updates) =>
-        withChatPersistenceContext({
-          reason: updates.state === 'streaming'
-            ? 'streaming_patch'
-            : updates.state
-              ? 'terminal_state'
-              : 'thread_mutation',
-        }, () => setWhenPrivateStorageWritable((state) => {
-          const existingThread = state.threads[threadId];
-          if (!existingThread) {
-            return state;
-          }
+      patchAssistantMessage: (threadId, messageId, updates) => {
+        assertPrivateStorageWritable();
+        const existingThread = get().threads[threadId];
+        if (!existingThread) {
+          incrementChatStreamCounter('chat.stream.patch.skipped');
+          return;
+        }
 
-          const messages = existingThread.messages;
-          if (messages.length === 0) {
-            return state;
-          }
+        const runtime = ensureTransientAssistantRuntime(existingThread, messageId);
+        if (!runtime) {
+          incrementChatStreamCounter('chat.stream.patch.skipped');
+          return;
+        }
 
-          const lastIndex = messages.length - 1;
-          const targetIndex =
-            messages[lastIndex]?.id === messageId
-              ? lastIndex
-              : messages.findIndex((message) => message.id === messageId);
+        const isTerminalPatch = updates.state !== undefined && updates.state !== 'streaming';
+        if (!isTerminalPatch) {
+          const nextMessage: ChatMessage = {
+            ...runtime.currentMessage,
+            ...updates,
+            state: 'streaming',
+          };
+          runtime.currentMessage = nextMessage;
+          runtime.presentationMessages[runtime.presentationMessages.length - 1] = nextMessage;
+          runtime.presentationThread = {
+            ...existingThread,
+            messages: runtime.presentationMessages,
+          };
+          runtime.sourceThread = existingThread;
 
-          if (targetIndex < 0) {
-            return state;
-          }
+          chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
+          set((state) => ({
+            streamingRevision: state.streamingRevision + 1,
+          }));
+          incrementChatStreamCounter('chat.stream.patch');
+          return;
+        }
 
-          if (!canPatchAssistantMessage(messages, targetIndex)) {
-            return state;
-          }
+        withChatPersistenceContext({ reason: 'terminal_state' }, () => {
+          setWhenPrivateStorageWritable((state) => {
+            const durableThread = state.threads[threadId];
+            const currentRuntime = durableThread
+              ? getTransientAssistantRuntime(durableThread, messageId)
+              : null;
+            if (!durableThread || !currentRuntime) {
+              return state;
+            }
 
-          const nextMessages = messages.slice();
-          nextMessages[targetIndex] = { ...messages[targetIndex], ...updates };
+            const nextMessages = durableThread.messages.slice();
+            nextMessages[nextMessages.length - 1] = {
+              ...currentRuntime.currentMessage,
+              ...updates,
+            };
 
-          const nextStatus =
-            updates.state === 'streaming'
-              ? 'generating'
-              : updates.state === 'stopped'
+            const nextStatus =
+              updates.state === 'stopped'
                 ? 'stopped'
                 : updates.state === 'error'
                   ? 'error'
-                  : existingThread.status === 'generating'
+                  : durableThread.status === 'generating'
                     ? 'idle'
-                    : existingThread.status;
+                    : durableThread.status;
+            const nextThread = updateThreadMetadata({
+              ...durableThread,
+              messages: nextMessages,
+              status: nextStatus,
+              lastGeneratedAt: Date.now(),
+            });
 
-          const shouldUpdateMetadata = Boolean(updates.state && updates.state !== 'streaming');
-          const nextThreadBase: ChatThread = {
-            ...existingThread,
-            messages: nextMessages,
-            status: nextStatus,
-            lastGeneratedAt:
-              updates.state && updates.state !== 'streaming'
-                ? Date.now()
-                : existingThread.lastGeneratedAt,
-          };
-          const nextThread = shouldUpdateMetadata
-            ? updateThreadMetadata(nextThreadBase)
-            : nextThreadBase;
-
-          return {
-            threads: {
-              ...state.threads,
-              [threadId]: {
-                ...nextThread,
+            return {
+              threads: {
+                ...state.threads,
+                [threadId]: nextThread,
               },
-            },
-          };
-        })),
+            };
+          });
+        });
+      },
 
       replaceLastAssistantMessage: (threadId) => {
         const thread = get().threads[threadId];
@@ -1971,6 +2107,11 @@ export const useChatStore = create<ChatStoreState>()(
             },
           };
         });
+
+        const nextThread = get().threads[threadId];
+        if (nextThread) {
+          createTransientAssistantRuntime(nextThread, nextMessageId);
+        }
 
         return nextMessageId;
       },
@@ -2069,6 +2210,11 @@ export const useChatStore = create<ChatStoreState>()(
           };
         });
 
+        const nextThread = get().threads[threadId];
+        if (nextThread) {
+          createTransientAssistantRuntime(nextThread, nextAssistantMessageId);
+        }
+
         return nextAssistantMessageId;
       },
 
@@ -2112,10 +2258,14 @@ export const useChatStore = create<ChatStoreState>()(
           };
         }),
 
-      getThread: (threadId) => (threadId ? get().threads[threadId] ?? null : null),
+      getThread: (threadId) => {
+        const thread = threadId ? get().threads[threadId] : undefined;
+        return thread ? getPresentedChatThread(thread) : null;
+      },
       getActiveThread: () => {
         const { activeThreadId, threads } = get();
-        return activeThreadId ? threads[activeThreadId] ?? null : null;
+        const thread = activeThreadId ? threads[activeThreadId] : undefined;
+        return thread ? getPresentedChatThread(thread) : null;
       },
       getConversationIndex: () =>
         buildConversationIndex(get().threads),
@@ -2151,6 +2301,7 @@ export const useChatStore = create<ChatStoreState>()(
           state.activeThreadId = findMostRecentThreadId(state.threads);
         }
 
+        reconcileTransientAssistantRuntimes(state.threads);
         scheduleChatAttachmentDirectoryReconciliation();
       },
     },
@@ -2161,15 +2312,30 @@ function flushChatThreadPersistence(threadId: string, reason: ChatPersistenceWri
   const state = useChatStore.getState();
   const storage = getAppStorage();
   const thread = state.threads[threadId];
+  const snapshot: ChatStoreSnapshot = {
+    threads: state.threads,
+    activeThreadId: state.activeThreadId,
+  };
 
   if (!thread) {
-    writeChatPersistenceSnapshotTransaction(storage, state, reason, {
+    writeChatPersistenceSnapshotTransaction(storage, snapshot, reason, {
       removedThreadIds: [threadId],
     });
     return;
   }
 
-  writeChatPersistenceSnapshotTransaction(storage, state, reason, {
+  const materializedThread = materializeTransientAssistantThread(thread);
+  const materializedSnapshot = materializedThread === thread
+    ? snapshot
+    : {
+        ...snapshot,
+        threads: {
+          ...snapshot.threads,
+          [threadId]: materializedThread,
+        },
+      };
+
+  writeChatPersistenceSnapshotTransaction(storage, materializedSnapshot, reason, {
     changedThreadIds: [threadId],
   });
 }
@@ -2184,9 +2350,11 @@ export function flushPendingChatPersistenceWrites(reason: ChatPersistenceWriteRe
 
 export function resetChatStoreForPrivateStorageReset(): void {
   chatPersistenceScheduler.cancelAllPendingWrites();
+  transientAssistantRuntimes.clear();
   useChatStore.setState({
     threads: {},
     activeThreadId: null,
+    streamingRevision: 0,
   });
   clearPersistedChatRecords(getAppStorage());
   void useChatStore.persist.clearStorage();

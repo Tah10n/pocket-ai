@@ -18,6 +18,7 @@ jest.mock('@shopify/flash-list', () => {
   return {
     FlashList: ({
       data,
+      extraData,
       renderItem,
       keyExtractor,
       ItemSeparatorComponent,
@@ -37,6 +38,8 @@ jest.mock('@shopify/flash-list', () => {
         View,
         {
           testID: 'chat-flash-list',
+          data,
+          extraData,
           maintainVisibleContentPosition,
           onContentSizeChange,
           onScroll,
@@ -539,6 +542,7 @@ jest.mock('../../src/hooks/useChatSession', () => ({
   useChatSession: () => ({
     activeThread: require('../../src/store/chatStore').useChatStore.getState().getActiveThread(),
     messages: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.messages ?? [],
+    messageListRevision: require('../../src/store/chatStore').useChatStore.getState().streamingRevision,
     isGenerating: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.status === 'generating',
     shouldOfferSummary: Boolean(
       require('../../src/store/chatStore').useChatStore
@@ -2461,6 +2465,70 @@ describe('ChatScreen', () => {
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
     expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
+  });
+
+  it('passes the stable presentation list and latest transient assistant to FlashList', () => {
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    let assistantId = '';
+
+    act(() => {
+      assistantId = useChatStore.getState().createAssistantPlaceholder('thread-1');
+    });
+    rerender(React.createElement(ChatScreen));
+
+    const messagesAfterPlaceholder = useChatStore.getState().getActiveThread()!.messages;
+    expect(getByTestId('chat-flash-list').props.data).toBe(messagesAfterPlaceholder);
+    expect(getByTestId('chat-flash-list').props.data.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: '',
+      state: 'streaming',
+    }));
+
+    act(() => {
+      useChatStore.getState().patchAssistantMessage('thread-1', assistantId, {
+        content: 'Latest transient answer',
+        thoughtContent: 'Transient reasoning',
+        tokensPerSec: 7.25,
+        state: 'streaming',
+      });
+    });
+    rerender(React.createElement(ChatScreen));
+
+    const flashList = getByTestId('chat-flash-list');
+    expect(useChatStore.getState().getActiveThread()!.messages).toBe(messagesAfterPlaceholder);
+    expect(flashList.props.data).toBe(messagesAfterPlaceholder);
+    expect(flashList.props.data.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Latest transient answer',
+      thoughtContent: 'Transient reasoning',
+      tokensPerSec: 7.25,
+      state: 'streaming',
+    }));
+    expect(flashList.props.extraData).toContain(`${assistantId}:streaming:23:7.25:1`);
+
+    act(() => {
+      useChatStore.getState().patchAssistantMessage('thread-1', assistantId, {
+        content: 'Newest transient answer',
+        thoughtContent: 'Changed reasoning',
+        tokensPerSec: 7.25,
+      });
+    });
+    rerender(React.createElement(ChatScreen));
+
+    const flashListAfterSameLengthSnapshot = getByTestId('chat-flash-list');
+    expect(flashListAfterSameLengthSnapshot.props.data).toBe(messagesAfterPlaceholder);
+    expect(flashListAfterSameLengthSnapshot.props.data.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Newest transient answer',
+      thoughtContent: 'Changed reasoning',
+      tokensPerSec: 7.25,
+    }));
+    expect(flashListAfterSameLengthSnapshot.props.extraData)
+      .toContain(`${assistantId}:streaming:23:7.25:2`);
+
+    act(() => {
+      useChatStore.getState().stopAssistantMessage('thread-1', assistantId);
+    });
   });
 
   it('does not disable auto-follow after a tap during generation', () => {

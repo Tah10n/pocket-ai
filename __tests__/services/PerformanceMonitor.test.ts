@@ -41,4 +41,34 @@ describe('PerformanceMonitor', () => {
     expect(snapshot.events).toHaveLength(0);
     expect(snapshot.counters).toEqual({});
   });
+
+  it('reuses one no-op span and records no metadata while disabled', () => {
+    performanceMonitor.setEnabled(false);
+    const metadata = Object.defineProperty({}, 'sensitiveValue', {
+      enumerable: true,
+      get: () => {
+        throw new Error('disabled instrumentation inspected metadata');
+      },
+    });
+
+    const first = performanceMonitor.startSpan('test.disabled.first', metadata);
+    const second = performanceMonitor.startSpan('test.disabled.second', metadata);
+
+    expect(first).toBe(second);
+    expect(() => first.end(metadata)).not.toThrow();
+    expect(performanceMonitor.snapshot().events).toEqual([]);
+  });
+
+  it('keeps event storage bounded while preserving aggregate counters', () => {
+    for (let index = 0; index < 450; index += 1) {
+      performanceMonitor.mark(`test.mark.${index}`);
+    }
+    performanceMonitor.incrementCounter('test.aggregate', 450);
+
+    const snapshot = performanceMonitor.snapshot();
+    expect(snapshot.events).toHaveLength(400);
+    expect(snapshot.events[0]?.name).toBe('test.mark.50');
+    expect(snapshot.events.at(-1)?.name).toBe('test.mark.449');
+    expect(snapshot.counters['test.aggregate']).toBe(450);
+  });
 });

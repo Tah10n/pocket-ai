@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { render, waitFor } from '@testing-library/react-native';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { useTruncationTracking } from '../../src/hooks/useTruncationTracking';
 import { type ChatThread } from '../../src/types/chat';
 import {
@@ -11,6 +12,7 @@ import {
   resolveThreadInferenceWindowOptions,
 } from '../../src/utils/inferenceWindow';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../../src/utils/modelReasoningCapabilities';
+import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
@@ -34,6 +36,7 @@ jest.mock('../../src/utils/inferenceWindow', () => {
   return {
     ...actual,
     buildInferenceWindowWithAccurateTokenCounts: jest.fn(() => Promise.reject({ code: 'engine_busy' })),
+    getThreadInferenceWindow: jest.fn(actual.getThreadInferenceWindow),
   };
 });
 
@@ -132,6 +135,8 @@ describe('useTruncationTracking', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(true);
     (registry.getModel as jest.Mock).mockImplementation((modelId: string) => getMockModel(modelId));
     (llmEngineService.countPromptTokens as jest.Mock).mockResolvedValue(64);
   });
@@ -234,5 +239,74 @@ describe('useTruncationTracking', () => {
     hook.rerender(buildThread('author/model-q8'), 1600);
 
     expect(() => firstProbeControl?.throwIfCancelled?.()).toThrow('Accurate truncation probe was cancelled.');
+  });
+
+  it('does not traverse 1000-message history during streaming patches and recounts once at terminal state', async () => {
+    const getWindow = getThreadInferenceWindow as jest.MockedFunction<typeof getThreadInferenceWindow>;
+    const idleThread = buildPerformanceThread({ historicalMessageCount: 1000 });
+    const hook = renderHookHarness(idleThread, 4096);
+
+    await waitFor(() => {
+      expect(getWindow).toHaveBeenCalled();
+    });
+    const callsAfterIdle = getWindow.mock.calls.length;
+    const historicalMessages = idleThread.messages;
+    const streamingAssistant = {
+      id: 'message-streaming-assistant',
+      role: 'assistant' as const,
+      content: '',
+      createdAt: idleThread.updatedAt + 1,
+      state: 'streaming' as const,
+      modelId: idleThread.activeModelId,
+    };
+    let generatingThread: ChatThread = {
+      ...idleThread,
+      status: 'generating',
+      updatedAt: idleThread.updatedAt + 1,
+      messages: [...historicalMessages, streamingAssistant],
+    };
+
+    hook.rerender(generatingThread, 4096);
+    expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle);
+
+    for (let patchIndex = 1; patchIndex <= 100; patchIndex += 1) {
+      generatingThread = {
+        ...generatingThread,
+        updatedAt: generatingThread.updatedAt + 1,
+        messages: [
+          ...historicalMessages,
+          {
+            ...streamingAssistant,
+            content: `stream-patch-${patchIndex}`,
+          },
+        ],
+      };
+      hook.rerender(generatingThread, 4096);
+    }
+
+    expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle);
+
+    const terminalThread: ChatThread = {
+      ...generatingThread,
+      status: 'idle',
+      updatedAt: generatingThread.updatedAt + 1,
+      messages: [
+        ...historicalMessages,
+        {
+          ...streamingAssistant,
+          content: 'terminal assistant response',
+          state: 'complete',
+        },
+      ],
+    };
+    hook.rerender(terminalThread, 4096);
+
+    await waitFor(() => {
+      expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle + 1);
+    });
+
+    const performanceSnapshot = performanceMonitor.snapshot();
+    expect(performanceSnapshot.counters['chat.stream.historyTraversal'] ?? 0).toBe(0);
+    expect(performanceSnapshot.events.filter((event) => event.name === 'chat.prompt.window.heuristic')).toHaveLength(2);
   });
 });

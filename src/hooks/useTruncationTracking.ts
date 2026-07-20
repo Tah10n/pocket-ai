@@ -11,6 +11,7 @@ import {
   resolveThreadInferenceWindowOptions,
 } from '../utils/inferenceWindow';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
+import { performanceMonitor } from '../services/PerformanceMonitor';
 
 type TruncationState = ReturnType<typeof createTruncationState>;
 
@@ -18,6 +19,26 @@ const EMPTY_TRUNCATION_STATE: TruncationState = {
   truncatedMessageIds: [],
   shouldOfferSummary: false,
 };
+
+function computeHeuristicTruncationState(
+  thread: ChatThread,
+  windowOptions: Parameters<typeof getThreadInferenceWindow>[1],
+): TruncationState {
+  const instrumentationEnabled = performanceMonitor.isEnabled();
+  const span = instrumentationEnabled
+    ? performanceMonitor.startSpan('chat.prompt.window.heuristic')
+    : null;
+  if (instrumentationEnabled && thread.status === 'generating') {
+    performanceMonitor.incrementCounter('chat.stream.historyTraversal');
+  }
+
+  try {
+    const { truncatedMessageIds } = getThreadInferenceWindow(thread, windowOptions);
+    return createTruncationState(truncatedMessageIds);
+  } finally {
+    span?.end();
+  }
+}
 
 function isAudioReady(readiness: MultimodalReadinessState | undefined, expectedModelId: string | null): boolean {
   return readiness?.status === 'ready'
@@ -110,12 +131,17 @@ export function useTruncationTracking(
       return EMPTY_TRUNCATION_STATE;
     }
 
+    if (activeThread.status === 'generating') {
+      return truncationCacheRef.current.threadId === activeThread.id
+        ? truncationCacheRef.current.state
+        : EMPTY_TRUNCATION_STATE;
+    }
+
     const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
       maxContextTokens: activeContextTokenBudget,
       responseReserveTokens: activeThreadResponseReserveTokens,
     });
-    const { truncatedMessageIds } = getThreadInferenceWindow(activeThread, windowOptions);
-    return createTruncationState(truncatedMessageIds);
+    return computeHeuristicTruncationState(activeThread, windowOptions);
   }, [activeContextTokenBudget, activeThread, activeThreadResponseReserveTokens]);
 
   useEffect(() => {
@@ -195,6 +221,10 @@ export function useTruncationTracking(
         allowMediaFallback: true,
       });
 
+    const exactSpan = performanceMonitor.isEnabled()
+      ? performanceMonitor.startSpan('chat.prompt.window.exact')
+      : null;
+
     void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens, { throwIfCancelled })
       .then(({ truncatedMessageIds }) => {
         if (!isCancelled) {
@@ -204,9 +234,11 @@ export function useTruncationTracking(
             threadId: activeThread.id,
             state,
           });
+          exactSpan?.end({ outcome: 'success' });
         }
       })
       .catch((error) => {
+        exactSpan?.end({ outcome: isCancelled ? 'cancelled' : 'error' });
         if (!isCancelled) {
           const errorCode = error && typeof error === 'object' && 'code' in error
             ? String((error as { code?: unknown }).code)
@@ -239,6 +271,7 @@ export function useTruncationTracking(
 
     return () => {
       isCancelled = true;
+      exactSpan?.end({ outcome: 'cancelled' });
     };
   }, [activeContextTokenBudget, activeThread, activeThreadModelId, activeThreadMultimodalReadiness, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
 

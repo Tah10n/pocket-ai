@@ -22,7 +22,10 @@ import {
   shouldFlushAssistantStreamPatchOnBoundary,
   stopActiveChatGenerationForPrivateStorageBlocked,
 } from '../../src/hooks/useChatSession';
-import { DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER } from '../../src/types/chat';
+import {
+  DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+  type LlmChatCompletionOptions,
+} from '../../src/types/chat';
 import { presetManager } from '../../src/services/PresetManager';
 import { AppError } from '../../src/services/AppError';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
@@ -141,6 +144,7 @@ jest.mock('../../src/services/storage', () => {
 
 describe('useChatSession', () => {
   let appStateListeners: Array<(state: 'active' | 'background' | 'inactive') => void>;
+  type ChatTokenCallback = NonNullable<LlmChatCompletionOptions['onToken']>;
 
   function renderHookHarness() {
     let session: ReturnType<typeof useChatSession> | null = null;
@@ -2173,6 +2177,91 @@ describe('useChatSession', () => {
     expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
       'chat.stream.nativeCallback': 4,
       'chat.stream.presentation': 4,
+    }));
+  });
+
+  it('processes cumulative native content snapshots once in total', async () => {
+    const deltas = Array.from({ length: 256 }, (_, index) => String(index % 10));
+    const finalContent = deltas.join('');
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        let cumulativeContent = '';
+        deltas.forEach((delta) => {
+          cumulativeContent += delta;
+          onToken?.({
+            token: delta,
+            content: cumulativeContent,
+            contentMode: 'cumulative',
+          });
+        });
+
+        return {
+          text: finalContent,
+          content: finalContent,
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Count steadily');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: finalContent,
+        state: 'complete',
+      }),
+    );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.stream.nativeCallback': deltas.length,
+      'chat.stream.presentation': deltas.length,
+      'chat.stream.presentationCharacters': finalContent.length,
+    }));
+  });
+
+  it('resynchronizes when native streaming switches from raw accumulated text to filtered content', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: '<think>',
+          accumulatedText: '<think>',
+        });
+        onToken?.({
+          token: 'Visible answer',
+          content: 'Visible answer',
+          contentMode: 'cumulative',
+          reasoningContent: 'Plan',
+          reasoningContentMode: 'cumulative',
+        });
+
+        return {
+          reasoning_content: 'Plan',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Plan',
+        state: 'complete',
+      }),
+    );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.stream.nativeCallback': 2,
+      'chat.stream.presentation': 2,
+      'chat.stream.presentationCharacters': '<think>'.length + 'Visible answer'.length + 'Plan'.length,
     }));
   });
 

@@ -170,11 +170,71 @@ describe('IncrementalAssistantPresentationParser', () => {
   it('supports accumulated visible snapshots mixed with deltas', () => {
     const parser = createIncrementalAssistantPresentationParser();
 
-    parser.applySnapshot('Hel');
-    parser.applySnapshot('Hello');
+    parser.applyCumulativeSnapshot('Hel');
+    parser.applyCumulativeSnapshot('Hello');
     parser.appendDelta(' world');
 
     expect(parser.getPresentation()).toEqual(completedPresentation('Hello world'));
+    expect(parser.getProcessedCharacterCount()).toBe('Hello world'.length);
+  });
+
+  it('consumes prefix-growing cumulative snapshots in linear total character work', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    const content = Array.from({ length: 512 }, (_, index) => String(index % 10)).join('');
+
+    for (let length = 1; length <= content.length; length += 1) {
+      parser.applyCumulativeSnapshot(content.slice(0, length));
+      parser.getPresentation();
+    }
+
+    expect(parser.getPresentation()).toEqual(completedPresentation(content));
+    expect(parser.getProcessedCharacterCount()).toBe(content.length);
+  });
+
+  it('does not reprocess deltas repeated by later cumulative snapshots', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    let content = '';
+
+    for (let index = 0; index < 256; index += 1) {
+      const delta = String(index % 10);
+      content += delta;
+      parser.appendDelta(delta);
+      parser.applyCumulativeSnapshot(content);
+      parser.getPresentation();
+    }
+
+    expect(parser.getPresentation()).toEqual(completedPresentation(content));
+    expect(parser.getProcessedCharacterCount()).toBe(content.length);
+  });
+
+  it('fully resynchronizes an explicit snapshot replacement', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    const staleSnapshot = '<think>Stale plan</think>Stale answer';
+    const freshSnapshot = '<thinking>Fresh plan</thinking>Fresh answer';
+
+    parser.applyCumulativeSnapshot(staleSnapshot);
+    parser.applySnapshot(freshSnapshot);
+
+    expect(parser.getPresentation()).toEqual(
+      completedPresentation('Fresh answer', 'Fresh plan'),
+    );
+    expect(parser.getProcessedCharacterCount()).toBe(
+      staleSnapshot.length + freshSnapshot.length,
+    );
+  });
+
+  it('fully resynchronizes a shrinking cumulative content snapshot', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    const longerSnapshot = 'A longer stale answer';
+    const shorterSnapshot = 'Fresh';
+
+    parser.applyCumulativeSnapshot(longerSnapshot);
+    parser.applyCumulativeSnapshot(shorterSnapshot);
+
+    expect(parser.getPresentation()).toEqual(completedPresentation(shorterSnapshot));
+    expect(parser.getProcessedCharacterCount()).toBe(
+      longerSnapshot.length + shorterSnapshot.length,
+    );
   });
 
   it('lets explicit native reasoning override raw marker-derived reasoning', () => {
@@ -202,6 +262,49 @@ describe('IncrementalAssistantPresentationParser', () => {
     parser.applyExplicitReasoningSnapshot('Reset');
     parser.appendExplicitReasoningDelta(' complete');
     expect(parser.getPresentation().thoughtContent).toBe('Reset complete');
+  });
+
+  it('consumes cumulative explicit reasoning snapshots in linear total character work', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    const reasoning = Array.from({ length: 512 }, (_, index) => String(index % 10)).join('');
+
+    for (let length = 1; length <= reasoning.length; length += 1) {
+      parser.applyCumulativeExplicitReasoningSnapshot(reasoning.slice(0, length));
+      parser.getPresentation();
+    }
+
+    expect(parser.getPresentation().thoughtContent).toBe(reasoning);
+    expect(parser.getProcessedCharacterCount()).toBe(reasoning.length);
+  });
+
+  it('does not reprocess explicit reasoning deltas repeated by cumulative snapshots', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    let reasoning = '';
+
+    for (let index = 0; index < 256; index += 1) {
+      const delta = String(index % 10);
+      reasoning += delta;
+      parser.appendExplicitReasoningDelta(delta);
+      parser.applyCumulativeExplicitReasoningSnapshot(reasoning);
+      parser.getPresentation();
+    }
+
+    expect(parser.getPresentation().thoughtContent).toBe(reasoning);
+    expect(parser.getProcessedCharacterCount()).toBe(reasoning.length);
+  });
+
+  it('fully resynchronizes a shrinking cumulative explicit reasoning snapshot', () => {
+    const parser = createIncrementalAssistantPresentationParser();
+    const longerSnapshot = 'A longer stale reasoning trace';
+    const shorterSnapshot = 'Fresh plan';
+
+    parser.applyCumulativeExplicitReasoningSnapshot(longerSnapshot);
+    parser.applyCumulativeExplicitReasoningSnapshot(shorterSnapshot);
+
+    expect(parser.getPresentation().thoughtContent).toBe(shorterSnapshot);
+    expect(parser.getProcessedCharacterCount()).toBe(
+      longerSnapshot.length + shorterSnapshot.length,
+    );
   });
 
   it('treats empty raw and explicit chunks as no-ops', () => {

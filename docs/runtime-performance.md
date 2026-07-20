@@ -127,8 +127,17 @@ message or create a second terminal transaction.
 The parser accepts deltas, accumulated snapshots, explicit native reasoning, and mixed
 callback modes. It supports the reasoning delimiters used by current llama.cpp-compatible
 models, including tags split across callback boundaries. Delta input advances from the
-previous parser state; a replacement snapshot may be processed once at snapshot length,
-after which later deltas remain incremental.
+previous parser state. `LLMEngineService` marks llama.rn's accumulated content and
+reasoning callbacks as cumulative. Those snapshots advance by length and process only
+their new suffix, without comparing or rescanning the old prefix. An explicitly marked
+replacement or a shrinking cumulative snapshot is processed once at snapshot length to
+resynchronize, after which later snapshots or deltas remain incremental. In mixed mode,
+deltas advance the same consumed-length cursor, so a later cumulative snapshot does not
+replay them. A producer must not mark a callback as cumulative if it cannot guarantee
+prefix-extension semantics.
+Raw `accumulatedText` and llama.rn's filtered `content` use distinct source identities;
+switching between them performs one explicit resynchronization instead of applying one
+source's length cursor to the other.
 
 The parser exposes a processed-character counter for deterministic complexity tests. It
 does not invoke Markdown rendering on the streaming callback path.
@@ -200,7 +209,7 @@ Important trace families include:
 | Family | What it establishes |
 |---|---|
 | `chat.prompt.*` | Attachment, tokenization, window, and final preparation stages |
-| `chat.stream.nativeCallback`, `chat.stream.presentation`, `chat.stream.patch`, and `chat.stream.historyTraversal` | Native callbacks, parser applications, streaming patches, and accidental history traversal |
+| `chat.stream.nativeCallback`, `chat.stream.presentation`, `chat.stream.presentationCharacters`, `chat.stream.patch`, and `chat.stream.historyTraversal` | Native callbacks, parser applications, characters consumed by presentation parsing, streaming patches, and accidental history traversal |
 | `chat.persist.*` | Sanitization, serialization, storage writes, bytes, progress, and terminal writes |
 | `chat.turn.*` | Terminal mutation and persistence-transaction counts |
 | `model.init.total`, `model.init.attempt`, `model.init.profileSkipped`, and `model.init.profileDuplicate` | Total load lifecycle, bounded attempt sequence, guarded skips, and duplicate rejection |
@@ -225,7 +234,7 @@ characters instead of wall-clock thresholds.
 | Streaming state | Every patch replaced the thread/messages path | 100 patches retain the durable thread, messages array, presentation array, and all 1,000 historical objects |
 | Streaming persistence | A streaming flush could sanitize and serialize the full thread | 100 patches produce 0 durable sanitizations, 0 durable stringifications, and 0 durable thread writes; background flush writes 1 bounded progress record |
 | Terminal state | Content, metrics, and status could settle through separate mutations | Success/stop/error use 1 store mutation and 1 logical terminal persistence transaction, with stale-ID and idempotency checks |
-| Reasoning parsing | Each callback could rescan accumulated output | Delta streams report processed characters exactly equal to total input characters; a snapshot adds its length once |
+| Reasoning parsing | Each callback could rescan accumulated output | Delta streams and 256 prefix-growing native content snapshots report processed characters exactly equal to final input length; an explicit replacement adds its length once |
 | Model initialization | Duplicate or known-bad accelerator profiles could be retried | Candidate keys are unique, GPU layers descend, known OOM upper bounds are skipped, and CPU fallback remains |
 | Catalog cancellation | Singleton-wide cancellation could abort unrelated screens | Two consumers share one resource call; detaching one leaves the other running; the last detach aborts and all maps/listeners settle empty |
 | Cache-size measurement | N concurrent callers could enqueue N full scans | 8 direct bridge callers use 1 native invocation; 6 storage callers use 1 native invocation; 5 JavaScript-fallback callers use 1 filesystem walk |

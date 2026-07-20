@@ -484,13 +484,15 @@ describe('LLMEngineService', () => {
     expect(onToken).toHaveBeenNthCalledWith(1, {
       token: '',
       content: '',
+      contentMode: 'cumulative',
       reasoningContent: 'Plan carefully',
-      reasoningContentMode: 'snapshot',
+      reasoningContentMode: 'cumulative',
       accumulatedText: '<think>Plan carefully',
     });
     expect(onToken).toHaveBeenNthCalledWith(2, {
       token: 'answer',
       content: 'Visible answer',
+      contentMode: 'cumulative',
       accumulatedText: '<think>Plan carefully</think>Visible answer',
     });
   });

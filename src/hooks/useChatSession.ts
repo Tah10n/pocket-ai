@@ -1718,6 +1718,7 @@ export const useChatSession = () => {
       : null;
 
     const presentationParser = createIncrementalAssistantPresentationParser();
+    let presentationSnapshotSource: 'raw' | 'native-content' | null = null;
     let tokensCount = 0;
     let hasMarkedFirstToken = false;
     const startTime = Date.now();
@@ -1728,6 +1729,23 @@ export const useChatSession = () => {
     let hasFlushedFirstAssistantPatch = false;
     let lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
     let latestRawAssistantSnapshot = '';
+
+    const applyCumulativePresentationSnapshot = (
+      snapshot: string,
+      source: Exclude<typeof presentationSnapshotSource, null>,
+    ) => {
+      if (presentationSnapshotSource !== null && presentationSnapshotSource !== source) {
+        presentationParser.applySnapshot(snapshot);
+      } else {
+        presentationParser.applyCumulativeSnapshot(snapshot);
+      }
+      presentationSnapshotSource = source;
+    };
+
+    const appendPresentationDelta = (delta: string) => {
+      presentationParser.appendDelta(delta);
+      presentationSnapshotSource ??= 'raw';
+    };
 
     const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
       const elapsedSec = (Date.now() - startTime) / 1000;
@@ -2322,6 +2340,9 @@ export const useChatSession = () => {
         },
         onToken: (token) => {
           const isStreamingTraceEnabled = performanceMonitor.isEnabled();
+          const processedCharactersBefore = isStreamingTraceEnabled
+            ? presentationParser.getProcessedCharacterCount()
+            : 0;
           if (isStreamingTraceEnabled) {
             performanceMonitor.incrementCounter('chat.stream.nativeCallback');
           }
@@ -2336,7 +2357,7 @@ export const useChatSession = () => {
           }
 
           if (typeof token === 'string') {
-            presentationParser.appendDelta(token);
+            appendPresentationDelta(token);
           } else {
             const hasReasoningUpdate = token.reasoningContent !== undefined;
             if (typeof token.accumulatedText === 'string') {
@@ -2344,12 +2365,17 @@ export const useChatSession = () => {
             }
 
             if (token.content !== undefined) {
-              presentationParser.applySnapshot(token.content);
+              if (token.contentMode === 'cumulative') {
+                applyCumulativePresentationSnapshot(token.content, 'native-content');
+              } else {
+                presentationParser.applySnapshot(token.content);
+                presentationSnapshotSource = 'native-content';
+              }
             } else if (!hasReasoningUpdate) {
               if (typeof token.accumulatedText === 'string') {
-                presentationParser.applySnapshot(token.accumulatedText);
+                applyCumulativePresentationSnapshot(token.accumulatedText, 'raw');
               } else {
-                presentationParser.appendDelta(token.token);
+                appendPresentationDelta(token.token);
               }
             }
             // Reasoning-only native updates intentionally ignore raw accumulated text. Its
@@ -2358,6 +2384,10 @@ export const useChatSession = () => {
             if (token.reasoningContent !== undefined) {
               if (token.reasoningContentMode === 'delta') {
                 presentationParser.appendExplicitReasoningDelta(token.reasoningContent);
+              } else if (token.reasoningContentMode === 'cumulative') {
+                presentationParser.applyCumulativeExplicitReasoningSnapshot(
+                  token.reasoningContent,
+                );
               } else {
                 presentationParser.applyExplicitReasoningSnapshot(token.reasoningContent);
               }
@@ -2366,6 +2396,14 @@ export const useChatSession = () => {
 
           if (isStreamingTraceEnabled) {
             performanceMonitor.incrementCounter('chat.stream.presentation');
+            const processedCharacterCount = presentationParser.getProcessedCharacterCount()
+              - processedCharactersBefore;
+            if (processedCharacterCount > 0) {
+              performanceMonitor.incrementCounter(
+                'chat.stream.presentationCharacters',
+                processedCharacterCount,
+              );
+            }
           }
           tokensCount += 1;
           scheduleAssistantPatch({

@@ -259,9 +259,9 @@ function classifyIncrementalReasoningOpen(content: string): AwaitingOpenClassifi
 
 /**
  * Stateful streaming parser. Delta characters are consumed once; only the
- * bounded marker lookahead and close-tag suffix are revisited. Full snapshots
- * intentionally rebuild raw presentation state to provide deterministic
- * resynchronization.
+ * bounded marker lookahead and close-tag suffix are revisited. Prefix-extending
+ * cumulative snapshots consume only their new suffix. Explicit or non-prefix
+ * snapshots rebuild raw presentation state for deterministic resynchronization.
  */
 export class IncrementalAssistantPresentationParser {
   private mode: IncrementalParserMode = 'awaiting_open';
@@ -277,6 +277,8 @@ export class IncrementalAssistantPresentationParser {
   private explicitReasoningRaw = '';
   private hasExplicitReasoning = false;
   private processedCharacterCount = 0;
+  private rawStreamLength = 0;
+  private explicitReasoningStreamLength = 0;
 
   appendDelta(delta: string): void {
     if (!delta) {
@@ -284,10 +286,12 @@ export class IncrementalAssistantPresentationParser {
     }
 
     this.processRawCharacters(delta);
+    this.rawStreamLength += delta.length;
   }
 
   applySnapshot(snapshot: string): void {
     this.resetRawPresentationState();
+    this.rawStreamLength = snapshot.length;
     if (!snapshot) {
       return;
     }
@@ -295,14 +299,50 @@ export class IncrementalAssistantPresentationParser {
     this.processRawCharacters(snapshot);
   }
 
+  applyCumulativeSnapshot(snapshot: string): void {
+    // Cumulative producers guarantee prefix extension. Deliberately use only
+    // the consumed stream length here: startsWith(previousSnapshot) would itself rescan
+    // the entire processed prefix on every callback. Call applySnapshot for an
+    // explicit replacement; a shrinking cumulative value also resynchronizes.
+    if (snapshot.length >= this.rawStreamLength) {
+      const suffix = snapshot.slice(this.rawStreamLength);
+      this.rawStreamLength = snapshot.length;
+      if (suffix) {
+        this.processRawCharacters(suffix);
+      }
+      return;
+    }
+
+    this.resetRawPresentationState();
+    this.rawStreamLength = snapshot.length;
+    if (snapshot) {
+      this.processRawCharacters(snapshot);
+    }
+  }
+
   applyExplicitReasoningSnapshot(reasoning: string): void {
     this.hasExplicitReasoning = true;
     this.explicitReasoningRaw = reasoning;
+    this.explicitReasoningStreamLength = reasoning.length;
     if (!reasoning) {
       return;
     }
 
     this.processedCharacterCount += reasoning.length;
+  }
+
+  applyCumulativeExplicitReasoningSnapshot(reasoning: string): void {
+    this.hasExplicitReasoning = true;
+    this.explicitReasoningRaw = reasoning;
+
+    if (reasoning.length >= this.explicitReasoningStreamLength) {
+      this.processedCharacterCount += reasoning.length - this.explicitReasoningStreamLength;
+      this.explicitReasoningStreamLength = reasoning.length;
+      return;
+    }
+
+    this.processedCharacterCount += reasoning.length;
+    this.explicitReasoningStreamLength = reasoning.length;
   }
 
   appendExplicitReasoningDelta(delta: string): void {
@@ -312,6 +352,7 @@ export class IncrementalAssistantPresentationParser {
 
     this.hasExplicitReasoning = true;
     this.explicitReasoningRaw += delta;
+    this.explicitReasoningStreamLength += delta.length;
     this.processedCharacterCount += delta.length;
   }
 

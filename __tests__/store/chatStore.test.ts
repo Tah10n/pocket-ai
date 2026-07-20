@@ -87,6 +87,105 @@ function buildCompletedRegenerationThread(id: string): ChatThread {
   };
 }
 
+function buildTrailingModelSwitchThread(
+  id: string,
+  options: {
+    targetCreatedAt?: number;
+    oldTailAttachment?: ReturnType<typeof buildStoredAttachment>;
+  } = {},
+): ChatThread {
+  const targetCreatedAt = options.targetCreatedAt ?? 10;
+  return {
+    ...buildThread(id, targetCreatedAt),
+    title: 'Original branch title',
+    titleSource: 'derived',
+    activeModelId: 'author/model-q8',
+    messages: [
+      {
+        id: `${id}-user-1`,
+        role: 'user',
+        content: 'Original prompt',
+        createdAt: targetCreatedAt,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-assistant-old`,
+        role: 'assistant',
+        content: 'Original durable answer',
+        createdAt: targetCreatedAt + 1,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      ...(options.oldTailAttachment
+        ? [{
+            id: `${id}-user-tail`,
+            role: 'user' as const,
+            content: 'Old tail attachment',
+            attachments: [options.oldTailAttachment],
+            createdAt: targetCreatedAt + 2,
+            state: 'complete' as const,
+            kind: 'message' as const,
+            modelId: 'author/model-q4',
+          }, {
+            id: `${id}-assistant-tail`,
+            role: 'assistant' as const,
+            content: 'Old tail response',
+            createdAt: targetCreatedAt + 3,
+            state: 'complete' as const,
+            kind: 'message' as const,
+            modelId: 'author/model-q4',
+          }]
+        : []),
+      {
+        id: `${id}-switch-q8`,
+        role: 'system',
+        content: '',
+        createdAt: targetCreatedAt + 4,
+        state: 'complete',
+        kind: 'model_switch',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      },
+    ],
+    summary: {
+      content: 'Stale summary from the old branch',
+      createdAt: targetCreatedAt + 3,
+      sourceMessageIds: [`${id}-user-1`, `${id}-assistant-old`],
+    },
+    updatedAt: targetCreatedAt + 4,
+    status: 'idle',
+  };
+}
+
+function captureChatPersistenceWrites() {
+  const appStorage = getAppStorage() as unknown as { set: jest.Mock; remove: jest.Mock };
+  const originalSet = appStorage.set;
+  const originalRemove = appStorage.remove;
+  const setKeys: string[] = [];
+  const removedKeys: string[] = [];
+  appStorage.set = jest.fn(function setWithCapture(this: unknown, key: string, value: unknown) {
+    setKeys.push(key);
+    return originalSet.call(this, key, value);
+  });
+  appStorage.remove = jest.fn(function removeWithCapture(this: unknown, key: string) {
+    removedKeys.push(key);
+    return originalRemove.call(this, key);
+  });
+
+  return {
+    setKeys,
+    removedKeys,
+    restore: () => {
+      appStorage.set = originalSet;
+      appStorage.remove = originalRemove;
+    },
+  };
+}
+
 function seedPersistedChatThread(thread: ChatThread, persistedAt = 100): void {
   writeChatThreadRecord(storage, thread, persistedAt);
   writeChatPersistenceIndex(storage, {
@@ -173,6 +272,14 @@ async function flushAttachmentCleanup(cycles = 2) {
   for (let cycle = 0; cycle < cycles; cycle += 1) {
     await Promise.resolve();
   }
+}
+
+async function reportAllAttachmentCleanupCandidatesDeleted({
+  candidateLocalUris,
+}: {
+  candidateLocalUris: Iterable<string>;
+}): Promise<number> {
+  return Array.from(candidateLocalUris).length;
 }
 
 function captureScheduledTimeouts() {
@@ -1815,6 +1922,1144 @@ describe('chatStore', () => {
     ]);
   });
 
+  it('does not start branch replacement without a durable base record', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-missing-durable-base');
+    useChatStore.setState({
+      threads: { [thread.id]: thread },
+      activeThreadId: thread.id,
+    });
+
+    expect(useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited without a durable base',
+    )).toBeNull();
+    expect(useChatStore.getState().threads[thread.id]).toBe(thread);
+    expect(useChatStore.getState().getThread(thread.id)).toBe(thread);
+    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+  });
+
+  it('keeps the durable branch unchanged before first model-switch regeneration output', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-before-output');
+    seedPersistedChatThread(thread, 100);
+    const rawThreads = useChatStore.getState().threads;
+    const rawThread = rawThreads[thread.id];
+    const rawMessages = rawThread.messages;
+    const rawAssistant = rawMessages[1];
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(thread.id));
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+        thread.id,
+        `${thread.id}-user-1`,
+        'Edited prompt',
+      );
+
+      expect(assistantId).toBeTruthy();
+      expect(useChatStore.getState().threads).toBe(rawThreads);
+      expect(useChatStore.getState().threads[thread.id]).toBe(rawThread);
+      expect(useChatStore.getState().threads[thread.id].messages).toBe(rawMessages);
+      expect(useChatStore.getState().threads[thread.id].messages[1]).toBe(rawAssistant);
+      expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+        status: 'generating',
+        summary: undefined,
+        activeModelId: 'author/model-q8',
+        messages: [
+          expect.objectContaining({
+            id: `${thread.id}-user-1`,
+            content: 'Edited prompt',
+            modelId: 'author/model-q8',
+          }),
+          expect.objectContaining({
+            id: assistantId,
+            content: '',
+            state: 'streaming',
+            modelId: 'author/model-q8',
+          }),
+        ],
+      }));
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+      expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(thread.id));
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('restores the old branch after a crash before first output', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-crash-before-output');
+    seedPersistedChatThread(thread, 100);
+    const originalMessageIds = thread.messages.map((message) => message.id);
+
+    expect(useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt that must stay transient',
+    )).toBeTruthy();
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const recovered = useChatStore.getState().getThread(thread.id)!;
+    expect(recovered.messages.map((message) => message.id)).toEqual(originalMessageIds);
+    expect(recovered.messages[1]).toEqual(expect.objectContaining({
+      id: `${thread.id}-assistant-old`,
+      content: 'Original durable answer',
+      state: 'complete',
+    }));
+    expect(recovered.messages.at(-1)).toEqual(expect.objectContaining({
+      id: `${thread.id}-switch-q8`,
+      kind: 'model_switch',
+    }));
+    expect(recovered.messages.some((message) => message.state === 'stopped')).toBe(false);
+  });
+
+  it('persists bounded branch progress after partial output', () => {
+    jest.useFakeTimers();
+    const thread = buildPerformanceThread({
+      historicalMessageCount: 1000,
+      attachments: 'mixed',
+      modelSwitchEvery: 125,
+    });
+    seedPersistedChatThread(thread, thread.updatedAt);
+    const target = thread.messages.find((message, index) => message.role === 'user' && index > 100)!;
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(thread.id))!;
+
+    try {
+      const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+        thread.id,
+        target.id,
+        'Bounded edited prompt',
+      )!;
+      useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+        content: 'Recoverable visible output',
+        thoughtContent: 'Recoverable thought output',
+      });
+      flushPendingChatPersistenceWrites('background');
+
+      const progress = readChatStreamingProgressRecord(storage, thread.id);
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+      expect(progress).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          messageId: assistantId,
+          content: 'Recoverable visible output',
+          branchReplacement: expect.objectContaining({
+            targetUserMessageId: target.id,
+            replacementUserMessage: expect.objectContaining({
+              id: target.id,
+              content: 'Bounded edited prompt',
+            }),
+          }),
+        }),
+      });
+      const rawProgress = storage.getString(getChatStreamingProgressStorageKey(thread.id))!;
+      expect(rawProgress.length).toBeLessThan(durableRecordBefore.length);
+      expect(rawProgress).not.toContain('Deterministic assistant message 999');
+    } finally {
+      useChatStore.getState().stopAssistantMessage(
+        thread.id,
+        useChatStore.getState().getThread(thread.id)?.messages.at(-1)?.id ?? '',
+      );
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps 100 branch patches over 1000 messages structurally O(1)', () => {
+    jest.useFakeTimers();
+    const thread = buildPerformanceThread({
+      historicalMessageCount: 1000,
+      attachments: 'mixed',
+      modelSwitchEvery: 125,
+    });
+    seedPersistedChatThread(thread, thread.updatedAt);
+    const targetIndex = thread.messages.findIndex(
+      (message, index) => index > 400 && message.role === 'user',
+    );
+    const target = thread.messages[targetIndex];
+    const rawThreads = useChatStore.getState().threads;
+    const rawThread = rawThreads[thread.id];
+    const rawMessages = rawThread.messages;
+    const rawMessageReferences = rawMessages.slice();
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(thread.id));
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      target.id,
+      'Performance branch edit',
+    )!;
+    const presentationMessages = useChatStore.getState().getThread(thread.id)!.messages;
+    const capture = captureChatPersistenceWrites();
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
+
+    try {
+      for (let patchIndex = 1; patchIndex <= 100; patchIndex += 1) {
+        useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+          content: `Branch partial ${patchIndex}`,
+          thoughtContent: `Branch thought ${patchIndex}`,
+          tokensPerSec: patchIndex / 2,
+        });
+
+        expect(useChatStore.getState().getThread(thread.id)?.messages).toBe(
+          presentationMessages,
+        );
+      }
+
+      expect(useChatStore.getState().threads).toBe(rawThreads);
+      expect(useChatStore.getState().threads[thread.id]).toBe(rawThread);
+      expect(useChatStore.getState().threads[thread.id].messages).toBe(rawMessages);
+      expect(rawMessages.every((message, index) => message === rawMessageReferences[index])).toBe(true);
+      expect(presentationMessages.slice(0, targetIndex).every(
+        (message, index) => message === rawMessageReferences[index],
+      )).toBe(true);
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+      expect(capture.setKeys.filter(
+        (key) => key === getChatThreadStorageKey(thread.id),
+      )).toHaveLength(0);
+      let snapshot = performanceMonitor.snapshot();
+      expect(snapshot.counters['chat.stream.patch']).toBe(100);
+      expect(snapshot.counters['chat.persist.sanitize'] ?? 0).toBe(0);
+      expect(snapshot.counters['chat.persist.stringify'] ?? 0).toBe(0);
+      expect(snapshot.events.some((event) => event.name.startsWith('chat.prompt.'))).toBe(false);
+
+      flushPendingChatPersistenceWrites('background');
+
+      snapshot = performanceMonitor.snapshot();
+      expect(capture.setKeys.filter(
+        (key) => key === getChatStreamingProgressStorageKey(thread.id),
+      )).toHaveLength(1);
+      expect(capture.setKeys.filter(
+        (key) => key === getChatThreadStorageKey(thread.id),
+      )).toHaveLength(0);
+      expect(snapshot.counters['chat.persist.sanitize'] ?? 0).toBe(0);
+      expect(snapshot.counters['chat.persist.stringify']).toBe(1);
+      expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))!.length).toBeLessThan(
+        durableRecordBefore!.length,
+      );
+    } finally {
+      capture.restore();
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+      useChatStore.getState().stopAssistantMessage(thread.id, assistantId);
+      jest.useRealTimers();
+    }
+  });
+
+  it('recovers partial model-switch regeneration by replacing the old tail', async () => {
+    const base = buildTrailingModelSwitchThread('thread-branch-partial-recovery');
+    const thread: ChatThread = {
+      ...base,
+      messages: [
+        {
+          id: `${base.id}-prefix-user`,
+          role: 'user',
+          content: 'Prefix prompt',
+          createdAt: 1,
+          state: 'complete',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+        {
+          id: `${base.id}-prefix-assistant`,
+          role: 'assistant',
+          content: 'Prefix answer',
+          createdAt: 2,
+          state: 'complete',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+        ...base.messages,
+      ],
+    };
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Recovered edited prompt',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Recovered partial branch',
+      thoughtContent: 'Recovered branch thought',
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const recovered = useChatStore.getState().getThread(thread.id)!;
+    expect(recovered.messages.map((message) => message.id)).not.toContain(`${thread.id}-assistant-old`);
+    expect(recovered.messages.map((message) => message.id)).not.toContain(`${thread.id}-switch-q8`);
+    expect(recovered.messages.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Recovered partial branch',
+      thoughtContent: 'Recovered branch thought',
+      state: 'stopped',
+    }));
+    const replacementUserIndex = recovered.messages.findIndex(
+      (message) => message.id === `${thread.id}-user-1`,
+    );
+    expect(recovered.messages[replacementUserIndex - 1]).toEqual(expect.objectContaining({
+      kind: 'model_switch',
+      switchFromModelId: 'author/model-q4',
+      switchToModelId: 'author/model-q8',
+    }));
+    expect(recovered.messages.filter((message) => message.role === 'assistant' && message.id === assistantId)).toHaveLength(1);
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+  });
+
+  it('retains branch progress and the old branch when recovery durable write fails', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-recovery-write-failure');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited recovery failure prompt',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Recoverable branch progress',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const progressBefore = storage.getString(getChatStreamingProgressStorageKey(thread.id));
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let didFailRecoveryWrite = false;
+    appStorage.set = jest.fn(function failRecoveryWrite(this: unknown, key: string, value: unknown) {
+      if (!didFailRecoveryWrite && key === getChatThreadStorageKey(thread.id)) {
+        didFailRecoveryWrite = true;
+        throw new Error('simulated recovery durable write failure');
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatPersistence] Failed to durably commit recovered streaming progress',
+        { errorName: 'Error' },
+      );
+    } finally {
+      appStorage.set = originalSet;
+      warnSpy.mockRestore();
+    }
+
+    const hydrated = useChatStore.getState().getThread(thread.id)!;
+    expect(hydrated.messages.map((message) => message.id)).toEqual(
+      thread.messages.map((message) => message.id),
+    );
+    expect(hydrated.messages[1]).toEqual(expect.objectContaining({
+      id: `${thread.id}-assistant-old`,
+      content: 'Original durable answer',
+    }));
+    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBe(progressBefore);
+  });
+
+  it('discards orphaned branch progress without resurrecting a thread', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-orphan-branch-progress');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Orphaned branch edit',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Orphaned partial branch',
+    });
+    flushPendingChatPersistenceWrites('background');
+    expect(readChatStreamingProgressRecord(storage, thread.id).ok).toBe(true);
+    storage.remove(getChatThreadStorageKey(thread.id));
+    storage.remove(CHAT_PERSISTENCE_INDEX_KEY);
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)).toBeNull();
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+  });
+
+  it('keeps a clear tombstone authoritative over stale branch progress', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-cleared-branch-progress');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Cleared branch edit',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Progress before authoritative clear',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const staleProgress = storage.getString(getChatStreamingProgressStorageKey(thread.id))!;
+
+    expect(useChatStore.getState().clearAllThreads()).toBe(1);
+    storage.set(getChatStreamingProgressStorageKey(thread.id), staleProgress);
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().threads).toEqual({});
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    expect(readPersistedChatIndex()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threadIds: [],
+      clearedAt: expect.any(Number),
+    }));
+  });
+
+  it('atomically commits successful branch regeneration', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-atomic-success');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Atomically edited prompt',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Earlier partial',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const capture = captureChatPersistenceWrites();
+    const mutationCounter = createMutationCounter(useChatStore.subscribe);
+    const telemetry = {
+      tokensPredicted: 24,
+      tokensEvaluated: 8,
+      predictedPerSecond: 6,
+      timeToFirstTokenMs: 120,
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 12,
+        draftTokensAccepted: 6,
+        acceptanceRate: 0.5,
+      },
+    };
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'success',
+        content: 'Final regenerated answer',
+        inferenceMetrics: telemetry,
+      })).toBe(true);
+
+      expect(mutationCounter.getCount()).toBe(1);
+      expect(capture.setKeys.filter((key) => key === getChatThreadStorageKey(thread.id))).toHaveLength(1);
+      expect(capture.setKeys.filter((key) => key === CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toHaveLength(1);
+      expect(capture.setKeys.filter((key) => key === CHAT_PERSISTENCE_INDEX_KEY)).toHaveLength(1);
+      expect(capture.removedKeys.filter((key) => key === getChatStreamingProgressStorageKey(thread.id))).toHaveLength(1);
+      const committed = useChatStore.getState().threads[thread.id];
+      expect(committed.messages).toHaveLength(2);
+      expect(committed.messages.map((message) => message.id)).not.toContain(`${thread.id}-assistant-old`);
+      expect(committed.messages.at(-1)).toEqual(expect.objectContaining({
+        id: assistantId,
+        content: 'Final regenerated answer',
+        state: 'complete',
+        inferenceMetrics: telemetry,
+      }));
+      expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+    } finally {
+      mutationCounter.unsubscribe();
+      capture.restore();
+    }
+  });
+
+  it('restores the old branch on stopped branch regeneration before output', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-empty-stop');
+    seedPersistedChatThread(thread, 100);
+    const oldMessageIds = thread.messages.map((message) => message.id);
+    const durableRecord = storage.getString(getChatThreadStorageKey(thread.id));
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Transient edit',
+    )!;
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'stopped',
+      })).toBe(true);
+      expect(useChatStore.getState().threads[thread.id]).toBe(thread);
+      expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id)).toEqual(oldMessageIds);
+      expect(useChatStore.getState().getThread(thread.id)?.status).toBe('idle');
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecord);
+      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(thread.id));
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'success',
+        content: 'Late output',
+      })).toBe(false);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('restores the old branch on branch generation error before output', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-empty-error');
+    seedPersistedChatThread(thread, 100);
+    const oldMessages = thread.messages;
+    const durableRecord = storage.getString(getChatThreadStorageKey(thread.id));
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Transient error edit',
+    )!;
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'error',
+        errorCode: 'generation_failed',
+        errorMessage: 'No output',
+      })).toBe(true);
+      expect(useChatStore.getState().threads[thread.id]).toBe(thread);
+      expect(useChatStore.getState().getThread(thread.id)?.messages).toBe(oldMessages);
+      expect(useChatStore.getState().getThread(thread.id)?.messages.some(
+        (message) => message.id === assistantId,
+      )).toBe(false);
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecord);
+      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(thread.id));
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('restores the old branch on successful regeneration without output', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-empty-success');
+    seedPersistedChatThread(thread, 100);
+    const durableRecord = storage.getString(getChatThreadStorageKey(thread.id));
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Transient empty-success edit',
+    )!;
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'success',
+        content: '   ',
+        thoughtContent: null,
+      })).toBe(true);
+      expect(useChatStore.getState().threads[thread.id]).toBe(thread);
+      expect(useChatStore.getState().getThread(thread.id)).toBe(thread);
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecord);
+      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(thread.id));
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('recommits the old branch when persisted partial output is later cleared', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-cleared-persisted-output');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Transient edit with later-cleared output',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Persisted partial output',
+      thoughtContent: 'Persisted partial thought',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const persistedProgress = readChatStreamingProgressRecord(storage, thread.id);
+    expect(persistedProgress).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        content: 'Persisted partial output',
+        thoughtContent: 'Persisted partial thought',
+      }),
+    });
+    expect(persistedProgress.ok).toBe(true);
+
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: '',
+      thoughtContent: undefined,
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'stopped',
+      content: '',
+      thoughtContent: null,
+    })).toBe(true);
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual(thread.messages);
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    const durableRecord = readChatThreadRecord(storage, thread.id);
+    expect(durableRecord).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({ messages: thread.messages }),
+      }),
+    });
+    if (durableRecord.ok && persistedProgress.ok) {
+      expect(durableRecord.value.persistedAt).toBeGreaterThan(persistedProgress.value.persistedAt);
+    }
+  });
+
+  it('commits partial stopped branch regeneration', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-partial-stop');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited stopped prompt',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial stopped answer',
+      thoughtContent: 'Partial stopped thought',
+    });
+
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'stopped',
+    })).toBe(true);
+    expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual([
+      expect.objectContaining({ content: 'Edited stopped prompt' }),
+      expect.objectContaining({
+        id: assistantId,
+        content: 'Partial stopped answer',
+        thoughtContent: 'Partial stopped thought',
+        state: 'stopped',
+      }),
+    ]);
+  });
+
+  it('commits partial error branch regeneration', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-partial-error');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited error prompt',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial errored answer',
+    });
+
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'Completion failed after output',
+    })).toBe(true);
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Partial errored answer',
+      state: 'error',
+      errorCode: 'generation_failed',
+    }));
+  });
+
+  it('keeps old branch and progress when terminal persistence fails', async () => {
+    const removedAttachment = buildStoredAttachment(
+      'thread-branch-terminal-failure',
+      'thread-branch-terminal-failure-user-tail',
+      'terminal-failure-old-tail.jpg',
+    );
+    const thread = buildTrailingModelSwitchThread('thread-branch-terminal-failure', {
+      oldTailAttachment: removedAttachment,
+    });
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt before failed commit',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Recoverable partial after failure',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    let didFail = false;
+    appStorage.set = jest.fn(function failTerminalThreadWrite(this: unknown, key: string, value: unknown) {
+      if (!didFail && key === getChatThreadStorageKey(thread.id)) {
+        didFail = true;
+        throw new Error('simulated branch terminal write failure');
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'success',
+        content: 'Terminal output that cannot commit',
+      })).toThrow('simulated branch terminal write failure');
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(useChatStore.getState().threads[thread.id]).toBe(thread);
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Recoverable partial after failure',
+      state: 'streaming',
+    }));
+    expect(readChatThreadRecord(storage, thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        persistedAt: 100,
+        thread: expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({ id: `${thread.id}-assistant-old` }),
+          ]),
+        }),
+      }),
+    });
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        messageId: assistantId,
+        content: 'Recoverable partial after failure',
+        branchReplacement: expect.any(Object),
+      }),
+    });
+    await flushAttachmentCleanup();
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      removedAttachment.localUri,
+      expect.anything(),
+    );
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const recovered = useChatStore.getState().getThread(thread.id)!;
+    expect(recovered.messages.map((message) => message.id)).not.toContain(
+      `${thread.id}-assistant-old`,
+    );
+    expect(recovered.messages.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Recoverable partial after failure',
+      state: 'stopped',
+    }));
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    await flushAttachmentCleanup(4);
+    expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
+      ([localUri]) => localUri === removedAttachment.localUri,
+    )).toHaveLength(1);
+  });
+
+  it('rejects branch progress for a stale target user', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-stale-target');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited stale target',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial stale-target output',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const mutatedThread: ChatThread = {
+      ...thread,
+      messages: thread.messages.map((message) => (
+        message.id === `${thread.id}-user-1`
+          ? { ...message, createdAt: message.createdAt + 1 }
+          : message
+      )),
+    };
+    writeChatThreadRecord(storage, mutatedThread, 100);
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual(mutatedThread.messages);
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+  });
+
+  it('rejects branch progress after a newer durable thread mutation', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-newer-durable');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited against old base',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Progress against old durable base',
+    });
+    flushPendingChatPersistenceWrites('background');
+    const newerThread: ChatThread = {
+      ...thread,
+      title: 'Newer durable title',
+      titleSource: 'manual',
+      updatedAt: 200,
+    };
+    writeChatThreadRecord(storage, newerThread, 200, { commitRevision: 9 });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+      title: 'Newer durable title',
+      messages: thread.messages,
+    }));
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+  });
+
+  it('ignores late branch assistant callbacks', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-late-callback');
+    seedPersistedChatThread(thread, 100);
+    const oldIds = thread.messages.map((message) => message.id);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Transient late callback edit',
+    )!;
+    useChatStore.getState().stopAssistantMessage(thread.id, assistantId);
+
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Late patch must not land',
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Late terminal must not land',
+    })).toBe(false);
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id)).toEqual(oldIds);
+  });
+
+  it('clears branch runtime and progress when the thread is deleted', async () => {
+    const removedAttachment = buildStoredAttachment(
+      'thread-branch-delete-runtime',
+      'thread-branch-delete-runtime-user-tail',
+      'delete-runtime-tail.jpg',
+    );
+    const thread = buildTrailingModelSwitchThread('thread-branch-delete-runtime', {
+      oldTailAttachment: removedAttachment,
+    });
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited before delete',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial before delete',
+    });
+    flushPendingChatPersistenceWrites('background');
+    await flushAttachmentCleanup();
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      removedAttachment.localUri,
+      expect.anything(),
+    );
+
+    useChatStore.getState().deleteThread(thread.id);
+    await flushAttachmentCleanup(4);
+
+    expect(useChatStore.getState().getThread(thread.id)).toBeNull();
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Late output',
+    })).toBe(false);
+    expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
+      ([localUri]) => localUri === removedAttachment.localUri,
+    )).toHaveLength(1);
+  });
+
+  it('clears branch runtime and progress on clearAllThreads', async () => {
+    const removedAttachment = buildStoredAttachment(
+      'thread-branch-clear-runtime',
+      'thread-branch-clear-runtime-user-tail',
+      'clear-runtime-tail.jpg',
+    );
+    const thread = buildTrailingModelSwitchThread('thread-branch-clear-runtime', {
+      oldTailAttachment: removedAttachment,
+    });
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited before clear',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      thoughtContent: 'Thought before clear',
+    });
+    flushPendingChatPersistenceWrites('background');
+    await flushAttachmentCleanup();
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      removedAttachment.localUri,
+      expect.anything(),
+    );
+
+    expect(useChatStore.getState().clearAllThreads()).toBe(1);
+    await flushAttachmentCleanup(4);
+    expect(useChatStore.getState().threads).toEqual({});
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'stopped',
+    })).toBe(false);
+    expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
+      ([localUri]) => localUri === removedAttachment.localUri,
+    )).toHaveLength(1);
+  });
+
+  it('preserves attachment references until successful branch commit', async () => {
+    const removedAttachment = buildStoredAttachment(
+      'thread-branch-attachment-preserve',
+      'thread-branch-attachment-preserve-user-tail',
+      'old-tail.jpg',
+    );
+    const thread = buildTrailingModelSwitchThread('thread-branch-attachment-preserve', {
+      oldTailAttachment: removedAttachment,
+    });
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited while preserving old files',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial output while old branch is durable',
+    });
+    flushPendingChatPersistenceWrites('background');
+    await flushAttachmentCleanup();
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      removedAttachment.localUri,
+      expect.anything(),
+    );
+    expect(readChatThreadRecord(storage, thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              id: `${thread.id}-user-tail`,
+              attachments: [expect.objectContaining({ localUri: removedAttachment.localUri })],
+            }),
+          ]),
+        }),
+      }),
+    });
+  });
+
+  it('runs attachment cleanup once after successful branch replacement', async () => {
+    const retainedAttachment = buildStoredAttachment(
+      'thread-branch-attachment-cleanup',
+      'thread-branch-attachment-cleanup-user-1',
+      'shared-retained.jpg',
+    );
+    const removedAttachment = buildStoredAttachment(
+      'thread-branch-attachment-cleanup',
+      'thread-branch-attachment-cleanup-user-tail',
+      'removed-once.jpg',
+    );
+    const sharedTailAttachment = {
+      ...buildStoredAttachment(
+        'thread-branch-attachment-cleanup',
+        'thread-branch-attachment-cleanup-user-tail',
+        'shared-tail-reference.jpg',
+      ),
+      localUri: retainedAttachment.localUri,
+    };
+    const base = buildTrailingModelSwitchThread('thread-branch-attachment-cleanup', {
+      oldTailAttachment: removedAttachment,
+    });
+    const thread: ChatThread = {
+      ...base,
+      messages: base.messages.map((message) => (
+        message.id === `${base.id}-user-1`
+          ? { ...message, attachments: [retainedAttachment] }
+          : message.id === `${base.id}-user-tail`
+            ? { ...message, attachments: [sharedTailAttachment, removedAttachment] }
+          : message
+      )),
+    };
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited attachment prompt',
+    )!;
+
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+    useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Successful replacement',
+    });
+    await flushAttachmentCleanup(4);
+
+    expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
+      ([localUri]) => localUri === removedAttachment.localUri,
+    )).toHaveLength(1);
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      retainedAttachment.localUri,
+      expect.anything(),
+    );
+  });
+
+  it('handles clock rollback and future-dated target messages', () => {
+    jest.useFakeTimers().setSystemTime(100);
+    const thread = buildTrailingModelSwitchThread('thread-branch-future-target', {
+      targetCreatedAt: 50_000,
+    });
+    seedPersistedChatThread(thread, 60_000);
+
+    try {
+      const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+        thread.id,
+        `${thread.id}-user-1`,
+        'Future target edit',
+      )!;
+      const presentedAssistant = useChatStore.getState().getThread(thread.id)?.messages.at(-1);
+      expect(presentedAssistant?.createdAt).toBeGreaterThanOrEqual(50_000);
+      useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+        content: 'Future-safe partial',
+      });
+      flushPendingChatPersistenceWrites('background');
+      const progress = readChatStreamingProgressRecord(storage, thread.id);
+      expect(progress).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          persistedAt: expect.any(Number),
+          branchReplacement: expect.objectContaining({
+            baseDurablePersistedAt: 60_000,
+            targetUserCreatedAt: 50_000,
+          }),
+        }),
+      });
+      if (progress.ok) {
+        expect(progress.value.persistedAt).toBeGreaterThan(60_000);
+      }
+      useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+        outcome: 'success',
+        content: 'Future-safe final',
+      });
+      expect(readChatThreadRecord(storage, thread.id)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          persistedAt: expect.any(Number),
+        }),
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not use a stale conversation summary in presented branch', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-stale-summary');
+    seedPersistedChatThread(thread, 100);
+
+    expect(useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt without stale summary',
+    )).toBeTruthy();
+
+    expect(useChatStore.getState().threads[thread.id].summary?.content).toBe(
+      'Stale summary from the old branch',
+    );
+    expect(useChatStore.getState().getThread(thread.id)?.summary).toBeUndefined();
+    expect(getThreadInferenceWindow(useChatStore.getState().getThread(thread.id)!, {
+      maxContextMessages: 100,
+      maxContextTokens: 4096,
+      responseReserveTokens: 256,
+    }).messages.map((message) => message.content)).not.toContain(
+      'Stale summary from the old branch',
+    );
+  });
+
+  it('preserves current active model and canonical model-switch ordering', () => {
+    const base = buildTrailingModelSwitchThread('thread-branch-switch-order');
+    const thread: ChatThread = {
+      ...base,
+      messages: [
+        {
+          id: `${base.id}-prefix-user`,
+          role: 'user',
+          content: 'Prefix',
+          createdAt: 1,
+          state: 'complete',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+        {
+          id: `${base.id}-prefix-assistant`,
+          role: 'assistant',
+          content: 'Prefix answer',
+          createdAt: 2,
+          state: 'complete',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+        ...base.messages,
+      ],
+    };
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Canonical switch edit',
+    )!;
+    useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Canonical answer',
+    });
+
+    const committed = useChatStore.getState().getThread(thread.id)!;
+    const replacementIndex = committed.messages.findIndex(
+      (message) => message.id === `${thread.id}-user-1`,
+    );
+    expect(committed.activeModelId).toBe('author/model-q8');
+    expect(committed.messages[replacementIndex - 1]).toEqual(expect.objectContaining({
+      kind: 'model_switch',
+      switchFromModelId: 'author/model-q4',
+      switchToModelId: 'author/model-q8',
+    }));
+    expect(committed.messages[replacementIndex]).toEqual(expect.objectContaining({
+      role: 'user',
+      modelId: 'author/model-q8',
+    }));
+    expect(committed.messages[replacementIndex + 1]).toEqual(expect.objectContaining({
+      id: assistantId,
+      role: 'assistant',
+      modelId: 'author/model-q8',
+    }));
+    expect(committed.messages.at(-1)?.kind).not.toBe('model_switch');
+  });
+
   it('deletes a message branch and resets the thread to earlier messages', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -1896,10 +3141,7 @@ describe('chatStore', () => {
       ],
     };
 
-    useChatStore.setState({
-      threads: { [thread.id]: thread },
-      activeThreadId: thread.id,
-    });
+    seedPersistedChatThread(thread, 100);
 
     expect(useChatStore.getState().deleteMessageBranch(thread.id, 'user-2')).toBe(true);
     await flushAttachmentCleanup();
@@ -1910,7 +3152,7 @@ describe('chatStore', () => {
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(retainedAttachment.localUri, expect.anything());
   });
 
-  it('cleans attachments removed by retry or edit branch replacement', async () => {
+  it('defers retry or edit branch attachment cleanup until terminal replacement', async () => {
     const retainedAttachment = buildStoredAttachment('thread-edit-cleanup', 'user-1', 'edited-kept.jpg');
     const removedAttachment = buildStoredAttachment('thread-edit-cleanup', 'user-2', 'edited-removed.jpg');
     const thread: ChatThread = {
@@ -1942,19 +3184,25 @@ describe('chatStore', () => {
       ],
     };
 
-    useChatStore.setState({
-      threads: { [thread.id]: thread },
-      activeThreadId: thread.id,
-    });
+    seedPersistedChatThread(thread, 100);
 
-    expect(useChatStore.getState().replaceBranchFromUserMessage(
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
       thread.id,
       'user-1',
       'Edited original image prompt',
-    )).toBeTruthy();
+    );
+    expect(assistantId).toBeTruthy();
     await flushAttachmentCleanup();
 
     expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments).toEqual([retainedAttachment]);
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(removedAttachment.localUri, expect.anything());
+
+    useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId!, {
+      outcome: 'success',
+      content: 'Replacement response',
+    });
+    await flushAttachmentCleanup();
+
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith(removedAttachment.localUri, {
       idempotent: true,
     });
@@ -3188,7 +4436,7 @@ describe('chatStore', () => {
   it('does not schedule attachment cleanup for metadata-only thread mutations', async () => {
     const cleanupSpy = jest
       .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',
       presetId: null,
@@ -3231,7 +4479,7 @@ describe('chatStore', () => {
       .mockImplementationOnce(() => new Promise<number>((resolve) => {
         firstCleanup.resolve = resolve;
       }))
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
     const firstAttachment = buildStoredAttachment('thread-cleanup-one', 'user-1', 'cleanup-one.jpg');
     const secondAttachment = buildStoredAttachment('thread-cleanup-two', 'user-1', 'cleanup-two.jpg');
     const firstThread: ChatThread = {
@@ -3281,7 +4529,7 @@ describe('chatStore', () => {
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
 
       expect(firstCleanup.resolve).toEqual(expect.any(Function));
-      firstCleanup.resolve?.(0);
+      firstCleanup.resolve?.(1);
       firstCleanup.resolve = null;
       await flushAttachmentCleanup(6);
 
@@ -3292,7 +4540,7 @@ describe('chatStore', () => {
       }));
     } finally {
       if (firstCleanup.resolve) {
-        firstCleanup.resolve(0);
+        firstCleanup.resolve(1);
       }
       cleanupSpy.mockRestore();
     }
@@ -3307,7 +4555,7 @@ describe('chatStore', () => {
       .mockImplementationOnce(() => new Promise<number>((resolve) => {
         firstCleanup.resolve = resolve;
       }))
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
     const inFlightAttachment = buildStoredAttachment('thread-cleanup-in-flight', 'user-1', 'cleanup-in-flight.jpg');
     const queuedAttachment = buildStoredAttachment('thread-cleanup-queued', 'user-1', 'cleanup-queued.jpg');
     const laterOrphanedAttachment = buildStoredAttachment('thread-cleanup-later', 'user-1', 'cleanup-later.jpg');
@@ -3365,7 +4613,7 @@ describe('chatStore', () => {
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
 
       expect(firstCleanup.resolve).toEqual(expect.any(Function));
-      firstCleanup.resolve?.(0);
+      firstCleanup.resolve?.(1);
       firstCleanup.resolve = null;
       await flushAttachmentCleanup(6);
 
@@ -3379,7 +4627,7 @@ describe('chatStore', () => {
       expect(Array.from(secondCleanupRequest.referencedLocalUris!)).not.toContain(laterOrphanedAttachment.localUri);
     } finally {
       if (firstCleanup.resolve) {
-        firstCleanup.resolve(0);
+        firstCleanup.resolve(1);
       }
       cleanupSpy.mockRestore();
     }
@@ -3388,7 +4636,7 @@ describe('chatStore', () => {
   it('bounds large unreferenced attachment cleanup batches', async () => {
     const cleanupSpy = jest
       .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
     const attachments = Array.from({ length: 18 }, (_, index) => (
       buildStoredAttachment('thread-cleanup-large', `user-${index}`, `cleanup-large-${index}.jpg`)
     ));
@@ -3432,7 +4680,7 @@ describe('chatStore', () => {
     const cleanupSpy = jest
       .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
       .mockRejectedValueOnce(new Error('cleanup unavailable'))
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
     const attachments = Array.from({ length: 18 }, (_, index) => (
       buildStoredAttachment('thread-cleanup-retry', `user-${index}`, `cleanup-retry-${index}.jpg`)
     ));
@@ -3487,13 +4735,73 @@ describe('chatStore', () => {
     }
   });
 
+  it('retries a candidate when per-file attachment deletion reports an incomplete batch', async () => {
+    const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const attachment = buildStoredAttachment(
+      'thread-cleanup-partial-failure',
+      'user-1',
+      'cleanup-partial-failure.jpg',
+    );
+    const removedThread: ChatThread = {
+      ...buildThread('thread-cleanup-partial-failure', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Per-file cleanup failure image prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [attachment],
+      }],
+    };
+    (FileSystem.deleteAsync as jest.Mock)
+      .mockRejectedValueOnce(new Error('single file delete failed'))
+      .mockResolvedValue(undefined);
+
+    try {
+      useChatStore.setState({
+        threads: { [removedThread.id]: removedThread },
+        activeThreadId: removedThread.id,
+      });
+
+      useChatStore.getState().deleteThread(removedThread.id);
+      await flushAttachmentCleanup(8);
+
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+      expect(FileSystem.deleteAsync).toHaveBeenLastCalledWith(attachment.localUri, {
+        idempotent: true,
+      });
+      expect(callbacks).toHaveLength(1);
+      expect(delays).toEqual([1000]);
+
+      callbacks.shift()?.();
+      await flushAttachmentCleanup(8);
+
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+      expect(FileSystem.deleteAsync).toHaveBeenLastCalledWith(attachment.localUri, {
+        idempotent: true,
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[chatStore] Failed to clean up chat attachments',
+        { errorName: 'Error' },
+      );
+    } finally {
+      while (callbacks.length > 0) {
+        callbacks.shift()?.();
+        await flushAttachmentCleanup();
+      }
+      warnSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
   it('honors cleanup retry backoff while merging new requests into the pending retry', async () => {
     const { callbacks, delays, setTimeoutSpy } = captureScheduledTimeouts();
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const cleanupSpy = jest
       .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
       .mockRejectedValueOnce(new Error('cleanup unavailable'))
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
     const firstAttachment = buildStoredAttachment('thread-cleanup-retry-first', 'user-1', 'cleanup-retry-first.jpg');
     const secondAttachment = buildStoredAttachment('thread-cleanup-retry-second', 'user-1', 'cleanup-retry-second.jpg');
     const firstThread: ChatThread = {
@@ -6108,7 +7416,7 @@ describe('chatStore', () => {
     };
     const cleanupSpy = jest
       .spyOn(chatAttachmentStorageService, 'deleteUnreferencedAttachmentFiles')
-      .mockResolvedValue(0);
+      .mockImplementation(reportAllAttachmentCleanupCandidatesDeleted);
 
     try {
       useChatStore.setState({

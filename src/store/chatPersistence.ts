@@ -2,6 +2,7 @@ import {
   getThreadActiveModelId,
   type ChatMessage,
   type ChatThread,
+  type GenerationParamsSnapshot,
   type LlmContentPart,
 } from '../types/chat';
 import type { ChatAttachment } from '../types/attachments';
@@ -23,6 +24,11 @@ import {
 } from '../utils/chatAttachments';
 import type { AppStorageFacade } from './storage';
 import { performanceMonitor } from '../services/PerformanceMonitor';
+import {
+  createChatBranchReplacementPlanFromProgress,
+  materializeChatBranchReplacementThread,
+  type ChatBranchReplacementProgress,
+} from './chatBranchReplacement';
 
 export const LEGACY_CHAT_STORE_STORAGE_KEY = 'chat-store';
 export const CHAT_PERSISTENCE_SCHEMA_VERSION = 2;
@@ -74,6 +80,7 @@ export interface ChatStreamingProgressRecord {
   persistedAt: number;
   revision: number;
   regeneratesMessageId?: string;
+  branchReplacement?: ChatBranchReplacementProgress;
 }
 
 export interface ChatPersistencePendingIndexCommit {
@@ -586,7 +593,7 @@ function sanitizeInferenceCompletionTelemetry(value: unknown): InferenceCompleti
     : sanitized;
 }
 
-function sanitizeChatMessageForPersistence(message: ChatMessage, threadId: string): ChatMessage {
+export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId: string): ChatMessage {
   const attachments = sanitizePersistedChatMessageAttachments(message, threadId);
   const contentParts = sanitizePersistedChatMessageContentParts(message);
   const inferenceMetrics = sanitizeInferenceCompletionTelemetry(message.inferenceMetrics);
@@ -688,6 +695,285 @@ export function parseChatThreadRecord(
   };
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
+function hasSameJsonShape(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isFiniteNumberInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= minimum
+    && value <= maximum;
+}
+
+function isSafeIntegerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return Number.isSafeInteger(value)
+    && (value as number) >= minimum
+    && (value as number) <= maximum;
+}
+
+function parseBranchParamsSnapshot(value: unknown): GenerationParamsSnapshot | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const allowedKeys = new Set([
+    'temperature',
+    'topP',
+    'topK',
+    'minP',
+    'repetitionPenalty',
+    'maxTokens',
+    'reasoningEffort',
+    'seed',
+  ]);
+  const validReasoningEffort = value.reasoningEffort === undefined
+    || value.reasoningEffort === 'off'
+    || value.reasoningEffort === 'auto'
+    || value.reasoningEffort === 'low'
+    || value.reasoningEffort === 'medium'
+    || value.reasoningEffort === 'high';
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || !isFiniteNumberInRange(value.temperature, 0, 2)
+    || !isFiniteNumberInRange(value.topP, 0, 1)
+    || (value.topK !== undefined && !isSafeIntegerInRange(value.topK, 0, 200))
+    || (value.minP !== undefined && !isFiniteNumberInRange(value.minP, 0, 1))
+    || (
+      value.repetitionPenalty !== undefined
+      && !isFiniteNumberInRange(value.repetitionPenalty, 0, 2)
+    )
+    || !isSafeIntegerInRange(value.maxTokens, 1, 8192)
+    || !(
+      value.seed === null
+      || isSafeIntegerInRange(value.seed, 0, 2_147_483_647)
+    )
+    || !validReasoningEffort
+  ) {
+    return null;
+  }
+
+  return {
+    temperature: value.temperature as number,
+    topP: value.topP as number,
+    topK: typeof value.topK === 'number' ? value.topK : undefined,
+    minP: typeof value.minP === 'number' ? value.minP : undefined,
+    repetitionPenalty: typeof value.repetitionPenalty === 'number'
+      ? value.repetitionPenalty
+      : undefined,
+    maxTokens: value.maxTokens as number,
+    reasoningEffort: typeof value.reasoningEffort === 'string'
+      ? value.reasoningEffort as GenerationParamsSnapshot['reasoningEffort']
+      : undefined,
+    seed: value.seed as number | null,
+  };
+}
+
+function parseBranchReplacementUserMessage({
+  value,
+  threadId,
+  targetUserMessageId,
+  targetUserCreatedAt,
+  modelId,
+}: {
+  value: unknown;
+  threadId: string;
+  targetUserMessageId: string;
+  targetUserCreatedAt: number;
+  modelId: string;
+}): ChatMessage | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const allowedKeys = new Set([
+    'id',
+    'role',
+    'kind',
+    'content',
+    'createdAt',
+    'state',
+    'modelId',
+    'attachments',
+    'contentParts',
+  ]);
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || value.id !== targetUserMessageId
+    || value.role !== 'user'
+    || value.kind !== 'message'
+    || typeof value.content !== 'string'
+    || value.content.length > 200_000
+    || value.createdAt !== targetUserCreatedAt
+    || value.state !== 'complete'
+    || value.modelId !== modelId
+    || (value.attachments != null && !Array.isArray(value.attachments))
+    || (value.contentParts != null && !Array.isArray(value.contentParts))
+  ) {
+    return null;
+  }
+
+  const candidate: ChatMessage = {
+    id: targetUserMessageId,
+    role: 'user',
+    kind: 'message',
+    content: value.content,
+    createdAt: targetUserCreatedAt,
+    state: 'complete',
+    modelId,
+    attachments: value.attachments as ChatMessage['attachments'],
+    contentParts: value.contentParts as ChatMessage['contentParts'],
+  };
+  const sanitized = sanitizeChatMessageForPersistence(candidate, threadId);
+  if (
+    sanitized.content !== sanitized.content.trim()
+    || (
+      sanitized.content.length === 0
+      && (sanitized.attachments?.length ?? 0) === 0
+    )
+    || !hasSameJsonShape(sanitized.attachments, value.attachments)
+    || !hasSameJsonShape(sanitized.contentParts, value.contentParts)
+  ) {
+    return null;
+  }
+
+  return sanitized;
+}
+
+function parseBranchInsertedModelSwitchMessage({
+  value,
+  targetUserCreatedAt,
+  modelId,
+}: {
+  value: unknown;
+  targetUserCreatedAt: number;
+  modelId: string;
+}): ChatMessage | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const allowedKeys = new Set([
+    'id',
+    'role',
+    'kind',
+    'content',
+    'createdAt',
+    'state',
+    'modelId',
+    'switchFromModelId',
+    'switchToModelId',
+  ]);
+  const id = readRequiredString(value.id);
+  const switchFromModelId = readRequiredString(value.switchFromModelId);
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || !id
+    || value.role !== 'system'
+    || value.kind !== 'model_switch'
+    || value.content !== ''
+    || value.createdAt !== targetUserCreatedAt
+    || value.state !== 'complete'
+    || value.modelId !== modelId
+    || !switchFromModelId
+    || switchFromModelId === modelId
+    || value.switchToModelId !== modelId
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    role: 'system',
+    kind: 'model_switch',
+    content: '',
+    createdAt: targetUserCreatedAt,
+    state: 'complete',
+    modelId,
+    switchFromModelId,
+    switchToModelId: modelId,
+  };
+}
+
+function parseChatBranchReplacementProgress({
+  value,
+  threadId,
+  modelId,
+}: {
+  value: unknown;
+  threadId: string;
+  modelId: string;
+}): ChatBranchReplacementProgress | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const allowedKeys = new Set([
+    'targetUserMessageId',
+    'targetUserCreatedAt',
+    'baseDurablePersistedAt',
+    'baseCommitRevision',
+    'replacementUserMessage',
+    'insertedModelSwitchMessage',
+    'paramsSnapshot',
+  ]);
+  const targetUserMessageId = readRequiredString(value.targetUserMessageId);
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || !targetUserMessageId
+    || !isNonNegativeSafeInteger(value.targetUserCreatedAt)
+    || !isNonNegativeSafeInteger(value.baseDurablePersistedAt)
+    || (
+      value.baseCommitRevision !== undefined
+      && !isNonNegativeSafeInteger(value.baseCommitRevision)
+    )
+  ) {
+    return null;
+  }
+
+  const replacementUserMessage = parseBranchReplacementUserMessage({
+    value: value.replacementUserMessage,
+    threadId,
+    targetUserMessageId,
+    targetUserCreatedAt: value.targetUserCreatedAt,
+    modelId,
+  });
+  const insertedModelSwitchMessage = value.insertedModelSwitchMessage === undefined
+    ? undefined
+    : parseBranchInsertedModelSwitchMessage({
+        value: value.insertedModelSwitchMessage,
+        targetUserCreatedAt: value.targetUserCreatedAt,
+        modelId,
+      });
+  const paramsSnapshot = parseBranchParamsSnapshot(value.paramsSnapshot);
+  if (
+    !replacementUserMessage
+    || !paramsSnapshot
+    || (value.insertedModelSwitchMessage !== undefined && !insertedModelSwitchMessage)
+    || insertedModelSwitchMessage?.id === targetUserMessageId
+  ) {
+    return null;
+  }
+
+  return {
+    targetUserMessageId,
+    targetUserCreatedAt: value.targetUserCreatedAt,
+    baseDurablePersistedAt: value.baseDurablePersistedAt,
+    baseCommitRevision: parseOptionalRevision(value.baseCommitRevision),
+    replacementUserMessage,
+    insertedModelSwitchMessage: insertedModelSwitchMessage ?? undefined,
+    paramsSnapshot,
+  };
+}
+
 export function parseChatStreamingProgressRecord(
   raw: string | null | undefined,
   expectedThreadId?: string,
@@ -704,6 +990,14 @@ export function parseChatStreamingProgressRecord(
   const regeneratesMessageId = value.regeneratesMessageId == null
     ? undefined
     : readRequiredString(value.regeneratesMessageId);
+  const hasBranchReplacement = Object.prototype.hasOwnProperty.call(value, 'branchReplacement');
+  const branchReplacement = !hasBranchReplacement || !threadId || !modelId
+    ? undefined
+    : parseChatBranchReplacementProgress({
+        value: value.branchReplacement,
+        threadId,
+        modelId,
+      });
   if (
     value.schemaVersion !== CHAT_STREAM_PROGRESS_SCHEMA_VERSION
     || !threadId
@@ -718,6 +1012,9 @@ export function parseChatStreamingProgressRecord(
     || !isNonNegativeSafeInteger(value.persistedAt)
     || !isNonNegativeSafeInteger(value.revision)
     || (value.regeneratesMessageId != null && !regeneratesMessageId)
+    || (hasBranchReplacement && !branchReplacement)
+    || (branchReplacement != null && regeneratesMessageId != null)
+    || branchReplacement?.insertedModelSwitchMessage?.id === messageId
   ) {
     return { ok: false, reason: 'invalid_shape' };
   }
@@ -737,6 +1034,7 @@ export function parseChatStreamingProgressRecord(
       persistedAt: value.persistedAt,
       revision: value.revision,
       regeneratesMessageId: regeneratesMessageId ?? undefined,
+      branchReplacement: branchReplacement ?? undefined,
     },
   };
 }
@@ -1045,6 +1343,7 @@ export function recoverChatThreadFromStreamingProgress(
   durablePersistedAt: number,
   progress: ChatStreamingProgressRecord,
   now = Date.now(),
+  durableCommitRevision?: number,
 ): ChatStreamingProgressRecoveryResult {
   if (progress.threadId !== thread.id || progress.modelId !== getThreadActiveModelId(thread)) {
     return { outcome: 'mismatched' };
@@ -1060,6 +1359,59 @@ export function recoverChatThreadFromStreamingProgress(
 
   if (progress.regeneratesMessageId === progress.messageId) {
     return { outcome: 'mismatched' };
+  }
+
+  if (progress.branchReplacement) {
+    const branch = progress.branchReplacement;
+    if (
+      branch.baseDurablePersistedAt !== durablePersistedAt
+      || branch.baseCommitRevision !== durableCommitRevision
+    ) {
+      return { outcome: 'stale' };
+    }
+
+    const targetIndex = thread.messages.findIndex(
+      (message) => message.id === branch.targetUserMessageId,
+    );
+    const target = targetIndex >= 0 ? thread.messages[targetIndex] : undefined;
+    if (
+      !target
+      || target.role !== 'user'
+      || target.kind === 'model_switch'
+      || target.createdAt !== branch.targetUserCreatedAt
+      || progress.createdAt < target.createdAt
+      || thread.messages.some((message) => message.id === progress.messageId)
+      || (
+        branch.insertedModelSwitchMessage != null
+        && thread.messages.some((message) => message.id === branch.insertedModelSwitchMessage?.id)
+      )
+    ) {
+      return { outcome: 'mismatched' };
+    }
+
+    const recoveredMessage: ChatMessage = {
+      id: progress.messageId,
+      role: 'assistant',
+      kind: 'message',
+      modelId: progress.modelId,
+      content: progress.content,
+      thoughtContent: progress.thoughtContent,
+      tokensPerSec: progress.tokensPerSec,
+      createdAt: progress.createdAt,
+      state: 'stopped',
+    };
+    const completedAt = Math.max(thread.updatedAt, progress.persistedAt, now);
+    const recoveredThread = materializeChatBranchReplacementThread({
+      thread,
+      plan: createChatBranchReplacementPlanFromProgress(branch, progress.modelId),
+      assistantMessage: recoveredMessage,
+      status: 'stopped',
+      updatedAt: completedAt,
+      lastGeneratedAt: completedAt,
+    });
+    return recoveredThread
+      ? { outcome: 'recovered', thread: recoveredThread }
+      : { outcome: 'mismatched' };
   }
 
   const matchingIndex = thread.messages.findIndex((message) => message.id === progress.messageId);

@@ -9,8 +9,11 @@ import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatSt
 import { AppState } from 'react-native';
 import { getAppStorage, storage } from '../../src/store/storage';
 import {
+  CHAT_PERSISTENCE_INDEX_KEY,
+  CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
   getChatStreamingProgressStorageKey,
   getChatThreadStorageKey,
+  readChatStreamingProgressRecord,
 } from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
@@ -192,8 +195,12 @@ describe('useChatSession', () => {
     (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
       temperature: 0.7,
       topP: 0.9,
+      topK: 40,
+      minP: 0.05,
+      repetitionPenalty: 1,
       maxTokens: modelId ? 1024 : 512,
       reasoningEffort: 'auto',
+      seed: null,
     }));
     (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({
@@ -260,6 +267,40 @@ describe('useChatSession', () => {
         status?: string;
         messages?: Array<Record<string, unknown>>;
       };
+    };
+  }
+
+  async function prepareTrailingModelSwitchRegeneration(
+    getSession: () => ReturnType<typeof useChatSession> | null,
+    prompt = 'Original model-switch prompt',
+  ) {
+    await act(async () => {
+      await getSession()?.appendUserMessage(prompt);
+    });
+
+    const completedThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessageId = completedThread.messages.find(
+      (message) => message.role === 'user',
+    )!.id;
+    await act(async () => {
+      useChatStore.getState().switchThreadModel(completedThread.id, 'author/model-q8');
+    });
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.READY,
+      activeModelId: 'author/model-q8',
+    });
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:1\u0001author/model-q8',
+    );
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.activeModelId).toBe('author/model-q8');
+    });
+
+    return {
+      threadId: completedThread.id,
+      targetUserMessageId,
+      rawThread: useChatStore.getState().threads[completedThread.id],
+      durableRecord: storage.getString(getChatThreadStorageKey(completedThread.id)),
     };
   }
 
@@ -2819,7 +2860,7 @@ describe('useChatSession', () => {
 
       await act(async () => {
         resolveCompletion?.();
-        await expect(sendPromise).rejects.toBe(privateStorageError);
+        await expect(sendPromise).resolves.toBeUndefined();
       });
     } finally {
       await act(async () => {
@@ -4937,6 +4978,699 @@ describe('useChatSession', () => {
 
     expect(didRegenerate).toBe(true);
     expect(useChatStore.getState().getActiveThread()?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+  });
+
+  it('regenerateLastResponse after trailing model_switch uses transient branch replacement', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+          resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    try {
+      await act(async () => {
+        regenerationPromise = getSession()?.regenerateLastResponse();
+      });
+      await waitFor(() => {
+        expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      });
+
+      expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+      expect(useChatStore.getState().getThread(prepared.threadId)).toEqual(expect.objectContaining({
+        status: 'generating',
+        messages: [
+          expect.objectContaining({
+            id: prepared.targetUserMessageId,
+            modelId: 'author/model-q8',
+          }),
+          expect.objectContaining({
+            role: 'assistant',
+            content: '',
+            state: 'streaming',
+            modelId: 'author/model-q8',
+          }),
+        ],
+      }));
+    } finally {
+      await act(async () => {
+        await getSession()?.stopGeneration();
+        resolvePromptCount?.();
+        await regenerationPromise;
+      });
+    }
+  });
+
+  it('regenerateLastResponse after trailing model_switch does not write durable history before first token', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({
+      temperature: 0.35,
+      topP: 0.8,
+      topK: 32,
+      minP: 0.02,
+      repetitionPenalty: 1.1,
+      maxTokens: 768,
+      reasoningEffort: 'medium',
+      seed: 7,
+    });
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writtenKeys: string[] = [];
+    appStorage.set = jest.fn(function capturePreOutputWrite(this: unknown, key: string, value: unknown) {
+      writtenKeys.push(key);
+      return originalSet.call(this, key, value);
+    });
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    try {
+      await act(async () => {
+        regenerationPromise = getSession()?.regenerateLastResponse();
+      });
+      await waitFor(() => {
+        expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      });
+
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+        prepared.durableRecord,
+      );
+      expect(useChatStore.getState().threads[prepared.threadId].paramsSnapshot.temperature).toBe(0.7);
+      expect(useChatStore.getState().getThread(prepared.threadId)?.paramsSnapshot).toEqual(
+        expect.objectContaining({
+          temperature: 0.35,
+          maxTokens: 768,
+          reasoningEffort: 'medium',
+        }),
+      );
+      expect(writtenKeys).not.toContain(getChatThreadStorageKey(prepared.threadId));
+      expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+      expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+    } finally {
+      appStorage.set = originalSet;
+      await act(async () => {
+        await getSession()?.stopGeneration();
+        resolvePromptCount?.();
+        await regenerationPromise;
+      });
+    }
+  });
+
+  it('stop during prompt preparation restores the previous model-switch branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    const originalMessageIds = prepared.rawThread.messages.map((message) => message.id);
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    const restored = useChatStore.getState().getActiveThread()!;
+    expect(restored.status).toBe('idle');
+    expect(restored.messages.map((message) => message.id)).toEqual(originalMessageIds);
+    expect(restored.messages[1]).toEqual(expect.objectContaining({
+      content: 'Hello back',
+      state: 'complete',
+    }));
+    expect(restored.messages.at(-1)?.kind).toBe('model_switch');
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await regenerationPromise;
+    });
+  });
+
+  it('prompt preparation error before first token restores the previous branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    const originalMessageIds = prepared.rawThread.messages.map((message) => message.id);
+    const promptError = new AppError(
+      'message_too_long',
+      'branch prompt preparation failed',
+    );
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    let didRejectGenerationCount = false;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        if (!didRejectGenerationCount) {
+          didRejectGenerationCount = true;
+          return Promise.reject(promptError);
+        }
+        return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+      },
+    );
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.regenerateLastResponse();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeTruthy();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.map(
+      (message) => message.id,
+    )).toEqual(originalMessageIds);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
+    expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+  });
+
+  it('partial output followed by stop commits the partial new branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolveCompletion: (() => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        onToken?.('Partial branch output');
+        resolveCompletion = () => resolve({ text: 'Partial branch output' });
+      }),
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.content).toBe(
+        'Partial branch output',
+      );
+    });
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    const stopped = useChatStore.getState().getActiveThread()!;
+    expect(stopped.messages).toHaveLength(2);
+    expect(stopped.messages[0]).toEqual(expect.objectContaining({
+      id: prepared.targetUserMessageId,
+      modelId: 'author/model-q8',
+    }));
+    expect(stopped.messages[1]).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial branch output',
+      state: 'stopped',
+      modelId: 'author/model-q8',
+    }));
+    expect(stopped.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+
+    await act(async () => {
+      resolveCompletion?.();
+      await regenerationPromise;
+    });
+  });
+
+  it('does not finalize a branch twice when the terminal durable write fails', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Recoverable terminal-write partial');
+        return { text: 'Recoverable terminal-write partial' };
+      },
+    );
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    let didFailTerminalWrite = false;
+    const threadWriteValues: string[] = [];
+    appStorage.set = jest.fn(function failOneTerminalWrite(this: unknown, key: string, value: unknown) {
+      if (key === getChatThreadStorageKey(prepared.threadId) && typeof value === 'string') {
+        threadWriteValues.push(value);
+        if (!didFailTerminalWrite && value.includes('Recoverable terminal-write partial')) {
+          didFailTerminalWrite = true;
+          throw new Error('simulated hook terminal write failure');
+        }
+      }
+      return originalSet.call(this, key, value);
+    });
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.regenerateLastResponse();
+        } catch (error) {
+          thrown = error;
+        }
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(thrown).toBeTruthy();
+    expect(didFailTerminalWrite).toBe(true);
+    expect(threadWriteValues.filter((value) => (
+      value.includes('Recoverable terminal-write partial')
+    ))).toHaveLength(1);
+    expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+    expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: 'Recoverable terminal-write partial',
+        state: 'streaming',
+      }),
+    );
+    expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+      prepared.durableRecord,
+    );
+    expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        content: 'Recoverable terminal-write partial',
+        branchReplacement: expect.any(Object),
+      }),
+    });
+  });
+
+  it('interrupts branch generation and preserves recovery state when stop persistence fails', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolveCompletion: (() => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        onToken?.('Recoverable failed-stop partial');
+        resolveCompletion = () => resolve({ text: 'Recoverable failed-stop partial' });
+      }),
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          branchReplacement: expect.any(Object),
+        }),
+      });
+    });
+
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const terminalWriteError = new Error('simulated stop terminal write failure');
+    const terminalThreadWrites: string[] = [];
+    let shouldFailTerminalWrite = true;
+    appStorage.set = jest.fn(function failStopTerminalWrite(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (key === getChatThreadStorageKey(prepared.threadId) && typeof value === 'string') {
+        terminalThreadWrites.push(value);
+        if (shouldFailTerminalWrite && value.includes('Recoverable failed-stop partial')) {
+          shouldFailTerminalWrite = false;
+          throw terminalWriteError;
+        }
+      }
+      return originalSet.call(this, key, value);
+    });
+    let stopError: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.stopGeneration();
+        } catch (error) {
+          stopError = error;
+        }
+      });
+
+      expect(stopError).toBe(terminalWriteError);
+      expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+      expect(terminalThreadWrites.filter((value) => (
+        value.includes('Recoverable failed-stop partial')
+      ))).toHaveLength(1);
+      expect(terminalThreadWrites.at(-1)).toBe(prepared.durableRecord);
+      expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+        expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          state: 'streaming',
+        }),
+      );
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+        prepared.durableRecord,
+      );
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          branchReplacement: expect.any(Object),
+        }),
+      });
+
+      await act(async () => {
+        resolveCompletion?.();
+        await regenerationPromise;
+      });
+
+      expect(terminalThreadWrites.filter((value) => (
+        value.includes('Recoverable failed-stop partial')
+      ))).toHaveLength(1);
+      expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+        prepared.durableRecord,
+      );
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId).ok).toBe(true);
+    } finally {
+      appStorage.set = originalSet;
+      resolveCompletion?.();
+      if (regenerationPromise) {
+        await regenerationPromise.catch(() => undefined);
+      }
+    }
+  });
+
+  it('edited earlier user message remains transient until recoverable output', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('First branch prompt');
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Second branch prompt');
+    });
+    const rawThread = useChatStore.getState().getActiveThread()!;
+    const rawMessages = rawThread.messages;
+    const targetUserMessageId = rawMessages.find((message) => message.role === 'user')!.id;
+    const durableRecord = storage.getString(getChatThreadStorageKey(rawThread.id));
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateFromUserMessage(
+        targetUserMessageId,
+        'Edited first branch prompt',
+      );
+    });
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    expect(useChatStore.getState().threads[rawThread.id]).toBe(rawThread);
+    expect(useChatStore.getState().threads[rawThread.id].messages).toBe(rawMessages);
+    expect(storage.getString(getChatThreadStorageKey(rawThread.id))).toBe(durableRecord);
+    expect(useChatStore.getState().getThread(rawThread.id)?.messages).toEqual([
+      expect.objectContaining({
+        id: targetUserMessageId,
+        content: 'Edited first branch prompt',
+      }),
+      expect.objectContaining({ role: 'assistant', state: 'streaming' }),
+    ]);
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      resolvePromptCount?.();
+      await regenerationPromise;
+    });
+  });
+
+  it('branch prompt uses edited user content and clears stale summary', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original summarized prompt');
+    });
+    const thread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessageId = thread.messages[0].id;
+    await act(async () => {
+      useChatStore.getState().setThreadSummary(thread.id, {
+        content: 'STALE SUMMARY MUST NOT ENTER THE PROMPT',
+        createdAt: Date.now(),
+        sourceMessageIds: thread.messages.map((message) => message.id),
+      });
+    });
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Edited summarized reply');
+        return { text: 'Edited summarized reply' };
+      },
+    );
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        targetUserMessageId,
+        'Edited summarized prompt',
+      );
+    });
+
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(completionMessages).toEqual([
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: 'Edited summarized prompt' },
+    ]);
+    expect(JSON.stringify(completionMessages)).not.toContain('STALE SUMMARY');
+    expect(useChatStore.getState().getActiveThread()?.summary).toBeUndefined();
+  });
+
+  it('prepared attachment resolution remains reused in branch regeneration', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original attached branch', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Later branch to discard', {
+        multimodalReadiness: readyVision,
+      });
+    });
+    const thread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = thread.messages.find((message) => message.attachments?.length)!;
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    performanceMonitor.clear();
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited attached branch',
+        { multimodalReadiness: readyVision },
+      );
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.map(([uri]) => uri)).toEqual([
+      copiedDraftImageAttachment.localUri,
+      copiedDraftImageAttachment.localUri,
+    ]);
+    expect(completionCall?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Edited attached branch',
+        mediaPaths: [copiedDraftImageAttachment.localUri],
+        attachments: [expect.objectContaining({ id: targetUserMessage.attachments?.[0]?.id })],
+      }),
+    ]));
+    expect(JSON.stringify(completionCall?.messages)).not.toContain('Later branch to discard');
+    expect(performanceMonitor.snapshot().events.some((event) => (
+      event.name === 'chat.prompt.total'
+      && event.meta?.attachmentLookups === 2
+    ))).toBe(true);
+  });
+
+  it('aborts attached branch regeneration when the thread model changes during preflight', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original attached race branch', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Later branch to preserve after abort');
+    });
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = originalThread.messages.find((message) => message.attachments?.length)!;
+    let releaseFileCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockClear()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseFileCheck = () => resolve({ exists: true, size: 123_456 });
+      }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (getGenerationParametersForModel as jest.Mock).mockClear();
+    let regenerationPromise: Promise<boolean> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited attached race branch',
+        { multimodalReadiness: readyVision },
+      );
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(releaseFileCheck).toEqual(expect.any(Function));
+    });
+
+    await act(async () => {
+      useChatStore.getState().switchThreadModel(originalThread.id, 'author/model-q8');
+    });
+    const switchedRawThread = useChatStore.getState().threads[originalThread.id];
+    const durableAfterSwitch = storage.getString(getChatThreadStorageKey(originalThread.id));
+
+    await act(async () => {
+      releaseFileCheck?.();
+      try {
+        await regenerationPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      message: 'The conversation changed while preparing regeneration. Try again.',
+    }));
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(getGenerationParametersForModel).not.toHaveBeenCalled();
+    expect(useChatStore.getState().threads[originalThread.id]).toBe(switchedRawThread);
+    expect(useChatStore.getState().getThread(originalThread.id)).toBe(switchedRawThread);
+    expect(switchedRawThread.activeModelId).toBe('author/model-q8');
+    expect(switchedRawThread.status).toBe('idle');
+    expect(storage.getString(getChatThreadStorageKey(originalThread.id))).toBe(durableAfterSwitch);
+    expect(storage.getString(getChatStreamingProgressStorageKey(originalThread.id))).toBeUndefined();
+  });
+
+  it('aborts attached branch regeneration when the active chat changes during preflight', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original attached active-chat race branch', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Later branch to preserve after active-chat abort');
+    });
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = originalThread.messages.find((message) => message.attachments?.length)!;
+    const durableBeforeSwitch = storage.getString(getChatThreadStorageKey(originalThread.id));
+    let releaseFileCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockClear()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseFileCheck = () => resolve({ exists: true, size: 123_456 });
+      }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (getGenerationParametersForModel as jest.Mock).mockClear();
+    let regenerationPromise: Promise<boolean> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited attached active-chat race branch',
+        { multimodalReadiness: readyVision },
+      );
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(releaseFileCheck).toEqual(expect.any(Function));
+    });
+
+    await act(async () => {
+      getSession()?.startNewChat();
+    });
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+
+    await act(async () => {
+      releaseFileCheck?.();
+      try {
+        await regenerationPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      message: 'The conversation changed while preparing regeneration. Try again.',
+    }));
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(getGenerationParametersForModel).not.toHaveBeenCalled();
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(useChatStore.getState().threads[originalThread.id]).toBe(originalThread);
+    expect(useChatStore.getState().getThread(originalThread.id)).toBe(originalThread);
+    expect(storage.getString(getChatThreadStorageKey(originalThread.id))).toBe(durableBeforeSwitch);
+    expect(storage.getString(getChatStreamingProgressStorageKey(originalThread.id))).toBeUndefined();
   });
 
   it('rebuilds the last turn instead of leaving a trailing model switch after regenerate', async () => {

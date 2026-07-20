@@ -1815,6 +1815,7 @@ export const useChatSession = () => {
       }
     };
 
+    let terminalFinalizationAttempted = false;
     const finalizeBufferedAssistantTurn = (
       finalization: AssistantTurnFinalization,
       options?: { allowStopped?: boolean },
@@ -1830,6 +1831,7 @@ export const useChatSession = () => {
       const bufferedThoughtContent = presentation.thoughtContent.length > 0
         ? presentation.thoughtContent
         : null;
+      terminalFinalizationAttempted = true;
       return finalizeAssistantTurn(threadId, assistantMessageId, {
         ...finalization,
         content: finalization.content ?? presentation.finalContent,
@@ -2303,7 +2305,9 @@ export const useChatSession = () => {
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          if (!terminalFinalizationAttempted) {
+            finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          }
           recordCompletionStats('stopped');
 
           sendOutcomeNotificationOnce('interrupted');
@@ -2421,7 +2425,9 @@ export const useChatSession = () => {
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          if (!terminalFinalizationAttempted) {
+            finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          }
           recordCompletionStats('stopped');
 
           sendOutcomeNotificationOnce('interrupted');
@@ -2457,7 +2463,9 @@ export const useChatSession = () => {
       endPromptPreparationSpan?.(generationState.stopRequested ? 'cancelled' : 'error');
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          if (!terminalFinalizationAttempted) {
+            finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          }
           recordCompletionStats('stopped');
 
           sendOutcomeNotificationOnce('interrupted');
@@ -2468,11 +2476,13 @@ export const useChatSession = () => {
       const message = resolvePersistedAssistantErrorMessage(error);
       const userFacingError = resolveUserFacingGenerationError(error, message);
 
-      finalizeBufferedAssistantTurn({
-        outcome: 'error',
-        errorCode: 'generation_failed',
-        errorMessage: message,
-      });
+      if (!terminalFinalizationAttempted) {
+        finalizeBufferedAssistantTurn({
+          outcome: 'error',
+          errorCode: 'generation_failed',
+          errorMessage: message,
+        });
+      }
       recordCompletionStats('error');
 
       sendOutcomeNotificationOnce('error');
@@ -2679,14 +2689,27 @@ export const useChatSession = () => {
     }
 
     generation.stopRequested = true;
-    if (generation.finalizeAssistantTurn) {
-      generation.finalizeAssistantTurn();
-    } else {
-      useChatStore.getState().finalizeAssistantTurn(
-        generation.threadId,
-        generation.messageId,
-        { outcome: 'stopped' },
-      );
+    let firstStopError: unknown;
+    let hasStopError = false;
+    const captureFirstStopError = (error: unknown) => {
+      if (!hasStopError) {
+        firstStopError = error;
+        hasStopError = true;
+      }
+    };
+
+    try {
+      if (generation.finalizeAssistantTurn) {
+        generation.finalizeAssistantTurn();
+      } else {
+        useChatStore.getState().finalizeAssistantTurn(
+          generation.threadId,
+          generation.messageId,
+          { outcome: 'stopped' },
+        );
+      }
+    } catch (error) {
+      captureFirstStopError(error);
     }
 
     try {
@@ -2701,10 +2724,20 @@ export const useChatSession = () => {
         }
         await llmEngineService.stopCompletion();
       }
-    } finally {
+    } catch (error) {
+      captureFirstStopError(error);
+    }
+
+    try {
       if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
+    } catch (error) {
+      captureFirstStopError(error);
+    }
+
+    if (hasStopError) {
+      throw firstStopError;
     }
   }, []);
 
@@ -2742,24 +2775,34 @@ export const useChatSession = () => {
       attachmentResolution.resolveFile,
     );
     attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
-    const syncedThread = syncThreadParametersCallback(activeThread);
+    const currentState = useChatStore.getState();
+    const currentThread = currentState.threads[activeThread.id];
+    if (
+      currentState.activeThreadId !== activeThread.id
+      || currentThread !== activeThread
+      || getThreadActiveModelId(currentThread) !== activeModelId
+    ) {
+      throw new Error('The conversation changed while preparing regeneration. Try again.');
+    }
+    const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
 
     const assistantMessageId = replaceBranchFromUserMessage(
-      syncedThread.id,
+      activeThread.id,
       messageId,
       normalizedContent,
+      branchParamsSnapshot,
     );
     if (!assistantMessageId) {
       throw new Error('The selected message could not be regenerated.');
     }
 
-    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+    await runAssistantCompletion(activeThread.id, assistantMessageId, {
       multimodalReadiness: effectiveMultimodalReadiness,
       attachmentResolution,
     });
 
     return true;
-  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParametersCallback]);
+  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
 
   const regenerateLastResponse = useCallback(async () => {
     if (!activeThread) {
@@ -2808,11 +2851,20 @@ export const useChatSession = () => {
       attachmentResolution.resolveFile,
     );
     attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
-    const syncedThread = syncThreadParametersCallback(activeThread);
+    const currentState = useChatStore.getState();
+    const currentThread = currentState.threads[activeThread.id];
+    if (
+      currentState.activeThreadId !== activeThread.id
+      || currentThread !== activeThread
+      || getThreadActiveModelId(currentThread) !== activeModelId
+    ) {
+      throw new Error('The conversation changed while preparing regeneration. Try again.');
+    }
+    const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
 
     const lastAssistantMessageIndex = (() => {
-      for (let index = syncedThread.messages.length - 1; index >= 0; index -= 1) {
-        if (syncedThread.messages[index]?.role === 'assistant') {
+      for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+        if (activeThread.messages[index]?.role === 'assistant') {
           return index;
         }
       }
@@ -2821,19 +2873,20 @@ export const useChatSession = () => {
     })();
     const canReplaceCurrentTurnAssistant =
       lastAssistantMessageIndex > lastUserMessageIndex &&
-      lastAssistantMessageIndex === syncedThread.messages.length - 1;
+      lastAssistantMessageIndex === activeThread.messages.length - 1;
 
     const regenerateFromLastUserWithPreparedAttachments = async () => {
       const assistantMessageId = replaceBranchFromUserMessage(
-        syncedThread.id,
+        activeThread.id,
         lastUserMessage.id,
         lastUserMessage.content.trim(),
+        branchParamsSnapshot,
       );
       if (!assistantMessageId) {
         throw new Error('The selected message could not be regenerated.');
       }
 
-      await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+      await runAssistantCompletion(activeThread.id, assistantMessageId, {
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
       });
@@ -2845,6 +2898,7 @@ export const useChatSession = () => {
       return regenerateFromLastUserWithPreparedAttachments();
     }
 
+    const syncedThread = syncThreadParametersCallback(activeThread);
     const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
     if (!assistantMessageId) {
       return regenerateFromLastUserWithPreparedAttachments();

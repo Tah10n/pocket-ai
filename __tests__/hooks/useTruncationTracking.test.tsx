@@ -5,6 +5,13 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { useTruncationTracking } from '../../src/hooks/useTruncationTracking';
+import { flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
+import {
+  CHAT_PERSISTENCE_SCHEMA_VERSION,
+  writeChatPersistenceIndex,
+  writeChatThreadRecord,
+} from '../../src/store/chatPersistence';
+import { storage } from '../../src/store/storage';
 import { type ChatThread, type LlmChatMessage } from '../../src/types/chat';
 import {
   buildInferenceWindowWithAccurateTokenCounts,
@@ -121,6 +128,29 @@ describe('useTruncationTracking', () => {
     };
   }
 
+  function renderStoreHookHarness(threadId: string, activeContextTokenBudget: number) {
+    let currentValue: ReturnType<typeof useTruncationTracking> | null = null;
+
+    const Harness = () => {
+      useChatStore((state) => state.streamingRevision);
+      useChatStore((state) => state.threads[threadId]);
+      const activeThread = useChatStore.getState().getThread(threadId);
+      const value = useTruncationTracking(activeThread, activeContextTokenBudget);
+
+      useEffect(() => {
+        currentValue = value;
+      }, [value]);
+
+      return null;
+    };
+
+    render(<Harness />);
+
+    return {
+      getState: () => currentValue,
+    };
+  }
+
   function getExpectedTruncationState(thread: ChatThread, budget: number) {
     const modelId = thread.activeModelId ?? thread.modelId;
     const model = getMockModel(modelId);
@@ -140,6 +170,9 @@ describe('useTruncationTracking', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    flushPendingChatPersistenceWrites('background');
+    useChatStore.setState({ threads: {}, activeThreadId: null, streamingRevision: 0 });
+    storage.getAllKeys().forEach((key) => storage.remove(key));
     (buildInferenceWindowWithAccurateTokenCounts as jest.Mock)
       .mockReset()
       .mockRejectedValue({ code: 'engine_busy' });
@@ -404,5 +437,64 @@ describe('useTruncationTracking', () => {
     const performanceSnapshot = performanceMonitor.snapshot();
     expect(performanceSnapshot.counters['chat.stream.historyTraversal'] ?? 0).toBe(0);
     expect(performanceSnapshot.events.filter((event) => event.name === 'chat.prompt.window.heuristic')).toHaveLength(2);
+  });
+
+  it('keeps actual 1000-message branch replacement patches off the truncation traversal path', async () => {
+    const getWindow = getThreadInferenceWindow as jest.MockedFunction<typeof getThreadInferenceWindow>;
+    const durableThread = buildPerformanceThread({ historicalMessageCount: 1000 });
+    writeChatThreadRecord(storage, durableThread, durableThread.updatedAt);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: durableThread.id,
+      threadIds: [durableThread.id],
+      updatedAt: durableThread.updatedAt,
+    });
+    useChatStore.setState({
+      threads: { [durableThread.id]: durableThread },
+      activeThreadId: durableThread.id,
+    });
+    const hook = renderStoreHookHarness(durableThread.id, 4096);
+
+    await waitFor(() => {
+      expect(hook.getState()).not.toBeNull();
+      expect(getWindow).toHaveBeenCalled();
+    });
+    const callsAfterIdle = getWindow.mock.calls.length;
+    performanceMonitor.clear();
+    let assistantId: string | null = null;
+
+    act(() => {
+      assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+        durableThread.id,
+        'message-history-998',
+        'Edited final user turn for branch performance coverage',
+      );
+    });
+    expect(assistantId).toBeTruthy();
+    expect(useChatStore.getState().getThread(durableThread.id)?.status).toBe('generating');
+    expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle);
+
+    for (let patchIndex = 1; patchIndex <= 100; patchIndex += 1) {
+      act(() => {
+        useChatStore.getState().patchAssistantMessage(durableThread.id, assistantId!, {
+          content: `Actual branch patch ${patchIndex}`,
+        });
+      });
+    }
+
+    expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle);
+    expect(performanceMonitor.snapshot().counters['chat.stream.historyTraversal'] ?? 0).toBe(0);
+
+    act(() => {
+      expect(useChatStore.getState().finalizeAssistantTurn(durableThread.id, assistantId!, {
+        outcome: 'success',
+        content: 'Actual branch terminal response',
+      })).toBe(true);
+    });
+
+    await waitFor(() => {
+      expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle + 1);
+    });
+    expect(performanceMonitor.snapshot().counters['chat.stream.historyTraversal'] ?? 0).toBe(0);
   });
 });

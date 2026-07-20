@@ -91,6 +91,119 @@ function buildProgress(
   };
 }
 
+function buildBranchRecoveryThread(id: string): ChatThread {
+  return {
+    ...buildThread(id),
+    activeModelId: 'author/model-q8',
+    messages: [
+      {
+        id: `${id}-prefix-user`,
+        role: 'user',
+        content: 'Prefix prompt',
+        createdAt: 1,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-prefix-assistant`,
+        role: 'assistant',
+        content: 'Prefix answer',
+        createdAt: 2,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-target-user`,
+        role: 'user',
+        content: 'Original target prompt',
+        createdAt: 3,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-old-assistant`,
+        role: 'assistant',
+        content: 'Old answer',
+        createdAt: 4,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-trailing-switch`,
+        role: 'system',
+        content: '',
+        createdAt: 5,
+        state: 'complete',
+        kind: 'model_switch',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      },
+    ],
+    summary: {
+      content: 'Stale branch summary',
+      createdAt: 5,
+      sourceMessageIds: [`${id}-target-user`, `${id}-old-assistant`],
+    },
+    updatedAt: 5,
+    status: 'idle',
+  };
+}
+
+function buildBranchProgress(
+  threadId: string,
+  overrides: Partial<ChatStreamingProgressRecord> = {},
+): ChatStreamingProgressRecord {
+  return buildProgress(threadId, {
+    messageId: `${threadId}-replacement-assistant`,
+    modelId: 'author/model-q8',
+    createdAt: 6,
+    persistedAt: 120,
+    regeneratesMessageId: undefined,
+    branchReplacement: {
+      targetUserMessageId: `${threadId}-target-user`,
+      targetUserCreatedAt: 3,
+      baseDurablePersistedAt: 100,
+      baseCommitRevision: 7,
+      replacementUserMessage: {
+        id: `${threadId}-target-user`,
+        role: 'user',
+        kind: 'message',
+        content: 'Edited target prompt',
+        createdAt: 3,
+        state: 'complete',
+        modelId: 'author/model-q8',
+      },
+      insertedModelSwitchMessage: {
+        id: `${threadId}-replacement-switch`,
+        role: 'system',
+        kind: 'model_switch',
+        content: '',
+        createdAt: 3,
+        state: 'complete',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      },
+      paramsSnapshot: {
+        temperature: 0.4,
+        topP: 0.8,
+        topK: 32,
+        minP: 0.05,
+        repetitionPenalty: 1.1,
+        maxTokens: 768,
+        reasoningEffort: 'medium',
+        seed: 42,
+      },
+    },
+    ...overrides,
+  });
+}
+
 describe('chatPersistence', () => {
   beforeEach(() => {
     storage.getAllKeys().forEach((key) => storage.remove(key));
@@ -141,6 +254,279 @@ describe('chatPersistence', () => {
     expect(parseChatStreamingProgressRecord('{broken', threadId)).toEqual({
       ok: false,
       reason: 'invalid_json',
+    });
+  });
+
+  it('parses valid branch progress without changing the progress schema version', () => {
+    const progress = buildBranchProgress('thread-valid-branch-progress');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify(progress), progress.threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+    expect(progress.schemaVersion).toBe(CHAT_STREAM_PROGRESS_SCHEMA_VERSION);
+  });
+
+  it('rejects malformed branch progress instead of downgrading it to append recovery', () => {
+    const progress = buildBranchProgress('thread-malformed-branch-progress');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: null,
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        baseCommitRevision: null,
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        insertedModelSwitchMessage: null,
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        paramsSnapshot: {
+          ...progress.branchReplacement?.paramsSnapshot,
+          topK: null,
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        baseDurablePersistedAt: -1,
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        unexpectedOldTail: ['old-1', 'old-2'],
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects noncanonical branch generation parameters instead of repairing corrupt progress', () => {
+    const progress = buildBranchProgress('thread-invalid-branch-params');
+    const validParams = progress.branchReplacement!.paramsSnapshot;
+    const invalidParams: Array<[string, Record<string, unknown>]> = [
+      ['temperature below range', { ...validParams, temperature: -0.01 }],
+      ['temperature above range', { ...validParams, temperature: 2.01 }],
+      ['topP below range', { ...validParams, topP: -0.01 }],
+      ['topP above range', { ...validParams, topP: 1.01 }],
+      ['fractional topK', { ...validParams, topK: 12.5 }],
+      ['topK above range', { ...validParams, topK: 201 }],
+      ['minP below range', { ...validParams, minP: -0.01 }],
+      ['minP above range', { ...validParams, minP: 1.01 }],
+      ['repetition penalty below range', { ...validParams, repetitionPenalty: -0.01 }],
+      ['repetition penalty above range', { ...validParams, repetitionPenalty: 2.01 }],
+      ['fractional maxTokens', { ...validParams, maxTokens: 768.5 }],
+      ['maxTokens below range', { ...validParams, maxTokens: 0 }],
+      ['maxTokens above range', { ...validParams, maxTokens: 8193 }],
+      ['negative seed', { ...validParams, seed: -1 }],
+      ['fractional seed', { ...validParams, seed: 42.5 }],
+      ['seed above range', { ...validParams, seed: 2_147_483_648 }],
+    ];
+
+    invalidParams.forEach(([description, paramsSnapshot]) => {
+      const result = parseChatStreamingProgressRecord(JSON.stringify({
+        ...progress,
+        branchReplacement: {
+          ...progress.branchReplacement,
+          paramsSnapshot,
+        },
+      }), progress.threadId);
+
+      expect([description, result]).toEqual([
+        description,
+        { ok: false, reason: 'invalid_shape' },
+      ]);
+    });
+  });
+
+  it('rejects a branch replacement user with an invalid role', () => {
+    const progress = buildBranchProgress('thread-invalid-branch-user-role');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        replacementUserMessage: {
+          ...progress.branchReplacement?.replacementUserMessage,
+          role: 'assistant',
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects an impossible empty branch replacement user', () => {
+    const progress = buildBranchProgress('thread-invalid-empty-branch-user');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        replacementUserMessage: {
+          ...progress.branchReplacement?.replacementUserMessage,
+          content: '   ',
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects an invalid branch model-switch shape', () => {
+    const progress = buildBranchProgress('thread-invalid-branch-switch');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        insertedModelSwitchMessage: {
+          ...progress.branchReplacement?.insertedModelSwitchMessage,
+          switchFromModelId: 'author/model-q8',
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects a branch model-switch id that collides with the replacement assistant id', () => {
+    const progress = buildBranchProgress('thread-duplicate-branch-message-id');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        insertedModelSwitchMessage: {
+          ...progress.branchReplacement?.insertedModelSwitchMessage,
+          id: progress.messageId,
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects branch recovery when the target user is missing', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-missing-target');
+    const progress = buildBranchProgress(thread.id);
+
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...thread,
+        messages: thread.messages.filter(
+          (message) => message.id !== `${thread.id}-target-user`,
+        ),
+      },
+      100,
+      progress,
+      130,
+      7,
+    )).toEqual({ outcome: 'mismatched' });
+  });
+
+  it('rejects branch recovery for a stale base persistedAt', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-stale-base');
+    const progress = buildBranchProgress(thread.id);
+
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      101,
+      progress,
+      130,
+      7,
+    )).toEqual({ outcome: 'stale' });
+  });
+
+  it('rejects branch recovery for a mismatched commit revision', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-stale-revision');
+    const progress = buildBranchProgress(thread.id);
+
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      100,
+      progress,
+      130,
+      8,
+    )).toEqual({ outcome: 'stale' });
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      100,
+      {
+        ...progress,
+        branchReplacement: {
+          ...progress.branchReplacement!,
+          baseCommitRevision: undefined,
+        },
+      },
+      130,
+      7,
+    )).toEqual({ outcome: 'stale' });
+  });
+
+  it('rejects corrupt attachment metadata in branch progress', () => {
+    const progress = buildBranchProgress('thread-branch-corrupt-attachment');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        replacementUserMessage: {
+          ...progress.branchReplacement?.replacementUserMessage,
+          attachments: [{
+            id: 'corrupt-attachment',
+            kind: 'image',
+            localUri: '../outside-private-storage.jpg',
+          }],
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('keeps old progress records without branch metadata backward compatible', () => {
+    const progress = buildProgress('thread-legacy-progress-without-branch');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify(progress), progress.threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+    expect(parseChatStreamingProgressRecord(
+      JSON.stringify(progress),
+      progress.threadId,
+    ).ok).toBe(true);
+  });
+
+  it('materializes valid branch recovery through the canonical branch builder', () => {
+    const thread = buildBranchRecoveryThread('thread-valid-branch-recovery');
+    const progress = buildBranchProgress(thread.id);
+
+    const recovery = recoverChatThreadFromStreamingProgress(thread, 100, progress, 130, 7);
+
+    expect(recovery).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        activeModelId: 'author/model-q8',
+        paramsSnapshot: progress.branchReplacement?.paramsSnapshot,
+        summary: undefined,
+        status: 'stopped',
+        messages: [
+          thread.messages[0],
+          thread.messages[1],
+          progress.branchReplacement?.insertedModelSwitchMessage,
+          progress.branchReplacement?.replacementUserMessage,
+          expect.objectContaining({
+            id: progress.messageId,
+            content: progress.content,
+            thoughtContent: progress.thoughtContent,
+            state: 'stopped',
+          }),
+        ],
+      }),
     });
   });
 

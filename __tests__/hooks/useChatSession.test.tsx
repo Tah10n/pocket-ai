@@ -35,6 +35,7 @@ import {
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/multimodal';
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
@@ -152,6 +153,8 @@ describe('useChatSession', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(true);
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',
@@ -469,6 +472,8 @@ describe('useChatSession', () => {
     expect(generationCountCalls.some(([call]) => (
       call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
     ))).toBe(false);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-image-1.jpg');
   });
 
   it('processes copied document drafts into persisted attachments and text content parts for inference', async () => {
@@ -543,7 +548,7 @@ describe('useChatSession', () => {
     );
   });
 
-  it('revalidates retained attachments before completion and recounts changed final payloads', async () => {
+  it('resolves each stable retained attachment URI once and reuses the prepared payload for completion', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
       modelId: 'author/model-q4',
@@ -568,26 +573,18 @@ describe('useChatSession', () => {
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri.includes('draft-image-1.jpg')) {
         retainedImageChecks += 1;
-        return { exists: retainedImageChecks === 1, size: 123_456 };
       }
 
       return { exists: true, size: 123_456 };
     });
     const tokenCountSnapshots: Array<{
       attachmentChecks: number;
-      signature: string;
       mediaPaths: string[];
     }> = [];
-    const toTokenCountSignature = (messages: any[]) => JSON.stringify(messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      mediaPaths: message.mediaPaths ?? [],
-    })));
     (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
       async ({ messages }: { messages: any[] }) => {
         tokenCountSnapshots.push({
           attachmentChecks: retainedImageChecks,
-          signature: toTokenCountSignature(messages),
           mediaPaths: messages.flatMap((message) => message.mediaPaths ?? []),
         });
         return messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100;
@@ -606,19 +603,28 @@ describe('useChatSession', () => {
       call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
     ));
 
-    expect(retainedImageChecks).toBe(2);
-    expect(completionMediaPaths).toEqual([]);
+    expect(retainedImageChecks).toBe(1);
+    expect(completionMediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
     expect(mediaTokenCountCalls.length).toBeGreaterThan(0);
-    const finalRecountSnapshots = tokenCountSnapshots.filter((snapshot) => (
-      snapshot.attachmentChecks >= 2
-      && snapshot.signature === toTokenCountSignature(completionCall.messages)
-    ));
-    expect(finalRecountSnapshots).toHaveLength(1);
-    expect(finalRecountSnapshots[0]?.mediaPaths).toEqual([]);
+    expect(tokenCountSnapshots.some((snapshot) => (
+      snapshot.mediaPaths.join('|') === completionMediaPaths.join('|')
+    ))).toBe(true);
+    const performanceSnapshot = performanceMonitor.snapshot();
+    expect(performanceSnapshot.events.map((event) => event.name)).toEqual(expect.arrayContaining([
+      'chat.prompt.total',
+      'chat.prompt.attachments',
+      'chat.prompt.tokenize',
+      'chat.prompt.finalize',
+    ]));
+    expect(performanceSnapshot.events.some((event) => (
+      event.name === 'chat.prompt.total'
+      && event.meta?.attachmentLookups === 1
+    ))).toBe(true);
+    expect(JSON.stringify(performanceSnapshot)).not.toContain('test-dir/chat-attachments');
     expect(completionCall?.params.n_predict).toBe(1024);
   });
 
-  it('does not final-recount or complete when stopped during retained attachment revalidation', async () => {
+  it('stops attachment preparation without starting further tokenizer or completion work', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
       modelId: 'author/model-q4',
@@ -640,35 +646,22 @@ describe('useChatSession', () => {
 
     let retainedImageChecks = 0;
     let stopPromise: Promise<void> | undefined;
+    let tokenizerCallsAtStop = 0;
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri.includes('draft-image-1.jpg')) {
         retainedImageChecks += 1;
-        if (retainedImageChecks === 2) {
-          (llmEngineService.getState as jest.Mock).mockReturnValue({
-            status: EngineStatus.IDLE,
-            activeModelId: 'author/model-q4',
-          });
-          stopPromise = getSession()?.stopGeneration();
-        }
-        return { exists: retainedImageChecks === 1, size: 123_456 };
+        tokenizerCallsAtStop = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+        (llmEngineService.getState as jest.Mock).mockReturnValue({
+          status: EngineStatus.IDLE,
+          activeModelId: 'author/model-q4',
+        });
+        stopPromise = getSession()?.stopGeneration();
+        await stopPromise;
+        return { exists: true, size: 123_456 };
       }
 
       return { exists: true, size: 123_456 };
     });
-    const tokenCountSnapshots: Array<{
-      attachmentChecks: number;
-      mediaPaths: string[];
-    }> = [];
-    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
-      async ({ messages }: { messages: any[] }) => {
-        tokenCountSnapshots.push({
-          attachmentChecks: retainedImageChecks,
-          mediaPaths: messages.flatMap((message) => message.mediaPaths ?? []),
-        });
-        return messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100;
-      },
-    );
-
     await act(async () => {
       await getSession()?.appendUserMessage('Follow up using the same image', {
         multimodalReadiness: { ...readyVision, checkedAt: 2 },
@@ -676,12 +669,10 @@ describe('useChatSession', () => {
       await stopPromise;
     });
 
-    expect(retainedImageChecks).toBe(2);
+    expect(retainedImageChecks).toBe(1);
     expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(tokenizerCallsAtStop);
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
-    expect(tokenCountSnapshots.filter((snapshot) => (
-      snapshot.attachmentChecks >= 2 && snapshot.mediaPaths.length === 0
-    ))).toHaveLength(0);
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
   });
 
@@ -2992,6 +2983,7 @@ describe('useChatSession', () => {
 
     const replaceLastAssistantSpy = jest.spyOn(useChatStore.getState(), 'replaceLastAssistantMessage');
     const getRegenerateSession = renderHookHarness();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
     (llmEngineService.chatCompletion as jest.Mock).mockClear();
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
@@ -3033,6 +3025,8 @@ describe('useChatSession', () => {
           ]),
         }),
       );
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(copiedDraftImageAttachment.localUri);
     } finally {
       replaceLastAssistantSpy.mockRestore();
     }

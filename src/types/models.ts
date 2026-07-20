@@ -273,11 +273,41 @@ export type EngineLifecycleEvent =
   | 'context_operation_unload_timeout'
   | 'active_completion_unload_timeout';
 
+export type EngineModelInitProfileSource =
+  | 'requested'
+  | 'conservative_probe'
+  | 'autotune'
+  | 'last_good'
+  | 'oom_retry'
+  | 'cpu_fallback'
+  | 'speculative_fallback'
+  | 'backend_discovery';
+
+export type EngineModelInitFailureCategory =
+  | 'out_of_memory'
+  | 'backend_unavailable'
+  | 'invalid_configuration'
+  | 'model_incompatible'
+  | 'cancelled'
+  | 'native_error'
+  | 'known_oom_upper_bound'
+  | 'attempt_limit';
+
 export type EngineBackendInitAttempt = {
   candidate: 'npu' | 'gpu' | 'cpu';
   nGpuLayers: number;
   devices?: string[];
+  contextSize: number;
+  nBatch?: number;
+  nUbatch?: number;
+  cacheTypeK: string;
+  cacheTypeV: string;
+  speculativeEnabled: boolean;
+  profileSource: EngineModelInitProfileSource;
+  probableOom: boolean;
+  durationMs: number;
   outcome: 'success' | 'error' | 'skipped';
+  failureCategory?: EngineModelInitFailureCategory;
   actualGpu?: boolean;
   reasonNoGPU?: string;
   error?: string;

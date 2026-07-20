@@ -4154,6 +4154,88 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
   });
 
+  it('emits complete sanitized model.init.attempt telemetry for one MTP fallback', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 2048,
+      backendPolicy: 'cpu',
+      gpuLayers: 0,
+      kvCacheType: 'f16',
+      nBatch: 64,
+      nUbatch: 32,
+    });
+    const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+      if (options?.speculative) {
+        throw new Error('MTP init failed at C:\\Users\\tester\\Models\\private-model.gguf');
+      }
+      return baseInitImplementation?.(options);
+    });
+
+    performanceMonitor.setEnabled(true);
+    let attemptEvents: ReturnType<typeof performanceMonitor.snapshot>['events'] = [];
+    try {
+      await llmEngineService.load('test/model', { forceReload: true });
+      attemptEvents = performanceMonitor.snapshot().events
+        .filter((event) => event.name === 'model.init.attempt');
+    } finally {
+      performanceMonitor.setEnabled(false);
+    }
+
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
+    expect(attemptEvents).toHaveLength(2);
+    expect(attemptEvents[0]).toEqual(expect.objectContaining({
+      type: 'span',
+      durationMs: expect.any(Number),
+      meta: expect.objectContaining({
+        modelId: 'test/model',
+        backendMode: 'cpu',
+        gpuLayers: 0,
+        deviceSelection: [],
+        contextSize: 2048,
+        batch: 64,
+        ubatch: 32,
+        kvCacheTypeK: 'f16',
+        kvCacheTypeV: 'f16',
+        speculativeEnabled: true,
+        profileSource: 'requested',
+        probableOom: false,
+        outcome: 'error',
+        failureCategory: 'native_error',
+        durationMs: expect.any(Number),
+      }),
+    }));
+    expect(attemptEvents[1]).toEqual(expect.objectContaining({
+      type: 'span',
+      durationMs: expect.any(Number),
+      meta: expect.objectContaining({
+        speculativeEnabled: false,
+        profileSource: 'speculative_fallback',
+        probableOom: false,
+        outcome: 'success',
+        durationMs: expect.any(Number),
+      }),
+    }));
+    expect(JSON.stringify(attemptEvents)).not.toContain('C:\\Users\\tester');
+    expect(JSON.stringify(attemptEvents)).not.toContain('private-model.gguf');
+
+    expect(llmEngineService.getState().diagnostics?.backendInitAttempts).toEqual([
+      expect.objectContaining({
+        candidate: 'cpu',
+        speculativeEnabled: true,
+        profileSource: 'requested',
+        outcome: 'error',
+        failureCategory: 'native_error',
+      }),
+      expect.objectContaining({
+        candidate: 'cpu',
+        speculativeEnabled: false,
+        profileSource: 'speculative_fallback',
+        outcome: 'success',
+      }),
+    ]);
+  });
+
   it('retries a pre-stream MTP completion once with speculative decoding disabled', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
     await llmEngineService.load('test/model', { forceReload: true });
@@ -4632,6 +4714,36 @@ describe('LLMEngineService', () => {
         expect.objectContaining({ candidate: 'gpu', nGpuLayers: 3, outcome: 'success', actualGpu: true }),
       ]),
     }));
+  });
+
+  it('does not retry a larger automatic GPU profile after the conservative probe and safer candidates OOM', async () => {
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: null,
+      kvCacheType: 'f16',
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.architecture': 'llama',
+      'general.type': 'model',
+      'llama.block_count': 12,
+      'llama.attention.head_count': 8,
+      'llama.embedding_length': 2048,
+    });
+    const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+      const layers = options?.n_gpu_layers ?? 0;
+      if (layers > 0) {
+        throw new Error(`GPU OOM at ${layers}`);
+      }
+      return baseInitImplementation?.(options);
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const attemptedLayers = (llamaRn.initLlama as jest.Mock).mock.calls
+      .map(([options]) => options?.n_gpu_layers ?? 0);
+    expect(attemptedLayers).toEqual([3, 2, 1, 0]);
+    expect(new Set(attemptedLayers).size).toBe(attemptedLayers.length);
   });
 
   it('reports requested and loaded GPU layers separately after retrying with fewer layers', async () => {

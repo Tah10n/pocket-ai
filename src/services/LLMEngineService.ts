@@ -13,6 +13,7 @@ import {
   type EngineBackendInitAttempt,
   type EngineLifecycleEvent,
   type EngineBackendPolicy,
+  type EngineModelInitProfileSource,
   type EngineSpeculativeDecodingDiagnostics,
   EngineStatus,
   EngineState,
@@ -101,6 +102,13 @@ import {
   chooseSafeLoadProfileCandidate,
 } from './LLMEngineService.safeLoadSearch';
 import {
+  buildModelInitLayerRetryCandidates,
+  classifyModelInitFailure,
+  dedupeAndBoundModelInitProfiles,
+  ModelInitAttemptGuard,
+  type ModelInitAttemptIdentity,
+} from './LLMEngineService.initRetryPolicy';
+import {
   ActiveCompletionRunner,
   type ContextOperationCancellationToken,
   ContextOperationRunner,
@@ -152,6 +160,10 @@ export interface LoadModelOptions {
   loadParamsOverride?: Partial<ModelLoadParameters>;
   preferLastWorkingProfile?: boolean;
 }
+
+type InitInferenceProfile = ResolvedInferenceProfile & {
+  profileSource: EngineModelInitProfileSource;
+};
 
 export type BackendAvailability = {
   gpuBackendAvailable: boolean | null;
@@ -5514,6 +5526,7 @@ class LLMEngineService {
         : null;
 
       const backendInitAttempts: EngineBackendInitAttempt[] = [];
+      const initAttemptGuard = new ModelInitAttemptGuard();
       const publishBackendInitAttempts = () => {
         this.backendInitAttemptsSnapshot = backendInitAttempts;
         if (initDiagnostics) {
@@ -5522,6 +5535,120 @@ class LLMEngineService {
             backendInitAttempts,
           };
         }
+      };
+
+      const buildInitAttemptIdentity = (
+        profile: InitInferenceProfile,
+        layers: number,
+        speculativeEnabled: boolean,
+      ): ModelInitAttemptIdentity => ({
+        backendMode: profile.backendMode,
+        devices: profile.devices,
+        nGpuLayers: Math.max(0, Math.round(layers)),
+        nThreads: profile.nThreads,
+        cpuMask: profile.cpuMask,
+        cpuStrict: profile.cpuStrict,
+        flashAttnType: resolveEffectiveFlashAttnType(profile.flashAttnType, layers),
+        useMmap: profile.useMmap,
+        useMlock: profile.useMlock,
+        nBatch: profile.nBatch,
+        nUbatch: profile.nUbatch,
+        kvUnified: profile.kvUnified,
+        nParallel: profile.nParallel,
+        contextSize: finalContextSize,
+        cacheTypeK,
+        cacheTypeV,
+        speculativeEnabled,
+      });
+
+      const buildInitAttemptTelemetryBase = (
+        profile: InitInferenceProfile,
+        layers: number,
+        speculativeEnabled: boolean,
+        profileSource: EngineModelInitProfileSource,
+      ) => ({
+        modelId,
+        backendMode: profile.backendMode,
+        gpuLayers: Math.max(0, Math.round(layers)),
+        deviceSelection: Array.isArray(profile.devices) ? [...profile.devices] : [],
+        contextSize: finalContextSize,
+        batch: profile.nBatch ?? null,
+        ubatch: profile.nUbatch ?? null,
+        kvCacheTypeK: cacheTypeK,
+        kvCacheTypeV: cacheTypeV,
+        speculativeEnabled,
+        profileSource,
+      });
+
+      const createInitAttemptRecord = ({
+        profile,
+        layers,
+        speculativeEnabled,
+        profileSource,
+        outcome,
+        probableOom,
+        durationMs,
+        failureCategory,
+        error,
+      }: {
+        profile: InitInferenceProfile;
+        layers: number;
+        speculativeEnabled: boolean;
+        profileSource: EngineModelInitProfileSource;
+        outcome: EngineBackendInitAttempt['outcome'];
+        probableOom: boolean;
+        durationMs: number;
+        failureCategory?: EngineBackendInitAttempt['failureCategory'];
+        error?: string;
+      }): EngineBackendInitAttempt => ({
+        candidate: profile.backendMode,
+        nGpuLayers: Math.max(0, Math.round(layers)),
+        ...(Array.isArray(profile.devices) && profile.devices.length > 0
+          ? { devices: [...profile.devices] }
+          : null),
+        contextSize: finalContextSize,
+        ...(typeof profile.nBatch === 'number' ? { nBatch: Math.round(profile.nBatch) } : null),
+        ...(typeof profile.nUbatch === 'number' ? { nUbatch: Math.round(profile.nUbatch) } : null),
+        cacheTypeK,
+        cacheTypeV,
+        speculativeEnabled,
+        profileSource,
+        probableOom,
+        durationMs: Math.max(0, durationMs),
+        outcome,
+        ...(failureCategory ? { failureCategory } : null),
+        ...(error ? { error } : null),
+      });
+
+      const recordSkippedInitAttempt = (
+        profile: InitInferenceProfile,
+        failureCategory: 'backend_unavailable' | 'known_oom_upper_bound' | 'attempt_limit',
+        probableOom = false,
+      ) => {
+        const speculativeEnabled = speculativeDecodingForLoad !== null;
+        const attempt = createInitAttemptRecord({
+          profile,
+          layers: profile.nGpuLayers,
+          speculativeEnabled,
+          profileSource: profile.profileSource,
+          outcome: 'skipped',
+          probableOom,
+          durationMs: 0,
+          failureCategory,
+        });
+        backendInitAttempts.push(attempt);
+        performanceMonitor.mark('model.init.attempt', {
+          ...buildInitAttemptTelemetryBase(
+            profile,
+            profile.nGpuLayers,
+            speculativeEnabled,
+            profile.profileSource,
+          ),
+          durationMs: 0,
+          outcome: 'skipped',
+          probableOom,
+          failureCategory,
+        });
       };
 
       const applyCalibrationForGpuLayers = (nextGpuLayers: number) => {
@@ -5577,10 +5704,11 @@ class LLMEngineService {
         }
       };
 
-      const initLlamaWithRetry = async (profile: ResolvedInferenceProfile): Promise<{
+      const initLlamaWithRetry = async (profile: InitInferenceProfile): Promise<{
         context: LlamaContext;
         resolvedGpuLayers: number;
-      }> => {
+        successfulAttempt: EngineBackendInitAttempt;
+      } | null> => {
         const {
           backendMode: candidate,
           devices,
@@ -5688,14 +5816,114 @@ class LLMEngineService {
           lastPublishedProgressAtMs = nowMs;
           this.updateState({ ...this.state, loadProgress: normalizedProgress });
         };
-        const initOnce = async (layers: number): Promise<LlamaContext> => {
+        const runNativeInitAttempt = async ({
+          layers,
+          speculativeConfig,
+          profileSource,
+          allowBeyondAttemptLimit = false,
+        }: {
+          layers: number;
+          speculativeConfig: ModelSpeculativeDecodingConfig | null;
+          profileSource: EngineModelInitProfileSource;
+          allowBeyondAttemptLimit?: boolean;
+        }): Promise<{ context: LlamaContext; attempt: EngineBackendInitAttempt } | null> => {
+          const normalizedAttemptLayers = Math.max(0, Math.round(layers));
+          const speculativeEnabled = speculativeConfig !== null;
+          const identity = buildInitAttemptIdentity(profile, normalizedAttemptLayers, speculativeEnabled);
+          const decision = initAttemptGuard.tryStart(identity, {
+            allowBeyondLimit: allowBeyondAttemptLimit,
+          });
+          if (decision !== 'started') {
+            if (decision === 'known_oom_upper_bound' || decision === 'attempt_limit') {
+              recordSkippedInitAttempt(
+                { ...profile, nGpuLayers: normalizedAttemptLayers, profileSource },
+                decision,
+                decision === 'known_oom_upper_bound',
+              );
+            }
+            return null;
+          }
+
+          const startedAtMs = Date.now();
+          const attemptSpan = performanceMonitor.startSpan(
+            'model.init.attempt',
+            buildInitAttemptTelemetryBase(
+              profile,
+              normalizedAttemptLayers,
+              speculativeEnabled,
+              profileSource,
+            ),
+          );
+          try {
+            const context = await initLlamaContext(
+              buildOptions(normalizedAttemptLayers, speculativeConfig),
+              onProgress,
+            );
+            const durationMs = Math.max(0, Date.now() - startedAtMs);
+            const attempt = createInitAttemptRecord({
+              profile,
+              layers: normalizedAttemptLayers,
+              speculativeEnabled,
+              profileSource,
+              outcome: 'success',
+              probableOom: false,
+              durationMs,
+            });
+            backendInitAttempts.push(attempt);
+            attemptSpan.end({
+              durationMs,
+              outcome: 'success',
+              probableOom: false,
+            });
+            return { context, attempt };
+          } catch (error) {
+            const durationMs = Math.max(0, Date.now() - startedAtMs);
+            const probableOom = isProbableMemoryFailure(error);
+            if (probableOom) {
+              initAttemptGuard.recordProbableOom(identity);
+            }
+            const failureCategory = classifyModelInitFailure(error, probableOom);
+            const attempt = createInitAttemptRecord({
+              profile,
+              layers: normalizedAttemptLayers,
+              speculativeEnabled,
+              profileSource,
+              outcome: 'error',
+              probableOom,
+              durationMs,
+              failureCategory,
+              error: sanitizeErrorMessageForDiagnostics(error),
+            });
+            backendInitAttempts.push(attempt);
+            attemptSpan.end({
+              durationMs,
+              outcome: 'error',
+              probableOom,
+              failureCategory,
+            });
+            throw error;
+          }
+        };
+
+        const initOnce = async (
+          layers: number,
+          profileSource: EngineModelInitProfileSource,
+        ): Promise<{ context: LlamaContext; attempt: EngineBackendInitAttempt } | null> => {
           const attemptedSpeculativeConfig = speculativeDecodingForLoad;
           if (!attemptedSpeculativeConfig) {
-            return initLlamaContext(buildOptions(layers, null), onProgress);
+            return runNativeInitAttempt({
+              layers,
+              speculativeConfig: null,
+              profileSource,
+            });
           }
 
           try {
-            return await initLlamaContext(buildOptions(layers, attemptedSpeculativeConfig), onProgress);
+            return await runNativeInitAttempt({
+              layers,
+              speculativeConfig: attemptedSpeculativeConfig,
+              profileSource,
+            });
           } catch (error) {
             await releaseAllLlamaContexts().catch(() => undefined);
             speculativeDecodingForLoad = null;
@@ -5716,30 +5944,43 @@ class LLMEngineService {
               mode: attemptedSpeculativeConfig.mode,
               ...buildSafeErrorLogDetails(error),
             });
-            return initLlamaContext(buildOptions(layers, null), onProgress);
+            return runNativeInitAttempt({
+              layers,
+              speculativeConfig: null,
+              profileSource: 'speculative_fallback',
+              // Preserve the one same-profile fallback even when the speculative attempt
+              // consumed the final accelerator-attempt slot.
+              allowBeyondAttemptLimit: true,
+            });
           }
         };
 
         const normalizedLayers = Math.max(0, Math.round(nGpuLayers));
         if (normalizedLayers <= 0) {
-          const context = await initOnce(0);
+          const result = await initOnce(0, profile.profileSource);
+          if (!result) {
+            return null;
+          }
           applyCalibrationForGpuLayers(0);
-          return { context, resolvedGpuLayers: 0 };
+          return {
+            context: result.context,
+            resolvedGpuLayers: 0,
+            successfulAttempt: result.attempt,
+          };
         }
 
         try {
-          const context = await initOnce(normalizedLayers);
+          const result = await initOnce(normalizedLayers, profile.profileSource);
+          if (!result) {
+            return null;
+          }
           applyCalibrationForGpuLayers(normalizedLayers);
-          return { context, resolvedGpuLayers: normalizedLayers };
+          return {
+            context: result.context,
+            resolvedGpuLayers: normalizedLayers,
+            successfulAttempt: result.attempt,
+          };
         } catch (error) {
-          backendInitAttempts.push({
-            candidate,
-            nGpuLayers: normalizedLayers,
-            devices,
-            outcome: 'error',
-            error: sanitizeErrorMessageForDiagnostics(error),
-          });
-
           const isOomLikely = isProbableMemoryFailure(error);
           if (calibrationKeyForLoad && isOomLikely) {
             this.persistCalibrationFailure({
@@ -5749,16 +5990,7 @@ class LLMEngineService {
           }
 
           const retryCandidates = isOomLikely
-            ? Array.from(
-                new Set([
-                  Math.floor(normalizedLayers * 0.75),
-                  Math.floor(normalizedLayers / 2),
-                  Math.floor(normalizedLayers / 4),
-                  1,
-                ]),
-              )
-                .filter((candidateLayers) => candidateLayers > 0 && candidateLayers < normalizedLayers)
-                .sort((a, b) => b - a)
+            ? buildModelInitLayerRetryCandidates(normalizedLayers)
             : [];
 
           if (process.env.NODE_ENV !== 'test') {
@@ -5786,17 +6018,17 @@ class LLMEngineService {
               : null;
 
             try {
-              const context = await initOnce(candidateLayers);
+              const result = await initOnce(candidateLayers, 'oom_retry');
+              if (!result) {
+                continue;
+              }
               applyCalibrationForGpuLayers(candidateLayers);
-              return { context, resolvedGpuLayers: candidateLayers };
+              return {
+                context: result.context,
+                resolvedGpuLayers: candidateLayers,
+                successfulAttempt: result.attempt,
+              };
             } catch (retryError) {
-              backendInitAttempts.push({
-                candidate,
-                nGpuLayers: candidateLayers,
-                devices,
-                outcome: 'error',
-                error: sanitizeErrorMessageForDiagnostics(retryError),
-              });
               lastError = retryError;
               if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
                 this.persistCalibrationFailure({
@@ -5868,6 +6100,9 @@ class LLMEngineService {
           return mode === 'gpu' || mode === 'npu';
         });
 
+      const preferConservativeGpuProbe = normalizedBackendPolicy === 'auto'
+        && explicitGpuLayers === null
+        && !autotuneBestStableProfile;
       let {
         effectiveBackendPolicy,
         candidates: resolvedInferenceCandidates,
@@ -5880,12 +6115,19 @@ class LLMEngineService {
         },
         gpuLayers,
         baseProfile: baseInferenceProfile,
-        preferConservativeGpuProbe: normalizedBackendPolicy === 'auto'
-          && explicitGpuLayers === null
-          && !autotuneBestStableProfile,
+        preferConservativeGpuProbe,
       });
 
-      let inferenceCandidatesForInit = resolvedInferenceCandidates;
+      let inferenceCandidatesForInit: InitInferenceProfile[] = resolvedInferenceCandidates.map((profile) => ({
+        ...profile,
+        profileSource: profile.backendMode === 'cpu'
+          ? (normalizedBackendPolicy === 'cpu' || gpuLayers <= 0 ? 'requested' : 'cpu_fallback')
+          : preferConservativeGpuProbe
+            && profile.backendMode === 'gpu'
+            && profile.nGpuLayers < gpuLayers
+            ? 'conservative_probe'
+            : 'requested',
+      }));
       let resolvedBackendPolicyReasons = backendPolicyReasons;
 
       const capabilitiesKnown = Boolean(backendCapabilities && backendCapabilities.discoveryUnavailable !== true);
@@ -5941,16 +6183,16 @@ class LLMEngineService {
 
           // Only honor stored device selectors for NPU. GPU device strings can be human-readable
           // labels (with whitespace) and may not be safe to feed back into init.
-          const preferredCandidate: ResolvedInferenceProfile = {
+          const preferredCandidate: InitInferenceProfile = {
             ...baseInferenceProfile,
             backendMode: preferredBackendMode,
             nGpuLayers: clampedGpuLayers,
+            profileSource: 'autotune',
             ...(preferredBackendMode === 'npu'
               ? { devices: preferredNpuDevices ?? ['HTP*'] }
               : null),
           };
 
-          const seenCandidateKeys = new Set<string>();
           inferenceCandidatesForInit = [
             preferredCandidate,
             ...(didUseSavedNpuDevices && fallbackNpuDevices
@@ -5960,18 +6202,12 @@ class LLMEngineService {
                     backendMode: 'npu',
                     nGpuLayers: clampedGpuLayers,
                     devices: fallbackNpuDevices,
-                  } satisfies ResolvedInferenceProfile,
+                    profileSource: 'autotune',
+                  } satisfies InitInferenceProfile,
                 ]
               : []),
-            ...resolvedInferenceCandidates,
-          ].filter((profile) => {
-            const candidateKey = `${profile.backendMode}:${Array.isArray(profile.devices) ? profile.devices.join('|') : '*'}`;
-            if (seenCandidateKeys.has(candidateKey)) {
-              return false;
-            }
-            seenCandidateKeys.add(candidateKey);
-            return true;
-          });
+            ...inferenceCandidatesForInit,
+          ];
 
           if (inferenceCandidatesForInit[0]?.backendMode !== resolvedInferenceCandidates[0]?.backendMode) {
             resolvedBackendPolicyReasons = [
@@ -5995,13 +6231,14 @@ class LLMEngineService {
 
         const baseWarmupCandidate = inferenceCandidatesForInit.find((candidate) => candidate.backendMode === targetBackendMode) ?? null;
         if (baseWarmupCandidate) {
-          const warmupCandidate: ResolvedInferenceProfile = (() => {
+          const warmupCandidate: InitInferenceProfile = (() => {
             if (targetBackendMode === 'cpu') {
               return {
                 ...baseWarmupCandidate,
                 backendMode: 'cpu',
                 nGpuLayers: 0,
                 flashAttnType: 'off',
+                profileSource: 'last_good',
               };
             }
 
@@ -6015,6 +6252,7 @@ class LLMEngineService {
                 backendMode: 'cpu',
                 nGpuLayers: 0,
                 flashAttnType: 'off',
+                profileSource: 'last_good',
               };
             }
 
@@ -6022,6 +6260,7 @@ class LLMEngineService {
               ...baseWarmupCandidate,
               backendMode: targetBackendMode,
               nGpuLayers: clampedGpuLayers,
+              profileSource: 'last_good',
               ...(targetBackendMode === 'npu' && Array.isArray(lastGoodProfile.devices) && lastGoodProfile.devices.length > 0
                 ? { devices: lastGoodProfile.devices }
                 : null),
@@ -6032,18 +6271,7 @@ class LLMEngineService {
             ? `${inferenceCandidatesForInit[0].backendMode}:${Array.isArray(inferenceCandidatesForInit[0].devices) ? inferenceCandidatesForInit[0].devices.join('|') : '*'}`
             : '';
 
-          const seenCandidateKeys = new Set<string>();
-          // Keep the warmup candidate in addition to the requested candidate.
-          // Include `nGpuLayers` in the key so we don't accidentally drop a higher-layer request.
-          inferenceCandidatesForInit = [warmupCandidate, ...inferenceCandidatesForInit].filter((profile) => {
-            const devicesKey = Array.isArray(profile.devices) ? profile.devices.join('|') : '*';
-            const candidateKey = `${profile.backendMode}:${devicesKey}:${Math.max(0, Math.round(profile.nGpuLayers))}`;
-            if (seenCandidateKeys.has(candidateKey)) {
-              return false;
-            }
-            seenCandidateKeys.add(candidateKey);
-            return true;
-          });
+          inferenceCandidatesForInit = [warmupCandidate, ...inferenceCandidatesForInit];
 
           const nextFirstKey = inferenceCandidatesForInit[0]
             ? `${inferenceCandidatesForInit[0].backendMode}:${Array.isArray(inferenceCandidatesForInit[0].devices) ? inferenceCandidatesForInit[0].devices.join('|') : '*'}`
@@ -6058,6 +6286,8 @@ class LLMEngineService {
         }
       }
 
+      inferenceCandidatesForInit = dedupeAndBoundModelInitProfiles(inferenceCandidatesForInit);
+
       this.requestedBackendPolicy = normalizedBackendPolicy;
       this.effectiveBackendPolicy = effectiveBackendPolicy as EngineBackendPolicy;
       this.backendPolicyReasons = resolvedBackendPolicyReasons;
@@ -6069,20 +6299,22 @@ class LLMEngineService {
       // known device discovery result.
       if (capabilitiesKnown && gpuLayers > 0) {
         if (requestedBackendPolicy === 'npu' && !candidateModes.has('npu')) {
-          backendInitAttempts.push({
-            candidate: 'npu',
+          recordSkippedInitAttempt({
+            ...baseInferenceProfile,
+            backendMode: 'npu',
             nGpuLayers: gpuLayers,
             devices: selectedBackendDevices ?? ['HTP*'],
-            outcome: 'skipped',
-          });
+            profileSource: 'backend_discovery',
+          }, 'backend_unavailable');
         }
 
         if (requestedBackendPolicy === 'gpu' && !candidateModes.has('gpu')) {
-          backendInitAttempts.push({
-            candidate: 'gpu',
+          recordSkippedInitAttempt({
+            ...baseInferenceProfile,
+            backendMode: 'gpu',
             nGpuLayers: gpuLayers,
-            outcome: 'skipped',
-          });
+            profileSource: 'backend_discovery',
+          }, 'backend_unavailable');
         }
       }
 
@@ -6094,33 +6326,35 @@ class LLMEngineService {
         };
       }
 
-      let resolvedInitProfile: ResolvedInferenceProfile | null = null;
+      let resolvedInitProfile: InitInferenceProfile | null = null;
       let resolvedInitGpuLayers: number | null = null;
       let resolvedRuntimeDevices: string[] | null = null;
       let resolvedInitActualGpu: boolean | null = null;
       let lastBackendInitError: unknown | null = null;
       for (let i = 0; i < inferenceCandidatesForInit.length; i += 1) {
         const profile = inferenceCandidatesForInit[i];
-        const { backendMode: candidate, nGpuLayers, devices } = profile;
+        const { backendMode: candidate } = profile;
         const hasAcceleratorCandidateAfter = inferenceCandidatesForInit.slice(i + 1).some((next) => next.backendMode !== 'cpu');
 
-        const attemptsBeforeProfile = backendInitAttempts.length;
         try {
-          const { context, resolvedGpuLayers: candidateGpuLayers } = await initLlamaWithRetry(profile);
+          const initResult = await initLlamaWithRetry(profile);
+          if (!initResult) {
+            continue;
+          }
+          const {
+            context,
+            resolvedGpuLayers: candidateGpuLayers,
+            successfulAttempt,
+          } = initResult;
           const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
           const runtimeAccelerationEnabled = candidate === 'npu'
             ? (Boolean(context.gpu) || (this.hasNpuRuntimeSignal(context) && reasonNoGPU.length === 0))
             : Boolean(context.gpu);
           const actualGpu = candidateGpuLayers > 0 && runtimeAccelerationEnabled;
-
-          backendInitAttempts.push({
-            candidate,
-            nGpuLayers: Math.max(0, Math.round(candidateGpuLayers)),
-            devices,
-            outcome: 'success',
-            actualGpu,
-            ...(reasonNoGPU ? { reasonNoGPU } : null),
-          });
+          successfulAttempt.actualGpu = actualGpu;
+          if (reasonNoGPU) {
+            successfulAttempt.reasonNoGPU = reasonNoGPU;
+          }
 
           // If an accelerator candidate initializes but the runtime reports CPU mode,
           // treat this as a degraded init and continue to the next candidate.
@@ -6166,15 +6400,6 @@ class LLMEngineService {
           break;
         } catch (error) {
           lastBackendInitError = error;
-          if (backendInitAttempts.length === attemptsBeforeProfile) {
-            backendInitAttempts.push({
-              candidate,
-              nGpuLayers: Math.max(0, Math.round(nGpuLayers)),
-              devices,
-              outcome: 'error',
-              error: sanitizeErrorMessageForDiagnostics(error),
-            });
-          }
 
           if (candidate === 'cpu') {
             cpuInitError = error;

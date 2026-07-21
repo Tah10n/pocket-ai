@@ -1244,6 +1244,98 @@ describe('useChatSession', () => {
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
   });
 
+  it('stops scheduling filesystem lookups after candidate attachment preparation is cancelled', async () => {
+    const expectedConcurrentLookups = 8;
+    const threadId = 'thread-cancel-window-attachments';
+    const messageId = 'message-many-documents';
+    const documentAttachments: ChatAttachment[] = Array.from({ length: 32 }, (_, index) => ({
+      id: `document-${index}`,
+      kind: 'document',
+      state: 'ready',
+      threadId,
+      messageId,
+      localUri: `test-dir/chat-attachments/document-${index}.txt`,
+      pathCategory: 'chat_attachment',
+      fileName: `document-${index}.txt`,
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: index + 1,
+      document: {
+        processorId: 'document-text',
+        processorVersion: 1,
+        extractedCharCount: 16,
+        isScanned: false,
+      },
+    }));
+    useChatStore.setState({
+      threads: {
+        [threadId]: {
+          id: threadId,
+          title: 'Cancellation window',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 256,
+            seed: null,
+          },
+          messages: [{
+            id: messageId,
+            role: 'user',
+            content: 'Use the retained documents.',
+            createdAt: 1,
+            state: 'complete',
+            kind: 'message',
+            modelId: 'author/model-q4',
+            attachments: documentAttachments,
+            contentParts: [{ type: 'text', text: 'Retained document content.' }],
+          }],
+          createdAt: 1,
+          updatedAt: 1,
+          status: 'idle',
+        },
+      },
+      activeThreadId: threadId,
+    });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(8_192);
+    const releaseLookups: Array<() => void> = [];
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(() => new Promise((resolve) => {
+      releaseLookups.push(() => resolve({ exists: true, size: 128 }));
+    }));
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    act(() => {
+      sendPromise = getSession()?.appendUserMessage('Cancel this preparation');
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(expectedConcurrentLookups);
+    });
+    const tokenizerCallsAtCancellation = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+
+    await act(async () => {
+      const stopPromise = getSession()?.stopGeneration();
+      releaseLookups.splice(0).forEach((release) => release());
+      await stopPromise;
+      await sendPromise;
+    });
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(expectedConcurrentLookups);
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(tokenizerCallsAtCancellation);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
   it('uses estimated media prompt tokens while fitting an image prompt with room to spare', async () => {
     const chatState = useChatStore.getState();
     const threadId = chatState.createThread({
@@ -1895,10 +1987,92 @@ describe('useChatSession', () => {
       });
     });
 
-    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
     expect(llmEngineService.chatCompletion).toHaveBeenCalled();
     expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
       .toBe('test-dir/chat-attachments/missing-outside.jpg');
+  });
+
+  it('never resolves attachments from 900 messages outside the conservative inference window', async () => {
+    const threadId = 'thread-window-first-attachments';
+    const messages = Array.from({ length: 1_000 }, (_, index) => {
+      const messageId = `window-message-${index}`;
+      const hasTruncatedAttachment = index < 900;
+      return {
+        id: messageId,
+        role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+        content: index < 900 ? `Old attachment turn ${index}` : `Retained tail turn ${index}`,
+        createdAt: index + 1,
+        state: 'complete' as const,
+        kind: 'message' as const,
+        modelId: 'author/model-q4',
+        ...(hasTruncatedAttachment
+          ? {
+              attachments: [{
+                ...copiedImageAttachment,
+                id: `truncated-attachment-${index}`,
+                threadId,
+                messageId,
+                localUri: `test-dir/chat-attachments/truncated-${index}.jpg`,
+                fileName: `truncated-${index}.jpg`,
+              }],
+            }
+          : null),
+      };
+    });
+
+    useChatStore.setState({
+      threads: {
+        [threadId]: {
+          id: threadId,
+          title: 'Window-first attachments',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 64,
+            seed: null,
+          },
+          messages,
+          createdAt: 1,
+          updatedAt: 1_000,
+          status: 'idle',
+        },
+      },
+      activeThreadId: threadId,
+    });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(900);
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 123_456 });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh prompt at the retained tail', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const lookedUpUris = (FileSystem.getInfoAsync as jest.Mock).mock.calls.map(([uri]) => String(uri));
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages ?? [];
+    expect(lookedUpUris.some((uri) => uri.includes('/truncated-'))).toBe(false);
+    expect(completionMessages.some((message: any) => message.content === 'Old attachment turn 899')).toBe(false);
+    expect(completionMessages.at(-1)).toEqual(expect.objectContaining({
+      role: 'user',
+      content: 'Fresh prompt at the retained tail',
+    }));
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
+      .toBe('test-dir/chat-attachments/truncated-0.jpg');
   });
 
   it('drops empty historical image-only turns when their retained image is missing', async () => {

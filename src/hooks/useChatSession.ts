@@ -1088,56 +1088,6 @@ function stripUnsupportedThreadInferenceAttachments(
   };
 }
 
-async function resolveChatMessageAudioAttachmentsForInference(
-  message: ChatMessage,
-  isLatestUserMessage: boolean,
-  latestUserMessageId?: string | null,
-  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
-  readiness?: MultimodalReadinessState,
-  expectedModelId?: string | null,
-): Promise<ChatMessage> {
-  const attachments = message.attachments;
-  const hasInputAudioContentParts = message.contentParts?.some((part) => part.type === 'input_audio') === true;
-  if (!attachments?.length) {
-    return hasInputAudioContentParts
-      ? withResolvedChatMessageInferenceContent(message, undefined)
-      : message;
-  }
-
-  const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
-  let didInspectAudioAttachments = false;
-  for (const attachment of attachments) {
-    if (!isGenericChatAttachment(attachment) || attachment.kind !== 'audio') {
-      nextAttachments.push(attachment);
-      continue;
-    }
-
-    didInspectAudioAttachments = true;
-    const resolution = await resolveAttachmentFile(attachment.localUri);
-    const localUri = resolution.normalizedUri;
-    const exists = resolution.exists;
-    if (!localUri || !exists) {
-      if (isLatestUserMessage) {
-        throwMissingAttachments(latestUserMessageId ?? undefined, [attachment]);
-      }
-      continue;
-    }
-
-    const resolvedAttachment = localUri !== attachment.localUri
-      ? { ...attachment, localUri }
-      : attachment;
-    if (!shouldRetainAttachmentForInference(resolvedAttachment, readiness, expectedModelId)) {
-      continue;
-    }
-
-    nextAttachments.push(resolvedAttachment);
-  }
-
-  return didInspectAudioAttachments || hasInputAudioContentParts
-    ? withResolvedChatMessageInferenceContent(message, nextAttachments)
-    : message;
-}
-
 async function assertUserMessageAttachmentsReadyForRegeneration(
   message: ChatMessage,
   readiness?: MultimodalReadinessState,
@@ -1331,21 +1281,6 @@ async function resolveRetainedMessagesForInferenceAttachments(
   return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(resolvedMessages));
 }
 
-async function resolveLatestUserMessageAttachmentsForInference(
-  message: ChatMessage | undefined,
-  readiness?: MultimodalReadinessState,
-  expectedModelId?: string | null,
-  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
-): Promise<void> {
-  if (!message || !messageHasAttachments(message)) {
-    return;
-  }
-
-  assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
-  assertAudioReadyForInferenceAttachments([message], readiness, expectedModelId);
-  await assertMessageAttachmentFilesExist(message, resolveAttachmentFile);
-}
-
 function assertMultimodalReadyForInferenceAttachments(
   messages: readonly Pick<ChatMessage, 'attachments'>[],
   readiness?: MultimodalReadinessState,
@@ -1523,52 +1458,6 @@ function constrainInferenceAttachmentsToRequestLimit<T extends InferenceAttachme
   }
 
   return didConstrain ? nextMessages : messages as T[];
-}
-
-async function resolveThreadForInferenceAttachments({
-  thread,
-  latestUserMessageId,
-  multimodalReadiness,
-  expectedModelId,
-  attachmentResolution,
-}: {
-  thread: ChatThread;
-  latestUserMessageId: string | null;
-  multimodalReadiness?: MultimodalReadinessState;
-  expectedModelId?: string | null;
-  attachmentResolution: PreparedAttachmentResolution;
-}): Promise<ChatThread> {
-  const latestUserMessage = latestUserMessageId
-    ? thread.messages.find((message) => message.id === latestUserMessageId)
-    : undefined;
-  await resolveLatestUserMessageAttachmentsForInference(
-    latestUserMessage,
-    multimodalReadiness,
-    expectedModelId,
-    attachmentResolution.resolveFile,
-  );
-  const readinessFilteredThread = stripUnsupportedThreadInferenceAttachments(
-    thread,
-    multimodalReadiness,
-    expectedModelId,
-  );
-  const resolvedMessages = await mapWithConcurrency(
-    readinessFilteredThread.messages,
-    ATTACHMENT_FILE_CHECK_CONCURRENCY,
-    (message) => resolveChatMessageAudioAttachmentsForInference(
-      message,
-      Boolean(latestUserMessageId && message.id === latestUserMessageId),
-      latestUserMessageId,
-      attachmentResolution.resolveFile,
-      multimodalReadiness,
-      expectedModelId,
-    ),
-  );
-
-  return {
-    ...readinessFilteredThread,
-    messages: resolvedMessages,
-  };
 }
 
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
@@ -2135,29 +2024,17 @@ export const useChatSession = () => {
         }
       });
 
+      // Capability filtering is metadata-only and safe across the full thread.
+      // Filesystem validation begins only after the conservative window is selected.
+      thread = stripUnsupportedThreadInferenceAttachments(
+        storedThread,
+        effectiveMultimodalReadiness,
+        activeModelId,
+      );
       const windowOptions = resolveThreadInferenceWindowOptions(thread, {
         maxContextTokens: maxContextSize,
         responseReserveTokens: reasoningRuntimeConfig.responseReserveTokens,
       });
-
-      const attachmentPreparationSpan = performanceMonitor.isEnabled()
-        ? performanceMonitor.startSpan('chat.prompt.attachments')
-        : null;
-      try {
-        thread = await resolveThreadForInferenceAttachments({
-          thread: storedThread,
-          latestUserMessageId,
-          multimodalReadiness: effectiveMultimodalReadiness,
-          expectedModelId: activeModelId,
-          attachmentResolution,
-        });
-      } finally {
-        if (attachmentPreparationSpan) {
-          attachmentPreparationSpan.end({
-            uniqueFilesystemLookups: attachmentResolution.uniqueFilesystemLookupCount,
-          });
-        }
-      }
 
       const MESSAGE_TOO_LONG_ERROR_MESSAGE =
         'This message is too long for the current context window. Shorten it or increase the context size in Model Controls.';
@@ -2187,18 +2064,38 @@ export const useChatSession = () => {
           return existing;
         }
 
-        const preparation = resolveRetainedMessagesForInferenceAttachments(
+        const attachmentPreparationSpan = performanceMonitor.isEnabled()
+          ? performanceMonitor.startSpan('chat.prompt.attachments')
+          : null;
+        const filesystemLookupsAtStart = attachmentResolution.uniqueFilesystemLookupCount;
+        let preparation!: Promise<LlmChatMessage[]>;
+        preparation = resolveRetainedMessagesForInferenceAttachments(
           windowMessages,
           effectiveMultimodalReadiness,
           latestUserMessageId,
           attachmentResolution.resolveFile,
           activeModelId,
-        ).catch((error) => {
-          if (preparedMessagesBySignature.get(preparationKey) === preparation) {
-            preparedMessagesBySignature.delete(preparationKey);
-          }
-          throw error;
-        });
+        ).then(
+          (resolvedMessages) => {
+            attachmentPreparationSpan?.end({
+              outcome: 'success',
+              uniqueFilesystemLookups:
+                attachmentResolution.uniqueFilesystemLookupCount - filesystemLookupsAtStart,
+            });
+            return resolvedMessages;
+          },
+          (error) => {
+            attachmentPreparationSpan?.end({
+              outcome: 'error',
+              uniqueFilesystemLookups:
+                attachmentResolution.uniqueFilesystemLookupCount - filesystemLookupsAtStart,
+            });
+            if (preparedMessagesBySignature.get(preparationKey) === preparation) {
+              preparedMessagesBySignature.delete(preparationKey);
+            }
+            throw error;
+          },
+        );
         preparedMessagesBySignature.set(preparationKey, preparation);
         return preparation;
       };

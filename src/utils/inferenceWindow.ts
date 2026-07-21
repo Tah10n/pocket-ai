@@ -431,9 +431,14 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     Math.round(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens),
   );
 
-  const { messages: fullMessages, truncatedMessageIds: baseTruncatedMessageIds } = getThreadInferenceWindow(thread, {
-    maxContextMessages: options.maxContextMessages,
-  });
+  // Seed exact fitting from the conservative, filesystem-free heuristic window.
+  // Exact preparation may shrink this candidate, but it must never reopen older
+  // history: doing so would resolve attachments that were already excluded from
+  // the inference window.
+  const { messages: fullMessages, truncatedMessageIds: baseTruncatedMessageIds } = getThreadInferenceWindow(
+    thread,
+    options,
+  );
   const eligibleMessages = getEligibleThreadMessages(thread);
 
   if (maxContextTokens === null) {

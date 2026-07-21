@@ -5,6 +5,7 @@ import type {
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
+import appPackageJson from '../../package.json';
 import { hardwareListenerService } from './HardwareListenerService';
 import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import {
@@ -64,7 +65,15 @@ import { resolveKvCacheTypes } from '../utils/kvCache';
 import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
 import { readAutotuneResult } from './InferenceAutotuneStore';
-import { readLastGoodInferenceProfile, writeLastGoodInferenceProfile } from './InferenceLastGoodProfileStore';
+import {
+  getCurrentNativeModuleVersion,
+  readLastGoodInferenceProfile,
+  readModelInitFailureBound,
+  reconcileModelInitFailureBoundSuccess,
+  recordModelInitFailureBound,
+  writeLastGoodInferenceProfile,
+  type ModelInitFailureBoundIdentity,
+} from './InferenceLastGoodProfileStore';
 import {
   areThinkingCapabilitySnapshotsEqual,
   getErrorMessageText,
@@ -105,6 +114,7 @@ import {
   classifyModelInitFailure,
   dedupeAndBoundModelInitProfiles,
   ModelInitAttemptGuard,
+  type ModelInitAttemptDecision,
   type ModelInitAttemptIdentity,
 } from './LLMEngineService.initRetryPolicy';
 import {
@@ -175,6 +185,7 @@ export type BackendAvailability = {
 
 type StateListener = (state: EngineState) => void;
 type ChatCompletionReasoningFormat = NonNullable<NonNullable<LlmChatCompletionOptions['params']>['reasoning_format']>;
+const APP_VERSION = typeof appPackageJson?.version === 'string' ? appPackageJson.version : 'unknown';
 const DEFAULT_CONTEXT_SIZE = 4096;
 const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
@@ -304,6 +315,54 @@ type MultimodalReadinessRefreshRequest = {
 type InternalLoadOptions = {
   readonly backgroundReadinessRefresh?: MultimodalReadinessRefreshRequest;
 };
+
+function getDeviceModelForInitFailureIdentity(): string {
+  try {
+    const getModel = (DeviceInfo as unknown as { getModel?: () => string }).getModel;
+    const model = typeof getModel === 'function' ? getModel.call(DeviceInfo) : '';
+    return typeof model === 'string' && model.trim().length > 0 ? model.trim() : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function getDeviceAbisForInitFailureIdentity(): Promise<string[]> {
+  try {
+    const supportedAbis = (DeviceInfo as unknown as { supportedAbis?: () => Promise<string[]> }).supportedAbis;
+    const abis = typeof supportedAbis === 'function'
+      ? await supportedAbis.call(DeviceInfo)
+      : [];
+    return Array.isArray(abis)
+      ? abis.filter((abi): abi is string => typeof abi === 'string' && abi.trim().length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function getOsBuildIdForInitFailureIdentity(): Promise<string> {
+  try {
+    const getBuildId = (DeviceInfo as unknown as { getBuildId?: () => Promise<string> }).getBuildId;
+    const buildId = typeof getBuildId === 'function'
+      ? await getBuildId.call(DeviceInfo)
+      : '';
+    return typeof buildId === 'string' && buildId.trim().length > 0 ? buildId.trim() : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function buildNativeRuntimeIdentity(buildInfo: unknown): string {
+  if (!buildInfo || typeof buildInfo !== 'object') {
+    return 'unknown';
+  }
+  const record = buildInfo as { number?: unknown; commit?: unknown };
+  const number = typeof record.number === 'string' ? record.number.trim() : '';
+  const commit = typeof record.commit === 'string' ? record.commit.trim() : '';
+  return number.length > 0 || commit.length > 0
+    ? JSON.stringify({ number, commit })
+    : 'unknown';
+}
 
 function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
   if (!paths || paths.length === 0) {
@@ -1180,6 +1239,43 @@ class LLMEngineService {
       this.normalizeArtifactString(resolvedProjector.localPath),
       this.normalizeArtifactString(resolvedProjector.projectorPath),
     ]);
+  }
+
+  private resolvePersistedCompanionDownloadMarker({
+    modificationTime,
+    integrity,
+    updatedAt,
+    metadataParts,
+  }: {
+    modificationTime: unknown;
+    integrity?: { kind: 'sha256' | 'size'; sizeBytes: number; checkedAt: number; sha256?: string };
+    updatedAt?: number;
+    metadataParts: readonly unknown[];
+  }): string | null {
+    const normalizedModificationTime = this.toArtifactTimestamp(modificationTime);
+    if (normalizedModificationTime !== null) {
+      return `mtime:${normalizedModificationTime}`;
+    }
+
+    const integrityCheckedAt = this.toArtifactTimestamp(integrity?.checkedAt);
+    if (integrity && integrityCheckedAt !== null) {
+      return `integrity:${JSON.stringify({
+        kind: integrity.kind,
+        sizeBytes: this.toPositiveByteCount(integrity.sizeBytes),
+        sha256: this.normalizeArtifactString(integrity.sha256),
+        checkedAt: integrityCheckedAt,
+      })}`;
+    }
+
+    const normalizedUpdatedAt = this.toArtifactTimestamp(updatedAt);
+    if (normalizedUpdatedAt !== null) {
+      return `updated:${normalizedUpdatedAt}`;
+    }
+
+    const normalizedMetadata = metadataParts.map((part) => this.normalizeArtifactString(part));
+    return normalizedMetadata.some((part) => part !== null)
+      ? `metadata:${JSON.stringify(normalizedMetadata)}`
+      : null;
   }
 
   private isActiveMultimodalContextForResolvedProjector({
@@ -3797,7 +3893,13 @@ class LLMEngineService {
   private async resolveLoadTimeProjectorMemoryInfo(
     model: ModelMetadata | null | undefined,
     projectorResolutionOperationCache?: ProjectorResolutionOperationCache,
-  ): Promise<{ projectorId: string; sizeBytes: number | null; memoryFitSizeBytes: number } | null> {
+  ): Promise<{
+    projectorId: string;
+    sizeBytes: number | null;
+    sha256: string | null;
+    downloadMarker: string | null;
+    memoryFitSizeBytes: number;
+  } | null> {
     if (!model || !this.hasRequestedNativeMultimodalSupport(model)) {
       return null;
     }
@@ -3816,10 +3918,29 @@ class LLMEngineService {
       });
       const sizeBytes = this.toPositiveByteCount(resolvedProjector.fileInfo.size)
         ?? this.toPositiveByteCount(projector.size);
+      const projectorArtifact = model.artifacts?.find((artifact) => (
+        artifact.kind === 'multimodal_projector' && artifact.id === projector.id
+      ));
+      const verifiedSha256 = this.normalizeArtifactString(projectorArtifact?.integrity?.sha256)
+        ?? this.normalizeArtifactString(projectorArtifact?.sha256)
+        ?? this.normalizeArtifactString(projector.sha256);
 
       return {
         projectorId: projector.id,
         sizeBytes,
+        sha256: verifiedSha256,
+        downloadMarker: this.resolvePersistedCompanionDownloadMarker({
+          modificationTime: resolvedProjector.fileInfo.modificationTime,
+          integrity: projectorArtifact?.integrity,
+          updatedAt: projectorArtifact?.updatedAt,
+          metadataParts: [
+            projector.hfRevision,
+            projector.fileName,
+            projector.repoId,
+            projector.ownerModelId,
+            projector.ownerVariantId,
+          ],
+        }),
         memoryFitSizeBytes: sizeBytes ?? UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES,
       };
     } catch (error) {
@@ -4853,6 +4974,11 @@ class LLMEngineService {
       }
 
       const resolvedTotalMemoryBytes = systemMemorySnapshot?.totalBytes ?? totalMemoryBytes;
+      const deviceModelForInitFailureIdentity = getDeviceModelForInitFailureIdentity();
+      const deviceAbisForInitFailureIdentity = await getDeviceAbisForInitFailureIdentity();
+      const osBuildIdForInitFailureIdentity = await getOsBuildIdForInitFailureIdentity();
+      const llamaRuntimeBuildInfo = getLlamaBuildInfo();
+      const nativeRuntimeBuildForInitFailureIdentity = buildNativeRuntimeIdentity(llamaRuntimeBuildInfo);
       const resolvedModelSizeBytes = typeof fileInfo.size === 'number' ? fileInfo.size : modelSizeBytes ?? null;
       const kvCacheAvailableBudgetBytes = systemMemorySnapshot ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot) : null;
       let { cacheTypeK, cacheTypeV } = resolveKvCacheTypes({
@@ -4912,7 +5038,7 @@ class LLMEngineService {
 
       initDiagnostics = {
         modelId,
-        llamaRnBuild: getLlamaBuildInfo(),
+        llamaRnBuild: llamaRuntimeBuildInfo,
         fileSizeBytes: typeof fileInfo.size === 'number' ? fileInfo.size : null,
         totalMemoryBytes: resolvedTotalMemoryBytes,
         hasSystemMemorySnapshot: systemMemorySnapshot !== null,
@@ -4954,6 +5080,7 @@ class LLMEngineService {
         && configuredDraftArtifact.sizeBytes > 0
         ? Math.round(configuredDraftArtifact.sizeBytes)
         : null;
+      let speculativeDraftDownloadMarker: string | null = null;
       this.speculativeDraftSizeBytes = speculativeDraftSizeBytes;
       if (speculativeDecodingForLoad?.mode === 'draft_model' && cachedModel) {
         const draftArtifact = configuredDraftArtifact;
@@ -4972,11 +5099,22 @@ class LLMEngineService {
               && resolvedDraft.fileInfo.size > 0
               ? Math.round(resolvedDraft.fileInfo.size)
               : draftArtifact.sizeBytes;
+            speculativeDraftDownloadMarker = this.resolvePersistedCompanionDownloadMarker({
+              modificationTime: resolvedDraft.fileInfo.modificationTime,
+              integrity: draftArtifact.integrity,
+              updatedAt: draftArtifact.updatedAt,
+              metadataParts: [
+                draftArtifact.hfRevision,
+                draftArtifact.remoteFileName,
+                draftArtifact.id,
+              ],
+            });
             this.speculativeDraftSizeBytes = speculativeDraftSizeBytes;
           } catch (error) {
             this.speculativeDecodingFallbackReason = 'draft_artifact_unavailable';
             speculativeDecodingForLoad = null;
             speculativeDraftSizeBytes = null;
+            speculativeDraftDownloadMarker = null;
             this.speculativeDraftSizeBytes = null;
             console.warn('[LLMEngine] Gemma MTP draft is unavailable; loading the base model without speculative decoding', {
               modelId,
@@ -5552,6 +5690,13 @@ class LLMEngineService {
 
       const backendInitAttempts: EngineBackendInitAttempt[] = [];
       const initAttemptGuard = new ModelInitAttemptGuard();
+      const profileUsesNoExtraBufts = (profile: InitInferenceProfile): boolean => (
+        shouldUseLowMemoryContextParams
+        && typeof profile.nBatch === 'number'
+        && Number.isFinite(profile.nBatch)
+        && typeof profile.nUbatch === 'number'
+        && Number.isFinite(profile.nUbatch)
+      );
       const publishBackendInitAttempts = () => {
         this.backendInitAttemptsSnapshot = backendInitAttempts;
         if (initDiagnostics) {
@@ -5578,6 +5723,7 @@ class LLMEngineService {
         useMlock: profile.useMlock,
         nBatch: profile.nBatch,
         nUbatch: profile.nUbatch,
+        noExtraBufts: profileUsesNoExtraBufts(profile),
         kvUnified: profile.kvUnified,
         nParallel: profile.nParallel,
         contextSize: finalContextSize,
@@ -5585,6 +5731,107 @@ class LLMEngineService {
         cacheTypeV,
         speculativeEnabled,
       });
+
+      const buildPersistentFailureBoundIdentity = (
+        profile: InitInferenceProfile,
+        layers: number,
+        speculativeConfig: ModelSpeculativeDecodingConfig | null,
+      ): ModelInitFailureBoundIdentity => ({
+        modelId,
+        modelFileSizeBytes: verifiedFileSizeBytes,
+        modelSha256: cachedModel?.downloadIntegrity?.sha256 ?? cachedModel?.sha256,
+        modelDownloadMarker: loadedArtifactIdentity.modificationTime
+          ?? loadedArtifactIdentity.fallbackDownloadMarker,
+        modelVariantId: cachedModel?.activeVariantId,
+        modelResolvedFileName: cachedModel?.resolvedFileName,
+        modelRevision: cachedModel?.hfRevision,
+        deviceModel: deviceModelForInitFailureIdentity,
+        deviceAbis: deviceAbisForInitFailureIdentity,
+        totalMemoryBytes: resolvedTotalMemoryBytes,
+        platform: Platform.OS,
+        platformVersion: String(Platform.Version ?? 'unknown'),
+        osBuildId: osBuildIdForInitFailureIdentity,
+        appVersion: APP_VERSION,
+        nativeModuleVersion: getCurrentNativeModuleVersion(),
+        nativeRuntimeBuild: nativeRuntimeBuildForInitFailureIdentity,
+        backendMode: profile.backendMode,
+        devices: profile.devices,
+        contextSize: finalContextSize,
+        cacheTypeK,
+        cacheTypeV,
+        nThreads: profile.nThreads,
+        cpuMask: profile.cpuMask,
+        cpuStrict: profile.cpuStrict,
+        flashAttnType: resolveEffectiveFlashAttnType(profile.flashAttnType, layers),
+        useMmap: profile.useMmap,
+        useMlock: profile.useMlock,
+        nBatch: profile.nBatch,
+        nUbatch: profile.nUbatch,
+        noExtraBufts: profileUsesNoExtraBufts(profile),
+        kvUnified: profile.kvUnified,
+        nParallel: profile.nParallel,
+        projector: loadTimeProjectorMemory
+          ? {
+              id: loadTimeProjectorMemory.projectorId,
+              sizeBytes: loadTimeProjectorMemory.sizeBytes,
+              sha256: loadTimeProjectorMemory.sha256,
+              downloadMarker: loadTimeProjectorMemory.downloadMarker,
+            }
+          : null,
+        speculative: speculativeConfig
+          ? {
+              mode: speculativeConfig.mode,
+              maxDraftTokens: speculativeConfig.maxDraftTokens,
+              draft: speculativeConfig.mode === 'draft_model' && configuredDraftArtifact
+                ? {
+                    id: configuredDraftArtifact.id,
+                    sizeBytes: speculativeDraftSizeBytes,
+                    sha256: configuredDraftArtifact.integrity?.sha256
+                      ?? configuredDraftArtifact.sha256,
+                    downloadMarker: speculativeDraftDownloadMarker,
+                  }
+                : null,
+            }
+          : null,
+      });
+
+      const readPersistentFailureBound = (
+        identity: ModelInitFailureBoundIdentity,
+      ): number | null => {
+        try {
+          return readModelInitFailureBound(identity)?.oomUpperBoundGpuLayers ?? null;
+        } catch {
+          performanceMonitor.incrementCounter('model.init.failureBoundReadFailed');
+          return null;
+        }
+      };
+
+      const persistFailureBound = (
+        identity: ModelInitFailureBoundIdentity,
+        oomUpperBoundGpuLayers: number,
+      ): void => {
+        try {
+          const persisted = recordModelInitFailureBound(identity, oomUpperBoundGpuLayers);
+          if (persisted) {
+            performanceMonitor.incrementCounter('model.init.failureBoundLearned');
+          }
+        } catch {
+          performanceMonitor.incrementCounter('model.init.failureBoundWriteFailed');
+        }
+      };
+
+      const reconcileSuccessfulFailureBound = (
+        identity: ModelInitFailureBoundIdentity,
+        successfulGpuLayers: number,
+      ): void => {
+        try {
+          if (reconcileModelInitFailureBoundSuccess(identity, successfulGpuLayers)) {
+            performanceMonitor.incrementCounter('model.init.failureBoundCleared');
+          }
+        } catch {
+          performanceMonitor.incrementCounter('model.init.failureBoundWriteFailed');
+        }
+      };
 
       const buildInitAttemptTelemetryBase = (
         profile: InitInferenceProfile,
@@ -5734,6 +5981,7 @@ class LLMEngineService {
         context: LlamaContext;
         resolvedGpuLayers: number;
         successfulAttempt: EngineBackendInitAttempt;
+        successfulFailureBoundIdentity: ModelInitFailureBoundIdentity;
       } | null> => {
         const {
           backendMode: candidate,
@@ -5810,7 +6058,7 @@ class LLMEngineService {
             && typeof nUbatch === 'number'
             && Number.isFinite(nUbatch)
               ? {
-                  ...(shouldUseLowMemoryContextParams ? { no_extra_bufts: true } : null),
+                  ...(profileUsesNoExtraBufts(profile) ? { no_extra_bufts: true } : null),
                   n_batch: Math.round(nBatch),
                   n_ubatch: Math.round(nUbatch),
                 }
@@ -5842,6 +6090,15 @@ class LLMEngineService {
           lastPublishedProgressAtMs = nowMs;
           this.updateState({ ...this.state, loadProgress: normalizedProgress });
         };
+        type NativeInitAttemptResult =
+          | {
+              status: 'success';
+              context: LlamaContext;
+              attempt: EngineBackendInitAttempt;
+              failureBoundIdentity: ModelInitFailureBoundIdentity;
+            }
+          | { status: 'skipped'; decision: Exclude<ModelInitAttemptDecision, 'started'> };
+
         const runNativeInitAttempt = async ({
           layers,
           speculativeConfig,
@@ -5852,10 +6109,21 @@ class LLMEngineService {
           speculativeConfig: ModelSpeculativeDecodingConfig | null;
           profileSource: EngineModelInitProfileSource;
           allowBeyondAttemptLimit?: boolean;
-        }): Promise<{ context: LlamaContext; attempt: EngineBackendInitAttempt } | null> => {
+        }): Promise<NativeInitAttemptResult> => {
           const normalizedAttemptLayers = Math.max(0, Math.round(layers));
           const speculativeEnabled = speculativeConfig !== null;
           const identity = buildInitAttemptIdentity(profile, normalizedAttemptLayers, speculativeEnabled);
+          const persistentIdentity = buildPersistentFailureBoundIdentity(
+            profile,
+            normalizedAttemptLayers,
+            speculativeConfig,
+          );
+          if (normalizedAttemptLayers > 0 || speculativeEnabled) {
+            const persistedUpperBound = readPersistentFailureBound(persistentIdentity);
+            if (persistedUpperBound !== null) {
+              initAttemptGuard.recordKnownOomUpperBound(identity, persistedUpperBound);
+            }
+          }
           const decision = initAttemptGuard.tryStart(identity, {
             allowBeyondLimit: allowBeyondAttemptLimit,
           });
@@ -5871,7 +6139,10 @@ class LLMEngineService {
                 decision === 'known_oom_upper_bound',
               );
             }
-            return null;
+            if (decision === 'known_oom_upper_bound') {
+              performanceMonitor.incrementCounter('model.init.failureBoundSkipped');
+            }
+            return { status: 'skipped', decision };
           }
 
           const startedAtMs = Date.now();
@@ -5905,12 +6176,20 @@ class LLMEngineService {
               outcome: 'success',
               probableOom: false,
             });
-            return { context, attempt };
+            return {
+              status: 'success',
+              context,
+              attempt,
+              failureBoundIdentity: persistentIdentity,
+            };
           } catch (error) {
             const durationMs = Math.max(0, Date.now() - startedAtMs);
             const probableOom = isProbableMemoryFailure(error);
             if (probableOom) {
               initAttemptGuard.recordProbableOom(identity);
+              if (normalizedAttemptLayers > 0 || speculativeEnabled) {
+                persistFailureBound(persistentIdentity, normalizedAttemptLayers);
+              }
             }
             const failureCategory = classifyModelInitFailure(error, probableOom);
             const attempt = createInitAttemptRecord({
@@ -5938,7 +6217,7 @@ class LLMEngineService {
         const initOnce = async (
           layers: number,
           profileSource: EngineModelInitProfileSource,
-        ): Promise<{ context: LlamaContext; attempt: EngineBackendInitAttempt } | null> => {
+        ): Promise<NativeInitAttemptResult> => {
           const attemptedSpeculativeConfig = speculativeDecodingForLoad;
           if (!attemptedSpeculativeConfig) {
             return runNativeInitAttempt({
@@ -5949,10 +6228,32 @@ class LLMEngineService {
           }
 
           try {
-            return await runNativeInitAttempt({
+            const speculativeResult = await runNativeInitAttempt({
               layers,
               speculativeConfig: attemptedSpeculativeConfig,
               profileSource,
+            });
+            if (speculativeResult.status === 'success' || speculativeResult.decision !== 'known_oom_upper_bound') {
+              return speculativeResult;
+            }
+
+            speculativeDecodingForLoad = null;
+            this.speculativeDecodingFallbackReason = 'initialization_failed';
+            initDiagnostics = {
+              ...initDiagnostics,
+              speculativeDecoding: {
+                requested: true,
+                mode: attemptedSpeculativeConfig.mode,
+                draftArtifactReady: speculativeDraftPath !== undefined,
+                maxDraftTokens: attemptedSpeculativeConfig.maxDraftTokens,
+                fallbackReason: this.speculativeDecodingFallbackReason,
+                initializationError: 'known_oom_upper_bound',
+              },
+            };
+            return runNativeInitAttempt({
+              layers,
+              speculativeConfig: null,
+              profileSource: 'speculative_fallback',
             });
           } catch (error) {
             await releaseAllLlamaContexts().catch(() => undefined);
@@ -5988,7 +6289,7 @@ class LLMEngineService {
         const normalizedLayers = Math.max(0, Math.round(nGpuLayers));
         if (normalizedLayers <= 0) {
           const result = await initOnce(0, profile.profileSource);
-          if (!result) {
+          if (result.status === 'skipped') {
             return null;
           }
           applyCalibrationForGpuLayers(0);
@@ -5996,81 +6297,137 @@ class LLMEngineService {
             context: result.context,
             resolvedGpuLayers: 0,
             successfulAttempt: result.attempt,
+            successfulFailureBoundIdentity: result.failureBoundIdentity,
           };
         }
 
+        let retryUpperBound: number | null = null;
+        let lastError: unknown | null = null;
+        let initialFailureForLog: unknown | null = null;
         try {
           const result = await initOnce(normalizedLayers, profile.profileSource);
-          if (!result) {
-            return null;
+          if (result.status === 'skipped') {
+            if (result.decision !== 'known_oom_upper_bound') {
+              return null;
+            }
+
+            const activeSpeculativeIdentity = buildInitAttemptIdentity(
+              profile,
+              normalizedLayers,
+              speculativeDecodingForLoad !== null,
+            );
+            const baseOnlyIdentity = buildInitAttemptIdentity(profile, normalizedLayers, false);
+            retryUpperBound = Math.min(
+              normalizedLayers,
+              initAttemptGuard.getKnownOomUpperBound(activeSpeculativeIdentity)
+                ?? initAttemptGuard.getKnownOomUpperBound(baseOnlyIdentity)
+                ?? normalizedLayers,
+            );
+          } else {
+            applyCalibrationForGpuLayers(normalizedLayers);
+            return {
+              context: result.context,
+              resolvedGpuLayers: normalizedLayers,
+              successfulAttempt: result.attempt,
+              successfulFailureBoundIdentity: result.failureBoundIdentity,
+            };
           }
-          applyCalibrationForGpuLayers(normalizedLayers);
-          return {
-            context: result.context,
-            resolvedGpuLayers: normalizedLayers,
-            successfulAttempt: result.attempt,
-          };
         } catch (error) {
           const isOomLikely = isProbableMemoryFailure(error);
-          if (calibrationKeyForLoad && isOomLikely) {
+          const initialCalibrationKey = verifiedFileSizeBytes !== null
+            ? this.buildCalibrationKeyString({
+                ggufMetadata,
+                verifiedFileSizeBytes,
+                contextTokens: finalContextSize,
+                gpuLayers: normalizedLayers,
+                cacheTypeK,
+                cacheTypeV,
+                useMmap: requestedUseMmap,
+                hasMmproj: hasLoadTimeMmproj,
+                nBatch: effectiveBatchParams?.nBatch,
+                nUbatch: effectiveBatchParams?.nUbatch,
+              })
+            : null;
+          if (initialCalibrationKey && isOomLikely) {
             this.persistCalibrationFailure({
-              calibrationKey: calibrationKeyForLoad,
+              calibrationKey: initialCalibrationKey,
               observedRawBudgetBytes,
             });
           }
 
-          const retryCandidates = isOomLikely
-            ? buildModelInitLayerRetryCandidates(normalizedLayers)
-            : [];
+          if (!isOomLikely) {
+            if (process.env.NODE_ENV !== 'test') {
+              console.warn(`[LLMEngine] ${candidate.toUpperCase()} init failed`, buildSafeErrorLogDetails(error));
+            }
+            throw error;
+          }
 
-          if (process.env.NODE_ENV !== 'test') {
+          retryUpperBound = normalizedLayers;
+          lastError = error;
+          initialFailureForLog = error;
+        }
+
+        const retryCandidates = retryUpperBound !== null
+          ? buildModelInitLayerRetryCandidates(retryUpperBound)
+          : [];
+
+        if (process.env.NODE_ENV !== 'test') {
+          if (initialFailureForLog) {
             const logLabel = retryCandidates.length > 0
               ? `[LLMEngine] ${candidate.toUpperCase()} init failed, retrying with fewer layers`
               : `[LLMEngine] ${candidate.toUpperCase()} init failed`;
-            console.warn(logLabel, buildSafeErrorLogDetails(error));
+            console.warn(logLabel, buildSafeErrorLogDetails(initialFailureForLog));
+          } else if (retryCandidates.length > 0) {
+            console.warn(`[LLMEngine] ${candidate.toUpperCase()} known OOM profile skipped, retrying below the persisted bound`, {
+              modelId,
+              retryUpperBound,
+            });
           }
+        }
 
-          let lastError: unknown = error;
-          for (const candidateLayers of retryCandidates) {
-            const candidateCalibrationKey = verifiedFileSizeBytes !== null
-              ? this.buildCalibrationKeyString({
-                  ggufMetadata,
-                  verifiedFileSizeBytes,
-                  contextTokens: finalContextSize,
-                  gpuLayers: candidateLayers,
-                  cacheTypeK,
-                  cacheTypeV,
-                  useMmap: requestedUseMmap,
-                  hasMmproj: hasLoadTimeMmproj,
-                  nBatch: effectiveBatchParams?.nBatch,
-                  nUbatch: effectiveBatchParams?.nUbatch,
-                })
-              : null;
+        for (const candidateLayers of retryCandidates) {
+          const candidateCalibrationKey = verifiedFileSizeBytes !== null
+            ? this.buildCalibrationKeyString({
+                ggufMetadata,
+                verifiedFileSizeBytes,
+                contextTokens: finalContextSize,
+                gpuLayers: candidateLayers,
+                cacheTypeK,
+                cacheTypeV,
+                useMmap: requestedUseMmap,
+                hasMmproj: hasLoadTimeMmproj,
+                nBatch: effectiveBatchParams?.nBatch,
+                nUbatch: effectiveBatchParams?.nUbatch,
+              })
+            : null;
 
-            try {
-              const result = await initOnce(candidateLayers, 'oom_retry');
-              if (!result) {
-                continue;
-              }
-              applyCalibrationForGpuLayers(candidateLayers);
-              return {
-                context: result.context,
-                resolvedGpuLayers: candidateLayers,
-                successfulAttempt: result.attempt,
-              };
-            } catch (retryError) {
-              lastError = retryError;
-              if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
-                this.persistCalibrationFailure({
-                  calibrationKey: candidateCalibrationKey,
-                  observedRawBudgetBytes,
-                });
-              }
+          try {
+            const result = await initOnce(candidateLayers, 'oom_retry');
+            if (result.status === 'skipped') {
+              continue;
+            }
+            applyCalibrationForGpuLayers(candidateLayers);
+            return {
+              context: result.context,
+              resolvedGpuLayers: candidateLayers,
+              successfulAttempt: result.attempt,
+              successfulFailureBoundIdentity: result.failureBoundIdentity,
+            };
+          } catch (retryError) {
+            lastError = retryError;
+            if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
+              this.persistCalibrationFailure({
+                calibrationKey: candidateCalibrationKey,
+                observedRawBudgetBytes,
+              });
             }
           }
+        }
 
+        if (lastError !== null) {
           throw lastError;
         }
+        return null;
       };
 
       const baseInferenceProfile: Omit<ResolvedInferenceProfile, 'backendMode' | 'devices' | 'nGpuLayers'> = {
@@ -6375,6 +6732,7 @@ class LLMEngineService {
             context,
             resolvedGpuLayers: candidateGpuLayers,
             successfulAttempt,
+            successfulFailureBoundIdentity,
           } = initResult;
           const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
           const runtimeAccelerationEnabled = candidate === 'npu'
@@ -6403,6 +6761,13 @@ class LLMEngineService {
               reasonNoGPU || `${candidate.toUpperCase()} acceleration was not enabled.`,
             );
             continue;
+          }
+
+          if (actualGpu) {
+            reconcileSuccessfulFailureBound(
+              successfulFailureBoundIdentity,
+              candidateGpuLayers,
+            );
           }
 
           resolvedInitProfile = profile;

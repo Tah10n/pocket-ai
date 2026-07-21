@@ -2,6 +2,7 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { inferenceBackendService } from '../../src/services/InferenceBackendService';
+import { createStorage } from '../../src/services/storage';
 import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
 
@@ -89,6 +90,7 @@ describe('LLMEngineService Stability', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        createStorage('pocket-ai-last-good-profiles', { tier: 'private' }).clearAll();
         (initLlama as jest.Mock).mockReset();
         (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
         (releaseAllLlama as jest.Mock).mockResolvedValue(undefined);

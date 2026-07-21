@@ -2,6 +2,8 @@ import {
   buildModelInitLayerRetryCandidates,
   classifyModelInitFailure,
   dedupeAndBoundModelInitProfiles,
+  MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS,
+  MAX_MODEL_INIT_TOTAL_ATTEMPTS,
   ModelInitAttemptGuard,
   type ModelInitAttemptIdentity,
 } from '../../src/services/LLMEngineService.initRetryPolicy';
@@ -86,6 +88,22 @@ describe('model init retry policy', () => {
     expect(guard.tryStart(baseOnly)).toBe('duplicate');
   });
 
+  it('canonicalizes equivalent backend device sets before duplicate detection', () => {
+    const guard = new ModelInitAttemptGuard();
+
+    expect(guard.tryStart(createAttempt({ devices: [' GPU1 ', 'GPU0', 'GPU1'] }))).toBe('started');
+    expect(guard.tryStart(createAttempt({ devices: ['GPU0', 'GPU1'] }))).toBe('duplicate');
+  });
+
+  it('keeps normal and low-memory native buffer profiles distinct', () => {
+    const guard = new ModelInitAttemptGuard();
+
+    expect(guard.tryStart(createAttempt({ nBatch: 256, nUbatch: 128, noExtraBufts: false })))
+      .toBe('started');
+    expect(guard.tryStart(createAttempt({ nBatch: 256, nUbatch: 128, noExtraBufts: true })))
+      .toBe('started');
+  });
+
   it('bounds accelerator attempts without removing the CPU fallback', () => {
     const guard = new ModelInitAttemptGuard(2);
 
@@ -97,6 +115,34 @@ describe('model init retry policy', () => {
       nGpuLayers: 0,
       flashAttnType: 'off',
     }))).toBe('started');
+  });
+
+  it('enforces an absolute native-attempt cap while reserving MTP-base and CPU fallback slots', () => {
+    const guard = new ModelInitAttemptGuard();
+    for (let layers = 1; layers < MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS; layers += 1) {
+      expect(guard.tryStart(createAttempt({ nGpuLayers: layers }))).toBe('started');
+    }
+
+    expect(guard.tryStart(createAttempt({
+      nGpuLayers: MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS,
+      speculativeEnabled: true,
+    }))).toBe('started');
+    expect(guard.tryStart(createAttempt({
+      nGpuLayers: MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS,
+      speculativeEnabled: false,
+    }), { allowBeyondLimit: true })).toBe('started');
+    expect(guard.tryStart(createAttempt({
+      backendMode: 'cpu',
+      nGpuLayers: 0,
+      flashAttnType: 'off',
+    }))).toBe('started');
+    expect(MAX_MODEL_INIT_TOTAL_ATTEMPTS).toBe(MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS + 2);
+    expect(guard.tryStart(createAttempt({
+      backendMode: 'cpu',
+      nGpuLayers: 0,
+      nThreads: 2,
+      flashAttnType: 'off',
+    }))).toBe('attempt_limit');
   });
 
   it('reports only bounded failure categories instead of raw native error text', () => {

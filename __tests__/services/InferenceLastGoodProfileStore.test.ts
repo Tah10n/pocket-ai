@@ -30,7 +30,71 @@ jest.mock('llama.rn/package.json', () => ({
 // Require after mocks to avoid transform/hoisting differences.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const lastGoodStore = require('../../src/services/InferenceLastGoodProfileStore') as typeof import('../../src/services/InferenceLastGoodProfileStore');
-const { readLastGoodInferenceProfile, writeLastGoodInferenceProfile } = lastGoodStore;
+const {
+  MAX_MODEL_INIT_FAILURE_BOUND_ENTRIES,
+  readLastGoodInferenceProfile,
+  readModelInitFailureBound,
+  reconcileModelInitFailureBoundSuccess,
+  recordModelInitFailureBound,
+  writeLastGoodInferenceProfile,
+} = lastGoodStore;
+type ModelInitFailureBoundIdentity = import('../../src/services/InferenceLastGoodProfileStore').ModelInitFailureBoundIdentity;
+
+function createFailureBoundIdentity(
+  overrides: Partial<ModelInitFailureBoundIdentity> = {},
+): ModelInitFailureBoundIdentity {
+  return {
+    modelId: 'test/model',
+    modelFileSizeBytes: 1_234_567,
+    modelSha256: 'model-sha',
+    modelDownloadMarker: 123,
+    modelVariantId: 'variant-a',
+    modelResolvedFileName: 'model-a.gguf',
+    modelRevision: 'main',
+    deviceModel: 'Pixel Test',
+    deviceAbis: ['arm64-v8a', 'armeabi-v7a'],
+    totalMemoryBytes: 8_000_000_000,
+    platform: 'android',
+    platformVersion: '36',
+    osBuildId: 'BP2A.250605.031',
+    appVersion: '1.6.0',
+    nativeModuleVersion: '1.2.3-test',
+    nativeRuntimeBuild: '{"number":"42","commit":"abc123"}',
+    backendMode: 'gpu',
+    devices: ['GPU1', 'GPU0'],
+    contextSize: 4096,
+    cacheTypeK: 'f16',
+    cacheTypeV: 'q8_0',
+    nThreads: 6,
+    cpuMask: 'ff',
+    cpuStrict: true,
+    flashAttnType: 'on',
+    useMmap: true,
+    useMlock: false,
+    nBatch: 512,
+    nUbatch: 256,
+    noExtraBufts: false,
+    kvUnified: false,
+    nParallel: 1,
+    projector: {
+      id: 'projector-a',
+      sizeBytes: 1000,
+      sha256: 'projector-sha',
+      downloadMarker: 'integrity:projector-a',
+    },
+    speculative: {
+      mode: 'draft_model',
+      maxDraftTokens: 3,
+      draft: {
+        id: 'draft-a',
+        sizeBytes: 2000,
+        sha256: 'draft-sha',
+        downloadMarker: 'updated:789',
+      },
+    },
+    ...overrides,
+  };
+}
 
 function clearLastGoodStorage() {
   mockStorage.clearAll();
@@ -285,5 +349,144 @@ describe('InferenceLastGoodProfileStore', () => {
     });
     expect(readGpu?.backendMode).toBe('gpu');
     expect(readGpu?.devices).toBeUndefined();
+  });
+
+  it('persists the lowest learned OOM bound and canonicalizes ABI/device ordering', () => {
+    const identity = createFailureBoundIdentity();
+
+    expect(recordModelInitFailureBound(identity, 12)).toEqual(expect.objectContaining({
+      oomUpperBoundGpuLayers: 12,
+    }));
+    expect(recordModelInitFailureBound({
+      ...identity,
+      deviceAbis: [...identity.deviceAbis].reverse(),
+      devices: [...(identity.devices ?? [])].reverse(),
+    }, 9)).toEqual(expect.objectContaining({
+      oomUpperBoundGpuLayers: 9,
+    }));
+
+    expect(readModelInitFailureBound(identity)).toEqual(expect.objectContaining({
+      oomUpperBoundGpuLayers: 9,
+    }));
+  });
+
+  it.each([
+    ['model size', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelFileSizeBytes: 2_000_000 })],
+    ['model SHA', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelSha256: 'new-model-sha' })],
+    ['download marker', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelDownloadMarker: 999 })],
+    ['active model variant', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelVariantId: 'variant-b' })],
+    ['resolved model filename', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelResolvedFileName: 'model-b.gguf' })],
+    ['model revision', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelRevision: 'revision-b' })],
+    ['device model', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, deviceModel: 'Pixel Changed' })],
+    ['device ABI', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, deviceAbis: ['x86_64'] })],
+    ['total memory', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, totalMemoryBytes: 12_000_000_000 })],
+    ['OS build', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, osBuildId: 'BP3A.changed' })],
+    ['backend mode', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, backendMode: 'npu' as const })],
+    ['backend devices', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, devices: ['HTP0'] })],
+    ['context size', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, contextSize: 8192 })],
+    ['resolved K cache type', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, cacheTypeK: 'q8_0' })],
+    ['resolved V cache type', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, cacheTypeV: 'f16' })],
+    ['batch', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, nBatch: 256 })],
+    ['ubatch', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, nUbatch: 128 })],
+    ['low-memory native buffers mode', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, noExtraBufts: true })],
+    ['mmap', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, useMmap: false })],
+    ['mlock', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, useMlock: true })],
+    ['Flash Attention', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, flashAttnType: 'off' as const })],
+    ['projector', (identity: ModelInitFailureBoundIdentity) => ({
+      ...identity,
+      projector: { ...identity.projector!, downloadMarker: 'integrity:projector-b' },
+    })],
+    ['speculative draft', (identity: ModelInitFailureBoundIdentity) => ({
+      ...identity,
+      speculative: {
+        ...identity.speculative!,
+        draft: { ...identity.speculative!.draft!, downloadMarker: 'updated:999' },
+      },
+    })],
+    ['app version', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, appVersion: '1.7.0' })],
+    ['native runtime version', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, nativeModuleVersion: '2.0.0' })],
+    ['native runtime build', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, nativeRuntimeBuild: '{"number":"43","commit":"def456"}' })],
+  ] as [string, (identity: ModelInitFailureBoundIdentity) => ModelInitFailureBoundIdentity][])('invalidates a failure bound when %s changes', (_label, mutate) => {
+    const identity = createFailureBoundIdentity();
+    recordModelInitFailureBound(identity, 12);
+
+    expect(readModelInitFailureBound(mutate(identity))).toBeNull();
+    expect(readModelInitFailureBound(identity)?.oomUpperBoundGpuLayers).toBe(12);
+  });
+
+  it('expires learned bounds after the requested TTL', () => {
+    const identity = createFailureBoundIdentity();
+    recordModelInitFailureBound(identity, 12);
+
+    expect(readModelInitFailureBound(identity, 500)).toBeNull();
+    expect(mockStorage.getAllKeys().filter((key) => key.startsWith('init-oom-bound:'))).toHaveLength(0);
+  });
+
+  it('expires a bound recorded implausibly in the future after clock rollback', () => {
+    const identity = createFailureBoundIdentity();
+    dateNowSpy.mockReturnValueOnce(10_000_000).mockReturnValue(1_000_000);
+    recordModelInitFailureBound(identity, 12);
+
+    expect(readModelInitFailureBound(identity, 0)).toBeNull();
+    expect(mockStorage.getAllKeys().filter((key) => key.startsWith('init-oom-bound:'))).toHaveLength(0);
+  });
+
+  it('persists an exact CPU speculative OOM marker without poisoning base-only CPU identity', () => {
+    const speculativeIdentity = createFailureBoundIdentity({
+      backendMode: 'cpu',
+      devices: [],
+      speculative: { mode: 'embedded', maxDraftTokens: 3, draft: null },
+    });
+    const baseIdentity = { ...speculativeIdentity, speculative: null };
+
+    expect(recordModelInitFailureBound(speculativeIdentity, 0)?.oomUpperBoundGpuLayers).toBe(0);
+    expect(readModelInitFailureBound(speculativeIdentity)?.oomUpperBoundGpuLayers).toBe(0);
+    expect(readModelInitFailureBound(baseIdentity)).toBeNull();
+  });
+
+  it('clears only a bound contradicted by an equal-or-higher successful profile', () => {
+    const identity = createFailureBoundIdentity();
+    recordModelInitFailureBound(identity, 9);
+
+    expect(reconcileModelInitFailureBoundSuccess(identity, 8)).toBe(false);
+    expect(readModelInitFailureBound(identity)?.oomUpperBoundGpuLayers).toBe(9);
+    expect(reconcileModelInitFailureBoundSuccess(identity, 9)).toBe(true);
+    expect(readModelInitFailureBound(identity)).toBeNull();
+  });
+
+  it('bounds persisted failure records and evicts the oldest entries deterministically', () => {
+    const firstIdentity = createFailureBoundIdentity({ modelId: 'test/model-0' });
+    for (let index = 0; index <= MAX_MODEL_INIT_FAILURE_BOUND_ENTRIES; index += 1) {
+      recordModelInitFailureBound(createFailureBoundIdentity({ modelId: `test/model-${index}` }), 12);
+    }
+
+    const failureKeys = mockStorage.getAllKeys().filter((key) => key.startsWith('init-oom-bound:'));
+    expect(failureKeys).toHaveLength(MAX_MODEL_INIT_FAILURE_BOUND_ENTRIES);
+    expect(readModelInitFailureBound(firstIdentity)).toBeNull();
+    expect(readModelInitFailureBound(createFailureBoundIdentity({
+      modelId: `test/model-${MAX_MODEL_INIT_FAILURE_BOUND_ENTRIES}`,
+    }))?.oomUpperBoundGpuLayers).toBe(12);
+  });
+
+  it('keeps legacy FNV-32 collision identities in separate widened-digest records', () => {
+    const firstIdentity = createFailureBoundIdentity({ modelId: 'owner/ful8jip0' });
+    const secondIdentity = createFailureBoundIdentity({ modelId: 'owner/8bmhgz6d' });
+
+    recordModelInitFailureBound(firstIdentity, 12);
+    recordModelInitFailureBound(secondIdentity, 9);
+
+    expect(readModelInitFailureBound(firstIdentity)?.oomUpperBoundGpuLayers).toBe(12);
+    expect(readModelInitFailureBound(secondIdentity)?.oomUpperBoundGpuLayers).toBe(9);
+    expect(mockStorage.getAllKeys().filter((key) => key.startsWith('init-oom-bound:'))).toHaveLength(2);
+  });
+
+  it('removes corrupted failure-bound payloads without exposing their contents', () => {
+    const identity = createFailureBoundIdentity();
+    recordModelInitFailureBound(identity, 12);
+    const failureKey = mockStorage.getAllKeys().find((key) => key.startsWith('init-oom-bound:'))!;
+    mockStorage.set(failureKey, '{private-path:C:\\Users\\someone');
+
+    expect(readModelInitFailureBound(identity)).toBeNull();
+    expect(mockStorage.contains(failureKey)).toBe(false);
   });
 });

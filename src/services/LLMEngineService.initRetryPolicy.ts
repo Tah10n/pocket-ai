@@ -5,6 +5,7 @@ import type {
 export const MAX_MODEL_INIT_PROFILE_CANDIDATES = 8;
 export const MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS = 12;
 export const MAX_MODEL_INIT_LAYER_RETRY_CANDIDATES = 4;
+export const MAX_MODEL_INIT_TOTAL_ATTEMPTS = MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS + 2;
 
 export type ModelInitCandidateIdentity = {
   backendMode: 'cpu' | 'gpu' | 'npu';
@@ -18,6 +19,7 @@ export type ModelInitCandidateIdentity = {
   useMlock: boolean;
   nBatch?: number;
   nUbatch?: number;
+  noExtraBufts?: boolean;
   kvUnified?: boolean;
   nParallel: number;
 };
@@ -52,10 +54,11 @@ function normalizeDevices(devices: string[] | undefined): string[] {
     return [];
   }
 
-  return devices
+  return Array.from(new Set(devices
     .filter((device): device is string => typeof device === 'string')
     .map((device) => device.trim())
-    .filter((device) => device.length > 0);
+    .filter((device) => device.length > 0)))
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }
 
 function buildCandidateKeyPayload(identity: ModelInitCandidateIdentity) {
@@ -71,6 +74,7 @@ function buildCandidateKeyPayload(identity: ModelInitCandidateIdentity) {
     useMlock: identity.useMlock === true,
     nBatch: normalizeOptionalInteger(identity.nBatch),
     nUbatch: normalizeOptionalInteger(identity.nUbatch),
+    noExtraBufts: identity.noExtraBufts === true,
     kvUnified: typeof identity.kvUnified === 'boolean' ? identity.kvUnified : null,
     nParallel: Math.max(1, normalizeInteger(identity.nParallel, 1)),
   };
@@ -154,10 +158,12 @@ export function buildModelInitLayerRetryCandidates(
 export class ModelInitAttemptGuard {
   private readonly attemptedKeys = new Set<string>();
   private readonly knownOomUpperBounds = new Map<string, number>();
+  private readonly knownExactOomAttemptKeys = new Set<string>();
   private acceleratorAttemptCount = 0;
 
   constructor(
     private readonly maxAcceleratorAttempts = MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS,
+    private readonly maxTotalAttempts = MAX_MODEL_INIT_TOTAL_ATTEMPTS,
   ) {}
 
   tryStart(
@@ -167,6 +173,14 @@ export class ModelInitAttemptGuard {
     const attemptKey = buildModelInitAttemptKey(identity);
     if (this.attemptedKeys.has(attemptKey)) {
       return 'duplicate';
+    }
+
+    if (this.knownExactOomAttemptKeys.has(attemptKey)) {
+      return 'known_oom_upper_bound';
+    }
+
+    if (this.attemptedKeys.size >= Math.max(1, Math.round(this.maxTotalAttempts))) {
+      return 'attempt_limit';
     }
 
     const normalizedLayers = normalizeInteger(identity.nGpuLayers);
@@ -192,8 +206,16 @@ export class ModelInitAttemptGuard {
   }
 
   recordProbableOom(identity: ModelInitAttemptIdentity): void {
-    const normalizedLayers = normalizeInteger(identity.nGpuLayers);
-    if (normalizedLayers <= 0) {
+    this.recordKnownOomUpperBound(identity, identity.nGpuLayers);
+  }
+
+  recordKnownOomUpperBound(
+    identity: ModelInitAttemptIdentity,
+    oomUpperBoundGpuLayers: number,
+  ): void {
+    const normalizedLayers = normalizeInteger(oomUpperBoundGpuLayers);
+    if (normalizedLayers === 0) {
+      this.knownExactOomAttemptKeys.add(buildModelInitAttemptKey(identity));
       return;
     }
 
@@ -208,6 +230,9 @@ export class ModelInitAttemptGuard {
   }
 
   getKnownOomUpperBound(identity: ModelInitAttemptIdentity): number | null {
+    if (this.knownExactOomAttemptKeys.has(buildModelInitAttemptKey(identity))) {
+      return 0;
+    }
     return this.knownOomUpperBounds.get(buildModelInitMemoryProfileKey(identity)) ?? null;
   }
 }

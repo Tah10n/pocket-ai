@@ -26,7 +26,11 @@ jest.mock('../../src/services/InferenceBackendService', () => ({
 }));
 
 jest.mock('../../src/services/InferenceLastGoodProfileStore', () => ({
+  getCurrentNativeModuleVersion: jest.fn().mockReturnValue('test-native'),
   readLastGoodInferenceProfile: jest.fn(),
+  readModelInitFailureBound: jest.fn().mockReturnValue(null),
+  reconcileModelInitFailureBoundSuccess: jest.fn().mockReturnValue(false),
+  recordModelInitFailureBound: jest.fn(),
   writeLastGoodInferenceProfile: jest.fn(),
 }));
 

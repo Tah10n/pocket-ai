@@ -1,6 +1,14 @@
 import type { AppStorageFacade } from '../src/store/storage';
 
-export type StorageWriteKind = 'index' | 'pending' | 'thread' | 'progress' | 'other';
+export type StorageWriteKind =
+  | 'index'
+  | 'pending'
+  | 'thread'
+  | 'progress_manifest'
+  | 'progress_operation'
+  | 'progress_checkpoint'
+  | 'progress_chunk'
+  | 'other';
 
 export type StorageCounterSnapshot = {
   setCalls: number;
@@ -64,13 +72,31 @@ function defaultClassifyStorageKey(key: string): StorageWriteKind {
     return 'thread';
   }
   if (key.startsWith('chat-store:progress:')) {
-    return 'progress';
+    return 'progress_manifest';
+  }
+  if (key.startsWith('chat-store:operation:')) {
+    return 'progress_operation';
+  }
+  if (key.startsWith('chat-store:progress-checkpoint:')) {
+    return 'progress_checkpoint';
+  }
+  if (key.startsWith('chat-store:progress-chunk:')) {
+    return 'progress_chunk';
   }
   return 'other';
 }
 
 function emptyWritesByKind(): Record<StorageWriteKind, number> {
-  return { index: 0, pending: 0, thread: 0, progress: 0, other: 0 };
+  return {
+    index: 0,
+    pending: 0,
+    thread: 0,
+    progress_manifest: 0,
+    progress_operation: 0,
+    progress_checkpoint: 0,
+    progress_chunk: 0,
+    other: 0,
+  };
 }
 
 export function createCountingAppStorage(options?: {

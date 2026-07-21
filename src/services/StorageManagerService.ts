@@ -33,8 +33,8 @@ import {
 } from '../utils/effectiveProjectorState';
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
-  CHAT_THREAD_STORAGE_KEY_PREFIX,
   LEGACY_CHAT_STORE_STORAGE_KEY,
+  isChatPersistenceStorageKey,
 } from '../store/chatPersistence';
 import {
   getAppCacheDirectorySizeBytes,
@@ -723,11 +723,7 @@ function getLegacyChatHistoryBytes() {
 }
 
 function getPersistedChatStoreBytes() {
-  const chatKeys = appStorage.getAllKeys().filter((key) => (
-    key === CHAT_STORE_KEY ||
-    key === CHAT_PERSISTENCE_INDEX_KEY ||
-    key.startsWith(CHAT_THREAD_STORAGE_KEY_PREFIX)
-  ));
+  const chatKeys = appStorage.getAllKeys().filter(isChatPersistenceStorageKey);
 
   return chatKeys.reduce((sum, key) => {
     const value = appStorage.getString(key);

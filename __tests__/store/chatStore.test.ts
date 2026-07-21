@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { ChatThread } from '../../src/types/chat';
+import { ChatMessage, ChatThread } from '../../src/types/chat';
 import {
   findMostRecentThreadId,
   flushPendingChatPersistenceWrites,
@@ -14,10 +14,14 @@ import {
   CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
   CHAT_PERSISTENCE_SCHEMA_VERSION,
   CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+  MAX_ASSISTANT_PROGRESS_CONTENT_CHARS,
   getChatStreamingProgressStorageKey,
+  getThreadIdFromChatStreamingProgressArtifactStorageKey,
   getChatThreadStorageKey,
+  listChatStreamingProgressStorageKeys,
   readChatStreamingProgressRecord,
   readChatThreadRecord,
+  removeChatStreamingProgressRecord,
   writeChatStreamingProgressRecord,
   writeChatPendingIndexCommit,
   writeChatPersistenceIndex,
@@ -29,7 +33,13 @@ import * as privateStorageService from '../../src/services/storage';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
-import { MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH } from '../../src/store/chatBranchReplacement';
+import {
+  MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS,
+  MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENT_METADATA_BYTES,
+  MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH,
+  MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS,
+  MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PART_TOTAL_CHARS,
+} from '../../src/store/chatBranchReplacement';
 import {
   captureReferenceSequence,
   countUnretainedItemReferences,
@@ -201,6 +211,31 @@ function seedPersistedChatThread(thread: ChatThread, persistedAt = 100): void {
     threads: { [thread.id]: thread },
     activeThreadId: thread.id,
   });
+}
+
+function snapshotStreamingProgressArtifacts(threadId: string): Map<string, string> {
+  return new Map(listChatStreamingProgressStorageKeys(storage)
+    .filter((key) => (
+      getThreadIdFromChatStreamingProgressArtifactStorageKey(key) === threadId
+    ))
+    .flatMap((key) => {
+      const value = storage.getString(key);
+      return value == null ? [] : [[key, value] as const];
+    }));
+}
+
+function restoreStreamingProgressArtifacts(artifacts: ReadonlyMap<string, string>): void {
+  const entries = Array.from(artifacts);
+  entries
+    .filter(([key]) => !key.startsWith('chat-store:progress:'))
+    .forEach(([key, value]) => storage.set(key, value));
+  entries
+    .filter(([key]) => key.startsWith('chat-store:progress:'))
+    .forEach(([key, value]) => storage.set(key, value));
+}
+
+function expectNoStreamingProgressArtifacts(threadId: string): void {
+  expect(snapshotStreamingProgressArtifacts(threadId)).toEqual(new Map());
 }
 
 type TerminalPersistenceMode = 'append' | 'replace' | 'replace_branch';
@@ -892,7 +927,7 @@ describe('chatStore', () => {
 
       const snapshot = performanceMonitor.snapshot();
       expect(snapshot.counters['chat.persist.sanitize'] ?? 0).toBe(0);
-      expect(snapshot.counters['chat.persist.stringify']).toBe(1);
+      expect(snapshot.counters['chat.persist.stringify']).toBe(3);
       expect(snapshot.counters['chat.persist.streaming']).toBe(1);
       expect(readChatStreamingProgressRecord(storage, durableThread.id)).toEqual({
         ok: true,
@@ -1773,7 +1808,7 @@ describe('chatStore', () => {
     expect(useChatStore.getState().threads[thread.id]).toBe(rawThread);
     expect(useChatStore.getState().getThread(thread.id)).toBe(rawThread);
     expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
-    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(thread.id);
 
     const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
       thread.id,
@@ -1798,6 +1833,129 @@ describe('chatStore', () => {
     expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
 
     useChatStore.getState().stopAssistantMessage(thread.id, assistantId);
+  });
+
+  it('rejects a combined multi-byte branch operation before transient runtime creation', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-operation-utf8-overflow');
+    const target = thread.messages[0];
+    const oversizedOperationThread: ChatThread = {
+      ...thread,
+      messages: [{
+        ...target,
+        contentParts: [{ type: 'text', text: '界'.repeat(100_000) }],
+      }, ...thread.messages.slice(1)],
+    };
+    seedPersistedChatThread(oversizedOperationThread, 100);
+    const rawThread = useChatStore.getState().threads[thread.id];
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(thread.id));
+
+    expect(useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      '界'.repeat(100_000),
+    )).toBeNull();
+    expect(useChatStore.getState().threads[thread.id]).toBe(rawThread);
+    expect(useChatStore.getState().getThread(thread.id)).toBe(rawThread);
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+    expectNoStreamingProgressArtifacts(thread.id);
+  });
+
+  it('rejects oversized or cyclic branch metadata before creating transient state', () => {
+    const scenarios: Array<{
+      name: string;
+      mutateTarget: (target: ChatMessage) => ChatMessage;
+    }> = [
+      {
+        name: 'attachment count',
+        mutateTarget: (target) => ({
+          ...target,
+          attachments: Array.from(
+            { length: MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS + 1 },
+            (_unused, index) => buildStoredAttachment(
+              target.id.split('-user-1')[0],
+              target.id,
+              `oversized-${index}.jpg`,
+            ),
+          ),
+        }),
+      },
+      {
+        name: 'attachment metadata bytes',
+        mutateTarget: (target) => ({
+          ...target,
+          attachments: [{
+            ...buildStoredAttachment(
+              target.id.split('-user-1')[0],
+              target.id,
+              'oversized-metadata.jpg',
+            ),
+            fileName: 'x'.repeat(MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENT_METADATA_BYTES + 1),
+          }],
+        }),
+      },
+      {
+        name: 'content part count',
+        mutateTarget: (target) => ({
+          ...target,
+          contentParts: Array.from(
+            { length: MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS + 1 },
+            () => ({ type: 'text' as const, text: 'bounded' }),
+          ),
+        }),
+      },
+      {
+        name: 'aggregate content part text',
+        mutateTarget: (target) => ({
+          ...target,
+          contentParts: [{
+            type: 'text',
+            text: 'x'.repeat(MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PART_TOTAL_CHARS + 1),
+          }],
+        }),
+      },
+      {
+        name: 'malformed nested content part',
+        mutateTarget: (target) => ({
+          ...target,
+          contentParts: [null] as unknown as ChatMessage['contentParts'],
+        }),
+      },
+      {
+        name: 'cyclic attachment metadata',
+        mutateTarget: (target) => {
+          const attachment = buildStoredAttachment(
+            target.id.split('-user-1')[0],
+            target.id,
+            'cyclic.jpg',
+          ) as ReturnType<typeof buildStoredAttachment> & { cycle?: unknown };
+          attachment.cycle = attachment;
+          return { ...target, attachments: [attachment] };
+        },
+      },
+    ];
+
+    scenarios.forEach(({ name, mutateTarget }, index) => {
+      const thread = buildTrailingModelSwitchThread(`thread-branch-bounds-${index}`);
+      seedPersistedChatThread(thread, 100);
+      const durableRecordBefore = storage.getString(getChatThreadStorageKey(thread.id));
+      const pollutedThread = {
+        ...thread,
+        messages: [mutateTarget(thread.messages[0]), ...thread.messages.slice(1)],
+      };
+      useChatStore.setState({
+        threads: { [thread.id]: pollutedThread },
+        activeThreadId: thread.id,
+      });
+
+      expect(useChatStore.getState().replaceBranchFromUserMessage(
+        thread.id,
+        `${thread.id}-user-1`,
+        `Rejected ${name}`,
+      )).toBeNull();
+      expect(useChatStore.getState().threads[thread.id]).toBe(pollutedThread);
+      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecordBefore);
+      expectNoStreamingProgressArtifacts(thread.id);
+    });
   });
 
   it('preserves image-only user attachments when regenerating a branch with empty text', () => {
@@ -2061,7 +2219,7 @@ describe('chatStore', () => {
     )).toBeNull();
     expect(useChatStore.getState().threads[thread.id]).toBe(thread);
     expect(useChatStore.getState().getThread(thread.id)).toBe(thread);
-    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(thread.id);
   });
 
   it('keeps the durable branch unchanged before first model-switch regeneration output', () => {
@@ -2184,11 +2342,18 @@ describe('chatStore', () => {
           }),
         }),
       });
-      const rawProgress = storage.getString(getChatStreamingProgressStorageKey(thread.id))!;
-      expect(rawProgress.length).toBeLessThan(durableRecordBefore.length);
-      expect(rawProgress).not.toContain('message-history-0');
-      expect(rawProgress).not.toContain('Deterministic assistant message 999');
-      expect(rawProgress).not.toContain('message-history-999');
+      const progressArtifacts = snapshotStreamingProgressArtifacts(thread.id);
+      const serializedProgress = Array.from(progressArtifacts.values()).join('');
+      const progressBytes = Array.from(progressArtifacts).reduce(
+        (total, [key, value]) => total + key.length + value.length,
+        0,
+      );
+      expect(progressBytes).toBeLessThan(durableRecordBefore.length);
+      expect(serializedProgress).toContain('Bounded edited prompt');
+      expect(serializedProgress).toContain('Recoverable visible output');
+      expect(serializedProgress).not.toContain('message-history-0');
+      expect(serializedProgress).not.toContain('Deterministic assistant message 999');
+      expect(serializedProgress).not.toContain('message-history-999');
     } finally {
       useChatStore.getState().stopAssistantMessage(
         thread.id,
@@ -2266,7 +2431,7 @@ describe('chatStore', () => {
         (key) => key === getChatThreadStorageKey(thread.id),
       )).toHaveLength(0);
       expect(snapshot.counters['chat.persist.sanitize'] ?? 0).toBe(0);
-      expect(snapshot.counters['chat.persist.stringify']).toBe(1);
+      expect(snapshot.counters['chat.persist.stringify']).toBe(3);
       expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))!.length).toBeLessThan(
         durableRecordBefore!.length,
       );
@@ -2486,7 +2651,7 @@ describe('chatStore', () => {
       content: 'Recoverable branch progress',
     });
     flushPendingChatPersistenceWrites('background');
-    const progressBefore = storage.getString(getChatStreamingProgressStorageKey(thread.id));
+    const progressBefore = snapshotStreamingProgressArtifacts(thread.id);
     const appStorage = getAppStorage() as unknown as { set: jest.Mock };
     const originalSet = appStorage.set;
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -2519,7 +2684,7 @@ describe('chatStore', () => {
       id: `${thread.id}-assistant-old`,
       content: 'Original durable answer',
     }));
-    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBe(progressBefore);
+    expect(snapshotStreamingProgressArtifacts(thread.id)).toEqual(progressBefore);
   });
 
   it('discards orphaned branch progress without resurrecting a thread', async () => {
@@ -2548,6 +2713,98 @@ describe('chatStore', () => {
     });
   });
 
+  it('cleans data-only progress slots after first-head publication is interrupted', async () => {
+    const thread = buildThread('thread-progress-orphan-before-first-head', 10);
+    seedPersistedChatThread(thread, 100);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const headKey = getChatStreamingProgressStorageKey(thread.id);
+    appStorage.set = jest.fn(function failFirstHeadPublish(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (key === headKey) {
+        throw new Error('simulated first progress head failure');
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(() => writeChatStreamingProgressRecord(storage, {
+        schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+        threadId: thread.id,
+        messageId: `${thread.id}-assistant-progress`,
+        modelId: thread.modelId,
+        createdAt: 11,
+        content: 'Unpublished partial response',
+        state: 'streaming',
+        persistedAt: 120,
+        revision: 1,
+      })).toThrow('simulated first progress head failure');
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    const unpublishedArtifacts = snapshotStreamingProgressArtifacts(thread.id);
+    expect(unpublishedArtifacts.size).toBe(2);
+    expect(unpublishedArtifacts.has(headKey)).toBe(false);
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id))
+      .toEqual(thread.messages.map((message) => message.id));
+    expectNoStreamingProgressArtifacts(thread.id);
+  });
+
+  it('retries data-only progress cleanup after a post-head removal failure', async () => {
+    const thread = buildThread('thread-progress-orphan-after-head-removal', 10);
+    seedPersistedChatThread(thread, 100);
+    expect(writeChatStreamingProgressRecord(storage, {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+      threadId: thread.id,
+      messageId: `${thread.id}-assistant-progress`,
+      modelId: thread.modelId,
+      createdAt: 11,
+      content: 'Published partial response',
+      state: 'streaming',
+      persistedAt: 120,
+      revision: 1,
+    })).toEqual({ status: 'written', kind: 'checkpoint' });
+    const headKey = getChatStreamingProgressStorageKey(thread.id);
+    const failedDataKey = Array.from(snapshotStreamingProgressArtifacts(thread.id).keys())
+      .find((key) => key !== headKey)!;
+    const appStorage = getAppStorage() as unknown as { remove: typeof storage.remove };
+    const originalRemove = appStorage.remove;
+    let didFailDataRemoval = false;
+    appStorage.remove = jest.fn(function failOneDataRemoval(this: unknown, key: string) {
+      if (!didFailDataRemoval && key === failedDataKey) {
+        didFailDataRemoval = true;
+        throw new Error('simulated progress data cleanup failure');
+      }
+      return originalRemove.call(this, key);
+    });
+
+    try {
+      expect(() => removeChatStreamingProgressRecord(storage, thread.id))
+        .toThrow('simulated progress data cleanup failure');
+    } finally {
+      appStorage.remove = originalRemove;
+    }
+
+    expect(didFailDataRemoval).toBe(true);
+    expect(storage.getString(headKey)).toBeUndefined();
+    expect(storage.getString(failedDataKey)).toBeDefined();
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id))
+      .toEqual(thread.messages.map((message) => message.id));
+    expectNoStreamingProgressArtifacts(thread.id);
+  });
+
   it('keeps a clear tombstone authoritative over stale branch progress', async () => {
     const thread = buildTrailingModelSwitchThread('thread-cleared-branch-progress');
     seedPersistedChatThread(thread, 100);
@@ -2560,10 +2817,11 @@ describe('chatStore', () => {
       content: 'Progress before authoritative clear',
     });
     flushPendingChatPersistenceWrites('background');
-    const staleProgress = storage.getString(getChatStreamingProgressStorageKey(thread.id))!;
+    const staleProgress = snapshotStreamingProgressArtifacts(thread.id);
 
     expect(useChatStore.getState().clearAllThreads()).toBe(1);
-    storage.set(getChatStreamingProgressStorageKey(thread.id), staleProgress);
+    restoreStreamingProgressArtifacts(staleProgress);
+    expect(readChatStreamingProgressRecord(storage, thread.id).ok).toBe(true);
     await useChatStore.persist.rehydrate();
 
     expect(useChatStore.getState().threads).toEqual({});
@@ -4308,13 +4566,13 @@ describe('chatStore', () => {
         }),
       ]);
       expect(storage.getString(getChatThreadStorageKey(thread.id))).toBeUndefined();
-      expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+      expectNoStreamingProgressArtifacts(thread.id);
       expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
 
       jest.advanceTimersByTime(10_000);
 
       expect(capture.writes).toHaveLength(1);
-      expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+      expectNoStreamingProgressArtifacts(thread.id);
     } finally {
       capture.restore();
       jest.useRealTimers();
@@ -4406,7 +4664,7 @@ describe('chatStore', () => {
         }),
       ]);
       expect(storage.getString(getChatThreadStorageKey(orphanThreadId))).toBeUndefined();
-      expect(storage.getString(getChatStreamingProgressStorageKey(orphanThreadId))).toBeUndefined();
+      expectNoStreamingProgressArtifacts(orphanThreadId);
       expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
       expect(storage.getString('chat-store')).toBeUndefined();
     } finally {
@@ -6792,11 +7050,14 @@ describe('chatStore', () => {
       const snapshot = performanceMonitor.snapshot();
       const progressRaw = storage.getString(getChatStreamingProgressStorageKey(streamingThread.id));
       expect(snapshot.counters['chat.persist.sanitize'] ?? 0).toBe(0);
-      expect(snapshot.counters['chat.persist.stringify']).toBe(1);
+      expect(snapshot.counters['chat.persist.stringify']).toBe(3);
       expect(snapshot.counters['chat.persist.streaming']).toBe(1);
-      expect(snapshot.events.filter((event) => event.name === 'chat.persist.stringify')).toEqual([
-        expect.objectContaining({ meta: { recordKind: 'progress' } }),
-      ]);
+      expect(snapshot.events.filter((event) => event.name === 'chat.persist.stringify'))
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ meta: { recordKind: 'progress_operation' } }),
+          expect.objectContaining({ meta: { recordKind: 'progress_checkpoint' } }),
+          expect.objectContaining({ meta: { recordKind: 'progress_manifest' } }),
+        ]));
       expect(storage.getString(getChatThreadStorageKey(streamingThread.id))).toBe(durableRecordBefore);
       expect(progressRaw).not.toContain('Deterministic user message');
       expect(progressRaw?.length ?? Number.MAX_SAFE_INTEGER).toBeLessThan(1_000);
@@ -7860,7 +8121,7 @@ describe('chatStore', () => {
         }),
       ],
     }));
-    expect(storage.getString(getChatStreamingProgressStorageKey(threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(threadId);
     expect(storage.getString(getChatThreadStorageKey(threadId))).toContain('Recovered partial answer');
     expect(storage.getString(getChatThreadStorageKey(threadId))).toContain('recovery-kept.jpg');
   });
@@ -7925,6 +8186,71 @@ describe('chatStore', () => {
     }));
   });
 
+  it('keeps the last bounded prefix and still allows durable and terminal commits after overflow', () => {
+    const durableThread = buildThread('thread-progress-capacity', 10);
+    const messageId = 'assistant-progress-capacity';
+    const streamingThread: ChatThread = {
+      ...durableThread,
+      messages: [
+        ...durableThread.messages,
+        {
+          id: messageId,
+          role: 'assistant',
+          content: '',
+          createdAt: 11,
+          state: 'streaming',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'generating',
+    };
+    writeChatThreadRecord(storage, durableThread, 10);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: durableThread.id,
+      threadIds: [durableThread.id],
+      updatedAt: 10,
+    });
+    useChatStore.setState({
+      threads: { [streamingThread.id]: streamingThread },
+      activeThreadId: streamingThread.id,
+    });
+    useChatStore.getState().patchAssistantMessage(streamingThread.id, messageId, {
+      content: 'last bounded prefix',
+    });
+    flushPendingChatPersistenceWrites('background');
+
+    const oversizedContent = 'x'.repeat(MAX_ASSISTANT_PROGRESS_CONTENT_CHARS + 1);
+    useChatStore.getState().patchAssistantMessage(streamingThread.id, messageId, {
+      content: oversizedContent,
+    });
+    expect(() => flushPendingChatPersistenceWrites('background')).not.toThrow();
+    expect(readChatStreamingProgressRecord(storage, streamingThread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({ content: 'last bounded prefix' }),
+    });
+
+    expect(useChatStore.getState().renameThread(
+      streamingThread.id,
+      'Renamed after progress overflow',
+    )).toBe(true);
+    expect(readChatThreadRecord(storage, streamingThread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({ title: 'Renamed after progress overflow' }),
+      }),
+    });
+
+    expect(useChatStore.getState().finalizeAssistantMessage(
+      streamingThread.id,
+      messageId,
+      oversizedContent,
+    )).toEqual(expect.objectContaining({ status: 'committed' }));
+    expect(useChatStore.getState().getThread(streamingThread.id)?.messages.at(-1)?.content)
+      .toHaveLength(MAX_ASSISTANT_PROGRESS_CONTENT_CHARS + 1);
+    expectNoStreamingProgressArtifacts(streamingThread.id);
+  });
+
   it('recovers progress when process death interrupts a nonterminal durable mutation', async () => {
     const threadId = 'thread-progress-interrupted-mutation';
     const durableThread = buildThread(threadId, 10);
@@ -7972,7 +8298,7 @@ describe('chatStore', () => {
     await useChatStore.persist.rehydrate();
 
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
-    expect(storage.getString(getChatStreamingProgressStorageKey(threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(threadId);
     expect(useChatStore.getState().getThread(threadId)).toEqual(expect.objectContaining({
       title: 'Renamed before process death',
       status: 'stopped',
@@ -8029,8 +8355,8 @@ describe('chatStore', () => {
       expect.objectContaining({ content: 'Durable final answer', state: 'complete' }),
     ]);
     expect(useChatStore.getState().getThread(corruptThread.id)).not.toBeNull();
-    expect(storage.getString(getChatStreamingProgressStorageKey(terminalThread.id))).toBeUndefined();
-    expect(storage.getString(getChatStreamingProgressStorageKey(corruptThread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(terminalThread.id);
+    expectNoStreamingProgressArtifacts(corruptThread.id);
   });
 
   it('removes progress on retention cleanup, delete, clear, and private-storage reset', () => {
@@ -8066,19 +8392,22 @@ describe('chatStore', () => {
     flushPendingChatPersistenceWrites('background');
 
     expect(useChatStore.getState().pruneExpiredThreads(7, now)).toBe(1);
-    expect(storage.getString(getChatStreamingProgressStorageKey(oldStreaming.id))).toBeUndefined();
-    expect(storage.getString(getChatStreamingProgressStorageKey(activeStreaming.id))).toContain('Active partial');
+    expectNoStreamingProgressArtifacts(oldStreaming.id);
+    expect(readChatStreamingProgressRecord(storage, activeStreaming.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({ content: 'Active partial' }),
+    });
 
     useChatStore.getState().deleteThread(activeStreaming.id);
-    expect(storage.getString(getChatStreamingProgressStorageKey(activeStreaming.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(activeStreaming.id);
 
     storage.set(getChatStreamingProgressStorageKey('orphan-clear'), JSON.stringify({ orphan: true }));
     expect(useChatStore.getState().clearAllThreads()).toBe(0);
-    expect(storage.getString(getChatStreamingProgressStorageKey('orphan-clear'))).toBeUndefined();
+    expectNoStreamingProgressArtifacts('orphan-clear');
 
     storage.set(getChatStreamingProgressStorageKey('orphan-reset'), JSON.stringify({ orphan: true }));
     resetChatStoreForPrivateStorageReset();
-    expect(storage.getString(getChatStreamingProgressStorageKey('orphan-reset'))).toBeUndefined();
+    expectNoStreamingProgressArtifacts('orphan-reset');
   });
 
   it('retains latest progress when a terminal durable commit fails', () => {
@@ -8243,11 +8572,14 @@ describe('chatStore', () => {
 
     jest.advanceTimersByTime(749);
     expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toBeUndefined();
-    expect(storage.getString(getChatStreamingProgressStorageKey(activeThread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(activeThread.id);
 
     flushPendingChatPersistenceWrites('background');
     expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toBeUndefined();
-    expect(storage.getString(getChatStreamingProgressStorageKey(activeThread.id))).toContain('Streaming token');
+    expect(readChatStreamingProgressRecord(storage, activeThread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({ content: 'Streaming token' }),
+    });
     expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
     expect(storage.getString(getChatThreadStorageKey(secondArchivedThread.id))).toBe(secondArchivedRecordBefore);
 
@@ -8258,7 +8590,7 @@ describe('chatStore', () => {
     );
 
     expect(storage.getString(getChatThreadStorageKey(activeThread.id))).toContain('Final answer');
-    expect(storage.getString(getChatStreamingProgressStorageKey(activeThread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(activeThread.id);
     expect(storage.getString(getChatThreadStorageKey(archivedThread.id))).toBe(archivedRecordBefore);
     expect(storage.getString(getChatThreadStorageKey(secondArchivedThread.id))).toBe(secondArchivedRecordBefore);
     jest.useRealTimers();

@@ -37,9 +37,11 @@ import {
   clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,
   getChatPersistenceIndexRevision,
+  getChatStreamingProgressStorageKey,
   getChatThreadStorageKey,
-  getThreadIdFromChatStreamingProgressStorageKey,
+  getThreadIdFromChatStreamingProgressArtifactStorageKey,
   getThreadIdFromChatThreadStorageKey,
+  isChatStreamingProgressOperationWithinBounds,
   listChatStreamingProgressStorageKeys,
   listChatThreadStorageKeys,
   readChatPersistenceIndex,
@@ -65,6 +67,7 @@ import {
   materializeChatBranchReplacementThread,
   validateChatBranchReplacementPlan,
   type ChatBranchBaseIdentity,
+  type ChatBranchReplacementProgress,
   type ChatBranchReplacementPlan,
 } from './chatBranchReplacement';
 
@@ -1091,17 +1094,32 @@ function discardOrphanedStreamingProgressRecords(
   storage: ReturnType<typeof getAppStorage>,
   survivingThreadIds: ReadonlySet<string>,
 ): void {
+  const artifactThreadIds = new Set<string>();
+  const authoritativeHeadThreadIds = new Set<string>();
   listChatStreamingProgressStorageKeys(storage).forEach((key) => {
-    const threadId = getThreadIdFromChatStreamingProgressStorageKey(key);
-    if (threadId && survivingThreadIds.has(threadId)) {
+    const threadId = getThreadIdFromChatStreamingProgressArtifactStorageKey(key);
+    if (threadId) {
+      artifactThreadIds.add(threadId);
+      if (key === getChatStreamingProgressStorageKey(threadId)) {
+        authoritativeHeadThreadIds.add(threadId);
+      }
       return;
     }
-
     try {
       storage.remove(key);
-      if (threadId) {
-        latestStreamingProgressPersistedAtById.delete(threadId);
-      }
+    } catch (error) {
+      console.warn('[ChatPersistence] Failed to discard orphaned streaming progress', {
+        errorName: getErrorName(error),
+      });
+    }
+  });
+  artifactThreadIds.forEach((threadId) => {
+    if (survivingThreadIds.has(threadId) && authoritativeHeadThreadIds.has(threadId)) {
+      return;
+    }
+    try {
+      removeChatStreamingProgressRecord(storage, threadId);
+      latestStreamingProgressPersistedAtById.delete(threadId);
     } catch (error) {
       console.warn('[ChatPersistence] Failed to discard orphaned streaming progress', {
         errorName: getErrorName(error),
@@ -1573,9 +1591,12 @@ function rollbackFailedChatPersistenceMutation(
       if (didRestorePersistedThread && previousThread && runtime) {
         attemptRollbackStep(() => {
           const progress = createStreamingProgressRecord(previousThread, runtime);
-          if (progress && writeChatStreamingProgressRecord(storage, progress)) {
-            runtime.lastProgressPersistedAt = progress.persistedAt;
-            latestStreamingProgressPersistedAtById.set(threadId, progress.persistedAt);
+          if (progress) {
+            const writeResult = writeChatStreamingProgressRecord(storage, progress);
+            if (writeResult.status === 'written' || writeResult.status === 'unchanged') {
+              runtime.lastProgressPersistedAt = progress.persistedAt;
+              latestStreamingProgressPersistedAtById.set(threadId, progress.persistedAt);
+            }
           }
         });
         chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
@@ -1650,7 +1671,8 @@ function prepareStreamingProgressBeforeDurableThreadMutation(
     return undefined;
   }
 
-  if (writeChatStreamingProgressRecord(storage, progress)) {
+  const writeResult = writeChatStreamingProgressRecord(storage, progress);
+  if (writeResult.status === 'written' || writeResult.status === 'unchanged') {
     runtime.lastProgressPersistedAt = progress.persistedAt;
     latestStreamingProgressPersistedAtById.set(thread.id, progress.persistedAt);
     return progress.persistedAt - 1;
@@ -1821,6 +1843,7 @@ interface TransientAssistantRuntime {
   sourceThread: ChatThread;
   progressRevision: number;
   lastProgressPersistedAt: number;
+  branchReplacementProgress?: ChatBranchReplacementProgress;
 }
 
 const transientAssistantRuntimes = new Map<string, TransientAssistantRuntime>();
@@ -2046,6 +2069,29 @@ function createTransientBranchReplacementRuntime(
     return null;
   }
 
+  const branchReplacementProgress = createChatBranchReplacementProgress(
+    baseThreadIdentity,
+    {
+      ...plan,
+      replacementUserMessage: sanitizeChatMessageForPersistence(
+        plan.replacementUserMessage,
+        thread.id,
+      ),
+      insertedModelSwitchMessage: plan.insertedModelSwitchMessage
+        ? sanitizeChatMessageForPersistence(plan.insertedModelSwitchMessage, thread.id)
+        : undefined,
+    },
+  );
+  if (!isChatStreamingProgressOperationWithinBounds({
+    threadId: thread.id,
+    messageId: assistantMessage.id,
+    modelId: assistantMessage.modelId ?? getThreadActiveModelId(thread),
+    createdAt: assistantMessage.createdAt,
+    branchReplacement: branchReplacementProgress,
+  })) {
+    return null;
+  }
+
   const materializedPresentationThread = materializeChatBranchReplacementThread({
     thread,
     plan,
@@ -2076,6 +2122,7 @@ function createTransientBranchReplacementRuntime(
     sourceThread: thread,
     progressRevision: 0,
     lastProgressPersistedAt: latestStreamingProgressPersistedAtById.get(thread.id) ?? 0,
+    branchReplacementProgress,
   };
   transientAssistantRuntimes.set(thread.id, runtime);
   return runtime;
@@ -2142,24 +2189,26 @@ function createStreamingProgressRecord(
     (latestDurableThreadPersistedAtById.get(thread.id) ?? 0) + 1,
     runtime.lastProgressPersistedAt + 1,
   );
-  const branchReplacement = runtime.mode.kind === 'replace_branch'
-    ? createChatBranchReplacementProgress(
-        runtime.mode.baseThreadIdentity,
-        {
-          ...runtime.mode.replacementPlan,
-          replacementUserMessage: sanitizeChatMessageForPersistence(
-            runtime.mode.replacementPlan.replacementUserMessage,
-            thread.id,
-          ),
-          insertedModelSwitchMessage: runtime.mode.replacementPlan.insertedModelSwitchMessage
-            ? sanitizeChatMessageForPersistence(
-                runtime.mode.replacementPlan.insertedModelSwitchMessage,
-                thread.id,
-              )
-            : undefined,
-        },
-      )
-    : undefined;
+  let branchReplacement = runtime.branchReplacementProgress;
+  if (runtime.mode.kind === 'replace_branch' && !branchReplacement) {
+    branchReplacement = createChatBranchReplacementProgress(
+      runtime.mode.baseThreadIdentity,
+      {
+        ...runtime.mode.replacementPlan,
+        replacementUserMessage: sanitizeChatMessageForPersistence(
+          runtime.mode.replacementPlan.replacementUserMessage,
+          thread.id,
+        ),
+        insertedModelSwitchMessage: runtime.mode.replacementPlan.insertedModelSwitchMessage
+          ? sanitizeChatMessageForPersistence(
+              runtime.mode.replacementPlan.insertedModelSwitchMessage,
+              thread.id,
+            )
+          : undefined,
+      },
+    );
+    runtime.branchReplacementProgress = branchReplacement;
+  }
   return {
     schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
     threadId: thread.id,
@@ -3099,7 +3148,8 @@ function flushChatThreadPersistence(threadId: string, reason: ChatPersistenceWri
     return;
   }
 
-  if (writeChatStreamingProgressRecord(storage, progress)) {
+  const writeResult = writeChatStreamingProgressRecord(storage, progress);
+  if (writeResult.status === 'written' || writeResult.status === 'unchanged') {
     runtime.lastProgressPersistedAt = progress.persistedAt;
     latestStreamingProgressPersistedAtById.set(threadId, progress.persistedAt);
   }

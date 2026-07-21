@@ -105,14 +105,25 @@ describe('PR130 runtime performance fixtures', () => {
 
     storageProbe.storage.set('chat-store:v2:thread:thread-a', 'é');
     storageProbe.storage.set('chat-store:v2:index', '{}');
+    storageProbe.storage.set('chat-store:progress:thread-a', '{}');
+    storageProbe.storage.set('chat-store:operation:thread-a:0', '{}');
+    storageProbe.storage.set('chat-store:progress-checkpoint:thread-a:0', '{}');
+    storageProbe.storage.set('chat-store:progress-chunk:thread-a:0', '{}');
 
     expect(references.array).toBe(first);
     expect(countUnretainedItemReferences(references.items, [{ id: 0 }, ...first])).toBe(0);
     expect(countUnretainedItemReferences(references.items, [first[0], { id: 2 }])).toBe(1);
     expect(storageProbe.snapshot()).toMatchObject({
-      setCalls: 2,
-      serializedBytes: 4,
-      writesByKind: { thread: 1, index: 1 },
+      setCalls: 6,
+      serializedBytes: 12,
+      writesByKind: {
+        thread: 1,
+        index: 1,
+        progress_manifest: 1,
+        progress_operation: 1,
+        progress_checkpoint: 1,
+        progress_chunk: 1,
+      },
     });
     expect(getCounterDelta({ metric: 3 }, { metric: 8 }, 'metric')).toBe(5);
   });

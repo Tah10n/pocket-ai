@@ -26,7 +26,10 @@ import type { AppStorageFacade } from './storage';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import {
   createChatBranchReplacementPlanFromProgress,
+  isChatBranchReplacementUserMessageWithinProgressBounds,
   materializeChatBranchReplacementThread,
+  MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS,
+  MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS,
   MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH,
   type ChatBranchReplacementProgress,
 } from './chatBranchReplacement';
@@ -37,8 +40,28 @@ export const CHAT_PERSISTENCE_INDEX_KEY = 'chat-store:v2:index';
 export const CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY = 'chat-store:v2:index:pending';
 export const CHAT_THREAD_STORAGE_KEY_PREFIX = 'chat-store:v2:thread:';
 export const CHAT_STREAM_PROGRESS_SCHEMA_VERSION = 1;
+export const CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION = 2;
 export const CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX = 'chat-store:progress:';
+export const CHAT_STREAM_OPERATION_STORAGE_KEY_PREFIX = 'chat-store:operation:';
+export const CHAT_STREAM_PROGRESS_CHECKPOINT_STORAGE_KEY_PREFIX = 'chat-store:progress-checkpoint:';
+export const CHAT_STREAM_PROGRESS_CHUNK_STORAGE_KEY_PREFIX = 'chat-store:progress-chunk:';
 export const DEFAULT_STREAMING_PERSISTENCE_DEBOUNCE_MS = 750;
+export const MAX_CHAT_PROGRESS_RECORD_BYTES = 7 * 1024 * 1024;
+export const MAX_CHAT_PROGRESS_OPERATION_BYTES = 512 * 1024;
+export const MAX_CHAT_PROGRESS_MANIFEST_BYTES = 64 * 1024;
+export const MAX_CHAT_PROGRESS_CHUNK_BYTES = 64 * 1024;
+export const MAX_CHAT_PROGRESS_CHUNKS = 128;
+export const MAX_CHAT_PROGRESS_AGGREGATE_BYTES = 16 * 1024 * 1024;
+export const MAX_ASSISTANT_PROGRESS_CONTENT_CHARS = 768 * 1024;
+export const MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS = 768 * 1024;
+// Maximum encoded values for one valid thread across every fixed physical slot.
+// Storage accounting also includes key bytes and therefore uses its own exact measurement.
+export const MAX_CHAT_PROGRESS_TOTAL_VALUE_BYTES = (
+  (2 * MAX_CHAT_PROGRESS_OPERATION_BYTES)
+  + (2 * MAX_CHAT_PROGRESS_RECORD_BYTES)
+  + (MAX_CHAT_PROGRESS_CHUNKS * MAX_CHAT_PROGRESS_CHUNK_BYTES)
+  + MAX_CHAT_PROGRESS_MANIFEST_BYTES
+);
 const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
 export type ChatPersistenceWriteReason =
@@ -84,6 +107,102 @@ export interface ChatStreamingProgressRecord {
   branchReplacement?: ChatBranchReplacementProgress;
 }
 
+type ChatStreamingProgressSlot = 0 | 1;
+
+interface ChatStreamingOperationRecord {
+  schemaVersion: typeof CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION;
+  threadId: string;
+  messageId: string;
+  modelId: string;
+  createdAt: number;
+  regeneratesMessageId?: string;
+  branchReplacement?: ChatBranchReplacementProgress;
+}
+
+type ChatStreamingOperationInput = Pick<
+  ChatStreamingProgressRecord,
+  | 'threadId'
+  | 'messageId'
+  | 'modelId'
+  | 'createdAt'
+  | 'regeneratesMessageId'
+  | 'branchReplacement'
+>;
+
+interface ChatStreamingProgressCheckpointRecord {
+  schemaVersion: typeof CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION;
+  threadId: string;
+  messageId: string;
+  createdAt: number;
+  revision: number;
+  persistedAt: number;
+  content: string;
+  thoughtContent?: string;
+  tokensPerSec?: number;
+}
+
+type ChatStreamingProgressTextUpdate =
+  | { kind: 'append' | 'replace'; value: string }
+  | { kind: 'clear' };
+
+interface ChatStreamingProgressChunkRecord {
+  schemaVersion: typeof CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION;
+  threadId: string;
+  messageId: string;
+  createdAt: number;
+  slot: number;
+  revision: number;
+  persistedAt: number;
+  content?: ChatStreamingProgressTextUpdate;
+  thoughtContent?: ChatStreamingProgressTextUpdate;
+  tokensPerSec?: number | null;
+}
+
+interface ChatStreamingProgressChunkReference {
+  slot: number;
+  revision: number;
+  persistedAt: number;
+}
+
+interface ChatStreamingProgressManifest {
+  schemaVersion: typeof CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION;
+  threadId: string;
+  messageId: string;
+  createdAt: number;
+  operationSlot: ChatStreamingProgressSlot;
+  checkpointSlot: ChatStreamingProgressSlot;
+  checkpointRevision: number;
+  checkpointPersistedAt: number;
+  chunks: ChatStreamingProgressChunkReference[];
+  revision: number;
+  persistedAt: number;
+}
+
+interface ChatStreamingProgressWriterState {
+  progress: ChatStreamingProgressRecord;
+  manifest: ChatStreamingProgressManifest;
+  operationSlot: ChatStreamingProgressSlot;
+  checkpointSlot: ChatStreamingProgressSlot;
+  activeChunkSlots: Set<number>;
+  operationBytes: number;
+  checkpointBytes: number;
+  manifestBytes: number;
+  referencedBytes: number;
+}
+
+export type ChatStreamingProgressWriteResult =
+  | { status: 'written'; kind: 'checkpoint' | 'delta' }
+  | { status: 'unchanged' }
+  | { status: 'stale' }
+  | {
+      status: 'rejected';
+      reason:
+        | 'content_too_large'
+        | 'thought_too_large'
+        | 'operation_too_large'
+        | 'record_too_large';
+    };
+
 export interface ChatPersistencePendingIndexCommit {
   schemaVersion: typeof CHAT_PERSISTENCE_SCHEMA_VERSION;
   revision: number;
@@ -113,14 +232,44 @@ export function getThreadIdFromChatThreadStorageKey(key: string): string | null 
 
   const encoded = key.slice(CHAT_THREAD_STORAGE_KEY_PREFIX.length);
   try {
-    return decodeURIComponent(encoded);
+    const decoded = decodeURIComponent(encoded);
+    return encodeURIComponent(decoded) === encoded ? decoded : null;
   } catch {
     return null;
   }
 }
 
+export function isChatPersistenceStorageKey(key: string): boolean {
+  return key === LEGACY_CHAT_STORE_STORAGE_KEY
+    || key === CHAT_PERSISTENCE_INDEX_KEY
+    || key === CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY
+    || key.startsWith(CHAT_THREAD_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_OPERATION_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_PROGRESS_CHECKPOINT_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_PROGRESS_CHUNK_STORAGE_KEY_PREFIX);
+}
+
 export function getChatStreamingProgressStorageKey(threadId: string): string {
   return `${CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX}${encodeURIComponent(threadId)}`;
+}
+
+export function getChatStreamingOperationStorageKey(
+  threadId: string,
+  slot: ChatStreamingProgressSlot,
+): string {
+  return `${CHAT_STREAM_OPERATION_STORAGE_KEY_PREFIX}${encodeURIComponent(threadId)}:${slot}`;
+}
+
+export function getChatStreamingProgressCheckpointStorageKey(
+  threadId: string,
+  slot: ChatStreamingProgressSlot,
+): string {
+  return `${CHAT_STREAM_PROGRESS_CHECKPOINT_STORAGE_KEY_PREFIX}${encodeURIComponent(threadId)}:${slot}`;
+}
+
+export function getChatStreamingProgressChunkStorageKey(threadId: string, slot: number): string {
+  return `${CHAT_STREAM_PROGRESS_CHUNK_STORAGE_KEY_PREFIX}${encodeURIComponent(threadId)}:${slot}`;
 }
 
 export function getThreadIdFromChatStreamingProgressStorageKey(key: string): string | null {
@@ -130,18 +279,96 @@ export function getThreadIdFromChatStreamingProgressStorageKey(key: string): str
 
   const encoded = key.slice(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX.length);
   try {
-    return decodeURIComponent(encoded);
+    const decoded = decodeURIComponent(encoded);
+    return encodeURIComponent(decoded) === encoded ? decoded : null;
   } catch {
     return null;
   }
 }
 
-function parseJsonObject(raw: string | null | undefined): ChatPersistenceReadResult<Record<string, unknown>> {
+function getThreadIdFromSlottedChatProgressStorageKey(
+  key: string,
+  prefix: string,
+  maximumSlot: number,
+): string | null {
+  if (!key.startsWith(prefix)) {
+    return null;
+  }
+
+  const suffix = key.slice(prefix.length);
+  const separatorIndex = suffix.lastIndexOf(':');
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const encoded = suffix.slice(0, separatorIndex);
+  const rawSlot = suffix.slice(separatorIndex + 1);
+  if (!/^\d+$/u.test(rawSlot)) {
+    return null;
+  }
+  const slot = Number(rawSlot);
+  if (
+    !Number.isSafeInteger(slot)
+    || slot < 0
+    || slot > maximumSlot
+    || String(slot) !== rawSlot
+  ) {
+    return null;
+  }
+
+  try {
+    const decoded = decodeURIComponent(encoded);
+    return encodeURIComponent(decoded) === encoded ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getThreadIdFromChatStreamingProgressArtifactStorageKey(key: string): string | null {
+  return getThreadIdFromChatStreamingProgressStorageKey(key)
+    ?? getThreadIdFromSlottedChatProgressStorageKey(
+      key,
+      CHAT_STREAM_OPERATION_STORAGE_KEY_PREFIX,
+      1,
+    )
+    ?? getThreadIdFromSlottedChatProgressStorageKey(
+      key,
+      CHAT_STREAM_PROGRESS_CHECKPOINT_STORAGE_KEY_PREFIX,
+      1,
+    )
+    ?? getThreadIdFromSlottedChatProgressStorageKey(
+      key,
+      CHAT_STREAM_PROGRESS_CHUNK_STORAGE_KEY_PREFIX,
+      MAX_CHAT_PROGRESS_CHUNKS - 1,
+    );
+}
+
+type ChatPersistenceRecordKind =
+  | 'index'
+  | 'pending'
+  | 'thread'
+  | 'progress'
+  | 'progress_manifest'
+  | 'progress_operation'
+  | 'progress_checkpoint'
+  | 'progress_chunk';
+
+function parseJsonObject(
+  raw: string | null | undefined,
+  options: { maxBytes?: number; recordKind?: ChatPersistenceRecordKind } = {},
+): ChatPersistenceReadResult<Record<string, unknown>> {
   if (raw == null) {
     return { ok: false, reason: 'missing' };
   }
 
+  if (options.maxBytes != null && getUtf8ByteLength(raw, options.maxBytes) > options.maxBytes) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
   try {
+    incrementChatPersistenceCounter('chat.persist.parse', 1, {
+      recordKind: options.recordKind ?? 'unknown',
+    });
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return { ok: false, reason: 'invalid_shape' };
@@ -175,8 +402,14 @@ function incrementChatPersistenceCounter(
     | 'chat.persist.terminal'
     | 'chat.persist.sanitize'
     | 'chat.persist.stringify'
+    | 'chat.persist.parse'
     | 'chat.persist.storage'
-    | 'chat.persist.bytes',
+    | 'chat.persist.bytes'
+    | 'chat.persist.assistantChars'
+    | 'chat.persist.progress.operation'
+    | 'chat.persist.progress.checkpoint'
+    | 'chat.persist.progress.delta'
+    | 'chat.persist.progress.manifest',
   by = 1,
   meta?: Record<string, unknown>,
 ): void {
@@ -185,7 +418,7 @@ function incrementChatPersistenceCounter(
   }
 }
 
-function getUtf8ByteLength(value: string): number {
+function getUtf8ByteLength(value: string, stopAfter = Number.POSITIVE_INFINITY): number {
   let bytes = 0;
   for (let index = 0; index < value.length; index += 1) {
     const codeUnit = value.charCodeAt(index);
@@ -204,23 +437,52 @@ function getUtf8ByteLength(value: string): number {
     } else {
       bytes += 3;
     }
+    if (bytes > stopAfter) {
+      return bytes;
+    }
   }
   return bytes;
+}
+
+function serializeChatRecord(
+  value: unknown,
+  recordKind: ChatPersistenceRecordKind,
+): { serialized: string; bytes: number } {
+  const serialized = JSON.stringify(value);
+  const bytes = getUtf8ByteLength(serialized);
+  incrementChatPersistenceCounter('chat.persist.stringify', 1, { recordKind });
+  return { serialized, bytes };
+}
+
+function writeSerializedChatRecord(
+  storage: AppStorageFacade,
+  key: string,
+  serialized: string,
+  bytes: number,
+  recordKind: ChatPersistenceRecordKind,
+): void {
+  incrementChatPersistenceCounter('chat.persist.storage', 1, { recordKind });
+  incrementChatPersistenceCounter('chat.persist.bytes', bytes, { recordKind });
+  if (recordKind === 'progress_operation') {
+    incrementChatPersistenceCounter('chat.persist.progress.operation');
+  } else if (recordKind === 'progress_checkpoint') {
+    incrementChatPersistenceCounter('chat.persist.progress.checkpoint');
+  } else if (recordKind === 'progress_chunk') {
+    incrementChatPersistenceCounter('chat.persist.progress.delta');
+  } else if (recordKind === 'progress_manifest') {
+    incrementChatPersistenceCounter('chat.persist.progress.manifest');
+  }
+  storage.set(key, serialized);
 }
 
 function serializeAndWriteChatRecord(
   storage: AppStorageFacade,
   key: string,
   value: unknown,
-  recordKind: 'index' | 'pending' | 'thread' | 'progress',
+  recordKind: ChatPersistenceRecordKind,
 ): void {
-  const serialized = JSON.stringify(value);
-  if (performanceMonitor.isEnabled()) {
-    incrementChatPersistenceCounter('chat.persist.stringify', 1, { recordKind });
-    incrementChatPersistenceCounter('chat.persist.storage', 1, { recordKind });
-    incrementChatPersistenceCounter('chat.persist.bytes', getUtf8ByteLength(serialized), { recordKind });
-  }
-  storage.set(key, serialized);
+  const { serialized, bytes } = serializeChatRecord(value, recordKind);
+  writeSerializedChatRecord(storage, key, serialized, bytes, recordKind);
 }
 
 function readRequiredString(value: unknown): string | null {
@@ -818,6 +1080,14 @@ function parseBranchReplacementUserMessage({
     || value.modelId !== modelId
     || (value.attachments != null && !Array.isArray(value.attachments))
     || (value.contentParts != null && !Array.isArray(value.contentParts))
+    || (
+      Array.isArray(value.attachments)
+      && value.attachments.length > MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS
+    )
+    || (
+      Array.isArray(value.contentParts)
+      && value.contentParts.length > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS
+    )
   ) {
     return null;
   }
@@ -835,7 +1105,8 @@ function parseBranchReplacementUserMessage({
   };
   const sanitized = sanitizeChatMessageForPersistence(candidate, threadId);
   if (
-    sanitized.content !== sanitized.content.trim()
+    !isChatBranchReplacementUserMessageWithinProgressBounds(sanitized)
+    || sanitized.content !== sanitized.content.trim()
     || (
       sanitized.content.length === 0
       && (sanitized.attachments?.length ?? 0) === 0
@@ -979,7 +1250,10 @@ export function parseChatStreamingProgressRecord(
   raw: string | null | undefined,
   expectedThreadId?: string,
 ): ChatPersistenceReadResult<ChatStreamingProgressRecord> {
-  const parsed = parseJsonObject(raw);
+  const parsed = parseJsonObject(raw, {
+    maxBytes: MAX_CHAT_PROGRESS_RECORD_BYTES,
+    recordKind: 'progress',
+  });
   if (!parsed.ok) {
     return parsed;
   }
@@ -1007,7 +1281,15 @@ export function parseChatStreamingProgressRecord(
     || (expectedThreadId != null && threadId !== expectedThreadId)
     || !isNonNegativeSafeInteger(value.createdAt)
     || typeof value.content !== 'string'
+    || (
+      typeof value.content === 'string'
+      && value.content.length > MAX_ASSISTANT_PROGRESS_CONTENT_CHARS
+    )
     || (value.thoughtContent != null && typeof value.thoughtContent !== 'string')
+    || (
+      typeof value.thoughtContent === 'string'
+      && value.thoughtContent.length > MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS
+    )
     || (value.tokensPerSec != null && !isNonNegativeFiniteNumber(value.tokensPerSec))
     || value.state !== 'streaming'
     || !isNonNegativeSafeInteger(value.persistedAt)
@@ -1120,56 +1402,1062 @@ export function removeChatThreadRecord(storage: AppStorageFacade, threadId: stri
   storage.remove(getChatThreadStorageKey(threadId));
 }
 
+type BoundedJsonObjectReadResult =
+  | { ok: true; value: Record<string, unknown>; bytes: number }
+  | { ok: false; reason: 'missing' | 'invalid_json' | 'invalid_shape' };
+
+function readBoundedJsonObject(
+  storage: AppStorageFacade,
+  key: string,
+  maxBytes: number,
+  recordKind: ChatPersistenceRecordKind,
+): BoundedJsonObjectReadResult {
+  const raw = storage.getString(key) ?? null;
+  if (raw == null) {
+    return { ok: false, reason: 'missing' };
+  }
+
+  const bytes = getUtf8ByteLength(raw, maxBytes);
+  if (bytes > maxBytes) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  const parsed = parseJsonObject(raw, { maxBytes, recordKind });
+  return parsed.ok ? { ...parsed, bytes } : parsed;
+}
+
+function isProgressSlot(value: unknown): value is ChatStreamingProgressSlot {
+  return value === 0 || value === 1;
+}
+
+function isProgressPositionAfter(
+  revision: number,
+  persistedAt: number,
+  previousRevision: number,
+  previousPersistedAt: number,
+): boolean {
+  return revision > previousRevision
+    || (revision === previousRevision && persistedAt > previousPersistedAt);
+}
+
+function parseChatStreamingOperationValue(
+  value: Record<string, unknown>,
+  expectedThreadId: string,
+): ChatStreamingOperationRecord | null {
+  const allowedKeys = new Set([
+    'schemaVersion',
+    'threadId',
+    'messageId',
+    'modelId',
+    'createdAt',
+    'regeneratesMessageId',
+    'branchReplacement',
+  ]);
+  const threadId = readRequiredString(value.threadId);
+  const messageId = readRequiredString(value.messageId);
+  const modelId = readRequiredString(value.modelId);
+  const regeneratesMessageId = value.regeneratesMessageId == null
+    ? undefined
+    : readRequiredString(value.regeneratesMessageId);
+  const hasBranchReplacement = Object.prototype.hasOwnProperty.call(value, 'branchReplacement');
+  const branchReplacement = !hasBranchReplacement || !threadId || !modelId
+    ? undefined
+    : parseChatBranchReplacementProgress({
+        value: value.branchReplacement,
+        threadId,
+        modelId,
+      });
+
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || value.schemaVersion !== CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION
+    || threadId !== expectedThreadId
+    || !messageId
+    || !modelId
+    || !isNonNegativeSafeInteger(value.createdAt)
+    || (value.regeneratesMessageId != null && !regeneratesMessageId)
+    || (hasBranchReplacement && !branchReplacement)
+    || (branchReplacement != null && regeneratesMessageId != null)
+    || branchReplacement?.insertedModelSwitchMessage?.id === messageId
+  ) {
+    return null;
+  }
+
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId,
+    messageId,
+    modelId,
+    createdAt: value.createdAt,
+    regeneratesMessageId: regeneratesMessageId ?? undefined,
+    branchReplacement: branchReplacement ?? undefined,
+  };
+}
+
+function parseChatStreamingCheckpointValue(
+  value: Record<string, unknown>,
+  expected: Pick<ChatStreamingProgressManifest, 'threadId' | 'messageId' | 'createdAt'>,
+): ChatStreamingProgressCheckpointRecord | null {
+  const allowedKeys = new Set([
+    'schemaVersion',
+    'threadId',
+    'messageId',
+    'createdAt',
+    'revision',
+    'persistedAt',
+    'content',
+    'thoughtContent',
+    'tokensPerSec',
+  ]);
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || value.schemaVersion !== CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION
+    || value.threadId !== expected.threadId
+    || value.messageId !== expected.messageId
+    || value.createdAt !== expected.createdAt
+    || !isNonNegativeSafeInteger(value.revision)
+    || !isNonNegativeSafeInteger(value.persistedAt)
+    || typeof value.content !== 'string'
+    || value.content.length > MAX_ASSISTANT_PROGRESS_CONTENT_CHARS
+    || (value.thoughtContent != null && typeof value.thoughtContent !== 'string')
+    || (
+      typeof value.thoughtContent === 'string'
+      && value.thoughtContent.length > MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS
+    )
+    || (value.tokensPerSec != null && !isNonNegativeFiniteNumber(value.tokensPerSec))
+  ) {
+    return null;
+  }
+
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: expected.threadId,
+    messageId: expected.messageId,
+    createdAt: expected.createdAt,
+    revision: value.revision,
+    persistedAt: value.persistedAt,
+    content: value.content,
+    thoughtContent: typeof value.thoughtContent === 'string' ? value.thoughtContent : undefined,
+    tokensPerSec: isNonNegativeFiniteNumber(value.tokensPerSec) ? value.tokensPerSec : undefined,
+  };
+}
+
+function parseChatStreamingTextUpdate(value: unknown): ChatStreamingProgressTextUpdate | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  if (value.kind === 'clear') {
+    return hasOnlyKeys(value, new Set(['kind'])) ? { kind: 'clear' } : null;
+  }
+
+  if (
+    (value.kind !== 'append' && value.kind !== 'replace')
+    || !hasOnlyKeys(value, new Set(['kind', 'value']))
+    || typeof value.value !== 'string'
+  ) {
+    return null;
+  }
+
+  return { kind: value.kind, value: value.value };
+}
+
+function parseChatStreamingChunkValue(
+  value: Record<string, unknown>,
+  expected: Pick<ChatStreamingProgressManifest, 'threadId' | 'messageId' | 'createdAt'>,
+  reference: ChatStreamingProgressChunkReference,
+): ChatStreamingProgressChunkRecord | null {
+  const allowedKeys = new Set([
+    'schemaVersion',
+    'threadId',
+    'messageId',
+    'createdAt',
+    'slot',
+    'revision',
+    'persistedAt',
+    'content',
+    'thoughtContent',
+    'tokensPerSec',
+  ]);
+  const content = value.content === undefined
+    ? undefined
+    : parseChatStreamingTextUpdate(value.content);
+  const thoughtContent = value.thoughtContent === undefined
+    ? undefined
+    : parseChatStreamingTextUpdate(value.thoughtContent);
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || value.schemaVersion !== CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION
+    || value.threadId !== expected.threadId
+    || value.messageId !== expected.messageId
+    || value.createdAt !== expected.createdAt
+    || value.slot !== reference.slot
+    || value.revision !== reference.revision
+    || value.persistedAt !== reference.persistedAt
+    || (value.content !== undefined && !content)
+    || (value.thoughtContent !== undefined && !thoughtContent)
+    || !(
+      value.tokensPerSec === undefined
+      || value.tokensPerSec === null
+      || isNonNegativeFiniteNumber(value.tokensPerSec)
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: expected.threadId,
+    messageId: expected.messageId,
+    createdAt: expected.createdAt,
+    slot: reference.slot,
+    revision: reference.revision,
+    persistedAt: reference.persistedAt,
+    content: content ?? undefined,
+    thoughtContent: thoughtContent ?? undefined,
+    tokensPerSec: value.tokensPerSec as number | null | undefined,
+  };
+}
+
+function parseChatStreamingManifestValue(
+  value: Record<string, unknown>,
+  expectedThreadId: string,
+): ChatStreamingProgressManifest | null {
+  const allowedKeys = new Set([
+    'schemaVersion',
+    'threadId',
+    'messageId',
+    'createdAt',
+    'operationSlot',
+    'checkpointSlot',
+    'checkpointRevision',
+    'checkpointPersistedAt',
+    'chunks',
+    'revision',
+    'persistedAt',
+  ]);
+  if (
+    !hasOnlyKeys(value, allowedKeys)
+    || value.schemaVersion !== CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION
+    || value.threadId !== expectedThreadId
+    || !readRequiredString(value.messageId)
+    || !isNonNegativeSafeInteger(value.createdAt)
+    || !isProgressSlot(value.operationSlot)
+    || !isProgressSlot(value.checkpointSlot)
+    || !isNonNegativeSafeInteger(value.checkpointRevision)
+    || !isNonNegativeSafeInteger(value.checkpointPersistedAt)
+    || !Array.isArray(value.chunks)
+    || value.chunks.length > MAX_CHAT_PROGRESS_CHUNKS
+    || !isNonNegativeSafeInteger(value.revision)
+    || !isNonNegativeSafeInteger(value.persistedAt)
+  ) {
+    return null;
+  }
+
+  const chunks: ChatStreamingProgressChunkReference[] = [];
+  const slots = new Set<number>();
+  let previousRevision = value.checkpointRevision;
+  let previousPersistedAt = value.checkpointPersistedAt;
+  for (const candidate of value.chunks) {
+    if (!isObjectRecord(candidate)) {
+      return null;
+    }
+    const allowedChunkKeys = new Set(['slot', 'revision', 'persistedAt']);
+    if (
+      !hasOnlyKeys(candidate, allowedChunkKeys)
+      || !isSafeIntegerInRange(candidate.slot, 0, MAX_CHAT_PROGRESS_CHUNKS - 1)
+      || !isNonNegativeSafeInteger(candidate.revision)
+      || !isNonNegativeSafeInteger(candidate.persistedAt)
+      || slots.has(candidate.slot)
+      || !isProgressPositionAfter(
+        candidate.revision,
+        candidate.persistedAt,
+        previousRevision,
+        previousPersistedAt,
+      )
+    ) {
+      return null;
+    }
+
+    chunks.push({
+      slot: candidate.slot,
+      revision: candidate.revision,
+      persistedAt: candidate.persistedAt,
+    });
+    slots.add(candidate.slot);
+    previousRevision = candidate.revision;
+    previousPersistedAt = candidate.persistedAt;
+  }
+
+  if (value.revision !== previousRevision || value.persistedAt !== previousPersistedAt) {
+    return null;
+  }
+
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: expectedThreadId,
+    messageId: value.messageId as string,
+    createdAt: value.createdAt,
+    operationSlot: value.operationSlot,
+    checkpointSlot: value.checkpointSlot,
+    checkpointRevision: value.checkpointRevision,
+    checkpointPersistedAt: value.checkpointPersistedAt,
+    chunks,
+    revision: value.revision,
+    persistedAt: value.persistedAt,
+  };
+}
+
+function applyRequiredProgressTextUpdate(
+  current: string,
+  update: ChatStreamingProgressTextUpdate | undefined,
+  maxChars: number,
+): string | null {
+  if (!update) {
+    return current;
+  }
+  if (update.kind === 'clear') {
+    return '';
+  }
+  if (update.kind === 'replace') {
+    return update.value.length <= maxChars ? update.value : null;
+  }
+  if (current.length + update.value.length > maxChars) {
+    return null;
+  }
+  return current + update.value;
+}
+
+function applyOptionalProgressTextUpdate(
+  current: string | undefined,
+  update: ChatStreamingProgressTextUpdate | undefined,
+  maxChars: number,
+): { ok: true; value: string | undefined } | { ok: false } {
+  if (!update) {
+    return { ok: true, value: current };
+  }
+  if (update.kind === 'clear') {
+    return { ok: true, value: undefined };
+  }
+  if (update.kind === 'replace') {
+    return update.value.length <= maxChars
+      ? { ok: true, value: update.value }
+      : { ok: false };
+  }
+  if ((current?.length ?? 0) + update.value.length > maxChars) {
+    return { ok: false };
+  }
+  return { ok: true, value: `${current ?? ''}${update.value}` };
+}
+
+type ChatStreamingProgressStateReadResult =
+  | {
+      ok: true;
+      progress: ChatStreamingProgressRecord;
+      writerState?: ChatStreamingProgressWriterState;
+    }
+  | { ok: false; reason: 'missing' | 'invalid_json' | 'invalid_shape' };
+
+function readChatStreamingProgressState(
+  storage: AppStorageFacade,
+  threadId: string,
+): ChatStreamingProgressStateReadResult {
+  const manifestKey = getChatStreamingProgressStorageKey(threadId);
+  const rawManifest = storage.getString(manifestKey) ?? null;
+  if (rawManifest == null) {
+    return { ok: false, reason: 'missing' };
+  }
+
+  const rawManifestBytes = getUtf8ByteLength(rawManifest, MAX_CHAT_PROGRESS_RECORD_BYTES);
+  if (rawManifestBytes > MAX_CHAT_PROGRESS_RECORD_BYTES) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+  const parsedEnvelope = parseJsonObject(rawManifest, {
+    maxBytes: MAX_CHAT_PROGRESS_RECORD_BYTES,
+    recordKind: 'progress_manifest',
+  });
+  if (!parsedEnvelope.ok) {
+    return parsedEnvelope;
+  }
+
+  if (parsedEnvelope.value.schemaVersion === CHAT_STREAM_PROGRESS_SCHEMA_VERSION) {
+    const legacy = parseChatStreamingProgressRecord(rawManifest, threadId);
+    return legacy.ok ? { ok: true, progress: legacy.value } : legacy;
+  }
+  if (rawManifestBytes > MAX_CHAT_PROGRESS_MANIFEST_BYTES) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  const manifest = parseChatStreamingManifestValue(parsedEnvelope.value, threadId);
+  if (!manifest) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  const operationRead = readBoundedJsonObject(
+    storage,
+    getChatStreamingOperationStorageKey(threadId, manifest.operationSlot),
+    MAX_CHAT_PROGRESS_OPERATION_BYTES,
+    'progress_operation',
+  );
+  if (!operationRead.ok) {
+    return { ok: false, reason: operationRead.reason === 'missing' ? 'invalid_shape' : operationRead.reason };
+  }
+  const operation = parseChatStreamingOperationValue(operationRead.value, threadId);
+  if (
+    !operation
+    || operation.messageId !== manifest.messageId
+    || operation.createdAt !== manifest.createdAt
+  ) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  const checkpointRead = readBoundedJsonObject(
+    storage,
+    getChatStreamingProgressCheckpointStorageKey(threadId, manifest.checkpointSlot),
+    MAX_CHAT_PROGRESS_RECORD_BYTES,
+    'progress_checkpoint',
+  );
+  if (!checkpointRead.ok) {
+    return { ok: false, reason: checkpointRead.reason === 'missing' ? 'invalid_shape' : checkpointRead.reason };
+  }
+  const checkpoint = parseChatStreamingCheckpointValue(checkpointRead.value, manifest);
+  if (
+    !checkpoint
+    || checkpoint.revision !== manifest.checkpointRevision
+    || checkpoint.persistedAt !== manifest.checkpointPersistedAt
+  ) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  let referencedBytes = rawManifestBytes + operationRead.bytes + checkpointRead.bytes;
+  if (referencedBytes > MAX_CHAT_PROGRESS_AGGREGATE_BYTES) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
+
+  let content = checkpoint.content;
+  let thoughtContent = checkpoint.thoughtContent;
+  let tokensPerSec = checkpoint.tokensPerSec;
+  for (const reference of manifest.chunks) {
+    const chunkRead = readBoundedJsonObject(
+      storage,
+      getChatStreamingProgressChunkStorageKey(threadId, reference.slot),
+      MAX_CHAT_PROGRESS_CHUNK_BYTES,
+      'progress_chunk',
+    );
+    if (!chunkRead.ok) {
+      return { ok: false, reason: chunkRead.reason === 'missing' ? 'invalid_shape' : chunkRead.reason };
+    }
+    referencedBytes += chunkRead.bytes;
+    if (referencedBytes > MAX_CHAT_PROGRESS_AGGREGATE_BYTES) {
+      return { ok: false, reason: 'invalid_shape' };
+    }
+
+    const chunk = parseChatStreamingChunkValue(chunkRead.value, manifest, reference);
+    if (!chunk) {
+      return { ok: false, reason: 'invalid_shape' };
+    }
+    const nextContent = applyRequiredProgressTextUpdate(
+      content,
+      chunk.content,
+      MAX_ASSISTANT_PROGRESS_CONTENT_CHARS,
+    );
+    const nextThoughtContent = applyOptionalProgressTextUpdate(
+      thoughtContent,
+      chunk.thoughtContent,
+      MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS,
+    );
+    if (nextContent == null || !nextThoughtContent.ok) {
+      return { ok: false, reason: 'invalid_shape' };
+    }
+    content = nextContent;
+    thoughtContent = nextThoughtContent.value;
+    if (chunk.tokensPerSec !== undefined) {
+      tokensPerSec = chunk.tokensPerSec ?? undefined;
+    }
+  }
+
+  const progress: ChatStreamingProgressRecord = {
+    schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+    threadId,
+    messageId: manifest.messageId,
+    modelId: operation.modelId,
+    createdAt: manifest.createdAt,
+    content,
+    thoughtContent,
+    tokensPerSec,
+    state: 'streaming',
+    persistedAt: manifest.persistedAt,
+    revision: manifest.revision,
+    regeneratesMessageId: operation.regeneratesMessageId,
+    branchReplacement: operation.branchReplacement,
+  };
+  return {
+    ok: true,
+    progress,
+    writerState: {
+      progress,
+      manifest,
+      operationSlot: manifest.operationSlot,
+      checkpointSlot: manifest.checkpointSlot,
+      activeChunkSlots: new Set(manifest.chunks.map((chunk) => chunk.slot)),
+      operationBytes: operationRead.bytes,
+      checkpointBytes: checkpointRead.bytes,
+      manifestBytes: rawManifestBytes,
+      referencedBytes,
+    },
+  };
+}
+
 export function readChatStreamingProgressRecord(
   storage: AppStorageFacade,
   threadId: string,
 ): ChatPersistenceReadResult<ChatStreamingProgressRecord> {
-  return parseChatStreamingProgressRecord(
-    storage.getString(getChatStreamingProgressStorageKey(threadId)) ?? null,
-    threadId,
+  const result = readChatStreamingProgressState(storage, threadId);
+  return result.ok
+    ? { ok: true, value: result.progress }
+    : result;
+}
+
+const chatStreamingProgressWriterStates = new WeakMap<
+  object,
+  Map<string, ChatStreamingProgressWriterState>
+>();
+
+function getChatStreamingProgressWriterStateMap(
+  storage: AppStorageFacade,
+): Map<string, ChatStreamingProgressWriterState> {
+  const storageIdentity = storage as object;
+  const current = chatStreamingProgressWriterStates.get(storageIdentity);
+  if (current) {
+    return current;
+  }
+
+  const created = new Map<string, ChatStreamingProgressWriterState>();
+  chatStreamingProgressWriterStates.set(storageIdentity, created);
+  return created;
+}
+
+function hasSameProgressOperationIdentity(
+  left: ChatStreamingProgressRecord,
+  right: ChatStreamingProgressRecord,
+): boolean {
+  return left.threadId === right.threadId
+    && left.messageId === right.messageId
+    && left.modelId === right.modelId
+    && left.createdAt === right.createdAt
+    && left.regeneratesMessageId === right.regeneratesMessageId
+    && (
+      left.branchReplacement === right.branchReplacement
+      || hasSameJsonShape(left.branchReplacement, right.branchReplacement)
+    );
+}
+
+function hasSameProgressSnapshot(
+  left: ChatStreamingProgressRecord,
+  right: ChatStreamingProgressRecord,
+): boolean {
+  return hasSameProgressOperationIdentity(left, right)
+    && left.content === right.content
+    && left.thoughtContent === right.thoughtContent
+    && left.tokensPerSec === right.tokensPerSec
+    && left.revision === right.revision
+    && left.persistedAt === right.persistedAt;
+}
+
+function createProgressTextUpdate(
+  previous: string,
+  next: string,
+): ChatStreamingProgressTextUpdate | undefined {
+  if (previous === next) {
+    return undefined;
+  }
+  if (next.length === 0) {
+    return { kind: 'clear' };
+  }
+  if (next.startsWith(previous)) {
+    return { kind: 'append', value: next.slice(previous.length) };
+  }
+  return { kind: 'replace', value: next };
+}
+
+function createOptionalProgressTextUpdate(
+  previous: string | undefined,
+  next: string | undefined,
+): ChatStreamingProgressTextUpdate | undefined {
+  if (previous === next) {
+    return undefined;
+  }
+  if (next === undefined) {
+    return { kind: 'clear' };
+  }
+  if (previous !== undefined && next.startsWith(previous)) {
+    return { kind: 'append', value: next.slice(previous.length) };
+  }
+  return { kind: 'replace', value: next };
+}
+
+function getProgressTextUpdateCharacterCount(
+  update: ChatStreamingProgressTextUpdate | undefined,
+): number {
+  return update?.kind === 'append' || update?.kind === 'replace'
+    ? update.value.length
+    : 0;
+}
+
+function rejectOversizedProgress(
+  progress: ChatStreamingProgressRecord,
+): ChatStreamingProgressWriteResult | null {
+  if (progress.content.length > MAX_ASSISTANT_PROGRESS_CONTENT_CHARS) {
+    return { status: 'rejected', reason: 'content_too_large' };
+  }
+  if ((progress.thoughtContent?.length ?? 0) > MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS) {
+    return { status: 'rejected', reason: 'thought_too_large' };
+  }
+  return null;
+}
+
+function createProgressOperationRecord(
+  progress: ChatStreamingOperationInput,
+): ChatStreamingOperationRecord {
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: progress.threadId,
+    messageId: progress.messageId,
+    modelId: progress.modelId,
+    createdAt: progress.createdAt,
+    ...(progress.regeneratesMessageId
+      ? { regeneratesMessageId: progress.regeneratesMessageId }
+      : null),
+    ...(progress.branchReplacement
+      ? { branchReplacement: progress.branchReplacement }
+      : null),
+  };
+}
+
+export function getChatStreamingProgressOperationByteLength(
+  progress: ChatStreamingOperationInput,
+): number {
+  try {
+    return getUtf8ByteLength(JSON.stringify(createProgressOperationRecord(progress)));
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+export function isChatStreamingProgressOperationWithinBounds(
+  progress: ChatStreamingOperationInput,
+): boolean {
+  return getChatStreamingProgressOperationByteLength(progress)
+    <= MAX_CHAT_PROGRESS_OPERATION_BYTES;
+}
+
+function createProgressCheckpointRecord(
+  progress: ChatStreamingProgressRecord,
+): ChatStreamingProgressCheckpointRecord {
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: progress.threadId,
+    messageId: progress.messageId,
+    createdAt: progress.createdAt,
+    revision: progress.revision,
+    persistedAt: progress.persistedAt,
+    content: progress.content,
+    thoughtContent: progress.thoughtContent,
+    tokensPerSec: progress.tokensPerSec,
+  };
+}
+
+function writeInitialProgressCheckpoint(
+  storage: AppStorageFacade,
+  progress: ChatStreamingProgressRecord,
+  previousState: ChatStreamingProgressWriterState | undefined,
+  writerStates: Map<string, ChatStreamingProgressWriterState>,
+): ChatStreamingProgressWriteResult {
+  const operationSlot: ChatStreamingProgressSlot = previousState?.operationSlot === 0 ? 1 : 0;
+  const checkpointSlot: ChatStreamingProgressSlot = previousState?.checkpointSlot === 0 ? 1 : 0;
+  const operation = createProgressOperationRecord(progress);
+  const checkpoint = createProgressCheckpointRecord(progress);
+  const operationSerialization = serializeChatRecord(operation, 'progress_operation');
+  if (operationSerialization.bytes > MAX_CHAT_PROGRESS_OPERATION_BYTES) {
+    return { status: 'rejected', reason: 'operation_too_large' };
+  }
+  const checkpointSerialization = serializeChatRecord(checkpoint, 'progress_checkpoint');
+  if (checkpointSerialization.bytes > MAX_CHAT_PROGRESS_RECORD_BYTES) {
+    return { status: 'rejected', reason: 'record_too_large' };
+  }
+
+  const manifest: ChatStreamingProgressManifest = {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: progress.threadId,
+    messageId: progress.messageId,
+    createdAt: progress.createdAt,
+    operationSlot,
+    checkpointSlot,
+    checkpointRevision: progress.revision,
+    checkpointPersistedAt: progress.persistedAt,
+    chunks: [],
+    revision: progress.revision,
+    persistedAt: progress.persistedAt,
+  };
+  const manifestSerialization = serializeChatRecord(manifest, 'progress_manifest');
+  if (
+    manifestSerialization.bytes > MAX_CHAT_PROGRESS_MANIFEST_BYTES
+    || operationSerialization.bytes
+      + checkpointSerialization.bytes
+      + manifestSerialization.bytes > MAX_CHAT_PROGRESS_AGGREGATE_BYTES
+  ) {
+    return { status: 'rejected', reason: 'record_too_large' };
+  }
+
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingOperationStorageKey(progress.threadId, operationSlot),
+    operationSerialization.serialized,
+    operationSerialization.bytes,
+    'progress_operation',
   );
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingProgressCheckpointStorageKey(progress.threadId, checkpointSlot),
+    checkpointSerialization.serialized,
+    checkpointSerialization.bytes,
+    'progress_checkpoint',
+  );
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingProgressStorageKey(progress.threadId),
+    manifestSerialization.serialized,
+    manifestSerialization.bytes,
+    'progress_manifest',
+  );
+
+  writerStates.set(progress.threadId, {
+    progress,
+    manifest,
+    operationSlot,
+    checkpointSlot,
+    activeChunkSlots: new Set(),
+    operationBytes: operationSerialization.bytes,
+    checkpointBytes: checkpointSerialization.bytes,
+    manifestBytes: manifestSerialization.bytes,
+    referencedBytes:
+      operationSerialization.bytes + checkpointSerialization.bytes + manifestSerialization.bytes,
+  });
+  incrementChatPersistenceCounter('chat.persist.streaming');
+  incrementChatPersistenceCounter(
+    'chat.persist.assistantChars',
+    progress.content.length + (progress.thoughtContent?.length ?? 0),
+    { recordKind: 'progress_checkpoint' },
+  );
+  return { status: 'written', kind: 'checkpoint' };
+}
+
+function writeCompactedProgressCheckpoint(
+  storage: AppStorageFacade,
+  progress: ChatStreamingProgressRecord,
+  currentState: ChatStreamingProgressWriterState,
+  writerStates: Map<string, ChatStreamingProgressWriterState>,
+): ChatStreamingProgressWriteResult {
+  const checkpointSlot: ChatStreamingProgressSlot = currentState.checkpointSlot === 0 ? 1 : 0;
+  const checkpoint = createProgressCheckpointRecord(progress);
+  const checkpointSerialization = serializeChatRecord(checkpoint, 'progress_checkpoint');
+  if (checkpointSerialization.bytes > MAX_CHAT_PROGRESS_RECORD_BYTES) {
+    return { status: 'rejected', reason: 'record_too_large' };
+  }
+
+  const manifest: ChatStreamingProgressManifest = {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: progress.threadId,
+    messageId: progress.messageId,
+    createdAt: progress.createdAt,
+    operationSlot: currentState.operationSlot,
+    checkpointSlot,
+    checkpointRevision: progress.revision,
+    checkpointPersistedAt: progress.persistedAt,
+    chunks: [],
+    revision: progress.revision,
+    persistedAt: progress.persistedAt,
+  };
+  const manifestSerialization = serializeChatRecord(manifest, 'progress_manifest');
+  if (
+    manifestSerialization.bytes > MAX_CHAT_PROGRESS_MANIFEST_BYTES
+    || currentState.operationBytes
+      + checkpointSerialization.bytes
+      + manifestSerialization.bytes > MAX_CHAT_PROGRESS_AGGREGATE_BYTES
+  ) {
+    return { status: 'rejected', reason: 'record_too_large' };
+  }
+
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingProgressCheckpointStorageKey(progress.threadId, checkpointSlot),
+    checkpointSerialization.serialized,
+    checkpointSerialization.bytes,
+    'progress_checkpoint',
+  );
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingProgressStorageKey(progress.threadId),
+    manifestSerialization.serialized,
+    manifestSerialization.bytes,
+    'progress_manifest',
+  );
+
+  writerStates.set(progress.threadId, {
+    progress,
+    manifest,
+    operationSlot: currentState.operationSlot,
+    checkpointSlot,
+    activeChunkSlots: new Set(),
+    operationBytes: currentState.operationBytes,
+    checkpointBytes: checkpointSerialization.bytes,
+    manifestBytes: manifestSerialization.bytes,
+    referencedBytes:
+      currentState.operationBytes + checkpointSerialization.bytes + manifestSerialization.bytes,
+  });
+  incrementChatPersistenceCounter('chat.persist.streaming');
+  incrementChatPersistenceCounter(
+    'chat.persist.assistantChars',
+    progress.content.length + (progress.thoughtContent?.length ?? 0),
+    { recordKind: 'progress_checkpoint' },
+  );
+  return { status: 'written', kind: 'checkpoint' };
+}
+
+function writeProgressDelta(
+  storage: AppStorageFacade,
+  progress: ChatStreamingProgressRecord,
+  currentState: ChatStreamingProgressWriterState,
+  writerStates: Map<string, ChatStreamingProgressWriterState>,
+): ChatStreamingProgressWriteResult {
+  let slot = 0;
+  while (slot < MAX_CHAT_PROGRESS_CHUNKS && currentState.activeChunkSlots.has(slot)) {
+    slot += 1;
+  }
+  if (slot >= MAX_CHAT_PROGRESS_CHUNKS) {
+    return writeCompactedProgressCheckpoint(storage, progress, currentState, writerStates);
+  }
+
+  const content = createProgressTextUpdate(currentState.progress.content, progress.content);
+  const thoughtContent = createOptionalProgressTextUpdate(
+    currentState.progress.thoughtContent,
+    progress.thoughtContent,
+  );
+  const tokensPerSec = currentState.progress.tokensPerSec === progress.tokensPerSec
+    ? undefined
+    : progress.tokensPerSec ?? null;
+  const chunk: ChatStreamingProgressChunkRecord = {
+    schemaVersion: CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+    threadId: progress.threadId,
+    messageId: progress.messageId,
+    createdAt: progress.createdAt,
+    slot,
+    revision: progress.revision,
+    persistedAt: progress.persistedAt,
+    content,
+    thoughtContent,
+    tokensPerSec,
+  };
+  const chunkSerialization = serializeChatRecord(chunk, 'progress_chunk');
+  if (chunkSerialization.bytes > MAX_CHAT_PROGRESS_CHUNK_BYTES) {
+    return writeCompactedProgressCheckpoint(storage, progress, currentState, writerStates);
+  }
+
+  const reference: ChatStreamingProgressChunkReference = {
+    slot,
+    revision: progress.revision,
+    persistedAt: progress.persistedAt,
+  };
+  const manifest: ChatStreamingProgressManifest = {
+    ...currentState.manifest,
+    chunks: [...currentState.manifest.chunks, reference],
+    revision: progress.revision,
+    persistedAt: progress.persistedAt,
+  };
+  const manifestSerialization = serializeChatRecord(manifest, 'progress_manifest');
+  const projectedReferencedBytes = currentState.referencedBytes
+    - currentState.manifestBytes
+    + chunkSerialization.bytes
+    + manifestSerialization.bytes;
+  if (
+    manifestSerialization.bytes > MAX_CHAT_PROGRESS_MANIFEST_BYTES
+    || projectedReferencedBytes > MAX_CHAT_PROGRESS_AGGREGATE_BYTES
+  ) {
+    return writeCompactedProgressCheckpoint(storage, progress, currentState, writerStates);
+  }
+
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingProgressChunkStorageKey(progress.threadId, slot),
+    chunkSerialization.serialized,
+    chunkSerialization.bytes,
+    'progress_chunk',
+  );
+  writeSerializedChatRecord(
+    storage,
+    getChatStreamingProgressStorageKey(progress.threadId),
+    manifestSerialization.serialized,
+    manifestSerialization.bytes,
+    'progress_manifest',
+  );
+
+  const activeChunkSlots = new Set(currentState.activeChunkSlots);
+  activeChunkSlots.add(slot);
+  writerStates.set(progress.threadId, {
+    progress,
+    manifest,
+    operationSlot: currentState.operationSlot,
+    checkpointSlot: currentState.checkpointSlot,
+    activeChunkSlots,
+    operationBytes: currentState.operationBytes,
+    checkpointBytes: currentState.checkpointBytes,
+    manifestBytes: manifestSerialization.bytes,
+    referencedBytes: projectedReferencedBytes,
+  });
+  incrementChatPersistenceCounter('chat.persist.streaming');
+  incrementChatPersistenceCounter(
+    'chat.persist.assistantChars',
+    getProgressTextUpdateCharacterCount(content)
+      + getProgressTextUpdateCharacterCount(thoughtContent),
+    { recordKind: 'progress_chunk' },
+  );
+  return { status: 'written', kind: 'delta' };
 }
 
 export function writeChatStreamingProgressRecord(
   storage: AppStorageFacade,
   progress: ChatStreamingProgressRecord,
-): boolean {
-  const currentResult = readChatStreamingProgressRecord(storage, progress.threadId);
-  if (currentResult.ok) {
-    const current = currentResult.value;
-    const sameMessage = current.messageId === progress.messageId;
-    const isOlderRevision = sameMessage && current.revision > progress.revision;
-    const isOlderTimestamp = sameMessage
-      ? current.revision === progress.revision && current.persistedAt > progress.persistedAt
-      : current.createdAt > progress.createdAt
-        || (current.createdAt === progress.createdAt && current.persistedAt > progress.persistedAt);
-    if (isOlderRevision || isOlderTimestamp) {
-      return false;
+): ChatStreamingProgressWriteResult {
+  const oversized = rejectOversizedProgress(progress);
+  if (oversized) {
+    return oversized;
+  }
+
+  const writerStates = getChatStreamingProgressWriterStateMap(storage);
+  let currentState = writerStates.get(progress.threadId);
+  let currentProgress = currentState?.progress;
+  if (!currentProgress) {
+    const currentResult = readChatStreamingProgressState(storage, progress.threadId);
+    if (currentResult.ok) {
+      currentProgress = currentResult.progress;
+      currentState = currentResult.writerState;
+      if (currentState) {
+        writerStates.set(progress.threadId, currentState);
+      }
     }
   }
 
-  incrementChatPersistenceCounter('chat.persist.streaming', 1);
-  serializeAndWriteChatRecord(
-    storage,
-    getChatStreamingProgressStorageKey(progress.threadId),
-    progress,
-    'progress',
-  );
-  return true;
+  if (currentProgress) {
+    const sameMessage = currentProgress.messageId === progress.messageId;
+    if (sameMessage) {
+      if (!hasSameProgressOperationIdentity(currentProgress, progress)) {
+        return { status: 'stale' };
+      }
+      if (
+        currentProgress.revision > progress.revision
+        || (
+          currentProgress.revision === progress.revision
+          && currentProgress.persistedAt > progress.persistedAt
+        )
+      ) {
+        return { status: 'stale' };
+      }
+      if (
+        currentProgress.revision === progress.revision
+        && currentProgress.persistedAt === progress.persistedAt
+      ) {
+        return hasSameProgressSnapshot(currentProgress, progress)
+          ? { status: 'unchanged' }
+          : { status: 'stale' };
+      }
+    } else if (
+      currentProgress.createdAt > progress.createdAt
+      || (
+        currentProgress.createdAt === progress.createdAt
+        && currentProgress.persistedAt >= progress.persistedAt
+      )
+    ) {
+      return { status: 'stale' };
+    }
+  }
+
+  if (!currentState || currentState.progress.messageId !== progress.messageId) {
+    return writeInitialProgressCheckpoint(storage, progress, currentState, writerStates);
+  }
+
+  return writeProgressDelta(storage, progress, currentState, writerStates);
 }
 
 export function removeChatStreamingProgressRecord(storage: AppStorageFacade, threadId: string): void {
   storage.remove(getChatStreamingProgressStorageKey(threadId));
+  getChatStreamingProgressWriterStateMap(storage).delete(threadId);
+
+  const artifactKeys = [
+    getChatStreamingOperationStorageKey(threadId, 0),
+    getChatStreamingOperationStorageKey(threadId, 1),
+    getChatStreamingProgressCheckpointStorageKey(threadId, 0),
+    getChatStreamingProgressCheckpointStorageKey(threadId, 1),
+    ...Array.from(
+      { length: MAX_CHAT_PROGRESS_CHUNKS },
+      (_unused, slot) => getChatStreamingProgressChunkStorageKey(threadId, slot),
+    ),
+  ];
+  let firstError: unknown;
+  artifactKeys.forEach((key) => {
+    try {
+      storage.remove(key);
+    } catch (error) {
+      firstError ??= error;
+    }
+  });
+  if (firstError) {
+    throw firstError;
+  }
 }
 
 export function listChatStreamingProgressStorageKeys(
   storage: Pick<AppStorageFacade, 'getAllKeys'>,
 ): string[] {
-  return storage.getAllKeys().filter((key) => key.startsWith(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX));
+  return storage.getAllKeys().filter((key) => (
+    key.startsWith(CHAT_STREAM_PROGRESS_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_OPERATION_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_PROGRESS_CHECKPOINT_STORAGE_KEY_PREFIX)
+    || key.startsWith(CHAT_STREAM_PROGRESS_CHUNK_STORAGE_KEY_PREFIX)
+  ));
 }
 
 export function clearChatStreamingProgressRecords(storage: AppStorageFacade): void {
-  listChatStreamingProgressStorageKeys(storage).forEach((key) => storage.remove(key));
+  const keys = listChatStreamingProgressStorageKeys(storage);
+  const threadIds = new Set<string>();
+  const malformedKeys: string[] = [];
+  keys.forEach((key) => {
+    const threadId = getThreadIdFromChatStreamingProgressArtifactStorageKey(key);
+    if (threadId) {
+      threadIds.add(threadId);
+    } else {
+      malformedKeys.push(key);
+    }
+  });
+
+  let firstError: unknown;
+  threadIds.forEach((threadId) => {
+    try {
+      removeChatStreamingProgressRecord(storage, threadId);
+    } catch (error) {
+      firstError ??= error;
+    }
+  });
+  malformedKeys.forEach((key) => {
+    try {
+      storage.remove(key);
+    } catch (error) {
+      firstError ??= error;
+    }
+  });
+  if (firstError) {
+    throw firstError;
+  }
+  chatStreamingProgressWriterStates.delete(storage as object);
 }
 
 function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.now()): number {
@@ -1192,12 +2480,12 @@ function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.no
     return Math.max(timestamp, recordResult.value.persistedAt + 1);
   }, baseTimestamp);
 
-  return listChatStreamingProgressStorageKeys(storage).reduce((timestamp, key) => {
-    const threadId = getThreadIdFromChatStreamingProgressStorageKey(key);
-    if (!threadId) {
-      return timestamp;
-    }
-
+  const progressThreadIds = new Set(
+    listChatStreamingProgressStorageKeys(storage)
+      .map(getThreadIdFromChatStreamingProgressArtifactStorageKey)
+      .filter((threadId): threadId is string => threadId != null),
+  );
+  return Array.from(progressThreadIds).reduce((timestamp, threadId) => {
     const progressResult = readChatStreamingProgressRecord(storage, threadId);
     return progressResult.ok
       ? Math.max(timestamp, progressResult.value.persistedAt + 1)
@@ -1218,7 +2506,9 @@ export function clearPersistedChatRecords(storage: AppStorageFacade): void {
     clearedAt,
   });
   storage.remove(LEGACY_CHAT_STORE_STORAGE_KEY);
-  listChatThreadStorageKeys(storage).forEach((key) => storage.remove(key));
+  storage.getAllKeys()
+    .filter((key) => key.startsWith(CHAT_THREAD_STORAGE_KEY_PREFIX))
+    .forEach((key) => storage.remove(key));
   clearChatStreamingProgressRecords(storage);
   removeChatPendingIndexCommit(storage);
 }

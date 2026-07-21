@@ -10,6 +10,107 @@ import {
 } from '../types/chat';
 
 export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH = 200_000;
+export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS = 8;
+export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PART_TOTAL_CHARS = 200_000;
+export const MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS = 24;
+export const MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENT_METADATA_BYTES = 64 * 1024;
+
+function getUtf8ByteLength(value: string, stopAfter = Number.POSITIVE_INFINITY): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit < 0x80) {
+      bytes += 1;
+    } else if (codeUnit < 0x800) {
+      bytes += 2;
+    } else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > stopAfter) {
+      return bytes;
+    }
+  }
+  return bytes;
+}
+
+function serializeWithinUtf8Limit(value: unknown, maximumBytes: number): string | null {
+  let minimumBytes = 0;
+  try {
+    const serialized = JSON.stringify(value, (key, entry: unknown) => {
+      if (key.length > 0) {
+        minimumBytes += getUtf8ByteLength(key, maximumBytes - minimumBytes);
+      }
+      if (typeof entry === 'string') {
+        minimumBytes += getUtf8ByteLength(entry, maximumBytes - minimumBytes);
+      }
+      if (minimumBytes > maximumBytes) {
+        throw new RangeError('JSON value exceeds its persistence byte limit');
+      }
+      return entry;
+    });
+    return typeof serialized === 'string'
+      && getUtf8ByteLength(serialized, maximumBytes) <= maximumBytes
+      ? serialized
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isChatBranchReplacementUserMessageWithinProgressBounds(
+  message: Pick<ChatMessage, 'attachments' | 'contentParts'>,
+): boolean {
+  if (message.attachments != null && !Array.isArray(message.attachments)) {
+    return false;
+  }
+  const attachments = message.attachments ?? [];
+  if (attachments.length > MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS) {
+    return false;
+  }
+
+  const serializedAttachments = serializeWithinUtf8Limit(
+    attachments,
+    MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENT_METADATA_BYTES,
+  );
+  if (!serializedAttachments) {
+    return false;
+  }
+
+  if (message.contentParts != null && !Array.isArray(message.contentParts)) {
+    return false;
+  }
+  const contentParts = message.contentParts ?? [];
+  if (contentParts.length > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS) {
+    return false;
+  }
+
+  let totalTextChars = 0;
+  for (const part of contentParts) {
+    if (
+      !part
+      || typeof part !== 'object'
+      || Array.isArray(part)
+      || part.type !== 'text'
+      || typeof part.text !== 'string'
+    ) {
+      return false;
+    }
+    totalTextChars += part.text.length;
+    if (totalTextChars > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PART_TOTAL_CHARS) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 export interface ChatBranchBaseIdentity {
   durablePersistedAt: number;
@@ -118,6 +219,11 @@ export function buildChatBranchReplacementPlan({
   }
 
   const activeModelId = getThreadActiveModelId(thread);
+  const replacementUserMessage = createReplacementUserMessage(target, content, activeModelId);
+  if (!isChatBranchReplacementUserMessageWithinProgressBounds(replacementUserMessage)) {
+    return null;
+  }
+
   const baseMessages = thread.messages.slice(0, targetIndex);
   const branchActiveModelId = deriveThreadActiveModelIdFromMessages({
     modelId: thread.modelId,
@@ -140,7 +246,7 @@ export function buildChatBranchReplacementPlan({
   return {
     targetUserMessageId,
     activeModelId,
-    replacementUserMessage: createReplacementUserMessage(target, content, activeModelId),
+    replacementUserMessage,
     insertedModelSwitchMessage,
     paramsSnapshot: { ...paramsSnapshot },
     clearSummary: true,

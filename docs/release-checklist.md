@@ -210,6 +210,9 @@ keyPassword=your-key-password
 - After switching models in chat, open Model Controls and confirm the active chat model shows `Apply & reload` instead of `Save load profile`.
 - Switch models more than once in the same conversation, then edit or regenerate an older user turn and confirm the rebuilt branch stays aligned with the intended active model.
 - Start a longer generation, then background the app and confirm Android shows a persistent generation notification and a completion notification when finished. Tap the notification and confirm it returns you to the chat.
+- During visible partial output, force-stop the app, relaunch it, and confirm only the last
+  committed partial prefix is recovered as stopped without duplicating the assistant turn
+  or resurrecting a replaced branch.
 - While sending, confirm the header stays stable, does not add a redundant `Generating` label, and the composer does not visibly jump on Android.
 - With the Android keyboard open, confirm the composer keeps a small but visible gap above the keyboard instead of touching it or floating too high.
 - Confirm the preset and model chips stay aligned to the normal chat content inset and do not inherit extra left offset from the back-button slot.
@@ -244,7 +247,9 @@ keyPassword=your-key-password
 - Rapidly tap the routed back affordance twice and confirm only one navigation occurs without leaving the app or logging an unhandled `GO_BACK` action.
 - Remove a downloaded model with `Delete and keep settings` and confirm the file is removed while its saved per-model settings remain available after downloading the same model again.
 - Remove a downloaded model with `Delete and reset settings` and confirm both the file and the saved per-model settings are cleared.
-- Clear chat history and confirm saved threads are removed.
+- Clear chat history during or after partial generation, relaunch, and confirm saved
+  threads plus all active-response recovery data are removed. Repeat with thread deletion
+  and confirm the deleted conversation cannot be recovered.
 - Reset settings and confirm defaults are restored.
 
 ## Release-facing files to keep aligned

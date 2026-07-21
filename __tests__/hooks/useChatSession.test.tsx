@@ -11,8 +11,9 @@ import { getAppStorage, storage } from '../../src/store/storage';
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
   CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
-  getChatStreamingProgressStorageKey,
+  getThreadIdFromChatStreamingProgressArtifactStorageKey,
   getChatThreadStorageKey,
+  listChatStreamingProgressStorageKeys,
   readChatStreamingProgressRecord,
 } from '../../src/store/chatPersistence';
 import {
@@ -47,6 +48,12 @@ import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
+
+function expectNoStreamingProgressArtifacts(threadId: string): void {
+  expect(listChatStreamingProgressStorageKeys(storage).filter(
+    (key) => getThreadIdFromChatStreamingProgressArtifactStorageKey(key) === threadId,
+  )).toEqual([]);
+}
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
@@ -3671,7 +3678,7 @@ describe('useChatSession', () => {
     expect(storage.getString(getChatThreadStorageKey(restoredThread.id))).not.toContain(
       completionError.message,
     );
-    expect(storage.getString(getChatStreamingProgressStorageKey(restoredThread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(restoredThread.id);
   });
 
   it('appends a new assistant when the last image-only user has no following assistant', async () => {
@@ -4483,14 +4490,16 @@ describe('useChatSession', () => {
     });
 
     expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toBe(durableRecordBeforeBackground);
-    expect(storage.getString(getChatStreamingProgressStorageKey(threadId ?? '')))
-      .toContain('Partial before background');
+    expect(readChatStreamingProgressRecord(storage, threadId ?? '')).toEqual({
+      ok: true,
+      value: expect.objectContaining({ content: 'Partial before background' }),
+    });
 
     await act(async () => {
       resolveCompletion?.();
       await sendPromise;
     });
-    expect(storage.getString(getChatStreamingProgressStorageKey(threadId ?? ''))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(threadId ?? '');
   });
 
   it('does not throw when background persistence flush hits blocked private storage', async () => {
@@ -5333,7 +5342,7 @@ describe('useChatSession', () => {
       expect(writtenKeys).not.toContain(getChatThreadStorageKey(prepared.threadId));
       expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
       expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
-      expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+      expectNoStreamingProgressArtifacts(prepared.threadId);
     } finally {
       appStorage.set = originalSet;
       await act(async () => {
@@ -5389,7 +5398,7 @@ describe('useChatSession', () => {
     const afterLatePromptPreparation = useChatStore.getState().getActiveThread()!;
     expect(afterLatePromptPreparation.status).toBe('idle');
     expect(afterLatePromptPreparation.messages.map((message) => message.id)).toEqual(originalMessageIds);
-    expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(prepared.threadId);
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
@@ -5431,7 +5440,7 @@ describe('useChatSession', () => {
       (message) => message.id,
     )).toEqual(originalMessageIds);
     expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
-    expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(prepared.threadId);
   });
 
   it('partial output followed by stop commits the partial new branch', async () => {
@@ -5486,7 +5495,7 @@ describe('useChatSession', () => {
       content: 'Partial branch output',
       state: 'stopped',
     }));
-    expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(prepared.threadId);
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallCount);
   });
 
@@ -5939,7 +5948,7 @@ describe('useChatSession', () => {
     expect(switchedRawThread.activeModelId).toBe('author/model-q8');
     expect(switchedRawThread.status).toBe('idle');
     expect(storage.getString(getChatThreadStorageKey(originalThread.id))).toBe(durableAfterSwitch);
-    expect(storage.getString(getChatStreamingProgressStorageKey(originalThread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(originalThread.id);
   });
 
   it('aborts attached branch regeneration when the active chat changes during preflight', async () => {
@@ -6010,7 +6019,7 @@ describe('useChatSession', () => {
     expect(useChatStore.getState().threads[originalThread.id]).toBe(originalThread);
     expect(useChatStore.getState().getThread(originalThread.id)).toBe(originalThread);
     expect(storage.getString(getChatThreadStorageKey(originalThread.id))).toBe(durableBeforeSwitch);
-    expect(storage.getString(getChatStreamingProgressStorageKey(originalThread.id))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(originalThread.id);
   });
 
   it('rebuilds the last turn instead of leaving a trailing model switch after regenerate', async () => {

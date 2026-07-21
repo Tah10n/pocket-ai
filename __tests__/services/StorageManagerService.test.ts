@@ -88,7 +88,15 @@ import {
 import { useChatStore } from '../../src/store/chatStore';
 import { getQueuedDownloadFileNames } from '../../src/store/downloadStore';
 import { storage as appStorage } from '../../src/store/storage';
-import { CHAT_PERSISTENCE_INDEX_KEY, getChatThreadStorageKey } from '../../src/store/chatPersistence';
+import {
+  CHAT_PERSISTENCE_INDEX_KEY,
+  CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
+  getChatStreamingOperationStorageKey,
+  getChatStreamingProgressCheckpointStorageKey,
+  getChatStreamingProgressChunkStorageKey,
+  getChatStreamingProgressStorageKey,
+  getChatThreadStorageKey,
+} from '../../src/store/chatPersistence';
 import * as FileSystem from 'expo-file-system/legacy';
 import { NativeModules, Platform } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
@@ -1077,6 +1085,28 @@ describe('StorageManagerService', () => {
     );
   });
 
+  it('counts pending commits and every V2 streaming progress artifact', async () => {
+    const threadId = 'thread-streaming';
+    const values = new Map<string, string>([
+      [CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY, '{"pending":true}'],
+      [getChatStreamingProgressStorageKey(threadId), '{"head":true}'],
+      [getChatStreamingOperationStorageKey(threadId, 0), '{"operation":true}'],
+      [getChatStreamingProgressCheckpointStorageKey(threadId, 0), '{"checkpoint":true}'],
+      [getChatStreamingProgressChunkStorageKey(threadId, 0), '{"chunk":true}'],
+    ]);
+    mockedAppStorage.getAllKeys.mockReturnValue(Array.from(values.keys()));
+    mockedAppStorage.getString.mockImplementation((key: string) => values.get(key));
+
+    const metrics = await getAppStorageMetrics();
+    const expectedBytes = Array.from(values).reduce(
+      (total, [key, value]) => total + key.length + value.length,
+      0,
+    );
+
+    expect(metrics.chatHistoryBytes).toBe(expectedBytes);
+    expect(metrics.appFilesBytes).toBeGreaterThanOrEqual(expectedBytes);
+  });
+
   it('treats an empty v2 chat persistence tombstone as zero chat history bytes', async () => {
     mockedAppStorage.getAllKeys.mockReturnValue([CHAT_PERSISTENCE_INDEX_KEY]);
     mockedAppStorage.getString.mockImplementation((key: string) => (
@@ -1094,6 +1124,28 @@ describe('StorageManagerService', () => {
     const metrics = await getAppStorageMetrics();
 
     expect(metrics.chatHistoryBytes).toBe(0);
+  });
+
+  it('still counts orphaned progress beside an empty v2 tombstone', async () => {
+    const progressKey = getChatStreamingProgressChunkStorageKey('orphan', 7);
+    const progressValue = '{"orphan":true}';
+    mockedAppStorage.getAllKeys.mockReturnValue([CHAT_PERSISTENCE_INDEX_KEY, progressKey]);
+    mockedAppStorage.getString.mockImplementation((key: string) => {
+      if (key === CHAT_PERSISTENCE_INDEX_KEY) {
+        return JSON.stringify({
+          schemaVersion: 2,
+          activeThreadId: null,
+          threadIds: [],
+          updatedAt: 20,
+          clearedAt: 20,
+        });
+      }
+      return key === progressKey ? progressValue : undefined;
+    });
+
+    const metrics = await getAppStorageMetrics();
+
+    expect(metrics.chatHistoryBytes).toBe(progressKey.length + progressValue.length);
   });
 
   it('treats an empty legacy chat history index as zero chat history bytes', async () => {

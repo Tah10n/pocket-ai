@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-07-16
+Last updated: 2026-07-21
 
 ## Summary
 
@@ -14,6 +14,9 @@ This document summarizes the current behavior of the app as configured in this r
 - Chat attachments selected from the device stay on the device during local inference. They are not uploaded to a hosted chat-completion API.
 - Downloaded GGUF files, multimodal projector companions, optional MTP draft companions, and copied chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
+- While a response is generating, bounded encrypted recovery data for the active partial
+  response may also be stored locally so a force-stop or crash can recover the last
+  committed prefix without copying the complete conversation.
 - System prompt presets, generation settings, and model-specific load profiles are persisted locally on the device and encrypted at rest.
 - An optional Hugging Face access token can be stored locally in secure device storage for browsing and downloading gated or private models.
 - Catalog metadata such as resolved GGUF file/variant size, selected file identity, access state, and local download status is cached locally only for app behavior and is not synced to a hosted account service.
@@ -54,7 +57,7 @@ Users can manage local data directly in the app:
 
 - offload downloaded models and associated multimodal projector or MTP draft companion artifacts while keeping or resetting saved per-model settings
 - unload the active model
-- clear persisted chat history
+- clear persisted chat history, including active-response recovery artifacts
 - discard attachment drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
 - reset settings
 - reset private app storage, including a best-effort cleanup of local chat attachments

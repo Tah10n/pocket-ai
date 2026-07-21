@@ -63,6 +63,10 @@ describe('PrivateStorageRecovery', () => {
   it('clears cached private handles and in-memory private persisted state after explicit reset', async () => {
     const preResetAppStorage = getAppStorage();
     preResetAppStorage.set('stale-private-key', 'stale-value');
+    preResetAppStorage.set('chat-store:progress:reset-thread', '{"head":true}');
+    preResetAppStorage.set('chat-store:operation:reset-thread:0', '{"operation":true}');
+    preResetAppStorage.set('chat-store:progress-checkpoint:reset-thread:0', '{"checkpoint":true}');
+    preResetAppStorage.set('chat-store:progress-chunk:reset-thread:0', '{"chunk":true}');
 
     useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -81,6 +85,12 @@ describe('PrivateStorageRecovery', () => {
     const postResetAppStorage = getAppStorage();
     expect(postResetAppStorage).not.toBe(preResetAppStorage);
     expect(postResetAppStorage.getString('stale-private-key')).toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:progress:reset-thread')).toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:operation:reset-thread:0')).toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:progress-checkpoint:reset-thread:0'))
+      .toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:progress-chunk:reset-thread:0'))
+      .toBeUndefined();
     expect(useChatStore.getState().getConversationIndex()).toEqual([]);
     expect(useChatStore.getState().activeThreadId).toBeNull();
     expect(useDownloadStore.getState().queue).toEqual([]);

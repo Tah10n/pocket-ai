@@ -2035,6 +2035,194 @@ describe('ModelCatalogService', () => {
     service.dispose();
   });
 
+  it('bounds atomic snapshot retries and never synthesizes a token/revision pair', async () => {
+    const service = new ModelCatalogService();
+    const staleRevision = huggingFaceTokenService.getCachedRevision() + 1;
+    const snapshotSpy = jest.spyOn(huggingFaceTokenService, 'getSnapshot').mockResolvedValue({
+      token: 'hf_uncommitted_token',
+      revision: staleRevision,
+    });
+    global.fetch = jest.fn();
+
+    try {
+      await expect(service.searchModels('snapshot-exhaustion')).rejects.toMatchObject({
+        code: 'network',
+        message: 'Catalog auth context changed during request',
+      });
+      expect(snapshotSpy).toHaveBeenCalledTimes(12);
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect((service as any).searchCache.size).toBe(0);
+    } finally {
+      snapshotSpy.mockRestore();
+      service.dispose();
+    }
+  });
+
+  it('retries authenticated search anonymously after token removal without keeping stale auth results', async () => {
+    await huggingFaceTokenService.saveToken('hf_token_to_remove');
+    const service = new ModelCatalogService();
+    const firstRequest = createDeferred<Response>();
+    let requestCount = 0;
+    global.fetch = jest.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Promise<Response>((resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          }, { once: true });
+          void firstRequest.promise.then(resolve, reject);
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepo('org/fresh-anonymous-after-removal')]),
+      });
+    }) as jest.Mock;
+
+    const pendingSearch = service.searchModels('token-removal', {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    });
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    await huggingFaceTokenService.clearToken();
+    firstRequest.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([makeGatedRepo('org/stale-private-auth-result')]),
+    } as unknown as Response);
+
+    await expect(pendingSearch).resolves.toEqual(expect.objectContaining({
+      models: [expect.objectContaining({ id: 'org/fresh-anonymous-after-removal' })],
+    }));
+    const searchCache = (service as any).searchCache as Map<string, {
+      result: { models: ModelMetadata[] };
+    }>;
+    expect(Array.from(searchCache.keys()).every((key) => key.startsWith('anon::'))).toBe(true);
+    expect(Array.from(searchCache.values()).flatMap((entry) => entry.result.models).map(
+      (model) => model.id,
+    )).not.toContain('org/stale-private-auth-result');
+    await waitForCatalogRequestMapsToSettle(service);
+    service.dispose();
+  });
+
+  it('revalidates auth after memory-fit awaits instead of returning an invalidated cached object', async () => {
+    await huggingFaceTokenService.saveToken('hf_memory_token_a');
+    const service = new ModelCatalogService();
+    const memoryRead = createDeferred<number>();
+    (DeviceInfo.getTotalMemory as jest.Mock)
+      .mockImplementationOnce(() => memoryRead.promise)
+      .mockResolvedValue(8 * 1024 * 1024 * 1024);
+    const query = 'memory-auth-race';
+    const normalizedQuery = (service as any).normalizeQuery(query);
+    const cacheKey = (service as any).buildMemorySearchCacheKey(
+      normalizedQuery,
+      null,
+      1,
+      null,
+      true,
+      undefined,
+      'deferred',
+      huggingFaceTokenService.getCachedRevision(),
+    );
+    (service as any).searchCache.set(cacheKey, {
+      result: {
+        models: [makeLocalModel('org/stale-memory-cache-model')],
+        hasMore: false,
+        nextCursor: null,
+      },
+      timestamp: Date.now(),
+      isBufferedCursor: false,
+      isReusableFirstPage: true,
+      lastAccessSequence: 1,
+      requestId: 1,
+    });
+    global.fetch = jest.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      expect((init?.headers as { Authorization?: string } | undefined)?.Authorization).toBe(
+        'Bearer hf_memory_token_b',
+      );
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepo('org/fresh-memory-cache-model')]),
+      });
+    }) as jest.Mock;
+
+    const pendingSearch = service.searchModels(query, {
+      pageSize: 1,
+      metadataResolution: 'deferred',
+    });
+    await waitForMockCallCount(DeviceInfo.getTotalMemory as jest.Mock, 1);
+    await huggingFaceTokenService.saveToken('hf_memory_token_b');
+    memoryRead.resolve(8 * 1024 * 1024 * 1024);
+
+    await expect(pendingSearch).resolves.toEqual(expect.objectContaining({
+      models: [expect.objectContaining({ id: 'org/fresh-memory-cache-model' })],
+    }));
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect((service as any).searchCache.has(cacheKey)).toBe(false);
+    await waitForCatalogRequestMapsToSettle(service);
+    service.dispose();
+  });
+
+  it('aborts stale tree, README, and probe work and cleans every detached consumer', async () => {
+    await huggingFaceTokenService.saveToken('hf_resource_token_a');
+    const service = new ModelCatalogService();
+    global.fetch = jest.fn((_input: RequestInfo | URL, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }, { once: true });
+      })
+    )) as jest.Mock;
+
+    const contextA = await huggingFaceTokenService.getSnapshot();
+    const pendingTree = (service as any).fetchHuggingFaceModelTree(
+      'org/stale-tree',
+      undefined,
+      { authToken: contextA.token, hasAuthToken: true, authVersion: contextA.revision },
+      REQUEST_AUTH_POLICY.REQUIRED_AUTH,
+    );
+    await waitForMockCallCount(global.fetch as jest.Mock, 1);
+    await huggingFaceTokenService.saveToken('hf_resource_token_b');
+    await expect(pendingTree).rejects.toMatchObject({ name: 'StaleCatalogAuthError' });
+    await waitForCatalogRequestMapsToSettle(service);
+
+    const contextB = await huggingFaceTokenService.getSnapshot();
+    const pendingReadme = (service as any).fetchModelReadmeData(
+      'org/stale-readme',
+      undefined,
+      { authToken: contextB.token, hasAuthToken: true, authVersion: contextB.revision },
+    );
+    await waitForMockCallCount(global.fetch as jest.Mock, 2);
+    await huggingFaceTokenService.saveToken('hf_resource_token_c');
+    await expect(pendingReadme).rejects.toMatchObject({ name: 'StaleCatalogAuthError' });
+    await waitForCatalogRequestMapsToSettle(service);
+
+    const contextC = await huggingFaceTokenService.getSnapshot();
+    const pendingProbe = (service as any).probeResolvedModelAccess(
+      {
+        id: 'org/stale-probe',
+        resolvedFileName: 'model.gguf',
+        accessState: ModelAccessState.AUTHORIZED,
+        isGated: true,
+        isPrivate: false,
+      },
+      { authToken: contextC.token, hasAuthToken: true, authVersion: contextC.revision },
+    );
+    await waitForMockCallCount(global.fetch as jest.Mock, 3);
+    await huggingFaceTokenService.clearToken();
+    await expect(pendingProbe).rejects.toMatchObject({ name: 'StaleCatalogAuthError' });
+    await waitForCatalogRequestMapsToSettle(service);
+
+    expect((service as any).resolvedFileProbeStateCache.size).toBe(0);
+    service.dispose();
+  });
+
   it('aborts blocking tree enrichment when its catalog search is cancelled', async () => {
     const service = new ModelCatalogService();
     const treeAbort = jest.fn();
@@ -4081,6 +4269,8 @@ describe('ModelCatalogService', () => {
   });
 
   it('preserves an existing auth-validated artifact when bounded tree fallback misses the exact file', async () => {
+    await huggingFaceTokenService.saveToken('hf_test_token');
+    const authSnapshot = await huggingFaceTokenService.getSnapshot();
     const service = new ModelCatalogService();
     const model: ModelMetadata = {
       id: 'org/bounded-auth-preserve-model',
@@ -4148,7 +4338,11 @@ describe('ModelCatalogService', () => {
     const [resolved] = await (service as any).resolveMissingModelMetadata(
       [model],
       { totalMemoryBytes: 8 * 1024 * 1024 * 1024, systemMemorySnapshot: null },
-      { authToken: 'hf_test_token', hasAuthToken: true, authVersion: 0 },
+      {
+        authToken: authSnapshot.token,
+        hasAuthToken: true,
+        authVersion: authSnapshot.revision,
+      },
       { treeProbeMode: 'bounded' },
     );
 
@@ -7974,6 +8168,227 @@ describe('ModelCatalogService', () => {
     expect(right.description).toBe('Shared README summary for both requests.');
     expect(readmeCallCount).toBe(1);
 
+    service.dispose();
+  });
+
+  it('evicts buffered pages before ordinary and reusable first-page cache entries', () => {
+    const service = new ModelCatalogService();
+    type SearchEntry = {
+      result: { models: ModelMetadata[]; hasMore: boolean; nextCursor: string | null };
+      timestamp: number;
+      isBufferedCursor: boolean;
+      isReusableFirstPage: boolean;
+      lastAccessSequence: number;
+      deferredMetadataPending?: boolean;
+    };
+    const internals = service as unknown as {
+      searchCache: Map<string, SearchEntry>;
+      pruneSearchCache(): void;
+    };
+    const now = Date.now();
+    const put = (key: string, entry: Omit<SearchEntry, 'result' | 'timestamp'>) => {
+      internals.searchCache.set(key, {
+        result: { models: [], hasMore: false, nextCursor: null },
+        timestamp: now,
+        ...entry,
+      });
+    };
+
+    for (let index = 0; index < 118; index += 1) {
+      put(`first-${index}`, {
+        isBufferedCursor: false,
+        isReusableFirstPage: true,
+        lastAccessSequence: 100 + index,
+      });
+    }
+    put('ordinary-deferred', {
+      isBufferedCursor: false,
+      isReusableFirstPage: false,
+      lastAccessSequence: 1,
+      deferredMetadataPending: true,
+    });
+    put('buffer-old', {
+      isBufferedCursor: true,
+      isReusableFirstPage: false,
+      lastAccessSequence: 2,
+    });
+    put('buffer-middle', {
+      isBufferedCursor: true,
+      isReusableFirstPage: false,
+      lastAccessSequence: 3,
+    });
+    put('buffer-new', {
+      isBufferedCursor: true,
+      isReusableFirstPage: false,
+      lastAccessSequence: 4,
+    });
+
+    internals.pruneSearchCache();
+
+    expect(internals.searchCache.size).toBe(120);
+    expect(internals.searchCache.has('buffer-old')).toBe(false);
+    expect(internals.searchCache.has('buffer-middle')).toBe(false);
+    expect(internals.searchCache.has('buffer-new')).toBe(true);
+    expect(internals.searchCache.has('ordinary-deferred')).toBe(true);
+    expect(internals.searchCache.has('first-0')).toBe(true);
+    service.dispose();
+  });
+
+  it('keeps a real-search overflow cursor usable while the cache remains bounded', async () => {
+    const service = new ModelCatalogService();
+    type SearchEntry = {
+      result: { models: ModelMetadata[]; hasMore: boolean; nextCursor: string | null };
+      timestamp: number;
+      isBufferedCursor: boolean;
+      isReusableFirstPage: boolean;
+      lastAccessSequence: number;
+    };
+    const searchCache = (service as unknown as {
+      searchCache: Map<string, SearchEntry>;
+    }).searchCache;
+    const now = Date.now();
+    for (let index = 0; index < 120; index += 1) {
+      searchCache.set(`anon::0::seed-${index}`, {
+        result: { models: [], hasMore: false, nextCursor: null },
+        timestamp: now,
+        isBufferedCursor: false,
+        isReusableFirstPage: true,
+        lastAccessSequence: index + 1,
+      });
+    }
+    global.fetch = jest.fn(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      headers: { get: jest.fn(() => null) },
+      json: () => Promise.resolve([
+        makeRepo('org/overflow-page-one'),
+        makeRepo('org/overflow-page-two'),
+      ]),
+    })) as jest.Mock;
+
+    const firstPage = await service.searchModels('overflow-real', { pageSize: 1 });
+
+    expect(firstPage.models.map((model) => model.id)).toEqual(['org/overflow-page-one']);
+    expect(firstPage.nextCursor).toMatch(/^catalog-buffer:/);
+    expect(searchCache.size).toBe(120);
+
+    await huggingFaceTokenService.saveToken('hf_added_after_anonymous_page');
+
+    const secondPage = await service.searchModels('overflow-real', {
+      pageSize: 1,
+      cursor: firstPage.nextCursor,
+    });
+
+    expect(secondPage.models.map((model) => model.id)).toEqual(['org/overflow-page-two']);
+    expect(secondPage.nextCursor).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(searchCache.size).toBeLessThanOrEqual(120);
+    service.dispose();
+  });
+
+  it('uses explicit access recency when ordinary pages compete for overflow eviction', () => {
+    const service = new ModelCatalogService();
+    type SearchEntry = {
+      result: { models: ModelMetadata[]; hasMore: boolean; nextCursor: string | null };
+      timestamp: number;
+      isBufferedCursor: boolean;
+      isReusableFirstPage: boolean;
+      lastAccessSequence: number;
+    };
+    const internals = service as unknown as {
+      searchCache: Map<string, SearchEntry>;
+      searchCacheAccessSequence: number;
+      pruneSearchCache(): void;
+      touchSearchCacheEntry(key: string): void;
+    };
+    const now = Date.now();
+    const result = { models: [], hasMore: false, nextCursor: null };
+
+    for (let index = 0; index < 119; index += 1) {
+      internals.searchCache.set(`first-${index}`, {
+        result,
+        timestamp: now,
+        isBufferedCursor: false,
+        isReusableFirstPage: true,
+        lastAccessSequence: 100 + index,
+      });
+    }
+    internals.searchCache.set('ordinary-touched', {
+      result,
+      timestamp: now,
+      isBufferedCursor: false,
+      isReusableFirstPage: false,
+      lastAccessSequence: 1,
+    });
+    internals.searchCache.set('ordinary-idle', {
+      result,
+      timestamp: now,
+      isBufferedCursor: false,
+      isReusableFirstPage: false,
+      lastAccessSequence: 2,
+    });
+    internals.searchCacheAccessSequence = 220;
+    internals.touchSearchCacheEntry('ordinary-touched');
+
+    internals.pruneSearchCache();
+
+    expect(internals.searchCache.size).toBe(120);
+    expect(internals.searchCache.has('ordinary-touched')).toBe(true);
+    expect(internals.searchCache.has('ordinary-idle')).toBe(false);
+    expect(internals.searchCache.has('first-0')).toBe(true);
+    service.dispose();
+  });
+
+  it('removes expired entries before overflow and uses LRU only as the first-page last resort', () => {
+    const service = new ModelCatalogService();
+    type SearchEntry = {
+      result: { models: ModelMetadata[]; hasMore: boolean; nextCursor: string | null };
+      timestamp: number;
+      isBufferedCursor: boolean;
+      isReusableFirstPage: boolean;
+      lastAccessSequence: number;
+    };
+    const internals = service as unknown as {
+      searchCache: Map<string, SearchEntry>;
+      pruneSearchCache(): void;
+    };
+    const result = { models: [], hasMore: false, nextCursor: null };
+    const now = Date.now();
+
+    internals.searchCache.set('expired-first', {
+      result,
+      timestamp: now - (6 * 60 * 1000),
+      isBufferedCursor: false,
+      isReusableFirstPage: true,
+      lastAccessSequence: 999,
+    });
+    for (let index = 0; index < 120; index += 1) {
+      internals.searchCache.set(`fresh-first-${index}`, {
+        result,
+        timestamp: now,
+        isBufferedCursor: false,
+        isReusableFirstPage: true,
+        lastAccessSequence: index + 1,
+      });
+    }
+
+    internals.pruneSearchCache();
+    expect(internals.searchCache.size).toBe(120);
+    expect(internals.searchCache.has('expired-first')).toBe(false);
+    expect(internals.searchCache.has('fresh-first-0')).toBe(true);
+
+    internals.searchCache.set('fresh-first-new', {
+      result,
+      timestamp: now,
+      isBufferedCursor: false,
+      isReusableFirstPage: true,
+      lastAccessSequence: 121,
+    });
+    internals.pruneSearchCache();
+
+    expect(internals.searchCache.size).toBe(120);
+    expect(internals.searchCache.has('fresh-first-0')).toBe(false);
+    expect(internals.searchCache.has('fresh-first-new')).toBe(true);
     service.dispose();
   });
 

@@ -13,6 +13,7 @@ import { createStorage } from '../../src/services/storage';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import { buildPerformanceExportJson } from '../../src/services/PerformanceExport';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { EngineStatus, LifecycleStatus } from '../../src/types/models';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
@@ -1054,8 +1055,8 @@ describe('LLMEngineService', () => {
 
     await expect(llmEngineService.load('test/model')).rejects.toMatchObject({
       code: 'model_load_failed',
-      message: persistenceError.message,
-      cause: persistenceError,
+      message: 'Model initialization failed.',
+      cause: undefined,
     });
 
     expect(llamaRn.initLlama).toHaveBeenCalled();
@@ -1067,7 +1068,7 @@ describe('LLMEngineService', () => {
       status: EngineStatus.ERROR,
       activeModelId: undefined,
       loadProgress: 0,
-      lastError: persistenceError.message,
+      lastError: 'Model initialization failed.',
     });
   });
 
@@ -2484,7 +2485,7 @@ describe('LLMEngineService', () => {
     expect(releaseWarning?.[1]).toEqual(expect.objectContaining({
       modelId: 'test/model',
       projectorId: downloadedProjector.id,
-      error: 'release failed for [path] and [path]',
+      errorName: 'Error',
     }));
     expect(releaseWarning?.[1]).toEqual(expect.not.objectContaining({
       projectorLocalPath: expect.anything(),
@@ -3275,7 +3276,7 @@ describe('LLMEngineService', () => {
     const sensitiveFormatterError = new Error(
       'formatter failed for prompt "secret prompt" at /document/private-image.jpg',
     );
-    sensitiveFormatterError.name = 'FormatterError';
+    sensitiveFormatterError.name = 'hf_PRIVATE_FORMATTER_NAME_SENTINEL';
     getFormattedChatMock().mockRejectedValueOnce(sensitiveFormatterError);
 
     try {
@@ -3295,13 +3296,46 @@ describe('LLMEngineService', () => {
     expect(formatterWarning).toEqual([
       '[LLMEngine] Failed to resolve template stop tokens',
       {
-        errorType: 'FormatterError',
+        errorType: 'Error',
         hasMessage: true,
       },
     ]);
     expect(formatterWarning?.some((arg: unknown) => arg instanceof Error)).toBe(false);
     expect(JSON.stringify(formatterWarning)).not.toContain('secret prompt');
     expect(JSON.stringify(formatterWarning)).not.toContain('/document/private-image.jpg');
+    expect(JSON.stringify(formatterWarning)).not.toContain('hf_PRIVATE_FORMATTER_NAME_SENTINEL');
+  });
+
+  it('normalizes projector lookup error names before logging', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const nameSentinel = 'PROMPT_PROJECTOR_NAME_SENTINEL';
+    const pathSentinel = 'C:\\Users\\private\\projector.gguf';
+    const lookupError = new Error(`Projector lookup failed at ${pathSentinel}`);
+    lookupError.name = nameSentinel;
+    (FileSystem.getInfoAsync as jest.Mock).mockRejectedValueOnce(lookupError);
+    (process.env as any).NODE_ENV = 'development';
+
+    try {
+      await expect((llmEngineService as any).resolveLoadTimeProjectorMemoryInfo(
+        createDownloadedVisionModel(),
+      )).resolves.toBeNull();
+    } finally {
+      (process.env as any).NODE_ENV = previousNodeEnv;
+    }
+
+    const projectorWarning = consoleWarnSpy.mock.calls.find(
+      (call) => call[0] === '[LLMEngine] Failed to resolve projector size for load-time memory fit',
+    );
+    expect(projectorWarning).toEqual([
+      '[LLMEngine] Failed to resolve projector size for load-time memory fit',
+      {
+        modelId: 'test/model',
+        projectorId: downloadedProjector.id,
+        errorName: 'Error',
+      },
+    ]);
+    expect(JSON.stringify(projectorWarning)).not.toContain(nameSentinel);
+    expect(JSON.stringify(projectorWarning)).not.toContain(pathSentinel);
   });
 
   it('reuses cached template additional stop tokens for the same loaded context, messages, and options', async () => {
@@ -4591,7 +4625,7 @@ describe('LLMEngineService', () => {
         modelId: 'test/model',
         backendMode: 'cpu',
         gpuLayers: 0,
-        deviceSelection: [],
+        deviceCount: 0,
         contextSize: 2048,
         batch: 64,
         ubatch: 32,
@@ -5230,13 +5264,14 @@ describe('LLMEngineService', () => {
       requestedGpuLayers: 12,
       loadedGpuLayers: 9,
       actualGpuAccelerated: true,
-      backendDevices: ['Adreno GPU'],
+      backendDevices: ['gpu'],
+      backendDeviceCount: 1,
       backendInitAttempts: [
         expect.objectContaining({
           candidate: 'gpu',
           nGpuLayers: 12,
           outcome: 'error',
-          error: 'GPU OOM',
+          failureCategory: 'out_of_memory',
         }),
         expect.objectContaining({
           candidate: 'gpu',
@@ -5512,44 +5547,44 @@ describe('LLMEngineService', () => {
     expect(thrown).toMatchObject({
       code: 'model_load_failed',
       details: expect.objectContaining({
-        gpuInitError: 'GPU OOM at 1',
-        cpuInitError: 'CPU init failed',
+        gpuInitFailureCategory: 'out_of_memory',
+        cpuInitFailureCategory: 'native_error',
         backendInitAttempts: [
           expect.objectContaining({
             candidate: 'gpu',
             nGpuLayers: 12,
             outcome: 'error',
-            error: 'GPU OOM at 12',
+            failureCategory: 'out_of_memory',
           }),
           expect.objectContaining({
             candidate: 'gpu',
             nGpuLayers: 9,
             outcome: 'error',
-            error: 'GPU OOM at 9',
+            failureCategory: 'out_of_memory',
           }),
           expect.objectContaining({
             candidate: 'gpu',
             nGpuLayers: 6,
             outcome: 'error',
-            error: 'GPU OOM at 6',
+            failureCategory: 'out_of_memory',
           }),
           expect.objectContaining({
             candidate: 'gpu',
             nGpuLayers: 3,
             outcome: 'error',
-            error: 'GPU OOM at 3',
+            failureCategory: 'out_of_memory',
           }),
           expect.objectContaining({
             candidate: 'gpu',
             nGpuLayers: 1,
             outcome: 'error',
-            error: 'GPU OOM at 1',
+            failureCategory: 'out_of_memory',
           }),
           expect.objectContaining({
             candidate: 'cpu',
             nGpuLayers: 0,
             outcome: 'error',
-            error: 'CPU init failed',
+            failureCategory: 'native_error',
           }),
         ],
       }),
@@ -5635,22 +5670,238 @@ describe('LLMEngineService', () => {
     expect(nativeCalls[1]).not.toHaveProperty('speculative');
   });
 
-  it('redacts private paths from backend init diagnostics', async () => {
+  it('keeps malicious native failure text out of logs, diagnostics, and traces', async () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalNativeLogsFlag = process.env.EXPO_PUBLIC_LLAMA_NATIVE_LOGS;
+    const originalDevFlag = (globalThis as any).__DEV__;
+    (process.env as any).NODE_ENV = 'development';
+    process.env.EXPO_PUBLIC_LLAMA_NATIVE_LOGS = '1';
+    (globalThis as any).__DEV__ = true;
+    const promptSentinel = 'PROMPT_SENTINEL_ENGINE';
+    const systemPromptSentinel = 'SYSTEM_PROMPT_SENTINEL_ENGINE';
+    const reasoningSentinel = 'REASONING_SENTINEL_ENGINE';
+    const completionSentinel = 'COMPLETION_SENTINEL_ENGINE';
+    const tokenSentinel = 'hf_ENGINE_TOKEN_SENTINEL';
+    const nativeLogSentinel = 'NATIVE_LOG_SENTINEL_ENGINE';
+    const windowsPath = 'C:\\Users\\tester\\Private Files\\artifact.bin';
+    const fileUri = 'file:///private/mobile/artifact.bin';
     (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
       contextSize: 4096,
       gpuLayers: 1,
       kvCacheType: 'f16',
     });
     (llamaRn.initLlama as jest.Mock).mockImplementation(async () => {
-      throw new Error('Failed to initialize C:\\Users\\tester\\Model Files\\model.gguf with file:///private/mobile/mmproj.gguf');
+      const maliciousDetails: Record<string, unknown> = {
+        prompt: promptSentinel,
+        systemPrompt: systemPromptSentinel,
+        reasoning: reasoningSentinel,
+        rawCompletion: completionSentinel,
+        token: tokenSentinel,
+        localPath: windowsPath,
+      };
+      maliciousDetails.self = maliciousDetails;
+      const maliciousError = new Error(
+        `${promptSentinel} ${systemPromptSentinel} ${reasoningSentinel} ${completionSentinel} ${tokenSentinel} ${windowsPath} ${fileUri}`,
+      );
+      Object.assign(maliciousError, { details: maliciousDetails });
+      throw maliciousError;
+    });
+    (llamaRn.addNativeLogListener as jest.Mock).mockImplementationOnce((
+      listener: (level: string, text: string) => void,
+    ) => {
+      listener('error', `${nativeLogSentinel} ${tokenSentinel} ${fileUri}`);
+      return { remove: jest.fn() };
     });
 
-    const thrown = await llmEngineService.load('test/model', { forceReload: true }).catch((error) => error);
-    const serializedDetails = JSON.stringify(thrown.details);
+    const privacyWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const privacyErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    performanceMonitor.setEnabled(true);
+    try {
+      const thrown = await llmEngineService.load('test/model', { forceReload: true }).catch((error) => error);
+      const engineState = llmEngineService.getState();
+      const lastModelLoadError = llmEngineService.getLastModelLoadError();
+      const serializedLogs = JSON.stringify([
+        ...privacyWarnSpy.mock.calls,
+        ...privacyErrorSpy.mock.calls,
+      ]);
+      const serializedTrace = JSON.stringify(performanceMonitor.snapshot());
+      const serializedEvidence = JSON.stringify({
+        thrown: {
+          name: thrown.name,
+          code: thrown.code,
+          message: thrown.message,
+          cause: thrown.cause,
+          details: thrown.details,
+          stack: thrown.stack,
+        },
+        engineState,
+        lastModelLoadError,
+        serializedLogs,
+        serializedTrace,
+      });
 
-    expect(serializedDetails).toContain('[path]');
-    expect(serializedDetails).not.toContain('C:\\Users\\tester');
-    expect(serializedDetails).not.toContain('file:///private');
+      expect(thrown.message).toBe('Model initialization failed.');
+      expect(thrown.cause).toBeUndefined();
+      expect(engineState.lastError).toBe('Model initialization failed.');
+      expect(lastModelLoadError).toMatchObject({
+        scope: 'LLMEngineService.load',
+        error: {
+          code: 'model_load_failed',
+          message: 'Model initialization failed.',
+          cause: undefined,
+        },
+      });
+      expect(thrown.details).toEqual(expect.objectContaining({
+        gpuInitFailureCategory: 'native_error',
+        cpuInitFailureCategory: 'native_error',
+        nativeLogCount: 1,
+        backendInitAttempts: expect.arrayContaining([
+          expect.objectContaining({ failureCategory: 'native_error' }),
+        ]),
+      }));
+      expect(privacyWarnSpy).toHaveBeenCalled();
+      expect(privacyErrorSpy).toHaveBeenCalledWith(
+        '[LLMEngine] Failed to initialize',
+        expect.objectContaining({
+          errorCode: 'model_load_failed',
+          errorName: 'AppError',
+          errorCategory: 'native_error',
+        }),
+      );
+      for (const sentinel of [
+        promptSentinel,
+        systemPromptSentinel,
+        reasoningSentinel,
+        completionSentinel,
+        tokenSentinel,
+        nativeLogSentinel,
+        windowsPath,
+        fileUri,
+      ]) {
+        expect(serializedEvidence).not.toContain(sentinel);
+      }
+    } finally {
+      performanceMonitor.setEnabled(false);
+      privacyWarnSpy.mockRestore();
+      privacyErrorSpy.mockRestore();
+      (process.env as any).NODE_ENV = originalNodeEnv;
+      if (originalNativeLogsFlag === undefined) {
+        delete process.env.EXPO_PUBLIC_LLAMA_NATIVE_LOGS;
+      } else {
+        process.env.EXPO_PUBLIC_LLAMA_NATIVE_LOGS = originalNativeLogsFlag;
+      }
+      (globalThis as any).__DEV__ = originalDevFlag;
+    }
+  });
+
+  it('exports only bounded categories and counts for native backend diagnostics', async () => {
+    const tokenSentinel = 'hf_BACKEND_TOKEN_SENTINEL';
+    const windowsPath = 'C:\\Users\\private\\backend.dll';
+    const fileUri = 'file:///private/backend.so';
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      { type: 'gpu', backend: 'OpenCL', deviceName: 'GPU0' },
+    ]);
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 1,
+      kvCacheType: 'f16',
+      backendPolicy: 'gpu',
+    });
+    (llamaRn.initLlama as jest.Mock).mockResolvedValueOnce({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: true,
+      devices: [tokenSentinel, windowsPath],
+      reasonNoGPU: `${tokenSentinel} ${windowsPath}`,
+      systemInfo: `${fileUri} ${tokenSentinel}`,
+      androidLib: windowsPath,
+    });
+
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const diagnostics = llmEngineService.getState().diagnostics;
+    expect(diagnostics).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      backendDevices: ['gpu', 'gpu'],
+      backendDeviceCount: 2,
+      initDevices: ['gpu', 'gpu'],
+      initDeviceCount: 2,
+      reasonNoGPU: 'native_error',
+      systemInfo: 'available',
+      androidLib: 'available',
+    }));
+    const serializedDiagnostics = JSON.stringify(diagnostics);
+    expect(serializedDiagnostics).not.toContain(tokenSentinel);
+    expect(serializedDiagnostics).not.toContain(windowsPath);
+    expect(serializedDiagnostics).not.toContain(fileUri);
+  });
+
+  it('keeps functional init selectors out of shared performance exports', async () => {
+    const selectorSentinel = 'HTP_PRIVATE_SELECTOR_SENTINEL';
+    getBackendDevicesInfoMock().mockResolvedValueOnce([
+      {
+        type: 'gpu',
+        backend: 'HTP',
+        deviceName: 'HTP0',
+      },
+    ]);
+    (registry.getModel as jest.Mock).mockReturnValue({
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'live-sha',
+    });
+    (getModelLoadParametersForModel as jest.Mock).mockReturnValueOnce({
+      contextSize: 4096,
+      gpuLayers: 12,
+      kvCacheType: 'f16',
+    });
+    writeAutotuneResult({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1024,
+      modelSha256: 'live-sha',
+      backendDiscoveryKnown: true,
+      bestStable: {
+        backendMode: 'npu',
+        nGpuLayers: 12,
+        devices: [selectorSentinel],
+      },
+      candidates: [],
+    });
+    (llamaRn.initLlama as jest.Mock).mockImplementationOnce(async (options?: { devices?: string[] }) => ({
+      completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu: true,
+      devices: [],
+      reasonNoGPU: '',
+      systemInfo: 'Android Hexagon test device',
+      androidLib: 'libQnnHtp.so',
+      initOptions: options,
+    }));
+
+    performanceMonitor.setEnabled(true);
+    try {
+      await llmEngineService.load('test/model', { forceReload: true });
+
+      expect((llamaRn.initLlama as jest.Mock).mock.calls.some(
+        ([options]) => options?.devices?.includes(selectorSentinel),
+      )).toBe(true);
+      expect(llmEngineService.getLastInitDeviceSelectorsForAutotune()).toEqual([selectorSentinel]);
+      const exportJson = buildPerformanceExportJson({ pretty: false });
+      expect(exportJson).not.toContain(selectorSentinel);
+      expect(exportJson).not.toContain('deviceSelection');
+      expect(JSON.parse(exportJson).events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          name: 'model.init.attempt',
+          meta: expect.objectContaining({ deviceCount: 1 }),
+        }),
+      ]));
+    } finally {
+      performanceMonitor.setEnabled(false);
+    }
   });
 
   it('reports CPU runtime honestly when upstream does not enable GPU acceleration', async () => {
@@ -5684,9 +5935,9 @@ describe('LLMEngineService', () => {
       requestedGpuLayers: 12,
       loadedGpuLayers: 0,
       actualGpuAccelerated: false,
-      reasonNoGPU: 'CPU fallback',
+      reasonNoGPU: 'native_error',
       backendInitAttempts: expect.arrayContaining([
-        expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: false, reasonNoGPU: 'OpenCL backend unavailable' }),
+        expect.objectContaining({ candidate: 'gpu', outcome: 'success', actualGpu: false, reasonNoGPU: 'backend_unavailable' }),
         expect.objectContaining({ candidate: 'cpu', outcome: 'success', actualGpu: false }),
       ]),
     }));
@@ -5822,7 +6073,8 @@ describe('LLMEngineService', () => {
       requestedGpuLayers: 12,
       loadedGpuLayers: 12,
       actualGpuAccelerated: true,
-      backendDevices: ['HTP0'],
+      backendDevices: ['npu'],
+      backendDeviceCount: 1,
     }));
   });
 
@@ -6017,7 +6269,7 @@ describe('LLMEngineService', () => {
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: false,
       devices: options?.devices?.includes('HTP0') ? ['HTP0'] : [],
-      reasonNoGPU: 'HTP acceleration disabled',
+      reasonNoGPU: 'native_error',
       systemInfo: 'Android Hexagon test device',
       androidLib: 'libQnnHtp.so',
     }));
@@ -6033,7 +6285,7 @@ describe('LLMEngineService', () => {
       backendMode: 'cpu',
       requestedBackendPolicy: 'npu',
       effectiveBackendPolicy: 'cpu',
-      reasonNoGPU: 'HTP acceleration disabled',
+      reasonNoGPU: 'native_error',
       backendInitAttempts: expect.arrayContaining([
         expect.objectContaining({ candidate: 'npu', outcome: 'success', actualGpu: false }),
         expect.objectContaining({ candidate: 'cpu', outcome: 'success', actualGpu: false }),
@@ -6520,7 +6772,8 @@ describe('LLMEngineService', () => {
     expect(calls[1][0].devices).toEqual(['HTP0']);
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
       backendMode: 'npu',
-      initDevices: ['HTP0'],
+      initDevices: ['npu'],
+      initDeviceCount: 1,
     }));
   });
 
@@ -6597,9 +6850,20 @@ describe('LLMEngineService', () => {
     ).rejects.toMatchObject({
       code: 'model_memory_insufficient',
       details: expect.objectContaining({
+        allowUnsafeMemoryLoad: false,
+        requestedLoadProfile: expect.objectContaining({
+          contextTokens: expect.any(Number),
+          gpuLayers: expect.any(Number),
+        }),
         safeLoadProfile: expect.objectContaining({
           contextTokens: 512,
           gpuLayers: 0,
+        }),
+        safeMemoryFit: expect.objectContaining({
+          decision: expect.any(String),
+          confidence: expect.any(String),
+          requiredBytes: expect.any(Number),
+          effectiveBudgetBytes: expect.any(Number),
         }),
       }),
     });
@@ -7398,9 +7662,20 @@ describe('LLMEngineService', () => {
     ).rejects.toMatchObject({
       code: 'model_memory_insufficient',
       details: expect.objectContaining({
+        allowUnsafeMemoryLoad: true,
+        requestedLoadProfile: expect.objectContaining({
+          contextTokens: expect.any(Number),
+          gpuLayers: expect.any(Number),
+        }),
         safeLoadProfile: expect.objectContaining({
           contextTokens: 512,
           gpuLayers: 0,
+        }),
+        safeMemoryFit: expect.objectContaining({
+          decision: expect.any(String),
+          confidence: expect.any(String),
+          requiredBytes: expect.any(Number),
+          effectiveBudgetBytes: expect.any(Number),
         }),
       }),
     });
@@ -7487,14 +7762,19 @@ describe('LLMEngineService', () => {
     expect(thrown).toMatchObject({
       code: 'model_memory_insufficient',
       details: expect.objectContaining({
-        modelId: 'test/model',
         hasSystemMemorySnapshot: true,
         lowMemorySignal: true,
+        allowUnsafeMemoryLoad: false,
+        memoryFit: expect.objectContaining({
+          decision: 'likely_oom',
+          confidence: 'high',
+        }),
       }),
     });
     expect(thrown.details).toEqual(expect.not.objectContaining({
       modelPath: expect.anything(),
       localPath: expect.anything(),
+      modelId: expect.anything(),
       systemMemorySnapshot: expect.anything(),
     }));
   });

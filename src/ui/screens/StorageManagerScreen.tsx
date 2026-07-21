@@ -20,7 +20,7 @@ import {
     resetAppSettings,
     type AppStorageMetrics,
 } from '../../services/StorageManagerService';
-import { getReportedErrorMessage, reportError } from '../../services/AppError';
+import { getReportedErrorMessage, reportPrivacySafeError } from '../../services/AppError';
 import { formatModelFileSize } from '../../utils/modelSize';
 import { toTestIdSegment } from '../../utils/testIds';
 
@@ -128,7 +128,11 @@ export function StorageManagerScreen() {
                 setMetricsLoadState('ready');
             }
         } catch (error) {
-            reportError('StorageManagerScreen.loadAppMetrics', error);
+            reportPrivacySafeError(
+                'StorageManagerScreen.loadAppMetrics',
+                error,
+                'storage_metrics_load_failed',
+            );
             if (mountedRef.current && metricsRequestIdRef.current === requestId) {
                 setMetricsLoadState('error');
             }

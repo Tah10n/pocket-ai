@@ -10,7 +10,7 @@ import {
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
-import { AppError, toAppError } from '../services/AppError';
+import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
 import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
@@ -464,12 +464,6 @@ function getDraftImageAttachmentMediaPaths(drafts: readonly AttachmentDraft[]): 
     .filter((mediaPath): mediaPath is string => mediaPath !== null)));
 }
 
-function getSanitizedErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
-  return error instanceof Error
-    ? { errorName: error.name || 'Error' }
-    : { errorType: typeof error };
-}
-
 function isAssistantTurnSettled(result: TerminalCommitResult): boolean {
   return result.status === 'committed' || result.status === 'restored_without_write';
 }
@@ -481,8 +475,7 @@ function createAssistantTurnPersistenceError(
     'action_failed',
     'The response is waiting to be saved. Restore private storage, then tap Stop to retry.',
     {
-      cause: result.error,
-      details: getSanitizedErrorDetails(result.error),
+      details: getPrivacySafeErrorLogDetails(result.error),
     },
   );
 }
@@ -537,7 +530,7 @@ export function resetActiveChatGenerationRuntimeForPrivateStorageReset(): void {
 function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope: string): boolean {
   if (error instanceof PrivateStorageUnavailableError) {
     console.warn(`[ChatSession] Skipped persisting ${scope} while private storage is blocked`, {
-      ...getSanitizedErrorDetails(error),
+      ...getPrivacySafeErrorLogDetails(error),
     });
     return true;
   }
@@ -564,7 +557,7 @@ export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promis
         );
       if (settlementResult.status === 'persistence_failed') {
         console.warn('[ChatSession] Terminal persistence remains pending while private storage is blocked', {
-          ...getSanitizedErrorDetails(settlementResult.error),
+          ...getPrivacySafeErrorLogDetails(settlementResult.error),
         });
       }
     } catch (error) {
@@ -1617,14 +1610,20 @@ export const useChatSession = () => {
           sharedGenerationState.current?.flushPendingAssistantPatch?.();
         } catch (error) {
           if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'background assistant patch')) {
-            console.warn('[ChatSession] Failed to flush background assistant patch', error);
+            console.warn(
+              '[ChatSession] Failed to flush background assistant patch',
+              getPrivacySafeErrorLogDetails(error),
+            );
           }
         }
         try {
           flushPendingChatPersistenceWrites('background');
         } catch (error) {
           if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'background chat persistence')) {
-            console.warn('[ChatSession] Failed to flush background chat persistence', error);
+            console.warn(
+              '[ChatSession] Failed to flush background chat persistence',
+              getPrivacySafeErrorLogDetails(error),
+            );
           }
         }
       }
@@ -1669,7 +1668,7 @@ export const useChatSession = () => {
               commitTerminalState: retryRecoveryCommit,
             };
             console.warn('[ChatSession] Foreground recovery is waiting for private storage', {
-              ...getSanitizedErrorDetails(result.error),
+              ...getPrivacySafeErrorLogDetails(result.error),
             });
           }
         } else {
@@ -1691,7 +1690,7 @@ export const useChatSession = () => {
               commitTerminalState: retryThreadStatusCommit,
             };
             console.warn('[ChatSession] Foreground orphan recovery is waiting for private storage', {
-              ...getSanitizedErrorDetails(result.error),
+              ...getPrivacySafeErrorLogDetails(result.error),
             });
           }
         }
@@ -1808,8 +1807,7 @@ export const useChatSession = () => {
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
 
-      const existingTokensPerSec = performanceMonitor.snapshot().counters['chat.tokensPerSec'] ?? 0;
-      performanceMonitor.incrementCounter('chat.tokensPerSec', tokensPerSec - existingTokensPerSec);
+      performanceMonitor.setGauge('chat.tokensPerSec', tokensPerSec);
 
       performanceMonitor.mark('chat.generation.outcome', {
         outcome,
@@ -2052,7 +2050,10 @@ export const useChatSession = () => {
             }
             await llmEngineService.stopCompletion();
           })().catch((error) => {
-            console.warn('[ChatSession] Failed to stop expired completion', error);
+            console.warn(
+              '[ChatSession] Failed to stop expired completion',
+              getPrivacySafeErrorLogDetails(error),
+            );
           });
         }
       });
@@ -2284,7 +2285,7 @@ export const useChatSession = () => {
         } else {
           console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', {
             context: 'prompt_token_count_fallback',
-            ...getSanitizedErrorDetails(error),
+            ...getPrivacySafeErrorLogDetails(error),
           });
           didUseHeuristicPromptTokens = true;
           messages = await resolvePreparedMessages(getThreadInferenceWindow(thread, windowOptions).messages);

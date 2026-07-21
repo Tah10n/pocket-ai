@@ -11,6 +11,7 @@ import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { performanceMonitor } from './PerformanceMonitor';
+import { getPrivacySafeErrorLogDetails } from './AppError';
 import type { SystemMemorySnapshot } from './SystemMetricsService';
 import { uniqueByKey } from '../utils/uniqueBy';
 import {
@@ -598,7 +599,10 @@ export class ModelCatalogService {
     try {
       listener(revision, source);
     } catch (error) {
-      console.warn('[ModelCatalogService] Cache invalidation listener failed', error);
+      console.warn(
+        '[ModelCatalogService] Cache invalidation listener failed',
+        getPrivacySafeErrorLogDetails(error),
+      );
     }
   }
 
@@ -611,7 +615,10 @@ export class ModelCatalogService {
       try {
         listener(update);
       } catch (error) {
-        console.warn('[ModelCatalogService] Metadata update listener failed', error);
+        console.warn(
+          '[ModelCatalogService] Metadata update listener failed',
+          getPrivacySafeErrorLogDetails(error),
+        );
       }
     });
   }
@@ -1103,7 +1110,7 @@ export class ModelCatalogService {
             });
           }
         } else {
-          console.error('[ModelCatalogService] Search failed', e);
+          console.error('[ModelCatalogService] Search failed', getPrivacySafeErrorLogDetails(e));
         }
 
         if (e instanceof ModelCatalogError) {
@@ -2045,7 +2052,10 @@ export class ModelCatalogService {
           throw error;
         }
 
-        console.warn(`[ModelCatalogService] Failed to load README summary for ${modelId}`, error);
+        console.warn(
+          `[ModelCatalogService] Failed to load README summary for ${modelId}`,
+          getPrivacySafeErrorLogDetails(error),
+        );
         return undefined;
       });
 
@@ -2853,7 +2863,10 @@ export class ModelCatalogService {
           throw error;
         }
 
-        console.warn(`[ModelCatalogService] Failed to resolve tree metadata for ${model.id}`, error);
+        console.warn(
+          `[ModelCatalogService] Failed to resolve tree metadata for ${model.id}`,
+          getPrivacySafeErrorLogDetails(error),
+        );
       }
 
       return model;
@@ -2981,7 +2994,10 @@ export class ModelCatalogService {
             throw error;
           }
           if (process.env.NODE_ENV !== 'test') {
-            console.warn('[ModelCatalogService] Deferred catalog metadata resolution failed', error);
+            console.warn(
+              '[ModelCatalogService] Deferred catalog metadata resolution failed',
+              getPrivacySafeErrorLogDetails(error),
+            );
           }
           throw error;
         }

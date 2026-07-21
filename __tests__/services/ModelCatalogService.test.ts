@@ -1336,6 +1336,59 @@ describe('ModelCatalogService', () => {
     }
   });
 
+  it('keeps malicious deferred metadata errors out of logs and traces', async () => {
+    const service = new ModelCatalogService();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const promptSentinel = 'PROMPT_SENTINEL_CATALOG';
+    const tokenSentinel = 'hf_CATALOG_TOKEN_SENTINEL';
+    const pathSentinel = 'C:\\Users\\private\\catalog.json';
+    const catalogError = new Error(`${promptSentinel} ${tokenSentinel} ${pathSentinel}`);
+    Object.assign(catalogError, {
+      authorization: tokenSentinel,
+      localPath: pathSentinel,
+      query: promptSentinel,
+    });
+    global.fetch = jest.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        return Promise.reject(catalogError);
+      }
+
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/private-deferred-model')]),
+      });
+    }) as jest.Mock;
+
+    performanceMonitor.setEnabled(true);
+    try {
+      await service.searchModels('private-deferred', {
+        pageSize: 1,
+        gated: false,
+        metadataResolution: 'deferred',
+      });
+      await waitForMockCallCount(global.fetch as jest.Mock, 2);
+      await waitForMockCallCount(warnSpy as unknown as jest.Mock, 1);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ModelCatalogService] Failed to resolve tree metadata for org/private-deferred-model',
+        { errorName: 'Error' },
+      );
+      const serializedEvidence = JSON.stringify({
+        logs: warnSpy.mock.calls,
+        trace: performanceMonitor.snapshot(),
+      });
+      expect(serializedEvidence).not.toContain(promptSentinel);
+      expect(serializedEvidence).not.toContain(tokenSentinel);
+      expect(serializedEvidence).not.toContain(pathSentinel);
+    } finally {
+      performanceMonitor.setEnabled(false);
+      warnSpy.mockRestore();
+      service.dispose();
+    }
+  });
+
   it('aborts deferred metadata and refetches the same query after cancellation', async () => {
     const service = new ModelCatalogService();
     const metadataListener = jest.fn();

@@ -305,7 +305,7 @@ describe('LLMEngineService last-good warmup', () => {
       expect.objectContaining({
         candidate: 'npu',
         outcome: 'skipped',
-        devices: ['HTP*'],
+        deviceCount: 1,
       }),
     ]));
   });

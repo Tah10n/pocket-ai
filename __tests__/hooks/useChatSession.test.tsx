@@ -398,25 +398,34 @@ describe('useChatSession', () => {
 
   it('creates and persists a thread-backed conversation', async () => {
     const getSession = renderHookHarness();
+    const snapshotSpy = jest.spyOn(performanceMonitor, 'snapshot');
+    const setGaugeSpy = jest.spyOn(performanceMonitor, 'setGauge');
 
-    await act(async () => {
-      await getSession()?.appendUserMessage('Hello there');
-    });
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Hello there');
+      });
 
-    await waitFor(() => {
-      expect(useChatStore.getState().getConversationIndex()).toHaveLength(1);
-    });
+      await waitFor(() => {
+        expect(useChatStore.getState().getConversationIndex()).toHaveLength(1);
+      });
 
-    const thread = useChatStore.getState().getActiveThread();
-    expect(thread?.modelId).toBe('author/model-q4');
-    expect(thread?.presetId).toBe('preset-1');
-    expect(thread?.presetSnapshot).toEqual({
-      id: 'preset-1',
-      name: 'Helpful Assistant',
-      systemPrompt: 'Be concise.',
-    });
-    expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
-    expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+      const thread = useChatStore.getState().getActiveThread();
+      expect(thread?.modelId).toBe('author/model-q4');
+      expect(thread?.presetId).toBe('preset-1');
+      expect(thread?.presetSnapshot).toEqual({
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      });
+      expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+      expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+      expect(setGaugeSpy).toHaveBeenCalledWith('chat.tokensPerSec', expect.any(Number));
+      expect(snapshotSpy).not.toHaveBeenCalled();
+    } finally {
+      snapshotSpy.mockRestore();
+      setGaugeSpy.mockRestore();
+    }
   });
 
   it('persists native MTP completion telemetry on the assistant message', async () => {
@@ -5522,7 +5531,10 @@ describe('useChatSession', () => {
       });
 
       expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
-      expect(warnSpy).toHaveBeenCalledWith('[ChatSession] Failed to stop expired completion', stopError);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatSession] Failed to stop expired completion',
+        { errorName: 'Error' },
+      );
       expect(interruptedSpy).toHaveBeenCalledTimes(1);
 
       await act(async () => {
@@ -6220,7 +6232,9 @@ describe('useChatSession', () => {
 
     const appStorage = getAppStorage() as unknown as { set: jest.Mock };
     const originalSet = appStorage.set;
-    const terminalWriteError = new Error('simulated stop terminal write failure');
+    const persistenceSentinel = 'hf_PRIVATE_PERSISTENCE_SENTINEL';
+    const terminalWriteError = new Error(`simulated stop terminal write failure ${persistenceSentinel}`);
+    terminalWriteError.name = 'PROMPT_PERSISTENCE_NAME_SENTINEL';
     const terminalThreadWrites: string[] = [];
     let shouldFailTerminalWrite = true;
     appStorage.set = jest.fn(function failStopTerminalWrite(
@@ -6250,8 +6264,11 @@ describe('useChatSession', () => {
 
       expect(stopError).toEqual(expect.objectContaining({
         name: 'AppError',
-        cause: terminalWriteError,
+        cause: undefined,
+        details: { errorName: 'Error' },
       }));
+      expect(JSON.stringify(stopError)).not.toContain(persistenceSentinel);
+      expect(JSON.stringify(stopError)).not.toContain('PROMPT_PERSISTENCE_NAME_SENTINEL');
       expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
       expect(terminalThreadWrites.filter((value) => (
         value.includes('Recoverable failed-stop partial')

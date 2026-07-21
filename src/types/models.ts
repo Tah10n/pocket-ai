@@ -296,7 +296,7 @@ export type EngineModelInitFailureCategory =
 export type EngineBackendInitAttempt = {
   candidate: 'npu' | 'gpu' | 'cpu';
   nGpuLayers: number;
-  devices?: string[];
+  deviceCount?: number;
   contextSize: number;
   nBatch?: number;
   nUbatch?: number;
@@ -310,12 +310,12 @@ export type EngineBackendInitAttempt = {
   failureCategory?: EngineModelInitFailureCategory;
   actualGpu?: boolean;
   reasonNoGPU?: string;
-  error?: string;
 };
 
 export interface EngineDiagnostics {
   backendMode: EngineBackendMode;
   backendDevices: string[];
+  backendDeviceCount?: number;
   reasonNoGPU?: string;
   systemInfo?: string;
   androidLib?: string;
@@ -328,6 +328,7 @@ export interface EngineDiagnostics {
   backendInitAttempts?: EngineBackendInitAttempt[];
   initGpuLayers?: number;
   initDevices?: string[];
+  initDeviceCount?: number;
   initCacheTypeK?: string;
   initCacheTypeV?: string;
   initFlashAttnType?: 'auto' | 'on' | 'off';

@@ -233,7 +233,10 @@ describe('LLMEngineService Stability', () => {
     it('reports low-memory unload failures without an unhandled rejection', async () => {
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
         (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
-        (releaseAllLlama as jest.Mock).mockRejectedValueOnce(new Error('native release failed'));
+        const nativeFailureSentinel = 'hf_PRIVATE_LOW_MEMORY_UNLOAD_SENTINEL';
+        (releaseAllLlama as jest.Mock).mockRejectedValueOnce(
+            new Error(`native release failed ${nativeFailureSentinel} at C:\\Users\\private\\model.gguf`),
+        );
 
         await llmEngineService.load(mockModel.id);
         expect(llmEngineService.getState().status).toBe('ready');
@@ -247,12 +250,14 @@ describe('LLMEngineService Stability', () => {
 
         expect(llmEngineService.getState()).toEqual(expect.objectContaining({
             status: 'error',
-            lastError: 'native release failed',
+            lastError: 'Failed to unload the model after a low-memory warning',
             diagnostics: expect.objectContaining({
                 lastLifecycleEvent: 'low_memory_unload_failed',
-                lastLifecycleError: 'native release failed',
+                lastLifecycleError: 'Failed to unload the model after a low-memory warning',
             }),
         }));
+        expect(JSON.stringify(llmEngineService.getState())).not.toContain(nativeFailureSentinel);
+        expect(JSON.stringify(llmEngineService.getState())).not.toContain('C:\\Users\\private');
     });
 
     it('serializes concurrent load requests and leaves the newest model active', async () => {

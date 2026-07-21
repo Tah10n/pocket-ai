@@ -41,6 +41,7 @@ import {
   invalidateAppCacheDirectorySizeMeasurement,
 } from './SystemMetricsService';
 import { performanceMonitor } from './PerformanceMonitor';
+import { getPrivacySafeErrorLogDetails } from './AppError';
 
 const CHAT_STORE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
@@ -148,12 +149,6 @@ function isFileSystemSymbolicLink(info: FileSystem.FileInfo): boolean {
     type?: string;
   };
   return candidate.isSymbolicLink === true || candidate.type === 'symbolicLink';
-}
-
-function getSanitizedStorageManagerErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
-  return error instanceof Error
-    ? { errorName: error.name || 'Error' }
-    : { errorType: typeof error };
 }
 
 function getDirectoryPathCategory(directoryUri: string): 'cache_storage' | 'model_storage' | 'app_storage' {
@@ -481,7 +476,7 @@ async function getDirectorySizeBytes(
     console.warn('[StorageManagerService] Failed to read directory size', {
       pathCategory: getDirectoryPathCategory(normalizedDirectoryUri),
       scope: 'directory_size',
-      ...getSanitizedStorageManagerErrorDetails(error),
+      ...getPrivacySafeErrorLogDetails(error),
     });
     if (propagateErrors) {
       throw error;
@@ -516,7 +511,7 @@ async function scanClearableCacheDirectorySizeBytes(
       console.warn('[StorageManagerService] Failed to read native cache size', {
         pathCategory: 'cache_storage',
         scope: 'native_directory_size',
-        ...getSanitizedStorageManagerErrorDetails(error),
+        ...getPrivacySafeErrorLogDetails(error),
       });
     }
 
@@ -537,7 +532,7 @@ async function scanClearableCacheDirectorySizeBytes(
       console.warn('[StorageManagerService] Failed to read clearable cache size', {
         pathCategory: 'cache_storage',
         scope: 'clearable_directory_size',
-        ...getSanitizedStorageManagerErrorDetails(error),
+        ...getPrivacySafeErrorLogDetails(error),
       });
       span.end({ outcome: 'error', source: 'js_fallback' });
       return 0;
@@ -938,7 +933,7 @@ async function refreshModelFileQuarantine() {
     console.warn('[StorageManagerService] Failed to refresh model file quarantine', {
       pathCategory: 'model_storage',
       scope: 'orphan_quarantine_refresh',
-      ...getSanitizedStorageManagerErrorDetails(error),
+      ...getPrivacySafeErrorLogDetails(error),
     });
   }
 }
@@ -1155,7 +1150,7 @@ export async function clearActiveCache() {
     console.warn('[StorageManagerService] Failed to clear catalog cache', {
       pathCategory: 'cache_storage',
       scope: 'catalog_cache_clear',
-      ...getSanitizedStorageManagerErrorDetails(error),
+      ...getPrivacySafeErrorLogDetails(error),
     });
     firstError = error;
   }
@@ -1204,7 +1199,7 @@ export async function clearActiveCache() {
     console.warn('[StorageManagerService] Failed to clear cache directory', {
       pathCategory: 'cache_storage',
       scope: 'active_cache_clear',
-      ...getSanitizedStorageManagerErrorDetails(error),
+      ...getPrivacySafeErrorLogDetails(error),
     });
     firstError = error;
   }
@@ -1214,7 +1209,7 @@ export async function clearActiveCache() {
       pathCategory: 'cache_storage',
       scope: 'active_cache_clear',
       failedCount: failedCacheEntryDeletes,
-      ...getSanitizedStorageManagerErrorDetails(firstError),
+      ...getPrivacySafeErrorLogDetails(firstError),
     });
   }
 
@@ -1254,7 +1249,7 @@ export async function cleanupQuarantinedModelFiles() {
       pathCategory: 'model_storage',
       scope: 'quarantined_model_cleanup',
       failedCount: failedQuarantinedDeletes,
-      ...getSanitizedStorageManagerErrorDetails(firstError),
+      ...getPrivacySafeErrorLogDetails(firstError),
     });
   }
 

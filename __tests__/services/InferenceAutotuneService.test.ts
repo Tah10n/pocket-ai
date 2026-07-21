@@ -25,6 +25,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     unload: jest.fn(),
     load: jest.fn(),
     getRecommendedLoadProfile: jest.fn(),
+    getLastInitDeviceSelectorsForAutotune: jest.fn(),
     chatCompletion: jest.fn(),
     interruptActiveCompletion: jest.fn(),
   },
@@ -73,6 +74,9 @@ describe('InferenceAutotuneService', () => {
 
     (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
     (llmEngineService.getState as jest.Mock).mockImplementation(() => state);
+    (llmEngineService.getLastInitDeviceSelectorsForAutotune as jest.Mock).mockImplementation(() => (
+      Array.isArray(state.diagnostics?.initDevices) ? [...state.diagnostics.initDevices] : []
+    ));
     (llmEngineService.unload as jest.Mock).mockImplementation(async () => {
       state = {
         status: EngineStatus.IDLE,
@@ -152,8 +156,8 @@ describe('InferenceAutotuneService', () => {
     expect(result.bestStable).toEqual(expect.objectContaining({
       backendMode: 'gpu',
       nGpuLayers: 12,
-      devices: ['Adreno GPU'],
     }));
+    expect(result.bestStable).not.toHaveProperty('devices');
 
     expect(readAutotuneResult({
       modelId: 'test/model',
@@ -464,10 +468,10 @@ describe('InferenceAutotuneService', () => {
 
     const result = await inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
 
-    expect(result.restorationError).toBe('native reload crashed');
+    expect(result.restorationError).toBe('Error');
     expect(warnSpy).toHaveBeenCalledWith(
       '[InferenceAutotune] Failed to restore previously loaded model',
-      expect.any(Error),
+      { errorName: 'Error' },
     );
 
     const persisted = readAutotuneResult({
@@ -519,6 +523,7 @@ describe('InferenceAutotuneService', () => {
           '',
           ' ',
           '../../etc/passwd',
+          'hf_PRIVATE_SELECTOR',
           'HTP_1',
           'HTP0',
           'HTP*',
@@ -542,6 +547,7 @@ describe('InferenceAutotuneService', () => {
     const override = (llmEngineService.load as jest.Mock).mock.calls
       .find((call) => call[0] === 'prev/model')?.[1]?.loadParamsOverride;
     expect(override.selectedBackendDevices.length).toBeLessThanOrEqual(10);
+    expect(override.selectedBackendDevices).not.toContain('hf_PRIVATE_SELECTOR');
   });
 
   it('filters and dedupes NPU selectors from backend discovery when creating candidates', async () => {
@@ -643,13 +649,40 @@ describe('InferenceAutotuneService', () => {
       }
     });
 
-    const result = await inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
+    const progressSnapshots: unknown[] = [];
+    const result = await inferenceAutotuneService.runBackendAutotune({
+      modelId: 'test/model',
+      onProgress: (snapshot) => progressSnapshots.push(snapshot),
+    });
 
     expect(result.bestStable).toEqual(expect.objectContaining({
       backendMode: 'npu',
       nGpuLayers: 12,
       devices: ['HTP0', 'HTP_1'],
     }));
+    const npuCandidate = result.candidates.find((candidate) => candidate.profile.backendMode === 'npu');
+    expect(npuCandidate?.profile).toEqual({
+      backendMode: 'npu',
+      nGpuLayers: 12,
+      deviceCount: 1,
+    });
+    expect(npuCandidate?.profile).not.toHaveProperty('devices');
+    expect(JSON.stringify(progressSnapshots)).not.toContain('HTP*');
+
+    const persisted = readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+    });
+    expect(persisted?.bestStable?.devices).toEqual(['HTP0', 'HTP_1']);
+    expect(persisted?.candidates.find((candidate) => candidate.profile.backendMode === 'npu')?.profile)
+      .toEqual({
+        backendMode: 'npu',
+        nGpuLayers: 12,
+        deviceCount: 1,
+      });
+    expect(JSON.stringify(persisted?.candidates)).not.toContain('HTP0');
+    expect(JSON.stringify(persisted?.candidates)).not.toContain('HTP_1');
   });
 
   it('attempts to unload the active candidate when previous-model restore fails and engine is not READY', async () => {
@@ -670,19 +703,19 @@ describe('InferenceAutotuneService', () => {
     });
 
     const result = await inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
-    expect(result.restorationError).toBe('restore failed');
+    expect(result.restorationError).toBe('Error');
     expect(llmEngineService.unload).toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
 
-  it('records string errors when a candidate load throws a non-Error', async () => {
+  it('records only the safe error type when a candidate load throws a string', async () => {
     (llmEngineService.load as jest.Mock).mockImplementationOnce(async () => {
       throw 'boom';
     });
 
     const result = await inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
-    expect(result.candidates.some((candidate) => candidate.success === false && candidate.error === 'boom')).toBe(true);
+    expect(result.candidates.some((candidate) => candidate.success === false && candidate.error === 'string')).toBe(true);
   });
 
   it('uses gguf.totalBytes when the model file info is unavailable', async () => {

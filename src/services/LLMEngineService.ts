@@ -13,6 +13,7 @@ import {
   type EngineBackendInitAttempt,
   type EngineLifecycleEvent,
   type EngineBackendPolicy,
+  type EngineModelInitFailureCategory,
   type EngineModelInitProfileSource,
   type EngineSpeculativeDecodingDiagnostics,
   EngineStatus,
@@ -32,7 +33,12 @@ import {
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   updateSettings,
 } from './SettingsStore';
-import { AppError, toAppError } from './AppError';
+import {
+  AppError,
+  getPrivacySafeErrorLogDetails,
+  getSafeAppErrorCode,
+  toAppError,
+} from './AppError';
 import { getFreshMemorySnapshot, type SystemMemorySnapshot } from './SystemMetricsService';
 import {
   clampContextWindowTokens,
@@ -190,7 +196,7 @@ const DEFAULT_CONTEXT_SIZE = 4096;
 const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS = 512;
-const MAX_NATIVE_LOG_LINES = 120;
+const MAX_NATIVE_LOG_COUNT = 120;
 const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const MODEL_LOAD_PROGRESS_MIN_PERCENT_DELTA = 2;
 const MODEL_LOAD_PROGRESS_MAX_PUBLISH_INTERVAL_MS = 250;
@@ -203,6 +209,7 @@ const CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting fo
 const CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for background prompt preparation before counting prompt tokens';
 const CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation to stop';
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
+const LOW_MEMORY_UNLOAD_FAILURE_MESSAGE = 'Failed to unload the model after a low-memory warning';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
 const FALLBACK_STOP_WORDS = [
   '</s>',
@@ -551,49 +558,307 @@ function withoutMediaPaths(message: LlmChatMessage): LlmChatMessage {
   };
 }
 
-function sanitizeErrorMessageForDiagnostics(error: unknown): string {
-  return sanitizeMultimodalFailureReason(getErrorMessageText(error), 512)
-    ?? (error instanceof Error ? error.name : typeof error);
-}
-
-function sanitizeDiagnosticValue(value: unknown): unknown {
-  if (typeof value === 'string') {
-    return sanitizeMultimodalFailureReason(value, 512) ?? '[redacted]';
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(sanitizeDiagnosticValue);
-  }
-
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-
-  if (value instanceof Error) {
-    return {
-      errorName: value.name,
-      message: sanitizeErrorMessageForDiagnostics(value),
-    };
-  }
-
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .map(([key, entry]) => [key, sanitizeDiagnosticValue(entry)]),
-  );
-}
-
 function buildSafeErrorLogDetails(error: unknown): Record<string, unknown> {
-  if (error instanceof AppError) {
-    return {
-      code: error.code,
-      message: sanitizeErrorMessageForDiagnostics(error),
-      ...(error.details ? { details: sanitizeDiagnosticValue(error.details) } : null),
-    };
+  return {
+    ...getPrivacySafeErrorLogDetails(error),
+    errorCategory: classifyModelInitFailure(error, isProbableMemoryFailure(error)),
+  };
+}
+
+const PRIVACY_SAFE_MODEL_LOAD_FAILURE_MESSAGE = 'Model initialization failed.';
+const MAX_PRIVACY_SAFE_INIT_ATTEMPTS = 64;
+const MAX_PRIVACY_SAFE_DEVICE_COUNT = 10;
+const SAFE_MODEL_INIT_FAILURE_CATEGORIES = new Set<EngineModelInitFailureCategory>([
+  'out_of_memory',
+  'backend_unavailable',
+  'invalid_configuration',
+  'model_incompatible',
+  'cancelled',
+  'native_error',
+  'known_oom_upper_bound',
+  'attempt_limit',
+]);
+const SAFE_MEMORY_FIT_DECISIONS = new Set([
+  'fits_high_confidence',
+  'fits_low_confidence',
+  'borderline',
+  'likely_oom',
+  'unknown',
+]);
+const SAFE_MEMORY_FIT_CONFIDENCE = new Set(['high', 'medium', 'low']);
+const SAFE_INIT_PROFILE_SOURCES = new Set<EngineModelInitProfileSource>([
+  'requested',
+  'conservative_probe',
+  'autotune',
+  'last_good',
+  'oom_retry',
+  'cpu_fallback',
+  'speculative_fallback',
+  'backend_discovery',
+]);
+
+function getOwnDataProperty(record: Record<string, unknown>, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readFiniteNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = getOwnDataProperty(record, key);
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean | undefined {
+  const value = getOwnDataProperty(record, key);
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function sanitizeLoadProfile(value: unknown): Record<string, number> | undefined {
+  const profile = asRecord(value);
+  if (!profile) {
+    return undefined;
   }
 
-  return error instanceof Error
-    ? { errorName: error.name, message: sanitizeErrorMessageForDiagnostics(error) }
-    : { errorType: typeof error };
+  const contextTokens = readFiniteNumber(profile, 'contextTokens');
+  const gpuLayers = readFiniteNumber(profile, 'gpuLayers');
+  if (contextTokens === undefined || gpuLayers === undefined) {
+    return undefined;
+  }
+
+  return { contextTokens, gpuLayers };
+}
+
+function sanitizeNumericRecord(
+  value: unknown,
+  keys: readonly string[],
+): Record<string, number> | undefined {
+  const source = asRecord(value);
+  if (!source) {
+    return undefined;
+  }
+
+  const sanitized: Record<string, number> = {};
+  for (const key of keys) {
+    const numericValue = readFiniteNumber(source, key);
+    if (numericValue !== undefined) {
+      sanitized[key] = numericValue;
+    }
+  }
+
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+function sanitizeMemoryFit(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) {
+    return undefined;
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  const decision = getOwnDataProperty(source, 'decision');
+  if (typeof decision === 'string' && SAFE_MEMORY_FIT_DECISIONS.has(decision)) {
+    sanitized.decision = decision;
+  }
+  const confidence = getOwnDataProperty(source, 'confidence');
+  if (typeof confidence === 'string' && SAFE_MEMORY_FIT_CONFIDENCE.has(confidence)) {
+    sanitized.confidence = confidence;
+  }
+
+  for (const key of ['requiredBytes', 'effectiveBudgetBytes'] as const) {
+    const numericValue = readFiniteNumber(source, key);
+    if (numericValue !== undefined) {
+      sanitized[key] = numericValue;
+    }
+  }
+
+  const breakdown = sanitizeNumericRecord(getOwnDataProperty(source, 'breakdown'), [
+    'weightsBytes',
+    'kvCacheBytes',
+    'computeBytes',
+    'multimodalBytes',
+    'overheadBytes',
+    'safetyMarginBytes',
+  ]);
+  if (breakdown) {
+    sanitized.breakdown = breakdown;
+  }
+
+  const budget = sanitizeNumericRecord(getOwnDataProperty(source, 'budget'), [
+    'totalMemoryBytes',
+    'liveAvailableBytes',
+    'freeBytes',
+    'processAvailableBytes',
+    'advertisedMemoryBytes',
+    'thresholdBytes',
+    'appResidentBytes',
+    'appPssBytes',
+    'reclaimableBytes',
+    'learnedSafeBudgetBytes',
+    'effectiveBudgetBytes',
+  ]);
+  if (budget) {
+    sanitized.budget = budget;
+  }
+
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+function sanitizeBackendInitAttempt(value: unknown): EngineBackendInitAttempt | null {
+  const source = asRecord(value);
+  if (!source) {
+    return null;
+  }
+
+  const candidate = getOwnDataProperty(source, 'candidate');
+  const outcome = getOwnDataProperty(source, 'outcome');
+  const profileSource = getOwnDataProperty(source, 'profileSource');
+  const nGpuLayers = readFiniteNumber(source, 'nGpuLayers');
+  const contextSize = readFiniteNumber(source, 'contextSize');
+  const durationMs = readFiniteNumber(source, 'durationMs');
+  const probableOom = readBoolean(source, 'probableOom');
+  const speculativeEnabled = readBoolean(source, 'speculativeEnabled');
+  if (
+    (candidate !== 'cpu' && candidate !== 'gpu' && candidate !== 'npu')
+    || (outcome !== 'success' && outcome !== 'error' && outcome !== 'skipped')
+    || typeof profileSource !== 'string'
+    || !SAFE_INIT_PROFILE_SOURCES.has(profileSource as EngineModelInitProfileSource)
+    || nGpuLayers === undefined
+    || contextSize === undefined
+    || durationMs === undefined
+    || probableOom === undefined
+    || speculativeEnabled === undefined
+  ) {
+    return null;
+  }
+
+  const sanitized: EngineBackendInitAttempt = {
+    candidate,
+    nGpuLayers,
+    contextSize,
+    cacheTypeK: 'redacted',
+    cacheTypeV: 'redacted',
+    speculativeEnabled,
+    profileSource: profileSource as EngineModelInitProfileSource,
+    probableOom,
+    durationMs,
+    outcome,
+  };
+  for (const key of ['nBatch', 'nUbatch', 'deviceCount'] as const) {
+    const numericValue = readFiniteNumber(source, key);
+    if (numericValue !== undefined) {
+      sanitized[key] = numericValue;
+    }
+  }
+  const actualGpu = readBoolean(source, 'actualGpu');
+  if (actualGpu !== undefined) {
+    sanitized.actualGpu = actualGpu;
+  }
+  const failureCategory = getOwnDataProperty(source, 'failureCategory');
+  if (typeof failureCategory === 'string' && SAFE_MODEL_INIT_FAILURE_CATEGORIES.has(failureCategory as EngineModelInitFailureCategory)) {
+    sanitized.failureCategory = failureCategory as EngineModelInitFailureCategory;
+  }
+  const reasonNoGPU = getOwnDataProperty(source, 'reasonNoGPU');
+  if (typeof reasonNoGPU === 'string' && SAFE_MODEL_INIT_FAILURE_CATEGORIES.has(reasonNoGPU as EngineModelInitFailureCategory)) {
+    sanitized.reasonNoGPU = reasonNoGPU;
+  }
+
+  return sanitized;
+}
+
+function sanitizeModelLoadErrorDetails(
+  ...sources: (Record<string, unknown> | null | undefined)[]
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  const numericKeys = [
+    'fileSizeBytes',
+    'totalMemoryBytes',
+    'requestedModelSizeBytes',
+    'resolvedContextSize',
+    'requestedGpuLayers',
+    'resolvedGpuLayers',
+    'modelSizeBytes',
+    'estimatedRuntimeBytes',
+    'availableMemoryBytes',
+    'freeMemoryBytes',
+    'thresholdBytes',
+    'reclaimableBytes',
+    'totalBudgetBytes',
+    'availableBudgetBytes',
+    'effectiveAvailableBudgetBytes',
+    'overBudgetRatio',
+  ] as const;
+  const booleanKeys = [
+    'hasSystemMemorySnapshot',
+    'lowMemorySignal',
+    'autoSafeLoadProfile',
+    'unsafeMemoryBypassedHardBlock',
+    'didUseSafeLoadProfile',
+    'lowMemory',
+    'allowUnsafeMemoryLoad',
+    'forceReload',
+  ] as const;
+
+  for (const source of sources) {
+    if (!source) {
+      continue;
+    }
+
+    for (const key of numericKeys) {
+      const value = readFiniteNumber(source, key);
+      if (value !== undefined) {
+        sanitized[key] = value;
+      }
+    }
+    for (const key of booleanKeys) {
+      const value = readBoolean(source, key);
+      if (value !== undefined) {
+        sanitized[key] = value;
+      }
+    }
+
+    for (const key of ['decision', 'confidence'] as const) {
+      const value = getOwnDataProperty(source, key);
+      const allowed = key === 'decision' ? SAFE_MEMORY_FIT_DECISIONS : SAFE_MEMORY_FIT_CONFIDENCE;
+      if (typeof value === 'string' && allowed.has(value)) {
+        sanitized[key] = value;
+      }
+    }
+
+    for (const key of ['safeLoadProfile', 'requestedLoadProfile', 'attemptedLoadProfile'] as const) {
+      const profile = sanitizeLoadProfile(getOwnDataProperty(source, key));
+      if (profile) {
+        sanitized[key] = profile;
+      }
+    }
+    for (const key of ['memoryFit', 'safeMemoryFit', 'requestedMemoryFit'] as const) {
+      const memoryFit = sanitizeMemoryFit(getOwnDataProperty(source, key));
+      if (memoryFit) {
+        sanitized[key] = memoryFit;
+      }
+    }
+
+    const attempts = getOwnDataProperty(source, 'backendInitAttempts');
+    if (Array.isArray(attempts)) {
+      const sanitizedAttempts = attempts
+        .slice(0, MAX_PRIVACY_SAFE_INIT_ATTEMPTS)
+        .map(sanitizeBackendInitAttempt)
+        .filter((attempt): attempt is EngineBackendInitAttempt => attempt !== null);
+      if (sanitizedAttempts.length > 0) {
+        sanitized.backendInitAttempts = sanitizedAttempts;
+      }
+    }
+  }
+
+  return sanitized;
 }
 
 function mergeTopLevelMediaPathsIntoLatestUserMessage(
@@ -694,8 +959,9 @@ function assertMultimodalReadyForAudioInputs(
 
 function getSanitizedTemplateFormatterErrorMetadata(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
+    const safeDetails = getPrivacySafeErrorLogDetails(error);
     return {
-      errorType: error.name || 'Error',
+      errorType: safeDetails.errorName ?? 'Error',
       hasMessage: error.message.length > 0,
     };
   }
@@ -1107,13 +1373,12 @@ class LLMEngineService {
     }
 
     void this.unload().catch((error) => {
-      const appError = toAppError(error, 'action_failed');
       this.lastLifecycleEvent = 'low_memory_unload_failed';
-      this.lastLifecycleError = appError.message;
+      this.lastLifecycleError = LOW_MEMORY_UNLOAD_FAILURE_MESSAGE;
       this.updateState({
         ...this.state,
         status: EngineStatus.ERROR,
-        lastError: appError.message,
+        lastError: LOW_MEMORY_UNLOAD_FAILURE_MESSAGE,
       });
 
       if (process.env.NODE_ENV !== 'test') {
@@ -3752,6 +4017,14 @@ class LLMEngineService {
       : null;
   }
 
+  /**
+   * Internal functional selectors for autotune restore/promotion.
+   * Public diagnostics intentionally expose only safe categories and counts.
+   */
+  public getLastInitDeviceSelectorsForAutotune(): string[] {
+    return Array.isArray(this.initDevices) ? [...this.initDevices] : [];
+  }
+
   private buildSpeculativeDecodingDiagnostics(): EngineSpeculativeDecodingDiagnostics | null {
     const configured = this.configuredSpeculativeDecoding;
     if (!configured) {
@@ -3948,7 +4221,7 @@ class LLMEngineService {
         console.warn('[LLMEngine] Failed to resolve projector size for load-time memory fit', {
           modelId: model.id,
           projectorId: projector.id,
-          errorName: error instanceof Error ? error.name : typeof error,
+          ...getPrivacySafeErrorLogDetails(error),
         });
       }
       return null;
@@ -4254,8 +4527,7 @@ class LLMEngineService {
       if (process.env.NODE_ENV !== 'test') {
         console.warn('[LLMEngine] Deferred multimodal readiness refresh failed', {
           modelId: pendingRefresh.modelId,
-          error: sanitizeMultimodalFailureReason(getErrorMessageText(error))
-            ?? (error instanceof Error ? error.name : typeof error),
+          ...getPrivacySafeErrorLogDetails(error),
         });
       }
     }
@@ -4717,11 +4989,10 @@ class LLMEngineService {
         this.activeMultimodalContext = activeMultimodal;
       }
       if (process.env.NODE_ENV !== 'test') {
-        const sanitizedErrorMessage = sanitizeMultimodalFailureReason(getErrorMessageText(error));
         console.warn('[LLMEngine] Failed to release multimodal context', {
           modelId: activeMultimodal.modelId,
           projectorId: activeMultimodal.projectorId,
-          error: sanitizedErrorMessage ?? (error instanceof Error ? error.name : typeof error),
+          ...getPrivacySafeErrorLogDetails(error),
         });
       }
       return false;
@@ -4839,11 +5110,6 @@ class LLMEngineService {
     const systemInfo = typeof context.systemInfo === 'string' ? context.systemInfo.trim() : '';
     const androidLib = typeof context.androidLib === 'string' ? context.androidLib.trim() : '';
 
-    this.activeBackendDevices = devices;
-    this.activeBackendReasonNoGpu = reasonNoGPU.length > 0 ? reasonNoGPU : null;
-    this.activeBackendSystemInfo = systemInfo.length > 0 ? systemInfo : null;
-    this.activeBackendAndroidLib = androidLib.length > 0 ? androidLib : null;
-
     const resolvedInitGpuLayers = typeof initGpuLayers === 'number' && Number.isFinite(initGpuLayers)
       ? Math.max(0, Math.round(initGpuLayers))
       : null;
@@ -4866,6 +5132,14 @@ class LLMEngineService {
 
     this.activeBackendMode = telemetry.activeBackendMode;
     this.actualGpuAccelerated = telemetry.actualGpuAccelerated;
+    this.activeBackendDevices = devices
+      .slice(0, MAX_PRIVACY_SAFE_DEVICE_COUNT)
+      .map(() => telemetry.activeBackendMode);
+    this.activeBackendReasonNoGpu = reasonNoGPU.length > 0
+      ? classifyModelInitFailure(reasonNoGPU, isProbableMemoryFailure(reasonNoGPU))
+      : null;
+    this.activeBackendSystemInfo = systemInfo.length > 0 ? 'available' : null;
+    this.activeBackendAndroidLib = androidLib.length > 0 ? 'available' : null;
   }
 
   /**
@@ -4923,7 +5197,7 @@ class LLMEngineService {
     const initTotalSpan = performanceMonitor.startSpan('model.init.total', { modelId });
     let initTotalOutcome: 'success' | 'error' = 'error';
     const isDev = typeof __DEV__ !== 'undefined' && __DEV__;
-    const nativeLogs: { level: string; text: string }[] = [];
+    let nativeLogCount = 0;
     let nativeLogListener: { remove: () => void } | null = null;
     let didEnableNativeLogs = false;
     let initDiagnostics: Record<string, unknown> | null = null;
@@ -5663,11 +5937,8 @@ class LLMEngineService {
 
        if (shouldBridgeNativeLogs) {
          try {
-           nativeLogListener = addNativeLlamaLogListener((level, text) => {
-            nativeLogs.push({ level, text });
-            if (nativeLogs.length > MAX_NATIVE_LOG_LINES) {
-              nativeLogs.splice(0, nativeLogs.length - MAX_NATIVE_LOG_LINES);
-            }
+           nativeLogListener = addNativeLlamaLogListener(() => {
+            nativeLogCount = Math.min(MAX_NATIVE_LOG_COUNT, nativeLogCount + 1);
           });
           await toggleNativeLlamaLogs(true);
           didEnableNativeLogs = true;
@@ -5842,7 +6113,9 @@ class LLMEngineService {
         modelId,
         backendMode: profile.backendMode,
         gpuLayers: Math.max(0, Math.round(layers)),
-        deviceSelection: Array.isArray(profile.devices) ? [...profile.devices] : [],
+        deviceCount: Array.isArray(profile.devices)
+          ? Math.min(profile.devices.length, MAX_PRIVACY_SAFE_DEVICE_COUNT)
+          : 0,
         contextSize: finalContextSize,
         batch: profile.nBatch ?? null,
         ubatch: profile.nUbatch ?? null,
@@ -5861,7 +6134,6 @@ class LLMEngineService {
         probableOom,
         durationMs,
         failureCategory,
-        error,
       }: {
         profile: InitInferenceProfile;
         layers: number;
@@ -5871,12 +6143,11 @@ class LLMEngineService {
         probableOom: boolean;
         durationMs: number;
         failureCategory?: EngineBackendInitAttempt['failureCategory'];
-        error?: string;
       }): EngineBackendInitAttempt => ({
         candidate: profile.backendMode,
         nGpuLayers: Math.max(0, Math.round(layers)),
         ...(Array.isArray(profile.devices) && profile.devices.length > 0
-          ? { devices: [...profile.devices] }
+          ? { deviceCount: Math.min(profile.devices.length, MAX_PRIVACY_SAFE_DEVICE_COUNT) }
           : null),
         contextSize: finalContextSize,
         ...(typeof profile.nBatch === 'number' ? { nBatch: Math.round(profile.nBatch) } : null),
@@ -5889,7 +6160,6 @@ class LLMEngineService {
         durationMs: Math.max(0, durationMs),
         outcome,
         ...(failureCategory ? { failureCategory } : null),
-        ...(error ? { error } : null),
       });
 
       const recordSkippedInitAttempt = (
@@ -6201,7 +6471,6 @@ class LLMEngineService {
               probableOom,
               durationMs,
               failureCategory,
-              error: sanitizeErrorMessageForDiagnostics(error),
             });
             backendInitAttempts.push(attempt);
             attemptSpan.end({
@@ -6267,7 +6536,7 @@ class LLMEngineService {
                 draftArtifactReady: speculativeDraftPath !== undefined,
                 maxDraftTokens: attemptedSpeculativeConfig.maxDraftTokens,
                 fallbackReason: this.speculativeDecodingFallbackReason,
-                initializationError: sanitizeErrorMessageForDiagnostics(error),
+                initializationError: classifyModelInitFailure(error, isProbableMemoryFailure(error)),
               },
             };
             console.warn('[LLMEngine] MTP initialization failed; retrying the same load profile without speculative decoding', {
@@ -6741,7 +7010,10 @@ class LLMEngineService {
           const actualGpu = candidateGpuLayers > 0 && runtimeAccelerationEnabled;
           successfulAttempt.actualGpu = actualGpu;
           if (reasonNoGPU) {
-            successfulAttempt.reasonNoGPU = reasonNoGPU;
+            successfulAttempt.reasonNoGPU = classifyModelInitFailure(
+              reasonNoGPU,
+              isProbableMemoryFailure(reasonNoGPU),
+            );
           }
 
           // If an accelerator candidate initializes but the runtime reports CPU mode,
@@ -6947,32 +7219,30 @@ class LLMEngineService {
       initTotalOutcome = 'success';
     } catch (error) {
       const baseError = toAppError(error, 'model_load_failed');
-      const extraDetails: Record<string, unknown> = {
-        ...(baseError.details ?? {}),
-        ...(initDiagnostics ?? {}),
-      };
+      const safeErrorCode = getSafeAppErrorCode(baseError.code, 'model_load_failed');
+      const extraDetails = sanitizeModelLoadErrorDetails(initDiagnostics, baseError.details);
 
       if (gpuInitError) {
-        extraDetails.gpuInitError = sanitizeErrorMessageForDiagnostics(gpuInitError);
+        extraDetails.gpuInitFailureCategory = classifyModelInitFailure(
+          gpuInitError,
+          isProbableMemoryFailure(gpuInitError),
+        );
       }
 
       if (cpuInitError) {
-        extraDetails.cpuInitError = sanitizeErrorMessageForDiagnostics(cpuInitError);
+        extraDetails.cpuInitFailureCategory = classifyModelInitFailure(
+          cpuInitError,
+          isProbableMemoryFailure(cpuInitError),
+        );
       }
 
-      if (isDev && nativeLogs.length > 0) {
-        extraDetails.nativeLogs = nativeLogs.map((line) => (
-          sanitizeMultimodalFailureReason(`${line.level}: ${line.text}`, 512) ?? `${line.level}: [redacted]`
-        ));
+      if (isDev && nativeLogCount > 0) {
+        extraDetails.nativeLogCount = nativeLogCount;
       }
 
-      const errorCause = baseError.cause ?? (error instanceof AppError ? error.cause : error);
-      const appError = Object.keys(extraDetails).length > 0
-        ? new AppError(baseError.code, baseError.message, {
-            cause: errorCause,
-            details: extraDetails,
-          })
-        : baseError;
+      const appError = new AppError(safeErrorCode, PRIVACY_SAFE_MODEL_LOAD_FAILURE_MESSAGE, {
+        ...(Object.keys(extraDetails).length > 0 ? { details: extraDetails } : null),
+      });
 
       const contextToReleaseAfterFailedInitialize = this.context;
       if (contextToReleaseAfterFailedInitialize) {
@@ -6992,10 +7262,7 @@ class LLMEngineService {
           : appError.code === 'model_memory_insufficient'
             ? '[LLMEngine] Insufficient memory during initialize'
             : '[LLMEngine] Memory warning during initialize';
-        console.warn(logLabel, {
-          ...buildSafeErrorLogDetails(appError),
-          ...(Object.keys(extraDetails).length > 0 ? { details: sanitizeDiagnosticValue(extraDetails) } : null),
-        });
+        console.warn(logLabel, buildSafeErrorLogDetails(appError));
         this.setContext(null);
         this.loadedArtifactIdentity = null;
         this.activeContextSize = DEFAULT_CONTEXT_SIZE;
@@ -7011,10 +7278,7 @@ class LLMEngineService {
         throw appError;
       }
 
-      console.error('[LLMEngine] Failed to initialize', {
-        ...buildSafeErrorLogDetails(appError),
-        ...(Object.keys(extraDetails).length > 0 ? { details: sanitizeDiagnosticValue(extraDetails) } : null),
-      });
+      console.error('[LLMEngine] Failed to initialize', buildSafeErrorLogDetails(appError));
       this.lastModelLoadError = appError;
       this.lastModelLoadErrorScope = 'LLMEngineService.load';
       this.setContext(null);

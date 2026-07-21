@@ -188,12 +188,35 @@ describe('StorageManagerScreen', () => {
 
   it('offers a retry when metrics fail instead of rendering empty storage', async () => {
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    mockGetAppStorageMetrics.mockRejectedValueOnce(new Error('storage probe failed'));
+    const promptSentinel = 'PROMPT_SENTINEL_STORAGE';
+    const tokenSentinel = 'hf_STORAGE_TOKEN_SENTINEL';
+    const pathSentinel = 'C:\\Users\\private\\storage.db';
+    const metricsError = new Error(`${promptSentinel} ${tokenSentinel} ${pathSentinel}`);
+    Object.assign(metricsError, { token: tokenSentinel, localPath: pathSentinel });
+    mockGetAppStorageMetrics.mockRejectedValueOnce(metricsError);
     try {
       const result = await renderScreen();
 
       expect(result.getByTestId('storage-manager-metrics-status')).toHaveTextContent('storageManager.metricsLoadError');
       expect(result.queryByText('storageManager.emptyModelsTitle')).toBeNull();
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[StorageManagerScreen.loadAppMetrics]',
+        expect.objectContaining({
+          code: 'action_failed',
+          details: {
+            category: 'storage_metrics_load_failed',
+            errorName: 'Error',
+          },
+        }),
+        {
+          category: 'storage_metrics_load_failed',
+          errorName: 'Error',
+        },
+      );
+      const serializedLog = JSON.stringify(errorSpy.mock.calls);
+      expect(serializedLog).not.toContain(promptSentinel);
+      expect(serializedLog).not.toContain(tokenSentinel);
+      expect(serializedLog).not.toContain(pathSentinel);
 
       fireEvent.press(result.getByTestId('storage-manager-retry-metrics'));
 

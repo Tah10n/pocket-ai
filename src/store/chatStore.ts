@@ -82,8 +82,12 @@ const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS = 1_000;
 const HYDRATION_ATTACHMENT_RECONCILIATION_ZERO_PROGRESS_RETRY_LIMIT = 2;
-const latestDurableThreadPersistedAtById = new Map<string, number>();
-const latestDurableThreadCommitRevisionById = new Map<string, number>();
+type DurableThreadPersistenceIdentity = {
+  sourceThread: ChatThread;
+  persistedAt: number;
+  commitRevision?: number;
+};
+const latestDurableThreadIdentityById = new Map<string, DurableThreadPersistenceIdentity>();
 const latestStreamingProgressPersistedAtById = new Map<string, number>();
 
 const chatStoreStateStorage = createInstrumentedStateStorage(createChatStoreStateStorage(), {
@@ -158,6 +162,7 @@ interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
   streamingRevision: number;
+  inferenceRevision: number;
   createThread: (input: CreateThreadInput) => string;
   mergeImportedThreads: (threads: ChatThread[]) => number;
   pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
@@ -890,6 +895,41 @@ function resolveThreadRecordPersistedAtForWrite(
   return Math.max(now, clearedAt + 1);
 }
 
+function cacheDurableThreadPersistenceIdentity(
+  sourceThread: ChatThread,
+  persistedAt: number,
+  commitRevision?: number,
+): DurableThreadPersistenceIdentity {
+  const identity: DurableThreadPersistenceIdentity = {
+    sourceThread,
+    persistedAt,
+    commitRevision,
+  };
+  latestDurableThreadIdentityById.set(sourceThread.id, identity);
+  return identity;
+}
+
+function removeChatThreadRecordAndInvalidateIdentity(
+  storage: ReturnType<typeof getAppStorage>,
+  threadId: string,
+): void {
+  removeChatThreadRecord(storage, threadId);
+  latestDurableThreadIdentityById.delete(threadId);
+}
+
+function clearPersistedChatRecordsAndInvalidateRuntimeCaches(
+  storage: ReturnType<typeof getAppStorage>,
+): void {
+  // Clearing chat persistence is a multi-record transaction. Invalidate the
+  // process-local identities before its first write so a partial clear cannot
+  // leave an old exact source reference trusted by the branch hot path.
+  // Successful rollback writes repopulate only the identities they actually
+  // restore; failed rollback writes therefore remain fail-closed.
+  latestDurableThreadIdentityById.clear();
+  latestStreamingProgressPersistedAtById.clear();
+  clearPersistedChatRecords(storage);
+}
+
 function writeChatThreadRecordForMutation(
   storage: ReturnType<typeof getAppStorage>,
   thread: ChatThread,
@@ -897,18 +937,13 @@ function writeChatThreadRecordForMutation(
 ) {
   const persistedAt = options?.persistedAt ?? Math.max(
     resolveThreadRecordPersistedAtForWrite(storage),
-    (latestDurableThreadPersistedAtById.get(thread.id) ?? 0) + 1,
+    (latestDurableThreadIdentityById.get(thread.id)?.persistedAt ?? 0) + 1,
     (latestStreamingProgressPersistedAtById.get(thread.id) ?? 0) + 1,
   );
   writeChatThreadRecord(storage, thread, persistedAt, {
     commitRevision: options?.commitRevision,
   });
-  latestDurableThreadPersistedAtById.set(thread.id, persistedAt);
-  if (options?.commitRevision == null) {
-    latestDurableThreadCommitRevisionById.delete(thread.id);
-  } else {
-    latestDurableThreadCommitRevisionById.set(thread.id, options.commitRevision);
-  }
+  cacheDurableThreadPersistenceIdentity(thread, persistedAt, options?.commitRevision);
 }
 
 function writeChatPersistenceSnapshotTransaction(
@@ -958,7 +993,7 @@ function writeChatPersistenceSnapshotTransaction(
     }
   });
   removedThreadIds.forEach((threadId) => {
-    removeChatThreadRecord(storage, threadId);
+    removeChatThreadRecordAndInvalidateIdentity(storage, threadId);
   });
 
   writeChatPersistenceIndex(storage, index);
@@ -987,12 +1022,6 @@ function readHydratableChatThreadRecord(
   const sanitized = sanitizePersistedChatThread(recordResult.value.thread, now);
   if (!sanitized) {
     return { ok: false, persistedAt: recordResult.value.persistedAt };
-  }
-  latestDurableThreadPersistedAtById.set(threadId, recordResult.value.persistedAt);
-  if (recordResult.value.commitRevision == null) {
-    latestDurableThreadCommitRevisionById.delete(threadId);
-  } else {
-    latestDurableThreadCommitRevisionById.set(threadId, recordResult.value.commitRevision);
   }
 
   const rawAttachmentLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads([recordResult.value.thread]);
@@ -1054,15 +1083,10 @@ function applyStreamingProgressDuringHydration(
 
   const recoveredPersistedAt = Math.max(now, progress.persistedAt + 1);
   try {
-    writeChatThreadRecord(storage, recovery.thread, recoveredPersistedAt, {
+    writeChatThreadRecordForMutation(storage, recovery.thread, {
+      persistedAt: recoveredPersistedAt,
       commitRevision: record.commitRevision,
     });
-    latestDurableThreadPersistedAtById.set(record.thread.id, recoveredPersistedAt);
-    if (record.commitRevision == null) {
-      latestDurableThreadCommitRevisionById.delete(record.thread.id);
-    } else {
-      latestDurableThreadCommitRevisionById.set(record.thread.id, record.commitRevision);
-    }
     discardStreamingProgressDuringHydration(storage, record.thread.id);
     const recoveredAttachmentLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads([
       recovery.thread,
@@ -1126,10 +1150,9 @@ function discardOrphanedStreamingProgressRecords(
       });
     }
   });
-  latestDurableThreadPersistedAtById.forEach((_persistedAt, threadId) => {
+  latestDurableThreadIdentityById.forEach((_identity, threadId) => {
     if (!survivingThreadIds.has(threadId)) {
-      latestDurableThreadPersistedAtById.delete(threadId);
-      latestDurableThreadCommitRevisionById.delete(threadId);
+      latestDurableThreadIdentityById.delete(threadId);
     }
   });
   latestStreamingProgressPersistedAtById.forEach((_persistedAt, threadId) => {
@@ -1170,7 +1193,7 @@ function discardUnappliedPendingIndexCommit(
   const indexedThreadIds = new Set(index?.threadIds ?? []);
   pending.changedThreadIds?.forEach((threadId) => {
     if (!indexedThreadIds.has(threadId)) {
-      removeChatThreadRecord(storage, threadId);
+      removeChatThreadRecordAndInvalidateIdentity(storage, threadId);
     }
   });
 
@@ -1192,7 +1215,7 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
   if (isPendingIndexCommitAlreadyApplied(index, pending)) {
     if (getChatPersistenceIndexRevision(index) === pending.revision) {
       pending.removedThreadIds?.forEach((threadId) => {
-        removeChatThreadRecord(storage, threadId);
+        removeChatThreadRecordAndInvalidateIdentity(storage, threadId);
       });
     }
     removeChatPendingIndexCommit(storage);
@@ -1239,7 +1262,7 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
   }
 
   removedThreadIds.forEach((threadId) => {
-    removeChatThreadRecord(storage, threadId);
+    removeChatThreadRecordAndInvalidateIdentity(storage, threadId);
   });
 
   pending.threadIds.forEach((threadId) => {
@@ -1260,7 +1283,16 @@ function recoverPendingChatIndexCommit(storage: ReturnType<typeof getAppStorage>
     record.droppedAttachmentLocalUris.forEach((localUri) => attachmentCleanupCandidates.add(localUri));
 
     if (record.recovered || (changedThreadIds.has(threadId) && record.commitRevision !== pending.revision)) {
-      writeChatThreadRecord(storage, record.thread, now, { commitRevision: pending.revision });
+      writeChatThreadRecordForMutation(storage, record.thread, {
+        persistedAt: now,
+        commitRevision: pending.revision,
+      });
+    } else {
+      cacheDurableThreadPersistenceIdentity(
+        record.thread,
+        record.persistedAt,
+        record.commitRevision,
+      );
     }
   });
 
@@ -1309,7 +1341,7 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
         if (!isNewerThanClear) {
           collectPersistedThreadAttachmentCleanupCandidates(storage, threadId)
             .forEach((localUri) => attachmentCleanupCandidates.add(localUri));
-          removeChatThreadRecord(storage, threadId);
+          removeChatThreadRecordAndInvalidateIdentity(storage, threadId);
           return;
         }
 
@@ -1327,7 +1359,15 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
         record.droppedAttachmentLocalUris.forEach((localUri) => attachmentCleanupCandidates.add(localUri));
 
         if (record.recovered) {
-          writeChatThreadRecord(storage, record.thread, Math.max(now, clearedAt + 1));
+          writeChatThreadRecordForMutation(storage, record.thread, {
+            persistedAt: Math.max(now, clearedAt + 1),
+          });
+        } else {
+          cacheDurableThreadPersistenceIdentity(
+            record.thread,
+            record.persistedAt,
+            record.commitRevision,
+          );
         }
       });
     } catch (error) {
@@ -1389,7 +1429,9 @@ function readV2PersistedChatState(now = Date.now()): ChatStoreHydrationResult | 
     record.droppedAttachmentLocalUris.forEach((localUri) => attachmentCleanupCandidates.add(localUri));
 
     if (record.recovered) {
-      writeChatThreadRecord(storage, thread, now);
+      writeChatThreadRecordForMutation(storage, thread, { persistedAt: now });
+    } else {
+      cacheDurableThreadPersistenceIdentity(thread, record.persistedAt, record.commitRevision);
     }
   });
 
@@ -1532,7 +1574,7 @@ function rollbackFailedChatPersistenceMutation(
   previousPersistenceIndex: ReturnType<typeof readChatPersistenceIndex>,
   previousDurableThreadIdentities: ReadonlyMap<
     string,
-    { persistedAt: number; commitRevision?: number }
+    DurableThreadPersistenceIdentity
   >,
 ): void {
   const rollbackErrors: unknown[] = [];
@@ -1570,8 +1612,9 @@ function rollbackFailedChatPersistenceMutation(
         : null;
       const previousPersistedThread = runtime?.durableThread ?? previousThread;
       const previousDurableIdentity = previousDurableThreadIdentities.get(threadId)
-        ?? (branchBaseIdentity
+        ?? (branchBaseIdentity && previousPersistedThread
           ? {
+              sourceThread: previousPersistedThread,
               persistedAt: branchBaseIdentity.durablePersistedAt,
               commitRevision: branchBaseIdentity.commitRevision,
             }
@@ -1585,10 +1628,11 @@ function rollbackFailedChatPersistenceMutation(
               }
             : undefined);
         } else {
-          removeChatThreadRecord(storage, threadId);
+          removeChatThreadRecordAndInvalidateIdentity(storage, threadId);
         }
       });
       if (didRestorePersistedThread && previousThread && runtime) {
+        runtime.persistenceRetryRequired = false;
         attemptRollbackStep(() => {
           const progress = createStreamingProgressRecord(previousThread, runtime);
           if (progress) {
@@ -1601,22 +1645,21 @@ function rollbackFailedChatPersistenceMutation(
         });
         chatPersistenceScheduler.scheduleStreamingThreadWrite(threadId);
       } else {
+        if (runtime) {
+          // The store snapshot is restored, but storage may contain the failed
+          // terminal candidate. Keep only this existing runtime retryable; the
+          // durable identity cache remains source-mismatched so new branches
+          // cannot trust phantom rollback metadata.
+          runtime.persistenceRetryRequired = true;
+        }
         chatPersistenceScheduler.cancelThreadWrite(threadId);
       }
 
-      if (previousDurableIdentity) {
-        latestDurableThreadPersistedAtById.set(threadId, previousDurableIdentity.persistedAt);
-        if (previousDurableIdentity.commitRevision == null) {
-          latestDurableThreadCommitRevisionById.delete(threadId);
-        } else {
-          latestDurableThreadCommitRevisionById.set(
-            threadId,
-            previousDurableIdentity.commitRevision,
-          );
-        }
-      } else if (!previousThread) {
-        latestDurableThreadPersistedAtById.delete(threadId);
-        latestDurableThreadCommitRevisionById.delete(threadId);
+      if (!didRestorePersistedThread) {
+        // Keep any newer cache entry untrusted via its source-thread mismatch.
+        // A later branch start must use the instrumented fallback and validate
+        // storage instead of accepting phantom rollback metadata.
+        return;
       }
     });
 
@@ -1710,10 +1753,7 @@ function persistChatStoreMutation(
 
   if (nextThreadIds.length === 0) {
     chatPersistenceScheduler.cancelAllPendingWrites();
-    clearPersistedChatRecords(storage);
-    latestDurableThreadPersistedAtById.clear();
-    latestDurableThreadCommitRevisionById.clear();
-    latestStreamingProgressPersistedAtById.clear();
+    clearPersistedChatRecordsAndInvalidateRuntimeCaches(storage);
     scheduleChatAttachmentCleanupForSnapshots(previous, next);
     return;
   }
@@ -1732,8 +1772,7 @@ function persistChatStoreMutation(
     removedThreadIds.forEach((threadId) => {
       chatPersistenceScheduler.cancelThreadWrite(threadId);
       removeStreamingProgressAfterDurableCommit(storage, threadId);
-      latestDurableThreadPersistedAtById.delete(threadId);
-      latestDurableThreadCommitRevisionById.delete(threadId);
+      latestDurableThreadIdentityById.delete(threadId);
     });
     // Streaming patches only mutate the latest assistant text/state. Avoid
     // traversing attachment references on every token; thread removal is the
@@ -1784,8 +1823,7 @@ function persistChatStoreMutation(
   removedThreadIds.forEach((threadId) => {
     chatPersistenceScheduler.cancelThreadWrite(threadId);
     removeStreamingProgressAfterDurableCommit(storage, threadId);
-    latestDurableThreadPersistedAtById.delete(threadId);
-    latestDurableThreadCommitRevisionById.delete(threadId);
+    latestDurableThreadIdentityById.delete(threadId);
   });
   scheduleChatAttachmentCleanupForThreadChanges(previous, next, {
     changedThreadIds,
@@ -1843,6 +1881,7 @@ interface TransientAssistantRuntime {
   sourceThread: ChatThread;
   progressRevision: number;
   lastProgressPersistedAt: number;
+  persistenceRetryRequired?: boolean;
   branchReplacementProgress?: ChatBranchReplacementProgress;
 }
 
@@ -1853,6 +1892,7 @@ function isBranchBaseIdentityCurrent(
   identity: ChatBranchBaseIdentity,
   targetIndex?: number,
 ): boolean {
+  const durableIdentity = latestDurableThreadIdentityById.get(thread.id);
   const target = targetIndex == null
     ? thread.messages.find((message) => message.id === identity.targetUserMessageId)
     : thread.messages[targetIndex];
@@ -1860,8 +1900,9 @@ function isBranchBaseIdentityCurrent(
     target?.role === 'user'
     && target.kind !== 'model_switch'
     && target.createdAt === identity.targetUserCreatedAt
-    && (latestDurableThreadPersistedAtById.get(thread.id) ?? 0) === identity.durablePersistedAt
-    && latestDurableThreadCommitRevisionById.get(thread.id) === identity.commitRevision
+    && durableIdentity?.sourceThread === thread
+    && durableIdentity.persistedAt === identity.durablePersistedAt
+    && durableIdentity.commitRevision === identity.commitRevision
   );
 }
 
@@ -1884,10 +1925,13 @@ function isTransientAssistantRuntimeValid(
       && runtime.presentationMessages[runtime.messageIndex] === runtime.currentMessage
       && thread.messages[runtime.mode.targetIndex] === runtime.mode.originalTargetMessage
       && runtime.mode.originalTargetMessage.id === runtime.mode.targetUserMessageId
-      && isBranchBaseIdentityCurrent(
-        thread,
-        runtime.mode.baseThreadIdentity,
-        runtime.mode.targetIndex,
+      && (
+        runtime.persistenceRetryRequired === true
+        || isBranchBaseIdentityCurrent(
+          thread,
+          runtime.mode.baseThreadIdentity,
+          runtime.mode.targetIndex,
+        )
       )
     );
   }
@@ -1930,7 +1974,7 @@ function createTransientAssistantRuntime(
   messageId: string,
   durableThread = thread,
 ): TransientAssistantRuntime | null {
-  ensureCachedDurableThreadPersistenceIdentity(durableThread.id);
+  ensureCachedDurableThreadPersistenceIdentity(durableThread);
   const lastIndex = thread.messages.length - 1;
   if (lastIndex < 0 || !canPatchAssistantMessage(thread.messages, lastIndex)) {
     return null;
@@ -1966,7 +2010,7 @@ function createTransientReplacementRuntime(
   targetIndex: number,
   replacement: ChatMessage,
 ): TransientAssistantRuntime | null {
-  ensureCachedDurableThreadPersistenceIdentity(thread.id);
+  ensureCachedDurableThreadPersistenceIdentity(thread);
   const originalMessage = thread.messages[targetIndex];
   if (
     targetIndex !== thread.messages.length - 1
@@ -2004,8 +2048,21 @@ function resolveChatBranchBaseIdentity(
   thread: ChatThread,
   target: ChatMessage,
 ): ChatBranchBaseIdentity | null {
+  const cachedIdentity = latestDurableThreadIdentityById.get(thread.id);
+  if (cachedIdentity?.sourceThread === thread) {
+    incrementChatBranchIdentityCounter('chat.branch.identity.cacheHit');
+    return {
+      durablePersistedAt: cachedIdentity.persistedAt,
+      commitRevision: cachedIdentity.commitRevision,
+      targetUserMessageId: target.id,
+      targetUserCreatedAt: target.createdAt,
+    };
+  }
+
+  incrementChatBranchIdentityCounter('chat.branch.identity.fallbackRead');
   const recordResult = readChatThreadRecord(getAppStorage(), thread.id);
   if (!recordResult.ok) {
+    incrementChatBranchIdentityCounter('chat.branch.identity.fallbackRejected');
     return null;
   }
 
@@ -2017,42 +2074,56 @@ function resolveChatBranchBaseIdentity(
     || persistedTarget.role !== 'user'
     || persistedTarget.kind === 'model_switch'
     || persistedTarget.createdAt !== target.createdAt
-    || getThreadActiveModelId(recordResult.value.thread) !== getThreadActiveModelId(thread)
+    || !isPersistedThreadSemanticallyCurrent(thread, recordResult.value.thread)
   ) {
+    incrementChatBranchIdentityCounter('chat.branch.identity.fallbackRejected');
     return null;
   }
 
-  latestDurableThreadPersistedAtById.set(thread.id, recordResult.value.persistedAt);
-  if (recordResult.value.commitRevision == null) {
-    latestDurableThreadCommitRevisionById.delete(thread.id);
-  } else {
-    latestDurableThreadCommitRevisionById.set(thread.id, recordResult.value.commitRevision);
-  }
+  const identity = cacheDurableThreadPersistenceIdentity(
+    thread,
+    recordResult.value.persistedAt,
+    recordResult.value.commitRevision,
+  );
 
   return {
-    durablePersistedAt: recordResult.value.persistedAt,
-    commitRevision: recordResult.value.commitRevision,
+    durablePersistedAt: identity.persistedAt,
+    commitRevision: identity.commitRevision,
     targetUserMessageId: target.id,
     targetUserCreatedAt: target.createdAt,
   };
 }
 
-function ensureCachedDurableThreadPersistenceIdentity(threadId: string): void {
-  if (latestDurableThreadPersistedAtById.has(threadId)) {
+function isPersistedThreadSemanticallyCurrent(
+  sourceThread: ChatThread,
+  persistedThread: ChatThread,
+): boolean {
+  try {
+    return JSON.stringify(sanitizeChatThreadForPersistence(sourceThread))
+      === JSON.stringify(sanitizeChatThreadForPersistence(persistedThread));
+  } catch {
+    return false;
+  }
+}
+
+function ensureCachedDurableThreadPersistenceIdentity(thread: ChatThread): void {
+  if (latestDurableThreadIdentityById.get(thread.id)?.sourceThread === thread) {
     return;
   }
 
-  const recordResult = readChatThreadRecord(getAppStorage(), threadId);
-  if (!recordResult.ok) {
+  const recordResult = readChatThreadRecord(getAppStorage(), thread.id);
+  if (
+    !recordResult.ok
+    || !isPersistedThreadSemanticallyCurrent(thread, recordResult.value.thread)
+  ) {
     return;
   }
 
-  latestDurableThreadPersistedAtById.set(threadId, recordResult.value.persistedAt);
-  if (recordResult.value.commitRevision == null) {
-    latestDurableThreadCommitRevisionById.delete(threadId);
-  } else {
-    latestDurableThreadCommitRevisionById.set(threadId, recordResult.value.commitRevision);
-  }
+  cacheDurableThreadPersistenceIdentity(
+    thread,
+    recordResult.value.persistedAt,
+    recordResult.value.commitRevision,
+  );
 }
 
 function createTransientBranchReplacementRuntime(
@@ -2186,7 +2257,7 @@ function createStreamingProgressRecord(
   const persistedAt = Math.max(
     Date.now(),
     message.createdAt,
-    (latestDurableThreadPersistedAtById.get(thread.id) ?? 0) + 1,
+    (latestDurableThreadIdentityById.get(thread.id)?.persistedAt ?? 0) + 1,
     runtime.lastProgressPersistedAt + 1,
   );
   let branchReplacement = runtime.branchReplacementProgress;
@@ -2247,6 +2318,17 @@ function incrementChatTurnCounter(name: 'chat.turn.finalize' | 'chat.turn.storeM
   }
 }
 
+function incrementChatBranchIdentityCounter(
+  name:
+    | 'chat.branch.identity.cacheHit'
+    | 'chat.branch.identity.fallbackRead'
+    | 'chat.branch.identity.fallbackRejected',
+): void {
+  if (performanceMonitor.isEnabled()) {
+    performanceMonitor.incrementCounter(name);
+  }
+}
+
 export const useChatStore = create<ChatStoreState>()(
   persist(
     (set, get) => {
@@ -2264,20 +2346,26 @@ export const useChatStore = create<ChatStoreState>()(
         };
         const previousDurableThreadIdentities = new Map<
           string,
-          { persistedAt: number; commitRevision?: number }
+          DurableThreadPersistenceIdentity
         >();
         Object.keys(previous.threads).forEach((threadId) => {
+          const previousThread = previous.threads[threadId];
+          const candidateRuntime = transientAssistantRuntimes.get(threadId);
+          const runtime = candidateRuntime
+            && candidateRuntime.sourceThread === previousThread
+            && candidateRuntime.durableMessages === previousThread?.messages
+            ? candidateRuntime
+            : null;
+          const expectedDurableSource = runtime?.durableThread ?? previousThread;
+          const durableIdentity = latestDurableThreadIdentityById.get(threadId);
           if (
-            previous.threads[threadId] === next.threads[threadId]
-            || !latestDurableThreadPersistedAtById.has(threadId)
+            previousThread === next.threads[threadId]
+            || durableIdentity?.sourceThread !== expectedDurableSource
           ) {
             return;
           }
 
-          previousDurableThreadIdentities.set(threadId, {
-            persistedAt: latestDurableThreadPersistedAtById.get(threadId)!,
-            commitRevision: latestDurableThreadCommitRevisionById.get(threadId),
-          });
+          previousDurableThreadIdentities.set(threadId, durableIdentity);
         });
         const persistenceReason = chatPersistenceContext?.reason ?? 'thread_mutation';
         try {
@@ -2316,6 +2404,7 @@ export const useChatStore = create<ChatStoreState>()(
         threads: {},
         activeThreadId: null,
         streamingRevision: 0,
+        inferenceRevision: 0,
 
         createThread: ({ modelId, presetId, presetSnapshot, paramsSnapshot, title }) => {
         const id = createChatId('thread');
@@ -2357,6 +2446,7 @@ export const useChatStore = create<ChatStoreState>()(
             [id]: thread,
           },
           activeThreadId: id,
+          inferenceRevision: state.inferenceRevision + 1,
         }));
 
         return id;
@@ -2393,6 +2483,7 @@ export const useChatStore = create<ChatStoreState>()(
           return {
             threads: nextThreads,
             activeThreadId: nextActiveThreadId,
+            inferenceRevision: state.inferenceRevision + 1,
           };
         });
 
@@ -2420,6 +2511,7 @@ export const useChatStore = create<ChatStoreState>()(
           return {
             threads: nextThreads,
             activeThreadId: nextActiveThreadId,
+            inferenceRevision: state.inferenceRevision + 1,
           };
         });
 
@@ -2432,17 +2524,15 @@ export const useChatStore = create<ChatStoreState>()(
           assertPrivateStorageWritable();
           chatPersistenceScheduler.cancelAllPendingWrites();
           transientAssistantRuntimes.clear();
-          latestDurableThreadPersistedAtById.clear();
-          latestDurableThreadCommitRevisionById.clear();
-          latestStreamingProgressPersistedAtById.clear();
-          clearPersistedChatRecords(getAppStorage());
+          clearPersistedChatRecordsAndInvalidateRuntimeCaches(getAppStorage());
           return 0;
         }
 
-        setWhenPrivateStorageWritable({
+        setWhenPrivateStorageWritable((state) => ({
           threads: {},
           activeThreadId: null,
-        });
+          inferenceRevision: state.inferenceRevision + 1,
+        }));
 
         return threadCount;
         },
@@ -2469,6 +2559,7 @@ export const useChatStore = create<ChatStoreState>()(
                 },
               }),
             },
+            inferenceRevision: state.inferenceRevision + 1,
           };
           }),
 
@@ -2499,6 +2590,7 @@ export const useChatStore = create<ChatStoreState>()(
                 },
               }),
             },
+            inferenceRevision: state.inferenceRevision + 1,
           };
           }),
 
@@ -2541,6 +2633,7 @@ export const useChatStore = create<ChatStoreState>()(
               ...state.threads,
               [threadId]: nextThread,
             },
+            inferenceRevision: state.inferenceRevision + 1,
           };
         });
 
@@ -2577,6 +2670,12 @@ export const useChatStore = create<ChatStoreState>()(
               ...state.threads,
               [threadId]: nextThread,
             },
+            ...(
+              normalizedMessage.role === 'assistant'
+              && normalizedMessage.state === 'streaming'
+                ? null
+                : { inferenceRevision: state.inferenceRevision + 1 }
+            ),
           };
           }),
 
@@ -2676,6 +2775,7 @@ export const useChatStore = create<ChatStoreState>()(
                 didDiscardEmptyBranchWithoutDurableMutation = true;
                 return {
                   streamingRevision: state.streamingRevision + 1,
+                  inferenceRevision: state.inferenceRevision + 1,
                 };
               }
               const terminalMessage: ChatMessage = finalization.outcome === 'error'
@@ -2701,9 +2801,12 @@ export const useChatStore = create<ChatStoreState>()(
               let nextThread: ChatThread | null;
               if (runtime.mode.kind === 'replace_branch' && !shouldRestoreReplacement) {
                 if (
-                  !isBranchBaseIdentityCurrent(
-                    durableThread,
-                    runtime.mode.baseThreadIdentity,
+                  (
+                    runtime.persistenceRetryRequired !== true
+                    && !isBranchBaseIdentityCurrent(
+                      durableThread,
+                      runtime.mode.baseThreadIdentity,
+                    )
                   )
                   || !validateChatBranchReplacementPlan(
                     durableThread,
@@ -2743,6 +2846,7 @@ export const useChatStore = create<ChatStoreState>()(
                   ...state.threads,
                   [threadId]: nextThread,
                 },
+                inferenceRevision: state.inferenceRevision + 1,
               };
             });
           });
@@ -2805,6 +2909,7 @@ export const useChatStore = create<ChatStoreState>()(
           return {
             threads: nextThreads,
             activeThreadId: nextActiveThreadId,
+            inferenceRevision: state.inferenceRevision + 1,
           };
         });
       },
@@ -2873,6 +2978,7 @@ export const useChatStore = create<ChatStoreState>()(
                 status: 'idle',
               }),
             },
+            inferenceRevision: state.inferenceRevision + 1,
           };
         });
 
@@ -2969,6 +3075,7 @@ export const useChatStore = create<ChatStoreState>()(
         }
         set((state) => ({
           streamingRevision: state.streamingRevision + 1,
+          inferenceRevision: state.inferenceRevision + 1,
         }));
 
         return nextMessageId;
@@ -3027,6 +3134,7 @@ export const useChatStore = create<ChatStoreState>()(
         }
         set((state) => ({
           streamingRevision: state.streamingRevision + 1,
+          inferenceRevision: state.inferenceRevision + 1,
         }));
 
         return nextAssistantMessageId;
@@ -3069,6 +3177,7 @@ export const useChatStore = create<ChatStoreState>()(
                 }),
               },
             },
+            inferenceRevision: state.inferenceRevision + 1,
           };
         }),
 
@@ -3104,6 +3213,7 @@ export const useChatStore = create<ChatStoreState>()(
           ...currentState,
           threads: hydratedState.threads,
           activeThreadId: hydratedState.activeThreadId,
+          inferenceRevision: currentState.inferenceRevision + 1,
         };
       },
       onRehydrateStorage: () => (state) => {
@@ -3164,17 +3274,16 @@ export function flushPendingChatPersistenceWrites(reason: ChatPersistenceWriteRe
 }
 
 export function resetChatStoreForPrivateStorageReset(): void {
+  const nextInferenceRevision = useChatStore.getState().inferenceRevision + 1;
   chatPersistenceScheduler.cancelAllPendingWrites();
   transientAssistantRuntimes.clear();
-  latestDurableThreadPersistedAtById.clear();
-  latestDurableThreadCommitRevisionById.clear();
-  latestStreamingProgressPersistedAtById.clear();
+  clearPersistedChatRecordsAndInvalidateRuntimeCaches(getAppStorage());
   useChatStore.setState({
     threads: {},
     activeThreadId: null,
     streamingRevision: 0,
+    inferenceRevision: nextInferenceRevision,
   });
-  clearPersistedChatRecords(getAppStorage());
   void useChatStore.persist.clearStorage();
 }
 export type { ThreadInferenceWindow, ThreadInferenceWindowOptions } from '../utils/inferenceWindow';

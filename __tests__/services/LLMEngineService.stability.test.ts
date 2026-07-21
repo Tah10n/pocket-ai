@@ -455,7 +455,7 @@ describe('LLMEngineService Stability', () => {
 
             await expect(observedUnload).resolves.toMatchObject({ code: 'engine_unloading' });
             await expect(observedCompletion).resolves.toMatchObject({ code: 'engine_busy' });
-            await expect(observedBlockedCount).resolves.toMatchObject({ code: 'engine_unloading' });
+            await expect(observedBlockedCount).resolves.toMatchObject({ code: 'engine_busy' });
             expect(completion).not.toHaveBeenCalled();
             expect(releaseAllLlama).not.toHaveBeenCalled();
             expect(llmEngineService.hasActiveContextOperation()).toBe(true);
@@ -643,7 +643,7 @@ describe('LLMEngineService Stability', () => {
             await expect(observedUnload).resolves.toMatchObject({ code: 'engine_unloading' });
 
             await expect(observedFirstCount).resolves.toMatchObject({ code: 'engine_unloading' });
-            await expect(observedQueuedCount).resolves.toMatchObject({ code: 'engine_unloading' });
+            await expect(observedQueuedCount).resolves.toMatchObject({ code: 'engine_busy' });
             expect(releaseAllLlama).not.toHaveBeenCalled();
             expect(llmEngineService.hasActiveContextOperation()).toBe(true);
 
@@ -841,7 +841,7 @@ describe('LLMEngineService Stability', () => {
         }
     });
 
-    it('does not detach the context when a stopped chat operation drains but a background operation is hung', async () => {
+    it('rejects new background work while completion owns the context without detaching it', async () => {
         let resolvePromptPreparation: (() => void) | undefined;
         const getFormattedChat = jest.fn(() => new Promise((resolve) => {
             resolvePromptPreparation = () => resolve({ prompt: 'Prompt after stop', additional_stops: [] });
@@ -894,7 +894,7 @@ describe('LLMEngineService Stability', () => {
             activeModelId: mockModel.id,
         }));
         expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
-        expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+        expect(llmEngineService.hasActiveContextOperation()).toBe(false);
         expect(releaseAllLlama).not.toHaveBeenCalled();
     });
 

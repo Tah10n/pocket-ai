@@ -21,6 +21,7 @@ import {
 } from '../../src/utils/inferenceWindow';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../../src/utils/modelReasoningCapabilities';
 import { buildPerformanceThread } from '../fixtures/chatPerformanceFixtures';
+import { markInteractiveWorkStarted } from '../../src/utils/idleTask';
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
@@ -105,11 +106,25 @@ describe('useTruncationTracking', () => {
     };
   }
 
-  function renderHookHarness(activeThread: ChatThread | null, activeContextTokenBudget: number | undefined) {
+  function renderHookHarness(
+    activeThread: ChatThread | null,
+    activeContextTokenBudget: number | undefined,
+    initialInferenceRevision = 0,
+  ) {
     let currentValue: ReturnType<typeof useTruncationTracking> | null = null;
+    let renderCount = 0;
 
-    const Harness = ({ thread, tokenBudget }: { thread: ChatThread | null; tokenBudget: number | undefined }) => {
-      const value = useTruncationTracking(thread, tokenBudget);
+    const Harness = ({
+      thread,
+      tokenBudget,
+      inferenceRevision,
+    }: {
+      thread: ChatThread | null;
+      tokenBudget: number | undefined;
+      inferenceRevision: number;
+    }) => {
+      renderCount += 1;
+      const value = useTruncationTracking(thread, tokenBudget, inferenceRevision);
 
       useEffect(() => {
         currentValue = value;
@@ -118,12 +133,30 @@ describe('useTruncationTracking', () => {
       return null;
     };
 
-    const rendered = render(<Harness thread={activeThread} tokenBudget={activeContextTokenBudget} />);
+    const rendered = render(
+      <Harness
+        thread={activeThread}
+        tokenBudget={activeContextTokenBudget}
+        inferenceRevision={initialInferenceRevision}
+      />,
+    );
 
     return {
+      getRenderCount: () => renderCount,
       getState: () => currentValue,
-      rerender: (thread: ChatThread | null, tokenBudget: number | undefined) => {
-        rendered.rerender(<Harness thread={thread} tokenBudget={tokenBudget} />);
+      unmount: rendered.unmount,
+      rerender: (
+        thread: ChatThread | null,
+        tokenBudget: number | undefined,
+        nextInferenceRevision = initialInferenceRevision,
+      ) => {
+        rendered.rerender(
+          <Harness
+            thread={thread}
+            tokenBudget={tokenBudget}
+            inferenceRevision={nextInferenceRevision}
+          />,
+        );
       },
     };
   }
@@ -133,9 +166,14 @@ describe('useTruncationTracking', () => {
 
     const Harness = () => {
       useChatStore((state) => state.streamingRevision);
+      const inferenceRevision = useChatStore((state) => state.inferenceRevision);
       useChatStore((state) => state.threads[threadId]);
       const activeThread = useChatStore.getState().getThread(threadId);
-      const value = useTruncationTracking(activeThread, activeContextTokenBudget);
+      const value = useTruncationTracking(
+        activeThread,
+        activeContextTokenBudget,
+        inferenceRevision,
+      );
 
       useEffect(() => {
         currentValue = value;
@@ -171,7 +209,12 @@ describe('useTruncationTracking', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     flushPendingChatPersistenceWrites('background');
-    useChatStore.setState({ threads: {}, activeThreadId: null, streamingRevision: 0 });
+    useChatStore.setState({
+      threads: {},
+      activeThreadId: null,
+      streamingRevision: 0,
+      inferenceRevision: 0,
+    });
     storage.getAllKeys().forEach((key) => storage.remove(key));
     (buildInferenceWindowWithAccurateTokenCounts as jest.Mock)
       .mockReset()
@@ -285,8 +328,8 @@ describe('useTruncationTracking', () => {
     });
 
     await waitFor(() => {
-      expect(buildAccurateWindow).toHaveBeenCalledTimes(2);
-      expect(hook.getState()).toEqual(createTruncationState(['message-1', 'message-2']));
+      expect(buildAccurateWindow).toHaveBeenCalledTimes(1);
+      expect(hook.getState()).toEqual(createTruncationState(['message-1']));
     });
     expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
   });
@@ -370,6 +413,103 @@ describe('useTruncationTracking', () => {
     expect(() => firstProbeControl?.throwIfCancelled?.()).toThrow('Accurate truncation probe was cancelled.');
   });
 
+  it('publishes only the exact inference revision when an older probe resolves last at the same timestamp', async () => {
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    let resolveFirstProbe: ((value: {
+      messages: never[];
+      promptTokens: number;
+      promptSafetyMarginTokens: number;
+      truncatedMessageIds: string[];
+    }) => void) | undefined;
+    buildAccurateWindow
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveFirstProbe = resolve;
+      }))
+      .mockResolvedValueOnce({
+        messages: [],
+        promptTokens: 64,
+        promptSafetyMarginTokens: 0,
+        truncatedMessageIds: ['message-2'],
+      });
+    const initialThread = buildThread('author/model-q4');
+    const hook = renderHookHarness(initialThread, 1600, 10);
+
+    await waitFor(() => {
+      expect(buildAccurateWindow).toHaveBeenCalledTimes(1);
+    });
+
+    const changedThread: ChatThread = {
+      ...initialThread,
+      updatedAt: initialThread.updatedAt,
+      messages: initialThread.messages.map((message, index) => (
+        index === 0 ? { ...message, content: 'Changed at the same wall-clock time' } : message
+      )),
+    };
+    hook.rerender(changedThread, 1600, 11);
+
+    await waitFor(() => {
+      expect(buildAccurateWindow).toHaveBeenCalledTimes(2);
+      expect(hook.getState()).toEqual(createTruncationState(['message-2']));
+    });
+
+    await act(async () => {
+      resolveFirstProbe?.({
+        messages: [],
+        promptTokens: 64,
+        promptSafetyMarginTokens: 0,
+        truncatedMessageIds: ['message-1'],
+      });
+      await Promise.resolve();
+    });
+
+    expect(hook.getState()).toEqual(createTruncationState(['message-2']));
+  });
+
+  it('debounces passive probes again when interactive work starts before the idle turn', async () => {
+    jest.useFakeTimers();
+    const buildAccurateWindow = buildInferenceWindowWithAccurateTokenCounts as jest.Mock;
+    buildAccurateWindow.mockResolvedValue({
+      messages: [],
+      promptTokens: 64,
+      promptSafetyMarginTokens: 0,
+      truncatedMessageIds: [],
+    });
+    const hook = renderHookHarness(buildThread('author/model-q4'), 1600, 1);
+    const renderCountBeforeInteraction = hook.getRenderCount();
+
+    try {
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(149);
+      });
+      expect(buildAccurateWindow).not.toHaveBeenCalled();
+
+      act(() => {
+        markInteractiveWorkStarted();
+        markInteractiveWorkStarted();
+        markInteractiveWorkStarted();
+      });
+      expect(hook.getRenderCount()).toBe(renderCountBeforeInteraction);
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(149);
+      });
+      expect(buildAccurateWindow).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(1);
+      });
+      expect(buildAccurateWindow).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(1);
+      });
+      expect(buildAccurateWindow).toHaveBeenCalledTimes(1);
+    } finally {
+      hook.unmount();
+      jest.useRealTimers();
+    }
+  });
+
   it('does not traverse 1000-message history during streaming patches and recounts once at terminal state', async () => {
     const getWindow = getThreadInferenceWindow as jest.MockedFunction<typeof getThreadInferenceWindow>;
     const idleThread = buildPerformanceThread({ historicalMessageCount: 1000 });
@@ -428,7 +568,7 @@ describe('useTruncationTracking', () => {
         },
       ],
     };
-    hook.rerender(terminalThread, 4096);
+    hook.rerender(terminalThread, 4096, 1);
 
     await waitFor(() => {
       expect(getWindow).toHaveBeenCalledTimes(callsAfterIdle + 1);

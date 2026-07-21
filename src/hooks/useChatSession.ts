@@ -55,6 +55,7 @@ import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
+import { markInteractiveWorkStarted } from '../utils/idleTask';
 import {
   materializeAttachmentDraftsForMessage,
   materializeDocumentDraftsForProcessing,
@@ -124,6 +125,7 @@ type PreparedInferenceRequest = {
   promptSafetyMarginTokens: number;
   modelId: string;
   contextIdentity: string;
+  inferenceRevision: number;
   messageSignature: string;
   tokenCountSource: 'exact' | 'conservative' | 'cache';
   attachmentResolution: PreparedAttachmentResolution;
@@ -138,6 +140,40 @@ type PromptTokenFormattingParams = {
 type TerminalCommitResult =
   | { status: 'committed' | 'restored_without_write' | 'stale' }
   | { status: 'persistence_failed'; error: unknown };
+
+type PromptPreparationEngineSnapshot = {
+  readonly modelId: string;
+  readonly contextIdentity: string;
+};
+
+function capturePromptPreparationEngineSnapshot(expectedModelId: string): PromptPreparationEngineSnapshot {
+  const engineState = llmEngineService.getState();
+  if (engineState.status !== EngineStatus.READY || engineState.activeModelId !== expectedModelId) {
+    throw new AppError(
+      'engine_not_ready',
+      'The model context changed before prompt preparation started. Try again.',
+    );
+  }
+
+  return {
+    modelId: expectedModelId,
+    contextIdentity: llmEngineService.getPromptContextIdentity(),
+  };
+}
+
+function assertPromptPreparationEngineSnapshotCurrent(snapshot: PromptPreparationEngineSnapshot): void {
+  const engineState = llmEngineService.getState();
+  if (
+    engineState.status !== EngineStatus.READY
+    || engineState.activeModelId !== snapshot.modelId
+    || llmEngineService.getPromptContextIdentity() !== snapshot.contextIdentity
+  ) {
+    throw new AppError(
+      'engine_not_ready',
+      'The model context changed while preparing the prompt. Try again.',
+    );
+  }
+}
 
 interface ActiveGenerationState {
   threadId: string;
@@ -1616,6 +1652,7 @@ export function getThreadTruncationState(thread: ChatThread, options?: Inference
 export const useChatSession = () => {
   const activeThread = useChatStore((state) => state.getActiveThread());
   const messageListRevision = useChatStore((state) => state.streamingRevision);
+  const inferenceRevision = useChatStore((state) => state.inferenceRevision);
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
@@ -1645,7 +1682,11 @@ export const useChatSession = () => {
       : undefined;
   })();
 
-  const truncationState = useTruncationTracking(activeThread, activeContextTokenBudget);
+  const truncationState = useTruncationTracking(
+    activeThread,
+    activeContextTokenBudget,
+    inferenceRevision,
+  );
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -1755,6 +1796,7 @@ export const useChatSession = () => {
     if (!storedThread) {
       throw new Error('Thread not found');
     }
+    const inferenceRevisionAtPromptStart = useChatStore.getState().inferenceRevision;
 
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
@@ -1775,6 +1817,12 @@ export const useChatSession = () => {
     const throwIfGenerationStopped = () => {
       if (generationState.stopRequested) {
         throw new Error('Generation was stopped before native completion started.');
+      }
+      if (useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while preparing the prompt. Try again.',
+        );
       }
     };
     const promptPreparationSpan = performanceMonitor.isEnabled()
@@ -2031,7 +2079,9 @@ export const useChatSession = () => {
       void notificationService.sendInferenceErrorNotification({ threadId });
     };
 
+    let releasePromptPreparation: (() => void) | null = null;
     try {
+      releasePromptPreparation = llmEngineService.beginPromptPreparation();
       const {
         activeModelId,
         model,
@@ -2270,6 +2320,11 @@ export const useChatSession = () => {
           throw error;
         }
 
+        // A prompt-semantic mutation can arrive while native tokenization is
+        // pending. It must abort this preparation instead of being mistaken
+        // for a tokenizer failure and continuing through the heuristic path.
+        throwIfGenerationStopped();
+
         const appError = toAppError(error);
 
         if (appError.code === 'message_too_long' && reasoningRuntimeConfig.enableThinking) {
@@ -2371,6 +2426,7 @@ export const useChatSession = () => {
             promptSafetyMarginTokens,
             modelId: activeModelId,
             contextIdentity: promptContextIdentity,
+            inferenceRevision: inferenceRevisionAtPromptStart,
             messageSignature,
             tokenCountSource,
             attachmentResolution,
@@ -2447,6 +2503,12 @@ export const useChatSession = () => {
         throw new AppError(
           'engine_not_ready',
           'The model context changed while preparing the prompt. Try again.',
+        );
+      }
+      if (useChatStore.getState().inferenceRevision !== preparedRequest.inferenceRevision) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while preparing the prompt. Try again.',
         );
       }
 
@@ -2636,6 +2698,8 @@ export const useChatSession = () => {
       sendOutcomeNotificationOnce('error');
       throw userFacingError;
     } finally {
+      releasePromptPreparation?.();
+      releasePromptPreparation = null;
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         scheduledFlushDelayMs = null;
@@ -2700,6 +2764,7 @@ export const useChatSession = () => {
   }, [switchThreadModel, updateThreadParamsSnapshot]);
 
   const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
+    markInteractiveWorkStarted();
     assertPrivateStorageWritableForChatMutation();
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
@@ -2745,93 +2810,121 @@ export const useChatSession = () => {
       options.multimodalReadiness,
       activeModelId,
     );
-    await assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile);
-    await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile);
-    const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
-    const documentContentParts = processedDocumentAttachments.contentParts;
-    const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
-    const effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
-      ? assertActiveMultimodalReadyForAttachmentMediaPaths({
-          mediaPaths: imageAttachmentMediaPaths,
-          multimodalReadiness: options.multimodalReadiness,
-          expectedModelId: activeModelId,
-          mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
-        })
-      : options.multimodalReadiness;
-    attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
-
-    const threadId = activeThread?.id
-      ?? createThread({
-        modelId: activeModelId,
-        presetId: settings.activePresetId,
-        presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
-        paramsSnapshot: activeModelParams,
-      });
-
-    setActiveThread(threadId);
-
-    const existingThread = activeThread;
-    if (existingThread) {
-      ensureThreadUsesModelForSend(existingThread, activeModelId);
-      const nextThread = useChatStore.getState().getThread(threadId);
-      if (nextThread) {
-        syncThreadParametersCallback(nextThread, activeModelParams);
-      }
+    const interactiveStateAtStart = useChatStore.getState();
+    const interactiveRevisionAtStart = interactiveStateAtStart.inferenceRevision;
+    const activeThreadIdAtStart = interactiveStateAtStart.activeThreadId;
+    if ((activeThread?.id ?? null) !== activeThreadIdAtStart) {
+      throw new AppError(
+        'action_failed',
+        'The conversation changed before prompt preparation started. Try again.',
+      );
     }
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    try {
+      await assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile);
+      await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile);
+      const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
+      const currentState = useChatStore.getState();
+      if (
+        currentState.inferenceRevision !== interactiveRevisionAtStart
+        || currentState.activeThreadId !== activeThreadIdAtStart
+      ) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while preparing the prompt. Try again.',
+        );
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
 
-    const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
-    const threadModelId = threadAfterPossibleSwitch
-      ? getThreadActiveModelId(threadAfterPossibleSwitch)
-      : activeModelId;
+      const documentContentParts = processedDocumentAttachments.contentParts;
+      const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
+      const effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
+        ? assertActiveMultimodalReadyForAttachmentMediaPaths({
+            mediaPaths: imageAttachmentMediaPaths,
+            multimodalReadiness: options.multimodalReadiness,
+            expectedModelId: activeModelId,
+            mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
+          })
+        : options.multimodalReadiness;
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
 
-    const userMessageId = createChatId('message');
-    const normalizedText = text.trim();
-    const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
-      ? normalizedText
-      : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
-    const messageAttachments = [
-      ...materializeAttachmentDraftsForMessage({
-        threadId,
-        messageId: userMessageId,
-        drafts: attachmentDrafts,
-      }),
-      ...processedDocumentAttachments.attachments.map((attachment) => ({
-        ...attachment,
-        threadId,
-        messageId: userMessageId,
-      })),
-      ...materializeMediaDraftsForMessage({
-        threadId,
-        messageId: userMessageId,
-        drafts: mediaAttachmentDrafts,
-      }),
-    ];
-    const userMessage: ChatMessage = {
-      id: userMessageId,
-      role: 'user',
-      content: userMessageContent,
-      createdAt: Date.now(),
-      state: 'complete',
-      kind: 'message',
-      modelId: threadModelId,
-      ...(documentContentParts.length > 0 ? { contentParts: documentContentParts } : null),
-      ...(messageAttachments.length > 0
-        ? { attachments: messageAttachments }
-        : null),
-    };
+      const threadId = activeThread?.id
+        ?? createThread({
+          modelId: activeModelId,
+          presetId: settings.activePresetId,
+          presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
+          paramsSnapshot: activeModelParams,
+        });
 
-    appendMessage(threadId, userMessage);
-    options.onUserMessageAppended?.(userMessage);
+      setActiveThread(threadId);
 
-    const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
+      const existingThread = activeThread;
+      if (existingThread) {
+        ensureThreadUsesModelForSend(existingThread, activeModelId);
+        const nextThread = useChatStore.getState().getThread(threadId);
+        if (nextThread) {
+          syncThreadParametersCallback(nextThread, activeModelParams);
+        }
+      }
 
-    await runAssistantCompletion(threadId, assistantMessageId, {
-      multimodalReadiness: effectiveMultimodalReadiness,
-      attachmentResolution,
-    });
+      const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
+      const threadModelId = threadAfterPossibleSwitch
+        ? getThreadActiveModelId(threadAfterPossibleSwitch)
+        : activeModelId;
+
+      const userMessageId = createChatId('message');
+      const normalizedText = text.trim();
+      const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
+        ? normalizedText
+        : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
+      const messageAttachments = [
+        ...materializeAttachmentDraftsForMessage({
+          threadId,
+          messageId: userMessageId,
+          drafts: attachmentDrafts,
+        }),
+        ...processedDocumentAttachments.attachments.map((attachment) => ({
+          ...attachment,
+          threadId,
+          messageId: userMessageId,
+        })),
+        ...materializeMediaDraftsForMessage({
+          threadId,
+          messageId: userMessageId,
+          drafts: mediaAttachmentDrafts,
+        }),
+      ];
+      const userMessage: ChatMessage = {
+        id: userMessageId,
+        role: 'user',
+        content: userMessageContent,
+        createdAt: Date.now(),
+        state: 'complete',
+        kind: 'message',
+        modelId: threadModelId,
+        ...(documentContentParts.length > 0 ? { contentParts: documentContentParts } : null),
+        ...(messageAttachments.length > 0
+          ? { attachments: messageAttachments }
+          : null),
+      };
+
+      appendMessage(threadId, userMessage);
+      options.onUserMessageAppended?.(userMessage);
+
+      const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
+
+      await runAssistantCompletion(threadId, assistantMessageId, {
+        multimodalReadiness: effectiveMultimodalReadiness,
+        attachmentResolution,
+      });
+    } finally {
+      releaseInteractivePromptPreparation();
+    }
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
+    markInteractiveWorkStarted();
     const generation = sharedGenerationState.current;
     if (!generation) {
       return;
@@ -2906,6 +2999,7 @@ export const useChatSession = () => {
     nextContent: string,
     options: RegenerateUserMessageOptions = {},
   ) => {
+    markInteractiveWorkStarted();
     if (!activeThread) {
       return false;
     }
@@ -2928,43 +3022,51 @@ export const useChatSession = () => {
       requestedMultimodalReadiness,
       activeModelId,
     );
-    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-      targetMessage,
-      requestedMultimodalReadiness,
-      activeModelId,
-      attachmentResolution.resolveFile,
-    );
-    attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
-    const currentState = useChatStore.getState();
-    const currentThread = currentState.threads[activeThread.id];
-    if (
-      currentState.activeThreadId !== activeThread.id
-      || currentThread !== activeThread
-      || getThreadActiveModelId(currentThread) !== activeModelId
-    ) {
-      throw new Error('The conversation changed while preparing regeneration. Try again.');
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    try {
+      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
+        targetMessage,
+        requestedMultimodalReadiness,
+        activeModelId,
+        attachmentResolution.resolveFile,
+      );
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      const currentState = useChatStore.getState();
+      const currentThread = currentState.threads[activeThread.id];
+      if (
+        currentState.activeThreadId !== activeThread.id
+        || currentThread !== activeThread
+        || getThreadActiveModelId(currentThread) !== activeModelId
+      ) {
+        throw new Error('The conversation changed while preparing regeneration. Try again.');
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
+
+      const assistantMessageId = replaceBranchFromUserMessage(
+        activeThread.id,
+        messageId,
+        normalizedContent,
+        branchParamsSnapshot,
+      );
+      if (!assistantMessageId) {
+        throw new Error('The selected message could not be regenerated.');
+      }
+
+      await runAssistantCompletion(activeThread.id, assistantMessageId, {
+        multimodalReadiness: effectiveMultimodalReadiness,
+        attachmentResolution,
+      });
+
+      return true;
+    } finally {
+      releaseInteractivePromptPreparation();
     }
-    const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
-
-    const assistantMessageId = replaceBranchFromUserMessage(
-      activeThread.id,
-      messageId,
-      normalizedContent,
-      branchParamsSnapshot,
-    );
-    if (!assistantMessageId) {
-      throw new Error('The selected message could not be regenerated.');
-    }
-
-    await runAssistantCompletion(activeThread.id, assistantMessageId, {
-      multimodalReadiness: effectiveMultimodalReadiness,
-      attachmentResolution,
-    });
-
-    return true;
   }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
 
   const regenerateLastResponse = useCallback(async () => {
+    markInteractiveWorkStarted();
     if (!activeThread) {
       return false;
     }
@@ -3004,72 +3106,79 @@ export const useChatSession = () => {
       model?.multimodalReadiness,
       activeModelId,
     );
-    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-      lastUserMessage,
-      model?.multimodalReadiness,
-      activeModelId,
-      attachmentResolution.resolveFile,
-    );
-    attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
-    const currentState = useChatStore.getState();
-    const currentThread = currentState.threads[activeThread.id];
-    if (
-      currentState.activeThreadId !== activeThread.id
-      || currentThread !== activeThread
-      || getThreadActiveModelId(currentThread) !== activeModelId
-    ) {
-      throw new Error('The conversation changed while preparing regeneration. Try again.');
-    }
-    const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
-
-    const lastAssistantMessageIndex = (() => {
-      for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
-        if (activeThread.messages[index]?.role === 'assistant') {
-          return index;
-        }
-      }
-
-      return -1;
-    })();
-    const canReplaceCurrentTurnAssistant =
-      lastAssistantMessageIndex > lastUserMessageIndex &&
-      lastAssistantMessageIndex === activeThread.messages.length - 1;
-
-    const regenerateFromLastUserWithPreparedAttachments = async () => {
-      const assistantMessageId = replaceBranchFromUserMessage(
-        activeThread.id,
-        lastUserMessage.id,
-        lastUserMessage.content.trim(),
-        branchParamsSnapshot,
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    try {
+      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
+        lastUserMessage,
+        model?.multimodalReadiness,
+        activeModelId,
+        attachmentResolution.resolveFile,
       );
-      if (!assistantMessageId) {
-        throw new Error('The selected message could not be regenerated.');
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      const currentState = useChatStore.getState();
+      const currentThread = currentState.threads[activeThread.id];
+      if (
+        currentState.activeThreadId !== activeThread.id
+        || currentThread !== activeThread
+        || getThreadActiveModelId(currentThread) !== activeModelId
+      ) {
+        throw new Error('The conversation changed while preparing regeneration. Try again.');
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
+
+      const lastAssistantMessageIndex = (() => {
+        for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+          if (activeThread.messages[index]?.role === 'assistant') {
+            return index;
+          }
+        }
+
+        return -1;
+      })();
+      const canReplaceCurrentTurnAssistant =
+        lastAssistantMessageIndex > lastUserMessageIndex &&
+        lastAssistantMessageIndex === activeThread.messages.length - 1;
+
+      const regenerateFromLastUserWithPreparedAttachments = async () => {
+        const assistantMessageId = replaceBranchFromUserMessage(
+          activeThread.id,
+          lastUserMessage.id,
+          lastUserMessage.content.trim(),
+          branchParamsSnapshot,
+        );
+        if (!assistantMessageId) {
+          throw new Error('The selected message could not be regenerated.');
+        }
+
+        await runAssistantCompletion(activeThread.id, assistantMessageId, {
+          multimodalReadiness: effectiveMultimodalReadiness,
+          attachmentResolution,
+        });
+
+        return true;
+      };
+
+      if (!canReplaceCurrentTurnAssistant) {
+        return regenerateFromLastUserWithPreparedAttachments();
       }
 
-      await runAssistantCompletion(activeThread.id, assistantMessageId, {
+      const syncedThread = syncThreadParametersCallback(activeThread);
+      const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
+      if (!assistantMessageId) {
+        return regenerateFromLastUserWithPreparedAttachments();
+      }
+
+      await runAssistantCompletion(syncedThread.id, assistantMessageId, {
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
       });
 
       return true;
-    };
-
-    if (!canReplaceCurrentTurnAssistant) {
-      return regenerateFromLastUserWithPreparedAttachments();
+    } finally {
+      releaseInteractivePromptPreparation();
     }
-
-    const syncedThread = syncThreadParametersCallback(activeThread);
-    const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
-    if (!assistantMessageId) {
-      return regenerateFromLastUserWithPreparedAttachments();
-    }
-
-    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
-      multimodalReadiness: effectiveMultimodalReadiness,
-      attachmentResolution,
-    });
-
-    return true;
   }, [
     activeThread,
     ensureThreadCanGenerate,

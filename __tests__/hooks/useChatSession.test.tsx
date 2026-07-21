@@ -63,6 +63,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getPromptContextIdentity: jest.fn(),
     getContextSize: jest.fn(),
     getLastCompletionTelemetry: jest.fn(),
+    beginPromptPreparation: jest.fn(() => jest.fn()),
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     assertActiveMultimodalReadyForMediaPaths: jest.fn(),
@@ -227,6 +228,7 @@ describe('useChatSession', () => {
     );
     (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
     (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(null);
+    (llmEngineService.beginPromptPreparation as jest.Mock).mockImplementation(() => jest.fn());
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
         onToken?.('Hello back');
@@ -961,15 +963,10 @@ describe('useChatSession', () => {
 
     const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
     const completionMediaPaths = completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? []);
-    const mediaTokenCountCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.filter(([call]) => (
-      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
-    ));
-
     expect(retainedImageChecks).toBe(1);
     expect(completionMediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
-    expect(mediaTokenCountCalls.length).toBeGreaterThan(0);
     expect(tokenCountSnapshots.some((snapshot) => (
-      snapshot.mediaPaths.join('|') === completionMediaPaths.join('|')
+      snapshot.attachmentChecks === 1
     ))).toBe(true);
     const performanceSnapshot = performanceMonitor.snapshot();
     expect(performanceSnapshot.events.map((event) => event.name)).toEqual(expect.arrayContaining([
@@ -984,6 +981,173 @@ describe('useChatSession', () => {
     ))).toBe(true);
     expect(JSON.stringify(performanceSnapshot)).not.toContain('test-dir/chat-attachments');
     expect(completionCall?.params.n_predict).toBe(1024);
+  });
+
+  it('reserves foreground prompt work before validating draft attachments', async () => {
+    const events: string[] = [];
+    const releases: jest.Mock[] = [];
+    let resolveAttachmentCheck: (() => void) | undefined;
+    (llmEngineService.beginPromptPreparation as jest.Mock).mockImplementation(() => {
+      events.push('reserve');
+      const release = jest.fn(() => events.push('release'));
+      releases.push(release);
+      return release;
+    });
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockImplementationOnce(() => {
+        events.push('attachment_check');
+        return new Promise((resolve) => {
+          resolveAttachmentCheck = () => resolve({ exists: true, size: 123_456 });
+        });
+      })
+      .mockResolvedValue({ exists: true, size: 123_456 });
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Reserve before attachment work', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(events).toEqual(['reserve', 'attachment_check']);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveAttachmentCheck?.();
+      await sendPromise;
+    });
+
+    expect(llmEngineService.beginPromptPreparation).toHaveBeenCalledTimes(2);
+    expect(releases).toHaveLength(2);
+    expect(releases.every((release) => release.mock.calls.length === 1)).toBe(true);
+    expect(events.indexOf('reserve')).toBeLessThan(events.indexOf('attachment_check'));
+  });
+
+  it('does not append after prompt semantics change during draft validation', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Existing prompt');
+    });
+
+    const thread = useChatStore.getState().getActiveThread()!;
+    const messageIdsBefore = thread.messages.map((message) => message.id);
+    let resolveAttachmentCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAttachmentCheck = () => resolve({ exists: true, size: 123_456 });
+    }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    let sendPromise: Promise<void> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Must not be appended', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalled();
+    });
+
+    act(() => {
+      useChatStore.getState().updateThreadPresetSnapshot(
+        thread.id,
+        'preset-during-attachment-validation',
+        {
+          id: 'preset-during-attachment-validation',
+          name: 'Changed during validation',
+          systemPrompt: 'Use the new semantics.',
+        },
+      );
+    });
+    await act(async () => {
+      resolveAttachmentCheck?.();
+      try {
+        await sendPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'action_failed' }));
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id))
+      .toEqual(messageIdsBefore);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['engine unload', { status: EngineStatus.IDLE, activeModelId: undefined }, 'context-generation:2\u0001none'],
+    ['model replacement', { status: EngineStatus.READY, activeModelId: 'author/model-q8' }, 'context-generation:2\u0001author/model-q8'],
+  ])('does not append after %s during draft validation', async (
+    _label,
+    nextEngineState,
+    nextContextIdentity,
+  ) => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Existing prompt');
+    });
+
+    const thread = useChatStore.getState().getActiveThread()!;
+    const messageIdsBefore = thread.messages.map((message) => message.id);
+    let resolveAttachmentCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAttachmentCheck = () => resolve({ exists: true, size: 123_456 });
+    }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    let sendPromise: Promise<void> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Must not survive engine replacement', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalled();
+    });
+
+    (llmEngineService.getState as jest.Mock).mockReturnValue(nextEngineState);
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(nextContextIdentity);
+    await act(async () => {
+      resolveAttachmentCheck?.();
+      try {
+        await sendPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'engine_not_ready' }));
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id))
+      .toEqual(messageIdsBefore);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
   });
 
   it('rejects a latest attachment removed after tokenization before native completion starts', async () => {
@@ -1549,13 +1713,6 @@ describe('useChatSession', () => {
         localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
       }),
     ]);
-    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
-      call.messages.some((message: any) => message.content === 'Continue with text only')
-      && call.messages.flatMap((message: any) => [
-        ...(message.mediaPaths ?? []),
-        ...(message.attachments ?? []),
-      ]).length > 0
-    ))).toBe(true);
     expect(useChatStore.getState().getActiveThread()?.messages[0]?.attachments).toBe(persistedAttachmentBefore);
   });
 
@@ -1630,10 +1787,6 @@ describe('useChatSession', () => {
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-1.jpg');
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-2.jpg');
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-3.jpg');
-    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
-      call.messages.some((message: any) => message.content === 'Use these latest images')
-      && call.messages.flatMap((message: any) => message.mediaPaths ?? []).join('|') === mediaPaths.join('|')
-    ))).toBe(true);
     expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments).toHaveLength(3);
   });
 
@@ -5071,6 +5224,77 @@ describe('useChatSession', () => {
       role: 'assistant',
       state: 'stopped',
     }));
+  });
+
+  it('rejects a prepared request when prompt semantics change under a fixed clock', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Initial prompt');
+    });
+
+    const thread = useChatStore.getState().getActiveThread()!;
+    const fixedNow = thread.updatedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    let resolvePromptCount: ((tokens: number) => void) | undefined;
+    let regenerationPromise: Promise<boolean> | undefined;
+    let thrown: unknown;
+    exactPromptTokenCache.clear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+
+        return new Promise<number>((resolve) => {
+          resolvePromptCount = resolve;
+        });
+      },
+    );
+
+    try {
+      await act(async () => {
+        regenerationPromise = getSession()?.regenerateLastResponse();
+      });
+      await waitFor(() => {
+        expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(
+          ([call]) => call.chatBlocking !== false,
+        )).toBe(true);
+      });
+
+      const revisionBeforeMutation = useChatStore.getState().inferenceRevision;
+      act(() => {
+        useChatStore.getState().updateThreadPresetSnapshot(
+          thread.id,
+          'preset-fixed-clock-change',
+          {
+            id: 'preset-fixed-clock-change',
+            name: 'Fixed clock change',
+            systemPrompt: 'Prompt semantics changed while tokenization was pending.',
+          },
+        );
+      });
+      expect(useChatStore.getState().getThread(thread.id)?.updatedAt).toBe(fixedNow);
+      expect(useChatStore.getState().inferenceRevision).toBeGreaterThan(revisionBeforeMutation);
+
+      await act(async () => {
+        resolvePromptCount?.(32);
+        try {
+          await regenerationPromise;
+        } catch (error) {
+          thrown = error;
+        }
+      });
+    } finally {
+      resolvePromptCount?.(32);
+      nowSpy.mockRestore();
+    }
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'action_failed' }));
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(useChatStore.getState().getThread(thread.id)?.presetSnapshot.systemPrompt).toBe(
+      'Prompt semantics changed while tokenization was pending.',
+    );
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {

@@ -114,6 +114,7 @@ import {
   ContextOperationRunner,
   waitForPromiseWithTimeout,
   type ContextOperationDrainResult,
+  type ContextOperationPriority,
 } from './LLMEngineService.runners';
 import { performanceMonitor } from './PerformanceMonitor';
 import {
@@ -301,7 +302,7 @@ type MultimodalReadinessRefreshRequest = {
 };
 
 type InternalLoadOptions = {
-  readonly requeueReadinessRefreshOnActiveCompletion?: MultimodalReadinessRefreshRequest;
+  readonly backgroundReadinessRefresh?: MultimodalReadinessRefreshRequest;
 };
 
 function normalizeMediaPaths(paths: readonly string[] | undefined): string[] {
@@ -1298,11 +1299,14 @@ class LLMEngineService {
       return true;
     }
 
-    if (!this.activeCompletionPromise) {
+    if (
+      !this.activeCompletionPromise
+      && this.contextOperationRunner.isAdmissionAllowed('passive_readiness')
+    ) {
       return false;
     }
 
-    this.queueMultimodalReadinessRefreshAfterCompletion(refresh);
+    this.queueMultimodalReadinessRefresh(refresh);
     return true;
   }
 
@@ -1490,12 +1494,23 @@ class LLMEngineService {
 
   private trackContextOperation<T>(
     operation: (cancellation: ContextOperationCancellationToken) => Promise<T>,
-    options: { readonly chatBlocking?: boolean } = {},
+    options: {
+      readonly chatBlocking?: boolean;
+      readonly priority?: ContextOperationPriority;
+      readonly startTimeoutMs?: number;
+      readonly createStartTimeoutError?: () => unknown;
+    } = {},
   ): Promise<T> {
     return this.contextOperationRunner.track(
       operation,
       () => new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
-      options,
+      {
+        ...options,
+        createPriorityPreemptionError: () => new AppError(
+          'engine_busy',
+          CONTEXT_OPERATION_STOP_MESSAGE,
+        ),
+      },
     );
   }
 
@@ -1509,6 +1524,17 @@ class LLMEngineService {
 
   public hasActiveChatBlockingContextOperation(): boolean {
     return this.contextOperationRunner.hasActiveChatBlocking();
+  }
+
+  public beginPromptPreparation(): () => void {
+    if (this.isUnloading) {
+      throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
+    }
+
+    return this.contextOperationRunner.reserve(
+      'prompt_preparation',
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+    );
   }
 
   public async cancelActiveContextOperations(options: { timeoutMs?: number; detachOnTimeout?: boolean } = {}): Promise<ContextOperationDrainResult> {
@@ -1557,35 +1583,6 @@ class LLMEngineService {
     return error instanceof AppError
       && error.code === 'engine_busy'
       && error.message === CONTEXT_OPERATION_STOP_MESSAGE;
-  }
-
-  private async preemptBackgroundContextOperationsForCompletion(): Promise<void> {
-    this.contextOperationRunner.cancelActive(
-      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
-      { chatBlocking: false },
-    );
-    const drainResult = await this.waitForActiveContextOperations({
-      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
-    });
-
-    if (drainResult === 'timed_out') {
-      throw new AppError('engine_busy', CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE);
-    }
-  }
-
-  private async preemptBackgroundContextOperationsForPromptCount(): Promise<void> {
-    this.contextOperationRunner.cancelActive(
-      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
-      { chatBlocking: false },
-    );
-    const drainResult = await this.waitForActiveContextOperations({
-      timeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
-      chatBlocking: false,
-    });
-
-    if (drainResult === 'timed_out') {
-      throw new AppError('engine_busy', CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE);
-    }
   }
 
   private waitForUnloadPromise(
@@ -2661,7 +2658,7 @@ class LLMEngineService {
             useGpu: this.actualGpuAccelerated === true,
           };
           if (this.activeCompletionPromise) {
-            this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
+            this.queueMultimodalReadinessRefresh(refreshRequest);
           } else {
             try {
               await this.trackContextOperation(async (cancellation) => {
@@ -2679,13 +2676,13 @@ class LLMEngineService {
                   cancellation,
                   projectorResolutionOperationCache,
                 );
-              }, { chatBlocking: false });
+              }, { chatBlocking: false, priority: 'user_action' });
             } catch (error) {
               if (!this.isContextOperationStopError(error) || !this.activeCompletionPromise) {
                 throw error;
               }
 
-              this.queueMultimodalReadinessRefreshAfterCompletion(refreshRequest);
+              this.queueMultimodalReadinessRefresh(refreshRequest);
             }
           }
         }
@@ -2722,7 +2719,7 @@ class LLMEngineService {
         // Deferred readiness reloads are background work; they must not preempt a chat that
         // starts after the reload decision but before this load path reaches unloadInternal().
         if (this.shouldAbortBackgroundReadinessReloadBeforeUnload(
-          internalOptions.requeueReadinessRefreshOnActiveCompletion,
+          internalOptions.backgroundReadinessRefresh,
         )) {
           return;
         }
@@ -2807,6 +2804,11 @@ class LLMEngineService {
       throw error;
     }
 
+    const releaseCompletionReservation = this.contextOperationRunner.reserve(
+      'completion',
+      new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+    );
+
     let resolveCompletion!: (result: NativeCompletionResult) => void;
     let rejectCompletion!: (error: unknown) => void;
     const completionTask = new Promise<NativeCompletionResult>((resolve, reject) => {
@@ -2821,8 +2823,6 @@ class LLMEngineService {
         if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
           await this.initPromise;
         }
-
-        await this.preemptBackgroundContextOperationsForCompletion();
 
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
         const activeSpeculativeConfig = this.activeSpeculativeDecoding
@@ -2886,6 +2886,13 @@ class LLMEngineService {
             cancellation.throwIfCancelled();
             this.assertCompletionNotInterrupted(interruptGeneration);
             return resolution;
+          }, {
+            priority: 'completion',
+            startTimeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+            createStartTimeoutError: () => new AppError(
+              'engine_busy',
+              CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE,
+            ),
           });
           strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
@@ -3060,6 +3067,7 @@ class LLMEngineService {
         }
         rejectCompletion(error);
       } finally {
+        releaseCompletionReservation();
         this.completionRunner.clearIfActive(completionTask);
         if (this.pendingMultimodalReadinessRefresh) {
           this.schedulePendingMultimodalReadinessRefresh();
@@ -3251,7 +3259,7 @@ class LLMEngineService {
           });
         }
       }
-    }, { chatBlocking: false }).catch((error) => {
+    }, { chatBlocking: false, priority: 'passive_readiness' }).catch((error) => {
       if (this.isContextOperationStopError(error) || this.isUnloading) {
         return;
       }
@@ -3328,10 +3336,6 @@ class LLMEngineService {
       ? mediaAwareMessages
       : mediaAwareMessages.map(withoutMediaPaths);
 
-    if (chatBlocking !== false) {
-      await this.preemptBackgroundContextOperationsForPromptCount();
-    }
-
     return this.trackContextOperation(async (cancellation) => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
         await this.initPromise;
@@ -3399,7 +3403,19 @@ class LLMEngineService {
 
         throw error;
       }
-    }, { chatBlocking });
+    }, {
+      chatBlocking,
+      priority: chatBlocking === false ? 'background_probe' : 'prompt_preparation',
+      ...(chatBlocking === false
+        ? null
+        : {
+            startTimeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
+            createStartTimeoutError: () => new AppError(
+              'engine_busy',
+              CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE,
+            ),
+          }),
+    });
   }
 
   public async stopCompletion(): Promise<void> {
@@ -3528,7 +3544,7 @@ class LLMEngineService {
       return;
     }
 
-    this.queueMultimodalReadinessRefreshAfterCompletion({
+    this.queueMultimodalReadinessRefresh({
       modelId,
       context: this.context,
       useGpu: this.actualGpuAccelerated === true,
@@ -4017,7 +4033,7 @@ class LLMEngineService {
     return error instanceof LlamaRuntimeFeatureUnavailableError ? 'unsupported' : 'failed';
   }
 
-  private queueMultimodalReadinessRefreshAfterCompletion(refresh: MultimodalReadinessRefreshRequest): void {
+  private queueMultimodalReadinessRefresh(refresh: MultimodalReadinessRefreshRequest): void {
     this.pendingMultimodalReadinessRefresh = refresh;
     const activeCompletion = this.activeCompletionPromise;
     if (activeCompletion) {
@@ -4035,7 +4051,9 @@ class LLMEngineService {
       return;
     }
 
-    const refreshPromise = this.runPendingMultimodalReadinessRefresh();
+    const refreshPromise = this.contextOperationRunner
+      .waitUntilAllowed('passive_readiness')
+      .then(() => this.runPendingMultimodalReadinessRefresh());
     this.pendingMultimodalReadinessRefreshPromise = refreshPromise;
     void refreshPromise.finally(() => {
       if (this.pendingMultimodalReadinessRefreshPromise === refreshPromise) {
@@ -4066,7 +4084,7 @@ class LLMEngineService {
 
       if (this.activeCompletionPromise) {
         if (this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
-          this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+          this.queueMultimodalReadinessRefresh(pendingRefresh);
         }
         return;
       }
@@ -4080,14 +4098,14 @@ class LLMEngineService {
           pendingRefresh.modelId,
           undefined,
           projectorResolutionOperationCache,
-          { requeueReadinessRefreshOnActiveCompletion: pendingRefresh },
+          { backgroundReadinessRefresh: pendingRefresh },
         );
         return;
       }
 
       await this.trackContextOperation(async (cancellation) => {
         if (this.activeCompletionPromise) {
-          this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+          this.queueMultimodalReadinessRefresh(pendingRefresh);
           return;
         }
 
@@ -4103,10 +4121,12 @@ class LLMEngineService {
           cancellation,
           projectorResolutionOperationCache,
         );
-      }, { chatBlocking: false });
+      }, { chatBlocking: false, priority: 'passive_readiness' });
     } catch (error) {
-      if (this.isContextOperationStopError(error) && this.activeCompletionPromise) {
-        this.queueMultimodalReadinessRefreshAfterCompletion(pendingRefresh);
+      if (this.isContextOperationStopError(error)) {
+        if (this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
+          this.queueMultimodalReadinessRefresh(pendingRefresh);
+        }
         return;
       }
 
@@ -6676,6 +6696,7 @@ class LLMEngineService {
       loadProgress: 0,
       lastError: undefined,
     });
+    this.contextOperationRunner.clearReservations('prompt_preparation');
 
     try {
       const activeCompletion = this.activeCompletionDriverPromise;

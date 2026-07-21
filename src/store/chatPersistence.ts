@@ -928,7 +928,7 @@ export function parseChatThreadRecord(
   raw: string | null | undefined,
   expectedThreadId?: string,
 ): ChatPersistenceReadResult<ChatThreadRecord> {
-  const parsed = parseJsonObject(raw);
+  const parsed = parseJsonObject(raw, { recordKind: 'thread' });
   if (!parsed.ok) {
     return parsed;
   }

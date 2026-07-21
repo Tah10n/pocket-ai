@@ -13,6 +13,7 @@ import { getSendableDraftImageAttachments } from '../../src/utils/chatImageAttac
 import type { AttachmentDraft } from '../../src/types/multimodal';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
+import { getInteractiveWorkRevision } from '../../src/utils/idleTask';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -104,6 +105,30 @@ describe('ChatInputBar', () => {
     });
 
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
+  });
+
+  it('reports real composer typing and attachment selection as interactive work', () => {
+    const onAttachImages = jest.fn();
+    const { getByLabelText, getByPlaceholderText, getByTestId } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={onAttachImages}
+        imageAttachmentsEnabled
+      />,
+    );
+    const revisionBeforeTyping = getInteractiveWorkRevision();
+
+    fireEvent.changeText(getByPlaceholderText('chat.inputPlaceholder'), 'Recent typing');
+    const revisionAfterTyping = getInteractiveWorkRevision();
+    expect(revisionAfterTyping).toBeGreaterThan(revisionBeforeTyping);
+
+    fireEvent.press(getByTestId('chat-attach-menu-button'));
+    const revisionAfterMenuOpen = getInteractiveWorkRevision();
+    expect(revisionAfterMenuOpen).toBeGreaterThan(revisionAfterTyping);
+
+    fireEvent.press(getByLabelText('chat.attachments.attachImageAccessibilityLabel'));
+    expect(onAttachImages).toHaveBeenCalledTimes(1);
+    expect(getInteractiveWorkRevision()).toBeGreaterThan(revisionAfterMenuOpen);
   });
 
   it('clears the input immediately while an async send is still pending', async () => {

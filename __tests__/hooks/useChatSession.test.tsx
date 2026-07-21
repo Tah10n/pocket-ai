@@ -19,6 +19,7 @@ import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
   LONG_STREAM_PATCH_INTERVAL_MS,
+  resetActiveChatGenerationRuntimeForPrivateStorageReset,
   resetSharedGenerationStateForTests,
   resolveAssistantStreamPatchInterval,
   resolvePresetSnapshot,
@@ -2820,10 +2821,24 @@ describe('useChatSession', () => {
       lastUpdatedAt: 1,
     });
 
+    let shouldFailFinalization = true;
+    const failingFinalize = jest.fn((
+      threadId: string,
+      messageId: string,
+      finalization: any,
+    ) => {
+      if (shouldFailFinalization) {
+        shouldFailFinalization = false;
+        return {
+          status: 'persistence_failed' as const,
+          error: privateStorageError,
+          recovery: { threadId, messageId, finalization },
+        };
+      }
+      return originalFinalizeAssistantTurn(threadId, messageId, finalization);
+    });
     useChatStore.setState({
-      finalizeAssistantTurn: jest.fn(() => {
-        throw privateStorageError;
-      }),
+      finalizeAssistantTurn: failingFinalize,
     } as Partial<ReturnType<typeof useChatStore.getState>>);
 
     try {
@@ -2853,10 +2868,75 @@ describe('useChatSession', () => {
 
       expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
       expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('assistant turn stop'),
-        privateStorageError,
+        '[ChatSession] Terminal persistence remains pending while private storage is blocked',
+        { errorName: privateStorageError.name },
       );
+
+      await act(async () => {
+        resolveCompletion?.();
+        await expect(sendPromise).resolves.toBeUndefined();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await stopActiveChatGenerationForPrivateStorageBlocked();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(2);
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    } finally {
+      await act(async () => {
+        useChatStore.setState({
+          finalizeAssistantTurn: originalFinalizeAssistantTurn,
+        } as Partial<ReturnType<typeof useChatStore.getState>>);
+      });
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('discards a retained terminal recovery controller after confirmed private-storage reset', async () => {
+    let resolveCompletion: (() => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      () => new Promise((resolve) => {
+        resolveCompletion = () => resolve({ text: 'Completion settled after reset' });
+      }),
+    );
+
+    const originalFinalizeAssistantTurn = useChatStore.getState().finalizeAssistantTurn;
+    const terminalError = new Error('private storage remains blocked');
+    const failingFinalize = jest.fn((
+      threadId: string,
+      messageId: string,
+      finalization: any,
+    ) => ({
+      status: 'persistence_failed' as const,
+      error: terminalError,
+      recovery: { threadId, messageId, finalization },
+    }));
+    useChatStore.setState({ finalizeAssistantTurn: failingFinalize });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const getSession = renderHookHarness();
+      let sendPromise: Promise<void> | undefined;
+      await act(async () => {
+        sendPromise = getSession()?.appendUserMessage('Keep terminal recovery pending');
+      });
+      await waitFor(() => {
+        expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+      });
+
+      await act(async () => {
+        await stopActiveChatGenerationForPrivateStorageBlocked();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
+
+      resetActiveChatGenerationRuntimeForPrivateStorageReset();
+      await act(async () => {
+        await stopActiveChatGenerationForPrivateStorageBlocked();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
 
       await act(async () => {
         resolveCompletion?.();
@@ -2864,9 +2944,7 @@ describe('useChatSession', () => {
       });
     } finally {
       await act(async () => {
-        useChatStore.setState({
-          finalizeAssistantTurn: originalFinalizeAssistantTurn,
-        } as Partial<ReturnType<typeof useChatStore.getState>>);
+        useChatStore.setState({ finalizeAssistantTurn: originalFinalizeAssistantTurn });
       });
       warnSpy.mockRestore();
     }
@@ -4461,7 +4539,7 @@ describe('useChatSession', () => {
       });
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('background chat persistence'),
-        privateStorageError,
+        { errorName: privateStorageError.name },
       );
     } finally {
       appStorage.set = originalSet;
@@ -4515,6 +4593,175 @@ describe('useChatSession', () => {
     });
 
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('keeps foreground orphan thread-status persistence failures controllable with Stop', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-foreground-orphan-status': {
+            id: 'thread-foreground-orphan-status',
+            title: 'Recovered thread',
+            modelId: 'author/model-q4',
+            presetId: 'preset-1',
+            presetSnapshot: {
+              id: 'preset-1',
+              name: 'Helpful Assistant',
+              systemPrompt: 'Be concise.',
+            },
+            paramsSnapshot: {
+              temperature: 0.7,
+              topP: 0.9,
+              maxTokens: 1024,
+              seed: null,
+            },
+            messages: [{
+              id: 'assistant-foreground-orphan-status',
+              role: 'assistant',
+              content: 'Recovered partial',
+              createdAt: 1,
+              state: 'stopped',
+            }],
+            createdAt: 1,
+            updatedAt: 1,
+            status: 'generating',
+          },
+        },
+        activeThreadId: 'thread-foreground-orphan-status',
+      });
+    });
+
+    const terminalError = new Error('simulated orphan thread-status write failure');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const finalizeThreadStatus = useChatStore.getState().finalizeThreadStatus;
+    const failingFinalizeThreadStatus = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        throw terminalError;
+      })
+      .mockImplementation(finalizeThreadStatus);
+    useChatStore.setState({ finalizeThreadStatus: failingFinalizeThreadStatus });
+
+    try {
+      await act(async () => {
+        expect(() => {
+          emitAppState('background');
+          emitAppState('active');
+        }).not.toThrow();
+      });
+
+      expect(failingFinalizeThreadStatus).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatSession] Foreground orphan recovery is waiting for private storage',
+        { errorName: terminalError.name },
+      );
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+
+      await act(async () => {
+        await getSession()?.stopGeneration();
+      });
+
+      expect(failingFinalizeThreadStatus).toHaveBeenCalledTimes(2);
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    } finally {
+      await act(async () => {
+        useChatStore.setState({ finalizeThreadStatus });
+      });
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps foreground orphan recovery controllable when its terminal write fails', async () => {
+    const getSession = renderHookHarness();
+    let threadId = '';
+    let assistantMessageId = '';
+    await act(async () => {
+      threadId = useChatStore.getState().createThread({
+        modelId: 'author/model-q4',
+        presetId: 'preset-1',
+        presetSnapshot: {
+          id: 'preset-1',
+          name: 'Helpful Assistant',
+          systemPrompt: 'Be concise.',
+        },
+        paramsSnapshot: {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          seed: null,
+        },
+      });
+      useChatStore.getState().setActiveThread(threadId);
+      assistantMessageId = useChatStore.getState().createAssistantPlaceholder(threadId);
+      useChatStore.getState().patchAssistantMessage(threadId, assistantMessageId, {
+        content: 'Recoverable foreground partial',
+      });
+      flushPendingChatPersistenceWrites('background');
+      resetSharedGenerationStateForTests();
+    });
+
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const terminalError = new Error('simulated foreground terminal write failure');
+    let didFail = false;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    appStorage.set = jest.fn(function failForegroundTerminalWrite(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (
+        !didFail
+        && key === getChatThreadStorageKey(threadId)
+        && typeof value === 'string'
+        && value.includes('Recoverable foreground partial')
+      ) {
+        didFail = true;
+        throw terminalError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      await act(async () => {
+        expect(() => {
+          emitAppState('background');
+          emitAppState('active');
+        }).not.toThrow();
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(didFail).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[ChatSession] Foreground recovery is waiting for private storage',
+      { errorName: terminalError.name },
+    );
+    warnSpy.mockRestore();
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantMessageId,
+        content: 'Recoverable foreground partial',
+        state: 'streaming',
+      }),
+    );
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantMessageId,
+        content: 'Recoverable foreground partial',
+        state: 'stopped',
+      }),
+    );
   });
 
   it('does not stop a live generation when another hook instance returns to foreground', async () => {
@@ -5243,9 +5490,20 @@ describe('useChatSession', () => {
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallCount);
   });
 
-  it('does not finalize a branch twice when the terminal durable write fails', async () => {
+  it('retains an exact recovery controller when a terminal durable write fails', async () => {
     const getSession = renderHookHarness();
     const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    performanceMonitor.clear();
+    const completionNotificationSpy = jest
+      .spyOn(notificationService, 'sendCompletionNotification')
+      .mockResolvedValue(undefined);
+    const errorNotificationSpy = jest
+      .spyOn(notificationService, 'sendInferenceErrorNotification')
+      .mockResolvedValue(undefined);
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
         onToken?.('Recoverable terminal-write partial');
@@ -5281,6 +5539,11 @@ describe('useChatSession', () => {
     }
 
     expect(thrown).toBeTruthy();
+    expect(performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'chat.generation.outcome',
+    ).map((event) => event.meta?.outcome)).toEqual(['persistence_failed']);
+    expect(completionNotificationSpy).not.toHaveBeenCalled();
+    expect(errorNotificationSpy).not.toHaveBeenCalled();
     expect(didFailTerminalWrite).toBe(true);
     expect(threadWriteValues.filter((value) => (
       value.includes('Recoverable terminal-write partial')
@@ -5302,6 +5565,42 @@ describe('useChatSession', () => {
         branchReplacement: expect.any(Object),
       }),
     });
+
+    const retryThreadWrites: string[] = [];
+    appStorage.set = jest.fn(function captureRecoveryWrite(this: unknown, key: string, value: unknown) {
+      if (key === getChatThreadStorageKey(prepared.threadId) && typeof value === 'string') {
+        retryThreadWrites.push(value);
+      }
+      return originalSet.call(this, key, value);
+    });
+    try {
+      await act(async () => {
+        await getSession()?.stopGeneration();
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(retryThreadWrites.filter((value) => (
+      value.includes('Recoverable terminal-write partial')
+    ))).toHaveLength(1);
+    expect(useChatStore.getState().getThread(prepared.threadId)?.status).toBe('idle');
+    expect(useChatStore.getState().getThread(prepared.threadId)?.messages).toEqual([
+      expect.objectContaining({ id: prepared.targetUserMessageId }),
+      expect.objectContaining({
+        content: 'Recoverable terminal-write partial',
+        state: 'complete',
+      }),
+    ]);
+    expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    expect(performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'chat.generation.outcome',
+    ).map((event) => event.meta?.outcome)).toEqual(['persistence_failed']);
+    expect(completionNotificationSpy).not.toHaveBeenCalled();
+    expect(errorNotificationSpy).not.toHaveBeenCalled();
   });
 
   it('interrupts branch generation and preserves recovery state when stop persistence fails', async () => {
@@ -5359,7 +5658,10 @@ describe('useChatSession', () => {
         }
       });
 
-      expect(stopError).toBe(terminalWriteError);
+      expect(stopError).toEqual(expect.objectContaining({
+        name: 'AppError',
+        cause: terminalWriteError,
+      }));
       expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
       expect(terminalThreadWrites.filter((value) => (
         value.includes('Recoverable failed-stop partial')
@@ -5396,6 +5698,26 @@ describe('useChatSession', () => {
         prepared.durableRecord,
       );
       expect(readChatStreamingProgressRecord(storage, prepared.threadId).ok).toBe(true);
+
+      await act(async () => {
+        await getSession()?.stopGeneration();
+      });
+
+      expect(terminalThreadWrites.filter((value) => (
+        value.includes('Recoverable failed-stop partial')
+      ))).toHaveLength(2);
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages).toEqual([
+        expect.objectContaining({ id: prepared.targetUserMessageId }),
+        expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          state: 'stopped',
+        }),
+      ]);
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+      expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
     } finally {
       appStorage.set = originalSet;
       resolveCompletion?.();

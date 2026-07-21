@@ -489,7 +489,7 @@ describe('useTruncationTracking', () => {
       expect(useChatStore.getState().finalizeAssistantTurn(durableThread.id, assistantId!, {
         outcome: 'success',
         content: 'Actual branch terminal response',
-      })).toBe(true);
+      })).toEqual({ status: 'committed' });
     });
 
     await waitFor(() => {

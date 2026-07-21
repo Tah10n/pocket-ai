@@ -8,6 +8,7 @@ import { useDownloadStore } from '../../src/store/downloadStore';
 import { useModelsStore } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
+import * as chatSession from '../../src/hooks/useChatSession';
 
 jest.mock('expo-secure-store', () => ({
   isAvailableAsync: jest.fn(async () => true),
@@ -115,6 +116,30 @@ describe('PrivateStorageRecovery', () => {
     expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
     expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).not.toHaveBeenCalled();
     expect(registry.hasAnyDownloadedModels()).toBe(true);
+  });
+
+  it('continues a confirmed reset after chat stop and discards the retained generation controller', async () => {
+    const stopChatSpy = jest
+      .spyOn(chatSession, 'stopActiveChatGenerationForPrivateStorageBlocked')
+      .mockResolvedValue(undefined);
+    const resetChatRuntimeSpy = jest
+      .spyOn(chatSession, 'resetActiveChatGenerationRuntimeForPrivateStorageReset')
+      .mockImplementation(() => undefined);
+    const resetStorageSpy = jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation');
+
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).resolves.toEqual(
+      expect.objectContaining({ status: 'ready' }),
+    );
+
+    expect(stopChatSpy).toHaveBeenCalledTimes(1);
+    expect(resetStorageSpy).toHaveBeenCalledTimes(1);
+    expect(resetChatRuntimeSpy).toHaveBeenCalledTimes(1);
+    expect(stopChatSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      resetStorageSpy.mock.invocationCallOrder[0],
+    );
+    expect(resetStorageSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      resetChatRuntimeSpy.mock.invocationCallOrder[0],
+    );
   });
 
   it('returns blocked reset health when chat attachment cleanup fails after private storage reset', async () => {

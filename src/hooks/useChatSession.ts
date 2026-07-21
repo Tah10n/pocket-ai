@@ -34,6 +34,7 @@ import type { AttachmentDraft, MultimodalReadinessState } from '../types/multimo
 import {
   flushPendingChatPersistenceWrites,
   useChatStore,
+  type AssistantTurnCommitResult,
   type AssistantTurnFinalization,
 } from '../store/chatStore';
 import {
@@ -134,13 +135,17 @@ type PromptTokenFormattingParams = {
   add_generation_prompt?: boolean;
 };
 
+type TerminalCommitResult =
+  | { status: 'committed' | 'restored_without_write' | 'stale' }
+  | { status: 'persistence_failed'; error: unknown };
+
 interface ActiveGenerationState {
   threadId: string;
   messageId: string;
   stopRequested: boolean;
   nativeCompletionStarted: boolean;
   flushPendingAssistantPatch?: () => void;
-  finalizeAssistantTurn?: () => boolean;
+  commitTerminalState?: () => TerminalCommitResult;
 }
 
 export type AppendUserMessageOptions = {
@@ -428,6 +433,23 @@ function getSanitizedErrorDetails(error: unknown): { errorName: string } | { err
     : { errorType: typeof error };
 }
 
+function isAssistantTurnSettled(result: TerminalCommitResult): boolean {
+  return result.status === 'committed' || result.status === 'restored_without_write';
+}
+
+function createAssistantTurnPersistenceError(
+  result: Extract<TerminalCommitResult, { status: 'persistence_failed' }>,
+): AppError {
+  return new AppError(
+    'action_failed',
+    'The response is waiting to be saved. Restore private storage, then tap Stop to retry.',
+    {
+      cause: result.error,
+      details: getSanitizedErrorDetails(result.error),
+    },
+  );
+}
+
 function isMatchingGeneration(threadId: string, messageId: string) {
   return (
     sharedGenerationState.current?.threadId === threadId &&
@@ -468,12 +490,18 @@ export function shouldFlushAssistantStreamPatchOnBoundary(content: string) {
 }
 
 export function resetSharedGenerationStateForTests() {
+  resetActiveChatGenerationRuntimeForPrivateStorageReset();
+}
+
+export function resetActiveChatGenerationRuntimeForPrivateStorageReset(): void {
   sharedGenerationState.current = null;
 }
 
 function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope: string): boolean {
   if (error instanceof PrivateStorageUnavailableError) {
-    console.warn(`[ChatSession] Skipped persisting ${scope} while private storage is blocked`, error);
+    console.warn(`[ChatSession] Skipped persisting ${scope} while private storage is blocked`, {
+      ...getSanitizedErrorDetails(error),
+    });
     return true;
   }
 
@@ -483,20 +511,24 @@ function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope:
 export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promise<void> {
   const generation = sharedGenerationState.current;
   let deferredStateError: unknown = null;
+  let settlementResult: TerminalCommitResult | null = null;
 
   if (generation) {
     generation.stopRequested = true;
 
     const chatState = useChatStore.getState();
     try {
-      if (generation.finalizeAssistantTurn) {
-        generation.finalizeAssistantTurn();
-      } else {
-        chatState.finalizeAssistantTurn(
+      settlementResult = generation.commitTerminalState
+        ? generation.commitTerminalState()
+        : chatState.finalizeAssistantTurn(
           generation.threadId,
           generation.messageId,
           { outcome: 'stopped' },
         );
+      if (settlementResult.status === 'persistence_failed') {
+        console.warn('[ChatSession] Terminal persistence remains pending while private storage is blocked', {
+          ...getSanitizedErrorDetails(settlementResult.error),
+        });
       }
     } catch (error) {
       if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'assistant turn stop')) {
@@ -515,6 +547,16 @@ export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promis
     if (backgroundTaskService.isTaskActive('inference')) {
       await backgroundTaskService.stopBackgroundTask('inference');
     }
+  }
+
+  if (
+    generation
+    && sharedGenerationState.current === generation
+    && settlementResult
+    && settlementResult.status !== 'persistence_failed'
+    && !generation.nativeCompletionStarted
+  ) {
+    sharedGenerationState.current = null;
   }
 
   if (deferredStateError) {
@@ -1651,9 +1693,47 @@ export const useChatSession = () => {
 
         const assistantMessage = activeThread.messages.at(-1);
         if (assistantMessage?.role === 'assistant' && assistantMessage.state === 'streaming') {
-          state.finalizeAssistantTurn(activeThread.id, assistantMessage.id, { outcome: 'stopped' });
+          const recoveryFinalization = { outcome: 'stopped' } as const;
+          const retryRecoveryCommit = () => useChatStore.getState().finalizeAssistantTurn(
+            activeThread.id,
+            assistantMessage.id,
+            recoveryFinalization,
+          );
+          const result = retryRecoveryCommit();
+          if (result.status === 'persistence_failed') {
+            sharedGenerationState.current = {
+              threadId: activeThread.id,
+              messageId: assistantMessage.id,
+              stopRequested: true,
+              nativeCompletionStarted: false,
+              commitTerminalState: retryRecoveryCommit,
+            };
+            console.warn('[ChatSession] Foreground recovery is waiting for private storage', {
+              ...getSanitizedErrorDetails(result.error),
+            });
+          }
         } else {
-          state.finalizeThreadStatus(activeThread.id, 'stopped');
+          const retryThreadStatusCommit = (): TerminalCommitResult => {
+            try {
+              useChatStore.getState().finalizeThreadStatus(activeThread.id, 'stopped');
+              return { status: 'committed' };
+            } catch (error) {
+              return { status: 'persistence_failed', error };
+            }
+          };
+          const result = retryThreadStatusCommit();
+          if (result.status === 'persistence_failed') {
+            sharedGenerationState.current = {
+              threadId: activeThread.id,
+              messageId: assistantMessage?.id ?? activeThread.id,
+              stopRequested: true,
+              nativeCompletionStarted: false,
+              commitTerminalState: retryThreadStatusCommit,
+            };
+            console.warn('[ChatSession] Foreground orphan recovery is waiting for private storage', {
+              ...getSanitizedErrorDetails(result.error),
+            });
+          }
         }
       }
     });
@@ -1729,6 +1809,7 @@ export const useChatSession = () => {
     let hasFlushedFirstAssistantPatch = false;
     let lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
     let latestRawAssistantSnapshot = '';
+    let hasRecordedCompletionStats = false;
 
     const applyCumulativePresentationSnapshot = (
       snapshot: string,
@@ -1747,7 +1828,13 @@ export const useChatSession = () => {
       presentationSnapshotSource ??= 'raw';
     };
 
-    const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
+    const recordCompletionStats = (
+      outcome: 'success' | 'stopped' | 'error' | 'persistence_failed' | 'stale',
+    ) => {
+      if (hasRecordedCompletionStats) {
+        return;
+      }
+      hasRecordedCompletionStats = true;
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
 
@@ -1815,31 +1902,60 @@ export const useChatSession = () => {
       }
     };
 
-    let terminalFinalizationAttempted = false;
+    const terminalSettlement: { result: AssistantTurnCommitResult | null } = { result: null };
+    let pendingTerminalFinalization: AssistantTurnFinalization | null = null;
     const finalizeBufferedAssistantTurn = (
       finalization: AssistantTurnFinalization,
       options?: { allowStopped?: boolean },
-    ) => {
+    ): AssistantTurnCommitResult => {
       cancelScheduledAssistantPatch();
+      if (terminalSettlement.result && terminalSettlement.result.status !== 'persistence_failed') {
+        return terminalSettlement.result;
+      }
       if (!canMutateAssistantMessage(options)) {
-        return false;
+        terminalSettlement.result = { status: 'stale' };
+        return terminalSettlement.result;
       }
 
-      const elapsedSec = (Date.now() - startTime) / 1000;
-      const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
-      const presentation = presentationParser.getPresentation();
-      const bufferedThoughtContent = presentation.thoughtContent.length > 0
-        ? presentation.thoughtContent
-        : null;
-      terminalFinalizationAttempted = true;
-      return finalizeAssistantTurn(threadId, assistantMessageId, {
-        ...finalization,
-        content: finalization.content ?? presentation.finalContent,
-        thoughtContent: finalization.thoughtContent === undefined
-          ? bufferedThoughtContent
-          : finalization.thoughtContent,
-        tokensPerSec: finalization.tokensPerSec ?? tokensPerSec,
-      });
+      if (!pendingTerminalFinalization) {
+        const elapsedSec = (Date.now() - startTime) / 1000;
+        const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+        const presentation = presentationParser.getPresentation();
+        const bufferedThoughtContent = presentation.thoughtContent.length > 0
+          ? presentation.thoughtContent
+          : null;
+        pendingTerminalFinalization = {
+          ...finalization,
+          content: finalization.content ?? presentation.finalContent,
+          thoughtContent: finalization.thoughtContent === undefined
+            ? bufferedThoughtContent
+            : finalization.thoughtContent,
+          tokensPerSec: finalization.tokensPerSec ?? tokensPerSec,
+        };
+      }
+
+      terminalSettlement.result = finalizeAssistantTurn(
+        threadId,
+        assistantMessageId,
+        pendingTerminalFinalization,
+      );
+      return terminalSettlement.result;
+    };
+
+    const resolveTerminalCommitError = (result: AssistantTurnCommitResult): AppError | null => {
+      if (result.status === 'persistence_failed') {
+        recordCompletionStats('persistence_failed');
+        return createAssistantTurnPersistenceError(result);
+      }
+      if (result.status === 'stale') {
+        recordCompletionStats('stale');
+        return new AppError(
+          'action_failed',
+          'The response was not saved because the conversation changed. Try again.',
+        );
+      }
+
+      return null;
     };
 
     const scheduleAssistantPatch = (options?: { sentenceBoundary?: boolean }) => {
@@ -1887,7 +2003,7 @@ export const useChatSession = () => {
         ? { allowStopped: true, includeStreamingState: false }
         : undefined);
     };
-    generationState.finalizeAssistantTurn = () => finalizeBufferedAssistantTurn(
+    generationState.commitTerminalState = () => finalizeBufferedAssistantTurn(
       { outcome: 'stopped' },
       { allowStopped: true },
     );
@@ -1939,8 +2055,16 @@ export const useChatSession = () => {
 
         try {
           generationState.stopRequested = true;
-          finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
-          sendOutcomeNotificationOnce('interrupted');
+          const result = finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
+          }
         } finally {
           void (async () => {
             if (generationState.nativeCompletionStarted) {
@@ -2305,12 +2429,16 @@ export const useChatSession = () => {
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          if (!terminalFinalizationAttempted) {
-            finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
           }
-          recordCompletionStats('stopped');
-
-          sendOutcomeNotificationOnce('interrupted');
         }
         return;
       }
@@ -2422,15 +2550,20 @@ export const useChatSession = () => {
           });
         },
       });
+      generationState.nativeCompletionStarted = false;
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          if (!terminalFinalizationAttempted) {
-            finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
           }
-          recordCompletionStats('stopped');
-
-          sendOutcomeNotificationOnce('interrupted');
         }
         return;
       }
@@ -2442,7 +2575,7 @@ export const useChatSession = () => {
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
-      finalizeBufferedAssistantTurn({
+      const successResult = finalizeBufferedAssistantTurn({
         outcome: 'success',
         content: resolveVisibleAssistantContentFromCandidates(
           '',
@@ -2454,34 +2587,49 @@ export const useChatSession = () => {
         thoughtContent: finalThoughtContent.length > 0 ? finalThoughtContent : null,
         inferenceMetrics: completionTelemetry ?? undefined,
       });
+      const successCommitError = resolveTerminalCommitError(successResult);
+      if (successCommitError) {
+        throw successCommitError;
+      }
       recordCompletionStats('success');
 
       if (AppState.currentState !== 'active') {
         void notificationService.sendCompletionNotification('inference', { threadId });
       }
     } catch (error) {
+      generationState.nativeCompletionStarted = false;
       endPromptPreparationSpan?.(generationState.stopRequested ? 'cancelled' : 'error');
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          if (!terminalFinalizationAttempted) {
-            finalizeBufferedAssistantTurn({ outcome: 'stopped' }, { allowStopped: true });
+          const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
           }
-          recordCompletionStats('stopped');
-
-          sendOutcomeNotificationOnce('interrupted');
         }
         return;
+      }
+
+      if (terminalSettlement.result && !isAssistantTurnSettled(terminalSettlement.result)) {
+        throw resolveTerminalCommitError(terminalSettlement.result) ?? error;
       }
 
       const message = resolvePersistedAssistantErrorMessage(error);
       const userFacingError = resolveUserFacingGenerationError(error, message);
 
-      if (!terminalFinalizationAttempted) {
-        finalizeBufferedAssistantTurn({
+      const errorResult = finalizeBufferedAssistantTurn({
           outcome: 'error',
           errorCode: 'generation_failed',
           errorMessage: message,
-        });
+      });
+      const errorCommitError = resolveTerminalCommitError(errorResult);
+      if (errorCommitError) {
+        throw errorCommitError;
       }
       recordCompletionStats('error');
 
@@ -2497,7 +2645,8 @@ export const useChatSession = () => {
       unsubscribeExpiration = null;
 
       const wasCurrentGeneration = isMatchingGeneration(threadId, assistantMessageId);
-      if (wasCurrentGeneration) {
+      const shouldRetainRecoveryController = terminalSettlement.result?.status === 'persistence_failed';
+      if (wasCurrentGeneration && !shouldRetainRecoveryController) {
         sharedGenerationState.current = null;
       }
 
@@ -2691,6 +2840,7 @@ export const useChatSession = () => {
     generation.stopRequested = true;
     let firstStopError: unknown;
     let hasStopError = false;
+    let settlementResult: TerminalCommitResult | null = null;
     const captureFirstStopError = (error: unknown) => {
       if (!hasStopError) {
         firstStopError = error;
@@ -2699,14 +2849,15 @@ export const useChatSession = () => {
     };
 
     try {
-      if (generation.finalizeAssistantTurn) {
-        generation.finalizeAssistantTurn();
-      } else {
-        useChatStore.getState().finalizeAssistantTurn(
+      settlementResult = generation.commitTerminalState
+        ? generation.commitTerminalState()
+        : useChatStore.getState().finalizeAssistantTurn(
           generation.threadId,
           generation.messageId,
           { outcome: 'stopped' },
         );
+      if (settlementResult.status === 'persistence_failed') {
+        captureFirstStopError(createAssistantTurnPersistenceError(settlementResult));
       }
     } catch (error) {
       captureFirstStopError(error);
@@ -2734,6 +2885,15 @@ export const useChatSession = () => {
       }
     } catch (error) {
       captureFirstStopError(error);
+    }
+
+    if (
+      sharedGenerationState.current === generation
+      && settlementResult
+      && settlementResult.status !== 'persistence_failed'
+      && !generation.nativeCompletionStarted
+    ) {
+      sharedGenerationState.current = null;
     }
 
     if (hasStopError) {

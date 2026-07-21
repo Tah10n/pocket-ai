@@ -137,6 +137,20 @@ export type AssistantTurnFinalization =
       errorMessage: string;
     });
 
+export type AssistantTurnCommitResult =
+  | { status: 'committed' }
+  | { status: 'restored_without_write' }
+  | { status: 'stale' }
+  | {
+      status: 'persistence_failed';
+      error: unknown;
+      recovery: {
+        threadId: string;
+        messageId: string;
+        finalization: AssistantTurnFinalization;
+      };
+    };
+
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
@@ -155,14 +169,14 @@ interface ChatStoreState {
     threadId: string,
     messageId: string,
     finalization: AssistantTurnFinalization,
-  ) => boolean;
-  stopAssistantMessage: (threadId: string, messageId: string) => void;
+  ) => AssistantTurnCommitResult;
+  stopAssistantMessage: (threadId: string, messageId: string) => AssistantTurnCommitResult;
   finalizeAssistantMessage: (
     threadId: string,
     messageId: string,
     content: string,
     thoughtContent?: string | null,
-  ) => void;
+  ) => AssistantTurnCommitResult;
   deleteThread: (threadId: string) => void;
   renameThread: (threadId: string, title: string) => boolean;
   deleteMessageBranch: (threadId: string, messageId: string) => boolean;
@@ -170,7 +184,7 @@ interface ChatStoreState {
     threadId: string,
     messageId: string,
     updates: AssistantMessagePatch,
-  ) => void;
+  ) => AssistantTurnCommitResult | undefined;
   replaceLastAssistantMessage: (threadId: string) => string | null;
   replaceBranchFromUserMessage: (
     threadId: string,
@@ -1498,13 +1512,19 @@ function rollbackFailedChatPersistenceMutation(
   previous: ChatStoreSnapshot,
   next: ChatStoreSnapshot,
   previousPersistenceIndex: ReturnType<typeof readChatPersistenceIndex>,
+  previousDurableThreadIdentities: ReadonlyMap<
+    string,
+    { persistedAt: number; commitRevision?: number }
+  >,
 ): void {
   const rollbackErrors: unknown[] = [];
-  const attemptRollbackStep = (operation: () => void) => {
+  const attemptRollbackStep = (operation: () => void): boolean => {
     try {
       operation();
+      return true;
     } catch (error) {
       rollbackErrors.push(error);
+      return false;
     }
   };
 
@@ -1521,29 +1541,36 @@ function rollbackFailedChatPersistenceMutation(
       const previousThread = previous.threads[threadId];
       const candidateRuntime = previousThread
         ? transientAssistantRuntimes.get(previousThread.id)
-        : undefined;
-      const branchRuntime = candidateRuntime?.mode.kind === 'replace_branch'
+        : null;
+      const runtime = candidateRuntime
         && candidateRuntime.sourceThread === previousThread
-        && candidateRuntime.durableMessages === previousThread.messages
+        && candidateRuntime.durableMessages === previousThread?.messages
         ? candidateRuntime
         : null;
-      const branchBaseIdentity = branchRuntime?.mode.kind === 'replace_branch'
-        ? branchRuntime.mode.baseThreadIdentity
+      const branchBaseIdentity = runtime?.mode.kind === 'replace_branch'
+        ? runtime.mode.baseThreadIdentity
         : null;
-      attemptRollbackStep(() => {
-        if (previousThread) {
-          writeChatThreadRecordForMutation(storage, previousThread, branchBaseIdentity
+      const previousPersistedThread = runtime?.durableThread ?? previousThread;
+      const previousDurableIdentity = previousDurableThreadIdentities.get(threadId)
+        ?? (branchBaseIdentity
+          ? {
+              persistedAt: branchBaseIdentity.durablePersistedAt,
+              commitRevision: branchBaseIdentity.commitRevision,
+            }
+          : undefined);
+      const didRestorePersistedThread = attemptRollbackStep(() => {
+        if (previousPersistedThread) {
+          writeChatThreadRecordForMutation(storage, previousPersistedThread, previousDurableIdentity
             ? {
-                persistedAt: branchBaseIdentity.durablePersistedAt,
-                commitRevision: branchBaseIdentity.commitRevision,
+                persistedAt: previousDurableIdentity.persistedAt,
+                commitRevision: previousDurableIdentity.commitRevision,
               }
             : undefined);
         } else {
           removeChatThreadRecord(storage, threadId);
         }
       });
-      const runtime = previousThread ? getTransientAssistantRuntime(previousThread) : null;
-      if (previousThread && runtime) {
+      if (didRestorePersistedThread && previousThread && runtime) {
         attemptRollbackStep(() => {
           const progress = createStreamingProgressRecord(previousThread, runtime);
           if (progress && writeChatStreamingProgressRecord(storage, progress)) {
@@ -1555,6 +1582,21 @@ function rollbackFailedChatPersistenceMutation(
       } else {
         chatPersistenceScheduler.cancelThreadWrite(threadId);
       }
+
+      if (previousDurableIdentity) {
+        latestDurableThreadPersistedAtById.set(threadId, previousDurableIdentity.persistedAt);
+        if (previousDurableIdentity.commitRevision == null) {
+          latestDurableThreadCommitRevisionById.delete(threadId);
+        } else {
+          latestDurableThreadCommitRevisionById.set(
+            threadId,
+            previousDurableIdentity.commitRevision,
+          );
+        }
+      } else if (!previousThread) {
+        latestDurableThreadPersistedAtById.delete(threadId);
+        latestDurableThreadCommitRevisionById.delete(threadId);
+      }
     });
 
     attemptRollbackStep(() => {
@@ -1564,7 +1606,9 @@ function rollbackFailedChatPersistenceMutation(
         writeChatPersistenceIndexForSnapshot(storage, previous);
       }
     });
-    attemptRollbackStep(() => removeChatPendingIndexCommit(storage));
+    if (rollbackErrors.length === 0) {
+      attemptRollbackStep(() => removeChatPendingIndexCommit(storage));
+    }
   } catch (error) {
     rollbackErrors.push(error);
   }
@@ -1769,6 +1813,7 @@ type TransientAssistantRuntimeMode =
 interface TransientAssistantRuntime {
   mode: TransientAssistantRuntimeMode;
   messageIndex: number;
+  durableThread: ChatThread;
   durableMessages: ChatMessage[];
   currentMessage: ChatMessage;
   presentationMessages: ChatMessage[];
@@ -1860,7 +1905,9 @@ function createTransientPresentationThread(
 function createTransientAssistantRuntime(
   thread: ChatThread,
   messageId: string,
+  durableThread = thread,
 ): TransientAssistantRuntime | null {
+  ensureCachedDurableThreadPersistenceIdentity(durableThread.id);
   const lastIndex = thread.messages.length - 1;
   if (lastIndex < 0 || !canPatchAssistantMessage(thread.messages, lastIndex)) {
     return null;
@@ -1878,6 +1925,7 @@ function createTransientAssistantRuntime(
       durablePlaceholder,
     },
     messageIndex: lastIndex,
+    durableThread,
     durableMessages: thread.messages,
     currentMessage: durablePlaceholder,
     presentationMessages,
@@ -1895,6 +1943,7 @@ function createTransientReplacementRuntime(
   targetIndex: number,
   replacement: ChatMessage,
 ): TransientAssistantRuntime | null {
+  ensureCachedDurableThreadPersistenceIdentity(thread.id);
   const originalMessage = thread.messages[targetIndex];
   if (
     targetIndex !== thread.messages.length - 1
@@ -1915,6 +1964,7 @@ function createTransientReplacementRuntime(
       originalMessage,
     },
     messageIndex: targetIndex,
+    durableThread: thread,
     durableMessages: thread.messages,
     currentMessage: replacement,
     presentationMessages,
@@ -1964,6 +2014,24 @@ function resolveChatBranchBaseIdentity(
   };
 }
 
+function ensureCachedDurableThreadPersistenceIdentity(threadId: string): void {
+  if (latestDurableThreadPersistedAtById.has(threadId)) {
+    return;
+  }
+
+  const recordResult = readChatThreadRecord(getAppStorage(), threadId);
+  if (!recordResult.ok) {
+    return;
+  }
+
+  latestDurableThreadPersistedAtById.set(threadId, recordResult.value.persistedAt);
+  if (recordResult.value.commitRevision == null) {
+    latestDurableThreadCommitRevisionById.delete(threadId);
+  } else {
+    latestDurableThreadCommitRevisionById.set(threadId, recordResult.value.commitRevision);
+  }
+}
+
 function createTransientBranchReplacementRuntime(
   thread: ChatThread,
   plan: ChatBranchReplacementPlan,
@@ -2000,6 +2068,7 @@ function createTransientBranchReplacementRuntime(
       replacementPlan: plan,
     },
     messageIndex: presentationMessages.length - 1,
+    durableThread: thread,
     durableMessages: thread.messages,
     currentMessage: assistantMessage,
     presentationMessages,
@@ -2144,11 +2213,47 @@ export const useChatStore = create<ChatStoreState>()(
           threads: get().threads,
           activeThreadId: get().activeThreadId,
         };
+        const previousDurableThreadIdentities = new Map<
+          string,
+          { persistedAt: number; commitRevision?: number }
+        >();
+        Object.keys(previous.threads).forEach((threadId) => {
+          if (
+            previous.threads[threadId] === next.threads[threadId]
+            || !latestDurableThreadPersistedAtById.has(threadId)
+          ) {
+            return;
+          }
+
+          previousDurableThreadIdentities.set(threadId, {
+            persistedAt: latestDurableThreadPersistedAtById.get(threadId)!,
+            commitRevision: latestDurableThreadCommitRevisionById.get(threadId),
+          });
+        });
+        const persistenceReason = chatPersistenceContext?.reason ?? 'thread_mutation';
         try {
-          persistChatStoreMutation(previous, next, chatPersistenceContext?.reason ?? 'thread_mutation');
+          persistChatStoreMutation(previous, next, persistenceReason);
+          if (persistenceReason !== 'streaming_patch') {
+            Object.keys(next.threads).forEach((threadId) => {
+              if (previous.threads[threadId] === next.threads[threadId]) {
+                return;
+              }
+
+              const nextThread = next.threads[threadId];
+              const runtime = nextThread ? getTransientAssistantRuntime(nextThread) : null;
+              if (runtime) {
+                runtime.durableThread = nextThread;
+              }
+            });
+          }
           reconcileTransientAssistantRuntimes(next.threads);
         } catch (error) {
-          rollbackFailedChatPersistenceMutation(previous, next, previousPersistenceIndex);
+          rollbackFailedChatPersistenceMutation(
+            previous,
+            next,
+            previousPersistenceIndex,
+            previousDurableThreadIdentities,
+          );
           (set as any)({
             threads: previous.threads,
             activeThreadId: previous.activeThreadId,
@@ -2444,7 +2549,7 @@ export const useChatStore = create<ChatStoreState>()(
         });
         const nextThread = get().threads[threadId];
         if (nextThread) {
-          createTransientAssistantRuntime(nextThread, messageId);
+          createTransientAssistantRuntime(nextThread, messageId, thread ?? nextThread);
         }
         return messageId;
       },
@@ -2466,149 +2571,168 @@ export const useChatStore = create<ChatStoreState>()(
             )
           )
         ) {
-          return false;
+          return { status: 'stale' };
         }
-        assertPrivateStorageWritable();
-        if (!ensureTransientAssistantRuntime(existingThread, messageId)) {
-          return false;
-        }
+        try {
+          assertPrivateStorageWritable();
+          if (!ensureTransientAssistantRuntime(existingThread, messageId)) {
+            return { status: 'stale' };
+          }
 
-        let didFinalize = false;
-        let didDiscardEmptyBranchWithoutDurableMutation = false;
-        withChatPersistenceContext({ reason: 'terminal_state' }, () => {
-          setWhenPrivateStorageWritable((state) => {
-            const durableThread = state.threads[threadId];
-            const runtime = durableThread
-              ? getTransientAssistantRuntime(durableThread, messageId)
-              : null;
-            if (!durableThread || !runtime) {
-              return state;
-            }
-
-            const completedAt = Math.max(
-              Date.now(),
-              durableThread.updatedAt,
-              runtime.currentMessage.createdAt,
-            );
-            const currentMessage = runtime.currentMessage;
-            const terminalThoughtContent = finalization.thoughtContent === undefined
-              ? currentMessage.thoughtContent
-              : finalization.thoughtContent || undefined;
-            const terminalFields = {
-              content: finalization.content ?? currentMessage.content,
-              thoughtContent: terminalThoughtContent,
-              tokensPerSec: finalization.tokensPerSec ?? currentMessage.tokensPerSec,
-              inferenceMetrics: finalization.inferenceMetrics ?? currentMessage.inferenceMetrics,
-            };
-            const hasRecoverableOutput = terminalFields.content.trim().length > 0
-              || (terminalFields.thoughtContent?.trim().length ?? 0) > 0;
-            const shouldRestoreReplacement = (
-              (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
-              && !hasRecoverableOutput
-              && (
-                finalization.outcome !== 'success'
-                || runtime.mode.kind === 'replace_branch'
-              )
-            );
-            if (
-              runtime.mode.kind === 'replace_branch'
-              && shouldRestoreReplacement
-              && runtime.lastProgressPersistedAt
-                <= runtime.mode.baseThreadIdentity.durablePersistedAt
-            ) {
-              transientAssistantRuntimes.delete(threadId);
-              didFinalize = true;
-              didDiscardEmptyBranchWithoutDurableMutation = true;
-              return {
-                streamingRevision: state.streamingRevision + 1,
-              };
-            }
-            const terminalMessage: ChatMessage = finalization.outcome === 'error'
-              ? {
-                  ...currentMessage,
-                  ...terminalFields,
-                  state: 'error',
-                  errorCode: finalization.errorCode,
-                  errorMessage: finalization.errorMessage,
-                }
-              : {
-                  ...currentMessage,
-                  ...terminalFields,
-                  state: finalization.outcome === 'success' ? 'complete' : 'stopped',
-                  errorCode: undefined,
-                  errorMessage: undefined,
-                };
-            const nextStatus: ChatThreadStatus = shouldRestoreReplacement
-              ? durableThread.status
-              : finalization.outcome === 'success'
-                ? 'idle'
-                : finalization.outcome;
-            let nextThread: ChatThread | null;
-            if (runtime.mode.kind === 'replace_branch' && !shouldRestoreReplacement) {
-              if (
-                !isBranchBaseIdentityCurrent(
-                  durableThread,
-                  runtime.mode.baseThreadIdentity,
-                )
-                || !validateChatBranchReplacementPlan(
-                  durableThread,
-                  runtime.mode.replacementPlan,
-                )
-              ) {
+          let didFinalize = false;
+          let didDiscardEmptyBranchWithoutDurableMutation = false;
+          withChatPersistenceContext({ reason: 'terminal_state' }, () => {
+            setWhenPrivateStorageWritable((state) => {
+              const durableThread = state.threads[threadId];
+              const runtime = durableThread
+                ? getTransientAssistantRuntime(durableThread, messageId)
+                : null;
+              if (!durableThread || !runtime) {
                 return state;
               }
 
-              nextThread = materializeChatBranchReplacementThread({
-                thread: durableThread,
-                plan: runtime.mode.replacementPlan,
-                assistantMessage: terminalMessage,
-                status: nextStatus,
-                updatedAt: completedAt,
-                lastGeneratedAt: completedAt,
-              });
-            } else {
-              const nextMessages = durableThread.messages.slice();
-              if (!shouldRestoreReplacement) {
-                nextMessages[runtime.messageIndex] = terminalMessage;
+              const completedAt = Math.max(
+                Date.now(),
+                durableThread.updatedAt,
+                runtime.currentMessage.createdAt,
+              );
+              const currentMessage = runtime.currentMessage;
+              const terminalThoughtContent = finalization.thoughtContent === undefined
+                ? currentMessage.thoughtContent
+                : finalization.thoughtContent || undefined;
+              const terminalFields = {
+                content: finalization.content ?? currentMessage.content,
+                thoughtContent: terminalThoughtContent,
+                tokensPerSec: finalization.tokensPerSec ?? currentMessage.tokensPerSec,
+                inferenceMetrics: finalization.inferenceMetrics ?? currentMessage.inferenceMetrics,
+              };
+              const hasRecoverableOutput = terminalFields.content.trim().length > 0
+                || (terminalFields.thoughtContent?.trim().length ?? 0) > 0;
+              const shouldRestoreReplacement = (
+                (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
+                && !hasRecoverableOutput
+                && (
+                  finalization.outcome !== 'success'
+                  || runtime.mode.kind === 'replace_branch'
+                )
+              );
+              if (
+                runtime.mode.kind === 'replace_branch'
+                && shouldRestoreReplacement
+                && runtime.lastProgressPersistedAt
+                  <= runtime.mode.baseThreadIdentity.durablePersistedAt
+              ) {
+                transientAssistantRuntimes.delete(threadId);
+                didFinalize = true;
+                didDiscardEmptyBranchWithoutDurableMutation = true;
+                return {
+                  streamingRevision: state.streamingRevision + 1,
+                };
               }
-              nextThread = updateThreadMetadata({
-                ...durableThread,
-                messages: nextMessages,
-                status: nextStatus,
-                lastGeneratedAt: completedAt,
-              }, completedAt);
-            }
-            if (!nextThread) {
-              return state;
-            }
+              const terminalMessage: ChatMessage = finalization.outcome === 'error'
+                ? {
+                    ...currentMessage,
+                    ...terminalFields,
+                    state: 'error',
+                    errorCode: finalization.errorCode,
+                    errorMessage: finalization.errorMessage,
+                  }
+                : {
+                    ...currentMessage,
+                    ...terminalFields,
+                    state: finalization.outcome === 'success' ? 'complete' : 'stopped',
+                    errorCode: undefined,
+                    errorMessage: undefined,
+                  };
+              const nextStatus: ChatThreadStatus = shouldRestoreReplacement
+                ? durableThread.status
+                : finalization.outcome === 'success'
+                  ? 'idle'
+                  : finalization.outcome;
+              let nextThread: ChatThread | null;
+              if (runtime.mode.kind === 'replace_branch' && !shouldRestoreReplacement) {
+                if (
+                  !isBranchBaseIdentityCurrent(
+                    durableThread,
+                    runtime.mode.baseThreadIdentity,
+                  )
+                  || !validateChatBranchReplacementPlan(
+                    durableThread,
+                    runtime.mode.replacementPlan,
+                  )
+                ) {
+                  return state;
+                }
 
-            didFinalize = true;
-            return {
-              threads: {
-                ...state.threads,
-                [threadId]: nextThread,
-              },
-            };
+                nextThread = materializeChatBranchReplacementThread({
+                  thread: durableThread,
+                  plan: runtime.mode.replacementPlan,
+                  assistantMessage: terminalMessage,
+                  status: nextStatus,
+                  updatedAt: completedAt,
+                  lastGeneratedAt: completedAt,
+                });
+              } else {
+                const nextMessages = durableThread.messages.slice();
+                if (!shouldRestoreReplacement) {
+                  nextMessages[runtime.messageIndex] = terminalMessage;
+                }
+                nextThread = updateThreadMetadata({
+                  ...durableThread,
+                  messages: nextMessages,
+                  status: nextStatus,
+                  lastGeneratedAt: completedAt,
+                }, completedAt);
+              }
+              if (!nextThread) {
+                return state;
+              }
+
+              didFinalize = true;
+              return {
+                threads: {
+                  ...state.threads,
+                  [threadId]: nextThread,
+                },
+              };
+            });
           });
-        });
 
-        if (didDiscardEmptyBranchWithoutDurableMutation) {
-          chatPersistenceScheduler.cancelThreadWrite(threadId);
-          removeStreamingProgressAfterDurableCommit(getAppStorage(), threadId);
+          if (didDiscardEmptyBranchWithoutDurableMutation) {
+            chatPersistenceScheduler.cancelThreadWrite(threadId);
+            removeStreamingProgressAfterDurableCommit(getAppStorage(), threadId);
+          }
+          if (didFinalize) {
+            incrementChatTurnCounter('chat.turn.finalize');
+            incrementChatTurnCounter('chat.turn.storeMutations');
+          }
+          if (!didFinalize) {
+            return { status: 'stale' };
+          }
+          return {
+            status: didDiscardEmptyBranchWithoutDurableMutation
+              ? 'restored_without_write'
+              : 'committed',
+          };
+        } catch (error) {
+          return {
+            status: 'persistence_failed',
+            error,
+            recovery: {
+              threadId,
+              messageId,
+              finalization,
+            },
+          };
         }
-        if (didFinalize) {
-          incrementChatTurnCounter('chat.turn.finalize');
-          incrementChatTurnCounter('chat.turn.storeMutations');
-        }
-        return didFinalize;
       },
 
       stopAssistantMessage: (threadId, messageId) => {
-        get().finalizeAssistantTurn(threadId, messageId, { outcome: 'stopped' });
+        return get().finalizeAssistantTurn(threadId, messageId, { outcome: 'stopped' });
       },
 
       finalizeAssistantMessage: (threadId, messageId, content, thoughtContent) => {
-        get().finalizeAssistantTurn(threadId, messageId, {
+        return get().finalizeAssistantTurn(threadId, messageId, {
           outcome: 'success',
           content,
           thoughtContent,
@@ -2707,11 +2831,10 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       patchAssistantMessage: (threadId, messageId, updates) => {
-        assertPrivateStorageWritable();
         const isTerminalPatch = updates.state !== undefined && updates.state !== 'streaming';
         if (isTerminalPatch) {
           if (updates.state === 'error') {
-            get().finalizeAssistantTurn(threadId, messageId, {
+            return get().finalizeAssistantTurn(threadId, messageId, {
               outcome: 'error',
               content: updates.content,
               thoughtContent: updates.thoughtContent,
@@ -2720,19 +2843,18 @@ export const useChatStore = create<ChatStoreState>()(
               errorCode: updates.errorCode ?? 'generation_failed',
               errorMessage: updates.errorMessage ?? 'Generation failed',
             });
-            return;
           }
 
-          get().finalizeAssistantTurn(threadId, messageId, {
+          return get().finalizeAssistantTurn(threadId, messageId, {
             outcome: updates.state === 'complete' ? 'success' : 'stopped',
             content: updates.content,
             thoughtContent: updates.thoughtContent,
             tokensPerSec: updates.tokensPerSec,
             inferenceMetrics: updates.inferenceMetrics,
           });
-          return;
         }
 
+        assertPrivateStorageWritable();
         const existingThread = get().threads[threadId];
         if (!existingThread) {
           incrementChatStreamCounter('chat.stream.patch.skipped');

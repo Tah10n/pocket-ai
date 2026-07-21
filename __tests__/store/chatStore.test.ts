@@ -6,6 +6,8 @@ import {
   getThreadInferenceWindow,
   resetChatStoreForPrivateStorageReset,
   useChatStore,
+  type AssistantTurnCommitResult,
+  type AssistantTurnFinalization,
 } from '../../src/store/chatStore';
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
@@ -200,6 +202,84 @@ function seedPersistedChatThread(thread: ChatThread, persistedAt = 100): void {
     activeThreadId: thread.id,
   });
 }
+
+type TerminalPersistenceMode = 'append' | 'replace' | 'replace_branch';
+type TerminalPersistenceOutcome = AssistantTurnFinalization['outcome'];
+
+function prepareTerminalPersistenceCase(
+  mode: TerminalPersistenceMode,
+  suffix: string,
+): {
+  threadId: string;
+  messageId: string;
+  partialContent: string;
+  durableRecordBefore: string;
+} {
+  const threadId = `thread-terminal-matrix-${mode}-${suffix}`;
+  const durableThread = mode === 'append'
+    ? buildThread(threadId, 10)
+    : mode === 'replace'
+      ? buildCompletedRegenerationThread(threadId)
+      : buildTrailingModelSwitchThread(threadId);
+  seedPersistedChatThread(durableThread, 100);
+
+  const messageId = mode === 'append'
+    ? useChatStore.getState().createAssistantPlaceholder(threadId)
+    : mode === 'replace'
+      ? useChatStore.getState().replaceLastAssistantMessage(threadId)!
+      : useChatStore.getState().replaceBranchFromUserMessage(
+          threadId,
+          `${threadId}-user-1`,
+          'Edited terminal matrix prompt',
+        )!;
+  const partialContent = `Recoverable ${mode} ${suffix} partial`;
+  useChatStore.getState().patchAssistantMessage(threadId, messageId, {
+    content: partialContent,
+    thoughtContent: `Reasoning for ${mode} ${suffix}`,
+  });
+  flushPendingChatPersistenceWrites('background');
+
+  return {
+    threadId,
+    messageId,
+    partialContent,
+    durableRecordBefore: storage.getString(getChatThreadStorageKey(threadId))!,
+  };
+}
+
+function buildTerminalPersistenceFinalization(
+  mode: TerminalPersistenceMode,
+  outcome: TerminalPersistenceOutcome,
+): AssistantTurnFinalization {
+  const content = `Final ${mode} ${outcome} output`;
+  if (outcome === 'error') {
+    return {
+      outcome,
+      content,
+      errorCode: 'generation_failed',
+      errorMessage: `Terminal ${mode} failure`,
+    };
+  }
+
+  return { outcome, content };
+}
+
+const TERMINAL_PERSISTENCE_MODES: TerminalPersistenceMode[] = [
+  'append',
+  'replace',
+  'replace_branch',
+];
+const TERMINAL_PERSISTENCE_OUTCOMES: TerminalPersistenceOutcome[] = [
+  'success',
+  'stopped',
+  'error',
+];
+const TERMINAL_TRANSACTION_FAULTS = [
+  'pending_write',
+  'thread_write',
+  'index_write',
+  'pending_remove',
+] as const;
 
 function readPersistedChatIndex() {
   return JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}') as Record<string, unknown>;
@@ -1328,7 +1408,7 @@ describe('chatStore', () => {
       expect(useChatStore.getState().finalizeAssistantTurn(durableThread.id, replacementId, {
         outcome: 'success',
         content: 'Final regenerated answer',
-      })).toBe(true);
+      })).toEqual({ status: 'committed' });
 
       const finalized = useChatStore.getState().getThread(durableThread.id)!;
       expect(mutationCounter.getCount()).toBe(1);
@@ -1390,11 +1470,14 @@ describe('chatStore', () => {
     });
 
     try {
-      expect(() => useChatStore.getState().finalizeAssistantTurn(
+      expect(useChatStore.getState().finalizeAssistantTurn(
         durableThread.id,
         replacementId,
         { outcome: 'success', content: 'Regenerated final that fails' },
-      )).toThrow(writeError);
+      )).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: writeError,
+      }));
 
       expect(readChatThreadRecord(storage, durableThread.id)).toEqual({
         ok: true,
@@ -1450,7 +1533,7 @@ describe('chatStore', () => {
       durableThread.id,
       replacementId,
       finalization,
-    )).toBe(true);
+    )).toEqual({ status: 'committed' });
 
     const restored = useChatStore.getState().getThread(durableThread.id)!;
     expect(restored.status).toBe('idle');
@@ -1476,7 +1559,7 @@ describe('chatStore', () => {
       durableThread.id,
       staleReplacementId,
       { outcome: 'stopped' },
-    )).toBe(true);
+    )).toEqual({ status: 'committed' });
     const currentReplacementId = useChatStore.getState().replaceLastAssistantMessage(durableThread.id)!;
 
     useChatStore.getState().patchAssistantMessage(durableThread.id, staleReplacementId, {
@@ -1486,7 +1569,7 @@ describe('chatStore', () => {
       durableThread.id,
       staleReplacementId,
       { outcome: 'success', content: 'Stale terminal output' },
-    )).toBe(false);
+    )).toEqual({ status: 'stale' });
 
     expect(useChatStore.getState().getThread(durableThread.id)?.messages.at(-1)).toEqual(
       expect.objectContaining({
@@ -1550,7 +1633,7 @@ describe('chatStore', () => {
       durableThread.id,
       replacementId,
       { outcome: 'success', content: 'Late callback after deletion' },
-    )).toBe(false);
+    )).toEqual({ status: 'stale' });
   });
 
   it('replaces a message branch from a selected user turn', () => {
@@ -2529,7 +2612,7 @@ describe('chatStore', () => {
         outcome: 'success',
         content: 'Final regenerated answer',
         inferenceMetrics: telemetry,
-      })).toBe(true);
+      })).toEqual({ status: 'committed' });
 
       expect(mutationCounter.getCount()).toBe(1);
       expect(capture.setKeys.filter((key) => key === getChatThreadStorageKey(thread.id))).toHaveLength(1);
@@ -2576,7 +2659,7 @@ describe('chatStore', () => {
     expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
       outcome: 'success',
       content: 'Completed branch with manual title',
-    })).toBe(true);
+    })).toEqual({ status: 'committed' });
     expect(useChatStore.getState().threads[thread.id]).toEqual(expect.objectContaining({
       title: 'Project Atlas',
       titleSource: 'manual',
@@ -2598,7 +2681,7 @@ describe('chatStore', () => {
     try {
       expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
         outcome: 'stopped',
-      })).toBe(true);
+      })).toEqual({ status: 'restored_without_write' });
       expect(useChatStore.getState().threads[thread.id]).toBe(thread);
       expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id)).toEqual(oldMessageIds);
       expect(useChatStore.getState().getThread(thread.id)?.status).toBe('idle');
@@ -2609,7 +2692,7 @@ describe('chatStore', () => {
       expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
         outcome: 'success',
         content: 'Late output',
-      })).toBe(false);
+      })).toEqual({ status: 'stale' });
     } finally {
       capture.restore();
     }
@@ -2632,7 +2715,7 @@ describe('chatStore', () => {
         outcome: 'error',
         errorCode: 'generation_failed',
         errorMessage: 'No output',
-      })).toBe(true);
+      })).toEqual({ status: 'restored_without_write' });
       expect(useChatStore.getState().threads[thread.id]).toBe(thread);
       expect(useChatStore.getState().getThread(thread.id)?.messages).toBe(oldMessages);
       expect(useChatStore.getState().getThread(thread.id)?.messages.some(
@@ -2663,7 +2746,7 @@ describe('chatStore', () => {
         outcome: 'success',
         content: '   ',
         thoughtContent: null,
-      })).toBe(true);
+      })).toEqual({ status: 'restored_without_write' });
       expect(useChatStore.getState().threads[thread.id]).toBe(thread);
       expect(useChatStore.getState().getThread(thread.id)).toBe(thread);
       expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecord);
@@ -2706,7 +2789,7 @@ describe('chatStore', () => {
       outcome: 'stopped',
       content: '',
       thoughtContent: null,
-    })).toBe(true);
+    })).toEqual({ status: 'committed' });
 
     expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual(thread.messages);
     expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
@@ -2740,7 +2823,7 @@ describe('chatStore', () => {
 
     expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
       outcome: 'stopped',
-    })).toBe(true);
+    })).toEqual({ status: 'committed' });
     expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual([
       expect.objectContaining({ content: 'Edited stopped prompt' }),
       expect.objectContaining({
@@ -2768,7 +2851,7 @@ describe('chatStore', () => {
       outcome: 'error',
       errorCode: 'generation_failed',
       errorMessage: 'Completion failed after output',
-    })).toBe(true);
+    })).toEqual({ status: 'committed' });
     expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(expect.objectContaining({
       id: assistantId,
       content: 'Partial errored answer',
@@ -2808,10 +2891,13 @@ describe('chatStore', () => {
     });
 
     try {
-      expect(() => useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
         outcome: 'success',
         content: 'Terminal output that cannot commit',
-      })).toThrow('simulated branch terminal write failure');
+      })).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: expect.objectContaining({ message: 'simulated branch terminal write failure' }),
+      }));
     } finally {
       appStorage.set = originalSet;
     }
@@ -2951,7 +3037,7 @@ describe('chatStore', () => {
     expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
       outcome: 'success',
       content: 'Late terminal must not land',
-    })).toBe(false);
+    })).toEqual({ status: 'stale' });
     expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id)).toEqual(oldIds);
   });
 
@@ -2991,7 +3077,7 @@ describe('chatStore', () => {
     expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
       outcome: 'success',
       content: 'Late output',
-    })).toBe(false);
+    })).toEqual({ status: 'stale' });
     expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
       ([localUri]) => localUri === removedAttachment.localUri,
     )).toHaveLength(1);
@@ -3031,7 +3117,7 @@ describe('chatStore', () => {
     });
     expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
       outcome: 'stopped',
-    })).toBe(false);
+    })).toEqual({ status: 'stale' });
     expect((FileSystem.deleteAsync as jest.Mock).mock.calls.filter(
       ([localUri]) => localUri === removedAttachment.localUri,
     )).toHaveLength(1);
@@ -6824,7 +6910,7 @@ describe('chatStore', () => {
           tokensPerSec: 8.25,
           inferenceMetrics: telemetry,
         },
-      )).toBe(true);
+      )).toEqual({ status: 'committed' });
 
       const finalizedThread = useChatStore.getState().threads[streamingThread.id];
       expect(mutationCounter.getCount()).toBe(1);
@@ -6867,12 +6953,12 @@ describe('chatStore', () => {
         streamingThread.id,
         messageId,
         { outcome: 'stopped', content: 'Duplicate terminal callback' },
-      )).toBe(false);
+      )).toEqual({ status: 'stale' });
       expect(useChatStore.getState().finalizeAssistantTurn(
         streamingThread.id,
         'stale-assistant-id',
         { outcome: 'error', errorCode: 'stale', errorMessage: 'Stale callback' },
-      )).toBe(false);
+      )).toEqual({ status: 'stale' });
 
       const countersAfterDuplicates = performanceMonitor.snapshot().counters;
       expect(mutationCounter.getCount()).toBe(1);
@@ -6958,7 +7044,7 @@ describe('chatStore', () => {
         thoughtContent: null,
         inferenceMetrics: telemetry,
       },
-    )).toBe(true);
+    )).toEqual({ status: 'committed' });
 
     expect(useChatStore.getState().getThread(streamingThread.id)?.messages.at(-1)).toEqual(
       expect.objectContaining({
@@ -7034,7 +7120,7 @@ describe('chatStore', () => {
             { outcome },
           );
 
-      expect(didFinalize).toBe(true);
+      expect(didFinalize).toEqual({ status: 'committed' });
       expect(useChatStore.getState().getThread(streamingThread.id)?.messages.at(-1)).toEqual(
         expect.objectContaining({
           content: 'Partial visible answer',
@@ -7102,7 +7188,7 @@ describe('chatStore', () => {
       streamingThread.id,
       `assistant-${expectedMessageState}`,
       finalization,
-    )).toBe(true);
+    )).toEqual({ status: 'committed' });
 
     const finalized = useChatStore.getState().threads[streamingThread.id];
     expect(finalized.status).toBe(expectedThreadStatus);
@@ -7112,6 +7198,524 @@ describe('chatStore', () => {
       errorCode: expectedErrorCode,
     }));
   });
+
+  it.each(TERMINAL_PERSISTENCE_MODES.flatMap((mode) => (
+    TERMINAL_PERSISTENCE_OUTCOMES.flatMap((outcome) => (
+      TERMINAL_TRANSACTION_FAULTS.map((fault) => ({ mode, outcome, fault }))
+    ))
+  )))(
+    'returns recoverable failure for $mode $outcome when $fault fails and commits once on retry',
+    ({ mode, outcome, fault }) => {
+      const prepared = prepareTerminalPersistenceCase(mode, `${outcome}-${fault}`);
+      const finalization = buildTerminalPersistenceFinalization(mode, outcome);
+      const appStorage = getAppStorage() as unknown as { set: jest.Mock; remove: jest.Mock };
+      const originalSet = appStorage.set;
+      const originalRemove = appStorage.remove;
+      const writeError = new Error(`simulated ${fault}`);
+      let didFail = false;
+      let result: AssistantTurnCommitResult;
+
+      appStorage.set = jest.fn(function failTerminalSet(this: unknown, key: string, value: unknown) {
+        const shouldFail = !didFail && (
+          (fault === 'pending_write' && key === CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)
+          || (fault === 'thread_write' && key === getChatThreadStorageKey(prepared.threadId))
+          || (fault === 'index_write' && key === CHAT_PERSISTENCE_INDEX_KEY)
+        );
+        if (shouldFail) {
+          didFail = true;
+          throw writeError;
+        }
+        return originalSet.call(this, key, value);
+      });
+      appStorage.remove = jest.fn(function failTerminalRemove(this: unknown, key: string) {
+        if (!didFail && fault === 'pending_remove' && key === CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY) {
+          didFail = true;
+          throw writeError;
+        }
+        return originalRemove.call(this, key);
+      });
+
+      try {
+        result = useChatStore.getState().finalizeAssistantTurn(
+          prepared.threadId,
+          prepared.messageId,
+          finalization,
+        );
+      } finally {
+        appStorage.set = originalSet;
+        appStorage.remove = originalRemove;
+      }
+
+      expect(didFail).toBe(true);
+      expect(result!).toEqual({
+        status: 'persistence_failed',
+        error: writeError,
+        recovery: {
+          threadId: prepared.threadId,
+          messageId: prepared.messageId,
+          finalization,
+        },
+      });
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+        expect.objectContaining({
+          id: prepared.messageId,
+          content: prepared.partialContent,
+          state: 'streaming',
+        }),
+      );
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).not.toContain(
+        `Final ${mode} ${outcome} output`,
+      );
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          messageId: prepared.messageId,
+          content: prepared.partialContent,
+        }),
+      });
+
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        prepared.threadId,
+        prepared.messageId,
+        finalization,
+      )).toEqual({ status: 'committed' });
+      const committed = useChatStore.getState().getThread(prepared.threadId)!;
+      expect(committed.status).toBe(outcome === 'success' ? 'idle' : outcome);
+      expect(committed.messages.filter((message) => message.id === prepared.messageId)).toEqual([
+        expect.objectContaining({
+          content: `Final ${mode} ${outcome} output`,
+          state: outcome === 'success' ? 'complete' : outcome,
+        }),
+      ]);
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        prepared.threadId,
+        prepared.messageId,
+        finalization,
+      )).toEqual({ status: 'stale' });
+    },
+  );
+
+  it.each([
+    { state: 'complete' as const, outcome: 'success' as const, threadStatus: 'idle' as const },
+    { state: 'stopped' as const, outcome: 'stopped' as const, threadStatus: 'stopped' as const },
+    { state: 'error' as const, outcome: 'error' as const, threadStatus: 'error' as const },
+  ])(
+    'forwards recoverable $state failures from the terminal patch compatibility API',
+    ({ state, outcome, threadStatus }) => {
+      const prepared = prepareTerminalPersistenceCase('append', `compatibility-${state}`);
+      const content = `Compatibility ${state} output`;
+      const finalization: AssistantTurnFinalization = outcome === 'error'
+        ? {
+            outcome,
+            content,
+            errorCode: 'compatibility_generation_failed',
+            errorMessage: 'Compatibility generation failed',
+          }
+        : { outcome, content };
+      const updates = state === 'error'
+        ? {
+            state,
+            content,
+            errorCode: finalization.outcome === 'error' ? finalization.errorCode : undefined,
+            errorMessage: finalization.outcome === 'error' ? finalization.errorMessage : undefined,
+          }
+        : { state, content };
+      const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+      const originalSet = appStorage.set;
+      const writeError = new Error(`simulated compatibility ${state} index failure`);
+      let didFail = false;
+      let result: AssistantTurnCommitResult | undefined;
+
+      appStorage.set = jest.fn(function failCompatibilityTerminalIndex(
+        this: unknown,
+        key: string,
+        value: unknown,
+      ) {
+        if (!didFail && key === CHAT_PERSISTENCE_INDEX_KEY) {
+          didFail = true;
+          throw writeError;
+        }
+        return originalSet.call(this, key, value);
+      });
+
+      try {
+        result = useChatStore.getState().patchAssistantMessage(
+          prepared.threadId,
+          prepared.messageId,
+          updates,
+        );
+      } finally {
+        appStorage.set = originalSet;
+      }
+
+      expect(didFail).toBe(true);
+      expect(result).toEqual({
+        status: 'persistence_failed',
+        error: writeError,
+        recovery: {
+          threadId: prepared.threadId,
+          messageId: prepared.messageId,
+          finalization,
+        },
+      });
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+        expect.objectContaining({
+          id: prepared.messageId,
+          content: prepared.partialContent,
+          state: 'streaming',
+        }),
+      );
+
+      expect(useChatStore.getState().patchAssistantMessage(
+        prepared.threadId,
+        prepared.messageId,
+        updates,
+      )).toEqual({ status: 'committed' });
+      expect(useChatStore.getState().getThread(prepared.threadId)).toEqual(expect.objectContaining({
+        status: threadStatus,
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            id: prepared.messageId,
+            content,
+            state,
+          }),
+        ]),
+      }));
+    },
+  );
+
+  it('rolls terminal failures back to the latest concurrent durable thread mutation', () => {
+    const prepared = prepareTerminalPersistenceCase('append', 'concurrent-durable-mutation');
+    expect(useChatStore.getState().renameThread(prepared.threadId, 'Durable manual title'))
+      .toBe(true);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const terminalError = new Error('simulated terminal index failure after rename');
+    let didFail = false;
+    appStorage.set = jest.fn(function failTerminalIndexAfterRename(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (!didFail && key === CHAT_PERSISTENCE_INDEX_KEY) {
+        didFail = true;
+        throw terminalError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        prepared.threadId,
+        prepared.messageId,
+        { outcome: 'success', content: 'Final output after durable rename' },
+      )).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: terminalError,
+      }));
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(didFail).toBe(true);
+    expect(readChatThreadRecord(storage, prepared.threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({
+          title: 'Durable manual title',
+          titleSource: 'manual',
+        }),
+      }),
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      prepared.threadId,
+      prepared.messageId,
+      { outcome: 'success', content: 'Final output after durable rename' },
+    )).toEqual({ status: 'committed' });
+    expect(useChatStore.getState().getThread(prepared.threadId)).toEqual(expect.objectContaining({
+      title: 'Durable manual title',
+      titleSource: 'manual',
+    }));
+  });
+
+  it('preserves the latest concurrent durable metadata across crash recovery after terminal failure', async () => {
+    const prepared = prepareTerminalPersistenceCase('append', 'concurrent-durable-crash');
+    expect(useChatStore.getState().renameThread(prepared.threadId, 'Crash-safe manual title'))
+      .toBe(true);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const terminalError = new Error('simulated terminal index failure before crash');
+    let didFail = false;
+    appStorage.set = jest.fn(function failTerminalIndexBeforeCrash(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (!didFail && key === CHAT_PERSISTENCE_INDEX_KEY) {
+        didFail = true;
+        throw terminalError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        prepared.threadId,
+        prepared.messageId,
+        { outcome: 'success', content: 'Uncommitted terminal output' },
+      )).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: terminalError,
+      }));
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(didFail).toBe(true);
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    const recovered = useChatStore.getState().getThread(prepared.threadId)!;
+    expect(recovered).toEqual(expect.objectContaining({
+      title: 'Crash-safe manual title',
+      titleSource: 'manual',
+      status: 'stopped',
+    }));
+    expect(recovered.messages.filter((message) => message.id === prepared.messageId))
+      .toEqual([
+        expect.objectContaining({
+          content: prepared.partialContent,
+          state: 'stopped',
+        }),
+      ]);
+    expect(JSON.stringify(recovered)).not.toContain('Uncommitted terminal output');
+  });
+
+  it.each(TERMINAL_PERSISTENCE_MODES.flatMap((mode) => (
+    TERMINAL_PERSISTENCE_OUTCOMES.map((outcome) => ({ mode, outcome }))
+  )))(
+    'treats $mode $outcome as committed when only obsolete progress cleanup fails',
+    async ({ mode, outcome }) => {
+      const prepared = prepareTerminalPersistenceCase(mode, `${outcome}-progress-remove`);
+      const finalization = buildTerminalPersistenceFinalization(mode, outcome);
+      const appStorage = getAppStorage() as unknown as { remove: jest.Mock };
+      const originalRemove = appStorage.remove;
+      const cleanupError = new Error('simulated progress cleanup failure');
+      let didFailCleanup = false;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      appStorage.remove = jest.fn(function failProgressCleanup(this: unknown, key: string) {
+        if (!didFailCleanup && key === getChatStreamingProgressStorageKey(prepared.threadId)) {
+          didFailCleanup = true;
+          throw cleanupError;
+        }
+        return originalRemove.call(this, key);
+      });
+
+      try {
+        expect(useChatStore.getState().finalizeAssistantTurn(
+          prepared.threadId,
+          prepared.messageId,
+          finalization,
+        )).toEqual({ status: 'committed' });
+      } finally {
+        appStorage.remove = originalRemove;
+      }
+
+      expect(didFailCleanup).toBe(true);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatPersistence] Failed to remove superseded streaming progress',
+        { errorName: cleanupError.name },
+      );
+      warnSpy.mockRestore();
+      expect(storage.getString(getChatStreamingProgressStorageKey(prepared.threadId))).toBeDefined();
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+
+      const recovered = useChatStore.getState().getThread(prepared.threadId)!;
+      expect(recovered.status).toBe(outcome === 'success' ? 'idle' : outcome);
+      expect(recovered.messages.filter((message) => message.id === prepared.messageId)).toHaveLength(1);
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+    },
+  );
+
+  it.each(TERMINAL_PERSISTENCE_MODES.flatMap((mode) => (
+    TERMINAL_PERSISTENCE_OUTCOMES.flatMap((outcome) => ([
+      { mode, outcome, rollbackFault: 'thread_restore' as const },
+      { mode, outcome, rollbackFault: 'progress_restore' as const },
+    ]))
+  )))(
+    'keeps $mode $outcome retryable when $rollbackFault also fails',
+    ({ mode, outcome, rollbackFault }) => {
+      const prepared = prepareTerminalPersistenceCase(mode, `${outcome}-${rollbackFault}`);
+      const finalization = buildTerminalPersistenceFinalization(mode, outcome);
+      const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+      const originalSet = appStorage.set;
+      const primaryError = new Error('simulated terminal index failure');
+      const rollbackError = new Error(`simulated ${rollbackFault}`);
+      let didFailPrimary = false;
+      let didFailRollback = false;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      appStorage.set = jest.fn(function failTerminalAndRollbackSet(
+        this: unknown,
+        key: string,
+        value: unknown,
+      ) {
+        if (!didFailPrimary && key === CHAT_PERSISTENCE_INDEX_KEY) {
+          didFailPrimary = true;
+          throw primaryError;
+        }
+        const rollbackKey = rollbackFault === 'thread_restore'
+          ? getChatThreadStorageKey(prepared.threadId)
+          : getChatStreamingProgressStorageKey(prepared.threadId);
+        if (didFailPrimary && !didFailRollback && key === rollbackKey) {
+          didFailRollback = true;
+          throw rollbackError;
+        }
+        return originalSet.call(this, key, value);
+      });
+
+      let result: AssistantTurnCommitResult;
+      try {
+        result = useChatStore.getState().finalizeAssistantTurn(
+          prepared.threadId,
+          prepared.messageId,
+          finalization,
+        );
+      } finally {
+        appStorage.set = originalSet;
+      }
+
+      expect(didFailPrimary).toBe(true);
+      expect(didFailRollback).toBe(true);
+      expect(result!).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: primaryError,
+      }));
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatPersistence] Failed to fully roll back failed chat persistence mutation',
+        { errorCount: 1, firstErrorName: rollbackError.name },
+      );
+      warnSpy.mockRestore();
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+        expect.objectContaining({
+          id: prepared.messageId,
+          content: prepared.partialContent,
+          state: 'streaming',
+        }),
+      );
+
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        prepared.threadId,
+        prepared.messageId,
+        finalization,
+      )).toEqual({ status: 'committed' });
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages.filter(
+        (message) => message.id === prepared.messageId,
+      )).toHaveLength(1);
+    },
+  );
+
+  it.each(TERMINAL_PERSISTENCE_MODES.flatMap((mode) => (
+    TERMINAL_PERSISTENCE_OUTCOMES.flatMap((outcome) => ([
+      { mode, outcome, rollbackFault: 'thread_restore' as const },
+      { mode, outcome, rollbackFault: 'progress_restore' as const },
+    ]))
+  )))(
+    'recovers $mode $outcome deterministically after a crash with a $rollbackFault fault',
+    async ({ mode, outcome, rollbackFault }) => {
+      const prepared = prepareTerminalPersistenceCase(
+        mode,
+        `${outcome}-${rollbackFault}-crash`,
+      );
+      const finalization = buildTerminalPersistenceFinalization(mode, outcome);
+      const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+      const originalSet = appStorage.set;
+      const primaryError = new Error('simulated crash terminal index failure');
+      const rollbackError = new Error(`simulated crash ${rollbackFault}`);
+      let didFailPrimary = false;
+      let didFailRollback = false;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      appStorage.set = jest.fn(function failTerminalAndRollbackBeforeCrash(
+        this: unknown,
+        key: string,
+        value: unknown,
+      ) {
+        if (!didFailPrimary && key === CHAT_PERSISTENCE_INDEX_KEY) {
+          didFailPrimary = true;
+          throw primaryError;
+        }
+        const rollbackKey = rollbackFault === 'thread_restore'
+          ? getChatThreadStorageKey(prepared.threadId)
+          : getChatStreamingProgressStorageKey(prepared.threadId);
+        if (didFailPrimary && !didFailRollback && key === rollbackKey) {
+          didFailRollback = true;
+          throw rollbackError;
+        }
+        return originalSet.call(this, key, value);
+      });
+
+      try {
+        expect(useChatStore.getState().finalizeAssistantTurn(
+          prepared.threadId,
+          prepared.messageId,
+          finalization,
+        )).toEqual(expect.objectContaining({
+          status: 'persistence_failed',
+          error: primaryError,
+        }));
+      } finally {
+        appStorage.set = originalSet;
+      }
+
+      expect(didFailPrimary).toBe(true);
+      expect(didFailRollback).toBe(true);
+      expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeDefined();
+      if (rollbackFault === 'thread_restore') {
+        expect(storage.getString(getChatThreadStorageKey(prepared.threadId)))
+          .toContain(`Final ${mode} ${outcome} output`);
+      } else {
+        expect(storage.getString(getChatThreadStorageKey(prepared.threadId)))
+          .toBe(prepared.durableRecordBefore);
+      }
+
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+
+      const recovered = useChatStore.getState().getThread(prepared.threadId)!;
+      const recoveredAssistant = recovered.messages.find(
+        (message) => message.id === prepared.messageId,
+      );
+      expect(recovered.messages.filter((message) => message.id === prepared.messageId))
+        .toHaveLength(1);
+      if (rollbackFault === 'thread_restore') {
+        expect(recovered.status).toBe(outcome === 'success' ? 'idle' : outcome);
+        expect(recoveredAssistant).toEqual(expect.objectContaining({
+          content: `Final ${mode} ${outcome} output`,
+          state: outcome === 'success' ? 'complete' : outcome,
+        }));
+      } else {
+        expect(recovered.status).toBe('stopped');
+        expect(recoveredAssistant).toEqual(expect.objectContaining({
+          content: prepared.partialContent,
+          state: 'stopped',
+        }));
+      }
+      expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+      warnSpy.mockRestore();
+    },
+  );
 
   it('keeps stale and duplicate terminal callbacks as no-ops when private storage is blocked', () => {
     const completedThread = buildThread('thread-terminal-duplicate-blocked', 10);
@@ -7157,7 +7761,7 @@ describe('chatStore', () => {
       completedStreamingThread.id,
       completedMessageId,
       { outcome: 'success', content: 'Completed before storage blocked' },
-    )).toBe(true);
+    )).toEqual({ status: 'committed' });
 
     const blockedError = new Error('private storage blocked');
     const writabilitySpy = jest
@@ -7171,19 +7775,22 @@ describe('chatStore', () => {
         completedStreamingThread.id,
         completedMessageId,
         { outcome: 'stopped' },
-      )).toBe(false);
+      )).toEqual({ status: 'stale' });
       expect(useChatStore.getState().finalizeAssistantTurn(
         replacementStreamingThread.id,
         'assistant-replaced-stale',
         { outcome: 'error', errorCode: 'stale', errorMessage: 'Stale callback' },
-      )).toBe(false);
+      )).toEqual({ status: 'stale' });
       expect(writabilitySpy).not.toHaveBeenCalled();
 
-      expect(() => useChatStore.getState().finalizeAssistantTurn(
+      expect(useChatStore.getState().finalizeAssistantTurn(
         replacementStreamingThread.id,
         currentMessageId,
         { outcome: 'stopped' },
-      )).toThrow(blockedError);
+      )).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: blockedError,
+      }));
       expect(writabilitySpy).toHaveBeenCalledTimes(1);
     } finally {
       writabilitySpy.mockRestore();
@@ -7527,11 +8134,14 @@ describe('chatStore', () => {
     });
 
     try {
-      expect(() => useChatStore.getState().finalizeAssistantMessage(
+      expect(useChatStore.getState().finalizeAssistantMessage(
         thread.id,
         messageId,
         'Final answer that fails',
-      )).toThrow(writeError);
+      )).toEqual(expect.objectContaining({
+        status: 'persistence_failed',
+        error: writeError,
+      }));
     } finally {
       appStorage.set = originalSet;
     }

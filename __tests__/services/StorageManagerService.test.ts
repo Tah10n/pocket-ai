@@ -72,6 +72,8 @@ import { clearChatHistory } from '../../src/services/StorageManagerService';
 import { clearActiveCache } from '../../src/services/StorageManagerService';
 import { cleanupQuarantinedModelFiles } from '../../src/services/StorageManagerService';
 import { getAppStorageMetrics } from '../../src/services/StorageManagerService';
+import { __getStorageManagerDirectorySizeStateForTests } from '../../src/services/StorageManagerService';
+import { __measureStorageManagerDirectorySizeForTests } from '../../src/services/StorageManagerService';
 import { __resetStorageManagerDirectorySizeCacheForTests } from '../../src/services/StorageManagerService';
 import { offloadModel } from '../../src/services/StorageManagerService';
 import { resetAppSettings } from '../../src/services/StorageManagerService';
@@ -935,7 +937,7 @@ describe('StorageManagerService', () => {
       expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
 
       resolveStaleScan(700);
-      await expect(staleMetrics).resolves.toEqual(expect.objectContaining({ cacheBytes: 700 }));
+      await expect(staleMetrics).resolves.toEqual(expect.objectContaining({ cacheBytes: 0 }));
 
       const dedupedFreshMetrics = getAppStorageMetrics();
       expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
@@ -1246,6 +1248,198 @@ describe('StorageManagerService', () => {
     expect(maxActiveStats).toBeLessThanOrEqual(8);
   });
 
+  it('bounds one shared filesystem work queue across concurrent directory scans', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let releaseFileSystemTasks!: () => void;
+    const fileSystemGate = new Promise<void>((resolve) => {
+      releaseFileSystemTasks = resolve;
+    });
+    let activeFileSystemTasks = 0;
+    let maxActiveFileSystemTasks = 0;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async () => {
+      activeFileSystemTasks += 1;
+      maxActiveFileSystemTasks = Math.max(maxActiveFileSystemTasks, activeFileSystemTasks);
+      await fileSystemGate;
+      activeFileSystemTasks -= 1;
+      return { exists: false };
+    });
+    const { limits } = __getStorageManagerDirectorySizeStateForTests();
+    const scanCount = limits.maxConcurrentFileSystemTasks + limits.maxQueuedFileSystemTasks + 12;
+
+    try {
+      const scans = Array.from({ length: scanCount }, (_, index) => (
+        __measureStorageManagerDirectorySizeForTests(`test-shared-queue-${index}/`)
+      ));
+      for (let cycle = 0; cycle < 6; cycle += 1) {
+        await Promise.resolve();
+      }
+
+      expect(__getStorageManagerDirectorySizeStateForTests()).toEqual(expect.objectContaining({
+        activeFileSystemTaskCount: limits.maxConcurrentFileSystemTasks,
+        queuedFileSystemTaskCount: limits.maxQueuedFileSystemTasks,
+      }));
+      expect(maxActiveFileSystemTasks).toBeLessThanOrEqual(limits.maxConcurrentFileSystemTasks);
+
+      releaseFileSystemTasks();
+      await expect(Promise.all(scans)).resolves.toEqual(Array(scanCount).fill(0));
+      expect(__getStorageManagerDirectorySizeStateForTests()).toEqual(expect.objectContaining({
+        activeFileSystemTaskCount: 0,
+        queuedFileSystemTaskCount: 0,
+      }));
+    } finally {
+      releaseFileSystemTasks();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('evicts least-recently-used directory measurements at the cache entry limit', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: false });
+    const { maxCacheEntries } = __getStorageManagerDirectorySizeStateForTests().limits;
+
+    for (let index = 0; index < maxCacheEntries + 2; index += 1) {
+      await __measureStorageManagerDirectorySizeForTests(`test-cache-root-${index}/`);
+    }
+
+    expect(__getStorageManagerDirectorySizeStateForTests().cacheEntryCount).toBe(maxCacheEntries);
+    await __measureStorageManagerDirectorySizeForTests('test-cache-root-0/');
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.filter(
+      ([uri]) => uri === 'test-cache-root-0/',
+    )).toHaveLength(2);
+    expect(__getStorageManagerDirectorySizeStateForTests().cacheEntryCount).toBe(maxCacheEntries);
+  });
+
+  it('falls back safely before inspecting a directory with thousands of sibling entries', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { maxVisitedNodes } = __getStorageManagerDirectorySizeStateForTests().limits;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-pathological-tree/'
+        ? { exists: true, isDirectory: true }
+        : { exists: true, isDirectory: true }
+    ));
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue(
+      Array.from({ length: maxVisitedNodes + 1 }, (_, index) => `nested-${index}`),
+    );
+
+    try {
+      await expect(
+        __measureStorageManagerDirectorySizeForTests('test-pathological-tree/'),
+      ).resolves.toBe(0);
+
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[StorageManagerService] Failed to read directory size',
+        expect.objectContaining({ errorName: 'DirectorySizeTraversalLimitError' }),
+      );
+      expect(__getStorageManagerDirectorySizeStateForTests().cacheEntryCount).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('bounds a deeply nested directory chain with thousands of visited nodes', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { maxVisitedNodes } = __getStorageManagerDirectorySizeStateForTests().limits;
+    let directoryReadCount = 0;
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({
+      exists: true,
+      isDirectory: true,
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async () => {
+      directoryReadCount += 1;
+      return ['d'];
+    });
+
+    try {
+      await expect(
+        __measureStorageManagerDirectorySizeForTests('test-deep-tree/'),
+      ).resolves.toBe(0);
+
+      expect(directoryReadCount).toBe(maxVisitedNodes + 1);
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(maxVisitedNodes + 1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[StorageManagerService] Failed to read directory size',
+        expect.objectContaining({ errorName: 'DirectorySizeTraversalLimitError' }),
+      );
+      expect(__getStorageManagerDirectorySizeStateForTests().cacheEntryCount).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('rejects traversal-shaped children and skips symbolic links during directory scans', async () => {
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-safe-tree/') {
+        return { exists: true, isDirectory: true };
+      }
+      if (uri === 'test-safe-tree/safe.bin') {
+        return { exists: true, isDirectory: false, size: 64 };
+      }
+      if (uri === 'test-safe-tree/link') {
+        return { exists: true, isDirectory: true, isSymbolicLink: true };
+      }
+      throw new Error('Unexpected directory child inspection');
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => (
+      uri === 'test-safe-tree/'
+        ? ['../escape', 'nested/escape', 'safe.bin', 'link']
+        : []
+    ));
+
+    await expect(__measureStorageManagerDirectorySizeForTests('test-safe-tree/')).resolves.toBe(64);
+
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith(expect.stringContaining('escape'));
+    expect(FileSystem.readDirectoryAsync).not.toHaveBeenCalledWith('test-safe-tree/link/');
+  });
+
+  it('does not publish stale directory results after invalidation during traversal', async () => {
+    let resolveStaleEntries!: (entries: string[]) => void;
+    let markStaleReadStarted!: () => void;
+    const staleEntries = new Promise<string[]>((resolve) => {
+      resolveStaleEntries = resolve;
+    });
+    const staleReadStarted = new Promise<void>((resolve) => {
+      markStaleReadStarted = resolve;
+    });
+    let rootReadCount = 0;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-invalidation-tree/') {
+        return { exists: true, isDirectory: true };
+      }
+      if (uri === 'test-invalidation-tree/fresh.bin') {
+        return { exists: true, isDirectory: false, size: 128 };
+      }
+      if (uri === 'test-invalidation-tree/stale.bin') {
+        return { exists: true, isDirectory: false, size: 512 };
+      }
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri !== 'test-invalidation-tree/') {
+        return [];
+      }
+      rootReadCount += 1;
+      if (rootReadCount === 1) {
+        markStaleReadStarted();
+        return staleEntries;
+      }
+      return ['fresh.bin'];
+    });
+
+    const staleMeasurement = __measureStorageManagerDirectorySizeForTests('test-invalidation-tree/');
+    await staleReadStarted;
+    __resetStorageManagerDirectorySizeCacheForTests();
+    const freshMeasurement = __measureStorageManagerDirectorySizeForTests('test-invalidation-tree/');
+    resolveStaleEntries(['stale.bin']);
+
+    await expect(staleMeasurement).resolves.toBe(0);
+    await expect(freshMeasurement).resolves.toBe(128);
+    await expect(
+      __measureStorageManagerDirectorySizeForTests('test-invalidation-tree/'),
+    ).resolves.toBe(128);
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-invalidation-tree/stale.bin');
+    expect(rootReadCount).toBe(2);
+  });
+
   it('reuses a recent cache directory size measurement', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri === 'test-cache/') {
@@ -1319,7 +1513,7 @@ describe('StorageManagerService', () => {
       expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);
 
       resolveOldScan(100);
-      await expect(staleMetrics).resolves.toEqual(expect.objectContaining({ cacheBytes: 100 }));
+      await expect(staleMetrics).resolves.toEqual(expect.objectContaining({ cacheBytes: 0 }));
 
       const dedupedFreshMetrics = getAppStorageMetrics();
       expect(NativeModules.SystemMetrics.getCacheDirectorySize).toHaveBeenCalledTimes(2);

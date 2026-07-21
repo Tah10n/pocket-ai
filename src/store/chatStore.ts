@@ -25,7 +25,9 @@ import {
   chatAttachmentStorageService,
   collectChatAttachmentLocalUrisFromUnknownThreadRecord,
   collectReferencedChatAttachmentLocalUrisFromThreads,
+  type ChatAttachmentFileCleanupResult,
 } from '../services/ChatAttachmentStorageService';
+import { normalizeChatAttachmentLocalUri } from '../utils/chatImageAttachments';
 import {
   CHAT_PERSISTENCE_SCHEMA_VERSION,
   CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
@@ -77,7 +79,9 @@ const FALLBACK_REPETITION_PENALTY = 1;
 const CHAT_STORE_STORAGE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES = 16;
 const UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS = 1_000;
-const UNREFERENCED_ATTACHMENT_CLEANUP_FAILURE_RETRY_LIMIT = 2;
+const UNREFERENCED_ATTACHMENT_CLEANUP_MAX_RETRY_DELAY_MS = 5 * 60 * 1_000;
+const UNREFERENCED_ATTACHMENT_CLEANUP_MAX_FAILURE_COUNT = 32;
+const UNREFERENCED_ATTACHMENT_CLEANUP_MAX_QUEUE_ENTRIES = 256;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_DELETES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_MAX_CANDIDATES = 16;
 const HYDRATION_ATTACHMENT_RECONCILIATION_RETRY_DELAY_MS = 1_000;
@@ -103,10 +107,10 @@ type HydrationAttachmentDirectoryReconciliationRequest = {
   zeroProgressRetryCount: number;
 };
 
-type UnreferencedAttachmentCleanupRequest = {
-  candidateLocalUris: Set<string>;
-  referencedLocalUris: Set<string>;
-  failureRetryCount: number;
+type UnreferencedAttachmentCleanupCandidate = {
+  localUri: string;
+  failureCount: number;
+  nextAttemptAt: number;
 };
 
 interface ChatStoreHydrationResult {
@@ -244,143 +248,291 @@ function createModelSwitchMessage({
 }
 
 let unreferencedAttachmentCleanupInFlight = false;
-let queuedUnreferencedAttachmentCleanupRequest: UnreferencedAttachmentCleanupRequest | null = null;
 let unreferencedAttachmentCleanupRetryTimeout: ReturnType<typeof setTimeout> | null = null;
+let unreferencedAttachmentCleanupRetryAt: number | null = null;
+let unreferencedAttachmentCleanupGeneration = 0;
+const queuedUnreferencedAttachmentCleanupCandidates = new Map<
+  string,
+  UnreferencedAttachmentCleanupCandidate
+>();
+let inFlightUnreferencedAttachmentCleanupCandidates = new Map<
+  string,
+  UnreferencedAttachmentCleanupCandidate
+>();
 
-function mergeUnreferencedAttachmentCleanupRequest(
-  current: UnreferencedAttachmentCleanupRequest | null,
-  next: UnreferencedAttachmentCleanupRequest,
-): UnreferencedAttachmentCleanupRequest {
-  if (!current) {
-    return next;
+function collectNormalizedChatAttachmentLocalUris(localUris: Iterable<string>): Set<string> {
+  const normalizedLocalUris = new Set<string>();
+  for (const localUri of localUris) {
+    const normalizedLocalUri = normalizeChatAttachmentLocalUri(localUri);
+    if (normalizedLocalUri) {
+      normalizedLocalUris.add(normalizedLocalUri);
+    }
   }
-
-  return {
-    candidateLocalUris: new Set([...current.candidateLocalUris, ...next.candidateLocalUris]),
-    referencedLocalUris: new Set([...current.referencedLocalUris, ...next.referencedLocalUris]),
-    failureRetryCount: Math.max(current.failureRetryCount, next.failureRetryCount),
-  };
+  return normalizedLocalUris;
 }
 
-function queueUnreferencedAttachmentCleanup(
-  request: UnreferencedAttachmentCleanupRequest,
-): void {
-  queuedUnreferencedAttachmentCleanupRequest = mergeUnreferencedAttachmentCleanupRequest(
-    queuedUnreferencedAttachmentCleanupRequest,
-    request,
+function clearUnreferencedAttachmentCleanupRetryTimeout(): void {
+  if (unreferencedAttachmentCleanupRetryTimeout !== null) {
+    clearTimeout(unreferencedAttachmentCleanupRetryTimeout);
+  }
+  unreferencedAttachmentCleanupRetryTimeout = null;
+  unreferencedAttachmentCleanupRetryAt = null;
+}
+
+function getUnreferencedAttachmentCleanupRetryDelay(failureCount: number): number {
+  const retryExponent = Math.min(20, Math.max(0, failureCount - 1));
+  return Math.min(
+    UNREFERENCED_ATTACHMENT_CLEANUP_MAX_RETRY_DELAY_MS,
+    UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS * (2 ** retryExponent),
   );
 }
 
-function takeQueuedUnreferencedAttachmentCleanupRequest(): UnreferencedAttachmentCleanupRequest | null {
-  const request = queuedUnreferencedAttachmentCleanupRequest;
-  queuedUnreferencedAttachmentCleanupRequest = null;
-  return request;
+function removeReferencedUnreferencedAttachmentCleanupCandidates(
+  referencedLocalUris: Iterable<string>,
+): void {
+  collectNormalizedChatAttachmentLocalUris(referencedLocalUris)
+    .forEach((localUri) => queuedUnreferencedAttachmentCleanupCandidates.delete(localUri));
 }
 
-function getUnreferencedAttachmentCleanupRetryDelay(failureRetryCount: number): number {
-  return UNREFERENCED_ATTACHMENT_CLEANUP_RETRY_DELAY_MS
-    * (2 ** Math.max(0, failureRetryCount - 1));
+function evictOneUnreferencedAttachmentCleanupCandidate(): boolean {
+  let selectedLocalUri: string | null = null;
+  let selectedCandidate: UnreferencedAttachmentCleanupCandidate | null = null;
+  for (const [localUri, candidate] of queuedUnreferencedAttachmentCleanupCandidates) {
+    if (inFlightUnreferencedAttachmentCleanupCandidates.get(localUri) === candidate) {
+      continue;
+    }
+    if (
+      !selectedCandidate
+      || candidate.failureCount > selectedCandidate.failureCount
+      || (
+        candidate.failureCount === selectedCandidate.failureCount
+        && candidate.nextAttemptAt > selectedCandidate.nextAttemptAt
+      )
+    ) {
+      selectedLocalUri = localUri;
+      selectedCandidate = candidate;
+    }
+  }
+
+  if (!selectedLocalUri) {
+    return false;
+  }
+  queuedUnreferencedAttachmentCleanupCandidates.delete(selectedLocalUri);
+  return true;
 }
 
-function scheduleQueuedUnreferencedAttachmentCleanupRetry(failureRetryCount: number): void {
-  if (unreferencedAttachmentCleanupRetryTimeout !== null) {
+function queueUnreferencedAttachmentCleanupCandidates({
+  candidateLocalUris,
+  referencedLocalUris,
+}: {
+  candidateLocalUris: Iterable<string>;
+  referencedLocalUris: Iterable<string>;
+}): void {
+  const referenced = collectNormalizedChatAttachmentLocalUris(referencedLocalUris);
+  referenced.forEach((localUri) => queuedUnreferencedAttachmentCleanupCandidates.delete(localUri));
+
+  const normalizedCandidates = collectNormalizedChatAttachmentLocalUris(candidateLocalUris);
+  for (const localUri of normalizedCandidates) {
+    if (referenced.has(localUri) || queuedUnreferencedAttachmentCleanupCandidates.has(localUri)) {
+      continue;
+    }
+    const evictedForCapacity = queuedUnreferencedAttachmentCleanupCandidates.size
+      >= UNREFERENCED_ATTACHMENT_CLEANUP_MAX_QUEUE_ENTRIES;
+    if (
+      queuedUnreferencedAttachmentCleanupCandidates.size
+      >= UNREFERENCED_ATTACHMENT_CLEANUP_MAX_QUEUE_ENTRIES
+      && !evictOneUnreferencedAttachmentCleanupCandidate()
+    ) {
+      performanceMonitor.incrementCounter('chat.attachments.cleanupQueueDropped', 1, {
+        reason: 'all_candidates_in_flight',
+      });
+      continue;
+    }
+    if (evictedForCapacity) {
+      performanceMonitor.incrementCounter('chat.attachments.cleanupQueueEvicted', 1, {
+        reason: 'capacity',
+      });
+    }
+    queuedUnreferencedAttachmentCleanupCandidates.set(localUri, {
+      localUri,
+      failureCount: 0,
+      nextAttemptAt: 0,
+    });
+  }
+}
+
+function updateUnreferencedAttachmentCleanupCandidateAfterFailure(
+  candidate: UnreferencedAttachmentCleanupCandidate,
+  now: number,
+): void {
+  if (queuedUnreferencedAttachmentCleanupCandidates.get(candidate.localUri) !== candidate) {
+    return;
+  }
+  const failureCount = Math.min(
+    UNREFERENCED_ATTACHMENT_CLEANUP_MAX_FAILURE_COUNT,
+    candidate.failureCount + 1,
+  );
+  queuedUnreferencedAttachmentCleanupCandidates.set(candidate.localUri, {
+    localUri: candidate.localUri,
+    failureCount,
+    nextAttemptAt: now + getUnreferencedAttachmentCleanupRetryDelay(failureCount),
+  });
+}
+
+function scheduleNextUnreferencedAttachmentCleanup(): void {
+  if (unreferencedAttachmentCleanupInFlight) {
+    return;
+  }
+  if (queuedUnreferencedAttachmentCleanupCandidates.size === 0) {
+    clearUnreferencedAttachmentCleanupRetryTimeout();
     return;
   }
 
+  const now = Date.now();
+  let earliestAttemptAt = Number.POSITIVE_INFINITY;
+  for (const candidate of queuedUnreferencedAttachmentCleanupCandidates.values()) {
+    earliestAttemptAt = Math.min(earliestAttemptAt, candidate.nextAttemptAt);
+  }
+  if (earliestAttemptAt <= now) {
+    clearUnreferencedAttachmentCleanupRetryTimeout();
+    runQueuedUnreferencedAttachmentCleanup();
+    return;
+  }
+
+  if (
+    unreferencedAttachmentCleanupRetryTimeout !== null
+    && unreferencedAttachmentCleanupRetryAt === earliestAttemptAt
+  ) {
+    return;
+  }
+  clearUnreferencedAttachmentCleanupRetryTimeout();
+  unreferencedAttachmentCleanupRetryAt = earliestAttemptAt;
+  const scheduledAttemptAt = earliestAttemptAt;
   unreferencedAttachmentCleanupRetryTimeout = setTimeout(() => {
     unreferencedAttachmentCleanupRetryTimeout = null;
-    runQueuedUnreferencedAttachmentCleanup();
-  }, getUnreferencedAttachmentCleanupRetryDelay(failureRetryCount));
+    unreferencedAttachmentCleanupRetryAt = null;
+    runQueuedUnreferencedAttachmentCleanup(scheduledAttemptAt);
+  }, Math.max(0, earliestAttemptAt - now));
 }
 
-function runQueuedUnreferencedAttachmentCleanup(): void {
-  if (unreferencedAttachmentCleanupInFlight || unreferencedAttachmentCleanupRetryTimeout !== null) {
+function applyUnreferencedAttachmentCleanupResults(
+  attemptedCandidates: ReadonlyMap<string, UnreferencedAttachmentCleanupCandidate>,
+  results: readonly ChatAttachmentFileCleanupResult[],
+): number {
+  const resultByLocalUri = new Map(results.map((result) => [result.localUri, result]));
+  const latestReferencedLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads(
+    useChatStore.getState().threads,
+  );
+  const now = Date.now();
+  let failedCount = 0;
+
+  for (const [localUri, candidate] of attemptedCandidates) {
+    if (queuedUnreferencedAttachmentCleanupCandidates.get(localUri) !== candidate) {
+      continue;
+    }
+    if (latestReferencedLocalUris.has(localUri)) {
+      queuedUnreferencedAttachmentCleanupCandidates.delete(localUri);
+      continue;
+    }
+
+    const status = resultByLocalUri.get(localUri)?.status;
+    if (status === 'deleted' || status === 'referenced') {
+      queuedUnreferencedAttachmentCleanupCandidates.delete(localUri);
+      continue;
+    }
+    if (status === 'deferred') {
+      continue;
+    }
+
+    failedCount += 1;
+    updateUnreferencedAttachmentCleanupCandidateAfterFailure(candidate, now);
+  }
+
+  return failedCount;
+}
+
+function runQueuedUnreferencedAttachmentCleanup(notBefore = Date.now()): void {
+  if (unreferencedAttachmentCleanupInFlight) {
     return;
   }
 
-  const request = takeQueuedUnreferencedAttachmentCleanupRequest();
-  if (!request || request.candidateLocalUris.size === 0) {
+  const now = Math.max(Date.now(), notBefore);
+  const dueCandidates = Array.from(queuedUnreferencedAttachmentCleanupCandidates.values())
+    .filter((candidate) => candidate.nextAttemptAt <= now)
+    .slice(0, UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES);
+  if (dueCandidates.length === 0) {
+    scheduleNextUnreferencedAttachmentCleanup();
     return;
   }
 
+  clearUnreferencedAttachmentCleanupRetryTimeout();
   unreferencedAttachmentCleanupInFlight = true;
-  let retryRequestAfterFailure: UnreferencedAttachmentCleanupRequest | null = null;
+  const cleanupGeneration = unreferencedAttachmentCleanupGeneration;
+  const attemptedCandidates = new Map(
+    dueCandidates.map((candidate) => [candidate.localUri, candidate]),
+  );
+  inFlightUnreferencedAttachmentCleanupCandidates = attemptedCandidates;
 
   void Promise.resolve()
     .then(async () => {
-      const candidates = Array.from(request.candidateLocalUris);
-      const batchCandidates = candidates.slice(0, UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES);
-      const remainingCandidates = candidates.slice(UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES);
+      if (cleanupGeneration !== unreferencedAttachmentCleanupGeneration) {
+        return [];
+      }
       const latestReferencedLocalUris = collectReferencedChatAttachmentLocalUrisFromThreads(
         useChatStore.getState().threads,
       );
-      const referencedLocalUris = new Set(request.referencedLocalUris);
-      // Queued cleanup requests can overlap: an attachment may be referenced in
-      // an older queued request and become a delete candidate in a later one.
-      // Only the latest store state should protect current candidates from
-      // deletion; stale queued references must not keep newly orphaned files.
-      batchCandidates.forEach((localUri) => referencedLocalUris.delete(localUri));
-      latestReferencedLocalUris.forEach((localUri) => referencedLocalUris.add(localUri));
-      const deletableBatchCandidates = batchCandidates.filter(
-        (localUri) => !referencedLocalUris.has(localUri),
-      );
-
-      if (batchCandidates.length > 0) {
-        try {
-          const deletedCount = await chatAttachmentStorageService.deleteUnreferencedAttachmentFiles({
-            candidateLocalUris: batchCandidates,
-            referencedLocalUris,
-            maxDeletes: UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES,
-          });
-          if (deletedCount !== deletableBatchCandidates.length) {
-            retryRequestAfterFailure = {
-              candidateLocalUris: new Set([
-                ...deletableBatchCandidates,
-                ...remainingCandidates,
-              ]),
-              referencedLocalUris: request.referencedLocalUris,
-              failureRetryCount: request.failureRetryCount + 1,
-            };
-            throw new Error('Incomplete unreferenced attachment cleanup');
-          }
-        } catch (error) {
-          retryRequestAfterFailure ??= {
-            candidateLocalUris: new Set([...batchCandidates, ...remainingCandidates]),
-            referencedLocalUris: request.referencedLocalUris,
-            failureRetryCount: request.failureRetryCount + 1,
-          };
-          throw error;
-        }
+      for (const localUri of latestReferencedLocalUris) {
+        queuedUnreferencedAttachmentCleanupCandidates.delete(localUri);
+        attemptedCandidates.delete(localUri);
       }
 
-      if (remainingCandidates.length > 0) {
-        queueUnreferencedAttachmentCleanup({
-          candidateLocalUris: new Set(remainingCandidates),
-          referencedLocalUris: request.referencedLocalUris,
-          failureRetryCount: 0,
+      if (attemptedCandidates.size === 0) {
+        return [];
+      }
+
+      return chatAttachmentStorageService.deleteUnreferencedAttachmentFilesDetailed({
+        candidateLocalUris: Array.from(attemptedCandidates.keys()),
+        referencedLocalUris: latestReferencedLocalUris,
+        getReferencedLocalUris: () => collectReferencedChatAttachmentLocalUrisFromThreads(
+          useChatStore.getState().threads,
+        ),
+        maxDeletes: UNREFERENCED_ATTACHMENT_CLEANUP_MAX_DELETES,
+      });
+    })
+    .then((results) => {
+      if (cleanupGeneration !== unreferencedAttachmentCleanupGeneration) {
+        return;
+      }
+      const failedCount = applyUnreferencedAttachmentCleanupResults(attemptedCandidates, results);
+      if (failedCount > 0) {
+        console.warn('[chatStore] Failed to clean up chat attachments', {
+          errorName: 'AttachmentCleanupIncompleteError',
+          failedCount,
         });
       }
     })
     .catch((error) => {
+      if (cleanupGeneration !== unreferencedAttachmentCleanupGeneration) {
+        return;
+      }
+      removeReferencedUnreferencedAttachmentCleanupCandidates(
+        collectReferencedChatAttachmentLocalUrisFromThreads(useChatStore.getState().threads),
+      );
+      const failureTimestamp = Date.now();
+      attemptedCandidates.forEach((candidate) => (
+        updateUnreferencedAttachmentCleanupCandidateAfterFailure(candidate, failureTimestamp)
+      ));
       console.warn('[chatStore] Failed to clean up chat attachments', {
         errorName: error instanceof Error ? error.name : typeof error,
       });
     })
     .finally(() => {
-      unreferencedAttachmentCleanupInFlight = false;
-      if (
-        retryRequestAfterFailure?.candidateLocalUris.size
-        && retryRequestAfterFailure.failureRetryCount
-          <= UNREFERENCED_ATTACHMENT_CLEANUP_FAILURE_RETRY_LIMIT
-      ) {
-        queueUnreferencedAttachmentCleanup(retryRequestAfterFailure);
-        scheduleQueuedUnreferencedAttachmentCleanupRetry(retryRequestAfterFailure.failureRetryCount);
+      if (cleanupGeneration !== unreferencedAttachmentCleanupGeneration) {
         return;
       }
-
-      if (queuedUnreferencedAttachmentCleanupRequest) {
-        runQueuedUnreferencedAttachmentCleanup();
-      }
+      unreferencedAttachmentCleanupInFlight = false;
+      inFlightUnreferencedAttachmentCleanupCandidates = new Map();
+      scheduleNextUnreferencedAttachmentCleanup();
     });
 }
 
@@ -391,17 +543,38 @@ function scheduleUnreferencedChatAttachmentCleanup({
   candidateLocalUris: Iterable<string>;
   referencedLocalUris: Iterable<string>;
 }): void {
-  const candidates = Array.from(new Set(candidateLocalUris));
-  if (candidates.length === 0) {
-    return;
-  }
-
-  queueUnreferencedAttachmentCleanup({
-    candidateLocalUris: new Set(candidates),
-    referencedLocalUris: new Set(referencedLocalUris),
-    failureRetryCount: 0,
+  queueUnreferencedAttachmentCleanupCandidates({
+    candidateLocalUris,
+    referencedLocalUris,
   });
   runQueuedUnreferencedAttachmentCleanup();
+}
+
+function resetUnreferencedAttachmentCleanupState(): void {
+  unreferencedAttachmentCleanupGeneration += 1;
+  clearUnreferencedAttachmentCleanupRetryTimeout();
+  queuedUnreferencedAttachmentCleanupCandidates.clear();
+  inFlightUnreferencedAttachmentCleanupCandidates = new Map();
+  unreferencedAttachmentCleanupInFlight = false;
+}
+
+export function __resetUnreferencedAttachmentCleanupForTests(): void {
+  resetUnreferencedAttachmentCleanupState();
+}
+
+export function __getUnreferencedAttachmentCleanupStateForTests(): {
+  candidateCount: number;
+  failureCounts: number[];
+  retryScheduled: boolean;
+  maxQueueEntries: number;
+} {
+  return {
+    candidateCount: queuedUnreferencedAttachmentCleanupCandidates.size,
+    failureCounts: Array.from(queuedUnreferencedAttachmentCleanupCandidates.values())
+      .map((candidate) => candidate.failureCount),
+    retryScheduled: unreferencedAttachmentCleanupRetryTimeout !== null,
+    maxQueueEntries: UNREFERENCED_ATTACHMENT_CLEANUP_MAX_QUEUE_ENTRIES,
+  };
 }
 
 function scheduleChatAttachmentCleanupForSnapshots(
@@ -504,16 +677,19 @@ function scheduleChatAttachmentCleanupForThreadChanges(
   },
 ): void {
   const candidateLocalUris = collectAttachmentCleanupCandidatesForThreadChanges(previous, next, changes);
+  const referencedLocalUris = collectProtectedChatAttachmentLocalUrisForThreadChanges(
+    next.threads,
+    changes.changedThreadIds,
+  );
+  removeReferencedUnreferencedAttachmentCleanupCandidates(referencedLocalUris);
   if (candidateLocalUris.size === 0) {
+    scheduleNextUnreferencedAttachmentCleanup();
     return;
   }
 
   scheduleUnreferencedChatAttachmentCleanup({
     candidateLocalUris,
-    referencedLocalUris: collectProtectedChatAttachmentLocalUrisForThreadChanges(
-      next.threads,
-      changes.changedThreadIds,
-    ),
+    referencedLocalUris,
   });
 }
 
@@ -3272,6 +3448,7 @@ export function flushPendingChatPersistenceWrites(reason: ChatPersistenceWriteRe
 
 export function resetChatStoreForPrivateStorageReset(): void {
   const nextInferenceRevision = useChatStore.getState().inferenceRevision + 1;
+  resetUnreferencedAttachmentCleanupState();
   chatPersistenceScheduler.cancelAllPendingWrites();
   transientAssistantRuntimes.clear();
   clearPersistedChatRecordsAndInvalidateRuntimeCaches(getAppStorage());

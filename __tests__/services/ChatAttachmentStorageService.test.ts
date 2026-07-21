@@ -893,6 +893,47 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/delete-3.jpg', expect.anything());
   });
 
+  it('reports normalized per-file cleanup outcomes for partial and deferred batches', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.deleteAsync as jest.Mock)
+      .mockRejectedValueOnce(new Error('first delete failed'))
+      .mockResolvedValueOnce(undefined);
+    const service = new ChatAttachmentStorageService();
+
+    try {
+      await expect(service.deleteUnreferencedAttachmentFilesDetailed({
+        candidateLocalUris: [
+          ' test-dir/chat-attachments/fails.jpg ',
+          'test-dir/chat-attachments/fails.jpg',
+          'test-dir/chat-attachments/referenced.jpg',
+          'test-dir/chat-attachments/deleted.jpg',
+          'test-dir/chat-attachments/deferred.jpg',
+        ],
+        referencedLocalUris: ['test-dir/chat-attachments/referenced.jpg'],
+        maxDeletes: 2,
+      })).resolves.toEqual([
+        { localUri: 'test-dir/chat-attachments/fails.jpg', status: 'failed' },
+        { localUri: 'test-dir/chat-attachments/referenced.jpg', status: 'referenced' },
+        { localUri: 'test-dir/chat-attachments/deleted.jpg', status: 'deleted' },
+        { localUri: 'test-dir/chat-attachments/deferred.jpg', status: 'deferred' },
+      ]);
+
+      expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(2);
+      expect(FileSystem.deleteAsync).toHaveBeenNthCalledWith(
+        1,
+        'test-dir/chat-attachments/fails.jpg',
+        { idempotent: true },
+      );
+      expect(FileSystem.deleteAsync).toHaveBeenNthCalledWith(
+        2,
+        'test-dir/chat-attachments/deleted.jpg',
+        { idempotent: true },
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('serializes unreferenced attachment deletes to avoid native IO bursts', async () => {
     const service = new ChatAttachmentStorageService();
     let releaseFirstDelete!: () => void;
@@ -917,6 +958,35 @@ describe('ChatAttachmentStorageService', () => {
     expect(FileSystem.deleteAsync).toHaveBeenNthCalledWith(2, 'test-dir/chat-attachments/delete-2.jpg', {
       idempotent: true,
     });
+  });
+
+  it('rechecks references immediately before each serialized attachment delete', async () => {
+    const service = new ChatAttachmentStorageService();
+    const firstLocalUri = 'test-dir/chat-attachments/delete-first.jpg';
+    const restoredLocalUri = 'test-dir/chat-attachments/restored-before-delete.jpg';
+    const latestReferencedLocalUris = new Set<string>();
+    let releaseFirstDelete!: () => void;
+    (FileSystem.deleteAsync as jest.Mock).mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releaseFirstDelete = resolve;
+    }));
+
+    const cleanupPromise = service.deleteUnreferencedAttachmentFilesDetailed({
+      candidateLocalUris: [firstLocalUri, restoredLocalUri],
+      getReferencedLocalUris: () => latestReferencedLocalUris,
+    });
+
+    await Promise.resolve();
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(firstLocalUri, { idempotent: true });
+
+    latestReferencedLocalUris.add(restoredLocalUri);
+    releaseFirstDelete();
+
+    await expect(cleanupPromise).resolves.toEqual([
+      { localUri: firstLocalUri, status: 'deleted' },
+      { localUri: restoredLocalUri, status: 'referenced' },
+    ]);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles the attachment directory by preserving referenced files and deleting safe unreferenced files', async () => {

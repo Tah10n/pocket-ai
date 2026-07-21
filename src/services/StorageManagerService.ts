@@ -47,6 +47,10 @@ const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
 const MIN_ESTIMATED_CONTEXT_BYTES = 64 * 1024 * 1024;
 const DIRECTORY_SIZE_CACHE_TTL_MS = 60_000;
 const DIRECTORY_SIZE_MAX_CONCURRENT_STATS = 8;
+const DIRECTORY_SIZE_CACHE_MAX_ENTRIES = 32;
+const DIRECTORY_SIZE_MAX_VISITED_NODES = 4_096;
+const DIRECTORY_SIZE_MAX_QUEUED_FILE_SYSTEM_TASKS = 64;
+const CLEARABLE_CACHE_DIRECTORY_SIZE_REQUEST_MAX_ENTRIES = 8;
 const PROTECTED_ACTIVE_CACHE_ENTRY_NAMES = new Set(['http-cache']);
 
 type PersistedChatStorePayload = {
@@ -89,6 +93,15 @@ type DirectorySizeCacheEntry = {
 
 type DirectoryStatLimiter = <T>(task: () => Promise<T>) => Promise<T>;
 
+type DirectoryTraversalOptions = {
+  excludedRootEntryNames?: ReadonlySet<string>;
+};
+
+type DirectoryFileSystemWorkQueue = {
+  schedule: <T>(task: () => Promise<T>) => Promise<T>;
+  getState: () => { activeCount: number; queuedCount: number };
+};
+
 type ClearableCacheDirectorySizeRequest = {
   generation: number;
   promise: Promise<number>;
@@ -120,6 +133,21 @@ function isFileSystemDirectory(info: { isDirectory?: boolean }): boolean {
 
 function joinDirectoryEntryUri(directoryUri: string, entryName: string): string {
   return `${normalizeDirectoryUri(directoryUri)}${entryName}`;
+}
+
+function isSafeDirectoryEntryName(entryName: string): boolean {
+  return entryName.length > 0
+    && entryName !== '.'
+    && entryName !== '..'
+    && !/[\\/?#%\u0000-\u001F\u007F]/u.test(entryName);
+}
+
+function isFileSystemSymbolicLink(info: FileSystem.FileInfo): boolean {
+  const candidate = info as FileSystem.FileInfo & {
+    isSymbolicLink?: boolean;
+    type?: string;
+  };
+  return candidate.isSymbolicLink === true || candidate.type === 'symbolicLink';
 }
 
 function getSanitizedStorageManagerErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
@@ -181,17 +209,104 @@ function createDirectoryStatLimiter(maxConcurrent: number): DirectoryStatLimiter
   });
 }
 
+class DirectorySizeTraversalCancelledError extends Error {
+  constructor() {
+    super('Directory size traversal was invalidated.');
+    this.name = 'DirectorySizeTraversalCancelledError';
+  }
+}
+
+class DirectorySizeTraversalLimitError extends Error {
+  constructor(scope: 'visited_nodes' | 'work_queue') {
+    super(`Directory size traversal exceeded its ${scope} limit.`);
+    this.name = 'DirectorySizeTraversalLimitError';
+  }
+}
+
+function createDirectoryFileSystemWorkQueue(
+  maxConcurrent: number,
+  maxQueued: number,
+): DirectoryFileSystemWorkQueue {
+  const queue: (() => void)[] = [];
+  let activeCount = 0;
+
+  const drainQueue = () => {
+    while (activeCount < maxConcurrent) {
+      const next = queue.shift();
+      if (!next) {
+        return;
+      }
+      next();
+    }
+  };
+
+  return {
+    schedule: async <T>(task: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+      const run = () => {
+        activeCount += 1;
+        Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            activeCount -= 1;
+            drainQueue();
+          });
+      };
+
+      if (activeCount < maxConcurrent) {
+        run();
+        return;
+      }
+
+      if (queue.length >= maxQueued) {
+        reject(new DirectorySizeTraversalLimitError('work_queue'));
+        return;
+      }
+
+      queue.push(run);
+    }),
+    getState: () => ({ activeCount, queuedCount: queue.length }),
+  };
+}
+
+const directoryFileSystemWorkQueue = createDirectoryFileSystemWorkQueue(
+  DIRECTORY_SIZE_MAX_CONCURRENT_STATS,
+  DIRECTORY_SIZE_MAX_QUEUED_FILE_SYSTEM_TASKS,
+);
+
+function assertDirectorySizeTraversalIsCurrent(cacheGeneration: number): void {
+  if (cacheGeneration !== directorySizeCacheGeneration) {
+    throw new DirectorySizeTraversalCancelledError();
+  }
+}
+
+async function scheduleDirectoryFileSystemTask<T>(
+  cacheGeneration: number,
+  task: () => Promise<T>,
+): Promise<T> {
+  assertDirectorySizeTraversalIsCurrent(cacheGeneration);
+  return directoryFileSystemWorkQueue.schedule(async () => {
+    assertDirectorySizeTraversalIsCurrent(cacheGeneration);
+    const result = await task();
+    assertDirectorySizeTraversalIsCurrent(cacheGeneration);
+    return result;
+  });
+}
+
 function getCachedDirectorySize(directoryUri: string): number | null {
   const cached = directorySizeCache.get(directoryUri);
   if (!cached) {
     return null;
   }
 
-  if (Date.now() - cached.measuredAt > DIRECTORY_SIZE_CACHE_TTL_MS) {
+  const cacheAgeMs = Date.now() - cached.measuredAt;
+  if (cacheAgeMs < 0 || cacheAgeMs > DIRECTORY_SIZE_CACHE_TTL_MS) {
     directorySizeCache.delete(directoryUri);
     return null;
   }
 
+  directorySizeCache.delete(directoryUri);
+  directorySizeCache.set(directoryUri, cached);
   return cached.sizeBytes;
 }
 
@@ -200,10 +315,18 @@ function cacheDirectorySizeIfCurrent(directoryUri: string, sizeBytes: number, ge
     return;
   }
 
+  directorySizeCache.delete(directoryUri);
   directorySizeCache.set(directoryUri, {
     measuredAt: Date.now(),
     sizeBytes,
   });
+  while (directorySizeCache.size > DIRECTORY_SIZE_CACHE_MAX_ENTRIES) {
+    const leastRecentlyUsedDirectoryUri = directorySizeCache.keys().next().value;
+    if (typeof leastRecentlyUsedDirectoryUri !== 'string') {
+      break;
+    }
+    directorySizeCache.delete(leastRecentlyUsedDirectoryUri);
+  }
 }
 
 function invalidateDirectorySizeMeasurements(): void {
@@ -215,18 +338,25 @@ function invalidateDirectorySizeMeasurements(): void {
 
 async function getDirectorySizeBytes(
   directoryUri: string,
-  statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS),
   cacheGeneration = directorySizeCacheGeneration,
   propagateErrors = false,
+  options: DirectoryTraversalOptions = {},
 ): Promise<number> {
   const normalizedDirectoryUri = normalizeDirectoryUri(directoryUri);
+  if (cacheGeneration !== directorySizeCacheGeneration) {
+    return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
+  }
+
   const cachedSize = getCachedDirectorySize(normalizedDirectoryUri);
   if (cachedSize !== null) {
     return cachedSize;
   }
 
   try {
-    const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
+    const info = await scheduleDirectoryFileSystemTask(
+      cacheGeneration,
+      () => FileSystem.getInfoAsync(normalizedDirectoryUri),
+    );
     if (!info.exists) {
       cacheDirectorySizeIfCurrent(
         normalizedDirectoryUri,
@@ -236,33 +366,118 @@ async function getDirectorySizeBytes(
       return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
     }
 
-    const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
-    if (entries.length === 0) {
-      cacheDirectorySizeIfCurrent(normalizedDirectoryUri, 0, cacheGeneration);
-      return 0;
+    const directoriesToVisit = [normalizedDirectoryUri];
+    const seenDirectoryUris = new Set(directoriesToVisit);
+    const seenEntryUris = new Set<string>();
+    let directoryIndex = 0;
+    let visitedNodeCount = 0;
+    let sizeBytes = 0;
+
+    while (directoryIndex < directoriesToVisit.length) {
+      assertDirectorySizeTraversalIsCurrent(cacheGeneration);
+      const currentDirectoryUri = directoriesToVisit[directoryIndex];
+      directoryIndex += 1;
+      const entries = await scheduleDirectoryFileSystemTask(
+        cacheGeneration,
+        () => FileSystem.readDirectoryAsync(currentDirectoryUri),
+      );
+      const prospectiveEntryUris = new Set<string>();
+      for (const entryName of entries) {
+        if (
+          !isSafeDirectoryEntryName(entryName)
+          || (
+            currentDirectoryUri === normalizedDirectoryUri
+            && options.excludedRootEntryNames?.has(entryName.toLowerCase())
+          )
+        ) {
+          continue;
+        }
+        const entryUri = joinDirectoryEntryUri(currentDirectoryUri, entryName);
+        if (!seenEntryUris.has(entryUri)) {
+          prospectiveEntryUris.add(entryUri);
+        }
+        if (
+          visitedNodeCount + prospectiveEntryUris.size
+          > DIRECTORY_SIZE_MAX_VISITED_NODES
+        ) {
+          throw new DirectorySizeTraversalLimitError('visited_nodes');
+        }
+      }
+      let entryIndex = 0;
+
+      while (entryIndex < entries.length) {
+        const entryBatch: { entryUri: string }[] = [];
+        while (
+          entryIndex < entries.length
+          && entryBatch.length < DIRECTORY_SIZE_MAX_CONCURRENT_STATS
+        ) {
+          const entryName = entries[entryIndex];
+          entryIndex += 1;
+          if (
+            !isSafeDirectoryEntryName(entryName)
+            || (
+              currentDirectoryUri === normalizedDirectoryUri
+              && options.excludedRootEntryNames?.has(entryName.toLowerCase())
+            )
+          ) {
+            continue;
+          }
+
+          const entryUri = joinDirectoryEntryUri(currentDirectoryUri, entryName);
+          if (seenEntryUris.has(entryUri)) {
+            continue;
+          }
+          seenEntryUris.add(entryUri);
+          visitedNodeCount += 1;
+          if (visitedNodeCount > DIRECTORY_SIZE_MAX_VISITED_NODES) {
+            throw new DirectorySizeTraversalLimitError('visited_nodes');
+          }
+          entryBatch.push({ entryUri });
+        }
+
+        if (entryBatch.length === 0) {
+          continue;
+        }
+
+        const entryInfos = await Promise.all(entryBatch.map(({ entryUri }) => (
+          scheduleDirectoryFileSystemTask(
+            cacheGeneration,
+            () => FileSystem.getInfoAsync(entryUri),
+          )
+        )));
+
+        entryInfos.forEach((entryInfo, batchIndex) => {
+          if (!entryInfo.exists || isFileSystemSymbolicLink(entryInfo)) {
+            return;
+          }
+
+          const { entryUri } = entryBatch[batchIndex];
+          if (isFileSystemDirectory(entryInfo)) {
+            const normalizedChildDirectoryUri = normalizeDirectoryUri(entryUri);
+            if (!seenDirectoryUris.has(normalizedChildDirectoryUri)) {
+              seenDirectoryUris.add(normalizedChildDirectoryUri);
+              directoriesToVisit.push(normalizedChildDirectoryUri);
+            }
+            return;
+          }
+
+          const entrySizeBytes = typeof entryInfo.size === 'number'
+            && Number.isFinite(entryInfo.size)
+            && entryInfo.size > 0
+            ? entryInfo.size
+            : 0;
+          sizeBytes = Math.min(Number.MAX_SAFE_INTEGER, sizeBytes + entrySizeBytes);
+        });
+      }
     }
 
-    const entrySizes = await Promise.all(
-      entries.map(async (entryName) => {
-        const entryUri = joinDirectoryEntryUri(normalizedDirectoryUri, entryName);
-        const entryInfo = await statLimiter(() => FileSystem.getInfoAsync(entryUri));
-
-        if (!entryInfo.exists) {
-          return 0;
-        }
-
-        if ((entryInfo as { isDirectory?: boolean }).isDirectory) {
-          return getDirectorySizeBytes(entryUri, statLimiter, cacheGeneration, propagateErrors);
-        }
-
-        return typeof entryInfo.size === 'number' ? entryInfo.size : 0;
-      }),
-    );
-
-    const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
+    assertDirectorySizeTraversalIsCurrent(cacheGeneration);
     cacheDirectorySizeIfCurrent(normalizedDirectoryUri, sizeBytes, cacheGeneration);
     return sizeBytes;
   } catch (error) {
+    if (error instanceof DirectorySizeTraversalCancelledError) {
+      return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
+    }
     console.warn('[StorageManagerService] Failed to read directory size', {
       pathCategory: getDirectoryPathCategory(normalizedDirectoryUri),
       scope: 'directory_size',
@@ -287,6 +502,10 @@ async function scanClearableCacheDirectorySizeBytes(
   try {
     try {
       const nativeSizeBytes = await getAppCacheDirectorySizeBytes();
+      if (cacheGeneration !== directorySizeCacheGeneration) {
+        span.end({ outcome: 'cancelled', source: 'native' });
+        return MIN_DIRECTORY_SIZE_FALLBACK_BYTES;
+      }
       if (nativeSizeBytes !== null) {
         cacheDirectorySizeIfCurrent(normalizedDirectoryUri, nativeSizeBytes, cacheGeneration);
         span.end({ outcome: 'success', source: 'native' });
@@ -306,29 +525,12 @@ async function scanClearableCacheDirectorySizeBytes(
     });
 
     try {
-      const info = await FileSystem.getInfoAsync(normalizedDirectoryUri);
-      if (!info.exists) {
-        cacheDirectorySizeIfCurrent(normalizedDirectoryUri, 0, cacheGeneration);
-        span.end({ outcome: 'success', source: 'js_fallback' });
-        return 0;
-      }
-
-      const entries = await FileSystem.readDirectoryAsync(normalizedDirectoryUri);
-      const statLimiter = createDirectoryStatLimiter(DIRECTORY_SIZE_MAX_CONCURRENT_STATS);
-      const entrySizes = await Promise.all(entries
-        .filter((entryName) => !PROTECTED_ACTIVE_CACHE_ENTRY_NAMES.has(entryName.toLowerCase()))
-        .map(async (entryName) => {
-          const entryUri = joinDirectoryEntryUri(normalizedDirectoryUri, entryName);
-          const entryInfo = await statLimiter(() => FileSystem.getInfoAsync(entryUri));
-          if (!entryInfo.exists) {
-            return 0;
-          }
-          return isFileSystemDirectory(entryInfo)
-            ? getDirectorySizeBytes(entryUri, statLimiter, cacheGeneration, true)
-            : typeof entryInfo.size === 'number' ? entryInfo.size : 0;
-        }));
-      const sizeBytes = entrySizes.reduce((sum, size) => sum + size, 0);
-      cacheDirectorySizeIfCurrent(normalizedDirectoryUri, sizeBytes, cacheGeneration);
+      const sizeBytes = await getDirectorySizeBytes(
+        normalizedDirectoryUri,
+        cacheGeneration,
+        true,
+        { excludedRootEntryNames: PROTECTED_ACTIVE_CACHE_ENTRY_NAMES },
+      );
       span.end({ outcome: 'success', source: 'js_fallback' });
       return sizeBytes;
     } catch (error) {
@@ -379,6 +581,16 @@ function getClearableCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise
       throw error;
     },
   );
+  while (
+    clearableCacheDirectorySizeRequests.size
+    >= CLEARABLE_CACHE_DIRECTORY_SIZE_REQUEST_MAX_ENTRIES
+  ) {
+    const oldestRequestDirectoryUri = clearableCacheDirectorySizeRequests.keys().next().value;
+    if (typeof oldestRequestDirectoryUri !== 'string') {
+      break;
+    }
+    clearableCacheDirectorySizeRequests.delete(oldestRequestDirectoryUri);
+  }
   clearableCacheDirectorySizeRequests.set(normalizedDirectoryUri, {
     generation,
     promise: sharedRequest,
@@ -389,6 +601,37 @@ function getClearableCacheDirectorySizeBytes(cacheDirectoryUri: string): Promise
 
 export function __resetStorageManagerDirectorySizeCacheForTests(): void {
   invalidateDirectorySizeMeasurements();
+}
+
+export function __measureStorageManagerDirectorySizeForTests(directoryUri: string): Promise<number> {
+  return getDirectorySizeBytes(directoryUri);
+}
+
+export function __getStorageManagerDirectorySizeStateForTests(): {
+  cacheEntryCount: number;
+  inFlightRequestCount: number;
+  activeFileSystemTaskCount: number;
+  queuedFileSystemTaskCount: number;
+  limits: {
+    maxCacheEntries: number;
+    maxConcurrentFileSystemTasks: number;
+    maxQueuedFileSystemTasks: number;
+    maxVisitedNodes: number;
+  };
+} {
+  const workQueueState = directoryFileSystemWorkQueue.getState();
+  return {
+    cacheEntryCount: directorySizeCache.size,
+    inFlightRequestCount: clearableCacheDirectorySizeRequests.size,
+    activeFileSystemTaskCount: workQueueState.activeCount,
+    queuedFileSystemTaskCount: workQueueState.queuedCount,
+    limits: {
+      maxCacheEntries: DIRECTORY_SIZE_CACHE_MAX_ENTRIES,
+      maxConcurrentFileSystemTasks: DIRECTORY_SIZE_MAX_CONCURRENT_STATS,
+      maxQueuedFileSystemTasks: DIRECTORY_SIZE_MAX_QUEUED_FILE_SYSTEM_TASKS,
+      maxVisitedNodes: DIRECTORY_SIZE_MAX_VISITED_NODES,
+    },
+  };
 }
 
 function getDownloadedModels() {

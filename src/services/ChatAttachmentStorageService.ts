@@ -39,6 +39,11 @@ export type ChatAttachmentDirectoryReconciliationResult = {
   hasMoreCandidates: boolean;
 };
 
+export type ChatAttachmentFileCleanupResult = {
+  localUri: string;
+  status: 'deleted' | 'failed' | 'referenced' | 'deferred';
+};
+
 type ChatAttachmentStorageServiceOptions = {
   now?: () => number;
   random?: () => number;
@@ -1178,27 +1183,63 @@ export class ChatAttachmentStorageService {
     referencedLocalUris?: Iterable<string>;
     maxDeletes?: number;
   }): Promise<number> {
+    const results = await this.deleteUnreferencedAttachmentFilesDetailed({
+      candidateLocalUris,
+      referencedLocalUris,
+      maxDeletes,
+    });
+    return results.filter((result) => result.status === 'deleted').length;
+  }
+
+  public async deleteUnreferencedAttachmentFilesDetailed({
+    candidateLocalUris,
+    referencedLocalUris = new Set<string>(),
+    getReferencedLocalUris,
+    maxDeletes,
+  }: {
+    candidateLocalUris: Iterable<string>;
+    referencedLocalUris?: Iterable<string>;
+    getReferencedLocalUris?: () => Iterable<string>;
+    maxDeletes?: number;
+  }): Promise<ChatAttachmentFileCleanupResult[]> {
     const referenced = collectNormalizedChatAttachmentLocalUris(referencedLocalUris);
     const deleteLimit = normalizePositiveInteger(maxDeletes);
-    const candidates = Array.from(new Set(candidateLocalUris))
-      .flatMap((candidateLocalUri) => {
-        const localUri = normalizeChatAttachmentLocalUri(candidateLocalUri);
-        return localUri && !referenced.has(localUri) ? [localUri] : [];
-      });
-    const boundedCandidates = deleteLimit === undefined
-      ? candidates
-      : candidates.slice(0, deleteLimit);
-
-    if (boundedCandidates.length === 0) {
-      return 0;
+    const candidates: string[] = [];
+    const seenCandidates = new Set<string>();
+    for (const candidateLocalUri of candidateLocalUris) {
+      const localUri = normalizeChatAttachmentLocalUri(candidateLocalUri);
+      if (!localUri || seenCandidates.has(localUri)) {
+        continue;
+      }
+      seenCandidates.add(localUri);
+      candidates.push(localUri);
     }
 
-    let deletedCount = 0;
-    for (const localUri of boundedCandidates) {
+    const results: ChatAttachmentFileCleanupResult[] = [];
+    let attemptedDeleteCount = 0;
+    for (const localUri of candidates) {
+      if (referenced.has(localUri)) {
+        results.push({ localUri, status: 'referenced' });
+        continue;
+      }
+      if (deleteLimit !== undefined && attemptedDeleteCount >= deleteLimit) {
+        results.push({ localUri, status: 'deferred' });
+        continue;
+      }
+      if (
+        getReferencedLocalUris
+        && collectNormalizedChatAttachmentLocalUris(getReferencedLocalUris()).has(localUri)
+      ) {
+        results.push({ localUri, status: 'referenced' });
+        continue;
+      }
+
+      attemptedDeleteCount += 1;
       try {
         await FileSystem.deleteAsync(localUri, { idempotent: true });
-        deletedCount += 1;
+        results.push({ localUri, status: 'deleted' });
       } catch (error) {
+        results.push({ localUri, status: 'failed' });
         console.warn('[ChatAttachmentStorage] Failed to delete unreferenced chat attachment', {
           pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
           context: 'unreferenced_cleanup',
@@ -1207,7 +1248,7 @@ export class ChatAttachmentStorageService {
       }
     }
 
-    return deletedCount;
+    return results;
   }
 
   public async reconcileAttachmentDirectory(

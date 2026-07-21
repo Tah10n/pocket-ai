@@ -98,6 +98,69 @@ describe('LlamaRuntimeAdapter', () => {
 
   it('rejects invalid completion result scalar fields', () => {
     expect(() => normalizeCompletionResult({ text: 123 })).toThrow('text must be a string');
+    expect(() => normalizeCompletionResult({ content: 123 })).toThrow(
+      'content must be a string or null',
+    );
+  });
+
+  it('preserves explicit completion empty strings and null clears', () => {
+    expect(normalizeCompletionResult({
+      text: 'stale raw text',
+      content: '',
+      reasoning_content: null,
+    })).toEqual({
+      text: 'stale raw text',
+      content: '',
+      reasoning_content: null,
+    });
+  });
+
+  it('restores bridge-omitted parsed empty fields as authoritative clears', () => {
+    expect(normalizeCompletionResult({
+      text: '<think>Plan</think>',
+      reasoning_content: 'Plan',
+      accumulated_text: '<think>Plan</think>',
+    })).toEqual({
+      text: '<think>Plan</think>',
+      content: null,
+      reasoning_content: 'Plan',
+      accumulated_text: '<think>Plan</think>',
+    });
+
+    expect(normalizeCompletionResult({
+      text: 'raw tool call',
+      tool_calls: [{
+        type: 'function',
+        function: { name: 'lookup', arguments: '{}' },
+      }],
+    })).toEqual({
+      text: 'raw tool call',
+      content: null,
+      reasoning_content: null,
+      tool_calls: [{
+        type: 'function',
+        function: { name: 'lookup', arguments: '{}' },
+      }],
+    });
+  });
+
+  it('does not use explicit empty fields to invent a clear for an absent sibling field', () => {
+    expect(normalizeCompletionResult({ text: 'raw answer', content: '' })).toEqual({
+      text: 'raw answer',
+      content: '',
+    });
+    expect(normalizeCompletionResult({ text: 'raw answer', reasoning_content: '' })).toEqual({
+      text: 'raw answer',
+      reasoning_content: '',
+    });
+  });
+
+  it('keeps parsed fields absent when the bridge exposes only raw text', () => {
+    const result = normalizeCompletionResult({ text: '<think>Plan</think>Answer' });
+
+    expect(result).toEqual({ text: '<think>Plan</think>Answer' });
+    expect(result).not.toHaveProperty('content');
+    expect(result).not.toHaveProperty('reasoning_content');
   });
 
   it('rejects malformed token callback scalar fields', async () => {

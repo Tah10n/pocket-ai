@@ -3422,32 +3422,49 @@ describe('chatStore', () => {
     }
   });
 
-  it('restores the old branch on successful regeneration without output', () => {
+  it('commits and rehydrates an authoritative empty successful branch', async () => {
     const thread = buildTrailingModelSwitchThread('thread-branch-empty-success');
     seedPersistedChatThread(thread, 100);
-    const durableRecord = storage.getString(getChatThreadStorageKey(thread.id));
     const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
       thread.id,
       `${thread.id}-user-1`,
-      'Transient empty-success edit',
+      'Authoritative empty-success edit',
     )!;
     const capture = captureChatPersistenceWrites();
 
     try {
       expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
         outcome: 'success',
-        content: '   ',
+        content: '',
         thoughtContent: null,
-      })).toEqual({ status: 'restored_without_write' });
-      expect(useChatStore.getState().threads[thread.id]).toBe(thread);
-      expect(useChatStore.getState().getThread(thread.id)).toBe(thread);
-      expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableRecord);
-      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(thread.id));
-      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
-      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+      })).toEqual({ status: 'committed' });
+      expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual([
+        expect.objectContaining({
+          id: `${thread.id}-user-1`,
+          content: 'Authoritative empty-success edit',
+        }),
+        expect.objectContaining({
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          state: 'complete',
+        }),
+      ]);
+      expect(capture.setKeys).toContain(getChatThreadStorageKey(thread.id));
     } finally {
       capture.restore();
     }
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantId,
+        content: '',
+        state: 'complete',
+      }),
+    );
   });
 
   it('recommits the old branch when persisted partial output is later cleared', () => {

@@ -2,7 +2,6 @@ import type {
   CompletionParams,
   LlamaContext,
   NativeBackendDeviceInfo,
-  NativeCompletionResult,
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
@@ -132,6 +131,7 @@ import {
   toggleNativeLlamaLogs,
   LlamaRuntimeFeatureUnavailableError,
   type LlamaContextInitParams,
+  type LlamaCompletionResult,
   type LlamaFormattedChatResult,
   type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
@@ -956,7 +956,7 @@ class LLMEngineService {
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
   private contextOperationRunner = new ContextOperationRunner();
-  private completionRunner = new ActiveCompletionRunner<NativeCompletionResult>();
+  private completionRunner = new ActiveCompletionRunner<LlamaCompletionResult>();
   private isUnloading = false;
   private activeCalibrationSession: CalibrationSession | null = null;
   private loadedArtifactIdentity: LoadedModelArtifactIdentity | null = null;
@@ -999,7 +999,7 @@ class LLMEngineService {
     this.contextOperationRunner.cancelGeneration = value;
   }
 
-  private get activeCompletionPromise(): Promise<NativeCompletionResult> | null {
+  private get activeCompletionPromise(): Promise<LlamaCompletionResult> | null {
     return this.completionRunner.activePromise;
   }
 
@@ -1007,7 +1007,7 @@ class LLMEngineService {
     return this.completionRunner.getActiveDriverPromise();
   }
 
-  private set activeCompletionPromise(value: Promise<NativeCompletionResult> | null) {
+  private set activeCompletionPromise(value: Promise<LlamaCompletionResult> | null) {
     this.completionRunner.activePromise = value;
     if (value === null) {
       this.completionRunner.activeDriverPromise = null;
@@ -1072,7 +1072,7 @@ class LLMEngineService {
     }
     this.context = context;
     this.contextGeneration += 1;
-    exactPromptTokenCache.clear();
+    exactPromptTokenCache.invalidateContext();
     this.additionalStopWordsCache.clear();
   }
 
@@ -2756,7 +2756,7 @@ class LLMEngineService {
     multimodalReadiness,
     onToken,
     params,
-  }: LlmChatCompletionOptions): Promise<NativeCompletionResult> {
+  }: LlmChatCompletionOptions): Promise<LlamaCompletionResult> {
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
@@ -2809,9 +2809,9 @@ class LLMEngineService {
       new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
     );
 
-    let resolveCompletion!: (result: NativeCompletionResult) => void;
+    let resolveCompletion!: (result: LlamaCompletionResult) => void;
     let rejectCompletion!: (error: unknown) => void;
-    const completionTask = new Promise<NativeCompletionResult>((resolve, reject) => {
+    const completionTask = new Promise<LlamaCompletionResult>((resolve, reject) => {
       resolveCompletion = resolve;
       rejectCompletion = reject;
     });
@@ -2994,7 +2994,7 @@ class LLMEngineService {
           }
         };
 
-        const finalizeCompletionResult = (result: NativeCompletionResult): NativeCompletionResult => {
+        const finalizeCompletionResult = (result: LlamaCompletionResult): LlamaCompletionResult => {
           const telemetry = buildInferenceCompletionTelemetry({
             result,
             mtpRequested: configuredSpeculativeDecoding?.enabled === true,

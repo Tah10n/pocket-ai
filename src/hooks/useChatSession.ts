@@ -49,6 +49,7 @@ import {
 import {
   createIncrementalAssistantPresentationParser,
   doesAssistantContentEndAtSentenceBoundary,
+  getAssistantPresentation,
   getVisibleAssistantContent,
 } from '../utils/chatPresentation';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
@@ -1501,22 +1502,51 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   };
 }
 
-function resolveVisibleAssistantContentFromCandidates(
-  fallback: string,
-  ...candidates: (string | undefined)[]
-) {
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string') {
-      continue;
-    }
-
-    const visibleContent = getVisibleAssistantContent(candidate);
-    if (visibleContent.length > 0) {
-      return visibleContent;
-    }
+function resolveSuccessfulAssistantContent({
+  completionContent,
+  completionText,
+  preferRawSnapshot,
+  streamedContent,
+  rawSnapshot,
+}: {
+  completionContent: string | null | undefined;
+  completionText: string | undefined;
+  preferRawSnapshot: boolean;
+  streamedContent: string;
+  rawSnapshot: string | undefined;
+}): string {
+  if (completionContent !== undefined) {
+    return completionContent ?? '';
+  }
+  if (completionText !== undefined) {
+    return getVisibleAssistantContent(completionText);
+  }
+  if (preferRawSnapshot && rawSnapshot !== undefined) {
+    return getVisibleAssistantContent(rawSnapshot);
   }
 
-  return fallback;
+  return streamedContent;
+}
+
+function resolveSuccessfulAssistantThought({
+  completionContent,
+  completionReasoningContent,
+  completionText,
+  streamedThoughtContent,
+}: {
+  completionContent: string | null | undefined;
+  completionReasoningContent: string | null | undefined;
+  completionText: string | undefined;
+  streamedThoughtContent: string;
+}): string {
+  if (completionReasoningContent !== undefined) {
+    return completionReasoningContent ?? '';
+  }
+  if (completionContent === undefined && completionText !== undefined) {
+    return getAssistantPresentation(completionText).thoughtContent;
+  }
+
+  return streamedThoughtContent;
 }
 
 export function buildInferenceMessagesForThread(thread: ChatThread, options?: InferenceBudgetOptions) {
@@ -1745,7 +1775,10 @@ export const useChatSession = () => {
     let sentBackgroundOutcomeNotification: 'interrupted' | 'error' | null = null;
     let hasFlushedFirstAssistantPatch = false;
     let lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
-    let latestRawAssistantSnapshot = '';
+    let latestRawAssistantSnapshot: string | undefined;
+    let latestRawAssistantSnapshotRevision = 0;
+    let latestPresentationUpdateRevision = 0;
+    let streamingCallbackRevision = 0;
     let hasRecordedCompletionStats = false;
 
     const applyCumulativePresentationSnapshot = (
@@ -2451,13 +2484,19 @@ export const useChatSession = () => {
             hasMarkedFirstToken = true;
             performanceMonitor.mark('chat.firstToken', { modelId });
           }
+          streamingCallbackRevision += 1;
+          const callbackRevision = streamingCallbackRevision;
 
           if (typeof token === 'string') {
             appendPresentationDelta(token);
+            if (token.length > 0) {
+              latestPresentationUpdateRevision = callbackRevision;
+            }
           } else {
             const hasReasoningUpdate = token.reasoningContent !== undefined;
             if (typeof token.accumulatedText === 'string') {
               latestRawAssistantSnapshot = token.accumulatedText;
+              latestRawAssistantSnapshotRevision = callbackRevision;
             }
 
             if (token.content !== undefined) {
@@ -2467,11 +2506,16 @@ export const useChatSession = () => {
                 presentationParser.applySnapshot(token.content);
                 presentationSnapshotSource = 'native-content';
               }
+              latestPresentationUpdateRevision = callbackRevision;
             } else if (!hasReasoningUpdate) {
               if (typeof token.accumulatedText === 'string') {
                 applyCumulativePresentationSnapshot(token.accumulatedText, 'raw');
+                latestPresentationUpdateRevision = callbackRevision;
               } else {
                 appendPresentationDelta(token.token);
+                if (token.token.length > 0) {
+                  latestPresentationUpdateRevision = callbackRevision;
+                }
               }
             }
             // Reasoning-only native updates intentionally ignore raw accumulated text. Its
@@ -2528,21 +2572,25 @@ export const useChatSession = () => {
       }
 
       const currentPresentation = presentationParser.getPresentation();
-      const finalThoughtContent = completion.reasoning_content !== undefined
-        ? completion.reasoning_content
-        : currentPresentation.thoughtContent;
+      const finalThoughtContent = resolveSuccessfulAssistantThought({
+        completionContent: completion.content,
+        completionReasoningContent: completion.reasoning_content,
+        completionText: completion.text,
+        streamedThoughtContent: currentPresentation.thoughtContent,
+      });
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
       const successResult = finalizeBufferedAssistantTurn({
         outcome: 'success',
-        content: resolveVisibleAssistantContentFromCandidates(
-          '',
-          completion.content,
-          currentPresentation.finalContent,
-          completion.text,
-          latestRawAssistantSnapshot,
-        ),
+        content: resolveSuccessfulAssistantContent({
+          completionContent: completion.content,
+          completionText: completion.text,
+          preferRawSnapshot:
+            latestRawAssistantSnapshotRevision > latestPresentationUpdateRevision,
+          streamedContent: currentPresentation.finalContent,
+          rawSnapshot: latestRawAssistantSnapshot,
+        }),
         thoughtContent: finalThoughtContent.length > 0 ? finalThoughtContent : null,
         inferenceMetrics: completionTelemetry ?? undefined,
       });

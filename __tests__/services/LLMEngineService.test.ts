@@ -389,10 +389,11 @@ describe('LLMEngineService', () => {
     });
   });
 
-  it('changes the prompt context identity for context recreation and model switches', () => {
+  it('changes prompt identity and explicitly invalidates cached counts on context recreation', async () => {
     const service = llmEngineService as any;
     const previousContext = service.context;
     const previousState = service.state;
+    const invalidateContextSpy = jest.spyOn(exactPromptTokenCache, 'invalidateContext');
 
     try {
       service.state = {
@@ -402,8 +403,11 @@ describe('LLMEngineService', () => {
       };
       service.setContext({ id: 'context-a' });
       const firstIdentity = llmEngineService.getPromptContextIdentity();
-      exactPromptTokenCache.getOrCreate('stale-context-entry', async () => 11);
+      const staleLookup = exactPromptTokenCache.getOrCreate('stale-context-entry', async () => 11);
+      await expect(staleLookup.promise).resolves.toBe(11);
+      staleLookup.release('success');
       expect(exactPromptTokenCache.snapshot().entryCount).toBe(1);
+      expect(exactPromptTokenCache.getDebugSnapshot().settledEntryCount).toBe(1);
 
       service.setContext({ id: 'context-b' });
       const recreatedIdentity = llmEngineService.getPromptContextIdentity();
@@ -418,9 +422,11 @@ describe('LLMEngineService', () => {
       expect(recreatedIdentity).not.toBe(firstIdentity);
       expect(switchedIdentity).not.toBe(recreatedIdentity);
       expect(exactPromptTokenCache.snapshot()).toEqual({ entryCount: 0, approxBytes: 0 });
+      expect(invalidateContextSpy).toHaveBeenCalled();
     } finally {
       service.state = previousState;
       service.setContext(previousContext);
+      invalidateContextSpy.mockRestore();
     }
   });
 

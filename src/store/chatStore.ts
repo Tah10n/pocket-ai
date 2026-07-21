@@ -2759,10 +2759,7 @@ export const useChatStore = create<ChatStoreState>()(
               const shouldRestoreReplacement = (
                 (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
                 && !hasRecoverableOutput
-                && (
-                  finalization.outcome !== 'success'
-                  || runtime.mode.kind === 'replace_branch'
-                )
+                && finalization.outcome !== 'success'
               );
               if (
                 runtime.mode.kind === 'replace_branch'

@@ -2,8 +2,11 @@ import type { MultimodalReadinessState } from '../types/multimodal';
 
 export const DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_ENTRIES = 128;
 export const DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_APPROX_BYTES = 64 * 1024;
+export const DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_IN_FLIGHT_ENTRIES = 32;
+export const DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_IN_FLIGHT_APPROX_BYTES = 64 * 1024;
 
-const PROMISE_ENTRY_APPROX_BYTES = 96;
+const IN_FLIGHT_ENTRY_APPROX_BYTES = 96;
+const SETTLED_ENTRY_APPROX_BYTES = 48;
 
 export type ExactPromptTokenCacheKeyInput = {
   contextIdentity: string;
@@ -22,15 +25,48 @@ export type ExactPromptTokenCacheLookup = {
   release: (outcome: 'success' | 'discard') => void;
 };
 
-type ExactPromptTokenCacheEntry = {
+export type ExactPromptTokenCacheLimits = {
+  maxEntries: number;
+  maxApproxBytes: number;
+  maxInFlightEntries?: number;
+  maxInFlightApproxBytes?: number;
+};
+
+type InFlightExactPromptTokenCacheEntry = {
   activeConsumers: number;
   approxBytes: number;
+  attachedToCurrentEpoch: boolean;
+  epoch: number;
   hasSuccessfulConsumer: boolean;
+  key: string;
   promise: Promise<number>;
+  state: 'pending' | 'fulfilled' | 'rejected';
+  value?: number;
+};
+
+type SettledExactPromptTokenCacheEntry = {
+  approxBytes: number;
+  value: number;
 };
 
 function encodeCacheKeyPart(value: string): string {
   return `${value.length}:${value}`;
+}
+
+function getKeyApproxBytes(key: string, overheadBytes: number): number {
+  return overheadBytes + (key.length * 2);
+}
+
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Exact prompt token cache ${label} must be a positive integer.`);
+  }
+}
+
+function assertPositiveFiniteNumber(value: number, label: string): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`Exact prompt token cache ${label} must be positive.`);
+  }
 }
 
 export function buildExactPromptTokenCacheKey(input: ExactPromptTokenCacheKeyInput): string {
@@ -63,115 +99,167 @@ export function buildPromptMultimodalReadinessIdentity(
 }
 
 export class BoundedExactPromptTokenCache {
-  private readonly entries = new Map<string, ExactPromptTokenCacheEntry>();
-  private totalApproxBytes = 0;
+  private readonly settledEntries = new Map<string, SettledExactPromptTokenCacheEntry>();
+  private readonly currentInFlightEntries = new Map<string, InFlightExactPromptTokenCacheEntry>();
+  private readonly allInFlightEntries = new Set<InFlightExactPromptTokenCacheEntry>();
+  private readonly limits: Required<ExactPromptTokenCacheLimits>;
+  private contextEpoch = 0;
+  private settledApproxBytes = 0;
+  private inFlightApproxBytes = 0;
 
-  public constructor(private readonly limits: {
-    maxEntries: number;
-    maxApproxBytes: number;
-  } = {
+  public constructor(limits: ExactPromptTokenCacheLimits = {
     maxEntries: DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_ENTRIES,
     maxApproxBytes: DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_APPROX_BYTES,
   }) {
-    if (!Number.isInteger(limits.maxEntries) || limits.maxEntries <= 0) {
-      throw new Error('Exact prompt token cache maxEntries must be a positive integer.');
-    }
-    if (!Number.isFinite(limits.maxApproxBytes) || limits.maxApproxBytes <= 0) {
-      throw new Error('Exact prompt token cache maxApproxBytes must be positive.');
-    }
+    this.limits = {
+      ...limits,
+      maxInFlightEntries:
+        limits.maxInFlightEntries ?? DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_IN_FLIGHT_ENTRIES,
+      maxInFlightApproxBytes:
+        limits.maxInFlightApproxBytes
+        ?? DEFAULT_EXACT_PROMPT_TOKEN_CACHE_MAX_IN_FLIGHT_APPROX_BYTES,
+    };
+
+    assertPositiveInteger(this.limits.maxEntries, 'maxEntries');
+    assertPositiveFiniteNumber(this.limits.maxApproxBytes, 'maxApproxBytes');
+    assertPositiveInteger(this.limits.maxInFlightEntries, 'maxInFlightEntries');
+    assertPositiveFiniteNumber(
+      this.limits.maxInFlightApproxBytes,
+      'maxInFlightApproxBytes',
+    );
   }
 
   public getOrCreate(key: string, create: () => Promise<number>): ExactPromptTokenCacheLookup {
-    const existing = this.entries.get(key);
-    if (existing) {
-      this.entries.delete(key);
-      this.entries.set(key, existing);
-      existing.activeConsumers += 1;
-      return this.createLookup(key, existing, true);
+    const activeEntry = this.currentInFlightEntries.get(key);
+    if (activeEntry) {
+      activeEntry.activeConsumers += 1;
+      return this.createInFlightLookup(activeEntry, true);
+    }
+
+    const settledEntry = this.settledEntries.get(key);
+    if (settledEntry) {
+      this.settledEntries.delete(key);
+      this.settledEntries.set(key, settledEntry);
+      return {
+        hit: true,
+        promise: Promise.resolve(settledEntry.value),
+        release: () => undefined,
+      };
     }
 
     let promise: Promise<number>;
     try {
-      promise = create();
+      promise = Promise.resolve(create());
     } catch (error) {
       promise = Promise.reject(error);
     }
-    const approxBytes = PROMISE_ENTRY_APPROX_BYTES + (key.length * 2);
-    if (approxBytes <= this.limits.maxApproxBytes) {
-      const entry = {
-        activeConsumers: 1,
-        approxBytes,
-        hasSuccessfulConsumer: false,
+
+    const approxBytes = getKeyApproxBytes(key, IN_FLIGHT_ENTRY_APPROX_BYTES);
+    if (!this.canAdmitInFlight(approxBytes)) {
+      return {
+        hit: false,
         promise,
+        release: () => undefined,
       };
-      this.entries.set(key, entry);
-      this.totalApproxBytes += approxBytes;
-      this.evictToLimits();
-
-      void promise.catch(() => {
-        this.delete(key, promise);
-      });
     }
 
-    const retainedEntry = this.entries.get(key);
-    if (retainedEntry?.promise === promise) {
-      return this.createLookup(key, retainedEntry, false);
-    }
-
-    return {
-      hit: false,
+    const entry: InFlightExactPromptTokenCacheEntry = {
+      activeConsumers: 1,
+      approxBytes,
+      attachedToCurrentEpoch: true,
+      epoch: this.contextEpoch,
+      hasSuccessfulConsumer: false,
+      key,
       promise,
-      release: () => undefined,
+      state: 'pending',
     };
+    this.currentInFlightEntries.set(key, entry);
+    this.allInFlightEntries.add(entry);
+    this.inFlightApproxBytes += approxBytes;
+
+    void promise.then(
+      (value) => this.handleInFlightFulfilled(entry, value),
+      () => this.handleInFlightRejected(entry),
+    );
+
+    return this.createInFlightLookup(entry, false);
   }
 
   public has(key: string): boolean {
-    return this.entries.has(key);
+    return this.currentInFlightEntries.has(key) || this.settledEntries.has(key);
   }
 
   public delete(key: string, expectedPromise?: Promise<number>): boolean {
-    const entry = this.entries.get(key);
-    if (!entry || (expectedPromise && entry.promise !== expectedPromise)) {
+    const activeEntry = this.currentInFlightEntries.get(key);
+    if (activeEntry && (!expectedPromise || activeEntry.promise === expectedPromise)) {
+      this.removeInFlightEntry(activeEntry);
+      return true;
+    }
+
+    if (expectedPromise) {
       return false;
     }
 
-    this.deleteEntry(key, entry);
-    return true;
+    return this.deleteSettledEntry(key);
+  }
+
+  /**
+   * Starts a fresh cache epoch without mutating promises already observed by callers.
+   * Detached work remains in admission accounting until it settles and its callers release it.
+   */
+  public invalidateContext(): void {
+    this.contextEpoch += 1;
+    this.clearSettledEntries();
+    for (const entry of [...this.currentInFlightEntries.values()]) {
+      entry.attachedToCurrentEpoch = false;
+      if (entry.state !== 'pending') {
+        this.removeInFlightEntry(entry);
+      }
+    }
+    this.currentInFlightEntries.clear();
   }
 
   public clear(): void {
-    this.entries.clear();
-    this.totalApproxBytes = 0;
+    this.invalidateContext();
   }
 
   public snapshot(): { entryCount: number; approxBytes: number } {
+    let currentInFlightApproxBytes = 0;
+    for (const entry of this.currentInFlightEntries.values()) {
+      currentInFlightApproxBytes += entry.approxBytes;
+    }
+
     return {
-      entryCount: this.entries.size,
-      approxBytes: this.totalApproxBytes,
+      entryCount: this.currentInFlightEntries.size + this.settledEntries.size,
+      approxBytes: currentInFlightApproxBytes + this.settledApproxBytes,
     };
   }
 
-  private evictToLimits(): void {
-    while (
-      this.entries.size > this.limits.maxEntries
-      || this.totalApproxBytes > this.limits.maxApproxBytes
-    ) {
-      const oldestKey = this.entries.keys().next().value;
-      if (typeof oldestKey !== 'string') {
-        break;
-      }
-
-      const oldestEntry = this.entries.get(oldestKey);
-      if (!oldestEntry) {
-        break;
-      }
-      this.deleteEntry(oldestKey, oldestEntry);
-    }
+  public getDebugSnapshot(): {
+    currentInFlightEntryCount: number;
+    detachedInFlightEntryCount: number;
+    inFlightApproxBytes: number;
+    settledEntryCount: number;
+    settledApproxBytes: number;
+  } {
+    return {
+      currentInFlightEntryCount: this.currentInFlightEntries.size,
+      detachedInFlightEntryCount:
+        this.allInFlightEntries.size - this.currentInFlightEntries.size,
+      inFlightApproxBytes: this.inFlightApproxBytes,
+      settledEntryCount: this.settledEntries.size,
+      settledApproxBytes: this.settledApproxBytes,
+    };
   }
 
-  private createLookup(
-    key: string,
-    entry: ExactPromptTokenCacheEntry,
+  private canAdmitInFlight(approxBytes: number): boolean {
+    return approxBytes <= this.limits.maxInFlightApproxBytes
+      && this.allInFlightEntries.size < this.limits.maxInFlightEntries
+      && this.inFlightApproxBytes + approxBytes <= this.limits.maxInFlightApproxBytes;
+  }
+
+  private createInFlightLookup(
+    entry: InFlightExactPromptTokenCacheEntry,
     hit: boolean,
   ): ExactPromptTokenCacheLookup {
     let released = false;
@@ -185,30 +273,122 @@ export class BoundedExactPromptTokenCache {
         }
         released = true;
 
-        const currentEntry = this.entries.get(key);
-        if (currentEntry !== entry) {
+        if (!this.allInFlightEntries.has(entry)) {
           return;
         }
 
-        currentEntry.activeConsumers = Math.max(0, currentEntry.activeConsumers - 1);
+        entry.activeConsumers = Math.max(0, entry.activeConsumers - 1);
         if (outcome === 'success') {
-          currentEntry.hasSuccessfulConsumer = true;
-          return;
+          entry.hasSuccessfulConsumer = true;
         }
 
-        if (currentEntry.activeConsumers === 0 && !currentEntry.hasSuccessfulConsumer) {
-          this.deleteEntry(key, currentEntry);
-        }
+        this.finalizeReleasedInFlightEntry(entry);
       },
     };
   }
 
-  private deleteEntry(key: string, entry: ExactPromptTokenCacheEntry): void {
-    if (!this.entries.delete(key)) {
+  private handleInFlightFulfilled(
+    entry: InFlightExactPromptTokenCacheEntry,
+    value: number,
+  ): void {
+    if (!this.allInFlightEntries.has(entry)) {
       return;
     }
 
-    this.totalApproxBytes = Math.max(0, this.totalApproxBytes - entry.approxBytes);
+    entry.state = 'fulfilled';
+    entry.value = value;
+    if (!entry.attachedToCurrentEpoch || entry.epoch !== this.contextEpoch) {
+      this.removeInFlightEntry(entry);
+      return;
+    }
+    this.finalizeReleasedInFlightEntry(entry);
+  }
+
+  private handleInFlightRejected(entry: InFlightExactPromptTokenCacheEntry): void {
+    if (!this.allInFlightEntries.has(entry)) {
+      return;
+    }
+
+    entry.state = 'rejected';
+    this.removeInFlightEntry(entry);
+  }
+
+  private finalizeReleasedInFlightEntry(entry: InFlightExactPromptTokenCacheEntry): void {
+    if (!this.allInFlightEntries.has(entry) || entry.activeConsumers > 0) {
+      return;
+    }
+
+    if (!entry.hasSuccessfulConsumer) {
+      this.removeInFlightEntry(entry);
+      return;
+    }
+
+    if (entry.state !== 'fulfilled' || entry.value === undefined) {
+      return;
+    }
+
+    const shouldPromote = entry.attachedToCurrentEpoch
+      && entry.epoch === this.contextEpoch
+      && this.currentInFlightEntries.get(entry.key) === entry;
+    const value = entry.value;
+    const key = entry.key;
+    this.removeInFlightEntry(entry);
+
+    if (shouldPromote) {
+      this.setSettledValue(key, value);
+    }
+  }
+
+  private setSettledValue(key: string, value: number): void {
+    const approxBytes = getKeyApproxBytes(key, SETTLED_ENTRY_APPROX_BYTES);
+    if (approxBytes > this.limits.maxApproxBytes) {
+      return;
+    }
+
+    this.deleteSettledEntry(key);
+    this.settledEntries.set(key, { approxBytes, value });
+    this.settledApproxBytes += approxBytes;
+    this.evictSettledToLimits();
+  }
+
+  private evictSettledToLimits(): void {
+    while (
+      this.settledEntries.size > this.limits.maxEntries
+      || this.settledApproxBytes > this.limits.maxApproxBytes
+    ) {
+      const oldestKey = this.settledEntries.keys().next().value;
+      if (typeof oldestKey !== 'string') {
+        break;
+      }
+      this.deleteSettledEntry(oldestKey);
+    }
+  }
+
+  private removeInFlightEntry(entry: InFlightExactPromptTokenCacheEntry): void {
+    if (!this.allInFlightEntries.delete(entry)) {
+      return;
+    }
+
+    if (this.currentInFlightEntries.get(entry.key) === entry) {
+      this.currentInFlightEntries.delete(entry.key);
+    }
+    entry.attachedToCurrentEpoch = false;
+    this.inFlightApproxBytes = Math.max(0, this.inFlightApproxBytes - entry.approxBytes);
+  }
+
+  private deleteSettledEntry(key: string): boolean {
+    const entry = this.settledEntries.get(key);
+    if (!entry || !this.settledEntries.delete(key)) {
+      return false;
+    }
+
+    this.settledApproxBytes = Math.max(0, this.settledApproxBytes - entry.approxBytes);
+    return true;
+  }
+
+  private clearSettledEntries(): void {
+    this.settledEntries.clear();
+    this.settledApproxBytes = 0;
   }
 }
 

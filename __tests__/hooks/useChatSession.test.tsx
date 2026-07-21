@@ -2589,6 +2589,189 @@ describe('useChatSession', () => {
     expect(persistedRecord).not.toContain('"thoughtContent":""');
   });
 
+  it('lets authoritative empty final content clear streamed text and survive rehydration', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: 'stale',
+          content: 'Stale streamed answer',
+          contentMode: 'cumulative',
+        });
+
+        return {
+          text: 'Stale raw completion text',
+          content: '',
+          reasoning_content: null,
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Return an empty answer');
+    });
+
+    const completedThread = useChatStore.getState().getActiveThread()!;
+    expect(completedThread.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: '',
+      thoughtContent: undefined,
+      state: 'complete',
+    }));
+    expect(readPersistedThreadRecord(completedThread.id).thread?.messages?.at(-1)).toEqual(
+      expect.objectContaining({ content: '', state: 'complete' }),
+    );
+
+    await act(async () => {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+    });
+
+    expect(useChatStore.getState().getThread(completedThread.id)?.messages.at(-1)).toEqual(
+      expect.objectContaining({ content: '', state: 'complete' }),
+    );
+  });
+
+  it('uses final text authoritatively when parsed content is genuinely absent', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Stale streamed answer');
+        return { text: 'Final answer from raw text' };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Use final raw text');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: 'Final answer from raw text',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('preserves marker-like authoritative parsed content without reparsing it', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Stale streamed answer');
+        return {
+          text: '<think>Raw reasoning</think>Stale raw answer',
+          content: '[THINK]literal user-facing text[/THINK]Exact answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Preserve parsed content literally');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: '[THINK]literal user-facing text[/THINK]Exact answer',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('treats marker-only final text as an empty visible answer instead of stale streamed text', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Stale visible answer');
+        return { text: '<think>Only final reasoning</think>' };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Reason without a visible answer');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: '',
+        thoughtContent: 'Only final reasoning',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('uses a newer reasoning-only raw snapshot to clear older native visible content', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: 'stale',
+          content: 'Stale native visible answer',
+          contentMode: 'cumulative',
+        });
+        onToken?.({
+          token: 'reasoning',
+          reasoningContent: 'Final reasoning only',
+          reasoningContentMode: 'cumulative',
+          accumulatedText: '<think>Final reasoning only</think>',
+        });
+        return { reasoning_content: 'Final reasoning only' };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Finish with reasoning only');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: '',
+        thoughtContent: 'Final reasoning only',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('materializes an authoritative empty answer during branch regeneration', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original branch prompt');
+    });
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = originalThread.messages.find((message) => message.role === 'user')!;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Transient regenerated answer');
+        return { text: 'Stale regenerated raw text', content: '' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited branch prompt',
+      );
+    });
+
+    const regeneratedThread = useChatStore.getState().getActiveThread()!;
+    expect(regeneratedThread.messages).toEqual([
+      expect.objectContaining({
+        id: targetUserMessage.id,
+        role: 'user',
+        content: 'Edited branch prompt',
+      }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: '',
+        state: 'complete',
+      }),
+    ]);
+    expect(JSON.stringify(regeneratedThread.messages)).not.toContain('Hello back');
+    expect(readPersistedThreadRecord(regeneratedThread.id).thread?.messages?.at(-1)).toEqual(
+      expect.objectContaining({ content: '', state: 'complete' }),
+    );
+  });
+
   it('parses reasoning markers split across string token callbacks', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
@@ -2760,7 +2943,7 @@ describe('useChatSession', () => {
 
         return {
           text: '<think>Thinking through the answer</think>Visible answer',
-          content: '',
+          content: 'Visible answer',
           reasoning_content: 'Thinking through the answer',
         };
       },
@@ -2821,7 +3004,7 @@ describe('useChatSession', () => {
 
         return {
           text: '[THINK]Thinking through the answer[/THINK]Visible answer',
-          content: '',
+          content: 'Visible answer',
           reasoning_content: 'Thinking through the answer',
         };
       },

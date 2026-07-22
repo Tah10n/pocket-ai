@@ -218,6 +218,13 @@ class DirectorySizeTraversalLimitError extends Error {
   }
 }
 
+class UnsafeCacheDirectoryEntryNameError extends Error {
+  constructor() {
+    super('Cache directory returned an unsafe entry name.');
+    this.name = 'UnsafeCacheDirectoryEntryNameError';
+  }
+}
+
 function createDirectoryFileSystemWorkQueue(
   maxConcurrent: number,
   maxQueued: number,
@@ -1182,6 +1189,11 @@ export async function clearActiveCache() {
       if (cacheInfo.exists) {
         const entries = await FileSystem.readDirectoryAsync(cacheDir);
         for (const entryName of entries) {
+          if (!isSafeDirectoryEntryName(entryName)) {
+            failedCacheEntryDeletes += 1;
+            firstError ??= new UnsafeCacheDirectoryEntryNameError();
+            continue;
+          }
           if (PROTECTED_ACTIVE_CACHE_ENTRY_NAMES.has(entryName.toLowerCase())) {
             continue;
           }

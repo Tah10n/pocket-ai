@@ -1614,6 +1614,47 @@ describe('StorageManagerService', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-cache/temporary.bin', { idempotent: true });
   });
 
+  it('rejects unsafe cache entry names without deleting outside the direct cache children', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
+      if (uri === 'test-cache/') {
+        return { exists: true, isDirectory: true };
+      }
+      return { exists: false };
+    });
+    (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValue([
+      'http-cache',
+      'HTTP-CACHE',
+      '%68ttp-cache',
+      '%2e%2e',
+      '..',
+      'nested/entry',
+      'temporary.bin',
+    ]);
+
+    await expect(clearActiveCache()).rejects.toThrow(
+      'Cache directory returned an unsafe entry name.',
+    );
+
+    expect(FileSystem.deleteAsync).toHaveBeenCalledTimes(1);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-cache/temporary.bin', {
+      idempotent: true,
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[StorageManagerService] Failed to delete cache entries',
+      expect.objectContaining({
+        pathCategory: 'cache_storage',
+        scope: 'active_cache_clear',
+        failedCount: 4,
+        errorName: 'Error',
+      }),
+    );
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('%68ttp-cache');
+    expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('%2e%2e');
+
+    warnSpy.mockRestore();
+  });
+
   it('retries cache entry deletion once before succeeding', async () => {
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri === 'test-cache/') {

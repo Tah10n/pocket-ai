@@ -742,6 +742,15 @@ describe('android-smoke target ABI contract', () => {
       .toThrow(/requires an explicit assemble task/);
   });
 
+  it('cleans generated native intermediates before invoking a fresh provenance build', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../../scripts/android-smoke.js'), 'utf8');
+    const cleanupIndex = source.indexOf('cleanAndroidNativeBuildIntermediates(projectRoot)');
+    const buildIndex = source.indexOf('runAndroidGradleBuild(gradleArgs);');
+
+    expect(cleanupIndex).toBeGreaterThan(-1);
+    expect(buildIndex).toBeGreaterThan(cleanupIndex);
+  });
+
   it('passes provenance cache-bypass arguments to the actual Gradle spawn wrapper', () => {
     const runChecked = jest.fn();
     const gradleArgs = buildGradleAssembleArgs('app:assembleRelease', 'x86_64');

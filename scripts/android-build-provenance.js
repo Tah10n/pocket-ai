@@ -94,19 +94,150 @@ const ANDROID_MODULE_GENERATED_INPUT_DIRECTORIES = new Set([
   ".kotlin",
   ".externalNativeBuild",
 ]);
+const WINDOWS_NINJA_LEGACY_MAX_PATH_CHARS = 259;
+const WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS = 207;
+const ANDROID_NATIVE_BUILD_INTERMEDIATE_NAMES = Object.freeze([
+  ".cxx",
+  ".externalNativeBuild",
+]);
 
-function createIsolatedAndroidBuildEnvironment(projectRoot, env = {}, overrides = {}) {
-  return {
-    ...env,
-    ...overrides,
-    GRADLE_USER_HOME: path.join(
+function resolveIsolatedAndroidGradleUserHome(projectRoot, options = {}) {
+  const platform = options.platform || process.platform;
+  if (platform !== "win32") {
+    return path.join(
       projectRoot,
       "node_modules",
       ".cache",
       "pocket-ai-android",
       "gradle-user-home"
-    ),
+    );
+  }
+
+  const windowsPath = path.win32;
+  const shortCacheRoot = options.shortCacheRoot || os.tmpdir();
+  if (!windowsPath.isAbsolute(shortCacheRoot)) {
+    throw new Error(
+      "Windows Android builds require POCKET_AI_ANDROID_SHORT_CACHE_ROOT to be an absolute writable short path."
+    );
+  }
+  const normalizedProjectRoot = windowsPath
+    .resolve(projectRoot)
+    .replace(/\\/gu, "/")
+    .toLowerCase();
+  const projectKey = crypto
+    .createHash("sha256")
+    .update(normalizedProjectRoot)
+    .digest("hex")
+    .slice(0, 12);
+  const gradleUserHome = windowsPath.join(
+    windowsPath.resolve(shortCacheRoot),
+    `g-${projectKey}`
+  );
+  if (
+    gradleUserHome.length
+      + 1
+      + WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS
+    > WINDOWS_NINJA_LEGACY_MAX_PATH_CHARS
+  ) {
+    throw new Error(
+      "Windows Android builds require POCKET_AI_ANDROID_SHORT_CACHE_ROOT to resolve to a writable short path."
+    );
+  }
+  return gradleUserHome;
+}
+
+function createIsolatedAndroidBuildEnvironment(projectRoot, env = {}, overrides = {}) {
+  const mergedEnvironment = {
+    ...env,
+    ...overrides,
   };
+  return {
+    ...mergedEnvironment,
+    GRADLE_USER_HOME: resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      shortCacheRoot: mergedEnvironment.POCKET_AI_ANDROID_SHORT_CACHE_ROOT,
+    }),
+  };
+}
+
+function isPathInsideRoot(candidatePath, rootPath) {
+  const relativePath = path.relative(rootPath, candidatePath);
+  return relativePath !== ""
+    && relativePath !== ".."
+    && !relativePath.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relativePath);
+}
+
+function collectInstalledAndroidPackageRoots(nodeModulesRoot) {
+  if (!fs.existsSync(nodeModulesRoot)) {
+    return [];
+  }
+  const packageRoots = [];
+  for (const entry of fs.readdirSync(nodeModulesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) {
+      continue;
+    }
+    const entryPath = path.join(nodeModulesRoot, entry.name);
+    if (!entry.name.startsWith("@")) {
+      packageRoots.push(entryPath);
+      continue;
+    }
+    for (const scopedEntry of fs.readdirSync(entryPath, { withFileTypes: true })) {
+      if (scopedEntry.isDirectory()) {
+        packageRoots.push(path.join(entryPath, scopedEntry.name));
+      }
+    }
+  }
+  return packageRoots;
+}
+
+function cleanAndroidNativeBuildIntermediates(projectRoot) {
+  try {
+    const resolvedProjectRoot = path.resolve(projectRoot);
+    const realProjectRoot = fs.realpathSync(resolvedProjectRoot);
+    const nodeModulesRoot = path.join(resolvedProjectRoot, "node_modules");
+    const androidRoot = path.join(resolvedProjectRoot, "android");
+    const projectAndroidModuleRoots = fs.existsSync(androidRoot)
+      ? fs.readdirSync(androidRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+        .map((entry) => path.join(androidRoot, entry.name))
+      : [];
+    const ownerRoots = [
+      androidRoot,
+      ...projectAndroidModuleRoots,
+      ...collectInstalledAndroidPackageRoots(nodeModulesRoot)
+        .map((packageRoot) => path.join(packageRoot, "android")),
+    ];
+    let removedDirectoryCount = 0;
+
+    for (const ownerRoot of ownerRoots) {
+      for (const intermediateName of ANDROID_NATIVE_BUILD_INTERMEDIATE_NAMES) {
+        const candidatePath = path.resolve(ownerRoot, intermediateName);
+        const allowedRoot = isPathInsideRoot(candidatePath, nodeModulesRoot)
+          ? nodeModulesRoot
+          : androidRoot;
+        if (!isPathInsideRoot(candidatePath, allowedRoot) || !fs.existsSync(candidatePath)) {
+          continue;
+        }
+        const resolvedAllowedRoot = fs.realpathSync(allowedRoot);
+        const resolvedCandidatePath = fs.realpathSync(candidatePath);
+        if (
+          !isPathInsideRoot(resolvedAllowedRoot, realProjectRoot)
+          || !isPathInsideRoot(resolvedCandidatePath, resolvedAllowedRoot)
+        ) {
+          throw new Error("Unsafe Android native intermediate target.");
+        }
+        const candidateStats = fs.lstatSync(candidatePath);
+        if (!candidateStats.isDirectory() || candidateStats.isSymbolicLink()) {
+          throw new Error("Unsafe Android native intermediate shape.");
+        }
+        fs.rmSync(candidatePath, { force: true, recursive: true });
+        removedDirectoryCount += 1;
+      }
+    }
+    return removedDirectoryCount;
+  } catch {
+    throw new Error("Unable to reset generated Android native build intermediates safely.");
+  }
 }
 
 function createAndroidShippingBuildEnvironment(projectRoot, env = {}, options = {}) {
@@ -1886,6 +2017,7 @@ module.exports = {
   collectGitProvenance,
   collectPrebuildInputState,
   collectToolchainVersions,
+  cleanAndroidNativeBuildIntermediates,
   createAndroidShippingBuildEnvironment,
   createIsolatedAndroidBuildEnvironment,
   createFileContentFingerprint,
@@ -1909,6 +2041,7 @@ module.exports = {
   resolveAndroidReleaseTaskContract,
   resolveAndroidGradleWrapperInvocation,
   resolveBuildStampPath,
+  resolveIsolatedAndroidGradleUserHome,
   resolvePrebuildStampPaths,
   resolveExpoCliInvocation,
   runAndroidReleaseArtifactTransaction,

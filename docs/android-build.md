@@ -107,7 +107,7 @@ reserve another code.
 
 ## Hermetic Gradle execution
 
-Provenance-aware builds use a repository-local, isolated `GRADLE_USER_HOME` and always add:
+Provenance-aware builds use an isolated `GRADLE_USER_HOME` and always add:
 
 ```text
 --rerun-tasks --no-build-cache --no-configuration-cache
@@ -117,6 +117,17 @@ This makes the artifact transaction independent of a developer's ordinary Gradle
 and prevents an old task output from being accepted as current evidence. External Gradle
 init scripts, argument files, JVM code-loading channels, injected Android properties, and
 non-canonical architecture overrides fail closed.
+
+On Windows, the isolated Gradle home is project-keyed under the system temporary directory
+to keep React Native prefab paths below the legacy 260-character Ninja path limit. The
+runner reserves 207 characters after the Gradle-home prefix for the longest current React
+Native prefab/CMake descendants and fails closed if that budget cannot be met. If the
+temporary root is unusually long, set `POCKET_AI_ANDROID_SHORT_CACHE_ROOT` to a writable
+short directory.
+Before a fresh provenance build, the runner removes only generated `.cxx/` and
+`.externalNativeBuild/` directories below the generated Android project and installed
+package Android roots, preventing stale CMake state from retaining an older absolute cache
+path. Other platforms retain the repository-local isolated Gradle home.
 
 The build manifest hashes repository inputs by content, including the embedded JavaScript
 bundle inputs for release builds. It excludes generated Android intermediates such as

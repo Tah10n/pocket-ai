@@ -16,6 +16,7 @@ const {
   collectBuildProvenance,
   collectContentHashEntries,
   collectPrebuildInputState,
+  cleanAndroidNativeBuildIntermediates,
   createAndroidShippingBuildEnvironment,
   createIsolatedAndroidBuildEnvironment,
   createFileContentFingerprint,
@@ -36,6 +37,7 @@ const {
   resolveAndroidReleaseTaskContract,
   resolveBuildStampPath,
   resolveExpoCliInvocation,
+  resolveIsolatedAndroidGradleUserHome,
   resolvePrebuildStampPaths,
   runAndroidReleaseArtifactTransaction,
   shouldRunPrebuild,
@@ -1103,13 +1105,7 @@ describe('Android build provenance routing', () => {
         { NODE_ENV: 'production' },
       );
       expect(isolatedEnvironment).toEqual(expect.objectContaining({
-        GRADLE_USER_HOME: path.join(
-          projectRoot,
-          'node_modules',
-          '.cache',
-          'pocket-ai-android',
-          'gradle-user-home',
-        ),
+        GRADLE_USER_HOME: resolveIsolatedAndroidGradleUserHome(projectRoot),
         NODE_ENV: 'production',
       }));
       expect(isolatedEnvironment.GRADLE_USER_HOME).not.toBe(setupGradleHome);
@@ -1127,6 +1123,127 @@ describe('Android build provenance routing', () => {
       ]);
     } finally {
       fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('uses a deterministic short Windows Gradle home and fails closed for a long temp root', () => {
+    const projectRoot = 'C:\\tmp\\pocket-ai-pr130-comprehensive-final-hardening';
+    const shortCacheRoot = 'C:\\Users\\fixture\\AppData\\Local\\Temp';
+    const first = resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      platform: 'win32',
+      shortCacheRoot,
+    });
+    const second = resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      platform: 'win32',
+      shortCacheRoot,
+    });
+    const otherProject = resolveIsolatedAndroidGradleUserHome('C:\\tmp\\another-project', {
+      platform: 'win32',
+      shortCacheRoot,
+    });
+
+    expect(first).toBe(second);
+    expect(first).toMatch(/^C:\\Users\\fixture\\AppData\\Local\\Temp\\g-[0-9a-f]{12}$/u);
+    expect(first).not.toBe(otherProject);
+    expect(first).not.toContain('pocket-ai-pr130');
+    const representativeNativePath = path.win32.join(
+      first,
+      'caches',
+      '8.14.3',
+      'transforms',
+      '08797f5609b8613ea13a1ae6d79a7559',
+      'transformed',
+      'react-android-0.83.6-debug',
+      'prefab',
+      'modules',
+      'reactnative',
+      'include',
+      'react',
+      'renderer',
+      'components',
+      'view',
+      'HostPlatformViewTraitsInitializer.h',
+    );
+    expect(representativeNativePath.length).toBeLessThan(260);
+    expect(() => resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      platform: 'win32',
+      shortCacheRoot: 'relative-cache',
+    })).toThrow('absolute writable short path');
+    expect(() => resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      platform: 'win32',
+      shortCacheRoot: 'C:\\Users\\a-very-long-private-profile-name\\AppData\\Local\\Temp',
+    })).toThrow('POCKET_AI_ANDROID_SHORT_CACHE_ROOT');
+  });
+
+  it('removes only generated native build intermediates from project and package Android roots', () => {
+    const projectRoot = createProject();
+    const generatedDirectories = [
+      path.join(projectRoot, 'android', 'app', '.cxx'),
+      path.join(projectRoot, 'node_modules', 'llama.rn', 'android', '.cxx'),
+      path.join(projectRoot, 'node_modules', '@scope', 'worklets', 'android', '.externalNativeBuild'),
+    ];
+    const sourceFiles = [
+      path.join(projectRoot, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
+      path.join(projectRoot, 'node_modules', 'llama.rn', 'android', 'CMakeLists.txt'),
+    ];
+    for (const generatedDirectory of generatedDirectories) {
+      fs.mkdirSync(generatedDirectory, { recursive: true });
+      fs.writeFileSync(path.join(generatedDirectory, 'state.bin'), 'generated');
+    }
+    for (const sourceFile of sourceFiles) {
+      fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+      fs.writeFileSync(sourceFile, 'source');
+    }
+
+    try {
+      expect(cleanAndroidNativeBuildIntermediates(projectRoot)).toBe(3);
+      expect(generatedDirectories.every((directory) => !fs.existsSync(directory))).toBe(true);
+      expect(sourceFiles.every((filePath) => fs.existsSync(filePath))).toBe(true);
+      expect(cleanAndroidNativeBuildIntermediates(projectRoot)).toBe(0);
+
+      const unsafeIntermediate = path.join(
+        projectRoot,
+        'node_modules',
+        'llama.rn',
+        'android',
+        '.cxx',
+      );
+      fs.writeFileSync(unsafeIntermediate, 'not-a-generated-directory');
+      expect(() => cleanAndroidNativeBuildIntermediates(projectRoot))
+        .toThrow('Unable to reset generated Android native build intermediates safely.');
+      expect(fs.readFileSync(unsafeIntermediate, 'utf8')).toBe('not-a-generated-directory');
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects an ancestor junction without deleting external native intermediates', () => {
+    const projectRoot = createProject();
+    const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-external-cxx-'));
+    const nodeModulesRoot = path.join(projectRoot, 'node_modules');
+    const externalIntermediate = path.join(
+      externalRoot,
+      'llama.rn',
+      'android',
+      '.cxx',
+    );
+    fs.mkdirSync(externalIntermediate, { recursive: true });
+    const sentinelPath = path.join(externalIntermediate, 'external-sentinel.bin');
+    fs.writeFileSync(sentinelPath, 'must-survive');
+    fs.symlinkSync(
+      externalRoot,
+      nodeModulesRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    try {
+      expect(() => cleanAndroidNativeBuildIntermediates(projectRoot))
+        .toThrow('Unable to reset generated Android native build intermediates safely.');
+      expect(fs.readFileSync(sentinelPath, 'utf8')).toBe('must-survive');
+    } finally {
+      fs.unlinkSync(nodeModulesRoot);
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+      fs.rmSync(externalRoot, { force: true, recursive: true });
     }
   });
 
@@ -1904,6 +2021,11 @@ describe('Android build provenance routing', () => {
     expect(releaseBuilder).toContain('resolveAndroidGradleWrapperInvocation({');
     expect(releaseBuilder).toContain('gradleArgs: releaseGradleExecutionArgs');
     expect(releaseBuilder).toContain('createIsolatedAndroidBuildEnvironment(');
+    const nativeCleanupIndex = releaseBuilder.indexOf(
+      'cleanAndroidNativeBuildIntermediates(projectRoot)',
+    );
+    expect(nativeCleanupIndex).toBeGreaterThan(-1);
+    expect(nativeCleanupIndex).toBeLessThan(releaseSpawnIndex);
     expect(releaseBuilder).toContain('createAndroidShippingBuildEnvironment(projectRoot, process.env');
     expect(releaseBuilder).toContain('forceProductionNodeEnv: true');
     expect(releaseBuilder.match(/androidQaEvidence: false/g)).toHaveLength(2);

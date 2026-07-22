@@ -11,6 +11,7 @@ const {
   collectAndroidEffectiveBuildContext,
   collectBuildProvenance,
   collectPrebuildInputState,
+  cleanAndroidNativeBuildIntermediates,
   createAndroidShippingBuildEnvironment,
   createIsolatedAndroidBuildEnvironment,
   createFileContentFingerprint,
@@ -411,6 +412,13 @@ const buildProvenance = collectBuildProvenance(projectRoot, {
   gradleArgs: releaseGradleExecutionArgs,
   buildContext: collectReleaseBuildContext(verifiedPrebuildInputState.digest),
 });
+
+const removedNativeIntermediateCount = cleanAndroidNativeBuildIntermediates(projectRoot);
+if (removedNativeIntermediateCount > 0) {
+  console.log(
+    `Removed ${removedNativeIntermediateCount} generated native build intermediate directories before the provenance build.`
+  );
+}
 
 const gradleInvocation = resolveAndroidGradleWrapperInvocation({
   platform: process.platform,

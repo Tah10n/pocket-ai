@@ -16,6 +16,7 @@ const {
   collectAndroidEffectiveBuildContext,
   collectBuildProvenance,
   collectPrebuildInputState,
+  cleanAndroidNativeBuildIntermediates,
   createIsolatedAndroidBuildEnvironment,
   createFileContentFingerprint,
   listZipEntries,
@@ -1995,6 +1996,12 @@ async function isPortFree(port) {
 function buildAndroidApk() {
   ensureAndroidNativeProject();
   ensureGradleWrapperExecutable();
+  const removedNativeIntermediateCount = cleanAndroidNativeBuildIntermediates(projectRoot);
+  if (removedNativeIntermediateCount > 0) {
+    log(
+      `Removed ${removedNativeIntermediateCount} generated native build intermediate directories before the provenance build.`
+    );
+  }
   log(`Building Android ${apkVariant} APK...`);
 
   const assembleTask = `app:assemble${apkVariant[0].toUpperCase()}${apkVariant.slice(1)}`;

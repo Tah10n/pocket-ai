@@ -153,6 +153,23 @@ npm run android:scenarios:storage -- --skip-build
 
 This check clears rebuildable app cache data and is intentionally not part of the default or `all` scenario packs.
 
+For current-source Android validation, run the fail-closed runtime and attachment packs. The
+branch-regeneration pack builds and installs a provenance-verified release APK and then runs
+an ordered, destructive recovery matrix:
+
+```bash
+npm run android:scenarios:runtime -- --fail-on-skip
+npm run android:scenarios:attachments -- --fail-on-skip
+npm run android:scenarios:branch-regeneration -- --fail-on-skip
+```
+
+The branch pack requires a prepared disposable conversation fixture and clears chat history
+at the end. Use synthetic, non-sensitive fixture content because screenshots and UI
+hierarchy evidence preserve visible text. See the
+[Android Build Guide](docs/android-build.md#current-head-release-apk-qa) and
+[Release Checklist](docs/release-checklist.md#destructive-branch-regeneration-pack) before
+running it.
+
 Generate a Jest coverage report locally:
 
 ```bash
@@ -176,7 +193,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
-| [Android Build Guide](docs/android-build.md) | Android release signing and bundling |
+| [Android Build Guide](docs/android-build.md) | Deterministic Android release builds, signing, provenance, and current-head QA |
 | [iOS Build Guide](docs/ios-build.md) | iOS archive, distribution, and signing |
 | [UI Architecture](docs/ui-architecture.md) | Component and layout guidelines |
 | [New Architecture](docs/new-architecture.md) | React Native new architecture notes |

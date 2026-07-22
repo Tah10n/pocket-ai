@@ -326,6 +326,41 @@ The fixtures cover 20, 200, and 1,000 historical messages; short and
 8K-token-equivalent outputs; reasoning; image, audio, and document history; and model
 switch markers.
 
+## Current-head Android branch evidence
+
+The deterministic counters above are complemented by a destructive, ordered device pack:
+
+```bash
+npm run android:scenarios:branch-regeneration -- --fail-on-skip
+```
+
+The pack builds and installs a release APK, then authenticates its exact Git, input, APK,
+install, device, and ABI provenance before allowing a destructive step. It covers pre-token
+and post-checkpoint force-stop recovery, stop-before-output, stop-after-partial, successful
+replacement, reasoning removal after settle and relaunch, image/document/audio identity,
+conversation deletion, and clear-history persistence after relaunch.
+
+Replacement checks use a full pre-operation assistant baseline. A passing operation must
+produce the newly observed terminal assistant directly after the target user; an unrelated,
+reused, reordered, or non-complete assistant cannot satisfy the success gate. Partial
+recovery must retain exactly one stopped replacement without duplicate message IDs. The
+reasoning case proves stale thought state is removed from both the settled and rehydrated
+topology. Attachment cases bind the prepared user attachment IDs to the resulting assistant
+generation rather than relying on visible labels alone.
+
+The final steps delete the fixture and clear all chat history, so the pack is one-shot and
+requires disposable prepared data. Its exact preconditions, 15 stable scenario IDs, and
+evidence locations are documented in the
+[Release Checklist](./release-checklist.md#destructive-branch-regeneration-pack).
+
+For this pack, the supporting accessibility and generation-control evidence is compiled
+into a verified QA release build. Shipping Android builds reject that configuration.
+Published scenario logs and JSON reports are app-scoped, bounded, and sanitized; raw
+collector files stay in task-private cache storage and are removed after evidence is
+derived. Screenshots and UI hierarchy XML are raw visible-state evidence, so the fixture
+must use synthetic, non-sensitive content and those artifacts must be reviewed before
+sharing.
+
 ## Native and measurement limits
 
 - Android performs the actual cache-tree walk on a single native executor, off the

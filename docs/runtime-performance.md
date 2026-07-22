@@ -364,12 +364,14 @@ sharing.
 ## Native and measurement limits
 
 - Android performs the actual cache-tree walk on a single native executor, off the
-  JavaScript thread. The repository has one production call path through
-  `SystemMetricsService`, so an additional native shared-future API is not currently
-  required.
-- An already-running native filesystem walk cannot be canceled. Generation checks prevent
-  its result from becoming current after clear or refresh; a fresh scan may be queued for
-  the new generation.
+  JavaScript thread. The walk is bounded by visited-node, depth, and elapsed-time limits;
+  it incrementally enumerates entries, rejects symlinks and out-of-root canonical paths,
+  and preserves the live `http-cache` directory.
+- Native cache scans are generation-aware and cooperatively interrupted by clear, refresh,
+  or React-context teardown. The executor has no waiting queue: a replacement request that
+  arrives before cancellation settles fails fast and uses the bounded JavaScript fallback
+  instead of accumulating native work. Android versions below 8 use that fallback because
+  the incremental native directory API is unavailable there.
 - iOS has no native cache-size method in this module and uses the bounded JavaScript
   fallback.
 - Model initialization duration and throughput remain device-, model-, backend-, and

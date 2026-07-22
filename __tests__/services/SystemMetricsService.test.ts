@@ -287,13 +287,17 @@ describe('SystemMetricsService', () => {
   it('does not let an invalidated scan clear its active replacement', async () => {
     const staleScan = createDeferred<number>();
     const freshScan = createDeferred<number>();
+    const invalidateNativeScan = jest.fn();
     NativeModules.SystemMetrics.getCacheDirectorySize = jest.fn()
       .mockImplementationOnce(() => staleScan.promise)
       .mockImplementationOnce(() => freshScan.promise);
+    NativeModules.SystemMetrics.invalidateCacheDirectorySizeMeasurement = invalidateNativeScan;
 
     const staleMeasurement = getAppCacheDirectorySizeBytes();
     invalidateAppCacheDirectorySizeMeasurement();
     const freshMeasurement = getAppCacheDirectorySizeBytes();
+
+    expect(invalidateNativeScan).toHaveBeenCalledTimes(1);
 
     staleScan.resolve(10);
     await expect(staleMeasurement).resolves.toBe(10);
@@ -304,6 +308,17 @@ describe('SystemMetricsService', () => {
 
     freshScan.resolve(20);
     await expect(Promise.all([freshMeasurement, dedupedFreshMeasurement])).resolves.toEqual([20, 20]);
+  });
+
+  it('contains a synchronous native invalidation failure without leaking it to callers', () => {
+    NativeModules.SystemMetrics.invalidateCacheDirectorySizeMeasurement = jest.fn(() => {
+      throw new Error('native cancellation failed');
+    });
+
+    expect(() => invalidateAppCacheDirectorySizeMeasurement()).not.toThrow();
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'storage.cacheScan.nativeInvalidationFailed': 1,
+    }));
   });
 
   it('does not invent an Android cache size when the native method is unavailable', async () => {

@@ -152,7 +152,7 @@ If your change affects Android behavior or visible UI flows, also run:
 npm run verify:mobile-change:android
 ```
 
-This command expects a connected Android phone by default and runs the fast `core` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
+This command expects a connected Android phone by default and runs the fail-closed `runtime` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
 
 Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The state-mutating `storage` pack is intentionally excluded from `all`:
 

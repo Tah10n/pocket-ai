@@ -133,8 +133,11 @@ path. Other platforms retain the repository-local isolated Gradle home.
 
 The build manifest hashes repository inputs by content, including the embedded JavaScript
 bundle inputs for release builds. It excludes generated Android intermediates such as
-`build/`, `.gradle/`, `.cxx/`, `.kotlin/`, and `.externalNativeBuild/`, while still hashing
-repository-owned native sources. The manifest also binds normalized toolchain versions,
+`build/`, `.gradle/`, `.cxx/`, `.kotlin/`, and `.externalNativeBuild/`. It also excludes the
+immediate `android/app/src/main/assets/ggml-hexagon/libggml-htp-*.so` libraries synchronized
+there by the llama.rn Gradle task, while continuing to hash every other source-owned Android
+asset in that directory and all native sources.
+The manifest also binds normalized toolchain versions,
 effective public build configuration, Git `HEAD`, tree and dirty identity, and a private
 HMAC of non-public local inputs. Inputs are recomputed after Gradle; any change during the
 build invalidates and removes the transaction outputs.

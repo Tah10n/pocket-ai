@@ -134,14 +134,36 @@ describe('Android build content provenance', () => {
       'cpp',
       'CMakeLists.txt',
     );
+    const trackedNativeAssetPath = path.join(
+      projectRoot,
+      'android',
+      'app',
+      'src',
+      'main',
+      'assets',
+      'ggml-hexagon',
+      'pocket-ai-owned.bin',
+    );
     const generatedPaths = [
       path.join(projectRoot, 'android', '.kotlin', 'sessions', 'kotlin-compiler-1.bin'),
       path.join(projectRoot, 'android', 'app', '.cxx', 'Debug', 'x86_64', 'build.ninja'),
       path.join(projectRoot, 'android', 'app', '.externalNativeBuild', 'cmake', 'metadata.json'),
       path.join(projectRoot, 'android', 'feature', '.cxx', 'Debug', 'arm64-v8a', 'build.ninja'),
+      path.join(
+        projectRoot,
+        'android',
+        'app',
+        'src',
+        'main',
+        'assets',
+        'ggml-hexagon',
+        'libggml-htp-v73.so',
+      ),
     ];
     fs.mkdirSync(path.dirname(trackedNativeSourcePath), { recursive: true });
     fs.writeFileSync(trackedNativeSourcePath, 'add_library(pocket_ai SHARED one.cpp)');
+    fs.mkdirSync(path.dirname(trackedNativeAssetPath), { recursive: true });
+    fs.writeFileSync(trackedNativeAssetPath, 'tracked-asset-one');
 
     const collect = () => collectBuildProvenance(projectRoot, {
       abi: 'x86_64',
@@ -164,13 +186,26 @@ describe('Android build content provenance', () => {
         entry.path.includes('/.cxx/')
         || entry.path.includes('/.externalNativeBuild/')
         || entry.path.startsWith('android/.kotlin/')
+        || entry.path === 'android/app/src/main/assets/ggml-hexagon/libggml-htp-v73.so'
       ))).toBe(false);
       expect(isExcludedAndroidBuildInput('android/.kotlin/sessions/state.bin')).toBe(true);
       expect(isExcludedAndroidBuildInput('android/app/.cxx/Debug/build.ninja')).toBe(true);
       expect(isExcludedAndroidBuildInput('android/app/.externalNativeBuild/cmake/state.json')).toBe(true);
+      expect(isExcludedAndroidBuildInput(
+        'android/app/src/main/assets/ggml-hexagon/libggml-htp-v73.so',
+      )).toBe(true);
       expect(isExcludedAndroidBuildInput('android/app/src/main/cpp/CMakeLists.txt')).toBe(false);
+      expect(isExcludedAndroidBuildInput(
+        'android/app/src/main/assets/ggml-hexagon/pocket-ai-owned.bin',
+      )).toBe(false);
+      expect(isExcludedAndroidBuildInput(
+        'android/app/src/main/assets/ggml-hexagon/custom/libggml-htp-v79.so',
+      )).toBe(false);
 
       fs.writeFileSync(trackedNativeSourcePath, 'add_library(pocket_ai SHARED two.cpp)');
+      expect(collect().digest).not.toBe(afterIntermediates.digest);
+      fs.writeFileSync(trackedNativeSourcePath, 'add_library(pocket_ai SHARED one.cpp)');
+      fs.writeFileSync(trackedNativeAssetPath, 'tracked-asset-two');
       expect(collect().digest).not.toBe(afterIntermediates.digest);
     } finally {
       fs.rmSync(projectRoot, { force: true, recursive: true });

@@ -94,6 +94,8 @@ const ANDROID_MODULE_GENERATED_INPUT_DIRECTORIES = new Set([
   ".kotlin",
   ".externalNativeBuild",
 ]);
+const ANDROID_GRADLE_GENERATED_INPUT_PATTERN =
+  /^android\/app\/src\/main\/assets\/ggml-hexagon\/libggml-htp-[^/]*\.so$/u;
 const WINDOWS_NINJA_LEGACY_MAX_PATH_CHARS = 259;
 const WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS = 214;
 const ANDROID_NATIVE_BUILD_INTERMEDIATE_NAMES = Object.freeze([
@@ -1479,6 +1481,9 @@ function normalizePath(value) {
 function isExcludedAndroidBuildInput(relativePath) {
   const normalized = normalizePath(relativePath);
   if (normalized === "android/local.properties") {
+    return true;
+  }
+  if (ANDROID_GRADLE_GENERATED_INPUT_PATTERN.test(normalized)) {
     return true;
   }
 

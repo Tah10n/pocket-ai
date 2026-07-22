@@ -24,7 +24,11 @@
     },
     "production": {
       "distribution": "store",
-      "channel": "production"
+      "channel": "production",
+      "env": {
+        "NODE_ENV": "production",
+        "POCKET_AI_SHIPPING_BUILD": "1"
+      }
     }
   }
 }

@@ -32,6 +32,7 @@ import {
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../types/attachments';
 import type { AttachmentDraft, MultimodalReadinessState } from '../types/multimodal';
 import {
+  flushChatStreamingProgressForAndroidQa,
   flushPendingChatPersistenceWrites,
   useChatStore,
   type AssistantTurnCommitResult,
@@ -83,6 +84,18 @@ import {
   validateChatMediaAttachmentLimit,
 } from '../utils/chatAttachments';
 import { buildLlmInferenceMessagesSignature } from '../utils/llmInferenceMessageSignature';
+import {
+  activateAndroidQaGenerationAfterFirstDurableOutput,
+  beginAndroidQaGeneration,
+  buildAndroidQaPreparedGenerationEvidence,
+  isAndroidQaGenerationEvidenceEnabled,
+  isAndroidQaGenerationGateArmed,
+  isAndroidQaGenerationHeld,
+  recordAndroidQaPreparedGenerationEvidence,
+  releaseAndroidQaGenerationGate,
+  shouldHoldAndroidQaGenerationBeforeFirstOutput,
+  waitForAndroidQaGenerationGateRelease,
+} from '../services/AndroidQaGenerationEvidence';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -545,6 +558,7 @@ export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promis
 
   if (generation) {
     generation.stopRequested = true;
+    releaseAndroidQaGenerationGate(generation.messageId);
 
     const chatState = useChatStore.getState();
     try {
@@ -1731,6 +1745,10 @@ export const useChatSession = () => {
       nativeCompletionStarted: false,
     };
     sharedGenerationState.current = generationState;
+    const isAndroidQaEvidenceEnabled = isAndroidQaGenerationEvidenceEnabled();
+    if (isAndroidQaEvidenceEnabled) {
+      beginAndroidQaGeneration(assistantMessageId);
+    }
 
     const throwIfGenerationStopped = () => {
       if (generationState.stopRequested) {
@@ -1865,8 +1883,19 @@ export const useChatSession = () => {
 
       patchAssistantMessage(threadId, assistantMessageId, updates);
       if (presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0) {
+        const isFirstDurableAssistantPatch = !hasFlushedFirstAssistantPatch;
         hasFlushedFirstAssistantPatch = true;
         lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
+        if (
+          isFirstDurableAssistantPatch
+          && isAndroidQaEvidenceEnabled
+          && isAndroidQaGenerationGateArmed('after-first-durable-output')
+        ) {
+          if (!flushChatStreamingProgressForAndroidQa(threadId, assistantMessageId)) {
+            throw new Error('Unable to verify the first durable Android QA generation patch.');
+          }
+          activateAndroidQaGenerationAfterFirstDurableOutput(assistantMessageId);
+        }
       }
     };
 
@@ -2025,6 +2054,7 @@ export const useChatSession = () => {
 
         try {
           generationState.stopRequested = true;
+          releaseAndroidQaGenerationGate(assistantMessageId);
           const result = finalizeBufferedAssistantTurn(
             { outcome: 'stopped' },
             { allowStopped: true },
@@ -2447,6 +2477,13 @@ export const useChatSession = () => {
         throw new Error('Wait for the current response to finish stopping before starting another response.');
       }
 
+      if (isAndroidQaEvidenceEnabled) {
+        recordAndroidQaPreparedGenerationEvidence(buildAndroidQaPreparedGenerationEvidence({
+          userMessageId: latestUserMessageId,
+          assistantMessageId,
+          preparedMessages: messages,
+        }));
+      }
       generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
@@ -2469,6 +2506,12 @@ export const useChatSession = () => {
           reasoning_format: reasoningFormatForRequest,
         },
         onToken: (token) => {
+          if (isAndroidQaEvidenceEnabled && (
+            shouldHoldAndroidQaGenerationBeforeFirstOutput(assistantMessageId)
+            || isAndroidQaGenerationHeld(assistantMessageId)
+          )) {
+            return;
+          }
           const isStreamingTraceEnabled = performanceMonitor.isEnabled();
           const processedCharactersBefore = isStreamingTraceEnabled
             ? presentationParser.getProcessedCharacterCount()
@@ -2554,6 +2597,9 @@ export const useChatSession = () => {
           });
         },
       });
+      if (isAndroidQaEvidenceEnabled) {
+        await waitForAndroidQaGenerationGateRelease(assistantMessageId);
+      }
       generationState.nativeCompletionStarted = false;
 
       if (generationState.stopRequested) {
@@ -2644,6 +2690,9 @@ export const useChatSession = () => {
       sendOutcomeNotificationOnce('error');
       throw userFacingError;
     } finally {
+      if (isAndroidQaEvidenceEnabled) {
+        releaseAndroidQaGenerationGate(assistantMessageId);
+      }
       releasePromptPreparation?.();
       releasePromptPreparation = null;
       if (flushTimeout) {
@@ -2877,6 +2926,7 @@ export const useChatSession = () => {
     }
 
     generation.stopRequested = true;
+    releaseAndroidQaGenerationGate(generation.messageId);
     let firstStopError: unknown;
     let hasStopError = false;
     let settlementResult: TerminalCommitResult | null = null;

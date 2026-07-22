@@ -85,6 +85,31 @@ describe('ChatInputBar', () => {
     }, {});
   }
 
+  it('exposes stable native ids for the composer, regeneration mode, send, and stop actions', () => {
+    const { getByTestId, rerender } = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        modeLabel="Regenerate"
+        modeDescription="Replace this branch"
+      />,
+    );
+
+    expect(getByTestId('chat-message-input')).toBeTruthy();
+    expect(getByTestId('chat-regeneration-mode')).toBeTruthy();
+    expect(getByTestId('chat-primary-action-send')).toBeTruthy();
+
+    rerender(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onStopGeneration={jest.fn()}
+        isSending
+        modeLabel="Regenerate"
+        modeDescription="Replace this branch"
+      />,
+    );
+    expect(getByTestId('chat-primary-action-stop')).toBeTruthy();
+  });
+
   it('sends the message when the input submits', async () => {
     const onSendMessage = jest.fn().mockResolvedValue(undefined);
     const { getByPlaceholderText } = render(

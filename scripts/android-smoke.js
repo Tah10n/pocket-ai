@@ -4,8 +4,29 @@ const fs = require("fs");
 const http = require("http");
 const net = require("net");
 const path = require("path");
-const crypto = require("crypto");
 const { spawn, spawnSync } = require("child_process");
+const {
+  ANDROID_PROVENANCE_GRADLE_EXECUTION_ARGS,
+  ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
+  ANDROID_UNIVERSAL_ABIS,
+  BUILD_PROVENANCE_SCHEMA_VERSION,
+  assertAndroidBuildOverrideContract,
+  buildAndroidCleanPrebuildArgs,
+  collectAndroidNativeProjectState,
+  collectAndroidEffectiveBuildContext,
+  collectBuildProvenance,
+  collectPrebuildInputState,
+  createIsolatedAndroidBuildEnvironment,
+  createFileContentFingerprint,
+  listZipEntries,
+  resolveBuildStampPath,
+  resolveAndroidGradleWrapperInvocation,
+  resolveExpoCliInvocation,
+  resolvePrebuildStampPaths,
+  shouldRunPrebuild,
+  withAndroidProvenanceGradleExecutionArgs,
+} = require("./android-build-provenance");
+const { sanitizeAndroidQaText } = require("./android-qa-sanitization");
 const { isCompletePngBuffer } = require("./png-validation");
 
 const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
@@ -14,6 +35,21 @@ const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const androidRoot = path.join(projectRoot, "android");
 const apkVariant = parseApkVariant(cliOptions.apkVariant ?? process.env.ANDROID_SMOKE_APK_VARIANT ?? "debug");
 const shouldUseEmbeddedBundle = apkVariant === "release" || process.env.ANDROID_SMOKE_SKIP_METRO === "1";
+const androidBuildNodeEnv = process.env.NODE_ENV
+  || (apkVariant === "release" ? "production" : "development");
+const androidBuildEnvironment = createIsolatedAndroidBuildEnvironment(
+  projectRoot,
+  process.env,
+  {
+    NODE_ENV: androidBuildNodeEnv,
+    ...(apkVariant === "release"
+      ? {
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING:
+            process.env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true",
+        }
+      : {}),
+  }
+);
 const localPropertiesPath = path.join(androidRoot, "local.properties");
 const appConfigPath = path.join(projectRoot, "app.json");
 const packageJsonPath = path.join(projectRoot, "package.json");
@@ -35,9 +71,21 @@ const apkPath = path.join(
   apkVariant,
   `app-${apkVariant}.apk`
 );
-const cacheRoot = path.join(artifactsRoot, ".cache");
-const buildStampPath = path.join(cacheRoot, "android-debug-build.json");
-const requiredNativeLibraries = ["libreactnative.so"];
+const supportedAndroidTargetAbis = Object.freeze([
+  "universal",
+  "arm64-v8a",
+  "x86_64",
+]);
+const cacheRoot = path.join(projectRoot, "node_modules", ".cache", "pocket-ai-android");
+const buildTargetAbi = parseTargetAbi(
+  cliOptions.targetAbi ?? process.env.ANDROID_SMOKE_TARGET_ABI ?? "universal"
+);
+const buildStampPath = resolveBuildStampPath(cacheRoot, apkVariant, buildTargetAbi);
+const {
+  activeStampPath: activePrebuildStampPath,
+  variantStampPath: prebuildStampPath,
+} = resolvePrebuildStampPaths(cacheRoot, apkVariant);
+const qaProvenanceReportPath = path.join(artifactsRoot, "build-provenance-latest.json");
 const metroStartupTimeoutMs = 90_000;
 const metroBundleTimeoutMs = 120_000;
 const deviceStartupTimeoutMs = 180_000;
@@ -74,6 +122,7 @@ if (require.main === module) {
 }
 
 async function main() {
+  assertSmokeBuildOverrideContract();
   const requestedSerial = cliOptions.serial || process.env.ANDROID_SERIAL || null;
   const requestedAvd = cliOptions.avd || process.env.ANDROID_AVD || null;
   const forceEmulator =
@@ -129,24 +178,52 @@ async function main() {
   wakeAndUnlockDevice(tools.adb, device.serial);
 
   const wantsSkipBuild = cliOptions.skipBuild || process.env.ANDROID_SKIP_BUILD === "1";
-  let didBuildDebugApk = false;
-  const buildInputState = collectNativeBuildInputState();
+  let didBuildAndroidApk = false;
+  const verifiedPrebuildInputState = ensureAndroidNativeProject();
+  const buildInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
   const buildReuse = resolveBuildReuseState(tools.adb, device.serial, buildInputState);
   if (buildReuse.canReuse) {
     const abiLabel = buildReuse.reuseDecision.matchedAbi
       ? ` for ABI ${buildReuse.reuseDecision.matchedAbi}`
       : "";
-    const prefix = wantsSkipBuild ? "Skipping Gradle build" : "Reusing the existing debug APK";
+    const prefix = wantsSkipBuild
+      ? "Skipping Gradle build"
+      : `Reusing the existing ${apkVariant} APK`;
     log(`${prefix}${abiLabel} (${buildReuse.reason}).`);
-    writeBuildStamp(buildInputState, buildReuse.apkFingerprint);
   } else {
     const prefix = wantsSkipBuild
-      ? "Requested --skip-build, but the existing debug APK cannot be reused"
-      : "Building a fresh Android debug APK";
+      ? `Requested --skip-build, but the existing ${apkVariant} APK cannot be reused`
+      : `Building a fresh Android ${apkVariant} APK`;
     log(`${prefix} (${buildReuse.reason}).`);
     buildAndroidApk();
-    didBuildDebugApk = true;
-    writeBuildStamp(collectNativeBuildInputState(), createFileFingerprint(apkPath));
+    didBuildAndroidApk = true;
+    const postBuildInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+    if (postBuildInputState.digest !== buildInputState.digest) {
+      throw new Error(
+        "Android build inputs changed while Gradle was running; refusing to stamp an ambiguous APK. Retry from a stable worktree."
+      );
+    }
+    const postBuildReuseDecision = resolveDebugApkReuseDecision(tools.adb, device.serial, apkPath);
+    if (!postBuildReuseDecision.canReuse) {
+      throw new Error(
+        `The freshly built ${apkVariant} APK does not satisfy the requested ABI contract `
+          + `(${postBuildReuseDecision.reason || "unknown incompatibility"}). `
+          + `Packaged ABIs: ${postBuildReuseDecision.packagedAbis.join(", ") || "none"}. `
+          + `Supported device ABIs: ${postBuildReuseDecision.supportedAbis.join(", ") || "unknown"}.`
+      );
+    }
+    writeBuildStamp(
+      postBuildInputState,
+      createFileFingerprint(apkPath),
+      postBuildReuseDecision
+    );
+  }
+
+  const readyInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+  if (readyInputState.digest !== buildInputState.digest) {
+    throw new Error(
+      "Android inputs changed after APK selection; refusing to install an artifact with ambiguous provenance."
+    );
   }
 
   if (!fs.existsSync(apkPath)) {
@@ -174,15 +251,28 @@ async function main() {
       log(`Using embedded JS bundle from the ${apkVariant} APK; Metro startup is not required.`);
     }
 
-    installDebugApk(tools.adb, device.serial, appPackage, {
-      allowReuseExistingInstallOnLowStorage: !didBuildDebugApk,
-      didBuildDebugApk,
+    const installResult = installDebugApk(tools.adb, device.serial, appPackage, {
+      allowReuseExistingInstallOnLowStorage: !didBuildAndroidApk,
+      didBuildDebugApk: didBuildAndroidApk,
+      buildInputState,
+    });
+    const installedInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+    if (installedInputState.digest !== buildInputState.digest) {
+      throw new Error(
+        "Android inputs changed during install; refusing to publish stale QA provenance."
+      );
+    }
+    writeQaProvenanceReport({
+      adbPath: tools.adb,
+      serial: device.serial,
+      appPackage,
+      buildInputState,
+      installResult,
     });
     if (metro) {
       reverseMetroPort(tools.adb, device.serial, metro.port);
     }
 
-    runCapture(tools.adb, ["-s", device.serial, "logcat", "-c"], { allowFailure: true });
     if (metro) {
       launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
     } else {
@@ -198,7 +288,7 @@ async function main() {
       saveScreenshot(tools.adb, device.serial, screenshotPath);
 
       const logcatPath = path.join(path.dirname(screenshotPath), "bootstrap-logcat.txt");
-      saveLogcat(tools.adb, device.serial, logcatPath);
+      saveLogcat(tools.adb, device.serial, logcatPath, { packageName: appPackage });
     }
 
     log(
@@ -217,7 +307,7 @@ async function main() {
     }
 
     if (screenshotPath) {
-      log(`Saved screenshot to ${screenshotPath}.`);
+      log("Saved Android bootstrap screenshot.");
     }
 
     if (metro?.started && cliOptions.transferMetroOwnership) {
@@ -243,7 +333,7 @@ async function main() {
       } finally {
         fs.rmSync(temporaryOwnershipPath, { force: true });
       }
-      log(`Transferred temporary Metro ownership to ${ownershipPath}.`);
+      log("Transferred temporary Metro ownership metadata.");
     }
 
     if (metro?.started && cliOptions.keepMetroForeground) {
@@ -358,90 +448,40 @@ function readExpoConfig() {
   };
 }
 
-function collectNativeBuildInputState() {
-  const entries = [];
-  const addFile = (filePath) => {
-    if (!fs.existsSync(filePath)) {
-      return;
-    }
-
-    const stats = fs.statSync(filePath);
-    if (!stats.isFile()) {
-      return;
-    }
-
-    entries.push({
-      path: toProjectRelativePath(filePath),
-      size: stats.size,
-      mtimeMs: Math.round(stats.mtimeMs),
-    });
-  };
-
-  const addTree = (rootPath) => {
-    if (!fs.existsSync(rootPath)) {
-      return;
-    }
-
-    const stats = fs.statSync(rootPath);
-    if (stats.isFile()) {
-      addFile(rootPath);
-      return;
-    }
-
-    const entriesInDirectory = fs.readdirSync(rootPath, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name));
-
-    for (const entry of entriesInDirectory) {
-      const fullPath = path.join(rootPath, entry.name);
-      const relativePath = toProjectRelativePath(fullPath);
-      if (isExcludedNativeBuildInput(relativePath)) {
-        continue;
-      }
-
-      if (entry.isDirectory()) {
-        addTree(fullPath);
-        continue;
-      }
-
-      if (entry.isFile()) {
-        addFile(fullPath);
-      }
-    }
-  };
-
-  addFile(appConfigPath);
-  addFile(appConfigJsPath);
-  addFile(appConfigTsPath);
-  addFile(packageJsonPath);
-  addFile(packageLockPath);
-  addFile(npmShrinkwrapPath);
-  addTree(patchesRoot);
-  addTree(androidRoot);
-
-  const latestInputMtimeMs = entries.reduce(
-    (latest, entry) => Math.max(latest, entry.mtimeMs),
-    0
-  );
-
-  return {
-    entries,
-    fingerprint: hashMetadataEntries(entries),
-    latestInputMtimeMs,
-  };
-}
-
-function isExcludedNativeBuildInput(relativePath) {
-  const normalized = normalizePath(relativePath);
-
-  return normalized === "android/local.properties"
-    || normalized === "android/build"
-    || normalized === "android/.gradle"
-    || normalized === "android/.cxx"
-    || normalized === "android/app/build"
-    || normalized.startsWith("android/build/")
-    || normalized.startsWith("android/.gradle/")
-    || normalized.startsWith("android/.cxx/")
-    || normalized.startsWith("android/app/build/");
+function collectNativeBuildInputState(verifiedPrebuildInputDigest = null) {
+  const currentPrebuildInputState = collectPrebuildInputState(projectRoot, {
+    variant: apkVariant,
+    nodeEnv: androidBuildNodeEnv,
+    env: androidBuildEnvironment,
+  });
+  if (
+    verifiedPrebuildInputDigest
+    && currentPrebuildInputState.digest !== verifiedPrebuildInputDigest
+  ) {
+    throw new Error(
+      "Expo/config-plugin inputs changed after native prebuild verification; retry the Android run."
+    );
+  }
+  const assembleTask = `app:assemble${apkVariant[0].toUpperCase()}${apkVariant.slice(1)}`;
+  const gradleArgs = buildGradleAssembleArgs(assembleTask, buildTargetAbi);
+  assertSmokeBuildOverrideContract(gradleArgs);
+  return collectBuildProvenance(projectRoot, {
+    variant: apkVariant,
+    abi: buildTargetAbi,
+    includeBundleInputs: shouldUseEmbeddedBundle,
+    androidRoot,
+    env: androidBuildEnvironment,
+    gradleArgs,
+    buildContext: {
+      androidQaEvidence: process.env.EXPO_PUBLIC_ANDROID_QA === "1",
+      effectiveBuild: collectAndroidEffectiveBuildContext(projectRoot, {
+        variant: apkVariant,
+        gradleArgs,
+        env: androidBuildEnvironment,
+      }),
+      prebuildInputDigest: currentPrebuildInputState.digest,
+    },
+  });
 }
 
 function resolveBuildReuseState(adbPath, serial, buildInputState) {
@@ -452,18 +492,23 @@ function resolveBuildReuseState(adbPath, serial, buildInputState) {
     : {
       canReuse: false,
       matchedAbi: null,
+      packagedAbis: [],
       supportedAbis: [],
       missingEntries: [],
+      reason: "APK is missing",
     };
   const buildStamp = readJsonFile(buildStampPath);
   const fingerprintMatches = Boolean(
     buildStamp
       && apkFingerprint
-      && buildStamp.nativeFingerprint === buildInputState.fingerprint
-      && buildStamp.apkFingerprint === apkFingerprint.fingerprint
-  );
-  const apkIsFreshByTime = Boolean(
-    apkFingerprint && buildInputState.latestInputMtimeMs <= apkFingerprint.mtimeMs
+      && buildStamp.schemaVersion === BUILD_PROVENANCE_SCHEMA_VERSION
+      && buildStamp.variant === apkVariant
+      && buildStamp.abi === buildTargetAbi
+      && buildStamp.provenanceDigest === buildInputState.digest
+      && buildStamp.apk?.sha256 === apkFingerprint.sha256
+      && buildStamp.apk?.size === apkFingerprint.size
+      && areStringArraysEqual(buildStamp.apk?.packagedAbis, reuseDecision.packagedAbis)
+      && buildStamp.apk?.matchedAbi === reuseDecision.matchedAbi
   );
 
   return {
@@ -471,76 +516,60 @@ function resolveBuildReuseState(adbPath, serial, buildInputState) {
       apkExists,
       abiCompatible: reuseDecision.canReuse,
       fingerprintMatches,
-      apkIsFreshByTime,
+      variant: apkVariant,
     }),
     apkFingerprint,
     reuseDecision,
   };
 }
 
-function evaluateApkReuse({ apkExists, abiCompatible, fingerprintMatches, apkIsFreshByTime }) {
+function evaluateApkReuse({ apkExists, abiCompatible, fingerprintMatches, variant = "debug" }) {
   if (!apkExists) {
     return {
       canReuse: false,
-      reason: "debug APK is missing",
+      reason: `${variant} APK is missing`,
     };
   }
 
   if (!abiCompatible) {
     return {
       canReuse: false,
-      reason: "the existing debug APK is incompatible with the target device ABI",
+      reason: `the existing ${variant} APK is incompatible with the target device ABI`,
     };
   }
 
   if (fingerprintMatches) {
     return {
       canReuse: true,
-      reason: "native build fingerprint matches the current APK",
-    };
-  }
-
-  if (apkIsFreshByTime) {
-    return {
-      canReuse: true,
-      reason: "the current APK is newer than all tracked native build inputs",
+      reason: "the content-hash build provenance matches the current APK",
     };
   }
 
   return {
     canReuse: false,
-    reason: "tracked native build inputs are newer than the current APK",
+    reason: "the APK is missing current content-hash build provenance",
   };
 }
 
 function createFileFingerprint(filePath) {
-  const stats = fs.statSync(filePath);
-  const metadata = {
-    path: toProjectRelativePath(filePath),
-    size: stats.size,
-    mtimeMs: Math.round(stats.mtimeMs),
-  };
-
-  return {
-    ...metadata,
-    fingerprint: hashMetadataEntries([metadata]),
-  };
+  return createFileContentFingerprint(filePath, projectRoot);
 }
 
-function hashMetadataEntries(entries) {
-  return crypto.createHash("sha1").update(JSON.stringify(entries)).digest("hex");
-}
-
-function writeBuildStamp(buildInputState, apkFingerprint) {
+function writeBuildStamp(buildInputState, apkFingerprint, abiDecision) {
   writeJsonFile(buildStampPath, {
+    schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
-    nativeFingerprint: buildInputState.fingerprint,
-    latestInputMtimeMs: buildInputState.latestInputMtimeMs,
-    trackedInputCount: buildInputState.entries.length,
-    apkFingerprint: apkFingerprint.fingerprint,
-    apkPath: apkFingerprint.path,
-    apkSize: apkFingerprint.size,
-    apkMtimeMs: apkFingerprint.mtimeMs,
+    variant: apkVariant,
+    abi: buildTargetAbi,
+    provenanceDigest: buildInputState.digest,
+    provenance: buildInputState,
+    apk: {
+      path: apkFingerprint.path,
+      size: apkFingerprint.size,
+      sha256: apkFingerprint.sha256,
+      packagedAbis: abiDecision.packagedAbis,
+      matchedAbi: abiDecision.matchedAbi,
+    },
   });
 }
 
@@ -552,15 +581,17 @@ function readJsonFile(filePath) {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log(`Ignoring unreadable JSON file at ${filePath} (${message}).`);
+    const errorCode = typeof error?.code === "string" ? error.code : "invalid_json";
+    log(`Ignoring unreadable Android QA cache JSON (${errorCode}).`);
     return null;
   }
 }
 
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2));
+  fs.renameSync(temporaryPath, filePath);
 }
 
 function toProjectRelativePath(filePath) {
@@ -575,45 +606,154 @@ function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath) {
   try {
     const primaryAbi = resolvePrimaryDeviceAbi(adbPath, serial);
     const supportedAbis = resolveDeviceSupportedAbis(adbPath, serial, primaryAbi);
-    if (!primaryAbi) {
-      return {
-        canReuse: false,
-        matchedAbi: null,
-        supportedAbis,
-        missingEntries: [],
-      };
-    }
-
-    const zipEntries = new Set(listZipEntries(apkFilePath));
-    const missingEntries = requiredNativeLibraries
-      .map((library) => `lib/${primaryAbi}/${library}`)
-      .filter((entryName) => !zipEntries.has(entryName));
-
-    if (missingEntries.length === 0) {
-      return {
-        canReuse: true,
-        matchedAbi: primaryAbi,
-        supportedAbis,
-        missingEntries: [],
-      };
-    }
-
-    return {
-      canReuse: false,
-      matchedAbi: null,
-      supportedAbis,
-      missingEntries,
-    };
+    return evaluateApkAbiCompatibility({
+      targetAbi: buildTargetAbi,
+      deviceAbis: supportedAbis,
+      zipEntries: listZipEntries(apkFilePath),
+      requiredLibraries: ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log(`Failed to inspect the existing debug APK for ABI compatibility (${message}). Rebuilding instead.`);
+    log(
+      `Failed to inspect the existing ${apkVariant} APK for ABI compatibility (${message}). `
+        + "Rebuilding instead."
+    );
     return {
       canReuse: false,
       matchedAbi: null,
+      packagedAbis: [],
       supportedAbis: [],
       missingEntries: [],
+      reason: `APK inspection failed: ${message}`,
     };
   }
+}
+
+function resolvePackagedAndroidAbis(zipEntries) {
+  const packagedAbis = new Set();
+  for (const entry of zipEntries || []) {
+    const match = `${entry}`.replace(/\\/gu, "/").match(/^lib\/([^/]+)\//u);
+    if (match) {
+      packagedAbis.add(match[1]);
+    }
+  }
+  return [...packagedAbis].sort();
+}
+
+function evaluateApkAbiCompatibility({
+  targetAbi,
+  deviceAbis,
+  zipEntries,
+  requiredLibraries = ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
+}) {
+  const normalizedTargetAbi = parseTargetAbi(targetAbi);
+  const supportedAbis = [...new Set((deviceAbis || []).map((abi) => `${abi}`.trim()).filter(Boolean))];
+  const normalizedZipEntries = new Set((zipEntries || []).map((entry) => `${entry}`.replace(/\\/gu, "/")));
+  const packagedAbis = resolvePackagedAndroidAbis(normalizedZipEntries);
+  const result = {
+    canReuse: false,
+    matchedAbi: null,
+    packagedAbis,
+    supportedAbis,
+    missingEntries: [],
+    reason: null,
+  };
+
+  if (supportedAbis.length === 0) {
+    return {
+      ...result,
+      reason: "the device did not report any supported ABI",
+    };
+  }
+
+  if (normalizedTargetAbi !== "universal") {
+    if (!supportedAbis.includes(normalizedTargetAbi)) {
+      return {
+        ...result,
+        reason: `the device does not support requested ABI ${normalizedTargetAbi}`,
+      };
+    }
+    if (!areStringArraysEqual(packagedAbis, [normalizedTargetAbi])) {
+      return {
+        ...result,
+        reason: `the targeted APK must package exactly ${normalizedTargetAbi}`,
+      };
+    }
+    const missingEntries = resolveRequiredNativeLibrariesForAbi(
+      normalizedTargetAbi,
+      requiredLibraries
+    )
+      .map((library) => `lib/${normalizedTargetAbi}/${library}`)
+      .filter((entryName) => !normalizedZipEntries.has(entryName));
+    if (missingEntries.length > 0) {
+      return {
+        ...result,
+        missingEntries,
+        reason: `the targeted APK is missing required native libraries for ${normalizedTargetAbi}`,
+      };
+    }
+    return {
+      ...result,
+      canReuse: true,
+      matchedAbi: normalizedTargetAbi,
+      reason: `the APK packages exactly requested ABI ${normalizedTargetAbi}`,
+    };
+  }
+
+  if (!areStringArraysEqual(packagedAbis, [...ANDROID_UNIVERSAL_ABIS].sort())) {
+    return {
+      ...result,
+      reason: "the universal APK must package exactly the canonical Android ABI set",
+    };
+  }
+
+  const missingUniversalEntries = ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
+    resolveRequiredNativeLibrariesForAbi(abi, requiredLibraries)
+      .map((library) => `lib/${abi}/${library}`)
+      .filter((entryName) => !normalizedZipEntries.has(entryName))
+  ));
+  if (missingUniversalEntries.length > 0) {
+    return {
+      ...result,
+      missingEntries: missingUniversalEntries,
+      reason: "the universal APK is missing required native libraries for one or more canonical ABIs",
+    };
+  }
+
+  for (const deviceAbi of supportedAbis) {
+    if (!packagedAbis.includes(deviceAbi)) {
+      continue;
+    }
+    return {
+      ...result,
+      canReuse: true,
+      matchedAbi: deviceAbi,
+      reason: `the universal APK packages the canonical ABI set and supports device ABI ${deviceAbi}`,
+    };
+  }
+
+  return {
+    ...result,
+    reason: "the universal APK has no ABI compatible with the target device",
+  };
+}
+
+function resolveRequiredNativeLibrariesForAbi(abi, requirements) {
+  if (Array.isArray(requirements)) {
+    return requirements;
+  }
+  const libraries = requirements?.[abi];
+  if (!Array.isArray(libraries) || libraries.length === 0) {
+    throw new Error(`Android APK verification has no required native-library contract for ABI ${abi}.`);
+  }
+  return libraries;
+}
+
+function areStringArraysEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
 }
 
 function resolvePrimaryDeviceAbi(adbPath, serial) {
@@ -644,50 +784,6 @@ function resolveDeviceSupportedAbis(adbPath, serial, primaryAbi = null) {
   }
 
   return primaryAbi ? [primaryAbi] : [];
-}
-
-function listZipEntries(zipFilePath) {
-  const zipBuffer = fs.readFileSync(zipFilePath);
-  const eocdSignature = 0x06054b50;
-  const centralDirectoryHeaderSignature = 0x02014b50;
-  const minimumEocdSize = 22;
-  const maxCommentLength = 0xffff;
-  const searchStart = Math.max(0, zipBuffer.length - minimumEocdSize - maxCommentLength);
-
-  let eocdOffset = -1;
-  for (let offset = zipBuffer.length - minimumEocdSize; offset >= searchStart; offset -= 1) {
-    if (zipBuffer.readUInt32LE(offset) === eocdSignature) {
-      eocdOffset = offset;
-      break;
-    }
-  }
-
-  if (eocdOffset < 0) {
-    throw new Error(`Could not find the ZIP central directory in ${zipFilePath}.`);
-  }
-
-  const centralDirectorySize = zipBuffer.readUInt32LE(eocdOffset + 12);
-  const centralDirectoryOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
-  const entries = [];
-  let offset = centralDirectoryOffset;
-  const directoryEnd = centralDirectoryOffset + centralDirectorySize;
-
-  while (offset < directoryEnd) {
-    if (zipBuffer.readUInt32LE(offset) !== centralDirectoryHeaderSignature) {
-      throw new Error(`Unexpected ZIP central directory header at offset ${offset}.`);
-    }
-
-    const fileNameLength = zipBuffer.readUInt16LE(offset + 28);
-    const extraFieldLength = zipBuffer.readUInt16LE(offset + 30);
-    const fileCommentLength = zipBuffer.readUInt16LE(offset + 32);
-    const fileNameOffset = offset + 46;
-    const fileNameEnd = fileNameOffset + fileNameLength;
-
-    entries.push(zipBuffer.toString("utf8", fileNameOffset, fileNameEnd));
-    offset = fileNameEnd + extraFieldLength + fileCommentLength;
-  }
-
-  return entries;
 }
 
 function pickConnectedDevice(adbPath, options = {}) {
@@ -1893,46 +1989,71 @@ function buildAndroidApk() {
   log(`Building Android ${apkVariant} APK...`);
 
   const assembleTask = `app:assemble${apkVariant[0].toUpperCase()}${apkVariant.slice(1)}`;
-  const buildEnv = apkVariant === "release"
-    ? {
-        ...process.env,
-        POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING:
-          process.env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true",
-      }
-    : process.env;
+  const gradleArgs = buildGradleAssembleArgs(assembleTask, buildTargetAbi);
+  assertSmokeBuildOverrideContract(gradleArgs);
+  runAndroidGradleBuild(gradleArgs);
+}
 
-  if (process.platform === "win32") {
-    runChecked(
-      process.env.ComSpec || process.env.COMSPEC || "cmd.exe",
-      ["/d", "/s", "/c", `gradlew.bat ${assembleTask}`],
-      {
-        cwd: androidRoot,
-        stdio: "inherit",
-        env: buildEnv,
-      }
-    );
-    return;
+function runAndroidGradleBuild(gradleArgs, options = {}) {
+  for (const requiredArgument of ANDROID_PROVENANCE_GRADLE_EXECUTION_ARGS) {
+    if (!gradleArgs.includes(requiredArgument)) {
+      throw new Error(
+        `Android provenance-aware Gradle execution requires ${requiredArgument}.`
+      );
+    }
   }
+  const execute = options.runChecked || runChecked;
+  const platform = options.platform || process.platform;
+  const buildEnv = options.env || androidBuildEnvironment;
+  const buildRoot = options.androidRoot || androidRoot;
+  const wrapperPath = options.gradleWrapperPath || gradleWrapperPath;
 
-  runChecked(gradleWrapperPath, [assembleTask], {
-    cwd: androidRoot,
+  const invocation = resolveAndroidGradleWrapperInvocation({
+    platform,
+    comSpec: options.comSpec,
+    gradleArgs,
+    gradleWrapperPath: wrapperPath,
+  });
+  execute(invocation.command, invocation.args, {
+    cwd: buildRoot,
     stdio: "inherit",
     env: buildEnv,
   });
 }
 
 function ensureAndroidNativeProject() {
-  if (fs.existsSync(gradleWrapperPath)) {
-    return;
+  const prebuildInputState = collectPrebuildInputState(projectRoot, {
+    variant: apkVariant,
+    nodeEnv: androidBuildNodeEnv,
+    env: androidBuildEnvironment,
+  });
+  const nativeProjectState = collectAndroidNativeProjectState(projectRoot);
+  const activePrebuildStamp = readJsonFile(activePrebuildStampPath);
+  const hasCurrentPrebuild = !shouldRunPrebuild({
+    gradleWrapperExists: fs.existsSync(gradleWrapperPath),
+    activeStamp: activePrebuildStamp,
+    inputState: prebuildInputState,
+    nativeProjectState,
+    variant: apkVariant,
+  });
+
+  if (hasCurrentPrebuild) {
+    return prebuildInputState;
   }
 
-  log("Android native project not found. Generating it with Expo prebuild...");
+  const reason = fs.existsSync(gradleWrapperPath)
+    ? "Expo/config-plugin inputs changed or have no verified prebuild stamp"
+    : "the Android native project is missing";
+  log(`Generating the Android native project with Expo prebuild because ${reason}...`);
+  fs.rmSync(activePrebuildStampPath, { force: true });
+  const expoCli = resolveExpoCliInvocation(projectRoot);
   runChecked(
-    resolveNpxCommand(),
-    ["expo", "prebuild", "--platform", "android", "--no-install"],
+    expoCli.command,
+    [...expoCli.args, ...buildAndroidCleanPrebuildArgs()],
     {
       cwd: projectRoot,
       stdio: "inherit",
+      env: androidBuildEnvironment,
     }
   );
 
@@ -1941,6 +2062,31 @@ function ensureAndroidNativeProject() {
       `Expected Gradle wrapper at ${gradleWrapperPath} after Expo prebuild, but it was not found.`
     );
   }
+
+  const verifiedInputState = collectPrebuildInputState(projectRoot, {
+    variant: apkVariant,
+    nodeEnv: androidBuildNodeEnv,
+    env: androidBuildEnvironment,
+  });
+  if (verifiedInputState.digest !== prebuildInputState.digest) {
+    throw new Error(
+      "Expo/config-plugin inputs changed while prebuild was running; refusing to stamp generated native sources."
+    );
+  }
+
+  const verifiedNativeProjectState = collectAndroidNativeProjectState(projectRoot);
+  const verifiedPrebuildStamp = {
+    schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
+    updatedAt: new Date().toISOString(),
+    variant: apkVariant,
+    inputDigest: verifiedInputState.digest,
+    nativeInputDigest: verifiedNativeProjectState.digest,
+    context: verifiedInputState.context,
+    inputs: verifiedInputState.entries,
+  };
+  writeJsonFile(prebuildStampPath, verifiedPrebuildStamp);
+  writeJsonFile(activePrebuildStampPath, verifiedPrebuildStamp);
+  return verifiedInputState;
 }
 
 function ensureGradleWrapperExecutable() {
@@ -1951,15 +2097,35 @@ function ensureGradleWrapperExecutable() {
   fs.chmodSync(gradleWrapperPath, 0o755);
 }
 
-function resolveNpxCommand() {
-  return process.platform === "win32" ? "npx.cmd" : "npx";
-}
-
 function installDebugApk(adbPath, serial, appPackage, options = {}) {
   const allowReuseExistingInstallOnLowStorage =
     options.allowReuseExistingInstallOnLowStorage !== false;
   const didBuildDebugApk = options.didBuildDebugApk === true;
+  const buildInputState = options.buildInputState;
   const apkFingerprint = createFileFingerprint(apkPath);
+  const abiDecision = resolveDebugApkReuseDecision(adbPath, serial, apkPath);
+  if (!abiDecision.canReuse) {
+    throw new Error(
+      `The ${apkVariant} APK no longer satisfies the requested ABI contract before install `
+        + `(${abiDecision.reason || "unknown incompatibility"}).`
+    );
+  }
+  const buildStamp = readJsonFile(buildStampPath);
+  if (
+    !buildStamp
+    || buildStamp.schemaVersion !== BUILD_PROVENANCE_SCHEMA_VERSION
+    || buildStamp.variant !== apkVariant
+    || buildStamp.abi !== buildTargetAbi
+    || buildStamp.provenanceDigest !== buildInputState?.digest
+    || buildStamp.apk?.sha256 !== apkFingerprint.sha256
+    || buildStamp.apk?.size !== apkFingerprint.size
+    || !areStringArraysEqual(buildStamp.apk?.packagedAbis, abiDecision.packagedAbis)
+    || buildStamp.apk?.matchedAbi !== abiDecision.matchedAbi
+  ) {
+    throw new Error(
+      `The ${apkVariant} APK does not have verified build provenance for the current inputs; refusing to install it.`
+    );
+  }
   const installedPackageInfo = readInstalledPackageInfo(adbPath, serial, appPackage);
   const installStampPath = resolveInstallStampPath(serial, appPackage);
   const installStamp = readJsonFile(installStampPath);
@@ -1969,14 +2135,24 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
     installStamp,
     apkFingerprint,
     devicePackageInfo: installedPackageInfo,
+    variant: apkVariant,
+    abi: buildTargetAbi,
+    buildProvenanceDigest: buildInputState.digest,
+    packagedAbis: abiDecision.packagedAbis,
+    matchedAbi: abiDecision.matchedAbi,
   });
 
   if (installReuse.canReuse) {
     log(`Reusing the existing app installation (${installReuse.reason}).`);
-    return;
+    return {
+      reused: true,
+      installStampPath,
+      installedPackageInfo,
+      abiDecision,
+    };
   }
 
-  log("Installing debug APK...");
+  log(`Installing ${apkVariant} APK...`);
 
   const result = spawnSync(adbPath, ["-s", serial, "install", "-r", apkPath], {
     encoding: "utf8",
@@ -1993,20 +2169,34 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
   }
 
   if (result.status === 0) {
-    writeInstallStamp(serial, appPackage, apkFingerprint, readInstalledPackageInfo(adbPath, serial, appPackage));
-    return;
+    const verifiedPackageInfo = readInstalledPackageInfo(adbPath, serial, appPackage);
+    verifyInstalledApkProvenance(verifiedPackageInfo, apkFingerprint, appPackage);
+    writeInstallStamp(
+      serial,
+      appPackage,
+      apkFingerprint,
+      verifiedPackageInfo,
+      buildInputState.digest,
+      abiDecision
+    );
+    return {
+      reused: false,
+      installStampPath,
+      installedPackageInfo: verifiedPackageInfo,
+      abiDecision,
+    };
   }
 
   if (isInsufficientStorageInstallFailure(output)) {
     if (!allowReuseExistingInstallOnLowStorage) {
       throw new Error(
-        "Android target storage is insufficient and the freshly built debug APK could not be installed. " +
+        `Android target storage is insufficient and the freshly built ${apkVariant} APK could not be installed. ` +
           "Free space on the device/emulator (or uninstall the existing app) and retry."
       );
     }
 
     throw new Error(
-      "Android target storage is insufficient and the current app installation could not be verified against the requested debug APK. " +
+      `Android target storage is insufficient and the current app installation could not be verified against the requested ${apkVariant} APK. ` +
         "Free space on the device/emulator (or wipe the emulator) and retry."
     );
   }
@@ -2023,6 +2213,11 @@ function evaluateInstallReuse({
   installStamp,
   apkFingerprint,
   devicePackageInfo,
+  variant = "debug",
+  abi = "universal",
+  buildProvenanceDigest = null,
+  packagedAbis = [],
+  matchedAbi = null,
 }) {
   if (!packageInstalled) {
     return {
@@ -2034,7 +2229,7 @@ function evaluateInstallReuse({
   if (didBuildDebugApk) {
     return {
       canReuse: false,
-      reason: "a fresh debug APK was built for this run",
+      reason: `a fresh ${variant} APK was built for this run`,
     };
   }
 
@@ -2045,17 +2240,55 @@ function evaluateInstallReuse({
     };
   }
 
-  if (installStamp.apkFingerprint !== apkFingerprint.fingerprint) {
+  if (
+    installStamp.schemaVersion !== BUILD_PROVENANCE_SCHEMA_VERSION
+    || installStamp.variant !== variant
+    || installStamp.abi !== abi
+    || !buildProvenanceDigest
+    || installStamp.buildProvenanceDigest !== buildProvenanceDigest
+  ) {
     return {
       canReuse: false,
-      reason: "the installed-app stamp points to a different debug APK",
+      reason: "the installed-app stamp has stale or incompatible build provenance",
     };
   }
 
-  if (!devicePackageInfo || !devicePackageInfo.installed || !devicePackageInfo.packagePath) {
+  if (installStamp.apkSha256 !== apkFingerprint.sha256) {
     return {
       canReuse: false,
-      reason: "current installed-app metadata is unavailable",
+      reason: `the installed-app stamp points to a different ${variant} APK`,
+    };
+  }
+
+  if (
+    !areStringArraysEqual(installStamp.packagedAbis, packagedAbis)
+    || installStamp.matchedAbi !== matchedAbi
+  ) {
+    return {
+      canReuse: false,
+      reason: "the installed-app stamp has stale or incompatible packaged ABI evidence",
+    };
+  }
+
+  if (
+    !devicePackageInfo
+    || !devicePackageInfo.installed
+    || !devicePackageInfo.packagePath
+    || !devicePackageInfo.apkSha256
+  ) {
+    return {
+      canReuse: false,
+      reason: "current installed-app metadata or content hash is unavailable",
+    };
+  }
+
+  if (
+    devicePackageInfo.apkSha256 !== apkFingerprint.sha256
+    || installStamp.installedApkSha256 !== devicePackageInfo.apkSha256
+  ) {
+    return {
+      canReuse: false,
+      reason: "the installed APK content hash does not match the verified local APK",
     };
   }
 
@@ -2088,9 +2321,20 @@ function evaluateInstallReuse({
     };
   }
 
+  if (
+    installStamp.versionName
+    && devicePackageInfo.versionName
+    && installStamp.versionName !== devicePackageInfo.versionName
+  ) {
+    return {
+      canReuse: false,
+      reason: "the installed app version name changed on the device",
+    };
+  }
+
   return {
     canReuse: true,
-    reason: "the installed app still matches the current debug APK",
+    reason: `the installed app content still matches the current ${variant} APK`,
   };
 }
 
@@ -2105,8 +2349,10 @@ function readInstalledPackageInfo(adbPath, serial, appPackage) {
     return {
       installed: false,
       packagePath: null,
+      apkSha256: null,
       lastUpdateTime: null,
       versionCode: null,
+      versionName: null,
     };
   }
 
@@ -2120,27 +2366,56 @@ function readInstalledPackageInfo(adbPath, serial, appPackage) {
   return {
     installed: true,
     packagePath,
+    apkSha256: readInstalledApkSha256(adbPath, serial, packagePath),
     lastUpdateTime: packageMetadata.lastUpdateTime,
     versionCode: packageMetadata.versionCode,
+    versionName: packageMetadata.versionName,
   };
 }
 
+function readInstalledApkSha256(adbPath, serial, packagePath) {
+  const commands = [
+    ["shell", "sha256sum", packagePath],
+    ["shell", "toybox", "sha256sum", packagePath],
+  ];
+
+  for (const command of commands) {
+    const output = runCapture(adbPath, ["-s", serial, ...command], { allowFailure: true });
+    const sha256 = parseSha256Output(output);
+    if (sha256) {
+      return sha256;
+    }
+  }
+
+  return null;
+}
+
+function parseSha256Output(output) {
+  const match = `${output || ""}`.match(/(?:^|\r?\n)\s*([a-fA-F0-9]{64})(?:\s+|$)/);
+  return match ? match[1].toLowerCase() : null;
+}
+
 function parsePackagePathOutput(output) {
-  return `${output}`
+  const packagePaths = `${output}`
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .find((line) => line.startsWith("package:"))
-    ?.slice("package:".length) || null;
+    .filter((line) => line.startsWith("package:"))
+    .map((line) => line.slice("package:".length));
+  return packagePaths.find((packagePath) => packagePath.endsWith("/base.apk"))
+    || packagePaths[0]
+    || null;
 }
 
 function parseDumpsysPackageOutput(output) {
   const normalized = `${output}`;
   const lastUpdateTimeMatch = normalized.match(/lastUpdateTime=(.+)/);
   const versionCodeMatch = normalized.match(/versionCode=(\d+)/);
+  const versionNameMatch = normalized.match(/versionName=([^\r\n]+)/);
 
   return {
     lastUpdateTime: lastUpdateTimeMatch ? lastUpdateTimeMatch[1].trim() : null,
     versionCode: versionCodeMatch ? versionCodeMatch[1] : null,
+    versionName: versionNameMatch ? versionNameMatch[1].trim() : null,
   };
 }
 
@@ -2150,18 +2425,97 @@ function resolveInstallStampPath(serial, appPackage) {
   return path.join(cacheRoot, `install-${safeSerial}-${safePackage}.json`);
 }
 
-function writeInstallStamp(serial, appPackage, apkFingerprint, installedPackageInfo) {
+function verifyInstalledApkProvenance(installedPackageInfo, apkFingerprint, appPackage) {
+  if (
+    !installedPackageInfo?.installed
+    || !installedPackageInfo.packagePath
+    || !installedPackageInfo.versionCode
+    || !installedPackageInfo.versionName
+  ) {
+    throw new Error(
+      `Android reported an incomplete installed-package identity for ${appPackage} after install.`
+    );
+  }
+  if (!installedPackageInfo.apkSha256) {
+    throw new Error(
+      `Could not content-hash the installed APK for ${appPackage}; refusing to claim install provenance.`
+    );
+  }
+  if (installedPackageInfo.apkSha256 !== apkFingerprint.sha256) {
+    throw new Error(
+      `Installed APK provenance mismatch for ${appPackage}: device content does not match the verified local APK.`
+    );
+  }
+}
+
+function writeInstallStamp(
+  serial,
+  appPackage,
+  apkFingerprint,
+  installedPackageInfo,
+  buildProvenanceDigest,
+  abiDecision
+) {
   writeJsonFile(resolveInstallStampPath(serial, appPackage), {
+    schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
     serial,
     packageName: appPackage,
-    apkFingerprint: apkFingerprint.fingerprint,
+    variant: apkVariant,
+    abi: buildTargetAbi,
+    buildProvenanceDigest,
+    apkSha256: apkFingerprint.sha256,
     apkPath: apkFingerprint.path,
     apkSize: apkFingerprint.size,
-    apkMtimeMs: apkFingerprint.mtimeMs,
+    packagedAbis: abiDecision.packagedAbis,
+    matchedAbi: abiDecision.matchedAbi,
+    installedApkSha256: installedPackageInfo.apkSha256,
     packagePath: installedPackageInfo.packagePath || null,
     lastUpdateTime: installedPackageInfo.lastUpdateTime || null,
     versionCode: installedPackageInfo.versionCode || null,
+    versionName: installedPackageInfo.versionName || null,
+  });
+}
+
+function writeQaProvenanceReport({ adbPath, serial, appPackage, buildInputState, installResult }) {
+  const buildStamp = readJsonFile(buildStampPath);
+  const installStampPath = installResult.installStampPath;
+  const installStamp = readJsonFile(installStampPath);
+  if (
+    !buildStamp
+    || !installStamp
+    || buildStamp.provenanceDigest !== buildInputState.digest
+    || installStamp.buildProvenanceDigest !== buildInputState.digest
+    || buildStamp.apk?.sha256 !== installStamp.installedApkSha256
+    || !areStringArraysEqual(buildStamp.apk?.packagedAbis, installStamp.packagedAbis)
+    || buildStamp.apk?.matchedAbi !== installStamp.matchedAbi
+    || !areStringArraysEqual(installResult.abiDecision?.packagedAbis, installStamp.packagedAbis)
+    || installResult.abiDecision?.matchedAbi !== installStamp.matchedAbi
+  ) {
+    throw new Error("Android QA provenance chain is incomplete after build/install verification.");
+  }
+
+  writeJsonFile(qaProvenanceReportPath, {
+    schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    serial,
+    packageName: appPackage,
+    variant: apkVariant,
+    abi: buildTargetAbi,
+    device: {
+      serial,
+      model: runCapture(
+        adbPath,
+        ["-s", serial, "shell", "getprop", "ro.product.model"],
+        { allowFailure: true }
+      ).trim() || null,
+      abis: resolveDeviceSupportedAbis(adbPath, serial),
+    },
+    reusedInstallation: installResult.reused,
+    buildStampPath: toProjectRelativePath(buildStampPath),
+    installStampPath: toProjectRelativePath(installStampPath),
+    build: buildStamp,
+    install: installStamp,
   });
 }
 
@@ -2390,17 +2744,73 @@ function saveScreenshot(adbPath, serial, outputPath) {
   captureAndroidScreenshot(adbPath, serial, outputPath);
 }
 
-function saveLogcat(adbPath, serial, outputPath) {
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+function parseAndroidPackageUid(output, packageName) {
+  for (const line of `${output || ""}`.split(/\r?\n/u)) {
+    const [packageToken, uidToken, ...extraTokens] = line.trim().split(/\s+/u);
+    if (
+      extraTokens.length === 0
+      && packageToken === `package:${packageName}`
+      && /^uid:\d+$/u.test(uidToken || "")
+    ) {
+      return uidToken.slice("uid:".length);
+    }
+  }
+  return null;
+}
 
-  const logs = runCapture(
+function parseAndroidProcessId(output) {
+  const normalized = `${output || ""}`.trim();
+  return /^\d+$/u.test(normalized) ? normalized : null;
+}
+
+function saveLogcat(adbPath, serial, outputPath, options = {}) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const capture = options.runCapture || runCapture;
+  const packageName = `${options.packageName || ""}`.trim();
+  if (!packageName) {
+    throw new Error("Privacy-scoped Android bootstrap logcat requires an app package name.");
+  }
+  const uid = parseAndroidPackageUid(
+    capture(
+      adbPath,
+      ["-s", serial, "shell", "cmd", "package", "list", "packages", "-U", packageName],
+      { allowFailure: true }
+    ),
+    packageName
+  );
+  const processId = parseAndroidProcessId(capture(
     adbPath,
-    ["-s", serial, "logcat", "-d", "-v", "time", "-t", "800"],
+    ["-s", serial, "shell", "pidof", "-s", packageName],
+    { allowFailure: true }
+  ));
+  if (!uid || !processId) {
+    throw new Error(
+      "Could not resolve the installed Android app UID and process for privacy-scoped bootstrap logcat."
+    );
+  }
+
+  const logs = capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "logcat",
+      "-d",
+      "-v",
+      "time",
+      `--uid=${uid}`,
+      `--pid=${processId}`,
+      "-t",
+      "800",
+    ],
     { allowFailure: true }
   );
 
-  fs.writeFileSync(outputPath, logs);
-  log(`Saved logcat to ${outputPath}.`);
+  fs.writeFileSync(outputPath, sanitizeAndroidQaText(logs, {
+    maxChars: 1_000_000,
+    sensitiveRoots: options.sensitiveRoots || [projectRoot],
+  }));
+  log("Saved sanitized app-scoped bootstrap logcat.");
 }
 
 function captureAndroidScreenshot(adbPath, serial, outputPath, options = {}) {
@@ -2526,6 +2936,7 @@ function parseCliOptions(argv) {
     port: null,
     launchDelayMs: null,
     apkVariant: null,
+    targetAbi: null,
     keepMetroForeground: false,
     clearMetroCache: false,
     autoTarget: false,
@@ -2590,6 +3001,11 @@ function parseCliOptions(argv) {
       continue;
     }
 
+    if (arg === "--target-abi") {
+      options.targetAbi = parseTargetAbi(readCliValue(argv, ++index, "--target-abi"));
+      continue;
+    }
+
     if (arg === "--screenshot") {
       const next = argv[index + 1];
       if (!next || next.startsWith("--")) {
@@ -2644,6 +3060,7 @@ function printHelp() {
   console.log("  --clear-metro-cache        Start a fresh Metro and reset its disk cache");
   console.log("  --transfer-metro-ownership <path> Internal: hand an owned Metro PID to a parent runner");
   console.log("  --apk-variant <variant>    Install debug or release APK (default: debug)");
+  console.log("  --target-abi <abi>         Build and verify universal, arm64-v8a, or x86_64");
   console.log("  --screenshot [path]        Save a screenshot after launch");
   console.log("  --launch-delay-ms <ms>     Wait time before saving a screenshot");
 }
@@ -2664,6 +3081,44 @@ function parseApkVariant(value) {
   }
 
   return normalized;
+}
+
+function parseTargetAbi(value) {
+  const normalized = `${value || "universal"}`.trim().toLowerCase();
+  if (!supportedAndroidTargetAbis.includes(normalized)) {
+    throw new Error(
+      `Invalid Android target ABI: ${value}. Expected one of ${supportedAndroidTargetAbis.join(", ")}.`
+    );
+  }
+  return normalized;
+}
+
+function buildGradleAssembleArgs(assembleTask, targetAbi = "universal") {
+  const normalizedAssembleTask = `${assembleTask || ""}`.trim();
+  if (!normalizedAssembleTask) {
+    throw new Error("Android Gradle provenance requires an explicit assemble task.");
+  }
+  const normalizedTargetAbi = parseTargetAbi(targetAbi);
+  const buildArgs = normalizedTargetAbi === "universal"
+    ? [normalizedAssembleTask]
+    : [normalizedAssembleTask, `-PreactNativeArchitectures=${normalizedTargetAbi}`];
+  return withAndroidProvenanceGradleExecutionArgs(buildArgs);
+}
+
+function assertSmokeBuildOverrideContract(gradleArgs = null, options = {}) {
+  const resolvedAbi = options.abi || buildTargetAbi;
+  const resolvedVariant = options.variant || apkVariant;
+  const resolvedGradleArgs = gradleArgs || buildGradleAssembleArgs(
+    `app:assemble${resolvedVariant[0].toUpperCase()}${resolvedVariant.slice(1)}`,
+    resolvedAbi
+  );
+  assertAndroidBuildOverrideContract(options.projectRoot || projectRoot, {
+    ...options,
+    abi: resolvedAbi,
+    variant: resolvedVariant,
+    env: options.env || androidBuildEnvironment,
+    gradleArgs: resolvedGradleArgs,
+  });
 }
 
 function isEmulatorSerial(serial) {
@@ -2694,6 +3149,9 @@ function wakeAndUnlockDevice(adbPath, serial) {
 }
 
 module.exports = {
+  assertSmokeBuildOverrideContract,
+  areStringArraysEqual,
+  buildGradleAssembleArgs,
   buildMetroBundlePath,
   buildMetroReverseSpecs,
   buildMetroStartArgs,
@@ -2703,18 +3161,26 @@ module.exports = {
   cleanupOwnedMetroAfterStartupFailure,
   createOwnedMetroProcessLifecycle,
   evaluateApkReuse,
+  evaluateApkAbiCompatibility,
   evaluateInstallReuse,
   ensureMetroServer,
   isInsufficientStorageInstallFailure,
   isAppJsReadyUiHierarchy,
   parseDumpsysPackageOutput,
+  parseAndroidPackageUid,
+  parseAndroidProcessId,
+  parseSha256Output,
   parseCliOptions,
   parseApkVariant,
+  parseTargetAbi,
   parsePackagePathOutput,
   readProcessIdentity,
   readAndroidUiHierarchy,
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
+  resolvePackagedAndroidAbis,
+  runAndroidGradleBuild,
+  saveLogcat,
   spawnOwnedProcess,
   spawnWindowsJobProcess,
   stopOwnedMetroProcess,

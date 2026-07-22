@@ -48,6 +48,11 @@ import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
+import {
+  armAndroidQaGenerationGate,
+  getAndroidQaGenerationEvidenceSnapshot,
+  resetAndroidQaGenerationEvidenceForTests,
+} from '../../src/services/AndroidQaGenerationEvidence';
 
 function expectNoStreamingProgressArtifacts(threadId: string): void {
   expect(listChatStreamingProgressStorageKeys(storage).filter(
@@ -158,6 +163,16 @@ describe('useChatSession', () => {
   let appStateListeners: Array<(state: 'active' | 'background' | 'inactive') => void>;
   type ChatTokenCallback = NonNullable<LlmChatCompletionOptions['onToken']>;
 
+  function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    return { promise, reject, resolve };
+  }
+
   function renderHookHarness() {
     let session: ReturnType<typeof useChatSession> | null = null;
 
@@ -178,6 +193,7 @@ describe('useChatSession', () => {
     performanceMonitor.clear();
     performanceMonitor.setEnabled(true);
     exactPromptTokenCache.clear();
+    resetAndroidQaGenerationEvidenceForTests();
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',
@@ -919,6 +935,11 @@ describe('useChatSession', () => {
         ]),
       }),
     );
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toEqual({
+      userMessageId: userMessage?.id,
+      assistantMessageId: thread?.messages[1]?.id,
+      attachments: [{ id: 'document-1', kind: 'document' }],
+    });
   });
 
   it('resolves each stable retained attachment URI once and reuses the prepared payload for completion', async () => {
@@ -4537,6 +4558,11 @@ describe('useChatSession', () => {
         ]),
       }),
     );
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toEqual({
+      userMessageId: userMessage?.id,
+      assistantMessageId: thread?.messages[1]?.id,
+      attachments: [{ id: persistedAttachments?.[0]?.id, kind: 'image' }],
+    });
   });
 
   it('regenerates an audio-only user message without requiring vision readiness', async () => {
@@ -4597,6 +4623,105 @@ describe('useChatSession', () => {
       role: 'assistant',
       content: 'Fresh audio reply',
       state: 'complete',
+    }));
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toEqual({
+      userMessageId: userMessage?.id,
+      assistantMessageId: useChatStore.getState().getActiveThread()?.messages[1]?.id,
+      attachments: [{ id: persistedAttachments?.[0]?.id, kind: 'audio' }],
+    });
+  });
+
+  it('holds a QA generation before the first native output so Stop persists no delta', async () => {
+    let onToken: ChatTokenCallback | undefined;
+    const completion = createDeferred<{ text: string }>();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken: callback }: LlmChatCompletionOptions) => {
+        onToken = callback;
+        return completion.promise;
+      },
+    );
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(async () => {
+      completion.resolve({ text: 'must not become authoritative' });
+    });
+    const getSession = renderHookHarness();
+    expect(armAndroidQaGenerationGate('before-first-output')).toBe(true);
+
+    let generationPromise: Promise<void> | undefined;
+    await act(async () => {
+      generationPromise = getSession()?.appendUserMessage('Gate before first output');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      onToken?.('blocked first output');
+    });
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate?.phase).toBe('before-first-output');
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: '',
+      state: 'streaming',
+    }));
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await generationPromise;
+    });
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: '',
+      thoughtContent: undefined,
+      state: 'stopped',
+    }));
+  });
+
+  it('holds a QA generation immediately after the first durable patch', async () => {
+    let onToken: ChatTokenCallback | undefined;
+    const completion = createDeferred<{ text: string }>();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken: callback }: LlmChatCompletionOptions) => {
+        onToken = callback;
+        return completion.promise;
+      },
+    );
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(async () => {
+      completion.resolve({ text: 'partial output plus forbidden tail' });
+    });
+    const getSession = renderHookHarness();
+    expect(armAndroidQaGenerationGate('after-first-durable-output')).toBe(true);
+
+    let generationPromise: Promise<void> | undefined;
+    await act(async () => {
+      generationPromise = getSession()?.appendUserMessage('Gate after first durable patch');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      onToken?.('partial output');
+      onToken?.(' plus forbidden tail');
+    });
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate?.phase)
+      .toBe('after-first-durable-output');
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: 'partial output',
+      state: 'streaming',
+    }));
+    const threadId = useChatStore.getState().activeThreadId ?? '';
+    expect(readChatStreamingProgressRecord(storage, threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        threadId,
+        content: 'partial output',
+        state: 'streaming',
+      }),
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await generationPromise;
+    });
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: 'partial output',
+      state: 'stopped',
     }));
   });
 

@@ -4,10 +4,24 @@ const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const {
+  buildGradleAssembleArgs,
+  captureOwnedProcessOwnership,
   ensureMetroServer,
+  spawnOwnedProcess,
   stopOwnedMetroProcessOrThrow,
   stopOwnedProcessTreeByPid,
 } = require("./android-smoke");
+const {
+  ANDROID_UNIVERSAL_ABIS,
+  BUILD_PROVENANCE_SCHEMA_VERSION,
+  collectAndroidEffectiveBuildContext,
+  collectBuildProvenance,
+  collectGitProvenance,
+  collectPrebuildInputState,
+  createIsolatedAndroidBuildEnvironment,
+  hashCanonicalJson,
+} = require("./android-build-provenance");
+const { sanitizeAndroidQaText } = require("./android-qa-sanitization");
 const { isCompletePngBuffer } = require("./png-validation");
 const DEFAULT_SCENARIO_PACK = "core";
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
@@ -41,6 +55,23 @@ const PREPARED_ATTACHMENT_SCENARIOS = [
 const PREPARED_ATTACHMENT_SEND_SCENARIOS = [
   "chat-attachment-prepared-send",
 ];
+const BRANCH_REGENERATION_SCENARIOS = [
+  "branch-regeneration-01-fixture",
+  "branch-regeneration-02-trailing-model-switch",
+  "branch-regeneration-03-force-stop-before-token",
+  "branch-regeneration-04-relaunch-old-branch",
+  "branch-regeneration-05-force-stop-after-partial",
+  "branch-regeneration-06-relaunch-partial-branch",
+  "branch-regeneration-07-success",
+  "branch-regeneration-08-stop-before-output",
+  "branch-regeneration-09-stop-after-partial",
+  "branch-regeneration-10-reasoning-clear",
+  "branch-regeneration-11-image-attachment",
+  "branch-regeneration-12-document-attachment",
+  "branch-regeneration-13-audio-attachment",
+  "branch-regeneration-14-delete-conversation",
+  "branch-regeneration-15-clear-history-relaunch",
+];
 const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
@@ -49,6 +80,7 @@ const SCENARIO_PACK_SCENARIOS = {
   "attachments-preconditioned": PRECONDITIONED_ATTACHMENT_SCENARIOS,
   "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
+  "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
     "style-screenshots",
@@ -68,6 +100,10 @@ const SCENARIO_PACK_SCENARIOS = {
   ],
 };
 const SCENARIO_PACKS = new Set([...Object.keys(SCENARIO_PACK_SCENARIOS), "all"]);
+const SUPPORTED_ANDROID_PROVENANCE_ABIS = new Set([
+  "universal",
+  ...ANDROID_UNIVERSAL_ABIS,
+]);
 
 const cliOptions = require.main === module
   ? parseCliOptions(process.argv.slice(2))
@@ -75,6 +111,7 @@ const cliOptions = require.main === module
 const projectRoot = path.resolve(__dirname, "..");
 const appConfigPath = path.join(projectRoot, "app.json");
 const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
+const androidRoot = path.join(projectRoot, "android");
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
 const expoConfig = readExpoConfig();
 const appPackageName = expoConfig.packageName;
@@ -310,6 +347,7 @@ const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
 const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
 const CLEAR_ACTIVE_CACHE_LABELS = ["Clear Active Cache", "Очистить активный кэш"];
 const STORAGE_CLEAR_CACHE_RESOURCE_ID = "storage-manager-clear-cache";
+const STORAGE_CLEAR_CHAT_RESOURCE_ID = "storage-manager-clear-chat";
 const ANDROID_DIALOG_POSITIVE_BUTTON_RESOURCE_ID = "android:id/button1";
 const STORAGE_CACHE_QA_DIRECTORY = "cache/pocket-ai-storage-qa";
 const STORAGE_CACHE_QA_SENTINEL = `${STORAGE_CACHE_QA_DIRECTORY}/sentinel.bin`;
@@ -331,6 +369,7 @@ const ACTIVE_MODEL_CTA_LABELS = [
 const CONVERSATIONS_TITLE_LABELS = ["All Conversations", "Все разговоры"];
 const MANAGE_CONVERSATIONS_LABELS = ["Manage", "Управлять"];
 const CONVERSATIONS_SEARCH_LABELS = ["Search conversations", "Поиск по разговорам"];
+const DELETE_LABELS = ["Delete", "Удалить"];
 const APP_FOREGROUND_MARKER_LABELS = [
   "NO MODEL LOADED",
   "МОДЕЛЬ НЕ ЗАГРУЖЕНА",
@@ -433,13 +472,54 @@ const MODEL_WARMUP_DETECTION_TIMEOUT_MS = 2_000;
 const MODEL_WARMUP_SETTLE_TIMEOUT_MS = 180_000;
 const UI_HIERARCHY_DUMP_COMMAND_TIMEOUT_MS = 5_000;
 const ADB_COMMAND_TIMEOUT_MS = 15_000;
+const LOGCAT_EVIDENCE_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+const LOGCAT_COLLECTOR_START_TIMEOUT_MS = 10_000;
+const LOGCAT_COLLECTOR_STOP_TIMEOUT_MS = 10_000;
+const LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS = 5_000;
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
 // Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
 // Give successful routes a short visual-settle window so QA evidence does not capture a
 // transient black surface immediately after navigation.
 const PASSED_SCENARIO_SCREENSHOT_SETTLE_MS = 1_000;
-const REPORT_ARTIFACT_PATH_FIELDS = ["screenshotPath", "uiDumpPath", "logcatPath"];
+const REPORT_ARTIFACT_PATH_FIELDS = [
+  "screenshotPath",
+  "uiDumpPath",
+  "logcatPath",
+  "provenancePath",
+];
+const REPORT_PRIVATE_FIELDS = new Set([
+  "rawLogPath",
+  "rawLogPaths",
+  "systemRawLogPath",
+  "privateLogcatPath",
+  "logcatCollector",
+]);
+const REPORT_MAX_DEPTH = 8;
+const REPORT_MAX_COLLECTION_ENTRIES = 100;
+const REPORT_MAX_STRING_LENGTH = 2_048;
+const QA_PROVENANCE_PATH = path.join(artifactsRoot, "build-provenance-latest.json");
+const BRANCH_EVIDENCE_DIRECTORY = "branch-regeneration";
+const PRIVATE_LOGCAT_DIRECTORY = path.join(
+  projectRoot,
+  "node_modules",
+  ".cache",
+  "pocket-ai-android",
+  "scenario-logcat"
+);
+const BRANCH_GENERATION_TIMEOUT_MS = 240_000;
+const BRANCH_PARTIAL_TIMEOUT_MS = 120_000;
+const BRANCH_FIXTURE_SCAN_LIMIT = 24;
+const FATAL_LOG_PATTERNS = [
+  /FATAL EXCEPTION/i,
+  /Fatal signal\s+\d+|SIGABRT|SIGBUS|SIGFPE|SIGILL|SIGSEGV/i,
+  /ANR in com\.github\.tah10n\.pocketai/i,
+  /Unhandled JS Exception/i,
+  /Unable to load script/i,
+  /JSApplicationIllegalArgumentException/i,
+  /ReactNativeJS.*(?:Invariant Violation|ReferenceError|TypeError)/i,
+];
+let activeQaProvenance = null;
 
 if (require.main === module) {
   main().catch((error) => {
@@ -457,6 +537,9 @@ async function main() {
   }
 
   const selectedScenarios = selectScenarios(scenarios, cliOptions);
+  const requiresCurrentHeadProvenance = selectedScenarios.some(
+    (scenario) => scenario.requiresCurrentHeadProvenance
+  );
 
   if (selectedScenarios.length === 0) {
     throw new Error(
@@ -467,11 +550,25 @@ async function main() {
   }
 
   fs.mkdirSync(artifactsRoot, { recursive: true });
+  try {
+    configureScenarioBuildEnvironment(cliOptions, requiresCurrentHeadProvenance);
+  } catch (error) {
+    const results = [{
+      id: "current-head-provenance",
+      status: "failed",
+      failureKind: "precondition",
+      durationMs: 0,
+      error: error instanceof Error ? error.message : String(error),
+    }];
+    writeReport(results);
+    throw markScenarioFailureRecorded(error);
+  }
 
   const adbPath = resolveAdbPath();
   const launchPlan = buildScenarioLaunchPlan(cliOptions, () => resolveTargetSerial(adbPath, cliOptions));
   let scenarioMetro = null;
-  let removeMetroSignalHandlers = () => {};
+  let activeLogcatCollector = null;
+  let removeResourceSignalHandlers = () => {};
   let mainError = null;
 
   try {
@@ -482,13 +579,25 @@ async function main() {
           preferredPort: cliOptions.port ?? undefined,
         });
         if (scenarioMetro.started) {
-          scenarioMetro.removeSignalHandlers?.();
-          removeMetroSignalHandlers = installScenarioOwnedMetroSignalHandlers(
-            () => scenarioMetro
+          removeResourceSignalHandlers = installScenarioResourceSignalHandlers(
+            () => ({
+              metro: scenarioMetro,
+              logcatCollector: activeLogcatCollector,
+            })
           );
+          scenarioMetro.removeSignalHandlers?.();
         }
       }
       launchApp(launchPlan.serialBeforeLaunch, scenarioMetro?.port ?? cliOptions.port);
+    }
+
+    if (!scenarioMetro?.started) {
+      removeResourceSignalHandlers = installScenarioResourceSignalHandlers(
+        () => ({
+          metro: scenarioMetro,
+          logcatCollector: activeLogcatCollector,
+        })
+      );
     }
 
     const serial = launchPlan.serialBeforeLaunch || resolveTargetSerial(adbPath, cliOptions);
@@ -497,109 +606,263 @@ async function main() {
 
     try {
       await context.ensureAppVisible();
-    await dismissDebuggerBannerIfPresent(adbPath, serial);
-
-    for (const scenario of selectedScenarios) {
-      const startedAt = Date.now();
-      log(`Running scenario: ${scenario.id} [${scenario.tier}]`);
+      await dismissDebuggerBannerIfPresent(adbPath, serial);
 
       try {
-        const outcome = await scenario.run(context);
-
-        if (outcome && outcome.status === "skipped") {
-          recordScenarioSkip({
-            scenario,
-            results,
-            startedAt,
-            reason: outcome.reason,
-            context,
-          });
-          writeReport(results);
-          continue;
+        if (requiresCurrentHeadProvenance && cliOptions.preserveRunningApp) {
+          throw new ScenarioPreconditionFailureError(
+            "Current-head scenarios cannot use --preserve-running-app because the live JS surface would not be relaunched from verified source."
+          );
         }
-
-        const screenshotPath = await captureSettledScenarioScreenshot(
-          context,
-          `${scenario.id}.png`
-        );
-        results.push({
-          id: scenario.id,
-          tier: scenario.tier,
-          status: "passed",
-          durationMs: Date.now() - startedAt,
-          screenshotPath,
-        });
-        log(`PASS ${scenario.id}`);
-        writeReport(results);
+        activeQaProvenance = requiresCurrentHeadProvenance
+          ? readAndValidateQaProvenance(adbPath, serial)
+          : null;
       } catch (error) {
-        if (error instanceof ScenarioSkipFailureError) {
-          throw error;
-        }
-
-        if (error instanceof ScenarioSkipError) {
-          recordScenarioSkip({
-            scenario,
-            results,
-            startedAt,
-            reason: error.message,
-            context,
-          });
-          writeReport(results);
-          continue;
-        }
-
-        const screenshotPath = context.captureScreenshot(`${scenario.id}-failed.png`);
         results.push({
-          id: scenario.id,
-          tier: scenario.tier,
+          id: "current-head-provenance",
           status: "failed",
-          durationMs: Date.now() - startedAt,
-          screenshotPath,
-          error: error.message,
+          failureKind: "precondition",
+          durationMs: 0,
+          error: error instanceof Error ? error.message : String(error),
         });
         writeReport(results);
-        throw error;
+        throw markScenarioFailureRecorded(error);
       }
-    }
 
-    writeReport(results);
-    log(`Completed ${results.length} basic scenario(s).`);
+      for (const scenario of selectedScenarios) {
+        if (activeLogcatCollector) {
+          cleanupAndroidLogcatCollector(activeLogcatCollector);
+          activeLogcatCollector = null;
+        }
+        const startedAt = Date.now();
+        log(`Running scenario: ${scenario.id} [${scenario.tier}]`);
+        context.resetStepEvidence(scenario.id);
+        let logcatCollector = null;
+
+        try {
+          if (scenario.captureFullEvidence) {
+            logcatCollector = await startAndroidLogcatCollector(
+              {
+                adbPath,
+                serial,
+                packageName: appPackageName,
+                stem: scenario.id,
+              },
+              {
+                onCollectorCreated: (collector) => {
+                  activeLogcatCollector = collector;
+                },
+              }
+            );
+            context.setStepLogcatCollector(logcatCollector);
+          }
+
+          const outcome = await scenario.run(context);
+
+          if (outcome && outcome.status === "skipped") {
+            await stopAndroidLogcatCollector(logcatCollector);
+            recordScenarioSkip({
+              scenario,
+              results,
+              startedAt,
+              reason: outcome.reason,
+              context,
+            });
+            writeReport(results);
+            continue;
+          }
+
+          if (outcome && outcome.status === "not_applicable") {
+            const screenshotPath = await captureSettledScenarioScreenshot(
+              context,
+              path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
+            );
+            await stopAndroidLogcatCollector(logcatCollector);
+            const evidence = captureScenarioEvidence({
+              adbPath,
+              serial,
+              scenario,
+              screenshotPath,
+              checkpoints: context.consumeStepCheckpoints(),
+              logcatCollector,
+            });
+            results.push({
+              id: scenario.id,
+              tier: scenario.tier,
+              step: scenario.step,
+              status: "not_applicable",
+              durationMs: Date.now() - startedAt,
+              ...evidence,
+              reason: outcome.reason,
+              ...(outcome.details ? { details: outcome.details } : {}),
+            });
+            log(`NOT APPLICABLE ${scenario.id}: ${outcome.reason}`);
+            writeReport(results);
+            continue;
+          }
+
+          const screenshotPath = await captureSettledScenarioScreenshot(
+            context,
+            scenario.captureFullEvidence
+              ? path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
+              : `${scenario.id}.png`
+          );
+          await stopAndroidLogcatCollector(logcatCollector);
+          const evidence = scenario.captureFullEvidence
+            ? captureScenarioEvidence({
+                adbPath,
+                serial,
+                scenario,
+                screenshotPath,
+                checkpoints: context.consumeStepCheckpoints(),
+                logcatCollector,
+              })
+            : { screenshotPath };
+          results.push({
+            id: scenario.id,
+            tier: scenario.tier,
+            step: scenario.step,
+            status: "passed",
+            durationMs: Date.now() - startedAt,
+            ...evidence,
+            ...(outcome?.details ? { details: outcome.details } : {}),
+          });
+          log(`PASS ${scenario.id}`);
+          writeReport(results);
+        } catch (caughtError) {
+          let error = caughtError;
+          if (logcatCollector && !logcatCollector.stopAttempted) {
+            try {
+              await stopAndroidLogcatCollector(logcatCollector);
+            } catch (collectorError) {
+              error = combineScenarioErrors(error, collectorError);
+            }
+          }
+
+          if (error instanceof ScenarioSkipFailureError) {
+            throw error;
+          }
+
+          if (error instanceof ScenarioSkipError) {
+            recordScenarioSkip({
+              scenario,
+              results,
+              startedAt,
+              reason: error.message,
+              context,
+            });
+            writeReport(results);
+            continue;
+          }
+
+          const evidence = captureFailedScenarioEvidence({
+            adbPath,
+            serial,
+            scenario,
+            context,
+            logcatCollector,
+          });
+          results.push({
+            id: scenario.id,
+            tier: scenario.tier,
+            step: scenario.step,
+            status: "failed",
+            durationMs: Date.now() - startedAt,
+            ...evidence,
+            error: error instanceof Error ? error.message : String(error),
+            ...(error instanceof ScenarioPreconditionFailureError
+              ? { failureKind: "precondition" }
+              : {}),
+          });
+          writeReport(results);
+          throw markScenarioFailureRecorded(error);
+        } finally {
+          context.setStepLogcatCollector(null);
+          if (logcatCollector) {
+            let cleanupSucceeded = false;
+            try {
+              cleanupAndroidLogcatCollector(logcatCollector);
+              cleanupSucceeded = true;
+            } catch (cleanupError) {
+              log(
+                `Could not remove private logcat capture for ${scenario.id}: ${cleanupError.message}`
+              );
+            } finally {
+              if (cleanupSucceeded && activeLogcatCollector === logcatCollector) {
+                activeLogcatCollector = null;
+              }
+            }
+          }
+        }
+      }
+
+      if (requiresCurrentHeadProvenance) {
+        try {
+          activeQaProvenance = readAndValidateQaProvenance(adbPath, serial);
+        } catch (error) {
+          results.push({
+            id: "current-head-provenance-final",
+            status: "failed",
+            failureKind: "precondition",
+            durationMs: 0,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          writeReport(results);
+          throw markScenarioFailureRecorded(error);
+        }
+      }
+
+      writeReport(results);
+      log(`Completed ${results.length} basic scenario(s).`);
     } catch (error) {
       if (!shouldAppendRunnerFailure(error)) {
         throw error;
       }
 
-    try {
-      const screenshotPath = context.captureScreenshot("run-failed.png");
-      const uiDumpPath = path.join(artifactsRoot, "run-failed.xml");
-      fs.writeFileSync(uiDumpPath, dumpUiHierarchy(adbPath, serial));
+      try {
+        const screenshotPath = context.captureScreenshot("run-failed.png");
+        const uiDumpPath = path.join(artifactsRoot, "run-failed.xml");
+        fs.writeFileSync(uiDumpPath, dumpUiHierarchy(adbPath, serial));
 
-      const logcatPath = path.join(artifactsRoot, "run-failed-logcat.txt");
-      const logcat = runCapture(adbPath, ["-s", serial, "logcat", "-d", "-t", "400"], {
-        allowFailure: true,
-      });
-      fs.writeFileSync(logcatPath, logcat);
+        const logcatPath = path.join(artifactsRoot, "run-failed-logcat.txt");
+        const packageUid = resolveAndroidPackageUid(adbPath, serial, appPackageName);
+        const logcat = runCapture(adbPath, [
+          "-s",
+          serial,
+          "logcat",
+          "-b",
+          "all",
+          `--uid=${packageUid}`,
+          "-d",
+          "-t",
+          "400",
+          "-v",
+          "threadtime",
+        ], {
+          allowFailure: true,
+        });
+        fs.writeFileSync(logcatPath, sanitizeQaLogcat(logcat));
 
-      results.push({
-        id: "runner-failure",
-        status: "failed",
-        durationMs: 0,
-        screenshotPath,
-        uiDumpPath,
-        logcatPath,
-        error: error.message,
-      });
-      writeReport(results);
-    } catch (captureError) {
-      results.push({
-        id: "runner-failure",
-        status: "failed",
-        durationMs: 0,
-        error: error.message,
-        captureError: captureError instanceof Error ? captureError.message : String(captureError),
-      });
-      writeReport(results);
-    }
+        results.push({
+          id: "runner-failure",
+          status: "failed",
+          durationMs: 0,
+          screenshotPath,
+          uiDumpPath,
+          logcatPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        writeReport(results);
+      } catch (captureError) {
+        results.push({
+          id: "runner-failure",
+          status: "failed",
+          durationMs: 0,
+          error: error instanceof Error ? error.message : String(error),
+          captureError: captureError instanceof Error ? captureError.message : String(captureError),
+        });
+        writeReport(results);
+      }
 
       throw error;
     }
@@ -607,24 +870,99 @@ async function main() {
     mainError = error;
     throw error;
   } finally {
-    removeMetroSignalHandlers();
+    let logcatCleanupError = null;
+    if (activeLogcatCollector) {
+      try {
+        cleanupAndroidLogcatCollector(activeLogcatCollector);
+        activeLogcatCollector = null;
+      } catch (cleanupError) {
+        logcatCleanupError = cleanupError;
+      }
+    }
+    let metroCleanupError = null;
     try {
       cleanupScenarioOwnedMetro(scenarioMetro);
+      scenarioMetro = null;
     } catch (cleanupError) {
-      if (!mainError) {
-        throw cleanupError;
+      metroCleanupError = cleanupError;
+    }
+    const cleanupErrors = [logcatCleanupError, metroCleanupError].filter(Boolean);
+    if (cleanupErrors.length === 0) {
+      removeResourceSignalHandlers();
+    }
+    if (cleanupErrors.length > 0) {
+      if (!mainError && cleanupErrors.length === 1) {
+        throw cleanupErrors[0];
       }
       throw new AggregateError(
-        [mainError, cleanupError],
-        `Android scenario run failed (${mainError.message}) and Metro cleanup also failed (${cleanupError.message}).`
+        [mainError, ...cleanupErrors].filter(Boolean),
+        mainError
+          ? `Android scenario run failed (${mainError.message}) and owned-resource cleanup also failed.`
+          : "Android scenario owned-resource cleanup failed."
       );
     }
   }
 }
 
+function captureFailedScenarioEvidence({
+  adbPath,
+  serial,
+  scenario,
+  context,
+  logcatCollector = null,
+}) {
+  try {
+    if (!scenario.captureFullEvidence) {
+      return { screenshotPath: context.captureScreenshot(`${scenario.id}-failed.png`) };
+    }
+
+    return captureScenarioEvidence({
+      adbPath,
+      serial,
+      scenario,
+      screenshotPath: context.captureScreenshot(
+        path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}-failed.png`)
+      ),
+      checkpoints: context.consumeStepCheckpoints(),
+      allowFatalMatches: true,
+      logcatCollector,
+    });
+  } catch (captureError) {
+    return {
+      evidenceCaptureError: captureError instanceof Error
+        ? captureError.message
+        : String(captureError),
+    };
+  }
+}
+
 function createScenarioContext(adbPath, serial) {
+  let activeStepId = "scenario";
+  let stepCheckpoints = [];
+  let stepLogcatCollector = null;
+
   return {
     serial,
+    resetStepEvidence: (stepId = "scenario") => {
+      activeStepId = sanitizeArtifactStem(stepId);
+      stepCheckpoints = [];
+      stepLogcatCollector = null;
+    },
+    setStepLogcatCollector: (collector) => {
+      stepLogcatCollector = collector;
+    },
+    captureCheckpoint: (label, options = {}) => {
+      const checkpoint = captureCheckpointEvidence({
+        adbPath,
+        serial,
+        stem: `${activeStepId}-${sanitizeArtifactStem(label)}`,
+        expectedJsSurface: options.expectedJsSurface || "foreground",
+        logcatCollector: stepLogcatCollector,
+      });
+      stepCheckpoints.push(checkpoint);
+      return checkpoint;
+    },
+    consumeStepCheckpoints: () => [...stepCheckpoints],
     ensureAppVisible: async () => {
       const startedAt = Date.now();
 
@@ -1095,8 +1433,41 @@ class ScenarioSkipError extends Error {}
 
 class ScenarioSkipFailureError extends Error {}
 
+class ScenarioPreconditionFailureError extends Error {}
+
 function shouldAppendRunnerFailure(error) {
-  return !(error instanceof ScenarioSkipFailureError);
+  return !(
+    error instanceof ScenarioSkipFailureError
+    || error?.scenarioFailureRecorded === true
+  );
+}
+
+function markScenarioFailureRecorded(error) {
+  const normalizedError = error instanceof Error ? error : new Error(String(error));
+  Object.defineProperty(normalizedError, "scenarioFailureRecorded", {
+    configurable: true,
+    value: true,
+  });
+  return normalizedError;
+}
+
+function combineScenarioErrors(primaryError, secondaryError) {
+  const primary = primaryError instanceof Error
+    ? primaryError
+    : new Error(String(primaryError));
+  const secondary = secondaryError instanceof Error
+    ? secondaryError
+    : new Error(String(secondaryError));
+  const message = `${primary.message} Android logcat evidence also failed: ${secondary.message}`;
+  const CombinedError = (
+    primary instanceof ScenarioPreconditionFailureError
+    || secondary instanceof ScenarioPreconditionFailureError
+  )
+    ? ScenarioPreconditionFailureError
+    : Error;
+  const combined = new CombinedError(message, { cause: primary });
+  combined.errors = [primary, secondary];
+  return combined;
 }
 
 function recordScenarioSkip({
@@ -1917,7 +2288,8 @@ function buildScenarios() {
           await ctx.tapAnyText(PERFORMANCE_ENABLE_INSTRUMENTATION_LABELS);
         }
 
-        runChecked(adbPath, ["-s", ctx.serial, "logcat", "-c"]);
+        const packageUid = resolveAndroidPackageUid(adbPath, ctx.serial, appPackageName);
+        const logcatStartEpoch = readAndroidLogcatStartEpoch(adbPath, ctx.serial);
 
         await scrollToAnyText(ctx, PERFORMANCE_DUMP_TO_LOGCAT_LABELS, {
           timeoutMs: 5_000,
@@ -1928,7 +2300,19 @@ function buildScenarios() {
         let logs = "";
         for (let attempt = 0; attempt < 4; attempt += 1) {
           await delay(1_500 + attempt * 1_000);
-          logs = runCapture(adbPath, ["-s", ctx.serial, "logcat", "-d", "-t", "800"]);
+          logs = runCapture(adbPath, [
+            "-s",
+            ctx.serial,
+            "logcat",
+            "-b",
+            "all",
+            `--uid=${packageUid}`,
+            "-T",
+            logcatStartEpoch,
+            "-d",
+            "-v",
+            "threadtime",
+          ]);
           if (logs.includes("POCKET_AI_PERF_TRACE")) {
             break;
           }
@@ -1939,7 +2323,1580 @@ function buildScenarios() {
         }
       },
     },
+    ...buildBranchRegenerationScenarios(),
   ];
+}
+
+function buildBranchRegenerationScenarios() {
+  const state = {
+    initialized: false,
+    threadId: null,
+    sentinelThreadId: null,
+    audioSupported: false,
+    targets: null,
+    trailingModelSwitchId: null,
+    stableMainAssistantId: null,
+    forceStoppedBeforeAssistantId: null,
+    partialAssistantId: null,
+    successfulAssistantId: null,
+  };
+  const scenario = (step, id, description, run, expectedJsSurface = "foreground") => ({
+    id,
+    step,
+    tier: "critical",
+    description,
+    captureFullEvidence: true,
+    requiresCurrentHeadProvenance: true,
+    expectedJsSurface,
+    run,
+  });
+
+  return [
+    scenario(
+      1,
+      BRANCH_REGENERATION_SCENARIOS[0],
+      "Validate the prepared branch-regeneration conversation, sentinel conversation, and loaded model.",
+      async (ctx) => {
+        const adbPath = resolveAdbPath();
+        await goToHome(ctx);
+        await waitForModelWarmupToSettleIfPresent(adbPath, ctx.serial);
+        const recentThreadIds = readVisibleRecentConversationIds(adbPath, ctx.serial);
+        if (recentThreadIds.length < 2) {
+          throw new ScenarioPreconditionFailureError(
+            "Branch-regeneration requires two prepared recent conversations: the fixture conversation and a clear-history sentinel."
+          );
+        }
+
+        state.threadId = recentThreadIds[0];
+        state.sentinelThreadId = recentThreadIds[1];
+        await openConversationByThreadId(ctx, state.threadId);
+        assertLoadedChatPrecondition(adbPath, ctx.serial);
+
+        const topology = await scanConversationTopology(ctx);
+        state.audioSupported = await detectAudioAttachmentSupport(ctx);
+        const fixture = resolveBranchFixture(topology, {
+          audioSupported: state.audioSupported,
+        });
+        state.targets = fixture.targets;
+        state.trailingModelSwitchId = fixture.trailingModelSwitchId;
+        state.stableMainAssistantId = fixture.targets.main.assistantId;
+        state.initialized = true;
+
+        return {
+          details: {
+            fixtureThreadId: state.threadId,
+            sentinelThreadId: state.sentinelThreadId,
+            audioSupported: state.audioSupported,
+            orderedMessageCount: topology.order.length,
+            targetIds: Object.fromEntries(
+              Object.entries(state.targets)
+                .filter(([, target]) => Boolean(target))
+                .map(([kind, target]) => [kind, {
+                  userId: target.userId,
+                  assistantId: target.assistantId,
+                }])
+            ),
+            trailingModelSwitchId: state.trailingModelSwitchId,
+          },
+        };
+      }
+    ),
+    scenario(
+      2,
+      BRANCH_REGENERATION_SCENARIOS[1],
+      "Confirm that the prepared main turn ends in a completed assistant response followed by a model-switch marker.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 2);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const topology = await scanConversationTopology(ctx);
+        assertTrailingModelSwitchTopology(topology, state.targets.main, state.trailingModelSwitchId);
+        return {
+          details: {
+            mainUserId: state.targets.main.userId,
+            stableAssistantId: state.stableMainAssistantId,
+            trailingModelSwitchId: state.trailingModelSwitchId,
+          },
+        };
+      }
+    ),
+    scenario(
+      3,
+      BRANCH_REGENERATION_SCENARIOS[2],
+      "Start main-turn regeneration and force-stop the app before the first generated output.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 3);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const beforeTopology = await scanConversationTopology(ctx);
+        const baseline = createBranchRegenerationBaseline(
+          beforeTopology,
+          state.targets.main.userId
+        );
+        await armAndroidQaGenerationGate(ctx, "before-first-output");
+        await startBranchRegeneration(ctx, state.targets.main);
+        const interruption = await interruptObservedBranchGeneration(ctx, {
+          baselineAssistantIds: baseline.assistantIds,
+          evidenceLabel: "force-stopped-before-first-output",
+          mode: "force-stop",
+          phase: "before-first-output",
+        });
+        state.forceStoppedBeforeAssistantId = interruption.assistantId;
+        ctx.captureCheckpoint("force-stopped-before-first-token", { expectedJsSurface: "stopped" });
+        return {
+          details: {
+            stableAssistantId: state.stableMainAssistantId,
+            interruptedAssistantId: interruption.assistantId,
+            interruptionEvidence: interruption,
+          },
+        };
+      },
+      "stopped"
+    ),
+    scenario(
+      4,
+      BRANCH_REGENERATION_SCENARIOS[3],
+      "Relaunch after the pre-token force-stop and verify the original assistant branch remains intact.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 4);
+        await relaunchScenarioAppAndOpenThread(ctx, state.threadId);
+        const topology = await scanConversationTopology(ctx);
+        assertTrailingModelSwitchTopology(topology, state.targets.main, state.trailingModelSwitchId);
+        assertAssistantState(topology, state.stableMainAssistantId, "complete");
+        assertMessageIdAbsent(topology, state.forceStoppedBeforeAssistantId);
+        assertNoDuplicateMessageIds(topology);
+        return {
+          details: {
+            restoredAssistantId: state.stableMainAssistantId,
+            restoredModelSwitchId: state.trailingModelSwitchId,
+          },
+        };
+      }
+    ),
+    scenario(
+      5,
+      BRANCH_REGENERATION_SCENARIOS[4],
+      "Start main-turn regeneration, persist real partial output, and force-stop the app.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 5);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const beforeTopology = await scanConversationTopology(ctx);
+        const baseline = createBranchRegenerationBaseline(
+          beforeTopology,
+          state.targets.main.userId
+        );
+        await armAndroidQaGenerationGate(ctx, "after-first-durable-output");
+        await startBranchRegeneration(ctx, state.targets.main);
+        const partial = await interruptObservedBranchGeneration(ctx, {
+          baselineAssistantIds: baseline.assistantIds,
+          evidenceLabel: "force-stopped-after-first-durable-output",
+          mode: "force-stop",
+          phase: "after-first-durable-output",
+        });
+        state.partialAssistantId = partial.assistantId;
+        ctx.captureCheckpoint("force-stopped-after-partial", { expectedJsSurface: "stopped" });
+        return {
+          details: {
+            partialAssistantId: state.partialAssistantId,
+            partialSurface: partial.surface,
+          },
+        };
+      },
+      "stopped"
+    ),
+    scenario(
+      6,
+      BRANCH_REGENERATION_SCENARIOS[5],
+      "Relaunch after partial output and verify one stopped replacement branch without duplicates.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 6);
+        if (!state.partialAssistantId) {
+          throw new ScenarioPreconditionFailureError("Step 6 requires the partial assistant id recorded by step 5.");
+        }
+        await relaunchScenarioAppAndOpenThread(ctx, state.threadId);
+        await waitForExactAssistantState(ctx, state.partialAssistantId, "stopped");
+        const topology = await scanConversationTopology(ctx);
+        assertAssistantState(topology, state.partialAssistantId, "stopped");
+        assertMessageIdAbsent(topology, state.stableMainAssistantId);
+        assertMessageIdAbsent(topology, state.trailingModelSwitchId);
+        assertNoDuplicateMessageIds(topology);
+        await ctx.expectResourceId("chat-stopped-banner", { timeoutMs: 10_000 });
+        return {
+          details: {
+            stoppedAssistantId: state.partialAssistantId,
+            duplicateCount: 0,
+          },
+        };
+      }
+    ),
+    scenario(
+      7,
+      BRANCH_REGENERATION_SCENARIOS[6],
+      "Complete main-turn branch regeneration and verify the stopped branch is replaced atomically.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 7);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const completed = await completeBranchRegeneration(ctx, state.targets.main);
+        state.successfulAssistantId = completed.assistantId;
+        const topology = completed.topology;
+        assertAssistantState(topology, state.successfulAssistantId, "complete");
+        assertMessageIdAbsent(topology, state.partialAssistantId);
+        assertNoDuplicateMessageIds(topology);
+        return {
+          details: {
+            completedAssistantId: state.successfulAssistantId,
+          },
+        };
+      }
+    ),
+    scenario(
+      8,
+      BRANCH_REGENERATION_SCENARIOS[7],
+      "Stop main-turn regeneration before output and verify the completed branch remains authoritative.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 8);
+        if (!state.successfulAssistantId) {
+          throw new ScenarioPreconditionFailureError("Step 8 requires the successful assistant id recorded by step 7.");
+        }
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const beforeTopology = await scanConversationTopology(ctx);
+        const baseline = createBranchRegenerationBaseline(
+          beforeTopology,
+          state.targets.main.userId
+        );
+        await armAndroidQaGenerationGate(ctx, "before-first-output");
+        await startBranchRegeneration(ctx, state.targets.main);
+        const interruption = await interruptObservedBranchGeneration(ctx, {
+          baselineAssistantIds: baseline.assistantIds,
+          evidenceLabel: "stopped-before-first-output",
+          mode: "tap-stop",
+          phase: "before-first-output",
+        });
+        await waitForRegenerationModeToClose(ctx);
+        const topology = await scanConversationTopology(ctx);
+        assertAssistantState(topology, state.successfulAssistantId, "complete");
+        assertMessageIdAbsent(topology, interruption.assistantId);
+        assertNoDuplicateMessageIds(topology);
+        return {
+          details: {
+            preservedAssistantId: state.successfulAssistantId,
+            interruptionEvidence: interruption,
+          },
+        };
+      }
+    ),
+    scenario(
+      9,
+      BRANCH_REGENERATION_SCENARIOS[8],
+      "Stop main-turn regeneration after partial output and verify one stopped replacement branch.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 9);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const beforeTopology = await scanConversationTopology(ctx);
+        const baseline = createBranchRegenerationBaseline(
+          beforeTopology,
+          state.targets.main.userId
+        );
+        await armAndroidQaGenerationGate(ctx, "after-first-durable-output");
+        await startBranchRegeneration(ctx, state.targets.main);
+        const partial = await interruptObservedBranchGeneration(ctx, {
+          baselineAssistantIds: baseline.assistantIds,
+          evidenceLabel: "stopped-after-first-durable-output",
+          mode: "tap-stop",
+          phase: "after-first-durable-output",
+        });
+        await waitForExactAssistantState(ctx, partial.assistantId, "stopped");
+        const topology = await scanConversationTopology(ctx);
+        assertAssistantState(topology, partial.assistantId, "stopped");
+        assertMessageIdAbsent(topology, state.successfulAssistantId);
+        assertNoDuplicateMessageIds(topology);
+        return {
+          details: {
+            stoppedAssistantId: partial.assistantId,
+          },
+        };
+      }
+    ),
+    scenario(
+      10,
+      BRANCH_REGENERATION_SCENARIOS[9],
+      "Regenerate the reasoning turn and verify stale reasoning from the replaced assistant is authoritatively removed.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 10);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        const reasoningConfiguration = await disableReasoningForAuthoritativeClear(ctx);
+        const completed = await completeBranchRegeneration(ctx, state.targets.reasoning);
+        const settledThoughtClear = assertAuthoritativeThoughtClear({
+          beforeTopology: completed.beforeTopology,
+          topology: completed.topology,
+          baseline: completed.baseline,
+          replacementAssistantId: completed.assistantId,
+        });
+        assertNoDuplicateMessageIds(completed.topology);
+
+        await relaunchScenarioAppAndOpenThread(ctx, state.threadId);
+        const rehydratedTopology = await scanConversationTopology(ctx);
+        const rehydratedThoughtClear = assertAuthoritativeThoughtClear({
+          beforeTopology: completed.beforeTopology,
+          topology: rehydratedTopology,
+          baseline: completed.baseline,
+          replacementAssistantId: completed.assistantId,
+        });
+        assertNoDuplicateMessageIds(rehydratedTopology);
+        return {
+          details: {
+            replacedReasoningAssistantId: completed.baseline.previousAssistantId,
+            authoritativeAssistantId: completed.assistantId,
+            reasoningConfiguration,
+            staleThoughtResourceRemoved: rehydratedThoughtClear.replacedThoughtAbsent,
+            authoritativeThoughtCleared: settledThoughtClear.replacementThoughtAbsent,
+            rehydratedThoughtClearVerified: rehydratedThoughtClear.replacementThoughtAbsent,
+          },
+        };
+      }
+    ),
+    scenario(
+      11,
+      BRANCH_REGENERATION_SCENARIOS[10],
+      "Regenerate the prepared image-attached turn and verify attachment identity survives branch replacement.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 11);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        await assertTargetAttachmentVisible(ctx, state.targets.image, "image");
+        const completed = await completeBranchRegeneration(ctx, state.targets.image);
+        const topology = completed.topology;
+        assertTargetAttachment(topology, state.targets.image, "image");
+        assertAssistantState(topology, completed.assistantId, "complete");
+        const preparedAttachmentIds = assertPreparedAttachmentGenerationEvidence(
+          createUiSnapshot(resolveAdbPath(), ctx.serial),
+          state.targets.image,
+          completed.assistantId,
+          "image"
+        );
+        return {
+          details: {
+            userId: state.targets.image.userId,
+            completedAssistantId: completed.assistantId,
+            attachmentKind: "image",
+            preparedAttachmentIds,
+          },
+        };
+      }
+    ),
+    scenario(
+      12,
+      BRANCH_REGENERATION_SCENARIOS[11],
+      "Regenerate the prepared document-attached turn and verify attachment identity survives branch replacement.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 12);
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        await assertTargetAttachmentVisible(ctx, state.targets.document, "document");
+        const completed = await completeBranchRegeneration(ctx, state.targets.document);
+        const topology = completed.topology;
+        assertTargetAttachment(topology, state.targets.document, "document");
+        assertAssistantState(topology, completed.assistantId, "complete");
+        const preparedAttachmentIds = assertPreparedAttachmentGenerationEvidence(
+          createUiSnapshot(resolveAdbPath(), ctx.serial),
+          state.targets.document,
+          completed.assistantId,
+          "document"
+        );
+        return {
+          details: {
+            userId: state.targets.document.userId,
+            completedAssistantId: completed.assistantId,
+            attachmentKind: "document",
+            preparedAttachmentIds,
+          },
+        };
+      }
+    ),
+    scenario(
+      13,
+      BRANCH_REGENERATION_SCENARIOS[12],
+      "Regenerate the prepared audio-attached turn when the installed runtime exposes audio attachments.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 13);
+        if (!state.audioSupported) {
+          return {
+            status: "not_applicable",
+            reason: "The installed runtime does not expose the audio attachment action.",
+            details: {
+              audioSupported: false,
+              verifiedBy: "chat-attach-audio-button absence",
+            },
+          };
+        }
+        if (!state.targets.audio) {
+          throw new ScenarioPreconditionFailureError(
+            "Audio is supported, but the prepared conversation has no audio-attached regeneration turn."
+          );
+        }
+        await ensureBranchThreadOpen(ctx, state.threadId);
+        await assertTargetAttachmentVisible(ctx, state.targets.audio, "audio");
+        const completed = await completeBranchRegeneration(ctx, state.targets.audio);
+        const topology = completed.topology;
+        assertTargetAttachment(topology, state.targets.audio, "audio");
+        assertAssistantState(topology, completed.assistantId, "complete");
+        const preparedAttachmentIds = assertPreparedAttachmentGenerationEvidence(
+          createUiSnapshot(resolveAdbPath(), ctx.serial),
+          state.targets.audio,
+          completed.assistantId,
+          "audio"
+        );
+        return {
+          details: {
+            audioSupported: true,
+            userId: state.targets.audio.userId,
+            completedAssistantId: completed.assistantId,
+            preparedAttachmentIds,
+          },
+        };
+      }
+    ),
+    scenario(
+      14,
+      BRANCH_REGENERATION_SCENARIOS[13],
+      "Delete the final fixture conversation through the user-facing conversation control.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 14);
+        await goToHome(ctx);
+        await tapConversationDelete(ctx, state.threadId);
+        await assertRecentConversationAbsent(ctx, state.threadId);
+        return {
+          details: {
+            deletedThreadId: state.threadId,
+          },
+        };
+      }
+    ),
+    scenario(
+      15,
+      BRANCH_REGENERATION_SCENARIOS[14],
+      "Clear chat history through Storage Manager, relaunch, and verify the sentinel conversation stays deleted.",
+      async (ctx) => {
+        requireBranchFixtureState(state, 15);
+        await goToSettings(ctx);
+        await scrollToAnyText(ctx, STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await ctx.tapAnyText(STORAGE_MANAGER_LABELS);
+        await ctx.expectAnyText(STORAGE_MANAGER_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+        await tapVisibleResource(ctx, STORAGE_CLEAR_CHAT_RESOURCE_ID, {
+          allowScroll: true,
+        });
+        await confirmAndroidDialog(ctx);
+        await delay(1_000);
+        forceStopScenarioApp(resolveAdbPath(), ctx.serial);
+        ctx.captureCheckpoint("history-cleared-force-stop", { expectedJsSurface: "stopped" });
+        await relaunchScenarioApp(ctx);
+        await goToHome(ctx);
+        const remainingThreadIds = readVisibleRecentConversationIds(resolveAdbPath(), ctx.serial);
+        if (remainingThreadIds.length > 0) {
+          throw new Error(
+            `Conversation history still contains ${remainingThreadIds.length} visible thread(s) after clear and relaunch.`
+          );
+        }
+        return {
+          details: {
+            deletedFixtureThreadId: state.threadId,
+            deletedSentinelThreadId: state.sentinelThreadId,
+            remainingVisibleConversationCount: remainingThreadIds.length,
+          },
+        };
+      }
+    ),
+  ];
+}
+
+function requireBranchFixtureState(state, step) {
+  if (!state.initialized || !state.threadId || !state.sentinelThreadId || !state.targets) {
+    throw new ScenarioPreconditionFailureError(
+      `Branch-regeneration step ${step} requires the ordered pack to start successfully at step 1.`
+    );
+  }
+}
+
+function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
+  if (options.apkVariant) {
+    env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
+  }
+  const effectiveApkVariant = (env.ANDROID_SMOKE_APK_VARIANT || "debug")
+    .trim()
+    .toLowerCase();
+  if (requiresCurrentHeadProvenance) {
+    if (effectiveApkVariant !== "release") {
+      throw new ScenarioPreconditionFailureError(
+        "Current-head Android scenarios require --apk-variant release so the verified APK contains the tested JS bundle."
+      );
+    }
+    env.EXPO_PUBLIC_ANDROID_QA = "1";
+    env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
+      env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
+  }
+  return {
+    androidQaEvidence: env.EXPO_PUBLIC_ANDROID_QA === "1",
+    apkVariant: effectiveApkVariant,
+  };
+}
+
+function normalizeAndroidResourceId(resourceId) {
+  const raw = `${resourceId || ""}`;
+  const androidIdIndex = raw.lastIndexOf(":id/");
+  if (androidIdIndex >= 0) {
+    return raw.slice(androidIdIndex + 4);
+  }
+  return raw;
+}
+
+function findResourcePrefixNodesInSnapshot(snapshot, prefix, options = {}) {
+  const viewportBounds = options.visibleOnly ? snapshot.viewportBounds : null;
+  return snapshot.nodes.filter((node) => {
+    if (!normalizeAndroidResourceId(node.resourceId).startsWith(prefix)) {
+      return false;
+    }
+    if (!options.visibleOnly) {
+      return true;
+    }
+    return Boolean(node.bounds)
+      && (!viewportBounds || isBoundsInViewport(node.bounds, viewportBounds));
+  });
+}
+
+function readVisibleRecentConversationIds(adbPath, serial) {
+  const snapshot = createUiSnapshot(adbPath, serial);
+  return findResourcePrefixNodesInSnapshot(snapshot, "recent-conversation-", {
+    visibleOnly: true,
+  })
+    .sort((left, right) => (left.bounds?.top ?? 0) - (right.bounds?.top ?? 0))
+    .map((node) => normalizeAndroidResourceId(node.resourceId).slice("recent-conversation-".length))
+    .filter((threadId, index, all) => threadId && all.indexOf(threadId) === index);
+}
+
+async function openConversationByThreadId(ctx, threadId) {
+  const adbPath = resolveAdbPath();
+  const resourceId = `recent-conversation-${threadId}`;
+  const node = await waitForResourceId(adbPath, ctx.serial, resourceId, {
+    timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+  if (!node.bounds) {
+    throw new ScenarioPreconditionFailureError(
+      `Prepared conversation ${threadId} is present but has no tappable bounds.`
+    );
+  }
+  tapBounds(adbPath, ctx.serial, node.bounds);
+  await waitForResourceId(adbPath, ctx.serial, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+  await waitForModelWarmupToSettleIfPresent(adbPath, ctx.serial);
+}
+
+function assertLoadedChatPrecondition(adbPath, serial) {
+  const snapshot = createUiSnapshot(adbPath, serial);
+  const noModel = findAnyNodeInSnapshot(snapshot, NO_MODEL_STATE_LABELS, {
+    visibleOnly: true,
+  });
+  const input = findResourceIdInSnapshot(snapshot, "chat-message-input", {
+    visibleOnly: true,
+  });
+  const modelSelector = findResourceIdInSnapshot(snapshot, "chat-header-model-selector", {
+    visibleOnly: true,
+  });
+  if (noModel || !input || !input.enabled || !modelSelector || !modelSelector.enabled) {
+    throw new ScenarioPreconditionFailureError(
+      "Branch-regeneration requires a prepared conversation with a loaded, selectable local model and an enabled chat input."
+    );
+  }
+}
+
+async function ensureBranchThreadOpen(ctx, threadId) {
+  await goToHome(ctx);
+  await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), ctx.serial);
+  await openConversationByThreadId(ctx, threadId);
+  assertLoadedChatPrecondition(resolveAdbPath(), ctx.serial);
+}
+
+function extractConversationToken(node) {
+  const resourceId = normalizeAndroidResourceId(node.resourceId);
+  const messageMatch = resourceId.match(
+    /^(user|assistant)-message-state-(complete|streaming|stopped|error)-(.+)$/
+  );
+  if (messageMatch) {
+    return {
+      key: `${messageMatch[1]}:${messageMatch[3]}`,
+      kind: messageMatch[1],
+      state: messageMatch[2],
+      id: messageMatch[3],
+      resourceId,
+    };
+  }
+  if (resourceId.startsWith("chat-model-switch-row-")) {
+    const id = resourceId.slice("chat-model-switch-row-".length);
+    return {
+      key: `model_switch:${id}`,
+      kind: "model_switch",
+      state: "complete",
+      id,
+      resourceId,
+    };
+  }
+  return null;
+}
+
+function extractVisibleConversationTokens(snapshot) {
+  const tokens = snapshot.nodes
+    .filter((node) => (
+      Boolean(node.bounds)
+      && (!snapshot.viewportBounds || isBoundsInViewport(node.bounds, snapshot.viewportBounds))
+    ))
+    .map((node) => ({ node, token: extractConversationToken(node) }))
+    .filter((entry) => Boolean(entry.token))
+    .sort((left, right) => {
+      const topDelta = left.node.bounds.top - right.node.bounds.top;
+      if (topDelta !== 0) {
+        return topDelta;
+      }
+      return left.node.bounds.left - right.node.bounds.left;
+    })
+    .map((entry) => entry.token);
+
+  const counts = new Map();
+  for (const token of tokens) {
+    counts.set(token.key, (counts.get(token.key) || 0) + 1);
+  }
+  const duplicateKeys = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([key]) => key);
+  if (duplicateKeys.length > 0) {
+    throw new Error(`Duplicate rendered message ids detected: ${duplicateKeys.join(", ")}.`);
+  }
+  return tokens;
+}
+
+function mergeOlderConversationOrder(olderTokens, currentOrder) {
+  if (currentOrder.length === 0) {
+    return [...olderTokens];
+  }
+  const maxOverlap = Math.min(olderTokens.length, currentOrder.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    const olderSuffix = olderTokens.slice(olderTokens.length - overlap);
+    const currentPrefix = currentOrder.slice(0, overlap);
+    if (olderSuffix.every((token, index) => token.key === currentPrefix[index].key)) {
+      return [...olderTokens.slice(0, olderTokens.length - overlap), ...currentOrder];
+    }
+  }
+  return [...olderTokens, ...currentOrder];
+}
+
+function buildConversationTopology(order, snapshots) {
+  const users = new Map();
+  const assistants = new Map();
+  const modelSwitches = new Map();
+  for (const token of order) {
+    const destination = token.kind === "user"
+      ? users
+      : token.kind === "assistant"
+        ? assistants
+        : modelSwitches;
+    destination.set(token.id, token);
+  }
+
+  const userIdsByLength = [...users.keys()].sort((left, right) => right.length - left.length);
+  const attachmentResourceIds = new Set();
+  const regenerateUserIds = new Set();
+  const thoughtAssistantIds = new Set();
+  const maxRenderedCounts = new Map();
+  for (const snapshot of snapshots) {
+    const snapshotCounts = new Map();
+    for (const node of snapshot.nodes) {
+      const resourceId = normalizeAndroidResourceId(node.resourceId);
+      if (!resourceId) {
+        continue;
+      }
+      snapshotCounts.set(resourceId, (snapshotCounts.get(resourceId) || 0) + 1);
+      if (/^message-attachment-(?:image|document|audio)-/.test(resourceId)) {
+        attachmentResourceIds.add(resourceId);
+      } else if (resourceId.startsWith("regenerate-message-")) {
+        regenerateUserIds.add(resourceId.slice("regenerate-message-".length));
+      } else if (resourceId.startsWith("thought-toggle-")) {
+        thoughtAssistantIds.add(resourceId.slice("thought-toggle-".length));
+      }
+    }
+    for (const [resourceId, count] of snapshotCounts) {
+      maxRenderedCounts.set(resourceId, Math.max(maxRenderedCounts.get(resourceId) || 0, count));
+    }
+  }
+
+  const attachmentsByUser = new Map([...users.keys()].map((userId) => [userId, new Map()]));
+  const unresolvedAttachments = [];
+  for (const resourceId of attachmentResourceIds) {
+    const kindMatch = resourceId.match(/^message-attachment-(image|document|audio)-/);
+    const kind = kindMatch?.[1] || null;
+    const userId = kind
+      ? userIdsByLength.find((candidate) => resourceId.startsWith(`message-attachment-${kind}-${candidate}-`))
+      : null;
+    if (!kind || !userId) {
+      unresolvedAttachments.push(resourceId);
+      continue;
+    }
+    const byKind = attachmentsByUser.get(userId);
+    if (!byKind.has(kind)) {
+      byKind.set(kind, []);
+    }
+    byKind.get(kind).push(resourceId);
+  }
+
+  return {
+    order,
+    users,
+    assistants,
+    modelSwitches,
+    attachmentsByUser,
+    regenerateUserIds,
+    thoughtAssistantIds,
+    unresolvedAttachments,
+    duplicateResourceIds: [...maxRenderedCounts.entries()]
+      .filter(([resourceId, count]) => (
+        count > 1
+        && /^(?:user|assistant)-message-state-|^chat-model-switch-row-/.test(resourceId)
+      ))
+      .map(([resourceId]) => resourceId),
+  };
+}
+
+async function scanConversationTopology(ctx, options = {}) {
+  const adbPath = resolveAdbPath();
+  await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  const snapshots = [];
+  let order = [];
+  let swipeCount = 0;
+  let reachedHistoryStart = false;
+  const scanLimit = options.scanLimit || BRANCH_FIXTURE_SCAN_LIMIT;
+
+  for (let attempt = 0; attempt < scanLimit; attempt += 1) {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    snapshots.push(snapshot);
+    const visibleTokens = extractVisibleConversationTokens(snapshot);
+    order = mergeOlderConversationOrder(visibleTokens, order);
+    if (hasConversationHistoryStartAnchor(snapshot)) {
+      reachedHistoryStart = true;
+      break;
+    }
+    if (attempt < scanLimit - 1) {
+      await ctx.swipeDown();
+      swipeCount += 1;
+    }
+  }
+
+  if (options.restoreBottom !== false) {
+    for (let index = 0; index < swipeCount + 1; index += 1) {
+      await ctx.swipeUp();
+    }
+  }
+  if (!reachedHistoryStart) {
+    throw new ScenarioPreconditionFailureError(
+      `Conversation topology scan did not reach chat-history-start-anchor within ${scanLimit} viewports.`
+    );
+  }
+  return buildConversationTopology(order, snapshots);
+}
+
+function hasConversationHistoryStartAnchor(snapshot) {
+  return Boolean(findResourceIdInSnapshot(snapshot, "chat-history-start-anchor", {
+    visibleOnly: true,
+  }));
+}
+
+function findPrecedingUserToken(order, assistantIndex) {
+  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+    if (order[index].kind === "user") {
+      return order[index];
+    }
+    if (order[index].kind === "assistant") {
+      break;
+    }
+  }
+  return null;
+}
+
+function findFollowingAssistantToken(order, userIndex) {
+  for (let index = userIndex + 1; index < order.length; index += 1) {
+    if (order[index].kind === "assistant") {
+      return order[index];
+    }
+    if (order[index].kind === "user") {
+      break;
+    }
+  }
+  return null;
+}
+
+function createBranchTarget(topology, userToken, assistantToken, attachmentKind = null) {
+  if (!userToken || !assistantToken) {
+    return null;
+  }
+  const attachmentResourceIds = attachmentKind
+    ? topology.attachmentsByUser.get(userToken.id)?.get(attachmentKind) || []
+    : [];
+  return {
+    userId: userToken.id,
+    assistantId: assistantToken.id,
+    userState: userToken.state,
+    assistantState: assistantToken.state,
+    attachmentKind,
+    attachmentResourceIds,
+  };
+}
+
+function resolveBranchFixture(topology, options = {}) {
+  if (topology.unresolvedAttachments.length > 0) {
+    throw new ScenarioPreconditionFailureError(
+      `Prepared attachment ids could not be associated with user turns: ${topology.unresolvedAttachments.join(", ")}.`
+    );
+  }
+  if (topology.order.length === 0) {
+    throw new ScenarioPreconditionFailureError("The prepared fixture conversation has no rendered messages.");
+  }
+
+  const trailingSwitchIndex = topology.order.length - 1;
+  const trailingSwitch = topology.order[trailingSwitchIndex];
+  if (trailingSwitch.kind !== "model_switch") {
+    throw new ScenarioPreconditionFailureError(
+      "The prepared fixture conversation must end with a trailing model-switch marker."
+    );
+  }
+  const mainAssistant = topology.order[trailingSwitchIndex - 1];
+  const mainUser = findPrecedingUserToken(topology.order, trailingSwitchIndex - 1);
+  if (!mainAssistant || mainAssistant.kind !== "assistant" || !mainUser) {
+    throw new ScenarioPreconditionFailureError(
+      "The trailing model-switch marker must follow a completed main assistant turn."
+    );
+  }
+  const main = createBranchTarget(topology, mainUser, mainAssistant);
+
+  let reasoning = null;
+  for (let index = trailingSwitchIndex - 2; index >= 0; index -= 1) {
+    const candidate = topology.order[index];
+    if (candidate.kind !== "assistant" || !topology.thoughtAssistantIds.has(candidate.id)) {
+      continue;
+    }
+    reasoning = createBranchTarget(
+      topology,
+      findPrecedingUserToken(topology.order, index),
+      candidate
+    );
+    if (reasoning) {
+      break;
+    }
+  }
+
+  const findAttachmentTarget = (kind) => {
+    for (let index = topology.order.length - 1; index >= 0; index -= 1) {
+      const user = topology.order[index];
+      if (user.kind !== "user") {
+        continue;
+      }
+      const resourceIds = topology.attachmentsByUser.get(user.id)?.get(kind) || [];
+      if (resourceIds.length === 0) {
+        continue;
+      }
+      const assistant = findFollowingAssistantToken(topology.order, index);
+      return createBranchTarget(topology, user, assistant, kind);
+    }
+    return null;
+  };
+
+  const targets = {
+    main,
+    reasoning,
+    image: findAttachmentTarget("image"),
+    document: findAttachmentTarget("document"),
+    audio: findAttachmentTarget("audio"),
+  };
+  const requiredTargets = ["main", "reasoning", "image", "document"];
+  if (options.audioSupported) {
+    requiredTargets.push("audio");
+  }
+  const missingTargets = requiredTargets.filter((kind) => !targets[kind]);
+  if (missingTargets.length > 0) {
+    throw new ScenarioPreconditionFailureError(
+      `Prepared branch-regeneration fixture is missing required turns: ${missingTargets.join(", ")}.`
+    );
+  }
+
+  for (const kind of requiredTargets) {
+    const target = targets[kind];
+    if (
+      target.userState !== "complete"
+      || target.assistantState !== "complete"
+      || !topology.regenerateUserIds.has(target.userId)
+    ) {
+      throw new ScenarioPreconditionFailureError(
+        `Prepared ${kind} turn must contain a completed user message, a completed assistant response, and a regeneration action.`
+      );
+    }
+  }
+
+  const indexByUserId = new Map(
+    topology.order.map((token, index) => [token.kind === "user" ? token.id : null, index])
+      .filter(([id]) => Boolean(id))
+  );
+  const orderedKinds = [
+    ...(options.audioSupported ? ["audio"] : []),
+    "document",
+    "image",
+    "reasoning",
+    "main",
+  ];
+  const targetIndexes = orderedKinds.map((kind) => indexByUserId.get(targets[kind].userId));
+  if (targetIndexes.some((index) => !Number.isInteger(index))) {
+    throw new ScenarioPreconditionFailureError("Prepared fixture target ordering could not be resolved.");
+  }
+  for (let index = 1; index < targetIndexes.length; index += 1) {
+    if (targetIndexes[index] <= targetIndexes[index - 1]) {
+      throw new ScenarioPreconditionFailureError(
+        `Prepared fixture order must be ${orderedKinds.join(" -> ")} -> model_switch.`
+      );
+    }
+  }
+
+  assertNoDuplicateMessageIds(topology);
+  return {
+    targets,
+    trailingModelSwitchId: trailingSwitch.id,
+  };
+}
+
+async function detectAudioAttachmentSupport(ctx) {
+  const adbPath = resolveAdbPath();
+  const menuButton = await waitForResourceId(adbPath, ctx.serial, ATTACH_MENU_BUTTON_RESOURCE_ID, {
+    timeoutMs: 10_000,
+    visibleOnly: true,
+  });
+  if (!menuButton.bounds) {
+    throw new ScenarioPreconditionFailureError("The prepared chat attachment menu is not tappable.");
+  }
+  tapBounds(adbPath, ctx.serial, menuButton.bounds);
+  await waitForResourceId(adbPath, ctx.serial, "chat-attachment-menu-sheet", {
+    timeoutMs: 10_000,
+    visibleOnly: true,
+  });
+  const snapshot = createUiSnapshot(adbPath, ctx.serial);
+  const audioSupported = Boolean(findResourceIdInSnapshot(snapshot, "chat-attach-audio-button", {
+    visibleOnly: true,
+  }));
+  await ctx.pressBack();
+  await waitForNoResourceId(adbPath, ctx.serial, "chat-attachment-menu-sheet", {
+    timeoutMs: 10_000,
+  });
+  return audioSupported;
+}
+
+async function findChatResourceWithScroll(ctx, resourceId, options = {}) {
+  const adbPath = resolveAdbPath();
+  const findNow = () => findResourceIdInSnapshot(
+    createUiSnapshot(adbPath, ctx.serial),
+    resourceId,
+    { visibleOnly: true }
+  );
+  let node = findNow();
+  if (node) {
+    return node;
+  }
+
+  const maxSwipes = options.maxSwipes ?? BRANCH_FIXTURE_SCAN_LIMIT;
+  for (let attempt = 0; attempt < maxSwipes; attempt += 1) {
+    await ctx.swipeDown();
+    node = findNow();
+    if (node) {
+      return node;
+    }
+  }
+  for (let attempt = 0; attempt < maxSwipes; attempt += 1) {
+    await ctx.swipeUp();
+    node = findNow();
+    if (node) {
+      return node;
+    }
+  }
+  throw new Error(
+    withUiSummary(adbPath, ctx.serial, `Could not find chat resource id "${resourceId}" while scanning the conversation.`)
+  );
+}
+
+async function tapVisibleResource(ctx, resourceId, options = {}) {
+  const adbPath = resolveAdbPath();
+  let node;
+  if (options.allowScroll) {
+    const maxSwipes = options.maxSwipes ?? 12;
+    for (let attempt = 0; attempt <= maxSwipes; attempt += 1) {
+      const snapshot = createUiSnapshot(adbPath, ctx.serial);
+      node = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+      if (node) {
+        break;
+      }
+      if (attempt < maxSwipes) {
+        await ctx.swipeUp();
+      }
+    }
+  } else {
+    node = await waitForResourceId(adbPath, ctx.serial, resourceId, {
+      timeoutMs: options.timeoutMs ?? 15_000,
+      visibleOnly: true,
+    });
+  }
+  if (!node?.bounds || !node.enabled) {
+    throw new Error(`Resource id "${resourceId}" is not enabled and tappable.`);
+  }
+  tapBounds(adbPath, ctx.serial, node.bounds);
+  await delay(options.afterTapDelayMs ?? 250);
+}
+
+async function startBranchRegeneration(ctx, target) {
+  const regenerateResourceId = `regenerate-message-${target.userId}`;
+  const regenerateButton = await findChatResourceWithScroll(ctx, regenerateResourceId);
+  if (!regenerateButton.bounds || !regenerateButton.enabled) {
+    throw new Error(`Regeneration action for user message ${target.userId} is not enabled.`);
+  }
+  tapBounds(resolveAdbPath(), ctx.serial, regenerateButton.bounds);
+  await waitForResourceId(resolveAdbPath(), ctx.serial, "chat-regeneration-mode", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await tapVisibleResource(ctx, "chat-primary-action-send", {
+    timeoutMs: 15_000,
+    afterTapDelayMs: 0,
+  });
+}
+
+function findVisibleAssistantTokens(snapshot) {
+  return findResourcePrefixNodesInSnapshot(snapshot, "assistant-message-state-", {
+    visibleOnly: true,
+  })
+    .map(extractConversationToken)
+    .filter(Boolean);
+}
+
+function hasAssistantPartialSurface(snapshot, assistantId) {
+  const content = findResourceIdInSnapshot(snapshot, `assistant-message-content-${assistantId}`, {
+    visibleOnly: true,
+  });
+  if (content && `${content.text || content.contentDesc || ""}`.trim()) {
+    return "content";
+  }
+  const thought = findResourceIdInSnapshot(snapshot, `thought-toggle-${assistantId}`, {
+    visibleOnly: true,
+  });
+  return thought ? "thought" : null;
+}
+
+function resolveAndroidQaGenerationGateObservation(snapshot, options) {
+  const phase = options.phase;
+  const markerPrefix = `chat-qa-generation-gate-${phase}-`;
+  const markerNodes = findResourcePrefixNodesInSnapshot(snapshot, markerPrefix, {
+    visibleOnly: true,
+  });
+  if (markerNodes.length === 0) {
+    return null;
+  }
+  if (markerNodes.length !== 1) {
+    throw new ScenarioPreconditionFailureError(
+      `Expected one active ${phase} QA gate marker, observed ${markerNodes.length}.`
+    );
+  }
+  const markerResourceId = normalizeAndroidResourceId(markerNodes[0].resourceId);
+  const assistantId = markerResourceId.slice(markerPrefix.length);
+  if (!assistantId || options.baselineAssistantIds.has(assistantId)) {
+    throw new ScenarioPreconditionFailureError(
+      `The ${phase} QA gate is not tied to a new branch assistant.`
+    );
+  }
+
+  const assistant = findVisibleAssistantTokens(snapshot).find((token) => token.id === assistantId);
+  const stopButton = findResourceIdInSnapshot(snapshot, "chat-primary-action-stop", {
+    visibleOnly: true,
+  });
+  if (!assistant || assistant.state !== "streaming" || !stopButton?.bounds || !stopButton.enabled) {
+    return null;
+  }
+
+  const surface = hasAssistantPartialSurface(snapshot, assistantId);
+  if (phase === "before-first-output" && surface) {
+    throw new ScenarioPreconditionFailureError(
+      `Assistant ${assistantId} exposed ${surface} while the before-first-output QA gate was active.`
+    );
+  }
+  if (phase === "after-first-durable-output" && !surface) {
+    return null;
+  }
+
+  return {
+    assistantId,
+    markerResourceId,
+    observedAt: new Date().toISOString(),
+    phase,
+    snapshot,
+    stopBounds: stopButton.bounds,
+    surface,
+  };
+}
+
+async function armAndroidQaGenerationGate(ctx, phase) {
+  const resourceId = `chat-qa-arm-${phase}`;
+  try {
+    await tapVisibleResource(ctx, resourceId, {
+      timeoutMs: 10_000,
+      afterTapDelayMs: 0,
+    });
+    await waitForResourceId(
+      resolveAdbPath(),
+      ctx.serial,
+      `chat-qa-generation-armed-${phase}`,
+      { timeoutMs: 10_000, visibleOnly: true }
+    );
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `The installed APK does not expose the required ${phase} Android QA generation gate: ${error.message}`
+    );
+  }
+}
+
+function persistBranchObservationSnapshot(label, snapshot) {
+  const evidenceRoot = path.join(artifactsRoot, BRANCH_EVIDENCE_DIRECTORY);
+  fs.mkdirSync(evidenceRoot, { recursive: true });
+  const uiDumpPath = path.join(
+    evidenceRoot,
+    `${sanitizeArtifactStem(label)}-observation.xml`
+  );
+  fs.writeFileSync(uiDumpPath, snapshot.xml);
+  return uiDumpPath;
+}
+
+async function interruptObservedBranchGeneration(ctx, options) {
+  const adbPath = resolveAdbPath();
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    ctx.serial,
+    {
+      timeoutMs: options.timeoutMs
+        ?? (options.phase === "after-first-durable-output" ? BRANCH_PARTIAL_TIMEOUT_MS : 30_000),
+      pollIntervalMs: 200,
+    },
+    (candidateSnapshot) => resolveAndroidQaGenerationGateObservation(candidateSnapshot, options)
+  );
+  if (!match) {
+    throw new ScenarioPreconditionFailureError(
+      withUiSnapshotSummary(
+        snapshot,
+        `The required ${options.phase} Android QA generation gate was not observed.`
+      )
+    );
+  }
+
+  if (options.mode === "force-stop") {
+    forceStopScenarioApp(adbPath, ctx.serial);
+  } else if (options.mode === "tap-stop") {
+    tapBounds(adbPath, ctx.serial, match.stopBounds);
+  } else {
+    throw new Error(`Unsupported branch interruption mode ${options.mode}.`);
+  }
+
+  const uiDumpPath = persistBranchObservationSnapshot(
+    options.evidenceLabel,
+    match.snapshot
+  );
+  if (options.mode === "tap-stop") {
+    await delay(250);
+  }
+  return {
+    assistantId: match.assistantId,
+    interruptedAt: new Date().toISOString(),
+    markerResourceId: match.markerResourceId,
+    uiDumpPath,
+    observedAt: match.observedAt,
+    phase: match.phase,
+    surface: match.surface,
+  };
+}
+
+async function disableReasoningForAuthoritativeClear(ctx) {
+  const adbPath = resolveAdbPath();
+  try {
+    await tapVisibleResource(ctx, "chat-header-model-controls", {
+      timeoutMs: 10_000,
+    });
+    await waitForResourceId(adbPath, ctx.serial, "model-parameters-sheet", {
+      timeoutMs: 10_000,
+      visibleOnly: true,
+    });
+    const reasoningOff = await waitForResourceId(adbPath, ctx.serial, "reasoning-effort-off", {
+      timeoutMs: 10_000,
+      visibleOnly: true,
+    });
+    if (!reasoningOff.enabled || !reasoningOff.bounds) {
+      throw new Error("reasoning-effort-off is disabled or not tappable");
+    }
+    if (!reasoningOff.selected) {
+      tapBounds(adbPath, ctx.serial, reasoningOff.bounds);
+      const { match, snapshot } = await waitForSnapshotMatch(
+        adbPath,
+        ctx.serial,
+        { timeoutMs: 10_000, pollIntervalMs: 250 },
+        (candidateSnapshot) => {
+          const candidate = findResourceIdInSnapshot(
+            candidateSnapshot,
+            "reasoning-effort-off",
+            { visibleOnly: true }
+          );
+          return candidate?.selected ? candidate : null;
+        }
+      );
+      if (!match) {
+        throw new Error(withUiSnapshotSummary(snapshot, "Reasoning-off selection did not settle."));
+      }
+    }
+    await tapVisibleResource(ctx, "model-parameters-sheet-close-button", {
+      timeoutMs: 10_000,
+    });
+    await waitForNoResourceId(adbPath, ctx.serial, "model-parameters-sheet", {
+      timeoutMs: 10_000,
+    });
+    return { reasoningEffort: "off", verifiedSelected: true };
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `Reasoning authoritative-clear requires an optional reasoning-off control: ${error.message}`
+    );
+  }
+}
+
+function createBranchRegenerationBaseline(topology, targetUserId) {
+  const targetUserIndex = topology.order.findIndex(
+    (token) => token.kind === "user" && token.id === targetUserId
+  );
+  if (targetUserIndex < 0) {
+    throw new ScenarioPreconditionFailureError(
+      `Branch-regeneration target user ${targetUserId} is missing from the pre-operation topology.`
+    );
+  }
+
+  const previousAssistant = topology.order[targetUserIndex + 1];
+  if (!previousAssistant || previousAssistant.kind !== "assistant") {
+    throw new ScenarioPreconditionFailureError(
+      `Branch-regeneration target user ${targetUserId} has no directly adjacent assistant before regeneration.`
+    );
+  }
+
+  return {
+    targetUserId,
+    previousAssistantId: previousAssistant.id,
+    assistantIds: new Set(topology.assistants.keys()),
+  };
+}
+
+function resolveBranchRegenerationReplacement(topology, baseline) {
+  const targetUserIndex = topology.order.findIndex(
+    (token) => token.kind === "user" && token.id === baseline.targetUserId
+  );
+  if (targetUserIndex < 0) {
+    throw new Error(
+      `Branch-regeneration target user ${baseline.targetUserId} disappeared after regeneration.`
+    );
+  }
+
+  const replacement = topology.order[targetUserIndex + 1];
+  if (!replacement || replacement.kind !== "assistant") {
+    throw new Error(
+      `Branch regeneration did not create an assistant directly adjacent to target user ${baseline.targetUserId}.`
+    );
+  }
+  if (baseline.assistantIds.has(replacement.id)) {
+    throw new Error(
+      `Branch regeneration reused pre-operation assistant ${replacement.id} for target user ${baseline.targetUserId}.`
+    );
+  }
+  if (replacement.state !== "complete") {
+    throw new Error(
+      `Branch-regeneration assistant ${replacement.id} ended in ${replacement.state} instead of complete.`
+    );
+  }
+
+  assertMessageIdAbsent(topology, baseline.previousAssistantId);
+  return replacement;
+}
+
+function assertAuthoritativeThoughtClear({
+  beforeTopology,
+  topology,
+  baseline,
+  replacementAssistantId,
+}) {
+  if (!beforeTopology.thoughtAssistantIds.has(baseline.previousAssistantId)) {
+    throw new ScenarioPreconditionFailureError(
+      `Reasoning-clear target assistant ${baseline.previousAssistantId} has no thought surface before regeneration.`
+    );
+  }
+
+  const replacement = resolveBranchRegenerationReplacement(topology, baseline);
+  if (replacement.id !== replacementAssistantId) {
+    throw new Error(
+      `Expected authoritative reasoning assistant ${replacementAssistantId}, observed ${replacement.id}.`
+    );
+  }
+  if (topology.thoughtAssistantIds.has(replacementAssistantId)) {
+    throw new Error(
+      `Authoritative reasoning assistant ${replacementAssistantId} still exposes thought content after clear.`
+    );
+  }
+
+  return {
+    replacedThoughtAbsent: !topology.thoughtAssistantIds.has(baseline.previousAssistantId),
+    replacementThoughtAbsent: !topology.thoughtAssistantIds.has(replacementAssistantId),
+  };
+}
+
+async function completeBranchRegeneration(ctx, target) {
+  const beforeTopology = await scanConversationTopology(ctx);
+  const baseline = createBranchRegenerationBaseline(beforeTopology, target.userId);
+  await startBranchRegeneration(ctx, target);
+  await waitForRegenerationModeToClose(ctx, {
+    timeoutMs: BRANCH_GENERATION_TIMEOUT_MS,
+  });
+  const topology = await scanConversationTopology(ctx);
+  const replacement = resolveBranchRegenerationReplacement(topology, baseline);
+  return {
+    assistantId: replacement.id,
+    baseline,
+    beforeTopology,
+    topology,
+  };
+}
+
+async function waitForRegenerationModeToClose(ctx, options = {}) {
+  const adbPath = resolveAdbPath();
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    ctx.serial,
+    { timeoutMs: options.timeoutMs ?? 30_000, pollIntervalMs: 500 },
+    (candidateSnapshot) => {
+      const mode = findResourceIdInSnapshot(candidateSnapshot, "chat-regeneration-mode", {
+        visibleOnly: true,
+      });
+      const send = findResourceIdInSnapshot(candidateSnapshot, "chat-primary-action-send", {
+        visibleOnly: true,
+      });
+      return !mode && send ? { settled: true } : null;
+    }
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(snapshot, "Regeneration mode did not settle back to the composer."));
+  }
+}
+
+async function waitForExactAssistantState(ctx, assistantId, state) {
+  const resourceId = `assistant-message-state-${state}-${assistantId}`;
+  await waitForResourceId(resolveAdbPath(), ctx.serial, resourceId, {
+    timeoutMs: 30_000,
+    visibleOnly: true,
+  });
+}
+
+function forceStopScenarioApp(adbPath, serial) {
+  runChecked(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackageName]);
+  sleepSync(500);
+  const pid = runCapture(adbPath, ["-s", serial, "shell", "pidof", appPackageName], {
+    allowFailure: true,
+  }).trim();
+  if (pid) {
+    throw new Error(`App process is still running after force-stop (${pid}).`);
+  }
+}
+
+async function relaunchScenarioApp(ctx) {
+  const adbPath = resolveAdbPath();
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "monkey",
+    "-p",
+    appPackageName,
+    "-c",
+    "android.intent.category.LAUNCHER",
+    "1",
+  ]);
+  await ctx.ensureAppVisible();
+  await ctx.dismissDebuggerBanner();
+  await waitForModelWarmupToSettleIfPresent(adbPath, ctx.serial);
+}
+
+async function relaunchScenarioAppAndOpenThread(ctx, threadId) {
+  await relaunchScenarioApp(ctx);
+  await ensureBranchThreadOpen(ctx, threadId);
+}
+
+function assertAssistantState(topology, assistantId, expectedState) {
+  const assistant = assistantId ? topology.assistants.get(assistantId) : null;
+  if (!assistant || assistant.state !== expectedState) {
+    throw new Error(
+      `Expected assistant ${assistantId} in state ${expectedState}, observed ${assistant?.state || "absent"}.`
+    );
+  }
+}
+
+function assertMessageIdAbsent(topology, messageId) {
+  if (!messageId) {
+    return;
+  }
+  if (
+    topology.users.has(messageId)
+    || topology.assistants.has(messageId)
+    || topology.modelSwitches.has(messageId)
+    || topology.thoughtAssistantIds.has(messageId)
+  ) {
+    throw new Error(`Replaced message ${messageId} is still present in the conversation.`);
+  }
+}
+
+function assertNoDuplicateMessageIds(topology) {
+  if (topology.duplicateResourceIds.length > 0) {
+    throw new Error(
+      `Duplicate message resources are visible: ${topology.duplicateResourceIds.join(", ")}.`
+    );
+  }
+  const keys = topology.order.map((token) => token.key);
+  const duplicateKeys = keys.filter((key, index) => keys.indexOf(key) !== index);
+  if (duplicateKeys.length > 0) {
+    throw new Error(`Duplicate message ids are present in conversation order: ${[...new Set(duplicateKeys)].join(", ")}.`);
+  }
+}
+
+function assertTrailingModelSwitchTopology(topology, mainTarget, modelSwitchId) {
+  const switchIndex = topology.order.findIndex(
+    (token) => token.kind === "model_switch" && token.id === modelSwitchId
+  );
+  if (switchIndex !== topology.order.length - 1) {
+    throw new Error(`Model-switch ${modelSwitchId} is not the trailing conversation item.`);
+  }
+  const assistant = topology.order[switchIndex - 1];
+  const user = findPrecedingUserToken(topology.order, switchIndex - 1);
+  if (
+    assistant?.kind !== "assistant"
+    || assistant.id !== mainTarget.assistantId
+    || assistant.state !== "complete"
+    || user?.id !== mainTarget.userId
+  ) {
+    throw new Error("The original main assistant branch before the trailing model-switch is not intact.");
+  }
+}
+
+function assertTargetAttachment(topology, target, kind) {
+  const resourceIds = topology.attachmentsByUser.get(target.userId)?.get(kind) || [];
+  if (resourceIds.length === 0) {
+    throw new Error(`Prepared ${kind} attachment disappeared from user message ${target.userId}.`);
+  }
+  const expected = target.attachmentResourceIds || [];
+  if (expected.length > 0 && !expected.every((resourceId) => resourceIds.includes(resourceId))) {
+    throw new Error(`Prepared ${kind} attachment identity changed during branch regeneration.`);
+  }
+}
+
+function resolveTargetAttachmentIds(target, kind) {
+  const prefix = `message-attachment-${kind}-${target.userId}-`;
+  const attachmentIds = (target.attachmentResourceIds || []).map((resourceId) => {
+    if (!resourceId.startsWith(prefix) || resourceId.length === prefix.length) {
+      throw new ScenarioPreconditionFailureError(
+        `Prepared ${kind} attachment resource ${resourceId} does not encode a stable attachment identity.`
+      );
+    }
+    return resourceId.slice(prefix.length);
+  });
+  if (attachmentIds.length === 0) {
+    throw new ScenarioPreconditionFailureError(
+      `Prepared ${kind} target ${target.userId} has no attachment identities.`
+    );
+  }
+  return attachmentIds;
+}
+
+function assertPreparedAttachmentGenerationEvidence(snapshot, target, assistantId, kind) {
+  const generationResourceId = `chat-prepared-generation-${target.userId}-${assistantId}`;
+  if (!findResourceIdInSnapshot(snapshot, generationResourceId, { visibleOnly: true })) {
+    throw new ScenarioPreconditionFailureError(
+      `Prepared-generation evidence for user ${target.userId} and assistant ${assistantId} is absent or stale.`
+    );
+  }
+
+  const attachmentIds = resolveTargetAttachmentIds(target, kind);
+  const evidencePrefix = `chat-prepared-attachment-${assistantId}-`;
+  const expectedMarkers = attachmentIds
+    .map((attachmentId) => `${kind}-${attachmentId}`)
+    .sort((left, right) => left.localeCompare(right));
+  const observedMarkers = [...new Set(
+    findResourcePrefixNodesInSnapshot(snapshot, evidencePrefix, { visibleOnly: true })
+      .map((node) => normalizeAndroidResourceId(node.resourceId).slice(evidencePrefix.length))
+      .filter(Boolean)
+  )].sort((left, right) => left.localeCompare(right));
+  if (!areExactStringArraysEqual(observedMarkers, expectedMarkers)) {
+    throw new ScenarioPreconditionFailureError(
+      `Final prepared request for assistant ${assistantId} has non-exact attachment evidence; expected ${expectedMarkers.join(", ")}, observed ${observedMarkers.join(", ") || "none"}.`
+    );
+  }
+  return attachmentIds;
+}
+
+async function assertTargetAttachmentVisible(ctx, target, kind) {
+  const resourceId = target.attachmentResourceIds?.[0];
+  if (!resourceId) {
+    throw new ScenarioPreconditionFailureError(
+      `Prepared ${kind} target has no stable attachment resource id.`
+    );
+  }
+  await findChatResourceWithScroll(ctx, resourceId);
+}
+
+async function confirmAndroidDialog(ctx) {
+  const button = await waitForResourceId(
+    resolveAdbPath(),
+    ctx.serial,
+    ANDROID_DIALOG_POSITIVE_BUTTON_RESOURCE_ID,
+    { timeoutMs: 10_000, visibleOnly: true }
+  );
+  if (!button.bounds || !button.enabled) {
+    throw new Error("Android confirmation dialog is not enabled and tappable.");
+  }
+  tapBounds(resolveAdbPath(), ctx.serial, button.bounds);
+  await delay(500);
+}
+
+async function tapConversationDelete(ctx, threadId) {
+  const adbPath = resolveAdbPath();
+  const deleteResourceId = `delete-conversation-${threadId}`;
+  const button = await waitForResourceId(adbPath, ctx.serial, deleteResourceId, {
+    timeoutMs: HOME_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+  if (!button.bounds || !button.enabled) {
+    throw new Error(`Delete control for conversation ${threadId} is not enabled and tappable.`);
+  }
+  tapBounds(adbPath, ctx.serial, button.bounds);
+  const snapshot = createUiSnapshot(adbPath, ctx.serial);
+  const resourceConfirm = findResourceIdInSnapshot(
+    snapshot,
+    ANDROID_DIALOG_POSITIVE_BUTTON_RESOURCE_ID,
+    { visibleOnly: true }
+  );
+  if (resourceConfirm) {
+    await confirmAndroidDialog(ctx);
+    return;
+  }
+  await ctx.tapAnyText(DELETE_LABELS, { timeoutMs: 10_000 });
+}
+
+async function assertRecentConversationAbsent(ctx, threadId) {
+  const resourceId = `recent-conversation-${threadId}`;
+  await waitForNoResourceId(resolveAdbPath(), ctx.serial, resourceId, {
+    timeoutMs: 15_000,
+  });
 }
 
 function selectScenarios(scenarios, options) {
@@ -1955,6 +3912,7 @@ function selectScenarios(scenarios, options) {
       ...PREPARED_ATTACHMENT_SCENARIOS,
       ...PREPARED_ATTACHMENT_SEND_SCENARIOS,
       ...STORAGE_SCENARIOS,
+      ...BRANCH_REGENERATION_SCENARIOS,
     ]);
     return scenarios.filter((scenario) => !explicitStateMutationScenarioIds.has(scenario.id));
   }
@@ -2601,13 +4559,22 @@ function cleanupScenarioOwnedMetro(metro, options = {}) {
   stopMetro(metro.lifecycle);
 }
 
-function installScenarioOwnedMetroSignalHandlers(
-  getMetro,
+function installScenarioResourceSignalHandlers(
+  getResources,
   processRef = process,
   options = {}
 ) {
   let isHandlingSignal = false;
-  const cleanupMetro = options.cleanupScenarioOwnedMetro ?? cleanupScenarioOwnedMetro;
+  let cleanedLogcatCollector = null;
+  let cleanedMetro = null;
+  const cleanupLogcat = options.cleanupAndroidLogcatCollector
+    ?? cleanupAndroidLogcatCollector;
+  const cleanupMetro = options.cleanupScenarioOwnedMetro
+    ?? cleanupScenarioOwnedMetro;
+  const add = () => {
+    processRef.once("SIGINT", onSigint);
+    processRef.once("SIGTERM", onSigterm);
+  };
   const remove = () => {
     processRef.removeListener("SIGINT", onSigint);
     processRef.removeListener("SIGTERM", onSigterm);
@@ -2617,19 +4584,49 @@ function installScenarioOwnedMetroSignalHandlers(
       return;
     }
     isHandlingSignal = true;
+    let resources = {};
+    let cleanupFailed = false;
     try {
-      cleanupMetro(getMetro());
+      resources = getResources() || {};
     } catch (error) {
-      console.error(`[android-scenarios] Metro cleanup after ${signal} failed: ${error.message}`);
-    } finally {
-      remove();
-      processRef.kill(processRef.pid, signal);
+      cleanupFailed = true;
+      console.error(`[android-scenarios] Resource lookup after ${signal} failed: ${error.message}`);
     }
+    try {
+      if (
+        resources.logcatCollector
+        && resources.logcatCollector !== cleanedLogcatCollector
+      ) {
+        cleanupLogcat(resources.logcatCollector);
+        cleanedLogcatCollector = resources.logcatCollector;
+      }
+    } catch (error) {
+      cleanupFailed = true;
+      console.error(
+        `[android-scenarios] Logcat cleanup after ${signal} failed: ${error.message}`
+      );
+    }
+    try {
+      if (resources.metro && resources.metro !== cleanedMetro) {
+        cleanupMetro(resources.metro);
+        cleanedMetro = resources.metro;
+      }
+    } catch (error) {
+      cleanupFailed = true;
+      console.error(`[android-scenarios] Metro cleanup after ${signal} failed: ${error.message}`);
+    }
+    if (cleanupFailed) {
+      remove();
+      isHandlingSignal = false;
+      add();
+      return;
+    }
+    remove();
+    processRef.kill(processRef.pid, signal);
   };
   const onSigint = () => handle("SIGINT");
   const onSigterm = () => handle("SIGTERM");
-  processRef.once("SIGINT", onSigint);
-  processRef.once("SIGTERM", onSigterm);
+  add();
   return remove;
 }
 
@@ -2735,6 +4732,10 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
 
   if (options.skipBuild) {
     args.push("--skip-build");
+  }
+
+  if (options.apkVariant) {
+    args.push("--apk-variant", options.apkVariant);
   }
 
   if (options.port) {
@@ -3723,6 +5724,7 @@ function parseUiNodes(xml) {
       packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
       enabled: attributes.enabled !== "false",
+      selected: attributes.selected === "true",
       bounds: parseBounds(attributes.bounds),
     });
 
@@ -4180,6 +6182,1100 @@ function withUiSnapshotSummary(snapshot, message) {
   return `${message}\nVisible UI: ${summarizeUiSnapshot(snapshot)}`;
 }
 
+function sanitizeArtifactStem(value) {
+  return `${value || "artifact"}`.replace(/[^a-zA-Z0-9._-]+/g, "-");
+}
+
+function resolveAndroidPackageUid(adbPath, serial, packageName, options = {}) {
+  const capture = options.runCapture || runCapture;
+  let packageDump;
+  try {
+    packageDump = capture(
+      adbPath,
+      ["-s", serial, "shell", "dumpsys", "package", packageName]
+    );
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not resolve the Android UID for ${packageName}: ${error.message}`,
+      { cause: error }
+    );
+  }
+
+  const uid = packageDump.match(/(?:^|\s)userId=(\d+)\b/m)?.[1] || null;
+  if (!uid) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not resolve the Android UID for ${packageName}; the installed package dump has no userId.`
+    );
+  }
+  return uid;
+}
+
+function readAndroidLogcatStartEpoch(adbPath, serial, options = {}) {
+  const capture = options.runCapture || runCapture;
+  let output;
+  try {
+    output = capture(adbPath, ["-s", serial, "shell", "date", "+%s.%3N"]);
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not establish the Android logcat start boundary: ${error.message}`,
+      { cause: error }
+    );
+  }
+  const epoch = output.trim().match(/^(\d{9,})\.(\d{3,6})$/);
+  if (!epoch) {
+    throw new ScenarioPreconditionFailureError(
+      `Android returned an unsupported logcat start timestamp: ${JSON.stringify(output.trim())}.`
+    );
+  }
+  return `${epoch[1]}.${epoch[2]}`;
+}
+
+function awaitWithTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeoutPromise = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
+
+function escapeAndroidLogcatRegex(value) {
+  return `${value}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function synchronizeAndroidLogcatCollector(collector) {
+  const streams = collector.streams || [];
+  collector.started = streams.length === collector.expectedStreamCount
+    && streams.every((stream) => stream.started);
+  collector.closed = streams.length === collector.expectedStreamCount
+    && streams.every((stream) => stream.closed);
+  collector.stopped = streams.length === collector.expectedStreamCount
+    && streams.every((stream) => stream.stopped);
+  collector.error = streams.find((stream) => stream.error)?.error || collector.error || null;
+  return collector;
+}
+
+function spawnAndroidLogcatStream(collector, definition, dependencies) {
+  const { fsImpl, spawnProcess, captureOwnership, requireOwnership } = dependencies;
+  let rawLogFd;
+  try {
+    rawLogFd = fsImpl.openSync(definition.rawLogPath, "wx");
+  } catch (error) {
+    throw new Error(`Could not prepare one private Android logcat stream: ${error.code || "filesystem error"}.`);
+  }
+
+  let child;
+  try {
+    child = spawnProcess(collector.adbPath, definition.args, {
+      stdio: ["ignore", rawLogFd, rawLogFd],
+      windowsHide: true,
+    });
+  } catch (error) {
+    fsImpl.closeSync(rawLogFd);
+    try {
+      fsImpl.rmSync(definition.rawLogPath, { force: true });
+    } catch {
+      // The generic collector failure below must not expose the private path.
+    }
+    throw error;
+  }
+
+  let resolveStarted;
+  let rejectStarted;
+  let resolveClosed;
+  const startedPromise = new Promise((resolve, reject) => {
+    resolveStarted = resolve;
+    rejectStarted = reject;
+  });
+  const closedPromise = new Promise((resolve) => {
+    resolveClosed = resolve;
+  });
+  const stream = {
+    ...definition,
+    child,
+    started: false,
+    closed: false,
+    stopped: false,
+    stopRequested: false,
+    error: null,
+    close: null,
+    startedPromise,
+    closedPromise,
+    resolveClosed,
+    ownership: null,
+    ownershipBoundary: child.pocketAiOwnershipBoundary || null,
+  };
+  collector.streams.push(stream);
+
+  child.once("spawn", () => {
+    try {
+      if (Number.isSafeInteger(child.pid) && child.pid > 0) {
+        stream.ownership = captureOwnership(child.pid, {
+          ownershipBoundary: stream.ownershipBoundary,
+        });
+      }
+      if (requireOwnership && !stream.ownership?.processIdentity?.startMarker) {
+        throw new Error(`Could not authenticate ownership of the Android ${stream.kind} logcat process.`);
+      }
+      stream.started = true;
+      synchronizeAndroidLogcatCollector(collector);
+      resolveStarted();
+    } catch (error) {
+      stream.error = error;
+      synchronizeAndroidLogcatCollector(collector);
+      rejectStarted(error);
+    }
+  });
+  child.once("error", (error) => {
+    stream.error = error;
+    synchronizeAndroidLogcatCollector(collector);
+    if (!stream.started) {
+      rejectStarted(error);
+    }
+  });
+  child.once("close", (code, signal) => {
+    stream.closed = true;
+    stream.close = { code, signal };
+    resolveClosed();
+    synchronizeAndroidLogcatCollector(collector);
+    if (!stream.started) {
+      rejectStarted(new Error(
+        `Android ${stream.kind} logcat exited before capture began (code=${code}, signal=${signal || "none"}).`
+      ));
+    }
+  });
+  fsImpl.closeSync(rawLogFd);
+  return stream;
+}
+
+function forceTerminateAndroidLogcatStream(collector, stream, options = {}) {
+  if (stream.closed) {
+    return true;
+  }
+
+  const processId = stream.child?.pid;
+  if (!Number.isSafeInteger(processId) || processId <= 0) {
+    return false;
+  }
+
+  stream.stopRequested = true;
+  const stopOwnedProcessTree = options.stopOwnedProcessTreeByPid
+    || collector.stopOwnedProcessTreeByPid
+    || stopOwnedProcessTreeByPid;
+  const ownership = stream.ownership || {};
+  let stopped = false;
+  try {
+    stopped = stopOwnedProcessTree(processId, {
+      expectedIdentity: ownership.processIdentity,
+      expectedProcessTreeIdentities: ownership.processTreeIdentities,
+      ownershipBoundary: ownership.ownershipBoundary || stream.ownershipBoundary,
+      trustedChildHandle: true,
+      killRoot: () => stream.child.kill("SIGKILL"),
+      gracefulTimeoutMs: options.gracefulTimeoutMs ?? LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS,
+      forcefulTimeoutMs: options.forcefulTimeoutMs ?? LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS,
+    });
+  } catch {
+    stopped = false;
+  }
+  if (!stopped) {
+    return false;
+  }
+
+  stream.closed = true;
+  stream.forcedTermination = true;
+  stream.close = stream.close || { code: null, signal: "OWNERSHIP_FALLBACK" };
+  stream.resolveClosed?.();
+  synchronizeAndroidLogcatCollector(collector);
+  return true;
+}
+
+function forceTerminateAndroidLogcatCollector(collector, options = {}) {
+  if (!collector) {
+    return true;
+  }
+  collector.stopRequested = true;
+  for (const stream of collector.streams || []) {
+    if (!stream.closed) {
+      forceTerminateAndroidLogcatStream(collector, stream, options);
+    }
+  }
+  synchronizeAndroidLogcatCollector(collector);
+  return (collector.streams || []).every((stream) => stream.closed);
+}
+
+async function startAndroidLogcatCollector({
+  adbPath,
+  serial,
+  packageName,
+  stem,
+}, options = {}) {
+  const fsImpl = options.fs || fs;
+  const spawnProcess = options.spawn || ((command, args, spawnOptions) => spawnOwnedProcess(
+    command,
+    args,
+    {
+      ...spawnOptions,
+      cwd: projectRoot,
+      detached: process.platform !== "win32",
+    }
+  ));
+  const captureOwnership = options.captureOwnership || captureOwnedProcessOwnership;
+  const requireOwnership = options.requireOwnership ?? !options.spawn;
+  const privateRoot = path.resolve(options.privateRoot || PRIVATE_LOGCAT_DIRECTORY);
+  const runCaptureForCollector = options.runCapture || runCapture;
+  const uid = resolveAndroidPackageUid(adbPath, serial, packageName, {
+    runCapture: runCaptureForCollector,
+  });
+  const startEpoch = readAndroidLogcatStartEpoch(adbPath, serial, {
+    runCapture: runCaptureForCollector,
+  });
+  const rawStem = `${sanitizeArtifactStem(stem)}-${process.pid}-${Date.now()}`;
+  const rawLogPath = path.join(privateRoot, `${rawStem}.app.raw.log`);
+  const systemRawLogPath = path.join(privateRoot, `${rawStem}.system-anr.raw.log`);
+  try {
+    fsImpl.mkdirSync(privateRoot, { recursive: true });
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not prepare private Android logcat storage: ${error.code || "filesystem error"}.`,
+      { cause: error }
+    );
+  }
+
+  const collector = {
+    adbPath,
+    packageName,
+    uid,
+    startEpoch,
+    rawLogPath,
+    systemRawLogPath,
+    rawLogPaths: [rawLogPath, systemRawLogPath],
+    fs: fsImpl,
+    streams: [],
+    expectedStreamCount: 2,
+    started: false,
+    closed: false,
+    stopped: false,
+    stopAttempted: false,
+    stopRequested: false,
+    stopPromise: null,
+    error: null,
+    startError: null,
+    stopOwnedProcessTreeByPid: options.stopOwnedProcessTreeByPid || stopOwnedProcessTreeByPid,
+  };
+  options.onCollectorCreated?.(collector);
+
+  const sharedArgs = [
+    "-s",
+    serial,
+    "logcat",
+    "-b",
+    "all",
+  ];
+  const streamDefinitions = [
+    {
+      kind: "app",
+      rawLogPath,
+      args: [
+        ...sharedArgs,
+        `--uid=${uid}`,
+        "-T",
+        startEpoch,
+        "-v",
+        "threadtime",
+      ],
+    },
+    {
+      kind: "system-anr",
+      rawLogPath: systemRawLogPath,
+      args: [
+        ...sharedArgs,
+        "--uid=1000",
+        "-T",
+        startEpoch,
+        "-v",
+        "threadtime",
+        "--regex",
+        `ANR in ${escapeAndroidLogcatRegex(packageName)}`,
+        "ActivityManager:V",
+        "*:S",
+      ],
+    },
+  ];
+
+  try {
+    for (const definition of streamDefinitions) {
+      spawnAndroidLogcatStream(collector, definition, {
+        fsImpl,
+        spawnProcess,
+        captureOwnership,
+        requireOwnership,
+      });
+    }
+    await awaitWithTimeout(
+      Promise.all(collector.streams.map((stream) => stream.startedPromise)),
+      options.startTimeoutMs ?? LOGCAT_COLLECTOR_START_TIMEOUT_MS,
+      "Timed out waiting for the app/system-scoped Android logcat collectors to start."
+    );
+    const earlyExit = collector.streams.find((stream) => stream.closed);
+    if (earlyExit) {
+      throw new Error(
+        `Android ${earlyExit.kind} logcat exited before the scenario began (code=${earlyExit.close?.code}, signal=${earlyExit.close?.signal || "none"}).`
+      );
+    }
+    synchronizeAndroidLogcatCollector(collector);
+    if (!collector.started) {
+      throw new Error("Android logcat collectors did not reach their complete owned-start state.");
+    }
+  } catch (error) {
+    collector.startError = error;
+    collector.stopRequested = true;
+    for (const stream of collector.streams) {
+      stream.stopRequested = true;
+      if (!stream.closed) {
+        try {
+          stream.child.kill("SIGKILL");
+        } catch {
+          // Authenticated ownership cleanup below remains authoritative.
+        }
+      }
+    }
+    await Promise.all(collector.streams.map(async (stream) => {
+      if (stream.closed) {
+        return;
+      }
+      try {
+        await awaitWithTimeout(
+          stream.closedPromise,
+          options.forceStopTimeoutMs ?? LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS,
+          "Timed out terminating an Android logcat collector that failed to start."
+        );
+      } catch {
+        forceTerminateAndroidLogcatStream(collector, stream, options);
+      }
+    }));
+    synchronizeAndroidLogcatCollector(collector);
+    const allOwnedProcessesReleased = collector.streams.every((stream) => stream.closed);
+    if (allOwnedProcessesReleased) {
+      for (const privatePath of collector.rawLogPaths) {
+        try {
+          fsImpl.rmSync(privatePath, { force: true });
+        } catch {
+          // The generic collector failure below must not expose the private path.
+        }
+      }
+      options.onCollectorCreated?.(null);
+    }
+    const cleanupSuffix = allOwnedProcessesReleased
+      ? ""
+      : " One or more owned collector processes remain retained for a later authenticated cleanup retry.";
+    throw new ScenarioPreconditionFailureError(
+      `Could not start the app/system-scoped Android logcat collectors: ${error.message}${cleanupSuffix}`,
+      { cause: error }
+    );
+  }
+
+  return collector;
+}
+
+async function stopAndroidLogcatStream(collector, stream, options = {}) {
+  if (!stream.started) {
+    throw new Error(`The Android ${stream.kind} logcat collector never started.`);
+  }
+  if (stream.closed && !stream.stopRequested) {
+    throw new Error(
+      `Android ${stream.kind} logcat exited before the step completed (code=${stream.close?.code}, signal=${stream.close?.signal || "none"}).`
+    );
+  }
+
+  stream.stopRequested = true;
+  let stopFailure = stream.error;
+  if (!stream.closed) {
+    const killAccepted = stream.child.kill();
+    if (!killAccepted) {
+      stopFailure = stopFailure || new Error(
+        `The Android ${stream.kind} logcat process rejected its owned stop request.`
+      );
+    }
+    try {
+      await awaitWithTimeout(
+        stream.closedPromise,
+        options.stopTimeoutMs ?? LOGCAT_COLLECTOR_STOP_TIMEOUT_MS,
+        `Timed out waiting for the Android ${stream.kind} logcat collector to stop.`
+      );
+    } catch (error) {
+      stopFailure = stopFailure || error;
+      stream.child.kill("SIGKILL");
+      try {
+        await awaitWithTimeout(
+          stream.closedPromise,
+          options.forceStopTimeoutMs ?? LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS,
+          `Timed out force-stopping the Android ${stream.kind} logcat collector.`
+        );
+      } catch (forceStopError) {
+        const ownershipFallbackStopped = forceTerminateAndroidLogcatStream(
+          collector,
+          stream,
+          options
+        );
+        const ownershipSuffix = ownershipFallbackStopped
+          ? " The owned collector was terminated by its authenticated process boundary."
+          : "";
+        throw new Error(`${stopFailure.message} ${forceStopError.message}${ownershipSuffix}`);
+      }
+    }
+  }
+
+  stopFailure = stopFailure || stream.error;
+  if (stopFailure) {
+    throw new Error(`Android ${stream.kind} logcat collection failed: ${stopFailure.message}`);
+  }
+  stream.stopped = true;
+  synchronizeAndroidLogcatCollector(collector);
+}
+
+async function stopAndroidLogcatCollector(collector, options = {}) {
+  if (!collector) {
+    return;
+  }
+  if (collector.stopPromise) {
+    return collector.stopPromise;
+  }
+
+  collector.stopAttempted = true;
+  collector.stopRequested = true;
+  collector.stopPromise = (async () => {
+    const failures = [];
+    if (collector.streams.length !== collector.expectedStreamCount) {
+      failures.push(new Error("Android logcat evidence is missing one or more required collectors."));
+    }
+    const results = await Promise.allSettled(
+      collector.streams.map((stream) => stopAndroidLogcatStream(collector, stream, options))
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        failures.push(result.reason);
+      }
+    }
+    synchronizeAndroidLogcatCollector(collector);
+    if (failures.length > 0) {
+      throw new ScenarioPreconditionFailureError(
+        failures.map((failure) => failure.message).join(" "),
+        { cause: failures[0] }
+      );
+    }
+    collector.stopped = true;
+  })();
+  return collector.stopPromise;
+}
+
+function readBoundedAndroidLogcatFile(collector, rawLogPath, stat) {
+  let descriptor;
+  try {
+    descriptor = collector.fs.openSync(rawLogPath, "r");
+    const snapshot = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < snapshot.length) {
+      const bytesRead = collector.fs.readSync(
+        descriptor,
+        snapshot,
+        offset,
+        snapshot.length - offset,
+        offset
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      offset += bytesRead;
+    }
+    return snapshot.subarray(0, offset).toString("utf8");
+  } finally {
+    if (descriptor != null) {
+      collector.fs.closeSync(descriptor);
+    }
+  }
+}
+
+function extractTargetSystemAnrLines(rawLog, packageName) {
+  const targetAnr = new RegExp(
+    `\\bANR in ${escapeAndroidLogcatRegex(packageName)}(?=\\s|:|$)`,
+    "i"
+  );
+  const targetLines = [];
+  for (const rawLine of `${rawLog || ""}`.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^-+\s+beginning of\s+/i.test(line)) {
+      continue;
+    }
+    if (!targetAnr.test(line)) {
+      throw new ScenarioPreconditionFailureError(
+        "The system Android logcat stream contained unrelated output; refusing to publish it."
+      );
+    }
+    if (!/\bActivityManager\s*:/i.test(line)) {
+      throw new ScenarioPreconditionFailureError(
+        "The system Android logcat stream contained output outside the ActivityManager ANR contract."
+      );
+    }
+    targetLines.push(rawLine);
+  }
+  return targetLines;
+}
+
+function readAndroidLogcatCollector(collector, options = {}) {
+  if (!collector?.started || collector.streams.length !== collector.expectedStreamCount) {
+    throw new ScenarioPreconditionFailureError(
+      "Android logcat evidence is unavailable because both required collectors were not started."
+    );
+  }
+  const streamError = collector.streams.find((stream) => stream.error)?.error || collector.error;
+  if (streamError) {
+    throw new ScenarioPreconditionFailureError(
+      `Android logcat evidence collection failed: ${streamError.message}`,
+      { cause: streamError }
+    );
+  }
+  const earlyExit = collector.streams.find((stream) => stream.closed && !stream.stopRequested);
+  if (earlyExit) {
+    throw new ScenarioPreconditionFailureError(
+      `Android ${earlyExit.kind} logcat collector exited before the step completed (code=${earlyExit.close?.code}, signal=${earlyExit.close?.signal || "none"}).`
+    );
+  }
+  const requireStopped = options.requireStopped !== false;
+  if (requireStopped && !collector.stopped) {
+    throw new ScenarioPreconditionFailureError(
+      "Android logcat evidence is incomplete because its collectors have not stopped cleanly."
+    );
+  }
+
+  let streamStats;
+  try {
+    streamStats = collector.streams.map((stream) => ({
+      stream,
+      stat: collector.fs.statSync(stream.rawLogPath),
+    }));
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not read private Android logcat evidence: ${error.code || "filesystem error"}.`,
+      { cause: error }
+    );
+  }
+  const maxBytes = options.maxBytes ?? LOGCAT_EVIDENCE_MAX_BUFFER_BYTES;
+  const totalBytes = streamStats.reduce((total, entry) => total + entry.stat.size, 0);
+  if (totalBytes > maxBytes) {
+    throw new ScenarioPreconditionFailureError(
+      `Android logcat evidence exceeded the ${maxBytes}-byte safety limit.`
+    );
+  }
+
+  let outputs;
+  try {
+    outputs = Object.fromEntries(streamStats.map(({ stream, stat }) => [
+      stream.kind,
+      readBoundedAndroidLogcatFile(collector, stream.rawLogPath, stat),
+    ]));
+  } catch (error) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not read private Android logcat evidence: ${error.code || "filesystem error"}.`,
+      { cause: error }
+    );
+  }
+  const systemAnrLines = extractTargetSystemAnrLines(outputs["system-anr"], collector.packageName);
+  const appOutput = outputs.app || "";
+  if (systemAnrLines.length === 0) {
+    return appOutput;
+  }
+  const separator = appOutput && !appOutput.endsWith("\n") ? "\n" : "";
+  return `${appOutput}${separator}${systemAnrLines.join("\n")}\n`;
+}
+
+function cleanupAndroidLogcatCollector(collector) {
+  if (!collector) {
+    return;
+  }
+  if ((collector.streams || []).some((stream) => !stream.closed)) {
+    if (!forceTerminateAndroidLogcatCollector(collector)) {
+      throw new ScenarioPreconditionFailureError(
+        "Refusing to remove private Android logcat files while a collector may still be running."
+      );
+    }
+  }
+  let removalError = null;
+  for (const privatePath of collector.rawLogPaths || [collector.rawLogPath]) {
+    try {
+      collector.fs.rmSync(privatePath, { force: true });
+    } catch (error) {
+      removalError = removalError || error;
+    }
+  }
+  if (removalError) {
+    throw new ScenarioPreconditionFailureError(
+      `Could not remove private Android logcat evidence: ${removalError.code || "filesystem error"}.`,
+      { cause: removalError }
+    );
+  }
+}
+
+function sanitizeQaLogcat(logcat) {
+  return sanitizeAndroidQaText(logcat, {
+    maxChars: LOGCAT_EVIDENCE_MAX_BUFFER_BYTES,
+    sensitiveRoots: [projectRoot],
+  });
+}
+
+function scanFatalAndroidLogs(logcat, patterns = FATAL_LOG_PATTERNS) {
+  return patterns
+    .map((pattern) => ({ pattern: pattern.source, matched: pattern.test(logcat) }))
+    .filter((entry) => entry.matched)
+    .map((entry) => entry.pattern);
+}
+
+function resolveObservedJsSurface(snapshot) {
+  return isAppForegroundSnapshot(snapshot) ? "foreground" : "stopped";
+}
+
+function captureEvidenceArtifacts({
+  adbPath,
+  serial,
+  stem,
+  screenshotPath = null,
+  expectedJsSurface = "foreground",
+  allowValidationFailure = false,
+  logcatCollector = null,
+  requireCompleteLogInterval = true,
+}) {
+  const evidenceRoot = path.join(artifactsRoot, BRANCH_EVIDENCE_DIRECTORY);
+  fs.mkdirSync(evidenceRoot, { recursive: true });
+  const resolvedStem = sanitizeArtifactStem(stem);
+  const resolvedScreenshotPath = screenshotPath || captureAndroidScreenshot(
+    adbPath,
+    serial,
+    path.join(evidenceRoot, `${resolvedStem}.png`)
+  );
+  const uiXml = dumpUiHierarchy(adbPath, serial);
+  const uiDumpPath = path.join(evidenceRoot, `${resolvedStem}.xml`);
+  fs.writeFileSync(uiDumpPath, uiXml);
+  const rawLogcat = readAndroidLogcatCollector(logcatCollector, {
+    requireStopped: requireCompleteLogInterval,
+  });
+  const sanitizedLogcat = sanitizeQaLogcat(rawLogcat);
+  const logcatPath = path.join(evidenceRoot, `${resolvedStem}-logcat.txt`);
+  fs.writeFileSync(logcatPath, sanitizedLogcat);
+  const fatalMatches = scanFatalAndroidLogs(sanitizedLogcat);
+  const observedJsSurface = resolveObservedJsSurface(parseUiSnapshot(uiXml));
+  const evidence = {
+    screenshotPath: resolvedScreenshotPath,
+    uiDumpPath,
+    logcatPath,
+    jsSurface: {
+      expected: expectedJsSurface,
+      observed: observedJsSurface,
+      verified: observedJsSurface === expectedJsSurface,
+    },
+    fatalScan: {
+      checked: true,
+      intervalComplete: requireCompleteLogInterval,
+      matchCount: fatalMatches.length,
+      matchedPatterns: fatalMatches,
+    },
+  };
+
+  if (!allowValidationFailure && !evidence.jsSurface.verified) {
+    const error = new Error(
+      `Expected Android JS surface ${expectedJsSurface}, observed ${observedJsSurface}.`
+    );
+    error.evidence = evidence;
+    throw error;
+  }
+  if (!allowValidationFailure && fatalMatches.length > 0) {
+    const error = new Error(
+      `Fatal Android/React Native log markers detected: ${fatalMatches.join(", ")}.`
+    );
+    error.evidence = evidence;
+    throw error;
+  }
+
+  return evidence;
+}
+
+function captureCheckpointEvidence({
+  adbPath,
+  serial,
+  stem,
+  expectedJsSurface,
+  logcatCollector,
+}) {
+  return {
+    label: stem,
+    ...captureEvidenceArtifacts({
+      adbPath,
+      serial,
+      stem: `${stem}-checkpoint`,
+      expectedJsSurface,
+      logcatCollector,
+      requireCompleteLogInterval: false,
+    }),
+  };
+}
+
+function captureScenarioEvidence({
+  adbPath,
+  serial,
+  scenario,
+  screenshotPath,
+  checkpoints = [],
+  allowFatalMatches = false,
+  logcatCollector = null,
+}) {
+  return {
+    ...captureEvidenceArtifacts({
+      adbPath,
+      serial,
+      stem: scenario.id,
+      screenshotPath,
+      expectedJsSurface: scenario.expectedJsSurface || "foreground",
+      allowValidationFailure: allowFatalMatches,
+      logcatCollector,
+    }),
+    checkpoints,
+    provenancePath: QA_PROVENANCE_PATH,
+  };
+}
+
+function readQaProvenanceIfPresent() {
+  if (!fs.existsSync(QA_PROVENANCE_PATH)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(QA_PROVENANCE_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readAndValidateQaProvenance(adbPath, serial) {
+  const provenance = readQaProvenanceIfPresent();
+  if (!provenance) {
+    throw new ScenarioPreconditionFailureError(
+      "Current-head Android QA provenance is missing or unreadable; rebuild and reinstall through android-smoke."
+    );
+  }
+  const gitBeforeDeviceVerification = collectGitProvenance(projectRoot);
+  const buildBeforeDeviceVerification = collectCurrentQaBuildProvenance(
+    provenance,
+    gitBeforeDeviceVerification
+  );
+  const installedIdentity = readInstalledScenarioPackageIdentity(adbPath, serial, appPackageName);
+  const currentGit = collectGitProvenance(projectRoot);
+  const currentBuildProvenance = collectCurrentQaBuildProvenance(provenance, currentGit);
+  if (!areExactGitProvenancesEqual(gitBeforeDeviceVerification, currentGit)) {
+    throw new ScenarioPreconditionFailureError(
+      "Current source HEAD/tree/dirty digest changed while Android package provenance was being verified."
+    );
+  }
+  if (buildBeforeDeviceVerification.digest !== currentBuildProvenance.digest) {
+    throw new ScenarioPreconditionFailureError(
+      "Android build inputs changed while installed-package provenance was being verified."
+    );
+  }
+  return validateQaProvenance({
+    provenance,
+    currentGit,
+    currentBuildProvenance,
+    installedIdentity,
+    serial,
+    packageName: appPackageName,
+  });
+}
+
+function collectCurrentQaBuildProvenance(provenance, currentGit, options = {}) {
+  const storedManifest = provenance?.build?.provenance;
+  const variant = provenance?.variant;
+  const abi = provenance?.abi;
+  if (!storedManifest || !variant || !abi) {
+    throw new ScenarioPreconditionFailureError(
+      "Android QA provenance cannot be recomputed because its build identity is incomplete."
+    );
+  }
+  const nodeEnv = storedManifest.buildContext?.effectiveBuild?.javascript?.nodeEnv
+    || (variant === "release" ? "production" : "development");
+  const env = createIsolatedAndroidBuildEnvironment(
+    projectRoot,
+    process.env,
+    { NODE_ENV: nodeEnv }
+  );
+  const assembleTask = `app:assemble${variant[0].toUpperCase()}${variant.slice(1)}`;
+  const gradleArgs = buildGradleAssembleArgs(assembleTask, abi);
+  const prebuildInputState = collectPrebuildInputState(projectRoot, {
+    variant,
+    nodeEnv,
+    env,
+    hmacKeyPath: options.hmacKeyPath,
+  });
+  const buildContext = {
+    ...(storedManifest.buildContext || {}),
+    androidQaEvidence: storedManifest.buildContext?.androidQaEvidence === true,
+    effectiveBuild: collectAndroidEffectiveBuildContext(projectRoot, {
+      variant,
+      gradleArgs,
+      env,
+    }),
+    prebuildInputDigest: prebuildInputState.digest,
+  };
+  return collectBuildProvenance(projectRoot, {
+    variant,
+    abi,
+    includeBundleInputs: storedManifest.embeddedBundle === true,
+    androidRoot,
+    env,
+    gradleArgs,
+    git: currentGit,
+    buildContext,
+    hmacKeyPath: options.hmacKeyPath,
+  });
+}
+
+function areExactGitProvenancesEqual(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.headSha === right.headSha
+    && left.treeSha === right.treeSha
+    && left.dirty === right.dirty
+    && left.dirtyDigest === right.dirtyDigest
+    && left.dirtyEntryCount === right.dirtyEntryCount
+  );
+}
+
+function validateQaProvenance({
+  provenance,
+  currentGit,
+  currentBuildProvenance,
+  installedIdentity,
+  serial,
+  packageName,
+}) {
+  const build = provenance?.build;
+  const install = provenance?.install;
+  const buildManifest = build?.provenance;
+  const effectiveVersion = buildManifest?.buildContext?.effectiveBuild?.version;
+  const packagedAbis = build?.apk?.packagedAbis;
+  const installPackagedAbis = install?.packagedAbis;
+  const matchedAbi = build?.apk?.matchedAbi;
+  const manifestDigest = buildManifest?.digest;
+  const manifestWithoutDigest = buildManifest
+    ? Object.fromEntries(Object.entries(buildManifest).filter(([key]) => key !== "digest"))
+    : null;
+  if (
+    provenance?.schemaVersion !== BUILD_PROVENANCE_SCHEMA_VERSION
+    || !SUPPORTED_ANDROID_PROVENANCE_ABIS.has(provenance?.abi)
+    || build?.schemaVersion !== BUILD_PROVENANCE_SCHEMA_VERSION
+    || install?.schemaVersion !== BUILD_PROVENANCE_SCHEMA_VERSION
+    || !manifestDigest
+    || hashCanonicalJson(manifestWithoutDigest) !== manifestDigest
+    || currentBuildProvenance?.digest !== manifestDigest
+    || build.provenanceDigest !== manifestDigest
+    || build.provenanceDigest !== install.buildProvenanceDigest
+    || build.variant !== "release"
+    || buildManifest.embeddedBundle !== true
+    || buildManifest.buildContext?.androidQaEvidence !== true
+    || !build.apk?.sha256
+    || build.apk.sha256 !== install.apkSha256
+    || build.apk.sha256 !== install.installedApkSha256
+    || !Array.isArray(packagedAbis)
+    || packagedAbis.length === 0
+    || !areExactStringArraysEqual(packagedAbis, installPackagedAbis)
+    || !matchedAbi
+    || matchedAbi !== install.matchedAbi
+    || !install.versionCode
+    || !install.versionName
+    || `${effectiveVersion?.code ?? ""}` !== `${install.versionCode}`
+    || `${effectiveVersion?.name ?? ""}` !== `${install.versionName}`
+  ) {
+    throw new ScenarioPreconditionFailureError(
+      "Android QA build/install provenance chain is stale, tampered, or incomplete."
+    );
+  }
+
+  if (
+    provenance.serial !== serial
+    || install.serial !== serial
+    || provenance.packageName !== packageName
+    || install.packageName !== packageName
+    || provenance.variant !== build.variant
+    || build.variant !== install.variant
+    || provenance.abi !== build.abi
+    || build.abi !== install.abi
+  ) {
+    throw new ScenarioPreconditionFailureError(
+      "Android QA provenance belongs to a different device, package, variant, or ABI."
+    );
+  }
+
+  if (
+    !installedIdentity?.installed
+    || !installedIdentity.packagePath
+    || !installedIdentity.apkSha256
+    || installedIdentity.apkSha256 !== build.apk.sha256
+    || installedIdentity.versionCode !== install.versionCode
+    || installedIdentity.versionName !== install.versionName
+    || (install.packagePath && installedIdentity.packagePath !== install.packagePath)
+  ) {
+    throw new ScenarioPreconditionFailureError(
+      "The APK currently installed on the Android target does not match the verified QA artifact."
+    );
+  }
+
+  const supportedAbis = Array.isArray(installedIdentity.supportedAbis)
+    ? installedIdentity.supportedAbis
+    : [];
+  if (!supportedAbis.includes(matchedAbi)) {
+    throw new ScenarioPreconditionFailureError(
+      `The current Android target does not advertise the APK ABI ${matchedAbi} selected during verification.`
+    );
+  }
+  if (provenance.abi === "universal") {
+    if (!areExactStringArraysEqual(packagedAbis, [...ANDROID_UNIVERSAL_ABIS].sort())) {
+      throw new ScenarioPreconditionFailureError(
+        "Universal APK provenance must package exactly the canonical Android ABI set."
+      );
+    }
+    if (!packagedAbis.includes(matchedAbi)) {
+      throw new ScenarioPreconditionFailureError(
+        "Universal APK provenance does not bind its selected device ABI to an actually packaged ABI."
+      );
+    }
+  } else if (
+    !areExactStringArraysEqual(packagedAbis, [provenance.abi])
+    || matchedAbi !== provenance.abi
+  ) {
+    throw new ScenarioPreconditionFailureError(
+      `Targeted APK provenance must package and select exactly requested ABI ${provenance.abi}.`
+    );
+  }
+
+  const builtGit = buildManifest.git;
+  if (
+    !builtGit
+    || builtGit.headSha !== currentGit.headSha
+    || builtGit.treeSha !== currentGit.treeSha
+    || builtGit.dirtyDigest !== currentGit.dirtyDigest
+  ) {
+    throw new ScenarioPreconditionFailureError(
+      "Installed Android APK provenance does not match the current source HEAD/tree/dirty digest."
+    );
+  }
+
+  return provenance;
+}
+
+function areExactStringArraysEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function readInstalledScenarioPackageIdentity(adbPath, serial, packageName) {
+  const packagePaths = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "pm", "path", packageName],
+    { allowFailure: true }
+  )
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("package:"))
+    .map((line) => line.slice("package:".length));
+  const packagePath = packagePaths.find((candidate) => candidate.endsWith("/base.apk"))
+    || packagePaths[0]
+    || null;
+  if (!packagePath) {
+    return {
+      installed: false,
+      packagePath: null,
+      apkSha256: null,
+      versionCode: null,
+      versionName: null,
+      supportedAbis: readScenarioDeviceAbis(adbPath, serial),
+    };
+  }
+
+  let apkSha256 = null;
+  for (const command of [
+    ["shell", "sha256sum", packagePath],
+    ["shell", "toybox", "sha256sum", packagePath],
+  ]) {
+    const output = runCapture(adbPath, ["-s", serial, ...command], { allowFailure: true });
+    const match = output.match(/(?:^|\r?\n)\s*([a-fA-F0-9]{64})(?:\s+|$)/);
+    if (match) {
+      apkSha256 = match[1].toLowerCase();
+      break;
+    }
+  }
+
+  const dumpsys = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "dumpsys", "package", packageName],
+    { allowFailure: true }
+  );
+  const versionCode = dumpsys.match(/versionCode=(\d+)/)?.[1] || null;
+  const versionName = dumpsys.match(/versionName=([^\r\n]+)/)?.[1]?.trim() || null;
+  return {
+    installed: true,
+    packagePath,
+    apkSha256,
+    versionCode,
+    versionName,
+    supportedAbis: readScenarioDeviceAbis(adbPath, serial),
+  };
+}
+
+function readScenarioDeviceAbis(adbPath, serial) {
+  const abiList = runCapture(
+    adbPath,
+    ["-s", serial, "shell", "getprop", "ro.product.cpu.abilist"],
+    { allowFailure: true }
+  ).trim();
+  if (abiList) {
+    return abiList.split(",").map((abi) => abi.trim()).filter(Boolean);
+  }
+  return ["ro.product.cpu.abi", "ro.product.cpu.abi2"]
+    .map((property) => runCapture(
+      adbPath,
+      ["-s", serial, "shell", "getprop", property],
+      { allowFailure: true }
+    ).trim())
+    .filter(Boolean);
+}
+
+function summarizeQaProvenance(provenance) {
+  if (!provenance) {
+    return null;
+  }
+  const build = provenance.build || {};
+  const install = provenance.install || {};
+  return {
+    schemaVersion: provenance.schemaVersion,
+    provenancePath: normalizeReportPath(path.relative(artifactsRoot, QA_PROVENANCE_PATH)),
+    packageName: provenance.packageName,
+    variant: provenance.variant,
+    abi: provenance.abi,
+    embeddedBundle: build.provenance?.embeddedBundle === true,
+    androidQaEvidence: build.provenance?.buildContext?.androidQaEvidence === true,
+    provenanceDigest: build.provenanceDigest,
+    apkSha256: build.apk?.sha256 || null,
+    packagedAbis: build.apk?.packagedAbis || [],
+    matchedAbi: build.apk?.matchedAbi || null,
+    installedApkSha256: install.installedApkSha256 || null,
+    versionCode: install.versionCode || null,
+    versionName: install.versionName || null,
+    source: build.provenance?.git || null,
+    device: provenance.device || {
+      serial: provenance.serial || null,
+      model: null,
+      abis: [],
+    },
+  };
+}
+
 function writeReport(results) {
   const reportPath = path.join(artifactsRoot, "latest-report.json");
   const summary = results.reduce((accumulator, result) => {
@@ -4187,42 +7283,69 @@ function writeReport(results) {
     return accumulator;
   }, {});
   const serializedResults = serializeReportResults(results);
-  fs.writeFileSync(
-    reportPath,
-    JSON.stringify(
+  const report = JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
         pack: cliOptions.scenario ? null : cliOptions.pack,
         selectedScenario: cliOptions.scenario,
         scenarioCount: results.length,
         summary,
+        provenance: summarizeQaProvenance(activeQaProvenance),
         results: serializedResults,
       },
       null,
       2
-    )
-  );
-  log(`Wrote scenario report to ${reportPath}`);
+    );
+  const temporaryPath = `${reportPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryPath, report);
+  fs.renameSync(temporaryPath, reportPath);
+  log("Wrote machine-readable Android scenario report.");
 }
 
 function serializeReportResults(results, roots = {}) {
   const resolvedArtifactsRoot = path.resolve(roots.artifactsRoot || artifactsRoot);
   const resolvedProjectRoot = path.resolve(roots.projectRoot || projectRoot);
+  const pathRoots = {
+    artifactsRoot: resolvedArtifactsRoot,
+    projectRoot: resolvedProjectRoot,
+  };
 
-  return results.map((result) => {
-    const serializedResult = { ...result };
-
-    for (const field of REPORT_ARTIFACT_PATH_FIELDS) {
-      if (typeof serializedResult[field] === "string") {
-        serializedResult[field] = toReportRelativePath(serializedResult[field], {
-          artifactsRoot: resolvedArtifactsRoot,
-          projectRoot: resolvedProjectRoot,
-        });
-      }
-    }
-
-    return serializedResult;
+  const sanitizeReportString = (value) => sanitizeAndroidQaText(value, {
+    maxChars: REPORT_MAX_STRING_LENGTH,
+    sensitiveRoots: [resolvedArtifactsRoot, resolvedProjectRoot],
   });
+
+  const serializeValue = (value, fieldName = null, depth = 0) => {
+    if (depth > REPORT_MAX_DEPTH) {
+      return "<max-depth>";
+    }
+    if (Array.isArray(value)) {
+      return value
+        .slice(0, REPORT_MAX_COLLECTION_ENTRIES)
+        .map((entry) => serializeValue(entry, null, depth + 1));
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value)
+          .filter(([key]) => !REPORT_PRIVATE_FIELDS.has(key))
+          .slice(0, REPORT_MAX_COLLECTION_ENTRIES)
+          .map(([key, entry]) => [key, serializeValue(entry, key, depth + 1)])
+      );
+    }
+    if (
+      typeof value === "string"
+      && fieldName
+      && REPORT_ARTIFACT_PATH_FIELDS.includes(fieldName)
+    ) {
+      return sanitizeReportString(toReportRelativePath(value, pathRoots));
+    }
+    if (typeof value === "string") {
+      return sanitizeReportString(value);
+    }
+    return value;
+  };
+
+  return results.map((result) => serializeValue(result));
 }
 
 function toReportRelativePath(filePath, roots) {
@@ -4231,9 +7354,12 @@ function toReportRelativePath(filePath, roots) {
   }
 
   const resolvedPath = path.resolve(filePath);
-  const baseRoot = isPathInsideOrEqual(resolvedPath, roots.artifactsRoot)
-    ? roots.artifactsRoot
-    : roots.projectRoot;
+  const isInsideArtifacts = isPathInsideOrEqual(resolvedPath, roots.artifactsRoot);
+  const isInsideProject = isPathInsideOrEqual(resolvedPath, roots.projectRoot);
+  if (!isInsideArtifacts && !isInsideProject) {
+    return "<external-artifact>";
+  }
+  const baseRoot = isInsideArtifacts ? roots.artifactsRoot : roots.projectRoot;
   const relativePath = path.relative(baseRoot, resolvedPath);
 
   if (!relativePath || path.isAbsolute(relativePath) || /^[A-Za-z]:[\\/]/.test(relativePath)) {
@@ -4270,6 +7396,7 @@ function parseCliOptions(argv) {
     bootstrapScreenshot: false,
     list: false,
     pack: DEFAULT_SCENARIO_PACK,
+    apkVariant: null,
     avd: null,
     serial: null,
     scenario: null,
@@ -4311,6 +7438,15 @@ function parseCliOptions(argv) {
 
     if (arg === "--avd") {
       options.avd = readCliValue(argv, ++index, "--avd");
+      continue;
+    }
+
+    if (arg === "--apk-variant") {
+      const apkVariant = readCliValue(argv, ++index, "--apk-variant").trim().toLowerCase();
+      if (apkVariant !== "debug" && apkVariant !== "release") {
+        throw new Error(`Unsupported Android APK variant "${apkVariant}". Expected debug or release.`);
+      }
+      options.apkVariant = apkVariant;
       continue;
     }
 
@@ -4367,6 +7503,7 @@ function printHelp() {
   console.log("  --emulator                 Run scenarios on an Android emulator instead of a connected phone");
   console.log("  --avd <name>               Use a specific AVD when starting an emulator");
   console.log("  --serial <serial>          Target a specific connected device");
+  console.log("  --apk-variant <variant>    Build/install debug or release APK (current-head packs require release)");
   console.log(`  --pack <${[...SCENARIO_PACKS].join("|")}> Run a scenario pack (default: ${DEFAULT_SCENARIO_PACK})`);
   console.log("  --scenario <id>            Run only one scenario");
   console.log("  --skip-build               Reuse the existing debug APK");
@@ -4383,6 +7520,7 @@ function runCapture(command, args, options = {}) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: options.timeout ?? ADB_COMMAND_TIMEOUT_MS,
+    maxBuffer: options.maxBuffer ?? LOGCAT_EVIDENCE_MAX_BUFFER_BYTES,
   });
 
   if (result.error) {
@@ -4750,13 +7888,22 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  BRANCH_REGENERATION_SCENARIOS,
+  areExactGitProvenancesEqual,
+  assertAuthoritativeThoughtClear,
+  assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
+  buildConversationTopology,
   buildScenarios,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
+  cleanupAndroidLogcatCollector,
+  configureScenarioBuildEnvironment,
+  collectCurrentQaBuildProvenance,
+  createBranchRegenerationBaseline,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
   activateClearedCatalogFilterOption,
@@ -4781,29 +7928,46 @@ module.exports = {
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   findResourceIdInSnapshot,
+  hasConversationHistoryStartAnchor,
   isBoundsClearOfBottomOverlay,
   getBottomTabTapPoint,
   goToHome,
   goToModelCatalog,
   inputFocusedTextAndConfirm,
-  installScenarioOwnedMetroSignalHandlers,
+  installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
+  extractVisibleConversationTokens,
+  mergeOlderConversationOrder,
+  markScenarioFailureRecorded,
+  normalizeAndroidResourceId,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
   parseUiSnapshot,
+  readAndroidLogcatCollector,
+  readAndroidLogcatStartEpoch,
   readTransferredMetroOwnership,
+  resolveAndroidPackageUid,
+  resolveBranchRegenerationReplacement,
+  resolveAndroidQaGenerationGateObservation,
+  resolveTargetAttachmentIds,
   restoreLanguageAfterScenario,
   runCapture,
   runChecked,
+  sanitizeQaLogcat,
+  scanFatalAndroidLogs,
+  ScenarioPreconditionFailureError,
   ScenarioSkipError,
   ScenarioSkipFailureError,
   serializeReportResults,
+  startAndroidLogcatCollector,
+  stopAndroidLogcatCollector,
   setCatalogFilterPanelOpen,
   shouldPrepareMetroForScenarioLaunch,
   shouldAppendRunnerFailure,
+  validateQaProvenance,
   waitForAnyNode,
   waitForEnabledAnyNode,
   waitForModelWarmupToSettleIfPresent,
@@ -4816,4 +7980,5 @@ module.exports = {
   assertAttachmentTextOnlyFallbackState,
   isAttachmentActionBusy,
   isPreparedAssistantResponseLabel,
+  resolveBranchFixture,
 };

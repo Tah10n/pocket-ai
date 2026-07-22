@@ -3446,6 +3446,34 @@ export function flushPendingChatPersistenceWrites(reason: ChatPersistenceWriteRe
   chatPersistenceScheduler.flushAllPendingWrites(reason);
 }
 
+export function flushChatStreamingProgressForAndroidQa(
+  threadId: string,
+  messageId: string,
+): boolean {
+  const thread = useChatStore.getState().threads[threadId];
+  if (!thread) {
+    return false;
+  }
+
+  const runtime = getTransientAssistantRuntime(thread, messageId);
+  if (!runtime) {
+    return false;
+  }
+
+  const expectedRevision = runtime.progressRevision;
+  const expectedContent = runtime.currentMessage.content;
+  const expectedThoughtContent = runtime.currentMessage.thoughtContent;
+  chatPersistenceScheduler.flushThreadWrite(threadId, 'streaming_patch');
+
+  const persistedProgress = readChatStreamingProgressRecord(getAppStorage(), threadId);
+  return persistedProgress.ok
+    && persistedProgress.value.messageId === messageId
+    && persistedProgress.value.revision === expectedRevision
+    && persistedProgress.value.content === expectedContent
+    && persistedProgress.value.thoughtContent === expectedThoughtContent
+    && persistedProgress.value.persistedAt === runtime.lastProgressPersistedAt;
+}
+
 export function resetChatStoreForPrivateStorageReset(): void {
   const nextInferenceRevision = useChatStore.getState().inferenceRevision + 1;
   resetUnreferencedAttachmentCleanupState();

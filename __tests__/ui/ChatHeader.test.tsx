@@ -101,6 +101,20 @@ describe('ChatHeader', () => {
     expect(getByText(modelLabel).props.numberOfLines).toBe(1);
   });
 
+  it('exposes stable native ids for the title and model selector', () => {
+    const { getByTestId } = render(
+      <ChatHeader
+        title="Prepared fixture"
+        modelLabel="Qwen 3 4B"
+        modelSelectable
+        onOpenModelSelector={jest.fn()}
+      />,
+    );
+
+    expect(getByTestId('chat-header-title')).toBeTruthy();
+    expect(getByTestId('chat-header-model-selector')).toBeTruthy();
+  });
+
   it('keeps preset and model pills on one row without stretching them evenly', () => {
     const modelLabel = 'Qwen 3 4B';
     const presetLabel = 'Helpful Assistant';
@@ -115,10 +129,10 @@ describe('ChatHeader', () => {
 
     expect(getByTestId('chat-header-pill-row').props.className).not.toContain('flex-wrap');
     expect(getByTestId(`screen-chip-${presetLabel}`).props.className).not.toContain('flex-1');
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.className).not.toContain('flex-1');
+    expect(getByTestId('chat-header-model-selector').props.className).not.toContain('flex-1');
     expect(getByTestId(`screen-chip-${presetLabel}`).props.textClassName).toBeUndefined();
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).not.toContain('flex-initial');
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).not.toContain('flex-1');
+    expect(getByTestId('chat-header-model-selector').props.textClassName).not.toContain('flex-initial');
+    expect(getByTestId('chat-header-model-selector').props.textClassName).not.toContain('flex-1');
   });
 
   it('supports a selectable preview state for the model chip without forcing a tap handler', () => {
@@ -131,8 +145,8 @@ describe('ChatHeader', () => {
       />,
     );
 
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.trailingIconName).toBe('keyboard-arrow-down');
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.onPress).toBeUndefined();
+    expect(getByTestId('chat-header-model-selector').props.trailingIconName).toBe('keyboard-arrow-down');
+    expect(getByTestId('chat-header-model-selector').props.onPress).toBeUndefined();
   });
 
   it('renders the unavailable model chip with warning presentation', () => {
@@ -144,9 +158,9 @@ describe('ChatHeader', () => {
       />,
     );
 
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.tone).toBe('warning');
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.leadingIconName).toBe('warning');
-    expect(getByTestId(`screen-chip-${modelLabel}`).props.textClassName).toContain('text-warning-700');
+    expect(getByTestId('chat-header-model-selector').props.tone).toBe('warning');
+    expect(getByTestId('chat-header-model-selector').props.leadingIconName).toBe('warning');
+    expect(getByTestId('chat-header-model-selector').props.textClassName).toContain('text-warning-700');
   });
 
   it.each([
@@ -208,7 +222,10 @@ describe('ChatHeader', () => {
     );
 
     expect(mockHeaderActionButton.mock.calls.some(
-      ([props]) => props.accessibilityLabel === 'chat.headerModelControlsAccessibilityLabel',
+      ([props]) => (
+        props.accessibilityLabel === 'chat.headerModelControlsAccessibilityLabel'
+        && props.testID === 'chat-header-model-controls'
+      ),
     )).toBe(true);
 
     mockHeaderActionButton.mockClear();

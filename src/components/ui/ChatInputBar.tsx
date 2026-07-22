@@ -533,6 +533,7 @@ export const ChatInputBar = ({
         : undefined;
     const resolvedTrailingActions = trailingActions ?? (
         <ScreenIconButton
+            testID={isSending ? 'chat-primary-action-stop' : 'chat-primary-action-send'}
             onPress={handlePrimaryAction}
             disabled={!isSending && !canSend}
             accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
@@ -766,6 +767,7 @@ export const ChatInputBar = ({
             ) : null}
 
             <ScreenInlineInput
+                testID="chat-message-input"
                 variant="composer"
                 applyGlassFrame={appearance.surfaceKind !== 'glass'}
                 className={disabled
@@ -1104,6 +1106,7 @@ export const ChatInputBar = ({
 
     const modeBanner = modeLabel ? (
         <ScreenSurface
+            testID="chat-regeneration-mode"
             tone={isDarkGlass ? 'default' : 'accent'}
             withControlTint={!isDarkGlass}
             className={modeBannerClassName}

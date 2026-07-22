@@ -3,17 +3,34 @@ const fs = require('fs');
 const os = require('os');
 const { EventEmitter } = require('events');
 const { isCompletePngBuffer } = require('../../scripts/png-validation');
+const { sanitizeAndroidQaText } = require('../../scripts/android-qa-sanitization');
+const {
+  collectAndroidEffectiveBuildContext,
+  collectBuildProvenance,
+  collectPrebuildInputState,
+  createIsolatedAndroidBuildEnvironment,
+  hashCanonicalJson,
+  withAndroidProvenanceGradleExecutionArgs,
+} = require('../../scripts/android-build-provenance');
 
 const {
+  BRANCH_REGENERATION_SCENARIOS,
+  assertAuthoritativeThoughtClear,
+  assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
+  buildConversationTopology,
   buildScenarios,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
+  cleanupAndroidLogcatCollector,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
+  collectCurrentQaBuildProvenance,
+  configureScenarioBuildEnvironment,
+  createBranchRegenerationBaseline,
   activateClearedCatalogFilterOption,
   appPrivatePathExists,
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
@@ -26,6 +43,7 @@ const {
   findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
+  extractVisibleConversationTokens,
   findAttachImageActionInSnapshot,
   findAttachMenuActionInSnapshot,
   findAnyNodeClearOfBottomOverlay,
@@ -34,6 +52,7 @@ const {
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
+  hasConversationHistoryStartAnchor,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
@@ -41,14 +60,18 @@ const {
   goToHome,
   goToModelCatalog,
   inputFocusedTextAndConfirm,
-  installScenarioOwnedMetroSignalHandlers,
+  installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
   openFirstVisibleVariantPicker,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
   prepareCatalogForVariantPickerSmokeScenario,
+  readAndroidLogcatCollector,
   readTransferredMetroOwnership,
+  resolveBranchRegenerationReplacement,
+  resolveAndroidQaGenerationGateObservation,
+  resolveTargetAttachmentIds,
   selectScenarios,
   ScenarioSkipError,
   restoreLanguageAfterScenario,
@@ -58,13 +81,24 @@ const {
   assertAttachmentTextOnlyFallbackState,
   isAttachmentActionBusy,
   isPreparedAssistantResponseLabel,
+  markScenarioFailureRecorded,
+  mergeOlderConversationOrder,
+  normalizeAndroidResourceId,
+  resolveBranchFixture,
+  sanitizeQaLogcat,
+  scanFatalAndroidLogs,
+  ScenarioPreconditionFailureError,
   ScenarioSkipFailureError,
   serializeReportResults,
   setCatalogFilterPanelOpen,
   shouldPrepareMetroForScenarioLaunch,
   shouldAppendRunnerFailure,
+  startAndroidLogcatCollector,
+  stopAndroidLogcatCollector,
   tapBottomTabUntilVisible,
   tapBoundsUntilAnyNode,
+  validateQaProvenance,
+  areExactGitProvenancesEqual,
   waitForAnyNode,
   waitForEnabledAnyNode,
   waitForModelWarmupToSettleIfPresent,
@@ -242,22 +276,65 @@ describe('Android scenario Metro ownership', () => {
     expect(removeSignalHandlers).toHaveBeenCalledTimes(1);
   });
 
-  it('cleans up a locally owned Metro before re-emitting termination signals', () => {
+  it('cleans up the active logcat collector and Metro through one signal owner', () => {
     const processRef = new EventEmitter();
-    processRef.pid = 5150;
+    processRef.pid = 5151;
     processRef.kill = jest.fn();
     const metro = { started: true, lifecycle: {} };
-    const cleanup = jest.fn();
+    const logcatCollector = { started: true, closed: false };
+    const cleanupLogcat = jest.fn();
+    const cleanupMetro = jest.fn();
 
-    installScenarioOwnedMetroSignalHandlers(() => metro, processRef, {
-      cleanupScenarioOwnedMetro: cleanup,
-    });
-    processRef.emit('SIGTERM');
+    installScenarioResourceSignalHandlers(
+      () => ({ metro, logcatCollector }),
+      processRef,
+      {
+        cleanupAndroidLogcatCollector: cleanupLogcat,
+        cleanupScenarioOwnedMetro: cleanupMetro,
+      },
+    );
+    processRef.emit('SIGINT');
 
-    expect(cleanup).toHaveBeenCalledWith(metro);
-    expect(processRef.kill).toHaveBeenCalledWith(5150, 'SIGTERM');
+    expect(cleanupLogcat).toHaveBeenCalledWith(logcatCollector);
+    expect(cleanupMetro).toHaveBeenCalledWith(metro);
+    expect(processRef.kill).toHaveBeenCalledWith(5151, 'SIGINT');
     expect(processRef.listenerCount('SIGINT')).toBe(0);
     expect(processRef.listenerCount('SIGTERM')).toBe(0);
+  });
+
+  it('does not terminate the runner while an owned logcat process is still unsafe to release', () => {
+    const processRef = new EventEmitter();
+    processRef.pid = 5152;
+    processRef.kill = jest.fn();
+    const cleanupLogcat = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('owned collector is still running');
+      })
+      .mockImplementationOnce(() => undefined);
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    installScenarioResourceSignalHandlers(
+      () => ({ logcatCollector: { started: true }, metro: null }),
+      processRef,
+      {
+        cleanupAndroidLogcatCollector: cleanupLogcat,
+        cleanupScenarioOwnedMetro: jest.fn(),
+      },
+    );
+
+    processRef.emit('SIGTERM');
+    expect(processRef.kill).not.toHaveBeenCalled();
+    expect(processRef.listenerCount('SIGINT')).toBe(1);
+    expect(processRef.listenerCount('SIGTERM')).toBe(1);
+
+    processRef.emit('SIGTERM');
+    expect(cleanupLogcat).toHaveBeenCalledTimes(2);
+    expect(processRef.kill).toHaveBeenCalledWith(5152, 'SIGTERM');
+    expect(processRef.listenerCount('SIGINT')).toBe(0);
+    expect(processRef.listenerCount('SIGTERM')).toBe(0);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('owned collector is still running'));
+    consoleError.mockRestore();
   });
 
   it('prepares Metro only for debug launches that need a development bundle', () => {
@@ -364,6 +441,24 @@ describe('app image picker configuration', () => {
 });
 
 describe('android-scenarios smoke bootstrap args', () => {
+  it('configures release and the QA seam before current-head launch, and rejects debug', () => {
+    const releaseEnv = {};
+    expect(configureScenarioBuildEnvironment({ apkVariant: 'release' }, true, releaseEnv)).toEqual({
+      androidQaEvidence: true,
+      apkVariant: 'release',
+    });
+    expect(releaseEnv).toEqual({
+      ANDROID_SMOKE_APK_VARIANT: 'release',
+      EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true',
+    });
+    expect(() => configureScenarioBuildEnvironment(
+      { apkVariant: 'debug' },
+      true,
+      {},
+    )).toThrow(ScenarioPreconditionFailureError);
+  });
+
   it('uses fast smoke reuse flags when skip-build is enabled', () => {
     const args = buildSmokeLaunchArgs(
       {
@@ -1110,6 +1205,10 @@ describe('android-scenarios npm defaults', () => {
     expect(packageJson.scripts['android:scenarios:attachments-prepared-send']).toContain('--fail-on-skip');
     expect(packageJson.scripts['android:scenarios:dependency-ui']).toContain('--pack dependency-ui');
     expect(packageJson.scripts['android:scenarios:runtime']).toContain('--pack runtime');
+    expect(packageJson.scripts['android:scenarios:runtime']).toContain('--fail-on-skip');
+    expect(packageJson.scripts['android:scenarios:branch-regeneration']).toBe(
+      'node ./scripts/android-scenarios.js --pack branch-regeneration --apk-variant release --fail-on-skip'
+    );
     expect(packageJson.scripts['android:scenarios:native']).toContain('--pack native');
     expect(packageJson.scripts['android:scenarios:extended']).toContain('--pack extended');
   });
@@ -3138,6 +3237,35 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('broadens the default mobile Android verifier to the fail-closed runtime pack', () => {
+    const packageScripts = require('../../package.json').scripts;
+    const androidVerifier = packageScripts['verify:mobile-change:android'];
+
+    expect(androidVerifier).toContain('verify:mobile-change');
+    expect(androidVerifier).toContain('android:scenarios:runtime');
+    expect(androidVerifier).not.toMatch(/android:scenarios(?:\s|$)/);
+    expect(packageScripts['android:scenarios:runtime']).toContain('--fail-on-skip');
+    expect(packageScripts['android:scenarios:branch-regeneration']).toContain('--apk-variant release');
+  });
+
+  it('selects the destructive branch-regeneration pack in its exact 15-step order', () => {
+    const selected = selectScenarios(
+      scenarios,
+      parseCliOptions(['--pack', 'branch-regeneration', '--fail-on-skip'])
+    );
+
+    expect(selected.map((scenario) => scenario.id)).toEqual(BRANCH_REGENERATION_SCENARIOS);
+    expect(selected.map((scenario) => scenario.step)).toEqual(
+      Array.from({ length: 15 }, (_, index) => index + 1)
+    );
+    expect(selected.every((scenario) => (
+      scenario.tier === 'critical'
+      && scenario.captureFullEvidence
+      && scenario.requiresCurrentHeadProvenance
+    ))).toBe(true);
+    expect(selected.filter((scenario) => scenario.expectedJsSurface === 'stopped').map((scenario) => scenario.step)).toEqual([3, 5]);
+  });
+
   it('runs broad non-prepared scenarios only for the all pack', () => {
     const selectedIds = selectScenarios(scenarios, parseCliOptions(['--pack', 'all'])).map((scenario) => scenario.id);
 
@@ -3147,6 +3275,7 @@ describe('android-scenarios pack selection', () => {
         'chat-attachment-preview-remove',
         'chat-attachment-prepared-send',
         'storage-cache-clear',
+        ...BRANCH_REGENERATION_SCENARIOS,
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
@@ -3162,6 +3291,1108 @@ describe('android-scenarios pack selection', () => {
     expect(selectedIds).not.toContain('chat-attachment-preview-remove');
     expect(selectedIds).not.toContain('chat-attachment-prepared-send');
     expect(selectedIds).not.toContain('storage-cache-clear');
+    expect(selectedIds).not.toEqual(expect.arrayContaining(BRANCH_REGENERATION_SCENARIOS));
+  });
+});
+
+describe('android-scenarios branch-regeneration fixture contract', () => {
+  function buildFixtureSnapshot({ includeAudio = true, includeDocument = true } = {}) {
+    let top = 80;
+    const nodes = [
+      '<node resource-id="" package="com.github.tah10n.pocketai" bounds="[0,0][1080,2400]" />',
+    ];
+    const add = (resourceId, offset = 0) => {
+      nodes.push(
+        `<node resource-id="com.github.tah10n.pocketai:id/${resourceId}" package="com.github.tah10n.pocketai" enabled="true" clickable="true" bounds="[40,${top + offset}][1040,${top + offset + 70}]" />`
+      );
+    };
+    const addTurn = (kind, userId, assistantId, { thought = false } = {}) => {
+      add(`user-message-state-complete-${userId}`);
+      if (kind) {
+        add(`message-attachment-${kind}-${userId}-attachment-${kind}`, 5);
+      }
+      add(`regenerate-message-${userId}`, 10);
+      top += 100;
+      add(`assistant-message-state-complete-${assistantId}`);
+      if (thought) {
+        add(`thought-toggle-${assistantId}`, 5);
+      }
+      top += 100;
+    };
+
+    if (includeAudio) {
+      addTurn('audio', 'user-audio', 'assistant-audio');
+    }
+    if (includeDocument) {
+      addTurn('document', 'user-document', 'assistant-document');
+    }
+    addTurn('image', 'user-image', 'assistant-image');
+    addTurn(null, 'user-reasoning', 'assistant-reasoning', { thought: true });
+    addTurn(null, 'user-main', 'assistant-main');
+    add('chat-model-switch-row-switch-tail');
+
+    return parseUiSnapshot(`<hierarchy>${nodes.join('')}</hierarchy>`);
+  }
+
+  function topologyFromSnapshot(snapshot) {
+    return buildConversationTopology(extractVisibleConversationTokens(snapshot), [snapshot]);
+  }
+
+  function topologyFromOrder(order, thoughtAssistantIds = []) {
+    const thoughtNodes = thoughtAssistantIds.map((assistantId, index) => (
+      `<node resource-id="com.github.tah10n.pocketai:id/thought-toggle-${assistantId}" package="com.github.tah10n.pocketai" bounds="[40,${80 + index * 80}][1040,${140 + index * 80}]" />`
+    ));
+    const snapshot = parseUiSnapshot(`<hierarchy>${thoughtNodes.join('')}</hierarchy>`);
+    return buildConversationTopology(order, [snapshot]);
+  }
+
+  function conversationToken(kind, id, state = 'complete') {
+    return {
+      key: `${kind}:${id}`,
+      kind,
+      id,
+      state,
+    };
+  }
+
+  it('resolves the required oldest-to-newest fixture without inspecting message content', () => {
+    const fixture = resolveBranchFixture(topologyFromSnapshot(buildFixtureSnapshot()), {
+      audioSupported: true,
+    });
+
+    expect(fixture.trailingModelSwitchId).toBe('switch-tail');
+    expect(fixture.targets).toEqual(expect.objectContaining({
+      audio: expect.objectContaining({ userId: 'user-audio', assistantId: 'assistant-audio' }),
+      document: expect.objectContaining({ userId: 'user-document', assistantId: 'assistant-document' }),
+      image: expect.objectContaining({ userId: 'user-image', assistantId: 'assistant-image' }),
+      reasoning: expect.objectContaining({ userId: 'user-reasoning', assistantId: 'assistant-reasoning' }),
+      main: expect.objectContaining({ userId: 'user-main', assistantId: 'assistant-main' }),
+    }));
+    expect(fixture.targets.image.attachmentResourceIds).toEqual([
+      'message-attachment-image-user-image-attachment-image',
+    ]);
+  });
+
+  it('treats missing required fixtures as precondition failures instead of skips', () => {
+    const missingDocument = topologyFromSnapshot(buildFixtureSnapshot({ includeDocument: false }));
+    expect(() => resolveBranchFixture(missingDocument, { audioSupported: true }))
+      .toThrow(ScenarioPreconditionFailureError);
+
+    const noAudio = topologyFromSnapshot(buildFixtureSnapshot({ includeAudio: false }));
+    expect(() => resolveBranchFixture(noAudio, { audioSupported: true }))
+      .toThrow(/missing required turns: audio/);
+    expect(() => resolveBranchFixture(noAudio, { audioSupported: false })).not.toThrow();
+
+    const missingDocumentAnswerSnapshot = buildFixtureSnapshot();
+    missingDocumentAnswerSnapshot.nodes = missingDocumentAnswerSnapshot.nodes.filter(
+      (node) => !node.resourceId.endsWith('assistant-message-state-complete-assistant-document')
+    );
+    expect(() => resolveBranchFixture(topologyFromSnapshot(missingDocumentAnswerSnapshot), {
+      audioSupported: true,
+    })).toThrow(/missing required turns: document/);
+  });
+
+  it('merges overlapping viewport sequences without dropping ordered message identity', () => {
+    const older = [
+      { key: 'user:1', id: '1' },
+      { key: 'assistant:1', id: '1a' },
+      { key: 'user:2', id: '2' },
+    ];
+    const newer = [
+      { key: 'user:2', id: '2' },
+      { key: 'assistant:2', id: '2a' },
+    ];
+
+    expect(mergeOlderConversationOrder(older, newer).map((token) => token.key)).toEqual([
+      'user:1',
+      'assistant:1',
+      'user:2',
+      'assistant:2',
+    ]);
+    expect(normalizeAndroidResourceId('com.example:id/chat-primary-action-send'))
+      .toBe('chat-primary-action-send');
+  });
+
+  it('recognizes only the stable visible history-start anchor as a complete topology scan', () => {
+    const anchored = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="com.example:id/chat-history-start-anchor" bounds="[0,20][1080,21]" />
+      </hierarchy>
+    `);
+    const offscreen = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="com.example:id/chat-history-start-anchor" bounds="[0,-20][1080,-19]" />
+      </hierarchy>
+    `);
+
+    expect(hasConversationHistoryStartAnchor(anchored)).toBe(true);
+    expect(hasConversationHistoryStartAnchor(offscreen)).toBe(false);
+  });
+
+  it('binds precise generation-gate observations to a new streaming assistant and one UI snapshot', () => {
+    const buildGateSnapshot = ({ phase, assistantId, content = '' }) => parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="com.example:id/chat-qa-generation-gate-${phase}-${assistantId}" bounds="[0,10][1,11]" />
+        <node resource-id="com.example:id/assistant-message-state-streaming-${assistantId}" bounds="[40,300][1040,500]" />
+        ${content ? `<node resource-id="com.example:id/assistant-message-content-${assistantId}" text="${content}" bounds="[40,330][1040,450]" />` : ''}
+        <node resource-id="com.example:id/chat-primary-action-stop" clickable="true" enabled="true" bounds="[900,2100][1040,2240]" />
+      </hierarchy>
+    `);
+    const beforeSnapshot = buildGateSnapshot({
+      phase: 'before-first-output',
+      assistantId: 'assistant-before',
+    });
+    const before = resolveAndroidQaGenerationGateObservation(beforeSnapshot, {
+      phase: 'before-first-output',
+      baselineAssistantIds: new Set(['assistant-old']),
+    });
+    expect(before).toEqual(expect.objectContaining({
+      assistantId: 'assistant-before',
+      phase: 'before-first-output',
+      stopBounds: expect.objectContaining({
+        left: 900,
+        top: 2100,
+        right: 1040,
+        bottom: 2240,
+      }),
+      surface: null,
+      snapshot: beforeSnapshot,
+    }));
+
+    const after = resolveAndroidQaGenerationGateObservation(buildGateSnapshot({
+      phase: 'after-first-durable-output',
+      assistantId: 'assistant-after',
+      content: 'first durable patch',
+    }), {
+      phase: 'after-first-durable-output',
+      baselineAssistantIds: new Set(['assistant-old']),
+    });
+    expect(after).toEqual(expect.objectContaining({
+      assistantId: 'assistant-after',
+      surface: 'content',
+    }));
+
+    expect(resolveAndroidQaGenerationGateObservation(parseUiSnapshot(
+      '<hierarchy><node resource-id="" bounds="[0,0][1080,2400]" /></hierarchy>'
+    ), {
+      phase: 'before-first-output',
+      baselineAssistantIds: new Set(),
+    })).toBeNull();
+    expect(() => resolveAndroidQaGenerationGateObservation(beforeSnapshot, {
+      phase: 'before-first-output',
+      baselineAssistantIds: new Set(['assistant-before']),
+    })).toThrow(/not tied to a new branch assistant/);
+  });
+
+  it('rejects a before-output gate that already exposes output and waits for durable after-output evidence', () => {
+    const beforeWithOutput = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-qa-generation-gate-before-first-output-assistant-new" bounds="[0,10][1,11]" />
+        <node resource-id="assistant-message-state-streaming-assistant-new" bounds="[40,300][1040,500]" />
+        <node resource-id="assistant-message-content-assistant-new" text="unexpected" bounds="[40,330][1040,450]" />
+        <node resource-id="chat-primary-action-stop" clickable="true" enabled="true" bounds="[900,2100][1040,2240]" />
+      </hierarchy>
+    `);
+    expect(() => resolveAndroidQaGenerationGateObservation(beforeWithOutput, {
+      phase: 'before-first-output',
+      baselineAssistantIds: new Set(),
+    })).toThrow(/exposed content/);
+
+    const afterWithoutOutput = parseUiSnapshot(beforeWithOutput.xml
+      .replace('before-first-output', 'after-first-durable-output')
+      .replace('<node resource-id="assistant-message-content-assistant-new" text="unexpected" bounds="[40,330][1040,450]" />', ''));
+    expect(resolveAndroidQaGenerationGateObservation(afterWithoutOutput, {
+      phase: 'after-first-durable-output',
+      baselineAssistantIds: new Set(),
+    })).toBeNull();
+  });
+
+  it('requires every stable attachment identity in the exact prepared generation request', () => {
+    const target = {
+      userId: 'user-document',
+      attachmentResourceIds: [
+        'message-attachment-document-user-document-attachment-1',
+        'message-attachment-document-user-document-attachment-2',
+      ],
+    };
+    const evidence = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-prepared-generation-user-document-assistant-new" bounds="[0,10][1,11]" />
+        <node resource-id="chat-prepared-attachment-assistant-new-document-attachment-1" bounds="[0,12][1,13]" />
+        <node resource-id="chat-prepared-attachment-assistant-new-document-attachment-2" bounds="[0,14][1,15]" />
+      </hierarchy>
+    `);
+
+    expect(resolveTargetAttachmentIds(target, 'document')).toEqual([
+      'attachment-1',
+      'attachment-2',
+    ]);
+    expect(assertPreparedAttachmentGenerationEvidence(
+      evidence,
+      target,
+      'assistant-new',
+      'document'
+    )).toEqual(['attachment-1', 'attachment-2']);
+
+    const staleGeneration = parseUiSnapshot(evidence.xml.replace(
+      'chat-prepared-generation-user-document-assistant-new',
+      'chat-prepared-generation-user-document-assistant-old'
+    ));
+    expect(() => assertPreparedAttachmentGenerationEvidence(
+      staleGeneration,
+      target,
+      'assistant-new',
+      'document'
+    )).toThrow(/absent or stale/);
+
+    const missingAttachment = parseUiSnapshot(evidence.xml.replace(
+      '<node resource-id="chat-prepared-attachment-assistant-new-document-attachment-2" bounds="[0,14][1,15]" />',
+      ''
+    ));
+    expect(() => assertPreparedAttachmentGenerationEvidence(
+      missingAttachment,
+      target,
+      'assistant-new',
+      'document'
+    )).toThrow(/non-exact attachment evidence/);
+
+    const extraAttachment = parseUiSnapshot(evidence.xml.replace(
+      '</hierarchy>',
+      '<node resource-id="chat-prepared-attachment-assistant-new-audio-stale-audio" bounds="[0,16][1,17]" /></hierarchy>'
+    ));
+    expect(() => assertPreparedAttachmentGenerationEvidence(
+      extraAttachment,
+      target,
+      'assistant-new',
+      'document'
+    )).toThrow(/audio-stale-audio/);
+  });
+
+  it('parses the Android selected attribute for authoritative model-control verification', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="reasoning-effort-off" selected="true" bounds="[0,0][100,100]" />
+      </hierarchy>
+    `);
+    expect(snapshot.nodes[0].selected).toBe(true);
+  });
+
+  it('requires a new completed assistant directly adjacent to the target user', () => {
+    const before = topologyFromOrder([
+      conversationToken('user', 'user-older'),
+      conversationToken('assistant', 'assistant-older'),
+      conversationToken('user', 'user-target'),
+      conversationToken('assistant', 'assistant-target-old'),
+    ]);
+    const baseline = createBranchRegenerationBaseline(before, 'user-target');
+    const after = topologyFromOrder([
+      conversationToken('user', 'user-older'),
+      conversationToken('assistant', 'assistant-older'),
+      conversationToken('user', 'user-target'),
+      conversationToken('assistant', 'assistant-target-new'),
+    ]);
+
+    expect(resolveBranchRegenerationReplacement(after, baseline)).toEqual(
+      expect.objectContaining({ id: 'assistant-target-new', state: 'complete' })
+    );
+    expect([...baseline.assistantIds]).toEqual([
+      'assistant-older',
+      'assistant-target-old',
+    ]);
+  });
+
+  it('rejects unrelated, reused, and non-complete branch replacements', () => {
+    const before = topologyFromOrder([
+      conversationToken('user', 'user-older'),
+      conversationToken('assistant', 'assistant-older'),
+      conversationToken('user', 'user-target'),
+      conversationToken('assistant', 'assistant-target-old'),
+    ]);
+    const baseline = createBranchRegenerationBaseline(before, 'user-target');
+
+    const unrelatedOnly = topologyFromOrder([
+      conversationToken('user', 'user-older'),
+      conversationToken('assistant', 'assistant-older'),
+      conversationToken('user', 'user-target'),
+    ]);
+    expect(() => resolveBranchRegenerationReplacement(unrelatedOnly, baseline))
+      .toThrow(/directly adjacent/);
+
+    const reused = topologyFromOrder([
+      conversationToken('user', 'user-target'),
+      conversationToken('assistant', 'assistant-older'),
+    ]);
+    expect(() => resolveBranchRegenerationReplacement(reused, baseline))
+      .toThrow(/reused pre-operation assistant/);
+
+    const stopped = topologyFromOrder([
+      conversationToken('user', 'user-target'),
+      conversationToken('assistant', 'assistant-target-new', 'stopped'),
+    ]);
+    expect(() => resolveBranchRegenerationReplacement(stopped, baseline))
+      .toThrow(/ended in stopped instead of complete/);
+  });
+
+  it('rejects a new completed assistant that belongs to another user', () => {
+    const before = topologyFromOrder([
+      conversationToken('user', 'user-target'),
+      conversationToken('assistant', 'assistant-target-old'),
+    ]);
+    const baseline = createBranchRegenerationBaseline(before, 'user-target');
+    const after = topologyFromOrder([
+      conversationToken('user', 'user-target'),
+      conversationToken('user', 'user-other'),
+      conversationToken('assistant', 'assistant-other-new'),
+    ]);
+
+    expect(() => resolveBranchRegenerationReplacement(after, baseline))
+      .toThrow(/directly adjacent/);
+  });
+
+  it('verifies authoritative thought clear on settle and rehydrate', () => {
+    const before = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-old'),
+    ], ['assistant-reasoning-old']);
+    const baseline = createBranchRegenerationBaseline(before, 'user-reasoning');
+    const settled = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-new'),
+    ]);
+
+    expect(assertAuthoritativeThoughtClear({
+      beforeTopology: before,
+      topology: settled,
+      baseline,
+      replacementAssistantId: 'assistant-reasoning-new',
+    })).toEqual({
+      replacedThoughtAbsent: true,
+      replacementThoughtAbsent: true,
+    });
+
+    const rehydrated = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-new'),
+    ]);
+    expect(() => assertAuthoritativeThoughtClear({
+      beforeTopology: before,
+      topology: rehydrated,
+      baseline,
+      replacementAssistantId: 'assistant-reasoning-new',
+    })).not.toThrow();
+  });
+
+  it('fails reasoning clear when thought is missing from the fixture or survives replacement', () => {
+    const beforeWithoutThought = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-old'),
+    ]);
+    const missingThoughtBaseline = createBranchRegenerationBaseline(
+      beforeWithoutThought,
+      'user-reasoning'
+    );
+    const cleared = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-new'),
+    ]);
+    expect(() => assertAuthoritativeThoughtClear({
+      beforeTopology: beforeWithoutThought,
+      topology: cleared,
+      baseline: missingThoughtBaseline,
+      replacementAssistantId: 'assistant-reasoning-new',
+    })).toThrow(ScenarioPreconditionFailureError);
+
+    const before = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-old'),
+    ], ['assistant-reasoning-old']);
+    const baseline = createBranchRegenerationBaseline(before, 'user-reasoning');
+    const replacementWithThought = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-new'),
+    ], ['assistant-reasoning-new']);
+    expect(() => assertAuthoritativeThoughtClear({
+      beforeTopology: before,
+      topology: replacementWithThought,
+      baseline,
+      replacementAssistantId: 'assistant-reasoning-new',
+    })).toThrow(/still exposes thought content/);
+
+    const staleThoughtResource = topologyFromOrder([
+      conversationToken('user', 'user-reasoning'),
+      conversationToken('assistant', 'assistant-reasoning-new'),
+    ], ['assistant-reasoning-old']);
+    expect(() => assertAuthoritativeThoughtClear({
+      beforeTopology: before,
+      topology: staleThoughtResource,
+      baseline,
+      replacementAssistantId: 'assistant-reasoning-new',
+    })).toThrow(/still present/);
+  });
+
+  it('redacts local paths and credentials while retaining fatal-log classification', () => {
+    const raw = [
+      `source=${path.resolve(__dirname, '..', '..', 'src', 'index.ts')}`,
+      'Authorization: Bearer secret.token.value',
+      'token=hf_12345678901234567890',
+      'uri=file:///C:/Users/example/private.txt',
+    ].join('\n');
+    const sanitized = sanitizeQaLogcat(raw);
+
+    expect(sanitized).toContain('<local-path>');
+    expect(sanitized).toContain('Bearer <redacted>');
+    expect(sanitized).toContain('<hugging-face-token>');
+    expect(sanitized).toContain('<local-file-uri>');
+    expect(sanitized).not.toContain('secret.token.value');
+    expect(scanFatalAndroidLogs('E/AndroidRuntime: FATAL EXCEPTION: main')).toEqual(
+      expect.arrayContaining([expect.stringContaining('FATAL EXCEPTION')])
+    );
+    expect(scanFatalAndroidLogs('F/libc: Fatal signal 7 (SIGBUS), code 1')).toEqual(
+      expect.arrayContaining([expect.stringContaining('Fatal signal')])
+    );
+    expect(scanFatalAndroidLogs('I/ReactNativeJS: branch regeneration complete')).toEqual([]);
+  });
+
+  it('redacts complete sensitive assignments and bounds arbitrary QA text', () => {
+    const raw = [
+      'prompt: confidential user text here',
+      'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+      'secret=alpha beta gamma',
+      'token="quoted credential with spaces" normal=retained',
+      'windows=D:\\private folder\\model.gguf',
+      'posix=/home/private-user/models/model.gguf',
+      'ordinary precondition reason',
+    ].join('\n');
+    const sanitized = sanitizeAndroidQaText(raw, { maxChars: 2_000 });
+
+    for (const secret of [
+      'confidential user text here',
+      'dXNlcjpwYXNzd29yZA',
+      'alpha beta gamma',
+      'quoted credential with spaces',
+      'D:\\private folder',
+      '/home/private-user',
+    ]) {
+      expect(sanitized).not.toContain(secret);
+    }
+    expect(sanitized).toContain('ordinary precondition reason');
+    const bounded = sanitizeAndroidQaText('x'.repeat(100), { maxChars: 16 });
+    expect(bounded).toBe(`${'x'.repeat(16)}\n<truncated:84>`);
+  });
+
+  it('requires the source snapshot to remain exact across device identity hashing', () => {
+    const baseline = {
+      headSha: 'head-1',
+      treeSha: 'tree-1',
+      dirty: true,
+      dirtyDigest: 'dirty-1',
+      dirtyEntryCount: 2,
+    };
+
+    expect(areExactGitProvenancesEqual(baseline, { ...baseline })).toBe(true);
+    expect(areExactGitProvenancesEqual(baseline, {
+      ...baseline,
+      dirtyDigest: 'dirty-2',
+    })).toBe(false);
+    expect(areExactGitProvenancesEqual(baseline, {
+      ...baseline,
+      dirtyEntryCount: 3,
+    })).toBe(false);
+  });
+
+  it('recomputes current QA provenance through the same isolated Gradle home as the build', () => {
+    const appRoot = path.resolve(__dirname, '..', '..');
+    const setupGradleHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-setup-gradle-'));
+    const setupGradleInitDirectory = path.join(setupGradleHome, 'init.d');
+    const hmacKeyPath = path.join(setupGradleHome, 'reuse-hmac.key');
+    const previousGradleUserHome = process.env.GRADLE_USER_HOME;
+    fs.mkdirSync(setupGradleInitDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(setupGradleInitDirectory, 'gradle-actions.build-result-capture.init.gradle'),
+      'allprojects {}\n',
+    );
+    fs.writeFileSync(path.join(setupGradleHome, 'gradle.properties'), 'privateValue=setup-gradle\n');
+    const currentGit = {
+      headSha: 'fixture-head',
+      treeSha: 'fixture-tree',
+      dirty: true,
+      dirtyDigest: 'fixture-dirty',
+      dirtyEntryCount: 1,
+    };
+    const variant = 'release';
+    const abi = 'x86_64';
+    const nodeEnv = 'production';
+    const isolatedEnvironment = createIsolatedAndroidBuildEnvironment(
+      appRoot,
+      process.env,
+      { NODE_ENV: nodeEnv },
+    );
+    const gradleArgs = withAndroidProvenanceGradleExecutionArgs([
+      'app:assembleRelease',
+      '-PreactNativeArchitectures=x86_64',
+    ]);
+    const prebuildInputState = collectPrebuildInputState(appRoot, {
+      env: isolatedEnvironment,
+      hmacKeyPath,
+      nodeEnv,
+      variant,
+    });
+    const buildContext = {
+      androidQaEvidence: false,
+      effectiveBuild: collectAndroidEffectiveBuildContext(appRoot, {
+        env: isolatedEnvironment,
+        gradleArgs,
+        variant,
+      }),
+      prebuildInputDigest: prebuildInputState.digest,
+    };
+    const storedManifest = collectBuildProvenance(appRoot, {
+      abi,
+      androidRoot: path.join(appRoot, 'android'),
+      buildContext,
+      env: isolatedEnvironment,
+      git: currentGit,
+      gradleArgs,
+      includeBundleInputs: true,
+      hmacKeyPath,
+      variant,
+    });
+
+    try {
+      process.env.GRADLE_USER_HOME = setupGradleHome;
+      const currentManifest = collectCurrentQaBuildProvenance({
+        abi,
+        build: { provenance: storedManifest },
+        variant,
+      }, currentGit, { hmacKeyPath });
+      expect(currentManifest.digest).toBe(storedManifest.digest);
+    } finally {
+      if (previousGradleUserHome == null) {
+        delete process.env.GRADLE_USER_HOME;
+      } else {
+        process.env.GRADLE_USER_HOME = previousGradleUserHome;
+      }
+      fs.rmSync(setupGradleHome, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects tampered stamps, stale source state, and a replaced installed APK', () => {
+    const apkSha256 = 'a'.repeat(64);
+    const currentGit = {
+      headSha: 'head-sha',
+      treeSha: 'tree-sha',
+      dirtyDigest: 'dirty-digest',
+    };
+    const manifest = {
+      schemaVersion: 2,
+      variant: 'release',
+      abi: 'x86_64',
+      embeddedBundle: true,
+      buildContext: {
+        androidQaEvidence: true,
+        effectiveBuild: {
+          version: { code: '16', name: '1.6.0' },
+        },
+      },
+      toolchains: { node: 'v22.0.0', java: '17', gradleWrapper: { version: '8.14.3' } },
+      git: currentGit,
+      entries: [{ path: 'src/app.ts', type: 'file', size: 1, sha256: 'b'.repeat(64) }],
+    };
+    const manifestDigest = hashCanonicalJson(manifest);
+    const provenance = {
+      schemaVersion: 2,
+      serial: 'emulator-5554',
+      packageName: 'com.github.tah10n.pocketai',
+      variant: 'release',
+      abi: 'x86_64',
+      build: {
+        schemaVersion: 2,
+        variant: 'release',
+        abi: 'x86_64',
+        provenanceDigest: manifestDigest,
+        provenance: { ...manifest, digest: manifestDigest },
+        apk: {
+          sha256: apkSha256,
+          packagedAbis: ['x86_64'],
+          matchedAbi: 'x86_64',
+        },
+      },
+      install: {
+        schemaVersion: 2,
+        serial: 'emulator-5554',
+        packageName: 'com.github.tah10n.pocketai',
+        variant: 'release',
+        abi: 'x86_64',
+        buildProvenanceDigest: manifestDigest,
+        apkSha256,
+        installedApkSha256: apkSha256,
+        packagedAbis: ['x86_64'],
+        matchedAbi: 'x86_64',
+        packagePath: '/data/app/fixture/base.apk',
+        versionCode: '16',
+        versionName: '1.6.0',
+      },
+    };
+    const installedIdentity = {
+      installed: true,
+      packagePath: '/data/app/fixture/base.apk',
+      apkSha256,
+      versionCode: '16',
+      versionName: '1.6.0',
+      supportedAbis: ['x86_64', 'x86'],
+    };
+    const validation = {
+      provenance,
+      currentGit,
+      currentBuildProvenance: { ...manifest, digest: manifestDigest },
+      installedIdentity,
+      serial: 'emulator-5554',
+      packageName: 'com.github.tah10n.pocketai',
+    };
+
+    expect(() => validateQaProvenance(validation)).not.toThrow();
+    expect(() => validateQaProvenance({
+      ...validation,
+      installedIdentity: { ...installedIdentity, apkSha256: 'c'.repeat(64) },
+    })).toThrow(/currently installed/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: {
+        ...provenance,
+        install: { ...provenance.install, versionCode: '17' },
+      },
+      installedIdentity: { ...installedIdentity, versionCode: '17' },
+    })).toThrow(/stale, tampered, or incomplete/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      currentGit: { ...currentGit, dirtyDigest: 'new-dirty-digest' },
+    })).toThrow(/current source/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      currentBuildProvenance: { ...manifest, digest: 'stale-input-digest' },
+    })).toThrow(/stale, tampered, or incomplete/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: {
+        ...provenance,
+        build: {
+          ...provenance.build,
+          provenance: {
+            ...provenance.build.provenance,
+            entries: [],
+          },
+        },
+      },
+    })).toThrow(/tampered/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: {
+        ...provenance,
+        build: { ...provenance.build, variant: 'debug' },
+      },
+    })).toThrow(/stale, tampered, or incomplete/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: {
+        ...provenance,
+        build: {
+          ...provenance.build,
+          provenance: {
+            ...provenance.build.provenance,
+            embeddedBundle: false,
+          },
+        },
+      },
+    })).toThrow(/stale, tampered, or incomplete/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: {
+        ...provenance,
+        build: {
+          ...provenance.build,
+          apk: {
+            ...provenance.build.apk,
+            packagedAbis: ['arm64-v8a', 'x86_64'],
+          },
+        },
+        install: {
+          ...provenance.install,
+          packagedAbis: ['arm64-v8a', 'x86_64'],
+        },
+      },
+    })).toThrow(/package and select exactly requested ABI/);
+
+    const universalManifest = { ...manifest, abi: 'universal' };
+    const universalDigest = hashCanonicalJson(universalManifest);
+    const universalProvenance = {
+      ...provenance,
+      abi: 'universal',
+      build: {
+        ...provenance.build,
+        abi: 'universal',
+        provenanceDigest: universalDigest,
+        provenance: { ...universalManifest, digest: universalDigest },
+        apk: {
+          ...provenance.build.apk,
+          packagedAbis: ['arm64-v8a', 'x86_64'],
+          matchedAbi: 'x86_64',
+        },
+      },
+      install: {
+        ...provenance.install,
+        abi: 'universal',
+        buildProvenanceDigest: universalDigest,
+        packagedAbis: ['arm64-v8a', 'x86_64'],
+        matchedAbi: 'x86_64',
+      },
+    };
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: {
+        ...universalProvenance,
+        build: {
+          ...universalProvenance.build,
+          apk: {
+            ...universalProvenance.build.apk,
+            packagedAbis: ['x86_64'],
+          },
+        },
+        install: {
+          ...universalProvenance.install,
+          packagedAbis: ['x86_64'],
+        },
+      },
+      currentBuildProvenance: { ...universalManifest, digest: universalDigest },
+    })).toThrow(/canonical Android ABI set/);
+    expect(() => validateQaProvenance({
+      ...validation,
+      provenance: universalProvenance,
+      currentBuildProvenance: { ...universalManifest, digest: universalDigest },
+    })).not.toThrow();
+  });
+
+  it('streams app UID logs and a server-filtered exact system ANR interval into private owned files', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-'));
+    const children = [4101, 4102].map((pid) => {
+      const child = new EventEmitter();
+      child.pid = pid;
+      child.kill = jest.fn(() => {
+        setImmediate(() => child.emit('close', null, 'SIGTERM'));
+        return true;
+      });
+      return child;
+    });
+    const spawn = jest.fn(() => {
+      const child = children[spawn.mock.calls.length - 1];
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    });
+    const runCapture = jest.fn((command, args) => (
+      args.includes('dumpsys')
+        ? 'Package [com.github.tah10n.pocketai]\n  userId=10234\n'
+        : '1784700000.123\n'
+    ));
+
+    try {
+      const collector = await startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'branch-step',
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn,
+      });
+      fs.appendFileSync(
+        collector.rawLogPath,
+        'complete app interval\n',
+      );
+      fs.appendFileSync(
+        collector.systemRawLogPath,
+        '--------- beginning of system\n07-22 12:00:00.000  1000  1000 E ActivityManager: ANR in com.github.tah10n.pocketai\n',
+      );
+
+      expect(spawn).toHaveBeenNthCalledWith(
+        1,
+        'adb',
+        [
+          '-s',
+          'device-1',
+          'logcat',
+          '-b',
+          'all',
+          '--uid=10234',
+          '-T',
+          '1784700000.123',
+          '-v',
+          'threadtime',
+        ],
+        expect.objectContaining({
+          stdio: ['ignore', expect.any(Number), expect.any(Number)],
+          windowsHide: true,
+        })
+      );
+      expect(spawn).toHaveBeenNthCalledWith(
+        2,
+        'adb',
+        [
+          '-s',
+          'device-1',
+          'logcat',
+          '-b',
+          'all',
+          '--uid=1000',
+          '-T',
+          '1784700000.123',
+          '-v',
+          'threadtime',
+          '--regex',
+          'ANR in com\\.github\\.tah10n\\.pocketai',
+          'ActivityManager:V',
+          '*:S',
+        ],
+        expect.objectContaining({
+          stdio: ['ignore', expect.any(Number), expect.any(Number)],
+          windowsHide: true,
+        })
+      );
+      expect(spawn.mock.calls[0][1]).not.toContain('-d');
+      expect(spawn.mock.calls[0][1]).not.toContain('-c');
+      expect(() => readAndroidLogcatCollector(collector)).toThrow(/not stopped cleanly/);
+      expect(readAndroidLogcatCollector(collector, { requireStopped: false }))
+        .toContain('complete app interval');
+      expect(scanFatalAndroidLogs(readAndroidLogcatCollector(
+        collector,
+        { requireStopped: false },
+      ))).toEqual([expect.stringContaining('ANR')]);
+
+      fs.appendFileSync(
+        collector.systemRawLogPath,
+        '07-22 12:00:01.000  1000  1000 I ActivityManager: unrelated system event\n',
+      );
+      expect(() => readAndroidLogcatCollector(collector, { requireStopped: false }))
+        .toThrow(/unrelated output/);
+      fs.writeFileSync(
+        collector.systemRawLogPath,
+        '07-22 12:00:00.000  1000  1000 E ActivityManager: ANR in com.github.tah10n.pocketai\n',
+      );
+      expect(() => readAndroidLogcatCollector(collector, {
+        requireStopped: false,
+        maxBytes: 1,
+      })).toThrow(/safety limit/);
+
+      await stopAndroidLogcatCollector(collector);
+      expect(readAndroidLogcatCollector(collector)).toContain('complete app interval');
+      expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+      cleanupAndroidLogcatCollector(collector);
+      expect(fs.existsSync(collector.rawLogPath)).toBe(false);
+      expect(fs.existsSync(collector.systemRawLogPath)).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed when the owned collector exits before the scenario completes', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-exit-'));
+    const children = [4201, 4202].map((pid) => {
+      const child = new EventEmitter();
+      child.pid = pid;
+      child.kill = jest.fn(() => {
+        setImmediate(() => child.emit('close', null, 'SIGTERM'));
+        return true;
+      });
+      return child;
+    });
+    const spawn = jest.fn(() => {
+      const child = children[spawn.mock.calls.length - 1];
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    });
+    const runCapture = jest.fn((command, args) => (
+      args.includes('dumpsys') ? 'userId=10234' : '1784700000.123'
+    ));
+
+    try {
+      const collector = await startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'unexpected-exit',
+      }, { privateRoot: tempDir, runCapture, spawn });
+      children[0].emit('close', 1, null);
+
+      expect(() => readAndroidLogcatCollector(collector, { requireStopped: false }))
+        .toThrow(/exited before the step completed/);
+      await expect(stopAndroidLogcatCollector(collector))
+        .rejects.toThrow(/exited before the step completed/);
+      expect(children[1].kill).toHaveBeenCalledTimes(1);
+      cleanupAndroidLogcatCollector(collector);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed on collector spawn errors and owned-stop timeouts', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-failure-'));
+    const runCapture = jest.fn((command, args) => (
+      args.includes('dumpsys') ? 'userId=10234' : '1784700000.123'
+    ));
+    const spawnFailures = [4301, 4302].map((pid, index) => {
+      const child = new EventEmitter();
+      child.pid = pid;
+      child.kill = jest.fn(() => {
+        setImmediate(() => child.emit('close', -1, null));
+        return true;
+      });
+      child.failStart = index === 1;
+      return child;
+    });
+
+    try {
+      const onCollectorCreated = jest.fn();
+      const failingSpawn = jest.fn(() => {
+        const child = spawnFailures[failingSpawn.mock.calls.length - 1];
+        setImmediate(() => child.emit(child.failStart ? 'error' : 'spawn', new Error('spawn denied')));
+        return child;
+      });
+      await expect(startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'spawn-error',
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn: failingSpawn,
+        onCollectorCreated,
+      })).rejects.toThrow(/spawn denied/);
+      expect(onCollectorCreated).toHaveBeenLastCalledWith(null);
+
+      const stuckChildren = [4242, 4243].map((pid) => {
+        const child = new EventEmitter();
+        child.pid = pid;
+        child.kill = jest.fn(() => true);
+        return child;
+      });
+      const stuckSpawn = jest.fn(() => {
+        const child = stuckChildren[stuckSpawn.mock.calls.length - 1];
+        setImmediate(() => child.emit('spawn'));
+        return child;
+      });
+      const stopOwnedProcessTree = jest.fn(() => true);
+      const collector = await startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'stop-timeout',
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn: stuckSpawn,
+        captureOwnership: (pid) => ({
+          processIdentity: { startMarker: `owned-logcat-process-${pid}` },
+          processTreeIdentities: [{
+            pid,
+            parentPid: null,
+            startMarker: `owned-logcat-process-${pid}`,
+            depth: 0,
+          }],
+          ownershipBoundary: 'test-owned-boundary',
+        }),
+        stopOwnedProcessTreeByPid: stopOwnedProcessTree,
+      });
+      await expect(stopAndroidLogcatCollector(collector, {
+        stopTimeoutMs: 1,
+        forceStopTimeoutMs: 1,
+      })).rejects.toThrow(/Timed out/);
+      expect(stuckChildren.every((child) => child.kill.mock.calls.length === 2)).toBe(true);
+      expect(stopOwnedProcessTree).toHaveBeenCalledWith(4242, expect.objectContaining({
+        expectedIdentity: { startMarker: 'owned-logcat-process-4242' },
+        ownershipBoundary: 'test-owned-boundary',
+      }));
+      expect(stopOwnedProcessTree).toHaveBeenCalledWith(4243, expect.objectContaining({
+        expectedIdentity: { startMarker: 'owned-logcat-process-4243' },
+        ownershipBoundary: 'test-owned-boundary',
+      }));
+      cleanupAndroidLogcatCollector(collector);
+      expect(fs.existsSync(collector.rawLogPath)).toBe(false);
+      expect(fs.existsSync(collector.systemRawLogPath)).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('retains a failed-start collector until a later authenticated cleanup retry succeeds', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-start-retain-'));
+    const children = [4401, 4402].map((pid, index) => {
+      const child = new EventEmitter();
+      child.pid = pid;
+      child.kill = jest.fn(() => true);
+      child.failStart = index === 1;
+      return child;
+    });
+    const spawn = jest.fn(() => {
+      const child = children[spawn.mock.calls.length - 1];
+      setImmediate(() => child.emit(child.failStart ? 'error' : 'spawn', new Error('system collector failed')));
+      return child;
+    });
+    const runCapture = jest.fn((command, args) => (
+      args.includes('dumpsys') ? 'userId=10234' : '1784700000.123'
+    ));
+    let allowOwnedCleanup = false;
+    const stopOwnedProcessTreeByPid = jest.fn(() => allowOwnedCleanup);
+    const onCollectorCreated = jest.fn();
+
+    try {
+      await expect(startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'failed-start-retained',
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn,
+        forceStopTimeoutMs: 1,
+        captureOwnership: (pid) => ({
+          processIdentity: { startMarker: `retained-${pid}` },
+          processTreeIdentities: [{
+            pid,
+            parentPid: null,
+            startMarker: `retained-${pid}`,
+            depth: 0,
+          }],
+          ownershipBoundary: 'retained-test-boundary',
+        }),
+        stopOwnedProcessTreeByPid,
+        onCollectorCreated,
+      })).rejects.toThrow(/remain retained for a later authenticated cleanup retry/);
+
+      const retainedCollector = onCollectorCreated.mock.calls[0][0];
+      expect(retainedCollector).toEqual(expect.objectContaining({
+        started: false,
+        closed: false,
+      }));
+      expect(onCollectorCreated).toHaveBeenCalledTimes(1);
+      expect(fs.existsSync(retainedCollector.rawLogPath)).toBe(true);
+      expect(fs.existsSync(retainedCollector.systemRawLogPath)).toBe(true);
+      expect(() => cleanupAndroidLogcatCollector(retainedCollector))
+        .toThrow(/collector may still be running/);
+      expect(fs.existsSync(retainedCollector.rawLogPath)).toBe(true);
+
+      allowOwnedCleanup = true;
+      cleanupAndroidLogcatCollector(retainedCollector);
+      expect(fs.existsSync(retainedCollector.rawLogPath)).toBe(false);
+      expect(fs.existsSync(retainedCollector.systemRawLogPath)).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
   });
 });
 
@@ -3236,7 +4467,23 @@ describe('android-scenarios skip signaling', () => {
 
   it('does not append a runner failure for skips already recorded as failed scenarios', () => {
     expect(shouldAppendRunnerFailure(new ScenarioSkipFailureError('already recorded'))).toBe(false);
+    expect(shouldAppendRunnerFailure(
+      markScenarioFailureRecorded(new Error('scenario evidence already recorded'))
+    )).toBe(false);
     expect(shouldAppendRunnerFailure(new Error('real runner failure'))).toBe(true);
+  });
+
+  it('parses and forwards an explicit release APK variant for current-head packs', () => {
+    const options = parseCliOptions(['--pack', 'branch-regeneration', '--apk-variant', 'Release']);
+    expect(options).toEqual(expect.objectContaining({ apkVariant: 'release' }));
+    expect(buildSmokeLaunchArgs({
+      ...options,
+      bootstrapScreenshot: false,
+    }, 'emulator-5554')).toEqual(expect.arrayContaining([
+      '--apk-variant',
+      'release',
+    ]));
+    expect(() => parseCliOptions(['--apk-variant', 'profile'])).toThrow(/Unsupported Android APK variant/);
   });
 });
 
@@ -3245,11 +4492,27 @@ describe('android-scenarios report path serialization', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-report-paths-'));
     const projectRoot = path.join(tempDir, 'project');
     const artifactsRoot = path.join(projectRoot, 'artifacts', 'android-scenarios');
+    const deepDiagnostic = {};
+    let deepCursor = deepDiagnostic;
+    for (let depth = 0; depth < 12; depth += 1) {
+      deepCursor.next = {};
+      deepCursor = deepCursor.next;
+    }
+    deepCursor.secret = 'must-not-survive-depth-bound';
     const results = [
       {
         id: 'home-smoke',
         status: 'passed',
         screenshotPath: path.join(artifactsRoot, 'home-smoke.png'),
+        rawLogPath: path.join(projectRoot, 'node_modules', '.cache', 'private.raw.log'),
+        rawLogPaths: [path.join(projectRoot, 'node_modules', '.cache', 'private.raw.log')],
+        systemRawLogPath: path.join(projectRoot, 'node_modules', '.cache', 'private.system.raw.log'),
+        logcatCollector: { privateLogcatPath: path.join(tempDir, 'secret.raw.log') },
+        checkpoints: [{
+          screenshotPath: path.join(artifactsRoot, 'branch-regeneration', 'checkpoint.png'),
+          uiDumpPath: path.join(artifactsRoot, 'branch-regeneration', 'checkpoint.xml'),
+          logcatPath: path.join(artifactsRoot, 'branch-regeneration', 'checkpoint-logcat.txt'),
+        }],
       },
       {
         id: 'bottom-tabs',
@@ -3268,11 +4531,24 @@ describe('android-scenarios report path serialization', () => {
         screenshotPath: path.join(artifactsRoot, 'run-failed.png'),
         uiDumpPath: path.join(artifactsRoot, 'run-failed.xml'),
         logcatPath: path.join(artifactsRoot, 'run-failed-logcat.txt'),
+        error: [
+          'prompt: confidential report prompt words',
+          'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+        ].join('\n'),
+        details: [{ captureError: `secret=alpha beta gamma\npath=${path.join(tempDir, 'private', 'file.bin')}` }],
+        deepDiagnostic,
+        repeatedDiagnostics: Array.from({ length: 150 }, (_value, index) => `reason-${index}`),
+        oversized: 'x'.repeat(4_096),
       },
       {
         id: 'project-root-artifact',
         status: 'failed',
         screenshotPath: path.join(projectRoot, 'artifacts', 'other-captures', 'capture.png'),
+      },
+      {
+        id: 'outside-root-artifact',
+        status: 'failed',
+        screenshotPath: path.join(tempDir, 'outside-project', 'private-capture.png'),
       },
     ];
 
@@ -3280,7 +4556,14 @@ describe('android-scenarios report path serialization', () => {
       const serializedResults = serializeReportResults(results, { artifactsRoot, projectRoot });
 
       expect(serializedResults).toEqual([
-        expect.objectContaining({ screenshotPath: 'home-smoke.png' }),
+        expect.objectContaining({
+          screenshotPath: 'home-smoke.png',
+          checkpoints: [expect.objectContaining({
+            screenshotPath: 'branch-regeneration/checkpoint.png',
+            uiDumpPath: 'branch-regeneration/checkpoint.xml',
+            logcatPath: 'branch-regeneration/checkpoint-logcat.txt',
+          })],
+        }),
         expect.objectContaining({ screenshotPath: 'bottom-tabs-failed.png' }),
         expect.objectContaining({
           screenshotPath: 'chat-attachment-text-only-fallback-skipped.png',
@@ -3292,7 +4575,23 @@ describe('android-scenarios report path serialization', () => {
           logcatPath: 'run-failed-logcat.txt',
         }),
         expect.objectContaining({ screenshotPath: 'artifacts/other-captures/capture.png' }),
+        expect.objectContaining({ screenshotPath: '<external-artifact>' }),
       ]);
+      expect(serializedResults[0]).not.toHaveProperty('rawLogPath');
+      expect(serializedResults[0]).not.toHaveProperty('rawLogPaths');
+      expect(serializedResults[0]).not.toHaveProperty('systemRawLogPath');
+      expect(serializedResults[0]).not.toHaveProperty('logcatCollector');
+      expect(JSON.stringify(serializedResults)).not.toContain('private.raw.log');
+      expect(JSON.stringify(serializedResults)).not.toContain('secret.raw.log');
+      expect(JSON.stringify(serializedResults)).not.toContain('confidential report prompt words');
+      expect(JSON.stringify(serializedResults)).not.toContain('dXNlcjpwYXNzd29yZA');
+      expect(JSON.stringify(serializedResults)).not.toContain('alpha beta gamma');
+      expect(JSON.stringify(serializedResults)).not.toContain(tempDir);
+      expect(serializedResults[3].details[0].captureError).toContain('<redacted>');
+      expect(JSON.stringify(serializedResults[3].deepDiagnostic)).toContain('<max-depth>');
+      expect(JSON.stringify(serializedResults[3].deepDiagnostic)).not.toContain('must-not-survive-depth-bound');
+      expect(serializedResults[3].repeatedDiagnostics).toHaveLength(100);
+      expect(serializedResults[3].oversized).toContain('<truncated:');
 
       for (const result of serializedResults) {
         for (const field of ['screenshotPath', 'uiDumpPath', 'logcatPath']) {
@@ -3304,6 +4603,9 @@ describe('android-scenarios report path serialization', () => {
       }
 
       expect(results[0].screenshotPath).toBe(path.join(artifactsRoot, 'home-smoke.png'));
+      expect(results[0].checkpoints[0].uiDumpPath).toBe(
+        path.join(artifactsRoot, 'branch-regeneration', 'checkpoint.xml')
+      );
       expect(results[3].uiDumpPath).toBe(path.join(artifactsRoot, 'run-failed.xml'));
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });

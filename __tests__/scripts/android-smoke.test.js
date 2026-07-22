@@ -3,6 +3,8 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const {
+  assertSmokeBuildOverrideContract,
+  buildGradleAssembleArgs,
   buildMetroBundlePath,
   buildMetroReverseSpecs,
   buildMetroStartArgs,
@@ -12,17 +14,25 @@ const {
   cleanupOwnedMetroAfterStartupFailure,
   createOwnedMetroProcessLifecycle,
   evaluateApkReuse,
+  evaluateApkAbiCompatibility,
   evaluateInstallReuse,
   isAppJsReadyUiHierarchy,
   isInsufficientStorageInstallFailure,
+  parseAndroidPackageUid,
+  parseAndroidProcessId,
   parseCliOptions,
   parseApkVariant,
+  parseTargetAbi,
   parseDumpsysPackageOutput,
+  parseSha256Output,
   parsePackagePathOutput,
   readAndroidUiHierarchy,
   readProcessIdentity,
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
+  resolvePackagedAndroidAbis,
+  runAndroidGradleBuild,
+  saveLogcat,
   spawnWindowsJobProcess,
   stopOwnedMetroProcess,
   stopOwnedMetroProcessOrThrow,
@@ -647,6 +657,256 @@ describe('android-smoke APK reuse decisions', () => {
       })
     );
   });
+
+  it('does not launder a missing content stamp through a newer APK mtime', () => {
+    expect(
+      evaluateApkReuse({
+        apkExists: true,
+        abiCompatible: true,
+        fingerprintMatches: false,
+        apkIsFreshByTime: true,
+      })
+    ).toEqual(
+      expect.objectContaining({
+        canReuse: false,
+      })
+    );
+  });
+});
+
+describe('android-smoke target ABI contract', () => {
+  const reactNativeLibrary = (abi) => `lib/${abi}/libreactnative.so`;
+  const rnLlamaLibrary = (abi) => `lib/${abi}/librnllama.so`;
+  const rnLlamaJniLibrary = (abi) => `lib/${abi}/librnllama_jni.so`;
+  const nativeLibraryEntries = (abi) => [
+    reactNativeLibrary(abi),
+    rnLlamaLibrary(abi),
+    rnLlamaJniLibrary(abi),
+  ];
+  const canonicalUniversalAbis = ['arm64-v8a', 'x86_64'];
+
+  it('accepts only the supported target ABI enum', () => {
+    expect(parseTargetAbi('Universal')).toBe('universal');
+    expect(parseTargetAbi('arm64-v8a')).toBe('arm64-v8a');
+    expect(parseCliOptions(['--target-abi', 'x86_64'])).toEqual(
+      expect.objectContaining({ targetAbi: 'x86_64' }),
+    );
+    expect(() => parseTargetAbi('armeabi-v7a')).toThrow('Invalid Android target ABI');
+    expect(() => parseTargetAbi('x86')).toThrow('Invalid Android target ABI');
+    expect(() => parseTargetAbi('mips')).toThrow('Invalid Android target ABI');
+    expect(() => parseCliOptions(['--target-abi', 'mips'])).toThrow('Invalid Android target ABI');
+  });
+
+  it('passes the React Native architecture property only for targeted builds', () => {
+    expect(buildGradleAssembleArgs('app:assembleRelease', 'universal')).toEqual([
+      'app:assembleRelease',
+      '--rerun-tasks',
+      '--no-build-cache',
+      '--no-configuration-cache',
+    ]);
+    expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a')).toEqual([
+      'app:assembleRelease',
+      '-PreactNativeArchitectures=arm64-v8a',
+      '--rerun-tasks',
+      '--no-build-cache',
+      '--no-configuration-cache',
+    ]);
+    expect(() => buildGradleAssembleArgs(undefined, 'universal'))
+      .toThrow(/requires an explicit assemble task/);
+  });
+
+  it('passes provenance cache-bypass arguments to the actual Gradle spawn wrapper', () => {
+    const runChecked = jest.fn();
+    const gradleArgs = buildGradleAssembleArgs('app:assembleRelease', 'x86_64');
+
+    runAndroidGradleBuild(gradleArgs, {
+      androidRoot: 'C:\\fixture\\android',
+      env: { GRADLE_USER_HOME: 'C:\\fixture\\isolated-gradle-home' },
+      gradleWrapperPath: 'C:\\fixture\\android\\gradlew',
+      platform: 'linux',
+      runChecked,
+    });
+
+    expect(runChecked).toHaveBeenCalledWith(
+      'C:\\fixture\\android\\gradlew',
+      [
+        'app:assembleRelease',
+        '-PreactNativeArchitectures=x86_64',
+        '--rerun-tasks',
+        '--no-build-cache',
+        '--no-configuration-cache',
+      ],
+      expect.objectContaining({
+        cwd: 'C:\\fixture\\android',
+        env: { GRADLE_USER_HOME: 'C:\\fixture\\isolated-gradle-home' },
+      }),
+    );
+    expect(() => runAndroidGradleBuild(['app:assembleRelease'], { runChecked }))
+      .toThrow(/requires --rerun-tasks/);
+
+    runChecked.mockClear();
+    runAndroidGradleBuild(gradleArgs, {
+      androidRoot: 'C:\\fixture\\android',
+      comSpec: 'C:\\Windows\\System32\\cmd.exe',
+      env: { GRADLE_USER_HOME: 'C:\\fixture\\isolated-gradle-home' },
+      gradleWrapperPath: 'C:\\fixture\\android\\gradlew.bat',
+      platform: 'win32',
+      runChecked,
+    });
+    expect(runChecked).toHaveBeenCalledWith(
+      'C:\\Windows\\System32\\cmd.exe',
+      [
+        '/d',
+        '/s',
+        '/c',
+        'gradlew.bat app:assembleRelease -PreactNativeArchitectures=x86_64 --rerun-tasks --no-build-cache --no-configuration-cache',
+      ],
+      expect.objectContaining({ cwd: 'C:\\fixture\\android' }),
+    );
+    for (const unsafeValue of [
+      '1.0&whoami',
+      '1.0|more',
+      '1.0<input',
+      '1.0>output',
+      '1.0^escape',
+      '1.0(parenthesized)',
+      '1.0%SECRET%',
+      '1.0!expanded!',
+      '1.0"quoted',
+      '1.0 with-space',
+    ]) {
+      expect(() => runAndroidGradleBuild([
+        'app:assembleRelease',
+        `-PpocketAiVersionName=${unsafeValue}`,
+        '--rerun-tasks',
+        '--no-build-cache',
+        '--no-configuration-cache',
+      ], { platform: 'win32', runChecked })).toThrow(/rejects arguments containing whitespace or cmd metacharacters/);
+    }
+  });
+
+  it('derives the actual packaged ABI set from APK ZIP entries', () => {
+    expect(resolvePackagedAndroidAbis([
+      'META-INF/MANIFEST.MF',
+      reactNativeLibrary('x86_64'),
+      'lib/arm64-v8a/libother.so',
+      reactNativeLibrary('x86_64'),
+    ])).toEqual(['arm64-v8a', 'x86_64']);
+  });
+
+  it('accepts a targeted ABI supported as a secondary device ABI', () => {
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'arm64-v8a',
+      deviceAbis: ['x86_64', 'arm64-v8a'],
+      zipEntries: nativeLibraryEntries('arm64-v8a'),
+    })).toEqual(expect.objectContaining({
+      canReuse: true,
+      matchedAbi: 'arm64-v8a',
+      packagedAbis: ['arm64-v8a'],
+    }));
+  });
+
+  it('rejects unsupported, missing, or over-broad targeted APK ABI sets', () => {
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'arm64-v8a',
+      deviceAbis: ['x86_64'],
+      zipEntries: nativeLibraryEntries('arm64-v8a'),
+    })).toEqual(expect.objectContaining({ canReuse: false }));
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'arm64-v8a',
+      deviceAbis: ['arm64-v8a'],
+      zipEntries: nativeLibraryEntries('x86_64'),
+    })).toEqual(expect.objectContaining({ canReuse: false }));
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'arm64-v8a',
+      deviceAbis: ['arm64-v8a'],
+      zipEntries: [
+        ...nativeLibraryEntries('arm64-v8a'),
+        ...nativeLibraryEntries('x86_64'),
+      ],
+    })).toEqual(expect.objectContaining({ canReuse: false }));
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'arm64-v8a',
+      deviceAbis: ['arm64-v8a'],
+      zipEntries: ['lib/arm64-v8a/libother.so'],
+    })).toEqual(expect.objectContaining({
+      canReuse: false,
+      missingEntries: nativeLibraryEntries('arm64-v8a'),
+    }));
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'x86_64',
+      deviceAbis: ['x86_64'],
+      zipEntries: [reactNativeLibrary('x86_64'), rnLlamaLibrary('x86_64')],
+    })).toEqual(expect.objectContaining({
+      canReuse: false,
+      missingEntries: [rnLlamaJniLibrary('x86_64')],
+    }));
+  });
+
+  it('accepts universal provenance only for the exact canonical ABI set with required libraries', () => {
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'universal',
+      deviceAbis: ['x86_64', 'arm64-v8a'],
+      zipEntries: canonicalUniversalAbis.flatMap(nativeLibraryEntries),
+    })).toEqual(expect.objectContaining({
+      canReuse: true,
+      matchedAbi: 'x86_64',
+      packagedAbis: [...canonicalUniversalAbis].sort(),
+    }));
+    expect(evaluateApkAbiCompatibility({
+      targetAbi: 'universal',
+      deviceAbis: ['x86_64'],
+      zipEntries: nativeLibraryEntries('x86_64'),
+    })).toEqual(expect.objectContaining({
+      canReuse: false,
+      reason: expect.stringContaining('canonical Android ABI set'),
+    }));
+  });
+
+  it('applies universal ABI and injected-signing guards through the smoke build entrypoint', () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-smoke-overrides-'));
+    const androidRoot = path.join(fixtureRoot, 'android');
+    const userGradlePropertiesPath = path.join(fixtureRoot, 'private-gradle', 'gradle.properties');
+    fs.mkdirSync(androidRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(androidRoot, 'gradle.properties'),
+      `reactNativeArchitectures=${canonicalUniversalAbis.join(',')}\n`,
+    );
+
+    try {
+      expect(() => assertSmokeBuildOverrideContract(null, {
+        projectRoot: fixtureRoot,
+        abi: 'universal',
+        variant: 'release',
+        env: {},
+        userGradlePropertiesPath,
+      })).not.toThrow();
+      expect(() => assertSmokeBuildOverrideContract(null, {
+        projectRoot: fixtureRoot,
+        abi: 'universal',
+        variant: 'release',
+        env: {
+          GRADLE_OPTS:
+            '-Dorg.gradle.project.android.injected.signing.store.file=C:\\private\\upload.jks',
+        },
+        userGradlePropertiesPath,
+      })).toThrow(/reject injected signing overrides/);
+
+      fs.writeFileSync(
+        path.join(androidRoot, 'gradle.properties'),
+        'reactNativeArchitectures=x86_64\n',
+      );
+      expect(() => assertSmokeBuildOverrideContract(null, {
+        projectRoot: fixtureRoot,
+        abi: 'universal',
+        variant: 'release',
+        env: {},
+        userGradlePropertiesPath,
+      })).toThrow(/canonical Android ABI set/);
+    } finally {
+      fs.rmSync(fixtureRoot, { force: true, recursive: true });
+    }
+  });
 });
 
 describe('android-smoke install reuse decisions', () => {
@@ -656,18 +916,33 @@ describe('android-smoke install reuse decisions', () => {
         packageInstalled: true,
         didBuildDebugApk: false,
         installStamp: {
-          apkFingerprint: 'apk-1',
+          schemaVersion: 2,
+          variant: 'debug',
+          abi: 'universal',
+          buildProvenanceDigest: 'build-1',
+          apkSha256: 'apk-1',
+          installedApkSha256: 'apk-1',
           packagePath: '/data/app/base.apk',
           lastUpdateTime: '2026-04-22 10:15:00',
           versionCode: '42',
+          versionName: '1.6.0',
+          packagedAbis: ['arm64-v8a', 'x86_64'],
+          matchedAbi: 'x86_64',
         },
-        apkFingerprint: { fingerprint: 'apk-1' },
+        apkFingerprint: { fingerprint: 'apk-1', sha256: 'apk-1' },
         devicePackageInfo: {
           installed: true,
           packagePath: '/data/app/base.apk',
+          apkSha256: 'apk-1',
           lastUpdateTime: '2026-04-22 10:15:00',
           versionCode: '42',
+          versionName: '1.6.0',
         },
+        variant: 'debug',
+        abi: 'universal',
+        buildProvenanceDigest: 'build-1',
+        packagedAbis: ['arm64-v8a', 'x86_64'],
+        matchedAbi: 'x86_64',
       })
     ).toEqual(
       expect.objectContaining({
@@ -682,22 +957,63 @@ describe('android-smoke install reuse decisions', () => {
         packageInstalled: true,
         didBuildDebugApk: false,
         installStamp: {
-          apkFingerprint: 'apk-old',
+          schemaVersion: 2,
+          variant: 'debug',
+          abi: 'universal',
+          buildProvenanceDigest: 'build-1',
+          apkSha256: 'apk-old',
+          installedApkSha256: 'apk-old',
           packagePath: '/data/app/base.apk',
         },
-        apkFingerprint: { fingerprint: 'apk-new' },
+        apkFingerprint: { fingerprint: 'apk-new', sha256: 'apk-new' },
         devicePackageInfo: {
           installed: true,
           packagePath: '/data/app/base.apk',
+          apkSha256: 'apk-old',
           lastUpdateTime: '2026-04-22 10:15:00',
           versionCode: '42',
         },
+        variant: 'debug',
+        abi: 'universal',
+        buildProvenanceDigest: 'build-1',
       })
     ).toEqual(
       expect.objectContaining({
         canReuse: false,
       })
     );
+  });
+
+  it('forces reinstall when packaged ABI evidence no longer matches the inspected APK', () => {
+    expect(evaluateInstallReuse({
+      packageInstalled: true,
+      didBuildDebugApk: false,
+      installStamp: {
+        schemaVersion: 2,
+        variant: 'release',
+        abi: 'arm64-v8a',
+        buildProvenanceDigest: 'build-1',
+        apkSha256: 'apk-1',
+        installedApkSha256: 'apk-1',
+        packagePath: '/data/app/base.apk',
+        packagedAbis: ['x86_64'],
+        matchedAbi: 'x86_64',
+      },
+      apkFingerprint: { sha256: 'apk-1' },
+      devicePackageInfo: {
+        installed: true,
+        packagePath: '/data/app/base.apk',
+        apkSha256: 'apk-1',
+      },
+      variant: 'release',
+      abi: 'arm64-v8a',
+      buildProvenanceDigest: 'build-1',
+      packagedAbis: ['arm64-v8a'],
+      matchedAbi: 'arm64-v8a',
+    })).toEqual(expect.objectContaining({
+      canReuse: false,
+      reason: expect.stringContaining('packaged ABI evidence'),
+    }));
   });
 });
 
@@ -706,18 +1022,105 @@ describe('android-smoke package metadata parsing', () => {
     expect(
       parsePackagePathOutput('package:/data/app/~~abc/base.apk\npackage:/data/app/~~abc/split_config.en.apk\n')
     ).toBe('/data/app/~~abc/base.apk');
+    expect(
+      parsePackagePathOutput('package:/data/app/~~abc/split_config.en.apk\npackage:/data/app/~~abc/base.apk\n')
+    ).toBe('/data/app/~~abc/base.apk');
   });
 
   it('extracts lastUpdateTime and versionCode from dumpsys output', () => {
     expect(
-      parseDumpsysPackageOutput('Packages:\n  Package [com.test.app] (123):\n    versionCode=42 minSdk=24\n    lastUpdateTime=2026-04-22 10:15:00\n')
+      parseDumpsysPackageOutput('Packages:\n  Package [com.test.app] (123):\n    versionCode=42 minSdk=24\n    versionName=1.6.0\n    lastUpdateTime=2026-04-22 10:15:00\n')
     ).toEqual({
       lastUpdateTime: '2026-04-22 10:15:00',
       versionCode: '42',
+      versionName: '1.6.0',
     });
+  });
+
+  it('accepts only canonical SHA-256 command output', () => {
+    const sha = 'a'.repeat(64);
+    expect(parseSha256Output(`${sha}  /data/app/base.apk\n`)).toBe(sha);
+    expect(parseSha256Output('sha256sum: not found')).toBeNull();
+    expect(parseSha256Output('abc /data/app/base.apk')).toBeNull();
   });
 
   it('sanitizes device identifiers for cache file names', () => {
     expect(sanitizeForFileName('emulator-5554/com.test.app')).toBe('emulator-5554_com.test.app');
+  });
+});
+
+describe('android-smoke privacy-scoped bootstrap logcat', () => {
+  const packageName = 'com.github.tah10n.pocketai';
+
+  it('parses only the exact installed package UID and a single process id', () => {
+    expect(parseAndroidPackageUid([
+      'package:com.example.other uid:10100',
+      `package:${packageName} uid:10123`,
+    ].join('\n'), packageName)).toBe('10123');
+    expect(parseAndroidPackageUid(`package:${packageName}.debug uid:10123`, packageName)).toBeNull();
+    expect(parseAndroidPackageUid(`package:${packageName} uid:not-a-number`, packageName)).toBeNull();
+    expect(parseAndroidProcessId('4567\n')).toBe('4567');
+    expect(parseAndroidProcessId('4567 4568')).toBeNull();
+  });
+
+  it('captures only the current app UID and PID, sanitizes output, and never clears global logcat', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-bootstrap-logcat-'));
+    const outputPath = path.join(tempDir, 'artifacts', 'bootstrap-logcat.txt');
+    const secretToken = 'hf_12345678901234567890';
+    const capture = jest.fn()
+      .mockReturnValueOnce(`package:${packageName} uid:10123\n`)
+      .mockReturnValueOnce('4567\n')
+      .mockReturnValueOnce([
+        `I/PocketAI: source=${path.join(tempDir, 'private', 'source.ts')}`,
+        `I/PocketAI: Authorization: Bearer ${secretToken}`,
+      ].join('\n'));
+
+    try {
+      saveLogcat('adb', 'device-1', outputPath, {
+        packageName,
+        runCapture: capture,
+        sensitiveRoots: [tempDir],
+      });
+
+      expect(capture.mock.calls[2][1]).toEqual([
+        '-s',
+        'device-1',
+        'logcat',
+        '-d',
+        '-v',
+        'time',
+        '--uid=10123',
+        '--pid=4567',
+        '-t',
+        '800',
+      ]);
+      expect(capture.mock.calls.flatMap((call) => call[1]).join(' ')).not.toContain('logcat -c');
+      const publishedLog = fs.readFileSync(outputPath, 'utf8');
+      expect(publishedLog).toContain('<local-path>');
+      expect(publishedLog).toContain('Bearer <redacted>');
+      expect(publishedLog).not.toContain(tempDir);
+      expect(publishedLog).not.toContain(secretToken);
+
+      const smokeSource = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'android-smoke.js'), 'utf8');
+      expect(smokeSource).not.toContain('["-s", device.serial, "logcat", "-c"]');
+      expect(smokeSource).toContain('log("Saved Android bootstrap screenshot.")');
+      expect(smokeSource).not.toContain('Saved screenshot to ${');
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed instead of falling back to unfiltered device logs', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-bootstrap-logcat-fail-'));
+    const outputPath = path.join(tempDir, 'bootstrap-logcat.txt');
+    try {
+      expect(() => saveLogcat('adb', 'device-1', outputPath, {
+        packageName,
+        runCapture: jest.fn(() => ''),
+      })).toThrow(/privacy-scoped bootstrap logcat/);
+      expect(fs.existsSync(outputPath)).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
   });
 });

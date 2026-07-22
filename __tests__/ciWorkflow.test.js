@@ -38,6 +38,19 @@ describe('Android catalog QA CI configuration', () => {
     expect(workflow).toContain('--pack "$ANDROID_QA_PACK"');
   });
 
+  it('defaults Android QA to runtime and delegates build reuse to the provenance-aware launcher', () => {
+    const selection = extractAndroidQaPackSelection(workflow);
+    const scenarioStep = workflow.match(/- name: Run Android scenarios[\s\S]+?script: ([^\n]+)/)?.[0] || '';
+
+    expect(selection).toContain('pack="runtime"');
+    expect(scenarioStep).toContain('--fail-on-skip');
+    expect(scenarioStep).not.toContain('--skip-build');
+    expect(workflow).not.toContain('npx expo prebuild');
+    expect(workflow).not.toContain('run: ./gradlew app:assembleRelease');
+    expect(workflow).not.toContain('gradle/actions/setup-gradle');
+    expect(workflow).toContain('POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"');
+  });
+
   it('keeps CI pack label priority documented in the same order', () => {
     const selection = extractAndroidQaPackSelection(workflow);
     const documentedPriority = packLabelPriority.join('`, `').replace('`, `android-pack-extended', '`, then `android-pack-extended');

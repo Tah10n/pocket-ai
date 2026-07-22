@@ -166,6 +166,19 @@ describe('ChatMessageBubble', () => {
     expect(getByTestId('assistant-message-state-complete-assistant-state')).toBeTruthy();
   });
 
+  it('exposes the user terminal state for exact native branch targeting', () => {
+    const { getByTestId } = render(
+      <ChatMessageBubble
+        id="user-state"
+        isUser
+        content="Prepared prompt"
+        messageState="complete"
+      />,
+    );
+
+    expect(getByTestId('user-message-state-complete-user-state')).toBeTruthy();
+  });
+
   it('renders a persisted thought disclosure and copies only the final markdown', async () => {
     const content = '<think>internal chain</think>\n\n**Visible answer**\n\n- bullet';
     const finalContent = '**Visible answer**\n\n- bullet';

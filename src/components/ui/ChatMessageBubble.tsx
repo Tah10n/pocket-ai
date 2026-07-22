@@ -375,7 +375,9 @@ const ChatMessageBubbleComponent = ({
 
   return (
     <Box
-      testID={isUser ? undefined : `assistant-message-state-${assistantMessageState}-${id}`}
+      testID={isUser
+        ? `user-message-state-${messageState}-${id}`
+        : `assistant-message-state-${assistantMessageState}-${id}`}
       className={`w-full flex-col gap-0.5 ${isUser ? 'items-end' : 'items-start'}`}
       onLayout={onLayout}
     >

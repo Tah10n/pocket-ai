@@ -95,7 +95,7 @@ const ANDROID_MODULE_GENERATED_INPUT_DIRECTORIES = new Set([
   ".externalNativeBuild",
 ]);
 const WINDOWS_NINJA_LEGACY_MAX_PATH_CHARS = 259;
-const WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS = 207;
+const WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS = 214;
 const ANDROID_NATIVE_BUILD_INTERMEDIATE_NAMES = Object.freeze([
   ".cxx",
   ".externalNativeBuild",
@@ -114,7 +114,11 @@ function resolveIsolatedAndroidGradleUserHome(projectRoot, options = {}) {
   }
 
   const windowsPath = path.win32;
-  const shortCacheRoot = options.shortCacheRoot || os.tmpdir();
+  const defaultShortCacheRoot = windowsPath.join(
+    options.homeDirectory || os.homedir(),
+    ".pa"
+  );
+  const shortCacheRoot = options.shortCacheRoot || defaultShortCacheRoot;
   if (!windowsPath.isAbsolute(shortCacheRoot)) {
     throw new Error(
       "Windows Android builds require POCKET_AI_ANDROID_SHORT_CACHE_ROOT to be an absolute writable short path."

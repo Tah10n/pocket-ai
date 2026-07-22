@@ -1128,22 +1128,22 @@ describe('Android build provenance routing', () => {
 
   it('uses a deterministic short Windows Gradle home and fails closed for a long temp root', () => {
     const projectRoot = 'C:\\tmp\\pocket-ai-pr130-comprehensive-final-hardening';
-    const shortCacheRoot = 'C:\\Users\\fixture\\AppData\\Local\\Temp';
+    const homeDirectory = 'C:\\Users\\fixture';
     const first = resolveIsolatedAndroidGradleUserHome(projectRoot, {
       platform: 'win32',
-      shortCacheRoot,
+      homeDirectory,
     });
     const second = resolveIsolatedAndroidGradleUserHome(projectRoot, {
       platform: 'win32',
-      shortCacheRoot,
+      homeDirectory,
     });
     const otherProject = resolveIsolatedAndroidGradleUserHome('C:\\tmp\\another-project', {
       platform: 'win32',
-      shortCacheRoot,
+      homeDirectory,
     });
 
     expect(first).toBe(second);
-    expect(first).toMatch(/^C:\\Users\\fixture\\AppData\\Local\\Temp\\g-[0-9a-f]{12}$/u);
+    expect(first).toMatch(/^C:\\Users\\fixture\\\.pa\\g-[0-9a-f]{12}$/u);
     expect(first).not.toBe(otherProject);
     expect(first).not.toContain('pocket-ai-pr130');
     const representativeNativePath = path.win32.join(
@@ -1153,7 +1153,7 @@ describe('Android build provenance routing', () => {
       'transforms',
       '08797f5609b8613ea13a1ae6d79a7559',
       'transformed',
-      'react-android-0.83.6-debug',
+      'react-android-0.83.6-release',
       'prefab',
       'modules',
       'reactnative',
@@ -1161,9 +1161,10 @@ describe('Android build provenance routing', () => {
       'react',
       'renderer',
       'components',
-      'view',
-      'HostPlatformViewTraitsInitializer.h',
+      'androidtextinput',
+      'AndroidTextInputComponentDescriptor.h',
     );
+    expect(path.win32.relative(first, representativeNativePath).length).toBe(214);
     expect(representativeNativePath.length).toBeLessThan(260);
     expect(() => resolveIsolatedAndroidGradleUserHome(projectRoot, {
       platform: 'win32',

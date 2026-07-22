@@ -118,12 +118,14 @@ and prevents an old task output from being accepted as current evidence. Externa
 init scripts, argument files, JVM code-loading channels, injected Android properties, and
 non-canonical architecture overrides fail closed.
 
-On Windows, the isolated Gradle home is project-keyed under the system temporary directory
-to keep React Native prefab paths below the legacy 260-character Ninja path limit. The
-runner reserves 207 characters after the Gradle-home prefix for the longest current React
-Native prefab/CMake descendants and fails closed if that budget cannot be met. If the
-temporary root is unusually long, set `POCKET_AI_ANDROID_SHORT_CACHE_ROOT` to a writable
-short directory.
+On Windows, the isolated Gradle home is project-keyed under a short `.pa/` directory in the
+operating-system user home to keep Ninja-facing React Native prefab paths below the legacy
+260-character path limit. The runner reserves 214 characters after the Gradle-home prefix
+for the current canonical React Native 0.83.6 prefab include path and fails closed if that
+known build-path budget cannot be met. This is not a claim that every duplicate file Gradle
+may materialize in its transform cache is shorter than the legacy limit. If the user-home
+path is unusually long, set `POCKET_AI_ANDROID_SHORT_CACHE_ROOT` to a writable short
+directory.
 Before a fresh provenance build, the runner removes only generated `.cxx/` and
 `.externalNativeBuild/` directories below the generated Android project and installed
 package Android roots, preventing stale CMake state from retaining an older absolute cache

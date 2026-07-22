@@ -164,7 +164,7 @@ npm run android:scenarios:storage -- --skip-build
 npm run android:scenarios -- --pack native
 ```
 
-In GitHub PRs, `Run Android checks` runs the core pack. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
+In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
 
 ## Localization
 

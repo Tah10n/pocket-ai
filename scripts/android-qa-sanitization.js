@@ -1,6 +1,30 @@
 "use strict";
 
 const DEFAULT_QA_TEXT_LIMIT = 1_000_000;
+const SAFE_ERROR_NAMES = new Set([
+  "AbortError",
+  "AggregateError",
+  "Error",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "TypeError",
+]);
+const SAFE_ERROR_CODES = new Set([
+  "EACCES",
+  "EADDRINUSE",
+  "EBUSY",
+  "ECONNREFUSED",
+  "EEXIST",
+  "EINVAL",
+  "EIO",
+  "ENOENT",
+  "ENOMEM",
+  "ENOSPC",
+  "ENOTEMPTY",
+  "EPERM",
+  "ETIMEDOUT",
+]);
 
 function escapeRegularExpression(value) {
   return `${value}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -102,7 +126,33 @@ function sanitizeAndroidQaText(value, options = {}) {
   return sanitized;
 }
 
+function describeAndroidQaError(error, category = "operation-failed") {
+  const normalizedCategory = /^[a-z][a-z0-9-]{0,63}$/u.test(`${category}`)
+    ? `${category}`
+    : "operation-failed";
+  let candidateName = "Error";
+  let candidateCode = "";
+  try {
+    if (typeof error?.name === "string") {
+      candidateName = error.name;
+    }
+  } catch {
+    // A hostile getter or Proxy must not escape the privacy boundary.
+  }
+  try {
+    if (typeof error?.code === "string") {
+      candidateCode = error.code.toUpperCase();
+    }
+  } catch {
+    // A hostile getter or Proxy must not escape the privacy boundary.
+  }
+  const safeName = SAFE_ERROR_NAMES.has(candidateName) ? candidateName : "Error";
+  const safeCode = SAFE_ERROR_CODES.has(candidateCode) ? candidateCode : "unknown";
+  return `${normalizedCategory} (name=${safeName}, code=${safeCode})`;
+}
+
 module.exports = {
   DEFAULT_QA_TEXT_LIMIT,
+  describeAndroidQaError,
   sanitizeAndroidQaText,
 };

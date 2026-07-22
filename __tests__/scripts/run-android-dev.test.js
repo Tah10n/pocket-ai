@@ -190,4 +190,44 @@ describe('Android development launcher', () => {
     child.emit('exit', 1, null);
     expect(processRef.exitCode).toBe(143);
   });
+
+  it('does not print malicious launcher errors while forwarding a signal', () => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.kill = jest.fn();
+    child.pocketAiOwnershipBoundary = 'posix-process-group';
+    child.pocketAiOwnershipSnapshot = {
+      processIdentity: { startMarker: 'owned-start' },
+      processTreeIdentities: [
+        { pid: 4242, parentPid: null, startMarker: 'owned-start', depth: 0 },
+      ],
+      ownershipBoundary: 'posix-process-group',
+    };
+    const processRef = new EventEmitter();
+    processRef.exitCode = undefined;
+    const maliciousError = new Error(
+      'PROMPT_SENTINEL hf_private_token C:\\Users\\private\\model.gguf'
+    );
+    maliciousError.name = 'PROMPT_SENTINEL';
+    maliciousError.code = 'hf_private_token';
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      attachAndroidDevLifecycle(child, processRef, {
+        stopProcessTree: jest.fn(() => {
+          throw maliciousError;
+        }),
+      });
+      processRef.emit('SIGTERM');
+
+      const logged = consoleError.mock.calls.flat().join('\n');
+      expect(logged).toContain('signal-forward-failed (name=Error, code=unknown)');
+      expect(logged).not.toContain('PROMPT_SENTINEL');
+      expect(logged).not.toContain('hf_private_token');
+      expect(logged).not.toContain('C:\\Users\\private\\model.gguf');
+      expect(processRef.exitCode).toBe(1);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

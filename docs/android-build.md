@@ -20,6 +20,13 @@ equivalent of this clean command when the generated native project is absent or 
 npx expo prebuild --clean --platform android --no-install
 ```
 
+The repository config plugin pins the generated wrapper to Gradle 8.14.3. Android Gradle
+Plugin 8.11 requires Gradle 8.13 or newer, so the default repository pairing uses
+8.14.3/8.11; Android QA records the actually selected toolchain in build provenance.
+Staying on Gradle 8 also avoids the Gradle 9 / Foojay 0.5 failure in the currently installed
+React Native 0.83.6 Gradle plugin. Do not hand-edit the ignored generated wrapper; rerun the
+repository prebuild path so the pin is applied deterministically.
+
 A prebuild is reusable only when all of these still match:
 
 - the build variant;

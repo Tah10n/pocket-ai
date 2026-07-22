@@ -31,6 +31,7 @@ const {
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
+  resolveDebugApkReuseDecision,
   runAndroidGradleBuild,
   saveLogcat,
   spawnWindowsJobProcess,
@@ -671,6 +672,32 @@ describe('android-smoke APK reuse decisions', () => {
         canReuse: false,
       })
     );
+  });
+
+  it('does not print malicious APK inspection failures', () => {
+    const maliciousError = new Error(
+      'PROMPT_SENTINEL hf_private_token C:\\Users\\private\\model.gguf'
+    );
+    maliciousError.name = 'PROMPT_SENTINEL';
+    maliciousError.code = 'hf_private_token';
+    const writeLog = jest.fn();
+
+    const decision = resolveDebugApkReuseDecision('adb', 'device-1', 'app-debug.apk', {
+      resolvePrimaryDeviceAbi: () => {
+        throw maliciousError;
+      },
+      log: writeLog,
+    });
+
+    const logged = writeLog.mock.calls.flat().join('\n');
+    expect(decision).toEqual(expect.objectContaining({
+      canReuse: false,
+      reason: 'APK inspection failed: apk-inspection-failed (name=Error, code=unknown)',
+    }));
+    expect(logged).toContain('apk-inspection-failed (name=Error, code=unknown)');
+    expect(logged).not.toContain('PROMPT_SENTINEL');
+    expect(logged).not.toContain('hf_private_token');
+    expect(logged).not.toContain('C:\\Users\\private\\model.gguf');
   });
 });
 

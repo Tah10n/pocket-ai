@@ -21,7 +21,10 @@ const {
   createIsolatedAndroidBuildEnvironment,
   hashCanonicalJson,
 } = require("./android-build-provenance");
-const { sanitizeAndroidQaText } = require("./android-qa-sanitization");
+const {
+  describeAndroidQaError,
+  sanitizeAndroidQaText,
+} = require("./android-qa-sanitization");
 const { isCompletePngBuffer } = require("./png-validation");
 const DEFAULT_SCENARIO_PACK = "core";
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
@@ -523,7 +526,7 @@ let activeQaProvenance = null;
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error(`[android-scenarios] ${error.message}`);
+    console.error(`[android-scenarios] ${describeAndroidQaError(error, "scenario-run-failed")}`);
     process.exit(1);
   });
 }
@@ -785,7 +788,7 @@ async function main() {
               cleanupSucceeded = true;
             } catch (cleanupError) {
               log(
-                `Could not remove private logcat capture for ${scenario.id}: ${cleanupError.message}`
+                `Could not remove private logcat capture for ${scenario.id}: ${describeAndroidQaError(cleanupError, "logcat-cleanup-failed")}`
               );
             } finally {
               if (cleanupSucceeded && activeLogcatCollector === logcatCollector) {
@@ -1283,7 +1286,9 @@ function clearFocusedTextInput(
     runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], primaryCommandOptions);
     return;
   } catch (error) {
-    log(`Focused text select-all clear failed; falling back to repeated delete: ${error.message}`);
+    log(
+      `Focused text select-all clear failed; falling back to repeated delete: ${describeAndroidQaError(error, "focused-text-clear-failed")}`
+    );
   }
 
   const boundedMaxDeleteCount = Number.isFinite(maxDeleteCount)
@@ -4590,7 +4595,9 @@ function installScenarioResourceSignalHandlers(
       resources = getResources() || {};
     } catch (error) {
       cleanupFailed = true;
-      console.error(`[android-scenarios] Resource lookup after ${signal} failed: ${error.message}`);
+      console.error(
+        `[android-scenarios] Resource lookup after ${signal} failed: ${describeAndroidQaError(error, "resource-lookup-failed")}`
+      );
     }
     try {
       if (
@@ -4603,7 +4610,7 @@ function installScenarioResourceSignalHandlers(
     } catch (error) {
       cleanupFailed = true;
       console.error(
-        `[android-scenarios] Logcat cleanup after ${signal} failed: ${error.message}`
+        `[android-scenarios] Logcat cleanup after ${signal} failed: ${describeAndroidQaError(error, "logcat-cleanup-failed")}`
       );
     }
     try {
@@ -4613,7 +4620,9 @@ function installScenarioResourceSignalHandlers(
       }
     } catch (error) {
       cleanupFailed = true;
-      console.error(`[android-scenarios] Metro cleanup after ${signal} failed: ${error.message}`);
+      console.error(
+        `[android-scenarios] Metro cleanup after ${signal} failed: ${describeAndroidQaError(error, "metro-cleanup-failed")}`
+      );
     }
     if (cleanupFailed) {
       remove();
@@ -4678,7 +4687,9 @@ function installTransferredMetroSignalHandlers(getOwnership, processRef = proces
     try {
       cleanupTransferredMetroOwnership(getOwnership());
     } catch (error) {
-      console.error(`[android-scenarios] Metro cleanup after ${signal} failed: ${error.message}`);
+      console.error(
+        `[android-scenarios] Metro cleanup after ${signal} failed: ${describeAndroidQaError(error, "metro-cleanup-failed")}`
+      );
     } finally {
       remove();
       processRef.kill(processRef.pid, signal);

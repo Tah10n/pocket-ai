@@ -3,7 +3,10 @@ const fs = require('fs');
 const os = require('os');
 const { EventEmitter } = require('events');
 const { isCompletePngBuffer } = require('../../scripts/png-validation');
-const { sanitizeAndroidQaText } = require('../../scripts/android-qa-sanitization');
+const {
+  describeAndroidQaError,
+  sanitizeAndroidQaText,
+} = require('../../scripts/android-qa-sanitization');
 const {
   collectAndroidEffectiveBuildContext,
   collectBuildProvenance,
@@ -309,7 +312,12 @@ describe('Android scenario Metro ownership', () => {
     const cleanupLogcat = jest
       .fn()
       .mockImplementationOnce(() => {
-        throw new Error('owned collector is still running');
+        const error = new Error(
+          'owned collector PROMPT_SENTINEL hf_private_token C:\\Users\\private\\model.gguf'
+        );
+        error.name = 'PROMPT_SENTINEL';
+        error.code = 'hf_private_token';
+        throw error;
       })
       .mockImplementationOnce(() => undefined);
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -333,7 +341,13 @@ describe('Android scenario Metro ownership', () => {
     expect(processRef.kill).toHaveBeenCalledWith(5152, 'SIGTERM');
     expect(processRef.listenerCount('SIGINT')).toBe(0);
     expect(processRef.listenerCount('SIGTERM')).toBe(0);
-    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('owned collector is still running'));
+    const logged = consoleError.mock.calls.flat().join('\n');
+    expect(logged).toContain('logcat-cleanup-failed');
+    expect(logged).toContain('name=Error');
+    expect(logged).toContain('code=unknown');
+    expect(logged).not.toContain('PROMPT_SENTINEL');
+    expect(logged).not.toContain('hf_private_token');
+    expect(logged).not.toContain('C:\\Users\\private\\model.gguf');
     consoleError.mockRestore();
   });
 
@@ -3783,6 +3797,35 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     expect(sanitized).toContain('ordinary precondition reason');
     const bounded = sanitizeAndroidQaText('x'.repeat(100), { maxChars: 16 });
     expect(bounded).toBe(`${'x'.repeat(16)}\n<truncated:84>`);
+  });
+
+  it('reduces malicious host errors to allowlisted metadata', () => {
+    const error = new Error(
+      'PROMPT_SENTINEL hf_private_token C:\\Users\\private\\model.gguf'
+    );
+    error.name = 'PROMPT_SENTINEL';
+    error.code = 'hf_private_token';
+
+    const sanitized = describeAndroidQaError(error, 'scenario-run-failed');
+
+    expect(sanitized).toBe('scenario-run-failed (name=Error, code=unknown)');
+    expect(sanitized).not.toContain('PROMPT_SENTINEL');
+    expect(sanitized).not.toContain('hf_private_token');
+    expect(sanitized).not.toContain('C:\\Users\\private\\model.gguf');
+
+    const permissionError = Object.assign(new Error('private detail'), { code: 'EPERM' });
+    expect(describeAndroidQaError(permissionError, 'cleanup-failed'))
+      .toBe('cleanup-failed (name=Error, code=EPERM)');
+
+    const hostileError = new Proxy({}, {
+      get: (_target, property) => {
+        throw new Error(
+          `${String(property)} PROMPT_SENTINEL hf_private_token C:\\Users\\private\\model.gguf`
+        );
+      },
+    });
+    expect(describeAndroidQaError(hostileError, 'proxy-failed'))
+      .toBe('proxy-failed (name=Error, code=unknown)');
   });
 
   it('requires the source snapshot to remain exact across device identity hashing', () => {

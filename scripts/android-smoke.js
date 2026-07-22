@@ -26,7 +26,10 @@ const {
   shouldRunPrebuild,
   withAndroidProvenanceGradleExecutionArgs,
 } = require("./android-build-provenance");
-const { sanitizeAndroidQaText } = require("./android-qa-sanitization");
+const {
+  describeAndroidQaError,
+  sanitizeAndroidQaText,
+} = require("./android-qa-sanitization");
 const { isCompletePngBuffer } = require("./png-validation");
 
 const cliOptions = require.main === module ? parseCliOptions(process.argv.slice(2)) : {};
@@ -114,7 +117,7 @@ const screenshotPath = screenshotTarget
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error(`[android-smoke] ${error.message}`);
+    console.error(`[android-smoke] ${describeAndroidQaError(error, "smoke-run-failed")}`);
     if (!process.exitCode) {
       process.exitCode = 1;
     }
@@ -352,7 +355,9 @@ async function main() {
         if (!mainError) {
           throw cleanupError;
         }
-        console.error(`[android-smoke] ${cleanupError.message}`);
+        console.error(
+          `[android-smoke] ${describeAndroidQaError(cleanupError, "metro-cleanup-failed")}`
+        );
         if (!process.exitCode) {
           process.exitCode = 1;
         }
@@ -602,20 +607,24 @@ function normalizePath(value) {
   return `${value}`.replace(/\\/g, "/");
 }
 
-function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath) {
+function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath, options = {}) {
+  const resolvePrimaryAbi = options.resolvePrimaryDeviceAbi || resolvePrimaryDeviceAbi;
+  const resolveSupportedAbis = options.resolveDeviceSupportedAbis || resolveDeviceSupportedAbis;
+  const readZipEntries = options.listZipEntries || listZipEntries;
+  const writeLog = options.log || log;
   try {
-    const primaryAbi = resolvePrimaryDeviceAbi(adbPath, serial);
-    const supportedAbis = resolveDeviceSupportedAbis(adbPath, serial, primaryAbi);
+    const primaryAbi = resolvePrimaryAbi(adbPath, serial);
+    const supportedAbis = resolveSupportedAbis(adbPath, serial, primaryAbi);
     return evaluateApkAbiCompatibility({
       targetAbi: buildTargetAbi,
       deviceAbis: supportedAbis,
-      zipEntries: listZipEntries(apkFilePath),
+      zipEntries: readZipEntries(apkFilePath),
       requiredLibraries: ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log(
-      `Failed to inspect the existing ${apkVariant} APK for ABI compatibility (${message}). `
+    const diagnostic = describeAndroidQaError(error, "apk-inspection-failed");
+    writeLog(
+      `Failed to inspect the existing ${apkVariant} APK for ABI compatibility (${diagnostic}). `
         + "Rebuilding instead."
     );
     return {
@@ -624,7 +633,7 @@ function resolveDebugApkReuseDecision(adbPath, serial, apkFilePath) {
       packagedAbis: [],
       supportedAbis: [],
       missingEntries: [],
-      reason: `APK inspection failed: ${message}`,
+      reason: `APK inspection failed: ${diagnostic}`,
     };
   }
 }
@@ -3179,6 +3188,7 @@ module.exports = {
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
+  resolveDebugApkReuseDecision,
   runAndroidGradleBuild,
   saveLogcat,
   spawnOwnedProcess,

@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { describeAndroidQaError } = require('./android-qa-sanitization');
 const {
   captureOwnedProcessOwnership,
   spawnOwnedProcess,
@@ -133,7 +134,9 @@ function attachAndroidDevLifecycle(child, processRef = process, options = {}) {
         throw new Error(`could not stop launcher process tree ${child.pid}`);
       }
     } catch (error) {
-      console.error(`[android-dev] Failed to forward ${signal}: ${error.message}`);
+      console.error(
+        `[android-dev] Failed to forward ${signal}: ${describeAndroidQaError(error, 'signal-forward-failed')}`
+      );
       processRef.exitCode = 1;
     }
   };
@@ -145,7 +148,9 @@ function attachAndroidDevLifecycle(child, processRef = process, options = {}) {
   child.once('error', (error) => {
     didSettle = true;
     removeSignalHandlers();
-    console.error(`[android-dev] Failed to start Expo: ${error.message}`);
+    console.error(
+      `[android-dev] Failed to start Expo: ${describeAndroidQaError(error, 'expo-start-failed')}`
+    );
     processRef.exitCode = 1;
   });
   child.once('exit', (code, signal) => {
@@ -173,7 +178,7 @@ function main() {
   try {
     child = startAndroidDev({ extraArgs: process.argv.slice(2), androidSmokePath });
   } catch (error) {
-    console.error(`[android-dev] ${error.message}`);
+    console.error(`[android-dev] ${describeAndroidQaError(error, 'android-dev-start-failed')}`);
     process.exitCode = 1;
     return;
   }

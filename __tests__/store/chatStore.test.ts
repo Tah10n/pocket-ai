@@ -3773,8 +3773,17 @@ describe('chatStore', () => {
       content: 'Partial before rename',
     });
 
-    expect(useChatStore.getState().renameThread(thread.id, 'Renamed during branch stream'))
-      .toBe(true);
+    const observedPresentedTitles: (string | undefined)[] = [];
+    const unsubscribe = useChatStore.subscribe((state) => {
+      observedPresentedTitles.push(state.getThread(thread.id)?.title);
+    });
+    try {
+      expect(useChatStore.getState().renameThread(thread.id, 'Renamed during branch stream'))
+        .toBe(true);
+    } finally {
+      unsubscribe();
+    }
+    expect(observedPresentedTitles.at(-1)).toBe('Renamed during branch stream');
     expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
       title: 'Renamed during branch stream',
       titleSource: 'manual',
@@ -3837,13 +3846,17 @@ describe('chatStore', () => {
 
     expect(useChatStore.getState().renameThread(thread.id, 'Crash-safe renamed branch'))
       .toBe(true);
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial branch output after rename',
+    });
+    flushPendingChatPersistenceWrites('background');
     const progressAfterRename = readChatStreamingProgressRecord(storage, thread.id);
     const durableAfterRename = readChatThreadRecord(storage, thread.id);
     expect(progressAfterRename).toEqual({
       ok: true,
       value: expect.objectContaining({
         messageId: assistantId,
-        content: 'Partial branch output before restart',
+        content: 'Partial branch output after rename',
         branchReplacement: expect.objectContaining({
           baseSemanticIdentity: expect.stringMatching(/^v1:/),
         }),
@@ -3865,7 +3878,7 @@ describe('chatStore', () => {
       messages: expect.arrayContaining([
         expect.objectContaining({
           id: assistantId,
-          content: 'Partial branch output before restart',
+          content: 'Partial branch output after rename',
           state: 'stopped',
         }),
       ]),
@@ -9254,6 +9267,9 @@ describe('chatStore', () => {
     flushPendingChatPersistenceWrites('background');
 
     expect(useChatStore.getState().renameThread(streamingThread.id, 'Renamed while generating')).toBe(true);
+    expect(useChatStore.getState().getThread(streamingThread.id)).toEqual(expect.objectContaining({
+      title: 'Renamed while generating',
+    }));
 
     const durableRecord = readChatThreadRecord(storage, streamingThread.id);
     const progressRecord = readChatStreamingProgressRecord(storage, streamingThread.id);

@@ -2460,14 +2460,9 @@ function rebaseTransientBranchRuntimeAfterMetadataMutation(
     commitRevision: durableIdentity.commitRevision,
   };
   runtime.mode.baseThreadIdentity = nextBaseIdentity;
-  if (runtime.branchReplacementProgress) {
-    runtime.branchReplacementProgress = {
-      ...runtime.branchReplacementProgress,
-      baseDurablePersistedAt: nextBaseIdentity.durablePersistedAt,
-      baseCommitRevision: nextBaseIdentity.commitRevision,
-      baseSemanticIdentity: nextBaseIdentity.baseSemanticIdentity,
-    };
-  }
+  // Persisted branch progress is one immutable operation. Its semantic identity
+  // already permits metadata-only recovery, while changing its durable base for
+  // the same message would make the V2 progress writer reject later deltas.
   runtime.durableThread = nextThread;
   runtime.durableMessages = nextThread.messages;
   refreshTransientPresentationThread(nextThread, runtime);
@@ -2641,10 +2636,14 @@ export const useChatStore = create<ChatStoreState>()(
         try {
           persistChatStoreMutation(previous, next, persistenceReason);
           if (persistenceReason !== 'streaming_patch') {
+            let didRefreshTransientPresentation = false;
             metadataOnlyBranchRuntimeRebases.forEach((runtime, threadId) => {
               const nextThread = next.threads[threadId];
-              if (nextThread) {
-                rebaseTransientBranchRuntimeAfterMetadataMutation(runtime, nextThread);
+              if (
+                nextThread
+                && rebaseTransientBranchRuntimeAfterMetadataMutation(runtime, nextThread)
+              ) {
+                didRefreshTransientPresentation = true;
               }
             });
             Object.keys(next.threads).forEach((threadId) => {
@@ -2656,8 +2655,17 @@ export const useChatStore = create<ChatStoreState>()(
               const runtime = nextThread ? getTransientAssistantRuntime(nextThread) : null;
               if (runtime) {
                 runtime.durableThread = nextThread;
+                if (runtime.mode.kind !== 'replace_branch') {
+                  refreshTransientPresentationThread(nextThread, runtime);
+                  didRefreshTransientPresentation = true;
+                }
               }
             });
+            if (didRefreshTransientPresentation) {
+              (set as any)((state: ChatStoreState) => ({
+                streamingRevision: state.streamingRevision + 1,
+              }), false);
+            }
           }
           reconcileTransientAssistantRuntimes(next.threads);
         } catch (error) {

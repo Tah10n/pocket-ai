@@ -2904,7 +2904,7 @@ export const useChatStore = create<ChatStoreState>()(
           }
 
           let didFinalize = false;
-          let didDiscardEmptyBranchWithoutDurableMutation = false;
+          let didRestoreReplacementWithoutDurableMutation = false;
           withChatPersistenceContext({ reason: 'terminal_state' }, () => {
             setWhenPrivateStorageWritable((state) => {
               const durableThread = state.threads[threadId];
@@ -2941,15 +2941,17 @@ export const useChatStore = create<ChatStoreState>()(
                 && finalization.outcome === 'success'
                 && !hasRecoverableOutput
               );
+              const durablePersistedAt = runtime.mode.kind === 'replace_branch'
+                ? runtime.mode.baseThreadIdentity.durablePersistedAt
+                : latestDurableThreadIdentityById.get(threadId)?.persistedAt ?? 0;
               if (
-                runtime.mode.kind === 'replace_branch'
+                (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
                 && shouldRestoreReplacement
-                && runtime.lastProgressPersistedAt
-                  <= runtime.mode.baseThreadIdentity.durablePersistedAt
+                && runtime.lastProgressPersistedAt <= durablePersistedAt
               ) {
                 transientAssistantRuntimes.delete(threadId);
                 didFinalize = true;
-                didDiscardEmptyBranchWithoutDurableMutation = true;
+                didRestoreReplacementWithoutDurableMutation = true;
                 return {
                   streamingRevision: state.streamingRevision + 1,
                   inferenceRevision: state.inferenceRevision + 1,
@@ -3034,7 +3036,7 @@ export const useChatStore = create<ChatStoreState>()(
             });
           });
 
-          if (didDiscardEmptyBranchWithoutDurableMutation) {
+          if (didRestoreReplacementWithoutDurableMutation) {
             chatPersistenceScheduler.cancelThreadWrite(threadId);
             removeStreamingProgressAfterDurableCommit(getAppStorage(), threadId);
           }
@@ -3046,7 +3048,7 @@ export const useChatStore = create<ChatStoreState>()(
             return { status: 'stale' };
           }
           return {
-            status: didDiscardEmptyBranchWithoutDurableMutation
+            status: didRestoreReplacementWithoutDurableMutation
               ? 'restored_without_write'
               : 'committed',
           };

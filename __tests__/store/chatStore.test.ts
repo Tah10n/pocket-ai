@@ -1694,27 +1694,64 @@ describe('chatStore', () => {
   ])('restores the previous answer for $outcome before first regenerated output', (finalization) => {
     const durableThread = buildCompletedRegenerationThread(`thread-regeneration-${finalization.outcome}-empty`);
     seedPersistedChatThread(durableThread);
+    const originalAssistant = durableThread.messages.at(-1);
+    const durableRecord = storage.getString(getChatThreadStorageKey(durableThread.id));
     const replacementId = useChatStore.getState().replaceLastAssistantMessage(durableThread.id)!;
+    const capture = captureChatPersistenceWrites();
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
 
-    expect(useChatStore.getState().finalizeAssistantTurn(
-      durableThread.id,
-      replacementId,
-      finalization,
-    )).toEqual({ status: 'committed' });
+    try {
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        durableThread.id,
+        replacementId,
+        finalization,
+      )).toEqual({ status: 'restored_without_write' });
 
-    const restored = useChatStore.getState().getThread(durableThread.id)!;
-    expect(restored.status).toBe('idle');
-    expect(restored.messages).toHaveLength(durableThread.messages.length);
-    expect(restored.messages.at(-1)).toEqual(expect.objectContaining({
-      id: `${durableThread.id}-assistant-original`,
-      content: 'Original durable answer',
-      state: 'complete',
-    }));
-    expect(restored.messages.some((message) => message.id === replacementId)).toBe(false);
-    expect(readChatStreamingProgressRecord(storage, durableThread.id)).toEqual({
-      ok: false,
-      reason: 'missing',
-    });
+      expect(useChatStore.getState().threads[durableThread.id]).toBe(durableThread);
+      const restored = useChatStore.getState().getThread(durableThread.id)!;
+      expect(restored.status).toBe('idle');
+      expect(restored.messages).toBe(durableThread.messages);
+      expect(restored.messages.at(-1)).toBe(originalAssistant);
+      expect(restored.messages.at(-1)).toEqual(expect.objectContaining({
+        id: `${durableThread.id}-assistant-original`,
+        content: 'Original durable answer',
+        state: 'complete',
+      }));
+      expect(restored.messages.some((message) => message.id === replacementId)).toBe(false);
+      expect(storage.getString(getChatThreadStorageKey(durableThread.id))).toBe(durableRecord);
+      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(durableThread.id));
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+      const snapshot = performanceMonitor.snapshot();
+      expect(snapshot.counters['chat.turn.persistenceTransactions'] ?? 0).toBe(0);
+      expect(snapshot.counters['chat.persist.terminal'] ?? 0).toBe(0);
+      expect(snapshot.events.filter(
+        (event) => event.name === 'chat.persist.stringify' && event.meta?.recordKind === 'thread',
+      )).toHaveLength(0);
+      expect(readChatStreamingProgressRecord(storage, durableThread.id)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+
+      useChatStore.getState().patchAssistantMessage(durableThread.id, replacementId, {
+        content: 'Late direct replacement output',
+      });
+      expect(useChatStore.getState().finalizeAssistantTurn(
+        durableThread.id,
+        replacementId,
+        { outcome: 'success', content: 'Late direct replacement terminal output' },
+      )).toEqual({ status: 'stale' });
+      expect(useChatStore.getState().threads[durableThread.id]).toBe(durableThread);
+      expect(useChatStore.getState().threads[durableThread.id].messages.at(-1)).toBe(
+        originalAssistant,
+      );
+    } finally {
+      capture.restore();
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+    }
   });
 
   it('preserves the previous answer when direct regeneration succeeds without output', () => {
@@ -1730,7 +1767,7 @@ describe('chatStore', () => {
         content: '',
         thoughtContent: null,
       },
-    )).toEqual({ status: 'committed' });
+    )).toEqual({ status: 'restored_without_write' });
 
     const restored = useChatStore.getState().getThread(durableThread.id)!;
     expect(restored.messages).toHaveLength(durableThread.messages.length);
@@ -1752,7 +1789,7 @@ describe('chatStore', () => {
       durableThread.id,
       staleReplacementId,
       { outcome: 'stopped' },
-    )).toEqual({ status: 'committed' });
+    )).toEqual({ status: 'restored_without_write' });
     const currentReplacementId = useChatStore.getState().replaceLastAssistantMessage(durableThread.id)!;
 
     useChatStore.getState().patchAssistantMessage(durableThread.id, staleReplacementId, {

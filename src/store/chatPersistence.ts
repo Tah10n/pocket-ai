@@ -25,7 +25,9 @@ import {
 import type { AppStorageFacade } from './storage';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import {
+  createChatBranchBaseSemanticIdentity,
   createChatBranchReplacementPlanFromProgress,
+  isChatBranchBaseSemanticIdentity,
   isChatBranchReplacementUserMessageWithinProgressBounds,
   materializeChatBranchReplacementThread,
   MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS,
@@ -1193,6 +1195,7 @@ function parseChatBranchReplacementProgress({
     'targetUserCreatedAt',
     'baseDurablePersistedAt',
     'baseCommitRevision',
+    'baseSemanticIdentity',
     'replacementUserMessage',
     'insertedModelSwitchMessage',
     'paramsSnapshot',
@@ -1206,6 +1209,10 @@ function parseChatBranchReplacementProgress({
     || (
       value.baseCommitRevision !== undefined
       && !isNonNegativeSafeInteger(value.baseCommitRevision)
+    )
+    || (
+      value.baseSemanticIdentity !== undefined
+      && !isChatBranchBaseSemanticIdentity(value.baseSemanticIdentity)
     )
   ) {
     return null;
@@ -1240,6 +1247,7 @@ function parseChatBranchReplacementProgress({
     targetUserCreatedAt: value.targetUserCreatedAt,
     baseDurablePersistedAt: value.baseDurablePersistedAt,
     baseCommitRevision: parseOptionalRevision(value.baseCommitRevision),
+    baseSemanticIdentity: value.baseSemanticIdentity,
     replacementUserMessage,
     insertedModelSwitchMessage: insertedModelSwitchMessage ?? undefined,
     paramsSnapshot,
@@ -2654,10 +2662,15 @@ export function recoverChatThreadFromStreamingProgress(
 
   if (progress.branchReplacement) {
     const branch = progress.branchReplacement;
-    if (
-      branch.baseDurablePersistedAt !== durablePersistedAt
-      || branch.baseCommitRevision !== durableCommitRevision
-    ) {
+    const hasExactDurableBase = (
+      branch.baseDurablePersistedAt === durablePersistedAt
+      && branch.baseCommitRevision === durableCommitRevision
+    );
+    const hasMetadataCompatibleDurableBase = (
+      branch.baseSemanticIdentity !== undefined
+      && branch.baseSemanticIdentity === createChatBranchBaseSemanticIdentity(thread)
+    );
+    if (!hasExactDurableBase && !hasMetadataCompatibleDurableBase) {
       return { outcome: 'stale' };
     }
 

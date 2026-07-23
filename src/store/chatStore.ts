@@ -65,6 +65,7 @@ import {
 } from './chatPersistence';
 import {
   buildChatBranchReplacementPlan,
+  createChatBranchBaseSemanticIdentity,
   createChatBranchReplacementProgress,
   materializeChatBranchReplacementThread,
   validateChatBranchReplacementPlan,
@@ -2063,6 +2064,26 @@ interface TransientAssistantRuntime {
 
 const transientAssistantRuntimes = new Map<string, TransientAssistantRuntime>();
 
+function isMetadataOnlyThreadMutation(
+  previousThread: ChatThread,
+  nextThread: ChatThread,
+): boolean {
+  return (
+    previousThread !== nextThread
+    && previousThread.id === nextThread.id
+    && previousThread.modelId === nextThread.modelId
+    && previousThread.activeModelId === nextThread.activeModelId
+    && previousThread.presetId === nextThread.presetId
+    && previousThread.presetSnapshot === nextThread.presetSnapshot
+    && previousThread.paramsSnapshot === nextThread.paramsSnapshot
+    && previousThread.messages === nextThread.messages
+    && previousThread.createdAt === nextThread.createdAt
+    && previousThread.lastGeneratedAt === nextThread.lastGeneratedAt
+    && previousThread.summary === nextThread.summary
+    && previousThread.status === nextThread.status
+  );
+}
+
 function isBranchBaseIdentityCurrent(
   thread: ChatThread,
   identity: ChatBranchBaseIdentity,
@@ -2087,6 +2108,10 @@ function isTransientAssistantRuntimeValid(
   thread: ChatThread,
   messageId = runtime.currentMessage.id,
 ): boolean {
+  const isMetadataOnlyRebase = (
+    runtime.sourceThread !== thread
+    && isMetadataOnlyThreadMutation(runtime.sourceThread, thread)
+  );
   if (
     thread.messages !== runtime.durableMessages
     || runtime.currentMessage.id !== messageId
@@ -2096,7 +2121,7 @@ function isTransientAssistantRuntimeValid(
 
   if (runtime.mode.kind === 'replace_branch') {
     return (
-      runtime.sourceThread === thread
+      (runtime.sourceThread === thread || isMetadataOnlyRebase)
       && runtime.messageIndex === runtime.presentationMessages.length - 1
       && runtime.presentationMessages[runtime.messageIndex] === runtime.currentMessage
       && thread.messages[runtime.mode.targetIndex] === runtime.mode.originalTargetMessage
@@ -2104,7 +2129,7 @@ function isTransientAssistantRuntimeValid(
       && (
         runtime.persistenceRetryRequired === true
         || isBranchBaseIdentityCurrent(
-          thread,
+          isMetadataOnlyRebase ? runtime.sourceThread : thread,
           runtime.mode.baseThreadIdentity,
           runtime.mode.targetIndex,
         )
@@ -2230,6 +2255,9 @@ function resolveChatBranchBaseIdentity(
     return {
       durablePersistedAt: cachedIdentity.persistedAt,
       commitRevision: cachedIdentity.commitRevision,
+      baseSemanticIdentity: createChatBranchBaseSemanticIdentity(
+        sanitizeHydratedThread(sanitizeChatThreadForPersistence(thread)),
+      ),
       targetUserMessageId: target.id,
       targetUserCreatedAt: target.createdAt,
     };
@@ -2265,6 +2293,9 @@ function resolveChatBranchBaseIdentity(
   return {
     durablePersistedAt: identity.persistedAt,
     commitRevision: identity.commitRevision,
+    baseSemanticIdentity: createChatBranchBaseSemanticIdentity(
+      sanitizeHydratedThread(sanitizeChatThreadForPersistence(thread)),
+    ),
     targetUserMessageId: target.id,
     targetUserCreatedAt: target.createdAt,
   };
@@ -2384,14 +2415,6 @@ function getTransientAssistantRuntime(
     return null;
   }
 
-  if (runtime.sourceThread !== thread) {
-    runtime.sourceThread = thread;
-    runtime.presentationThread = createTransientPresentationThread(
-      thread,
-      runtime.presentationMessages,
-    );
-  }
-
   return runtime;
 }
 
@@ -2402,11 +2425,64 @@ function refreshTransientPresentationThread(
   runtime.presentationThread = runtime.mode.kind === 'replace_branch'
     ? {
         ...runtime.presentationThread,
+        title: thread.title,
+        titleSource: thread.titleSource,
+        updatedAt: Math.max(runtime.presentationThread.updatedAt, thread.updatedAt),
         messages: runtime.presentationMessages,
         status: 'generating',
       }
     : createTransientPresentationThread(thread, runtime.presentationMessages);
   runtime.sourceThread = thread;
+}
+
+function rebaseTransientBranchRuntimeAfterMetadataMutation(
+  runtime: TransientAssistantRuntime,
+  nextThread: ChatThread,
+): boolean {
+  if (
+    runtime.mode.kind !== 'replace_branch'
+    || !isMetadataOnlyThreadMutation(runtime.sourceThread, nextThread)
+  ) {
+    return false;
+  }
+
+  const durableIdentity = latestDurableThreadIdentityById.get(nextThread.id);
+  if (
+    durableIdentity?.sourceThread !== nextThread
+    || nextThread.messages[runtime.mode.targetIndex] !== runtime.mode.originalTargetMessage
+  ) {
+    return false;
+  }
+
+  const nextBaseIdentity: ChatBranchBaseIdentity = {
+    ...runtime.mode.baseThreadIdentity,
+    durablePersistedAt: durableIdentity.persistedAt,
+    commitRevision: durableIdentity.commitRevision,
+  };
+  runtime.mode.baseThreadIdentity = nextBaseIdentity;
+  if (runtime.branchReplacementProgress) {
+    runtime.branchReplacementProgress = {
+      ...runtime.branchReplacementProgress,
+      baseDurablePersistedAt: nextBaseIdentity.durablePersistedAt,
+      baseCommitRevision: nextBaseIdentity.commitRevision,
+      baseSemanticIdentity: nextBaseIdentity.baseSemanticIdentity,
+    };
+  }
+  runtime.durableThread = nextThread;
+  runtime.durableMessages = nextThread.messages;
+  refreshTransientPresentationThread(nextThread, runtime);
+  return true;
+}
+
+function getActiveBranchReplacementRuntime(
+  thread: ChatThread | undefined,
+): TransientAssistantRuntime | null {
+  if (!thread) {
+    return null;
+  }
+
+  const runtime = getTransientAssistantRuntime(thread);
+  return runtime?.mode.kind === 'replace_branch' ? runtime : null;
 }
 
 function ensureTransientAssistantRuntime(
@@ -2520,6 +2596,24 @@ export const useChatStore = create<ChatStoreState>()(
           threads: get().threads,
           activeThreadId: get().activeThreadId,
         };
+        const metadataOnlyBranchRuntimeRebases = new Map<
+          string,
+          TransientAssistantRuntime
+        >();
+        Object.keys(previous.threads).forEach((threadId) => {
+          const previousThread = previous.threads[threadId];
+          const nextThread = next.threads[threadId];
+          const runtime = transientAssistantRuntimes.get(threadId);
+          if (
+            nextThread
+            && runtime?.mode.kind === 'replace_branch'
+            && runtime.sourceThread === previousThread
+            && runtime.durableMessages === previousThread.messages
+            && isMetadataOnlyThreadMutation(previousThread, nextThread)
+          ) {
+            metadataOnlyBranchRuntimeRebases.set(threadId, runtime);
+          }
+        });
         const previousDurableThreadIdentities = new Map<
           string,
           DurableThreadPersistenceIdentity
@@ -2547,6 +2641,12 @@ export const useChatStore = create<ChatStoreState>()(
         try {
           persistChatStoreMutation(previous, next, persistenceReason);
           if (persistenceReason !== 'streaming_patch') {
+            metadataOnlyBranchRuntimeRebases.forEach((runtime, threadId) => {
+              const nextThread = next.threads[threadId];
+              if (nextThread) {
+                rebaseTransientBranchRuntimeAfterMetadataMutation(runtime, nextThread);
+              }
+            });
             Object.keys(next.threads).forEach((threadId) => {
               if (previous.threads[threadId] === next.threads[threadId]) {
                 return;
@@ -2668,7 +2768,12 @@ export const useChatStore = create<ChatStoreState>()(
 
         pruneExpiredThreads: (retentionDays, now = Date.now()) => {
         const state = get();
-        const expiredThreadIds = getExpiredThreadIds(state.threads, retentionDays, now, state.activeThreadId);
+        const expiredThreadIds = getExpiredThreadIds(
+          state.threads,
+          retentionDays,
+          now,
+          state.activeThreadId,
+        ).filter((threadId) => !getActiveBranchReplacementRuntime(state.threads[threadId]));
         if (expiredThreadIds.length === 0) {
           return 0;
         }
@@ -2695,7 +2800,16 @@ export const useChatStore = create<ChatStoreState>()(
         },
 
         clearAllThreads: () => {
-        const threadCount = Object.keys(get().threads).length;
+        const currentThreads = get().threads;
+        if (
+          Object.values(currentThreads).some(
+            (thread) => getActiveBranchReplacementRuntime(thread) !== null,
+          )
+        ) {
+          return 0;
+        }
+
+        const threadCount = Object.keys(currentThreads).length;
         if (threadCount === 0) {
           assertPrivateStorageWritable();
           chatPersistenceScheduler.cancelAllPendingWrites();
@@ -2715,7 +2829,10 @@ export const useChatStore = create<ChatStoreState>()(
 
         setActiveThread: (threadId) => setWhenPrivateStorageWritable({ activeThreadId: threadId }),
 
-        updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) =>
+        updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) => {
+          if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
+            return;
+          }
           setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
@@ -2737,9 +2854,13 @@ export const useChatStore = create<ChatStoreState>()(
             },
             inferenceRevision: state.inferenceRevision + 1,
           };
-          }),
+          });
+        },
 
-        updateThreadParamsSnapshot: (threadId, paramsSnapshot) =>
+        updateThreadParamsSnapshot: (threadId, paramsSnapshot) => {
+          if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
+            return;
+          }
           setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
@@ -2768,9 +2889,13 @@ export const useChatStore = create<ChatStoreState>()(
             },
             inferenceRevision: state.inferenceRevision + 1,
           };
-          }),
+          });
+        },
 
         switchThreadModel: (threadId, nextModelId, at) => {
+        if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
+          return null;
+        }
         let createdMessageId: string | null = null;
 
         setWhenPrivateStorageWritable((state) => {
@@ -3078,6 +3203,9 @@ export const useChatStore = create<ChatStoreState>()(
       },
 
       deleteThread: (threadId) => {
+        if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
+          return;
+        }
         setWhenPrivateStorageWritable((state) => {
           if (!state.threads[threadId]) {
             return state;
@@ -3132,6 +3260,9 @@ export const useChatStore = create<ChatStoreState>()(
       deleteMessageBranch: (threadId, messageId) => {
         const thread = get().threads[threadId];
         if (!thread) {
+          return false;
+        }
+        if (getActiveBranchReplacementRuntime(thread)) {
           return false;
         }
 
@@ -3345,7 +3476,10 @@ export const useChatStore = create<ChatStoreState>()(
           };
         }),
 
-      setThreadSummary: (threadId, summary) =>
+      setThreadSummary: (threadId, summary) => {
+        if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
+          return;
+        }
         setWhenPrivateStorageWritable((state) => {
           const existingThread = state.threads[threadId];
           if (!existingThread) {
@@ -3364,7 +3498,8 @@ export const useChatStore = create<ChatStoreState>()(
             },
             inferenceRevision: state.inferenceRevision + 1,
           };
-        }),
+        });
+      },
 
       getThread: (threadId) => {
         const thread = threadId ? get().threads[threadId] : undefined;

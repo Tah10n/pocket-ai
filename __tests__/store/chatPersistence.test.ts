@@ -51,6 +51,9 @@ import {
   copiedImageAttachment,
   secondCopiedImageAttachment,
 } from '../fixtures/chatImageAttachmentFixtures';
+import {
+  createChatBranchBaseSemanticIdentity,
+} from '../../src/store/chatBranchReplacement';
 
 const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
@@ -361,6 +364,13 @@ describe('chatPersistence', () => {
       ...progress,
       branchReplacement: {
         ...progress.branchReplacement,
+        baseSemanticIdentity: 'raw prompt text is not a valid identity',
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
         unexpectedOldTail: ['old-1', 'old-2'],
       },
     }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
@@ -518,6 +528,70 @@ describe('chatPersistence', () => {
       },
       130,
       7,
+    )).toEqual({ outcome: 'stale' });
+  });
+
+  it('recovers branch progress across rename-only durable metadata', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-renamed-base');
+    const progress = buildBranchProgress(thread.id, {
+      branchReplacement: {
+        ...buildBranchProgress(thread.id).branchReplacement!,
+        baseSemanticIdentity: createChatBranchBaseSemanticIdentity(thread),
+      },
+    });
+    const renamedThread: ChatThread = {
+      ...thread,
+      title: 'Manual title after branch output',
+      titleSource: 'manual',
+      updatedAt: 110,
+    };
+
+    expect(recoverChatThreadFromStreamingProgress(
+      renamedThread,
+      110,
+      progress,
+      130,
+      8,
+    )).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        title: 'Manual title after branch output',
+        titleSource: 'manual',
+        status: 'stopped',
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            id: progress.messageId,
+            content: progress.content,
+            state: 'stopped',
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it('rejects semantic branch recovery after a prompt-affecting durable mutation', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-prompt-mutated-base');
+    const progress = buildBranchProgress(thread.id, {
+      branchReplacement: {
+        ...buildBranchProgress(thread.id).branchReplacement!,
+        baseSemanticIdentity: createChatBranchBaseSemanticIdentity(thread),
+      },
+    });
+    const promptMutatedThread: ChatThread = {
+      ...thread,
+      presetSnapshot: {
+        ...thread.presetSnapshot,
+        systemPrompt: 'A newer durable system prompt',
+      },
+      updatedAt: 110,
+    };
+
+    expect(recoverChatThreadFromStreamingProgress(
+      promptMutatedThread,
+      110,
+      progress,
+      130,
+      8,
     )).toEqual({ outcome: 'stale' });
   });
 

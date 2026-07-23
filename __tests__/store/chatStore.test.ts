@@ -3325,6 +3325,10 @@ describe('chatStore', () => {
     flushPendingChatPersistenceWrites('background');
     const staleProgress = snapshotStreamingProgressArtifacts(thread.id);
 
+    expect(useChatStore.getState().clearAllThreads()).toBe(0);
+    expect(useChatStore.getState().getThread(thread.id)).not.toBeNull();
+    expect(useChatStore.getState().stopAssistantMessage(thread.id, assistantId))
+      .toEqual({ status: 'committed' });
     expect(useChatStore.getState().clearAllThreads()).toBe(1);
     restoreStreamingProgressArtifacts(staleProgress);
     expect(readChatStreamingProgressRecord(storage, thread.id).ok).toBe(true);
@@ -3757,7 +3761,197 @@ describe('chatStore', () => {
     });
   });
 
-  it('rejects branch progress after a newer durable thread mutation', async () => {
+  it('rebases an active branch runtime across rename and commits the generated answer', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-live-rename');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt before rename',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial before rename',
+    });
+
+    expect(useChatStore.getState().renameThread(thread.id, 'Renamed during branch stream'))
+      .toBe(true);
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+      title: 'Renamed during branch stream',
+      titleSource: 'manual',
+      status: 'generating',
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: assistantId,
+          content: 'Partial before rename',
+          state: 'streaming',
+        }),
+      ]),
+    }));
+
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial after rename',
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Final answer after rename',
+    })).toEqual({ status: 'committed' });
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+      title: 'Renamed during branch stream',
+      titleSource: 'manual',
+      status: 'idle',
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: assistantId,
+          content: 'Final answer after rename',
+          state: 'complete',
+        }),
+      ]),
+    }));
+    expect(readChatThreadRecord(storage, thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({
+          title: 'Renamed during branch stream',
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              id: assistantId,
+              content: 'Final answer after rename',
+            }),
+          ]),
+        }),
+      }),
+    });
+  });
+
+  it('recovers partial branch output after restart following a durable rename', async () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-rename-restart');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt before restart',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Partial branch output before restart',
+    });
+
+    expect(useChatStore.getState().renameThread(thread.id, 'Crash-safe renamed branch'))
+      .toBe(true);
+    const progressAfterRename = readChatStreamingProgressRecord(storage, thread.id);
+    const durableAfterRename = readChatThreadRecord(storage, thread.id);
+    expect(progressAfterRename).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        messageId: assistantId,
+        content: 'Partial branch output before restart',
+        branchReplacement: expect.objectContaining({
+          baseSemanticIdentity: expect.stringMatching(/^v1:/),
+        }),
+      }),
+    });
+    expect(durableAfterRename.ok).toBe(true);
+    if (progressAfterRename.ok && durableAfterRename.ok) {
+      expect(progressAfterRename.value.persistedAt)
+        .toBeGreaterThan(durableAfterRename.value.persistedAt);
+    }
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+
+    expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+      title: 'Crash-safe renamed branch',
+      titleSource: 'manual',
+      status: 'stopped',
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          id: assistantId,
+          content: 'Partial branch output before restart',
+          state: 'stopped',
+        }),
+      ]),
+    }));
+    expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+  });
+
+  it('rejects prompt-affecting and destructive mutations while a branch runtime owns the thread', () => {
+    const thread = buildTrailingModelSwitchThread('thread-branch-mutation-guards');
+    seedPersistedChatThread(thread, 100);
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt protected by runtime ownership',
+    )!;
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Runtime remains live',
+    });
+    const durableThreadBefore = useChatStore.getState().threads[thread.id];
+    const inferenceRevisionBefore = useChatStore.getState().inferenceRevision;
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      useChatStore.getState().updateThreadPresetSnapshot(thread.id, 'preset-new', {
+        id: 'preset-new',
+        name: 'New preset',
+        systemPrompt: 'A newer system prompt',
+      });
+      useChatStore.getState().updateThreadParamsSnapshot(thread.id, {
+        ...thread.paramsSnapshot,
+        temperature: 0.2,
+      });
+      useChatStore.getState().setThreadSummary(thread.id, {
+        content: 'A newer summary',
+        createdAt: 200,
+        sourceMessageIds: [`${thread.id}-user-1`],
+      });
+      expect(useChatStore.getState().switchThreadModel(thread.id, 'author/model-q6'))
+        .toBeNull();
+      expect(useChatStore.getState().deleteMessageBranch(
+        thread.id,
+        `${thread.id}-user-1`,
+      )).toBe(false);
+      useChatStore.getState().deleteThread(thread.id);
+      expect(useChatStore.getState().clearAllThreads()).toBe(0);
+
+      expect(useChatStore.getState().threads[thread.id]).toBe(durableThreadBefore);
+      expect(useChatStore.getState().inferenceRevision).toBe(inferenceRevisionBefore);
+      expect(capture.setKeys).toEqual([]);
+      expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
+        status: 'generating',
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            id: assistantId,
+            content: 'Runtime remains live',
+            state: 'streaming',
+          }),
+        ]),
+      }));
+    } finally {
+      capture.restore();
+    }
+
+    useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
+      content: 'Runtime still accepts current callbacks',
+    });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'stopped',
+    })).toEqual({ status: 'committed' });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId, {
+      outcome: 'success',
+      content: 'Late terminal callback',
+    })).toEqual({ status: 'stale' });
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantId,
+        content: 'Runtime still accepts current callbacks',
+        state: 'stopped',
+      }),
+    );
+  });
+
+  it('rejects branch progress after a newer prompt-affecting durable mutation', async () => {
     const thread = buildTrailingModelSwitchThread('thread-branch-newer-durable');
     seedPersistedChatThread(thread, 100);
     const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
@@ -3771,8 +3965,10 @@ describe('chatStore', () => {
     flushPendingChatPersistenceWrites('background');
     const newerThread: ChatThread = {
       ...thread,
-      title: 'Newer durable title',
-      titleSource: 'manual',
+      presetSnapshot: {
+        ...thread.presetSnapshot,
+        systemPrompt: 'Newer durable system prompt',
+      },
       updatedAt: 200,
     };
     writeChatThreadRecord(storage, newerThread, 200, { commitRevision: 9 });
@@ -3781,7 +3977,9 @@ describe('chatStore', () => {
     await useChatStore.persist.rehydrate();
 
     expect(useChatStore.getState().getThread(thread.id)).toEqual(expect.objectContaining({
-      title: 'Newer durable title',
+      presetSnapshot: expect.objectContaining({
+        systemPrompt: 'Newer durable system prompt',
+      }),
       messages: thread.messages,
     }));
     expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({
@@ -3799,7 +3997,8 @@ describe('chatStore', () => {
       `${thread.id}-user-1`,
       'Transient late callback edit',
     )!;
-    useChatStore.getState().stopAssistantMessage(thread.id, assistantId);
+    expect(useChatStore.getState().stopAssistantMessage(thread.id, assistantId))
+      .toEqual({ status: 'restored_without_write' });
 
     useChatStore.getState().patchAssistantMessage(thread.id, assistantId, {
       content: 'Late patch must not land',
@@ -3811,7 +4010,7 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id)).toEqual(oldIds);
   });
 
-  it('clears branch runtime and progress when the thread is deleted', async () => {
+  it('blocks deleting a branch runtime until Stop, then clears runtime and progress', async () => {
     const removedAttachment = buildStoredAttachment(
       'thread-branch-delete-runtime',
       'thread-branch-delete-runtime-user-tail',
@@ -3837,6 +4036,11 @@ describe('chatStore', () => {
     );
 
     useChatStore.getState().deleteThread(thread.id);
+    expect(useChatStore.getState().getThread(thread.id)).not.toBeNull();
+    expect(readChatStreamingProgressRecord(storage, thread.id).ok).toBe(true);
+    expect(useChatStore.getState().stopAssistantMessage(thread.id, assistantId))
+      .toEqual({ status: 'committed' });
+    useChatStore.getState().deleteThread(thread.id);
     await flushAttachmentCleanup(4);
 
     expect(useChatStore.getState().getThread(thread.id)).toBeNull();
@@ -3853,7 +4057,7 @@ describe('chatStore', () => {
     )).toHaveLength(1);
   });
 
-  it('clears branch runtime and progress on clearAllThreads', async () => {
+  it('blocks clearAllThreads for a branch runtime until Stop', async () => {
     const removedAttachment = buildStoredAttachment(
       'thread-branch-clear-runtime',
       'thread-branch-clear-runtime-user-tail',
@@ -3878,6 +4082,11 @@ describe('chatStore', () => {
       expect.anything(),
     );
 
+    expect(useChatStore.getState().clearAllThreads()).toBe(0);
+    expect(useChatStore.getState().threads[thread.id]).toBeDefined();
+    expect(readChatStreamingProgressRecord(storage, thread.id).ok).toBe(true);
+    expect(useChatStore.getState().stopAssistantMessage(thread.id, assistantId))
+      .toEqual({ status: 'committed' });
     expect(useChatStore.getState().clearAllThreads()).toBe(1);
     await flushAttachmentCleanup(4);
     expect(useChatStore.getState().threads).toEqual({});

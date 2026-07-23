@@ -14,6 +14,134 @@ export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS = 8;
 export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PART_TOTAL_CHARS = 200_000;
 export const MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENTS = 24;
 export const MAX_CHAT_BRANCH_REPLACEMENT_ATTACHMENT_METADATA_BYTES = 64 * 1024;
+export const MAX_CHAT_BRANCH_BASE_SEMANTIC_IDENTITY_LENGTH = 64;
+
+type ChatBranchSemanticHashState = {
+  hashes: [number, number, number, number];
+  codeUnits: number;
+};
+
+function appendChatBranchSemanticHashSegment(
+  state: ChatBranchSemanticHashState,
+  kind: string,
+  value: string,
+): void {
+  const framedValue = `${kind.length}:${kind}:${value.length}:${value};`;
+  state.codeUnits += framedValue.length;
+
+  for (let index = 0; index < framedValue.length; index += 1) {
+    const codeUnit = framedValue.charCodeAt(index);
+    for (let hashIndex = 0; hashIndex < state.hashes.length; hashIndex += 1) {
+      state.hashes[hashIndex] ^= codeUnit;
+      state.hashes[hashIndex] = Math.imul(state.hashes[hashIndex], 0x01000193) >>> 0;
+    }
+  }
+}
+
+function appendStableChatBranchSemanticValue(
+  state: ChatBranchSemanticHashState,
+  value: unknown,
+): void {
+  if (value === null) {
+    appendChatBranchSemanticHashSegment(state, 'null', '');
+    return;
+  }
+
+  if (typeof value === 'string') {
+    appendChatBranchSemanticHashSegment(state, 'string', value);
+    return;
+  }
+
+  if (typeof value === 'number') {
+    appendChatBranchSemanticHashSegment(
+      state,
+      'number',
+      String(value === 0 ? 0 : value),
+    );
+    return;
+  }
+
+  if (typeof value === 'boolean') {
+    appendChatBranchSemanticHashSegment(state, 'boolean', value ? '1' : '0');
+    return;
+  }
+
+  if (value === undefined) {
+    appendChatBranchSemanticHashSegment(state, 'undefined', '');
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    appendChatBranchSemanticHashSegment(state, 'array', String(value.length));
+    value.forEach((entry) => {
+      appendStableChatBranchSemanticValue(state, entry === undefined ? null : entry);
+    });
+    return;
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort();
+    appendChatBranchSemanticHashSegment(state, 'object', String(keys.length));
+    keys.forEach((key) => {
+      appendChatBranchSemanticHashSegment(state, 'key', key);
+      appendStableChatBranchSemanticValue(state, record[key]);
+    });
+    return;
+  }
+
+  appendChatBranchSemanticHashSegment(state, typeof value, '');
+}
+
+/**
+ * Builds a fixed-size identity for every durable field except rename metadata.
+ * Raw prompt, attachment, and summary values are consumed only by the in-memory
+ * hash and are never retained in the progress envelope.
+ */
+export function createChatBranchBaseSemanticIdentity(thread: ChatThread): string {
+  const state: ChatBranchSemanticHashState = {
+    hashes: [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35],
+    codeUnits: 0,
+  };
+  appendStableChatBranchSemanticValue(state, {
+    id: thread.id,
+    modelId: thread.modelId,
+    activeModelId: thread.activeModelId,
+    presetId: thread.presetId,
+    presetSnapshot: thread.presetSnapshot,
+    paramsSnapshot: thread.paramsSnapshot,
+    messages: thread.messages,
+    createdAt: thread.createdAt,
+    lastGeneratedAt: thread.lastGeneratedAt,
+    summary: thread.summary,
+    status: thread.status,
+  });
+
+  return [
+    'v1',
+    state.codeUnits,
+    ...state.hashes.map((hash) => hash.toString(16).padStart(8, '0')),
+  ].join(':');
+}
+
+export function isChatBranchBaseSemanticIdentity(value: unknown): value is string {
+  if (
+    typeof value !== 'string'
+    || value.length > MAX_CHAT_BRANCH_BASE_SEMANTIC_IDENTITY_LENGTH
+  ) {
+    return false;
+  }
+
+  const match = /^v1:(\d+):([0-9a-f]{8}:){3}[0-9a-f]{8}$/.exec(value);
+  if (!match) {
+    return false;
+  }
+
+  const codeUnits = Number(match[1]);
+  return Number.isSafeInteger(codeUnits) && codeUnits >= 0;
+}
 
 function getUtf8ByteLength(value: string, stopAfter = Number.POSITIVE_INFINITY): number {
   let bytes = 0;
@@ -115,6 +243,7 @@ export function isChatBranchReplacementUserMessageWithinProgressBounds(
 export interface ChatBranchBaseIdentity {
   durablePersistedAt: number;
   commitRevision?: number;
+  baseSemanticIdentity?: string;
   targetUserMessageId: string;
   targetUserCreatedAt: number;
 }
@@ -133,6 +262,7 @@ export interface ChatBranchReplacementProgress {
   targetUserCreatedAt: number;
   baseDurablePersistedAt: number;
   baseCommitRevision?: number;
+  baseSemanticIdentity?: string;
   replacementUserMessage: ChatMessage;
   insertedModelSwitchMessage?: ChatMessage;
   paramsSnapshot: GenerationParamsSnapshot;
@@ -362,6 +492,7 @@ export function createChatBranchReplacementProgress(
     targetUserCreatedAt: baseIdentity.targetUserCreatedAt,
     baseDurablePersistedAt: baseIdentity.durablePersistedAt,
     baseCommitRevision: baseIdentity.commitRevision,
+    baseSemanticIdentity: baseIdentity.baseSemanticIdentity,
     replacementUserMessage: plan.replacementUserMessage,
     insertedModelSwitchMessage: plan.insertedModelSwitchMessage,
     paramsSnapshot: { ...plan.paramsSnapshot },

@@ -5713,7 +5713,7 @@ describe('useChatSession', () => {
     }));
   });
 
-  it('rejects a prepared request when prompt semantics change under a fixed clock', async () => {
+  it('rejects a prompt mutation while a prepared regeneration owns the thread', async () => {
     const getSession = renderHookHarness();
     await act(async () => {
       await getSession()?.appendUserMessage('Initial prompt');
@@ -5724,7 +5724,7 @@ describe('useChatSession', () => {
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
     let resolvePromptCount: ((tokens: number) => void) | undefined;
     let regenerationPromise: Promise<boolean> | undefined;
-    let thrown: unknown;
+    let regenerationResult: boolean | undefined;
     exactPromptTokenCache.clear();
     (llmEngineService.chatCompletion as jest.Mock).mockClear();
     (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
@@ -5762,26 +5762,21 @@ describe('useChatSession', () => {
         );
       });
       expect(useChatStore.getState().getThread(thread.id)?.updatedAt).toBe(fixedNow);
-      expect(useChatStore.getState().inferenceRevision).toBeGreaterThan(revisionBeforeMutation);
+      expect(useChatStore.getState().inferenceRevision).toBe(revisionBeforeMutation);
 
       await act(async () => {
         resolvePromptCount?.(32);
-        try {
-          await regenerationPromise;
-        } catch (error) {
-          thrown = error;
-        }
+        regenerationResult = await regenerationPromise;
       });
     } finally {
       resolvePromptCount?.(32);
       nowSpy.mockRestore();
     }
 
-    expect(thrown).toEqual(expect.objectContaining({ code: 'action_failed' }));
-    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
-    expect(useChatStore.getState().getThread(thread.id)?.presetSnapshot.systemPrompt).toBe(
-      'Prompt semantics changed while tokenization was pending.',
-    );
+    expect(regenerationResult).toBe(true);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getThread(thread.id)?.presetSnapshot.systemPrompt)
+      .toBe(thread.presetSnapshot.systemPrompt);
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {

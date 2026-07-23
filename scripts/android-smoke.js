@@ -118,7 +118,11 @@ const screenshotPath = screenshotTarget
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error(`[android-smoke] ${describeAndroidQaError(error, "smoke-run-failed")}`);
+    console.error(
+      `[android-smoke] ${describeAndroidQaError(error, "smoke-run-failed", {
+        allowedSourceFiles: ["android-smoke.js"],
+      })}`
+    );
     if (!process.exitCode) {
       process.exitCode = 1;
     }
@@ -2675,44 +2679,32 @@ function isAppJsReadyUiHierarchy(xml, appPackage) {
 
 function readAndroidUiHierarchy(adbPath, serial, options = {}) {
   const runSpawnSync = options.spawnSync ?? spawnSync;
-  const remotePath = options.remotePath ?? `/sdcard/pocket-ai-smoke-ready-${process.pid}.xml`;
   const commandTimeoutMs = options.commandTimeoutMs ?? uiHierarchyCommandTimeoutMs;
-  const spawnOptions = {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: commandTimeoutMs,
-  };
+  let dumpResult = null;
   try {
-    const dumpResult = runSpawnSync(
+    dumpResult = runSpawnSync(
       adbPath,
-      ["-s", serial, "shell", "uiautomator", "dump", remotePath],
-      spawnOptions,
+      ["-s", serial, "exec-out", "uiautomator", "dump", "/dev/tty"],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: commandTimeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+      },
     );
-    if (dumpResult.error || dumpResult.status !== 0) {
-      return null;
-    }
-
-    const readResult = runSpawnSync(
-      adbPath,
-      ["-s", serial, "exec-out", "cat", remotePath],
-      { ...spawnOptions, maxBuffer: 10 * 1024 * 1024 },
-    );
-    if (
-      readResult.error
-      || readResult.status !== 0
-      || typeof readResult.stdout !== "string"
-      || !readResult.stdout.includes("<hierarchy")
-    ) {
-      return null;
-    }
-    return readResult.stdout;
-  } finally {
-    runSpawnSync(
-      adbPath,
-      ["-s", serial, "shell", "rm", "-f", remotePath],
-      { stdio: "ignore", timeout: commandTimeoutMs },
-    );
+  } catch {
+    return null;
   }
+  if (
+    !dumpResult
+    || dumpResult.error
+    || dumpResult.status !== 0
+    || typeof dumpResult.stdout !== "string"
+    || !dumpResult.stdout.includes("<hierarchy")
+  ) {
+    return null;
+  }
+  return dumpResult.stdout;
 }
 
 async function waitForAppJsReady(adbPath, serial, appPackage, options = {}) {

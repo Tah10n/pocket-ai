@@ -126,7 +126,41 @@ function sanitizeAndroidQaText(value, options = {}) {
   return sanitized;
 }
 
-function describeAndroidQaError(error, category = "operation-failed") {
+function resolveAllowedErrorSourceSite(error, allowedSourceFiles) {
+  const allowedFiles = new Set(
+    (Array.isArray(allowedSourceFiles) ? allowedSourceFiles : [])
+      .map((fileName) => `${fileName || ""}`.trim())
+      .filter((fileName) => (
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:[cm]?js|tsx?)$/u.test(fileName)
+      ))
+  );
+  if (allowedFiles.size === 0) {
+    return null;
+  }
+
+  let stack = "";
+  try {
+    if (typeof error?.stack === "string") {
+      stack = error.stack;
+    }
+  } catch {
+    return null;
+  }
+
+  for (const fileName of allowedFiles) {
+    const sourcePattern = new RegExp(
+      `(?:^|[\\\\/])${escapeRegularExpression(fileName)}:(\\d{1,7}):(\\d{1,7})(?:\\)?(?:\\s|$))`,
+      "mu"
+    );
+    const match = stack.match(sourcePattern);
+    if (match) {
+      return `${fileName}:${match[1]}:${match[2]}`;
+    }
+  }
+  return null;
+}
+
+function describeAndroidQaError(error, category = "operation-failed", options = {}) {
   const normalizedCategory = /^[a-z][a-z0-9-]{0,63}$/u.test(`${category}`)
     ? `${category}`
     : "operation-failed";
@@ -148,11 +182,17 @@ function describeAndroidQaError(error, category = "operation-failed") {
   }
   const safeName = SAFE_ERROR_NAMES.has(candidateName) ? candidateName : "Error";
   const safeCode = SAFE_ERROR_CODES.has(candidateCode) ? candidateCode : "unknown";
-  return `${normalizedCategory} (name=${safeName}, code=${safeCode})`;
+  const safeSourceSite = resolveAllowedErrorSourceSite(
+    error,
+    options.allowedSourceFiles
+  );
+  const sourceSiteSuffix = safeSourceSite ? `, site=${safeSourceSite}` : "";
+  return `${normalizedCategory} (name=${safeName}, code=${safeCode}${sourceSiteSuffix})`;
 }
 
 module.exports = {
   DEFAULT_QA_TEXT_LIMIT,
   describeAndroidQaError,
+  resolveAllowedErrorSourceSite,
   sanitizeAndroidQaText,
 };

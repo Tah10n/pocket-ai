@@ -3826,6 +3826,25 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     });
     expect(describeAndroidQaError(hostileError, 'proxy-failed'))
       .toBe('proxy-failed (name=Error, code=unknown)');
+
+    const sourceError = new ReferenceError(
+      'PROMPT_SENTINEL hf_private_token C:\\Users\\private\\model.gguf'
+    );
+    sourceError.stack = [
+      'ReferenceError: PROMPT_SENTINEL hf_private_token',
+      '    at readAndroidUiHierarchy (/home/private-user/project/scripts/android-smoke.js:2688:17)',
+      '    at /home/private-user/project/private-secret.js:9:3',
+    ].join('\n');
+    const sourceDiagnostic = describeAndroidQaError(
+      sourceError,
+      'smoke-run-failed',
+      { allowedSourceFiles: ['android-smoke.js'] }
+    );
+    expect(sourceDiagnostic)
+      .toBe('smoke-run-failed (name=ReferenceError, code=unknown, site=android-smoke.js:2688:17)');
+    expect(sourceDiagnostic).not.toContain('PROMPT_SENTINEL');
+    expect(sourceDiagnostic).not.toContain('private-user');
+    expect(sourceDiagnostic).not.toContain('private-secret.js');
   });
 
   it('requires the source snapshot to remain exact across device identity hashing', () => {

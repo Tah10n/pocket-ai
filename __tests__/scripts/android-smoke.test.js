@@ -151,27 +151,35 @@ describe('android-smoke app JS readiness', () => {
     })).rejects.toThrow('while waiting for the app JS surface');
   });
 
-  it('bounds and cleans up Android UI hierarchy commands', () => {
+  it('streams a bounded Android UI hierarchy without device temp files', () => {
     const spawnSync = jest.fn()
-      .mockReturnValueOnce({ status: 0 })
-      .mockReturnValueOnce({ status: 0, stdout: readyHierarchy })
-      .mockReturnValueOnce({ status: 0 });
+      .mockReturnValueOnce({ status: 0, stdout: readyHierarchy });
 
     expect(readAndroidUiHierarchy('adb', 'device-1', {
       spawnSync,
-      remotePath: '/sdcard/readiness.xml',
     })).toBe(readyHierarchy);
-    expect(spawnSync).toHaveBeenCalledTimes(3);
-    expect(spawnSync.mock.calls[0][2]).toEqual(expect.objectContaining({ timeout: 5_000 }));
-    expect(spawnSync.mock.calls[1][2]).toEqual(expect.objectContaining({ timeout: 5_000 }));
-    expect(spawnSync.mock.calls[2][1]).toEqual([
+    expect(spawnSync).toHaveBeenCalledTimes(1);
+    expect(spawnSync.mock.calls[0][1]).toEqual([
       '-s',
       'device-1',
-      'shell',
-      'rm',
-      '-f',
-      '/sdcard/readiness.xml',
+      'exec-out',
+      'uiautomator',
+      'dump',
+      '/dev/tty',
     ]);
+    expect(spawnSync.mock.calls[0][2]).toEqual(expect.objectContaining({
+      timeout: 5_000,
+      maxBuffer: 10 * 1024 * 1024,
+    }));
+  });
+
+  it('treats one Android UI hierarchy probe exception as not ready', () => {
+    const spawnSync = jest.fn(() => {
+      throw new ReferenceError('transient probe failure');
+    });
+
+    expect(readAndroidUiHierarchy('adb', 'device-1', { spawnSync })).toBeNull();
+    expect(spawnSync).toHaveBeenCalledTimes(1);
   });
 });
 

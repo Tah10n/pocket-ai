@@ -2541,7 +2541,10 @@ export function removeChatStreamingProgressRecord(storage: AppStorageFacade, thr
   writerStates.delete(threadId);
 
   let firstError: unknown;
-  if (currentResult && !currentResult.ok) {
+  // A fresh process can reconstruct the current manifest but cannot recover
+  // obsolete crash-safe slots from the in-memory ownership cache. Enumerate
+  // only real keys on cache misses so those bounded orphans do not leak.
+  if (!cachedWriterState) {
     try {
       listBoundedChatStreamingProgressOrphanArtifactKeys(storage, threadId)
         .forEach((key) => artifactKeys.add(key));

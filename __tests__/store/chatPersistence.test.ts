@@ -1147,8 +1147,9 @@ describe('chatPersistence', () => {
     const threadId = 'thread-progress-short-cleanup-count';
     const set = jest.fn(storage.set.bind(storage));
     const getString = jest.fn(storage.getString.bind(storage));
+    const getAllKeys = jest.fn(storage.getAllKeys.bind(storage));
     const remove = jest.fn(storage.remove.bind(storage));
-    const instrumentedStorage = { ...storage, set, getString, remove };
+    const instrumentedStorage = { ...storage, set, getString, getAllKeys, remove };
 
     expect(writeChatStreamingProgressRecord(
       instrumentedStorage,
@@ -1161,6 +1162,7 @@ describe('chatPersistence', () => {
     removeChatStreamingProgressRecord(instrumentedStorage, threadId);
 
     expect(getString).not.toHaveBeenCalled();
+    expect(getAllKeys).not.toHaveBeenCalled();
     const removedKeys = remove.mock.calls.map(([key]) => key);
     expect(1 + 2 + 2 + MAX_CHAT_PROGRESS_CHUNKS).toBe(133);
     expect(removedKeys).toEqual([
@@ -1175,8 +1177,9 @@ describe('chatPersistence', () => {
     const threadId = 'thread-progress-long-cleanup-count';
     const set = jest.fn(storage.set.bind(storage));
     const getString = jest.fn(storage.getString.bind(storage));
+    const getAllKeys = jest.fn(storage.getAllKeys.bind(storage));
     const remove = jest.fn(storage.remove.bind(storage));
-    const instrumentedStorage = { ...storage, set, getString, remove };
+    const instrumentedStorage = { ...storage, set, getString, getAllKeys, remove };
     const writeCount = 64;
 
     for (let revision = 1; revision <= writeCount; revision += 1) {
@@ -1200,10 +1203,55 @@ describe('chatPersistence', () => {
     removeChatStreamingProgressRecord(instrumentedStorage, threadId);
 
     expect(getString).not.toHaveBeenCalled();
+    expect(getAllKeys).not.toHaveBeenCalled();
     const removedKeys = remove.mock.calls.map(([key]) => key);
     expect(removedKeys).toHaveLength(artifactKeys.length);
     expect(new Set(removedKeys)).toEqual(new Set(artifactKeys));
     expect(removedKeys).toHaveLength(66);
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
+  it('removes obsolete crash-safe slots after a writer-cache restart', () => {
+    const threadId = 'thread-progress-restart-cleanup';
+    const first = buildProgress(threadId, {
+      content: 'initial checkpoint',
+      thoughtContent: undefined,
+      revision: 1,
+      persistedAt: 1,
+    });
+    expect(writeChatStreamingProgressRecord(storage, first)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(writeChatStreamingProgressRecord(storage, {
+      ...first,
+      content: 'x'.repeat(70 * 1024),
+      revision: 2,
+      persistedAt: 2,
+    })).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    const artifactKeys = listChatStreamingProgressStorageKeys(storage);
+    expect(artifactKeys).toHaveLength(4);
+
+    const getString = jest.fn(storage.getString.bind(storage));
+    const getAllKeys = jest.fn(storage.getAllKeys.bind(storage));
+    const remove = jest.fn(storage.remove.bind(storage));
+    const restartedStorage = {
+      ...storage,
+      getString,
+      getAllKeys,
+      remove,
+    };
+
+    removeChatStreamingProgressRecord(restartedStorage, threadId);
+
+    expect(getString).toHaveBeenCalled();
+    expect(getAllKeys).toHaveBeenCalledTimes(1);
+    const removedKeys = remove.mock.calls.map(([key]) => key);
+    expect(removedKeys).toHaveLength(artifactKeys.length);
+    expect(new Set(removedKeys)).toEqual(new Set(artifactKeys));
     expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
   });
 

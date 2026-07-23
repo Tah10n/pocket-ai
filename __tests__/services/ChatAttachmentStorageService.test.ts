@@ -1014,6 +1014,90 @@ describe('ChatAttachmentStorageService', () => {
     });
   });
 
+  it('treats a missing attachment directory as a silent empty reconciliation', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({ exists: false });
+    const service = new ChatAttachmentStorageService();
+
+    try {
+      await expect(service.reconcileAttachmentDirectory()).resolves.toEqual({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/');
+      expect(FileSystem.readDirectoryAsync).not.toHaveBeenCalled();
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns without exposing paths when attachment directory inspection fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.getInfoAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('secret file:///private/chat-attachments'),
+    );
+    const service = new ChatAttachmentStorageService();
+
+    try {
+      await expect(service.reconcileAttachmentDirectory()).resolves.toEqual({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+
+      expect(FileSystem.readDirectoryAsync).not.toHaveBeenCalled();
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatAttachmentStorage] Failed to inspect chat attachment storage',
+        expect.objectContaining({
+          pathCategory: 'chat_attachment',
+          context: 'attachment_directory_reconciliation_inspection',
+          errorName: 'Error',
+        }),
+      );
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns and skips enumeration when attachment storage is not a directory', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValueOnce({
+      exists: true,
+      isDirectory: false,
+    });
+    const service = new ChatAttachmentStorageService();
+
+    try {
+      await expect(service.reconcileAttachmentDirectory()).resolves.toEqual({
+        deletedCount: 0,
+        attemptedDeleteCount: 0,
+        candidateCount: 0,
+        hasMoreCandidates: false,
+      });
+
+      expect(FileSystem.readDirectoryAsync).not.toHaveBeenCalled();
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatAttachmentStorage] Chat attachment storage path is not a directory',
+        {
+          pathCategory: 'chat_attachment',
+          context: 'attachment_directory_reconciliation_wrong_type',
+        },
+      );
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('test-dir/chat-attachments/');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('preserves referenced nested attachment directories during directory reconciliation', async () => {
     (FileSystem.readDirectoryAsync as jest.Mock).mockResolvedValueOnce([
       'thread-1',
@@ -1023,7 +1107,7 @@ describe('ChatAttachmentStorageService', () => {
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
       exists: true,
       size: uri.endsWith('/delete-me.jpg') ? 1234 : undefined,
-      isDirectory: uri.endsWith('/orphan-dir'),
+      isDirectory: uri === 'test-dir/chat-attachments/' || uri.endsWith('/orphan-dir'),
     }));
     const service = new ChatAttachmentStorageService();
 

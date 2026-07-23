@@ -1264,6 +1264,30 @@ export class ChatAttachmentStorageService {
       return createEmptyDirectoryReconciliationResult();
     }
 
+    let directoryInfo: FileSystem.FileInfo;
+    try {
+      directoryInfo = await FileSystem.getInfoAsync(directory);
+    } catch (error) {
+      console.warn('[ChatAttachmentStorage] Failed to inspect chat attachment storage', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'attachment_directory_reconciliation_inspection',
+        ...getSanitizedErrorDetails(error),
+      });
+      return createEmptyDirectoryReconciliationResult();
+    }
+
+    if (!directoryInfo.exists) {
+      return createEmptyDirectoryReconciliationResult();
+    }
+
+    if ((directoryInfo as { isDirectory?: boolean }).isDirectory === false) {
+      console.warn('[ChatAttachmentStorage] Chat attachment storage path is not a directory', {
+        pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
+        context: 'attachment_directory_reconciliation_wrong_type',
+      });
+      return createEmptyDirectoryReconciliationResult();
+    }
+
     let fileNames: string[];
     try {
       fileNames = await FileSystem.readDirectoryAsync(directory);

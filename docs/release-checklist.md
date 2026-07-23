@@ -98,10 +98,13 @@ build/install provenance. Do not add `--skip-build` or `--preserve-running-app` 
 command. Record the device model, serial, supported ABI list, selected ABI, final Git HEAD,
 APK SHA-256, report path, and the result of every step in the release evidence.
 
-For PR CI, `android-pack-catalog` selects the catalog pack and
-`android-pack-branch-regeneration` selects the destructive 15-step release pack with
-`--fail-on-skip`. The branch-regeneration label fails when the local model, fixture, or
-sentinel precondition is missing. If multiple Android pack labels are applied, CI uses this priority order: `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+For PR CI, `android-pack-catalog` selects the hosted catalog pack.
+`android-pack-branch-regeneration` instead dispatches the destructive 15-step release pack
+with `--fail-on-skip` to the dedicated prepared self-hosted runner. The label fails when
+the runner, local model, fixture, or sentinel precondition is missing. If multiple Android
+pack labels are applied, CI uses this priority order: `android-pack-all`,
+`android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`,
+`android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
 ## Build commands
 
@@ -198,6 +201,25 @@ preparing the fixture again.
 Audio is the only conditional target. If the installed runtime does not expose the audio
 attachment action, step 13 records `not_applicable` with explicit evidence. If audio is
 exposed, the audio fixture is mandatory and any missing precondition fails the pack.
+
+### PR runner contract
+
+The `android-pack-branch-regeneration` label targets a serialized, ephemeral self-hosted
+Linux runner with the labels `android` and `pocket-ai-branch-regeneration`. Each runner
+instance must accept one job, retain no credentials or personal state, and be discarded
+or reimaged after the job. Before applying the label:
+
+- expose the selected disposable device serial as the repository variable
+  `POCKET_AI_BRANCH_QA_SERIAL` or as the same runner environment variable;
+- keep `adb` on `PATH` and the selected device connected in the `device` state;
+- install the QA app with the same signing identity used by the runner build, then prepare
+  the model and conversations listed above;
+- remove secrets and personal data from both the runner and device.
+
+The workflow verifies the serial, device state, and existing package before building and
+installing the current merge candidate. The pack then validates the loaded model, exact
+fixture topology, release APK provenance, and all 15 ordered steps. Reprepare the device
+after every successful run because steps 14 and 15 delete the fixture and remaining history.
 
 ### Ordered steps
 

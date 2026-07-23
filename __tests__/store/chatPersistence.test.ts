@@ -1146,18 +1146,21 @@ describe('chatPersistence', () => {
   it('removes only the three artifacts used by a short progress checkpoint', () => {
     const threadId = 'thread-progress-short-cleanup-count';
     const set = jest.fn(storage.set.bind(storage));
+    const getString = jest.fn(storage.getString.bind(storage));
     const remove = jest.fn(storage.remove.bind(storage));
-    const instrumentedStorage = { ...storage, set, remove };
+    const instrumentedStorage = { ...storage, set, getString, remove };
 
     expect(writeChatStreamingProgressRecord(
       instrumentedStorage,
       buildProgress(threadId),
     )).toEqual({ status: 'written', kind: 'checkpoint' });
     expect(set).toHaveBeenCalledTimes(3);
+    getString.mockClear();
     remove.mockClear();
 
     removeChatStreamingProgressRecord(instrumentedStorage, threadId);
 
+    expect(getString).not.toHaveBeenCalled();
     const removedKeys = remove.mock.calls.map(([key]) => key);
     expect(1 + 2 + 2 + MAX_CHAT_PROGRESS_CHUNKS).toBe(133);
     expect(removedKeys).toEqual([
@@ -1171,8 +1174,9 @@ describe('chatPersistence', () => {
   it('removes only actually written artifacts from a long progress chain', () => {
     const threadId = 'thread-progress-long-cleanup-count';
     const set = jest.fn(storage.set.bind(storage));
+    const getString = jest.fn(storage.getString.bind(storage));
     const remove = jest.fn(storage.remove.bind(storage));
-    const instrumentedStorage = { ...storage, set, remove };
+    const instrumentedStorage = { ...storage, set, getString, remove };
     const writeCount = 64;
 
     for (let revision = 1; revision <= writeCount; revision += 1) {
@@ -1190,10 +1194,12 @@ describe('chatPersistence', () => {
     const artifactKeys = listChatStreamingProgressStorageKeys(storage);
     expect(set).toHaveBeenCalledTimes((writeCount * 2) + 1);
     expect(artifactKeys).toHaveLength(66);
+    getString.mockClear();
     remove.mockClear();
 
     removeChatStreamingProgressRecord(instrumentedStorage, threadId);
 
+    expect(getString).not.toHaveBeenCalled();
     const removedKeys = remove.mock.calls.map(([key]) => key);
     expect(removedKeys).toHaveLength(artifactKeys.length);
     expect(new Set(removedKeys)).toEqual(new Set(artifactKeys));

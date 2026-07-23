@@ -2523,8 +2523,10 @@ function listBoundedChatStreamingProgressOrphanArtifactKeys(
 export function removeChatStreamingProgressRecord(storage: AppStorageFacade, threadId: string): void {
   const writerStates = getChatStreamingProgressWriterStateMap(storage);
   const cachedWriterState = writerStates.get(threadId);
-  const currentResult = readChatStreamingProgressState(storage, threadId);
-  const currentWriterState = currentResult.ok ? currentResult.writerState : undefined;
+  const currentResult = cachedWriterState
+    ? undefined
+    : readChatStreamingProgressState(storage, threadId);
+  const currentWriterState = currentResult?.ok ? currentResult.writerState : undefined;
   const artifactKeys = collectChatStreamingProgressOwnedArtifactKeys(
     storage,
     threadId,
@@ -2539,7 +2541,7 @@ export function removeChatStreamingProgressRecord(storage: AppStorageFacade, thr
   writerStates.delete(threadId);
 
   let firstError: unknown;
-  if (!currentResult.ok) {
+  if (currentResult && !currentResult.ok) {
     try {
       listBoundedChatStreamingProgressOrphanArtifactKeys(storage, threadId)
         .forEach((key) => artifactKeys.add(key));

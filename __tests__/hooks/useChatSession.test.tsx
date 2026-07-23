@@ -2619,7 +2619,7 @@ describe('useChatSession', () => {
     expect(persistedRecord).not.toContain('"thoughtContent":""');
   });
 
-  it('lets authoritative empty final content clear streamed text and survive rehydration', async () => {
+  it('removes an empty-success append placeholder and stale streamed text across rehydration', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: ChatTokenCallback }) => {
         onToken?.({
@@ -2642,14 +2642,16 @@ describe('useChatSession', () => {
     });
 
     const completedThread = useChatStore.getState().getActiveThread()!;
-    expect(completedThread.messages.at(-1)).toEqual(expect.objectContaining({
-      role: 'assistant',
-      content: '',
-      thoughtContent: undefined,
-      state: 'complete',
-    }));
-    expect(readPersistedThreadRecord(completedThread.id).thread?.messages?.at(-1)).toEqual(
-      expect.objectContaining({ content: '', state: 'complete' }),
+    expect(completedThread.messages).toEqual([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Return an empty answer',
+        state: 'complete',
+      }),
+    ]);
+    expect(JSON.stringify(completedThread.messages)).not.toContain('Stale streamed answer');
+    expect(readPersistedThreadRecord(completedThread.id).thread?.messages).toEqual(
+      completedThread.messages,
     );
 
     await act(async () => {
@@ -2657,8 +2659,8 @@ describe('useChatSession', () => {
       await useChatStore.persist.rehydrate();
     });
 
-    expect(useChatStore.getState().getThread(completedThread.id)?.messages.at(-1)).toEqual(
-      expect.objectContaining({ content: '', state: 'complete' }),
+    expect(useChatStore.getState().getThread(completedThread.id)?.messages).toEqual(
+      completedThread.messages,
     );
   });
 
@@ -2761,7 +2763,7 @@ describe('useChatSession', () => {
     );
   });
 
-  it('materializes an authoritative empty answer during branch regeneration', async () => {
+  it('preserves the old branch when authoritative branch regeneration succeeds empty', async () => {
     const getSession = renderHookHarness();
     await act(async () => {
       await getSession()?.appendUserMessage('Original branch prompt');
@@ -2784,21 +2786,12 @@ describe('useChatSession', () => {
     });
 
     const regeneratedThread = useChatStore.getState().getActiveThread()!;
-    expect(regeneratedThread.messages).toEqual([
-      expect.objectContaining({
-        id: targetUserMessage.id,
-        role: 'user',
-        content: 'Edited branch prompt',
-      }),
-      expect.objectContaining({
-        role: 'assistant',
-        content: '',
-        state: 'complete',
-      }),
-    ]);
-    expect(JSON.stringify(regeneratedThread.messages)).not.toContain('Hello back');
-    expect(readPersistedThreadRecord(regeneratedThread.id).thread?.messages?.at(-1)).toEqual(
-      expect.objectContaining({ content: '', state: 'complete' }),
+    expect(regeneratedThread.messages).toEqual(originalThread.messages);
+    expect(JSON.stringify(regeneratedThread.messages)).toContain('Hello back');
+    expect(JSON.stringify(regeneratedThread.messages)).not.toContain('Edited branch prompt');
+    expect(JSON.stringify(regeneratedThread.messages)).not.toContain('Transient regenerated answer');
+    expect(readPersistedThreadRecord(regeneratedThread.id).thread?.messages).toEqual(
+      originalThread.messages,
     );
   });
 

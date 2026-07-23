@@ -2935,7 +2935,11 @@ export const useChatStore = create<ChatStoreState>()(
               const shouldRestoreReplacement = (
                 (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
                 && !hasRecoverableOutput
-                && finalization.outcome !== 'success'
+              );
+              const shouldDiscardEmptyAppend = (
+                runtime.mode.kind === 'append'
+                && finalization.outcome === 'success'
+                && !hasRecoverableOutput
               );
               if (
                 runtime.mode.kind === 'replace_branch'
@@ -2966,8 +2970,8 @@ export const useChatStore = create<ChatStoreState>()(
                     errorCode: undefined,
                     errorMessage: undefined,
                   };
-              const nextStatus: ChatThreadStatus = shouldRestoreReplacement
-                ? durableThread.status
+              const nextStatus: ChatThreadStatus = shouldRestoreReplacement || shouldDiscardEmptyAppend
+                ? runtime.durableThread.status
                 : finalization.outcome === 'success'
                   ? 'idle'
                   : finalization.outcome;
@@ -2998,15 +3002,21 @@ export const useChatStore = create<ChatStoreState>()(
                   lastGeneratedAt: completedAt,
                 });
               } else {
-                const nextMessages = durableThread.messages.slice();
-                if (!shouldRestoreReplacement) {
+                const nextMessages = shouldDiscardEmptyAppend
+                  ? runtime.durableThread.messages
+                  : durableThread.messages.slice();
+                if (!shouldRestoreReplacement && !shouldDiscardEmptyAppend) {
                   nextMessages[runtime.messageIndex] = terminalMessage;
                 }
                 nextThread = updateThreadMetadata({
-                  ...durableThread,
+                  ...(shouldDiscardEmptyAppend ? runtime.durableThread : durableThread),
                   messages: nextMessages,
                   status: nextStatus,
-                  lastGeneratedAt: completedAt,
+                  ...(
+                    shouldRestoreReplacement || shouldDiscardEmptyAppend
+                      ? null
+                      : { lastGeneratedAt: completedAt }
+                  ),
                 }, completedAt);
               }
               if (!nextThread) {

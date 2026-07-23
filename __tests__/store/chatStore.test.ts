@@ -1717,6 +1717,32 @@ describe('chatStore', () => {
     });
   });
 
+  it('preserves the previous answer when direct regeneration succeeds without output', () => {
+    const durableThread = buildCompletedRegenerationThread('thread-regeneration-success-empty');
+    seedPersistedChatThread(durableThread);
+    const replacementId = useChatStore.getState().replaceLastAssistantMessage(durableThread.id)!;
+
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      durableThread.id,
+      replacementId,
+      {
+        outcome: 'success',
+        content: '',
+        thoughtContent: null,
+      },
+    )).toEqual({ status: 'committed' });
+
+    const restored = useChatStore.getState().getThread(durableThread.id)!;
+    expect(restored.messages).toHaveLength(durableThread.messages.length);
+    expect(restored.messages.at(-1)).toBe(durableThread.messages.at(-1));
+    expect(restored.messages.at(-1)).toEqual(expect.objectContaining({
+      id: `${durableThread.id}-assistant-original`,
+      content: 'Original durable answer',
+      state: 'complete',
+    }));
+    expect(restored.messages.some((message) => message.id === replacementId)).toBe(false);
+  });
+
   it('ignores stale callbacks after a newer regeneration replaces the transient runtime', () => {
     const durableThread = buildCompletedRegenerationThread('thread-regeneration-stale-callback');
     seedPersistedChatThread(durableThread);
@@ -3431,9 +3457,10 @@ describe('chatStore', () => {
     }
   });
 
-  it('commits and rehydrates an authoritative empty successful branch', async () => {
+  it('preserves and rehydrates the old branch after an empty successful regeneration', async () => {
     const thread = buildTrailingModelSwitchThread('thread-branch-empty-success');
     seedPersistedChatThread(thread, 100);
+    const oldMessages = thread.messages;
     const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
       thread.id,
       `${thread.id}-user-1`,
@@ -3446,20 +3473,14 @@ describe('chatStore', () => {
         outcome: 'success',
         content: '',
         thoughtContent: null,
-      })).toEqual({ status: 'committed' });
-      expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual([
-        expect.objectContaining({
-          id: `${thread.id}-user-1`,
-          content: 'Authoritative empty-success edit',
-        }),
-        expect.objectContaining({
-          id: assistantId,
-          role: 'assistant',
-          content: '',
-          state: 'complete',
-        }),
-      ]);
-      expect(capture.setKeys).toContain(getChatThreadStorageKey(thread.id));
+      })).toEqual({ status: 'restored_without_write' });
+      expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual(oldMessages);
+      expect(useChatStore.getState().getThread(thread.id)?.messages.some(
+        (message) => message.id === assistantId,
+      )).toBe(false);
+      expect(capture.setKeys).not.toContain(getChatThreadStorageKey(thread.id));
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(capture.setKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
     } finally {
       capture.restore();
     }
@@ -3467,13 +3488,7 @@ describe('chatStore', () => {
     useChatStore.setState({ threads: {}, activeThreadId: null });
     await useChatStore.persist.rehydrate();
 
-    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(
-      expect.objectContaining({
-        id: assistantId,
-        content: '',
-        state: 'complete',
-      }),
-    );
+    expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual(oldMessages);
   });
 
   it('recommits the old branch when persisted partial output is later cleared', () => {

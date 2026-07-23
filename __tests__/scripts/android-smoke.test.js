@@ -35,6 +35,7 @@ const {
   runAndroidGradleBuild,
   saveLogcat,
   spawnWindowsJobProcess,
+  startAndroidSmokeMain,
   stopOwnedMetroProcess,
   stopOwnedMetroProcessOrThrow,
   stopOwnedProcessTreeByPid,
@@ -117,6 +118,22 @@ describe('android-smoke APK variant parsing', () => {
 describe('android-smoke app JS readiness', () => {
   const appPackage = 'com.github.tah10n.pocketai';
   const readyHierarchy = `<hierarchy><node package="${appPackage}" resource-id="home-screen-content" /></hierarchy>`;
+
+  it('defers CLI main until module initialization has completed', async () => {
+    let moduleInitialized = false;
+    const observedInitializationStates = [];
+    const runMain = jest.fn(() => {
+      observedInitializationStates.push(moduleInitialized);
+    });
+
+    const completion = startAndroidSmokeMain(runMain);
+    moduleInitialized = true;
+
+    expect(runMain).not.toHaveBeenCalled();
+    await expect(completion).resolves.toBeUndefined();
+    expect(runMain).toHaveBeenCalledTimes(1);
+    expect(observedInitializationStates).toEqual([true]);
+  });
 
   it('requires an app-owned React surface instead of accepting the native activity alone', () => {
     expect(isAppJsReadyUiHierarchy(

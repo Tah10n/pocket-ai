@@ -117,16 +117,22 @@ const screenshotPath = screenshotTarget
   : null;
 
 if (require.main === module) {
-  main().catch((error) => {
-    console.error(
-      `[android-smoke] ${describeAndroidQaError(error, "smoke-run-failed", {
-        allowedSourceFiles: ["android-smoke.js"],
-      })}`
-    );
-    if (!process.exitCode) {
-      process.exitCode = 1;
-    }
-  });
+  startAndroidSmokeMain();
+}
+
+function startAndroidSmokeMain(runMain = main) {
+  return Promise.resolve()
+    .then(runMain)
+    .catch((error) => {
+      console.error(
+        `[android-smoke] ${describeAndroidQaError(error, "smoke-run-failed", {
+          allowedSourceFiles: ["android-smoke.js"],
+        })}`
+      );
+      if (!process.exitCode) {
+        process.exitCode = 1;
+      }
+    });
 }
 
 async function main() {
@@ -3192,6 +3198,7 @@ module.exports = {
   saveLogcat,
   spawnOwnedProcess,
   spawnWindowsJobProcess,
+  startAndroidSmokeMain,
   stopOwnedMetroProcess,
   stopOwnedMetroProcessOrThrow,
   stopOwnedProcessTreeByPid,

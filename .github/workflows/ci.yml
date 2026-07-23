@@ -49,6 +49,7 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
         contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-native') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') ||
@@ -89,6 +90,8 @@ jobs:
 
           if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
             pack="all"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration') }}" == "true" ]]; then
+            pack="branch-regeneration"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
             pack="native"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then

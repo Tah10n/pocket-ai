@@ -154,17 +154,18 @@ npm run verify:mobile-change:android
 
 This command expects a connected Android phone by default and runs the fail-closed `runtime` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
 
-Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The state-mutating `storage` pack is intentionally excluded from `all`:
+Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `branch-regeneration` for the destructive prepared 15-step branch replacement matrix, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The state-mutating `storage` and `branch-regeneration` packs are intentionally excluded from `all`:
 
 ```bash
 npm run android:scenarios -- --pack catalog
 npm run android:scenarios -- --pack dependency-ui
 npm run android:scenarios -- --pack runtime
 npm run android:scenarios:storage -- --skip-build
+npm run android:scenarios:branch-regeneration
 npm run android:scenarios -- --pack native
 ```
 
-In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
+In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`. `android-pack-branch-regeneration` runs the existing 15-step release pack with `--fail-on-skip`; a missing loaded model, fixture, or sentinel is a CI failure, and the run is destructive to the prepared conversations. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
 
 ## Localization
 

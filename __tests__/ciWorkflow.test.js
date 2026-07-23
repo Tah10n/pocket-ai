@@ -7,6 +7,7 @@ const readAppFile = (...segments) => fs.readFileSync(path.join(appRoot, ...segme
 
 const packLabelPriority = [
   'android-pack-all',
+  'android-pack-branch-regeneration',
   'android-pack-native',
   'android-pack-runtime',
   'android-pack-dependency-ui',
@@ -36,6 +37,27 @@ describe('Android catalog QA CI configuration', () => {
     expect(selection).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-catalog')");
     expect(selection).toContain('pack="catalog"');
     expect(workflow).toContain('--pack "$ANDROID_QA_PACK"');
+  });
+
+  it('selects the destructive branch-regeneration pack as a fail-closed release run', () => {
+    const selection = extractAndroidQaPackSelection(workflow);
+    const scenarioStep = workflow.match(/- name: Run Android scenarios[\s\S]+?script: ([^\n]+)/)?.[0] || '';
+
+    expect(workflow).toContain(
+      "contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration')"
+    );
+    expect(selection).toContain(
+      "contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration')"
+    );
+    expect(selection).toContain('pack="branch-regeneration"');
+    expect(selection.indexOf("'android-pack-branch-regeneration'")).toBeLessThan(
+      selection.indexOf("'android-pack-native'")
+    );
+    expect(scenarioStep).toContain('--pack "$ANDROID_QA_PACK"');
+    expect(scenarioStep).toContain('--fail-on-skip');
+    expect(scenarioStep).not.toContain('--skip-build');
+    expect(scenarioStep).not.toContain('--preserve-running-app');
+    expect(workflow).toContain('ANDROID_SMOKE_APK_VARIANT: release');
   });
 
   it('defaults Android QA to runtime and delegates build reuse to the provenance-aware launcher', () => {

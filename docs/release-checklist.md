@@ -98,7 +98,10 @@ build/install provenance. Do not add `--skip-build` or `--preserve-running-app` 
 command. Record the device model, serial, supported ABI list, selected ABI, final Git HEAD,
 APK SHA-256, report path, and the result of every step in the release evidence.
 
-For PR CI, `android-pack-catalog` selects the catalog pack. If multiple Android pack labels are applied, CI uses this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+For PR CI, `android-pack-catalog` selects the catalog pack and
+`android-pack-branch-regeneration` selects the destructive 15-step release pack with
+`--fail-on-skip`. The branch-regeneration label fails when the local model, fixture, or
+sentinel precondition is missing. If multiple Android pack labels are applied, CI uses this priority order: `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
 ## Build commands
 

@@ -23,7 +23,9 @@ Link the issue this pull request addresses, if one exists.
 - [ ] Run Android checks
 - [ ] Run Android scenarios
 
-Optional Android QA pack labels (CI priority when multiple labels are present): `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+Optional Android QA pack labels (CI priority when multiple labels are present): `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+
+`android-pack-branch-regeneration` runs the destructive 15-step release pack fail-closed. It requires a loaded local model plus the prepared fixture and sentinel conversations; missing preconditions fail CI.
 
 ## UI evidence
 

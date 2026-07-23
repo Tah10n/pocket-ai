@@ -18,9 +18,11 @@ jest.mock('@shopify/flash-list', () => {
   return {
     FlashList: ({
       data,
+      extraData,
       renderItem,
       keyExtractor,
       ItemSeparatorComponent,
+      ListHeaderComponent,
       ListEmptyComponent,
       maintainVisibleContentPosition,
       onContentSizeChange,
@@ -37,6 +39,8 @@ jest.mock('@shopify/flash-list', () => {
         View,
         {
           testID: 'chat-flash-list',
+          data,
+          extraData,
           maintainVisibleContentPosition,
           onContentSizeChange,
           onScroll,
@@ -49,16 +53,21 @@ jest.mock('@shopify/flash-list', () => {
           onTouchCancel,
         },
         data?.length > 0
-          ? data.map((item: any, index: number) =>
-              mockReact.createElement(
-                mockReact.Fragment,
-                { key: keyExtractor ? keyExtractor(item, index) : index },
-                renderItem({ item, index }),
-                index < data.length - 1 && ItemSeparatorComponent
-                  ? mockReact.createElement(ItemSeparatorComponent)
-                  : null,
+          ? [
+              ListHeaderComponent
+                ? mockReact.createElement(mockReact.Fragment, { key: 'list-header' }, ListHeaderComponent)
+                : null,
+              ...data.map((item: any, index: number) =>
+                mockReact.createElement(
+                  mockReact.Fragment,
+                  { key: keyExtractor ? keyExtractor(item, index) : index },
+                  renderItem({ item, index }),
+                  index < data.length - 1 && ItemSeparatorComponent
+                    ? mockReact.createElement(ItemSeparatorComponent)
+                    : null,
+                ),
               ),
-            )
+            ]
           : ListEmptyComponent
             ? mockReact.createElement(ListEmptyComponent)
             : null,
@@ -539,6 +548,7 @@ jest.mock('../../src/hooks/useChatSession', () => ({
   useChatSession: () => ({
     activeThread: require('../../src/store/chatStore').useChatStore.getState().getActiveThread(),
     messages: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.messages ?? [],
+    messageListRevision: require('../../src/store/chatStore').useChatStore.getState().streamingRevision,
     isGenerating: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.status === 'generating',
     shouldOfferSummary: Boolean(
       require('../../src/store/chatStore').useChatStore
@@ -629,6 +639,10 @@ const { registry } = require('../../src/services/LocalStorageRegistry');
 const { AppError } = require('../../src/services/AppError');
 const { buildModelCapabilitySnapshot } = require('../../src/utils/modelCapabilities');
 const { buildProjectorArtifactId } = require('../../src/utils/modelProjectors');
+const {
+  recordAndroidQaPreparedGenerationEvidence,
+  resetAndroidQaGenerationEvidenceForTests,
+} = require('../../src/services/AndroidQaGenerationEvidence');
 const VERIFIED_LOCAL_SHA256 = 'f'.repeat(64);
 const copiedDraftImageAttachment = {
   id: 'draft-image-1',
@@ -860,6 +874,7 @@ describe('ChatScreen', () => {
   });
 
   beforeEach(() => {
+    resetAndroidQaGenerationEvidenceForTests();
     reactI18nextMock.__resetTranslations();
     Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatformOS });
     mockRegenerateFromUserMessage.mockClear();
@@ -996,6 +1011,65 @@ describe('ChatScreen', () => {
       },
       activeThreadId: 'thread-1',
     });
+  });
+
+  it('exposes a stable stopped-thread banner for relaunch verification', () => {
+    const current = useChatStore.getState();
+    useChatStore.setState({
+      threads: {
+        ...current.threads,
+        'thread-1': {
+          ...current.threads['thread-1'],
+          status: 'stopped',
+        },
+      },
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-stopped-banner')).toBeTruthy();
+  });
+
+  it('exposes a stable history-start anchor when Android QA evidence is enabled', () => {
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-history-start-anchor')).toBeTruthy();
+  });
+
+  it('keeps Android QA topology markers out of the production UI and accessibility tree', () => {
+    const evidenceService = require('../../src/services/AndroidQaGenerationEvidence');
+    const enabledSpy = jest.spyOn(
+      evidenceService,
+      'isAndroidQaGenerationEvidenceEnabled',
+    ).mockReturnValue(false);
+
+    try {
+      const { queryByTestId } = render(React.createElement(ChatScreen));
+      expect(queryByTestId('chat-history-start-anchor')).toBeNull();
+      expect(queryByTestId('chat-qa-generation-evidence')).toBeNull();
+    } finally {
+      enabledSpy.mockRestore();
+    }
+  });
+
+  it('exposes opt-in generation gates and privacy-safe prepared attachment markers', () => {
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(getByTestId('chat-qa-generation-evidence')).toBeTruthy();
+    fireEvent.press(getByTestId('chat-qa-arm-before-first-output'));
+    expect(getByTestId('chat-qa-generation-armed-before-first-output')).toBeTruthy();
+
+    act(() => {
+      recordAndroidQaPreparedGenerationEvidence({
+        userMessageId: 'message-1',
+        assistantMessageId: 'message-qa-assistant',
+        attachments: [{ id: 'attachment-image-1', kind: 'image' }],
+      });
+    });
+    expect(getByTestId('chat-prepared-generation-message-1-message-qa-assistant')).toBeTruthy();
+    expect(getByTestId(
+      'chat-prepared-attachment-message-qa-assistant-image-attachment-image-1',
+    )).toBeTruthy();
   });
 
   it('enables ready vision attachments and sends copied drafts with multimodal readiness', async () => {
@@ -2461,6 +2535,70 @@ describe('ChatScreen', () => {
     expect(getByText('Saved user prompt')).toBeTruthy();
     expect(getByText('Saved assistant reply')).toBeTruthy();
     expect(queryByText('T0.7 • P0.6 • K40 • 1024 tok')).toBeNull();
+  });
+
+  it('passes the stable presentation list and latest transient assistant to FlashList', () => {
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    let assistantId = '';
+
+    act(() => {
+      assistantId = useChatStore.getState().createAssistantPlaceholder('thread-1');
+    });
+    rerender(React.createElement(ChatScreen));
+
+    const messagesAfterPlaceholder = useChatStore.getState().getActiveThread()!.messages;
+    expect(getByTestId('chat-flash-list').props.data).toBe(messagesAfterPlaceholder);
+    expect(getByTestId('chat-flash-list').props.data.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: '',
+      state: 'streaming',
+    }));
+
+    act(() => {
+      useChatStore.getState().patchAssistantMessage('thread-1', assistantId, {
+        content: 'Latest transient answer',
+        thoughtContent: 'Transient reasoning',
+        tokensPerSec: 7.25,
+        state: 'streaming',
+      });
+    });
+    rerender(React.createElement(ChatScreen));
+
+    const flashList = getByTestId('chat-flash-list');
+    expect(useChatStore.getState().getActiveThread()!.messages).toBe(messagesAfterPlaceholder);
+    expect(flashList.props.data).toBe(messagesAfterPlaceholder);
+    expect(flashList.props.data.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Latest transient answer',
+      thoughtContent: 'Transient reasoning',
+      tokensPerSec: 7.25,
+      state: 'streaming',
+    }));
+    expect(flashList.props.extraData).toContain(`${assistantId}:streaming:23:7.25:1`);
+
+    act(() => {
+      useChatStore.getState().patchAssistantMessage('thread-1', assistantId, {
+        content: 'Newest transient answer',
+        thoughtContent: 'Changed reasoning',
+        tokensPerSec: 7.25,
+      });
+    });
+    rerender(React.createElement(ChatScreen));
+
+    const flashListAfterSameLengthSnapshot = getByTestId('chat-flash-list');
+    expect(flashListAfterSameLengthSnapshot.props.data).toBe(messagesAfterPlaceholder);
+    expect(flashListAfterSameLengthSnapshot.props.data.at(-1)).toEqual(expect.objectContaining({
+      id: assistantId,
+      content: 'Newest transient answer',
+      thoughtContent: 'Changed reasoning',
+      tokensPerSec: 7.25,
+    }));
+    expect(flashListAfterSameLengthSnapshot.props.extraData)
+      .toContain(`${assistantId}:streaming:23:7.25:2`);
+
+    act(() => {
+      useChatStore.getState().stopAssistantMessage('thread-1', assistantId);
+    });
   });
 
   it('does not disable auto-follow after a tap during generation', () => {

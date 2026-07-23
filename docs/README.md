@@ -12,6 +12,7 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
 - [`multimodal-attachments.md`](./multimodal-attachments.md): runtime media payload contracts, local attachment lifecycle boundaries, and privacy constraints
+- [`runtime-performance.md`](./runtime-performance.md): bounded chat, model-load, catalog, storage-scan, telemetry, and regression contracts
 - [`android-build.md`](./android-build.md): Android release signing, bundling, and Play Store versioning
 - [`ios-build.md`](./ios-build.md): iOS archive, Xcode distribution, signing, and TestFlight upload
 
@@ -23,6 +24,7 @@ Review this folder whenever you change:
 - privacy or network behavior
 - model discovery, variant selection, or download behavior
 - multimodal runtime, attachment lifecycle, or media diagnostics behavior
+- runtime performance contracts, instrumentation, cache ownership, or cancellation behavior
 - release flow or build metadata
 - native architecture assumptions
 - UI component conventions or localization rules

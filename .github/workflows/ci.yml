@@ -46,6 +46,10 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       (
+        !contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-all')
+      ) &&
+      (
         contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
         contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
@@ -76,9 +80,6 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -88,7 +89,7 @@ jobs:
       - name: Select Android QA pack
         shell: bash
         run: |
-          pack="core"
+          pack="runtime"
 
           if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
             pack="all"
@@ -110,21 +111,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Android native project
-        run: |
-          npx expo prebuild --platform android --no-install
-          chmod +x android/gradlew
-
-      - name: Build Android QA APK
-        working-directory: android
-        env:
-          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
-        run: ./gradlew app:assembleRelease
-
       - name: Run Android scenarios
         uses: reactivecircus/android-emulator-runner@v2
         env:
           ANDROID_SMOKE_APK_VARIANT: release
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
         with:
           api-level: 34
           arch: x86_64
@@ -133,13 +124,97 @@ jobs:
           disable-animations: true
           emulator-boot-timeout: 900
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          script: npm run android:scenarios -- --emulator --skip-build --pack "$ANDROID_QA_PACK" --bootstrap-screenshot
+          script: npm run android:scenarios -- --emulator --pack "$ANDROID_QA_PACK" --fail-on-skip --bootstrap-screenshot
 
       - name: Upload Android QA artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: android-qa
+          if-no-files-found: warn
+          path: |
+            artifacts/android-scenarios/**
+            artifacts/bootstrap-logcat.txt
+            android/app/build/outputs/apk/release/app-release.apk
+
+  android-branch-regeneration:
+    name: android (branch regeneration)
+    runs-on:
+      - self-hosted
+      - linux
+      - android
+      - pocket-ai-branch-regeneration
+    timeout-minutes: 120
+    needs: verify
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration') &&
+      !contains(github.event.pull_request.labels.*.name, 'android-pack-all')
+    concurrency:
+      group: pocket-ai-branch-regeneration
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Validate prepared Android runner
+        shell: bash
+        env:
+          REPOSITORY_BRANCH_QA_SERIAL: ${{ vars.POCKET_AI_BRANCH_QA_SERIAL }}
+        run: |
+          serial="${REPOSITORY_BRANCH_QA_SERIAL:-${POCKET_AI_BRANCH_QA_SERIAL:-}}"
+          if [[ -z "$serial" ]]; then
+            echo "POCKET_AI_BRANCH_QA_SERIAL must name the disposable prepared device." >&2
+            exit 1
+          fi
+          if ! command -v adb >/dev/null 2>&1; then
+            echo "The prepared runner must expose adb on PATH." >&2
+            exit 1
+          fi
+          if [[ "$(adb -s "$serial" get-state 2>/dev/null || true)" != "device" ]]; then
+            echo "Prepared Android device $serial is not connected and ready." >&2
+            exit 1
+          fi
+          if ! adb -s "$serial" shell pm path com.github.tah10n.pocketai |
+            tr -d '\r' |
+            grep -q '^package:'; then
+            echo "The prepared device must already contain the same-signature QA app data." >&2
+            exit 1
+          fi
+          echo "POCKET_AI_BRANCH_QA_SERIAL=$serial" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run destructive branch-regeneration pack
+        env:
+          ANDROID_SMOKE_APK_VARIANT: release
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
+        run: >-
+          npm run android:scenarios:branch-regeneration --
+          --serial "$POCKET_AI_BRANCH_QA_SERIAL"
+          --fail-on-skip
+
+      - name: Upload branch-regeneration QA artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-branch-regeneration-qa
           if-no-files-found: warn
           path: |
             artifacts/android-scenarios/**

@@ -12,6 +12,9 @@
   "bugs": {
     "url": "https://github.com/Tah10n/pocket-ai/issues"
   },
+  "engines": {
+    "node": ">=20.19.4"
+  },
   "expo": {
     "doctor": {
       "reactNativeDirectoryCheck": {
@@ -37,18 +40,20 @@
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
-    "android": "expo run:android",
+    "android": "node ./scripts/run-android-dev.js",
     "android:smoke": "node ./scripts/android-smoke.js",
     "android:emulator": "node ./scripts/android-smoke.js --emulator --screenshot artifacts/android-emulator-smoke.png",
     "android:scenarios": "node ./scripts/android-scenarios.js --pack core",
     "android:scenarios:emulator": "node ./scripts/android-scenarios.js --emulator --pack core",
     "android:scenarios:catalog": "node ./scripts/android-scenarios.js --pack catalog",
+    "android:scenarios:storage": "node ./scripts/android-scenarios.js --pack storage --fail-on-skip",
     "android:scenarios:attachments": "node ./scripts/android-scenarios.js --pack attachments",
     "android:scenarios:attachments-preconditioned": "node ./scripts/android-scenarios.js --pack attachments-preconditioned --preserve-running-app --fail-on-skip",
     "android:scenarios:attachments-prepared": "node ./scripts/android-scenarios.js --pack attachments-prepared --preserve-running-app --fail-on-skip",
     "android:scenarios:attachments-prepared-send": "node ./scripts/android-scenarios.js --pack attachments-prepared-send --preserve-running-app --fail-on-skip",
     "android:scenarios:dependency-ui": "node ./scripts/android-scenarios.js --pack dependency-ui",
-    "android:scenarios:runtime": "node ./scripts/android-scenarios.js --pack runtime",
+    "android:scenarios:runtime": "node ./scripts/android-scenarios.js --pack runtime --fail-on-skip",
+    "android:scenarios:branch-regeneration": "node ./scripts/android-scenarios.js --pack branch-regeneration --apk-variant release --fail-on-skip",
     "android:scenarios:native": "node ./scripts/android-scenarios.js --pack native",
     "android:scenarios:extended": "node ./scripts/android-scenarios.js --pack extended",
     "android:screens": "node ./scripts/android-screen-capture.js",
@@ -63,7 +68,7 @@
     "coverage": "node ./scripts/run-jest.js --runInBand --coverage",
     "typecheck": "tsc --noEmit",
     "verify:mobile-change": "npm run typecheck && npm run lint && npm test",
-    "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios",
+    "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios:runtime",
     "verify:mobile-change:android:vision-smoke": "npm run verify:mobile-change && npm run android:scenarios:runtime && npm run android:scenarios:catalog && npm run android:scenarios:attachments -- --fail-on-skip",
     "verify:mobile-change:android:vision-prepared": "npm run android:scenarios:attachments-prepared-send",
     "verify:mobile-change:android:vision": "npm run verify:mobile-change:android:vision-smoke",

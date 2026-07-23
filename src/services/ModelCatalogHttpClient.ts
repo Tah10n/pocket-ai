@@ -1,6 +1,6 @@
 import { REQUEST_AUTH_POLICY, type RequestAuthPolicy } from '../types/huggingFace';
 
-export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'unknown';
+export type ModelCatalogErrorCode = 'rate_limited' | 'timeout' | 'network' | 'cancelled' | 'unknown';
 
 type ModelCatalogErrorOptions = {
   retryAfterMs?: number;
@@ -42,6 +42,10 @@ export function getModelCatalogErrorMessage(error: unknown): string {
     if (error.code === 'network') {
       return 'Network error while loading models. Check your connection and try again.';
     }
+
+    if (error.code === 'cancelled') {
+      return 'Model catalog request was cancelled.';
+    }
   }
 
   return 'Could not load models right now. Please try again.';
@@ -76,16 +80,18 @@ export function buildHeaders(policy: RequestAuthPolicy, authToken: string | null
   };
 }
 
-export async function fetchWithTimeout(
+export async function fetchWithTimeout<T = Response>(
   url: string,
   init: RequestInit = {},
   timeoutMs = HF_REQUEST_TIMEOUT_MS,
-): Promise<Response> {
+  consume?: (response: Response) => Promise<T> | T,
+): Promise<T> {
   const controller = typeof AbortController !== 'undefined'
     ? new AbortController()
     : null;
   const signal = controller?.signal ?? init.signal;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timeoutError: ModelCatalogError | null = null;
   const externalSignal = init.signal;
   const abortListener = () => controller?.abort();
 
@@ -99,14 +105,23 @@ export async function fetchWithTimeout(
 
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
     timeoutId = setTimeout(() => {
+      timeoutError = new ModelCatalogError('timeout', `HF request timed out after ${timeoutMs}ms`);
       controller?.abort();
-      reject(new ModelCatalogError('timeout', `HF request timed out after ${timeoutMs}ms`));
+      reject(timeoutError);
     }, timeoutMs);
   });
 
   try {
-    const fetchPromise = fetch(url, signal ? { ...init, signal } : init);
+    const fetchPromise = fetch(url, signal ? { ...init, signal } : init)
+      .then((response) => consume ? consume(response) : response as T);
     return await Promise.race([fetchPromise, timeoutPromise]);
+  } catch (error) {
+    // Some fetch implementations reject synchronously from abort(), before the
+    // timeout promise wins the race. Preserve the actual timeout classification.
+    if (timeoutError) {
+      throw timeoutError;
+    }
+    throw error;
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);

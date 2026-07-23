@@ -9,6 +9,7 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
     saveModels: jest.fn(),
     getCalibrationRecord: jest.fn().mockReturnValue(undefined),
     setCalibrationRecord: jest.fn(),
+    saveCalibrationRecord: jest.fn(),
   },
 }));
 
@@ -25,7 +26,11 @@ jest.mock('../../src/services/InferenceBackendService', () => ({
 }));
 
 jest.mock('../../src/services/InferenceLastGoodProfileStore', () => ({
+  getCurrentNativeModuleVersion: jest.fn().mockReturnValue('test-native'),
   readLastGoodInferenceProfile: jest.fn(),
+  readModelInitFailureBound: jest.fn().mockReturnValue(null),
+  reconcileModelInitFailureBoundSuccess: jest.fn().mockReturnValue(false),
+  recordModelInitFailureBound: jest.fn(),
   writeLastGoodInferenceProfile: jest.fn(),
 }));
 
@@ -129,6 +134,60 @@ describe('LLMEngineService last-good warmup', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('does not revisit a higher requested profile after the last-good profile establishes an OOM upper bound', async () => {
+    (readLastGoodInferenceProfile as jest.Mock).mockReturnValue({
+      backendMode: 'gpu',
+      nGpuLayers: 10,
+    });
+    (initLlama as jest.Mock).mockImplementation(async (options?: any) => {
+      const layers = options?.n_gpu_layers ?? 0;
+      if (layers > 0) {
+        throw new Error(`GPU OOM at ${layers}`);
+      }
+      return createMockContext({ n_gpu_layers: 0, devices: [] });
+    });
+
+    const attempts = await runWithFreshService(async (llmEngineService) => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { registry } = require('../../src/services/LocalStorageRegistry') as typeof import('../../src/services/LocalStorageRegistry');
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'repo/model',
+        localPath: 'model.gguf',
+        lifecycleStatus: 'downloaded',
+        size: 1024,
+      });
+
+      await llmEngineService.load('repo/model', {
+        preferLastWorkingProfile: true,
+        loadParamsOverride: {
+          backendPolicy: 'gpu',
+          gpuLayers: 40,
+        },
+      });
+      return llmEngineService.getState().diagnostics?.backendInitAttempts ?? [];
+    });
+
+    const attemptedLayers = (initLlama as jest.Mock).mock.calls
+      .map(([options]) => options?.n_gpu_layers ?? 0);
+    expect(attemptedLayers).toEqual([10, 7, 5, 2, 1, 0]);
+    expect(attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        candidate: 'gpu',
+        nGpuLayers: 40,
+        profileSource: 'requested',
+        outcome: 'skipped',
+        probableOom: true,
+        failureCategory: 'known_oom_upper_bound',
+      }),
+      expect.objectContaining({
+        candidate: 'cpu',
+        nGpuLayers: 0,
+        profileSource: 'cpu_fallback',
+        outcome: 'success',
+      }),
+    ]));
   });
 
   it('falls back to a CPU warmup candidate when stored GPU layers are non-positive', async () => {
@@ -246,7 +305,7 @@ describe('LLMEngineService last-good warmup', () => {
       expect.objectContaining({
         candidate: 'npu',
         outcome: 'skipped',
-        devices: ['HTP*'],
+        deviceCount: 1,
       }),
     ]));
   });

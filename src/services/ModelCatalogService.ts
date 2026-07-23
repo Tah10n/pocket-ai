@@ -11,6 +11,7 @@ import { registry } from './LocalStorageRegistry';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { performanceMonitor } from './PerformanceMonitor';
+import { getPrivacySafeErrorLogDetails } from './AppError';
 import type { SystemMemorySnapshot } from './SystemMetricsService';
 import { uniqueByKey } from '../utils/uniqueBy';
 import {
@@ -68,6 +69,7 @@ import { applyModelVariantSelectionIfAvailable } from '../utils/modelVariants';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { dedupeModelVariantsByIdentity } from '../utils/modelVariantIdentity';
 import {
+  getModelDisplayArtifactSizeBytes,
   getProjectorMemoryFitSizeBytes,
   getSpeculativeDraftMemoryFitSizeBytes,
 } from '../utils/modelSize';
@@ -142,9 +144,10 @@ const SEARCH_CACHE_MAX_ENTRIES = 120;
 const BUFFERED_SEARCH_CACHE_MAX_AGE = 20 * 60 * 1000; // 20 minutes
 const MODEL_SNAPSHOT_CACHE_MAX_ENTRIES = 2000;
 const ACCESS_PROBE_CACHE_MAX_ENTRIES = 500;
-const PERSISTENT_CACHE_HYDRATION_WAIT_TIMEOUT_MS = 5000;
+const PERSISTENT_CACHE_HYDRATION_WAIT_TIMEOUT_MS = 1000;
+const CATALOG_SEARCH_REQUEST_TIMEOUT_MS = 8000;
 const DEFERRED_CATALOG_MAX_EMPTY_PAGES = 2;
-const DEFERRED_METADATA_BATCH_SIZE = 2;
+const DEFERRED_METADATA_BATCH_SIZE = 4;
 const DEFERRED_METADATA_TREE_MAX_PAGES = 1;
 
 export const HUGGING_FACE_TOKEN_SETTINGS_URL = `${HF_BASE_URL}/settings/tokens`;
@@ -154,6 +157,13 @@ class StaleCatalogAuthError extends Error {
   constructor() {
     super('Catalog auth context changed while the request was in flight');
     this.name = 'StaleCatalogAuthError';
+  }
+}
+
+class StaleCatalogRequestError extends Error {
+  constructor() {
+    super('Catalog request was cancelled because its result is no longer needed');
+    this.name = 'StaleCatalogRequestError';
   }
 }
 
@@ -173,6 +183,22 @@ export type ModelCatalogSearchOptions = {
   metadataResolution?: CatalogMetadataResolution;
 };
 
+export type CatalogSearchCancellationReason =
+  | 'superseded'
+  | 'unmount'
+  | 'manual_clear'
+  | 'dispose'
+  | 'consumer';
+
+export interface CatalogSearchSession {
+  cancelPendingRequests(reason?: CatalogSearchCancellationReason): void;
+  dispose(): void;
+}
+
+export type CatalogRequestOptions = {
+  signal?: AbortSignal;
+};
+
 export type ModelCatalogMetadataUpdate = {
   query: string;
   sort: CatalogServerSort | null;
@@ -183,6 +209,7 @@ export type ModelCatalogMetadataUpdate = {
 
 type RefreshModelMetadataOptions = {
   includeDetails?: boolean;
+  signal?: AbortSignal;
 };
 
 type ResolveMissingModelMetadataOptions = {
@@ -194,12 +221,29 @@ type ResolveMissingModelMetadataOptions = {
     requestedModelIds: string[];
     models: ModelMetadata[];
   }) => void;
+  shouldContinue?: () => boolean;
+  signal?: AbortSignal;
 };
 
 type FetchModelTreeOptions = {
   expectedFileName?: string;
   allowTargetEarlyStop?: boolean;
   maxPages?: number;
+  signal?: AbortSignal;
+};
+
+type CatalogSearchSessionState = {
+  id: number;
+  generation: number;
+  controller: AbortController;
+  disposed: boolean;
+};
+
+type CatalogSearchRequestScope = {
+  session: CatalogSearchSession;
+  sessionId: number;
+  generation: number;
+  signal: AbortSignal;
 };
 
 type CatalogMemoryFitContext = {
@@ -222,6 +266,8 @@ type ModelCatalogServiceOptions = {
 type DeferredMetadataResolutionInput = {
   cacheKey: string;
   cacheRequestId: number;
+  cacheOperationGeneration: number;
+  signal: AbortSignal;
   query: string;
   normalizedQuery: string;
   cursor: string | null;
@@ -241,30 +287,83 @@ type PersistAnonymousSearchInput = Pick<
   result: Omit<ModelCatalogSearchResult, 'warning'>;
 };
 
+type ActiveCatalogRequest = {
+  scope: 'search' | 'background';
+  authScope: CatalogCacheAuthScope;
+  authVersion: number;
+};
+
+type CatalogResourceFetchOptions<T> = {
+  scope?: ActiveCatalogRequest['scope'];
+  timeoutMs?: number;
+  requestContext?: CatalogRequestContext;
+  consume?: (response: Response) => Promise<T> | T;
+};
+
+type SharedCatalogRequestConsumer = {
+  signal?: AbortSignal;
+  abortListener?: () => void;
+};
+
+type SharedCatalogRequestEntry<T> = {
+  promise: Promise<T>;
+  controller: AbortController;
+  consumers: Map<number, SharedCatalogRequestConsumer>;
+  settled: boolean;
+  authScope: CatalogCacheAuthScope;
+  authVersion: number;
+};
+
+type CatalogResponseBody<T> = {
+  response: Response;
+  body: T | undefined;
+};
+
+type ModelCatalogSearchCacheEntry = CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>> & {
+  isReusableFirstPage: boolean;
+  lastAccessSequence: number;
+  deferredMetadataPending?: boolean;
+  deferredMetadataRequestKey?: string;
+};
+
+type ModelCatalogBatchResult = CatalogBatchResult & {
+  bufferedCacheKeys?: string[];
+};
+
 export class ModelCatalogService {
-  private searchCache: Map<string, CatalogCacheEntry<Omit<ModelCatalogSearchResult, 'warning'>>> = new Map();
+  private searchCache: Map<string, ModelCatalogSearchCacheEntry> = new Map();
   private searchRequestCache: Map<string, Promise<ModelCatalogSearchResult>> = new Map();
   private modelSnapshotCache: Map<string, ModelMetadata> = new Map();
   private persistentCache: ModelCatalogCacheStore;
-  private authCacheVersion = 0;
+  private authCacheVersion = huggingFaceTokenService.getCachedRevision();
   private bufferedCursorSequence = 0;
+  private searchCacheAccessSequence = 0;
   private searchRequestSequence = 0;
   private rateLimitUntilByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
   private rateLimitBackoffMsByAuthScope: Record<CatalogCacheAuthScope, number> = { anon: 0, auth: 0 };
   private cacheInvalidationRevision = 0;
   private cacheInvalidationListeners: Set<CacheInvalidationListener> = new Set();
   private metadataUpdateListeners: Set<MetadataUpdateListener> = new Set();
-  private deferredMetadataRequestCache: Map<string, Promise<void>> = new Map();
-  private treeRequestCache: Map<string, Promise<HuggingFaceTreeResponse>> = new Map();
-  private readmeRequestCache: Map<string, Promise<ReadmeModelData | undefined>> = new Map();
-  private resolvedFileProbeCache: Map<string, Promise<ModelAccessState | null>> = new Map();
+  private deferredMetadataRequestCache: Map<string, SharedCatalogRequestEntry<void>> = new Map();
+  private treeRequestCache: Map<string, SharedCatalogRequestEntry<HuggingFaceTreeResponse>> = new Map();
+  private readmeRequestCache: Map<string, SharedCatalogRequestEntry<ReadmeModelData | undefined>> = new Map();
+  private resolvedFileProbeCache: Map<string, SharedCatalogRequestEntry<ModelAccessState | null>> = new Map();
   private resolvedFileProbeStateCache: Map<string, ResolvedFileProbeCacheEntry> = new Map();
+  private activeNetworkRequestControllers: Map<AbortController, ActiveCatalogRequest> = new Map();
+  private catalogSearchSessions: Map<CatalogSearchSession, CatalogSearchSessionState> = new Map();
+  private defaultCatalogSearchSession: CatalogSearchSession | null = null;
+  private catalogSearchSessionSequence = 0;
+  private sharedRequestConsumerSequence = 0;
+  private catalogSearchGeneration = 0;
+  private cacheOperationGeneration = 0;
+  private persistentCacheHydrationGeneration = 0;
   private lastMemoryFitContext: CatalogMemoryFitContext | null = null;
   private persistentCacheHydrated: boolean;
   private persistentCacheHydrationAttemptSettled: boolean;
   private persistentCacheHydrationAttemptPromise: Promise<void>;
   private resolvePersistentCacheHydrationAttempt: (() => void) | undefined;
   private persistentCacheHydrationFailOpenTimer: ReturnType<typeof setTimeout> | undefined;
+  private incrementalPersistentCacheHydrationPromise: Promise<void> | null = null;
   private readonly unsubscribeFromTokenService: () => void;
   private isDisposed = false;
 
@@ -285,23 +384,30 @@ export class ModelCatalogService {
         return;
       }
 
-      this.authCacheVersion += 1;
+      this.authCacheVersion = huggingFaceTokenService.getCachedRevision();
+      this.invalidateAuthScopedCatalogState();
       if (source === 'mutation') {
-        this.clearCache('token');
+        this.persistentCache.clearSnapshots();
       } else {
-        this.clearVolatileCache('token', { emit: false });
         this.persistentCache.clearSnapshotsForScope('auth');
-        this.emitCacheInvalidation('token');
       }
+      this.emitCacheInvalidation('token');
     });
   }
 
   public dispose(): void {
     this.isDisposed = true;
+    this.persistentCacheHydrationGeneration += 1;
+    this.cancelAllPendingNetworkRequests('dispose');
+    for (const state of this.catalogSearchSessions.values()) {
+      state.controller.abort();
+      state.disposed = true;
+    }
+    this.catalogSearchSessions.clear();
+    this.defaultCatalogSearchSession = null;
     this.completePersistentCacheHydrationAttempt();
     this.cacheInvalidationListeners.clear();
     this.metadataUpdateListeners.clear();
-    this.deferredMetadataRequestCache.clear();
     this.unsubscribeFromTokenService();
   }
 
@@ -315,6 +421,10 @@ export class ModelCatalogService {
       return;
     }
 
+    // Supersede any incremental parser already in flight. Its store-level
+    // payload is stale after this synchronous barrier, and its service-level
+    // completion must not emit a second hydrate event.
+    this.persistentCacheHydrationGeneration += 1;
     const span = performanceMonitor.startSpan('catalog.hydratePersistentCache');
     try {
       this.persistentCache.hydrate();
@@ -332,6 +442,54 @@ export class ModelCatalogService {
       span.end({ outcome: 'error' });
       throw error;
     }
+  }
+
+  public hydratePersistentCacheIncrementally(): Promise<void> {
+    if (this.persistentCacheHydrated) {
+      this.completePersistentCacheHydrationAttempt();
+      return Promise.resolve();
+    }
+
+    if (this.incrementalPersistentCacheHydrationPromise) {
+      return this.incrementalPersistentCacheHydrationPromise;
+    }
+
+    // Give each retry a distinct epoch so a later clear or synchronous hydrate
+    // can make its eventual completion observationally stale.
+    this.persistentCacheHydrationGeneration += 1;
+    const hydrationGeneration = this.persistentCacheHydrationGeneration;
+    const span = performanceMonitor.startSpan('catalog.hydratePersistentCache');
+    const hydrationPromise = this.persistentCache.hydrateIncrementally()
+      .then((didApplyHydration) => {
+        if (hydrationGeneration !== this.persistentCacheHydrationGeneration || this.isDisposed) {
+          span.end({ outcome: 'stale' });
+          return;
+        }
+        this.persistentCacheHydrated = true;
+        this.completePersistentCacheHydrationAttempt();
+        if (!didApplyHydration) {
+          span.end({ outcome: 'noop' });
+          return;
+        }
+        span.end({ outcome: 'success' });
+        this.emitCacheInvalidation('hydrate');
+      })
+      .catch((error) => {
+        if (hydrationGeneration !== this.persistentCacheHydrationGeneration || this.isDisposed) {
+          span.end({ outcome: 'stale' });
+          return;
+        }
+        this.completePersistentCacheHydrationAttempt();
+        span.end({ outcome: 'error' });
+        throw error;
+      })
+      .finally(() => {
+        if (this.incrementalPersistentCacheHydrationPromise === hydrationPromise) {
+          this.incrementalPersistentCacheHydrationPromise = null;
+        }
+      });
+    this.incrementalPersistentCacheHydrationPromise = hydrationPromise;
+    return hydrationPromise;
   }
 
   private completePersistentCacheHydrationAttempt(): void {
@@ -382,15 +540,23 @@ export class ModelCatalogService {
   public clearCache(
     source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
   ): void {
-    this.clearVolatileCache(source, { emit: false });
-
     if (source === 'token') {
+      this.invalidateAuthScopedCatalogState();
       this.persistentCache.clearSnapshots();
-    } else {
-      this.persistentCache.clearAll();
-      this.persistentCacheHydrated = true;
-      this.completePersistentCacheHydrationAttempt();
+      this.emitCacheInvalidation(source);
+      return;
     }
+
+    this.clearVolatileCache(source, { emit: false });
+    this.persistentCacheHydrationGeneration += 1;
+
+    this.persistentCache.clearAll();
+
+    // Both clear paths leave the store synchronously hydrated: clearAll starts
+    // from an empty state, while clearSnapshots preserves search entries via a
+    // synchronous hydration barrier.
+    this.persistentCacheHydrated = true;
+    this.completePersistentCacheHydrationAttempt();
 
     this.emitCacheInvalidation(source);
   }
@@ -399,7 +565,9 @@ export class ModelCatalogService {
     source: Exclude<ModelCatalogCacheInvalidationSource, 'replay' | 'hydrate'> = 'unknown',
     options: { emit?: boolean } = {},
   ): void {
+    this.cancelAllPendingNetworkRequests(source === 'manual' ? 'manual_clear' : 'consumer');
     this.bufferedCursorSequence = 0;
+    this.searchCacheAccessSequence = 0;
     this.searchCache.clear();
     this.searchRequestCache.clear();
     this.deferredMetadataRequestCache.clear();
@@ -431,7 +599,10 @@ export class ModelCatalogService {
     try {
       listener(revision, source);
     } catch (error) {
-      console.warn('[ModelCatalogService] Cache invalidation listener failed', error);
+      console.warn(
+        '[ModelCatalogService] Cache invalidation listener failed',
+        getPrivacySafeErrorLogDetails(error),
+      );
     }
   }
 
@@ -444,12 +615,15 @@ export class ModelCatalogService {
       try {
         listener(update);
       } catch (error) {
-        console.warn('[ModelCatalogService] Metadata update listener failed', error);
+        console.warn(
+          '[ModelCatalogService] Metadata update listener failed',
+          getPrivacySafeErrorLogDetails(error),
+        );
       }
     });
   }
 
-  private pruneSearchCache(): void {
+  private pruneSearchCache(protectedKeys: ReadonlySet<string> = new Set()): void {
     const now = Date.now();
 
     for (const [key, entry] of this.searchCache.entries()) {
@@ -464,22 +638,75 @@ export class ModelCatalogService {
       return;
     }
 
-    for (const [key, entry] of this.searchCache.entries()) {
-      if (this.searchCache.size <= SEARCH_CACHE_MAX_ENTRIES) {
-        break;
+    // Overflow eviction is intentional and independent of Map insertion order:
+    // synthetic buffered pages first, then LRU ordinary cursor pages, while
+    // reusable first pages remain the last resort for offline/first-paint reuse.
+    const compareCandidates = (
+      left: [string, ModelCatalogSearchCacheEntry],
+      right: [string, ModelCatalogSearchCacheEntry],
+    ): number => {
+      const priorityDelta = this.getSearchCacheEvictionPriority(left[1])
+        - this.getSearchCacheEvictionPriority(right[1]);
+      if (priorityDelta !== 0) {
+        return priorityDelta;
       }
 
-      if (!entry.isBufferedCursor) {
-        this.searchCache.delete(key);
+      const recencyDelta = left[1].lastAccessSequence - right[1].lastAccessSequence;
+      if (recencyDelta !== 0) {
+        return recencyDelta;
+      }
+
+      const timestampDelta = left[1].timestamp - right[1].timestamp;
+      if (timestampDelta !== 0) {
+        return timestampDelta;
+      }
+
+      return left[0].localeCompare(right[0]);
+    };
+    const evictionCandidates = Array.from(this.searchCache.entries())
+      .filter(([key]) => !protectedKeys.has(key))
+      .sort(compareCandidates);
+    const overflow = this.searchCache.size - SEARCH_CACHE_MAX_ENTRIES;
+    for (let index = 0; index < overflow; index += 1) {
+      const candidate = evictionCandidates[index];
+      if (candidate) {
+        this.searchCache.delete(candidate[0]);
       }
     }
 
-    for (const key of this.searchCache.keys()) {
-      if (this.searchCache.size <= SEARCH_CACHE_MAX_ENTRIES) {
-        break;
+    // The normal prefetch contract protects at most a tiny current cursor
+    // chain. Keep the absolute bound even if a malformed upstream payload ever
+    // produces more protected pages than the cache can hold.
+    if (this.searchCache.size > SEARCH_CACHE_MAX_ENTRIES) {
+      const protectedFallbacks = Array.from(this.searchCache.entries())
+        .filter(([key]) => protectedKeys.has(key))
+        .sort(compareCandidates);
+      const protectedOverflow = this.searchCache.size - SEARCH_CACHE_MAX_ENTRIES;
+      for (let index = 0; index < protectedOverflow; index += 1) {
+        const candidate = protectedFallbacks[index];
+        if (candidate) {
+          this.searchCache.delete(candidate[0]);
+        }
       }
+    }
+  }
 
-      this.searchCache.delete(key);
+  private getSearchCacheEvictionPriority(entry: ModelCatalogSearchCacheEntry): number {
+    if (entry.isBufferedCursor) {
+      return 0;
+    }
+    return entry.isReusableFirstPage ? 2 : 1;
+  }
+
+  private nextSearchCacheAccessSequence(): number {
+    this.searchCacheAccessSequence += 1;
+    return this.searchCacheAccessSequence;
+  }
+
+  private touchSearchCacheEntry(cacheKey: string): void {
+    const entry = this.searchCache.get(cacheKey);
+    if (entry) {
+      entry.lastAccessSequence = this.nextSearchCacheAccessSequence();
     }
   }
 
@@ -495,34 +722,40 @@ export class ModelCatalogService {
   }
 
   private async createRequestContext(): Promise<CatalogRequestContext> {
-    // Guard against a theoretical infinite loop if auth token mutations happen continuously.
-    // In practice, this settles quickly (token changes are rare), but keep a best-effort escape hatch.
+    // A snapshot is linearized by HuggingFaceTokenService. The bounded loop only
+    // covers a new mutation landing after that snapshot but before this service
+    // observes it; never synthesize a token/revision pair after exhaustion.
     for (let attempt = 0; attempt < 6; attempt += 1) {
-      const authVersion = this.authCacheVersion;
-      const authToken = await huggingFaceTokenService.getToken();
-      if (authVersion !== this.authCacheVersion) {
+      const snapshot = await huggingFaceTokenService.getSnapshot();
+      if (snapshot.revision !== this.authCacheVersion) {
         continue;
       }
 
       return {
-        authToken,
-        hasAuthToken: Boolean(authToken),
-        authVersion,
+        authToken: snapshot.token,
+        hasAuthToken: Boolean(snapshot.token),
+        authVersion: snapshot.revision,
       };
     }
 
-    const authToken = await huggingFaceTokenService.getToken();
-
-    return {
-      authToken,
-      hasAuthToken: Boolean(authToken),
-      authVersion: this.authCacheVersion,
-    };
+    throw new StaleCatalogAuthError();
   }
 
   private assertRequestContextIsCurrent(requestContext: CatalogRequestContext): void {
-    if (this.authCacheVersion !== requestContext.authVersion) {
+    if (requestContext.hasAuthToken && this.authCacheVersion !== requestContext.authVersion) {
       throw new StaleCatalogAuthError();
+    }
+  }
+
+  private assertCacheOperationIsCurrent(generation: number): void {
+    if (this.isDisposed || generation !== this.cacheOperationGeneration) {
+      throw new StaleCatalogRequestError();
+    }
+  }
+
+  private assertRequestSignalIsCurrent(signal?: AbortSignal): void {
+    if (this.isDisposed || signal?.aborted) {
+      throw new StaleCatalogRequestError();
     }
   }
 
@@ -532,17 +765,68 @@ export class ModelCatalogService {
   public async searchModels(
     query: string = 'gguf',
     options?: ModelCatalogSearchOptions,
+    session?: CatalogSearchSession,
   ): Promise<ModelCatalogSearchResult> {
-    await this.waitForPersistentCacheHydrationAttempt();
-    return this.searchModelsInternal(query, options, 0);
+    const searchScope = this.captureCatalogSearchRequestScope(session);
+    const span = performanceMonitor.startSpan('catalog.search.session', {
+      sessionId: searchScope.sessionId,
+      generation: searchScope.generation,
+      cursorType: options?.cursor ? 'cursor' : 'initial',
+      pageSize: options?.pageSize ?? 20,
+      metadataResolution: options?.metadataResolution ?? 'blocking',
+    });
+    let outcome: 'success' | 'cancelled' | 'error' = 'success';
+
+    try {
+      await this.waitForPersistentCacheHydrationAttempt();
+      this.assertCatalogSearchIsCurrent(searchScope);
+      return await this.searchModelsWithAuthRetry(query, options, 0, searchScope);
+    } catch (error) {
+      if (error instanceof StaleCatalogRequestError) {
+        outcome = 'cancelled';
+        throw new ModelCatalogError('cancelled', 'Catalog request was cancelled');
+      }
+      outcome = error instanceof ModelCatalogError && error.code === 'cancelled'
+        ? 'cancelled'
+        : 'error';
+      throw error;
+    } finally {
+      span.end({ outcome });
+    }
+  }
+
+  private async searchModelsWithAuthRetry(
+    query: string,
+    options: ModelCatalogSearchOptions | undefined,
+    retryCount: number,
+    searchScope: CatalogSearchRequestScope,
+  ): Promise<ModelCatalogSearchResult> {
+    try {
+      return await this.searchModelsInternal(query, options, retryCount, searchScope);
+    } catch (error) {
+      if (
+        error instanceof StaleCatalogAuthError
+        && (options?.cursor ?? null) === null
+        && retryCount < 1
+      ) {
+        this.assertCatalogSearchIsCurrent(searchScope);
+        return this.searchModelsWithAuthRetry(query, options, retryCount + 1, searchScope);
+      }
+      if (error instanceof StaleCatalogAuthError) {
+        throw new ModelCatalogError('network', 'Catalog auth context changed during request');
+      }
+      throw error;
+    }
   }
 
   private async searchModelsInternal(
     query: string,
     options: ModelCatalogSearchOptions | undefined,
     retryCount: number,
+    searchScope: CatalogSearchRequestScope,
   ): Promise<ModelCatalogSearchResult> {
     const requestContext = await this.createRequestContext();
+    this.assertCatalogSearchIsCurrent(searchScope);
     const memoryFitContextPromise = this.getCurrentMemoryFitContext();
     const rawCursor = options?.cursor ?? null;
     const cursor = this.normalizeCatalogSearchCursor(rawCursor);
@@ -555,13 +839,15 @@ export class ModelCatalogService {
     const gated = options?.gated;
     const metadataResolution = options?.metadataResolution ?? 'blocking';
     const normalizedQuery = this.normalizeQuery(query);
-    const catalogSearchAuthPolicy = requestContext.hasAuthToken
-      ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
-      : REQUEST_AUTH_POLICY.ANONYMOUS;
-    const catalogSearchHasAuthScope = this.resolveRequestAuthScope(
-      catalogSearchAuthPolicy,
-      requestContext.authToken,
-    ) === 'auth';
+    const bufferedCursorAuthScope = this.getBufferedCursorAuthScope(cursor);
+    const catalogSearchAuthPolicy = bufferedCursorAuthScope === 'anon'
+      ? REQUEST_AUTH_POLICY.ANONYMOUS
+      : requestContext.hasAuthToken
+        ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
+        : REQUEST_AUTH_POLICY.ANONYMOUS;
+    const catalogSearchHasAuthScope = bufferedCursorAuthScope === null
+      ? this.resolveRequestAuthScope(catalogSearchAuthPolicy, requestContext.authToken) === 'auth'
+      : bufferedCursorAuthScope === 'auth';
     const cacheKey = this.buildMemorySearchCacheKey(
       normalizedQuery,
       cursor,
@@ -570,6 +856,7 @@ export class ModelCatalogService {
       catalogSearchHasAuthScope,
       gated,
       metadataResolution,
+      requestContext.authVersion,
     );
     const cached = this.searchCache.get(cacheKey);
     const isBufferedCursor = this.isBufferedCursor(cursor);
@@ -588,19 +875,42 @@ export class ModelCatalogService {
     }
 
     if (!forceRefresh && cached && (isCacheFresh || isBufferedCursorFresh)) {
-      const filteredCachedModels = filterCatalogSearchModels(
-        this.sanitizeCachedCatalogModelsResolvedFiles(cached.result.models),
-      ).map((model) => this.toSearchResultModel(model));
       const memoryFitContext = await memoryFitContextPromise;
-      return {
-        ...this.sanitizeSearchResultCursor(cached.result),
-        models: this.mergeSearchModelsWithRegistry(
-          filteredCachedModels,
-          this.getAuthScope(catalogSearchHasAuthScope),
-          memoryFitContext,
-          metadataResolution,
-        ),
-      };
+      this.assertRequestContextIsCurrent(requestContext);
+      this.assertCatalogSearchIsCurrent(searchScope);
+      const currentCached = this.searchCache.get(cacheKey);
+      const isCurrentCacheEntry = Boolean(currentCached) && (
+        cached.requestId === undefined || currentCached?.requestId === cached.requestId
+      );
+      if (currentCached && isCurrentCacheEntry) {
+        const filteredCachedModels = filterCatalogSearchModels(
+          this.sanitizeCachedCatalogModelsResolvedFiles(currentCached.result.models),
+        ).map((model) => this.toSearchResultModel(model));
+        const attachedDeferredRequest = !currentCached.deferredMetadataPending || Boolean(
+          currentCached.deferredMetadataRequestKey
+          && this.attachDeferredMetadataConsumer(
+            currentCached.deferredMetadataRequestKey,
+            searchScope.signal,
+          ),
+        );
+        if (!attachedDeferredRequest) {
+          this.searchCache.delete(cacheKey);
+        } else {
+          this.touchSearchCacheEntry(cacheKey);
+          const mergedCachedModels = this.mergeSearchModelsWithRegistry(
+            filteredCachedModels,
+            this.getAuthScope(catalogSearchHasAuthScope),
+            memoryFitContext,
+            metadataResolution,
+          );
+          return {
+            ...this.sanitizeSearchResultCursor(currentCached.result),
+            models: metadataResolution === 'deferred'
+              ? this.copySizeResolutionStates(filteredCachedModels, mergedCachedModels)
+              : mergedCachedModels,
+          };
+        }
+      }
     }
 
     if (isBufferedCursor) {
@@ -616,6 +926,8 @@ export class ModelCatalogService {
       }
 
       const memoryFitContext = await memoryFitContextPromise;
+      this.assertRequestContextIsCurrent(requestContext);
+      this.assertCatalogSearchIsCurrent(searchScope);
       const cachedSearch = (
         this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
         ?? (catalogSearchHasAuthScope
@@ -649,6 +961,8 @@ export class ModelCatalogService {
 
       if (cursor === null) {
         const memoryFitContext = await memoryFitContextPromise;
+        this.assertRequestContextIsCurrent(requestContext);
+        this.assertCatalogSearchIsCurrent(searchScope);
         const fallback = (
           this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
           ?? (catalogSearchHasAuthScope
@@ -666,10 +980,13 @@ export class ModelCatalogService {
       throw rateLimitError;
     }
 
-    const inFlight = this.searchRequestCache.get(cacheKey);
+    const searchRequestKey = `${cacheKey}::session:${searchScope.sessionId}:${searchScope.generation}`;
+    const inFlight = this.searchRequestCache.get(searchRequestKey);
     const requestPromise = inFlight ?? (async (): Promise<ModelCatalogSearchResult> => {
       try {
         const memoryFitContext = await memoryFitContextPromise;
+        this.assertRequestContextIsCurrent(requestContext);
+        this.assertCatalogSearchIsCurrent(searchScope);
         const fetched = await this.fetchCatalogBatch(
           normalizedQuery,
           pageSize,
@@ -680,52 +997,89 @@ export class ModelCatalogService {
           gated,
           catalogSearchAuthPolicy,
           metadataResolution,
+          searchScope,
         );
         this.assertRequestContextIsCurrent(requestContext);
+        this.assertCatalogSearchIsCurrent(searchScope);
+        const prepareResultsSpan = performanceMonitor.startSpan('catalog.prepareSearchResults', {
+          fetchedModels: fetched.models.length,
+          metadataResolution,
+        });
         const filteredModels = filterCatalogSearchModels(fetched.models);
-        const searchResultModels = filteredModels.map((model) => this.toSearchResultModel(model));
+        const searchResultModels = filteredModels
+          .map((model) => this.toSearchResultModel(model))
+          .map((model) => metadataResolution === 'deferred'
+            ? this.withPendingSizeResolution(model, requestContext)
+            : model);
         const result = {
           models: searchResultModels,
           hasMore: fetched.nextCursor !== null,
           nextCursor: fetched.nextCursor,
         };
+        prepareResultsSpan.end({ models: result.models.length });
 
         const cacheTimestamp = Date.now();
         this.searchRequestSequence += 1;
         const cacheRequestId = this.searchRequestSequence;
+        const deferredMetadataRequestKey = `${cacheKey}::request:${cacheRequestId}`;
         this.searchCache.set(cacheKey, {
           result,
           timestamp: cacheTimestamp,
           isBufferedCursor,
+          isReusableFirstPage: cursor === null,
+          lastAccessSequence: this.nextSearchCacheAccessSequence(),
           requestId: cacheRequestId,
+          ...(metadataResolution === 'deferred' ? {
+            deferredMetadataPending: true,
+            deferredMetadataRequestKey,
+          } : {}),
         });
-        this.pruneSearchCache();
-        this.persistAnonymousFirstPageSearch({
-          normalizedQuery,
-          cursor,
-          pageSize,
-          sort,
-          gated,
-          catalogSearchHasAuthScope,
-          result,
-        });
+        this.pruneSearchCache(new Set(fetched.bufferedCacheKeys ?? []));
+        if (metadataResolution === 'blocking') {
+          const persistSpan = performanceMonitor.startSpan('catalog.persistFirstSearchPage', {
+            models: result.models.length,
+          });
+          try {
+            this.persistAnonymousFirstPageSearch({
+              normalizedQuery,
+              cursor,
+              pageSize,
+              sort,
+              gated,
+              catalogSearchHasAuthScope,
+              result,
+            });
+          } finally {
+            persistSpan.end();
+          }
+        }
 
         const searchAuthScope = this.getAuthScope(catalogSearchHasAuthScope);
+        const mergeResultsSpan = performanceMonitor.startSpan('catalog.mergeSearchResults', {
+          models: result.models.length,
+          metadataResolution,
+        });
         const mergedModels = this.mergeSearchModelsWithRegistry(
           result.models,
           searchAuthScope,
           memoryFitContext,
           metadataResolution,
         );
+        const displayModels = metadataResolution === 'deferred'
+          ? this.copySizeResolutionStates(result.models, mergedModels)
+          : mergedModels;
+        mergeResultsSpan.end({ models: displayModels.length });
 
-        if (catalogSearchHasAuthScope && mergedModels.length > 0) {
-          this.reconcileAnonymousModelVisibility(mergedModels);
+        if (catalogSearchHasAuthScope && displayModels.length > 0) {
+          this.reconcileAnonymousModelVisibility(displayModels);
         }
 
         if (metadataResolution === 'deferred') {
           this.scheduleDeferredMetadataResolution({
             cacheKey,
             cacheRequestId,
+            cacheOperationGeneration: this.cacheOperationGeneration,
+            signal: searchScope.signal,
             query,
             normalizedQuery,
             cursor,
@@ -741,24 +1095,29 @@ export class ModelCatalogService {
 
         return {
           ...result,
-          models: mergedModels,
+          models: displayModels,
         };
       } catch (e) {
-        if (e instanceof StaleCatalogAuthError) {
+        if (e instanceof StaleCatalogAuthError || e instanceof StaleCatalogRequestError) {
           throw e;
         }
 
-        if (e instanceof ModelCatalogError && e.code === 'rate_limited') {
+        if (e instanceof ModelCatalogError) {
           if (process.env.NODE_ENV !== 'test') {
-            console.warn('[ModelCatalogService] Search rate limited', e);
+            console.info('[ModelCatalogService] Search recovered with fallback', {
+              code: e.code,
+              hasRetryDelay: typeof e.retryAfterMs === 'number',
+            });
           }
         } else {
-          console.error('[ModelCatalogService] Search failed', e);
+          console.error('[ModelCatalogService] Search failed', getPrivacySafeErrorLogDetails(e));
         }
 
         if (e instanceof ModelCatalogError) {
           if (cursor === null) {
             const memoryFitContext = await memoryFitContextPromise;
+            this.assertRequestContextIsCurrent(requestContext);
+            this.assertCatalogSearchIsCurrent(searchScope);
             const fallback = (
               this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
               ?? (catalogSearchHasAuthScope
@@ -779,6 +1138,8 @@ export class ModelCatalogService {
         const networkError = new ModelCatalogError('network', 'Model catalog request failed');
         if (cursor === null) {
           const memoryFitContext = await memoryFitContextPromise;
+          this.assertRequestContextIsCurrent(requestContext);
+          this.assertCatalogSearchIsCurrent(searchScope);
           const fallback = (
             this.getCachedSearchResultForScope(query, options, catalogSearchHasAuthScope, memoryFitContext)
             ?? (catalogSearchHasAuthScope
@@ -798,28 +1159,37 @@ export class ModelCatalogService {
     })();
 
     if (!inFlight) {
-      this.searchRequestCache.set(cacheKey, requestPromise);
+      this.searchRequestCache.set(searchRequestKey, requestPromise);
     }
 
     try {
       return await requestPromise;
     } catch (e) {
       if (e instanceof StaleCatalogAuthError) {
-        if (this.searchRequestCache.get(cacheKey) === requestPromise) {
-          this.searchRequestCache.delete(cacheKey);
+        if (this.searchRequestCache.get(searchRequestKey) === requestPromise) {
+          this.searchRequestCache.delete(searchRequestKey);
         }
 
         if (cursor === null && retryCount < 1) {
-          return this.searchModelsInternal(query, options, retryCount + 1);
+          return this.searchModelsInternal(
+            query,
+            options,
+            retryCount + 1,
+            searchScope,
+          );
         }
 
         throw new ModelCatalogError('network', 'Catalog auth context changed during request');
       }
 
+      if (e instanceof StaleCatalogRequestError) {
+        throw new ModelCatalogError('cancelled', 'Catalog request was cancelled');
+      }
+
       throw e;
     } finally {
-      if (!inFlight && this.searchRequestCache.get(cacheKey) === requestPromise) {
-        this.searchRequestCache.delete(cacheKey);
+      if (!inFlight && this.searchRequestCache.get(searchRequestKey) === requestPromise) {
+        this.searchRequestCache.delete(searchRequestKey);
       }
     }
   }
@@ -1133,6 +1503,7 @@ export class ModelCatalogService {
     }
 
     if (isMemoryEntryFresh && memoryEntry) {
+      this.touchSearchCacheEntry(memoryKey);
       const filteredMemoryModels = filterCatalogSearchModels(
         this.sanitizeCachedCatalogModelsResolvedFiles(memoryEntry.result.models),
       ).map((model) => this.toSearchResultModel(model));
@@ -1202,22 +1573,387 @@ export class ModelCatalogService {
       return model;
     }
 
-    return normalizePersistedModelMetadata({
+    const normalized = normalizePersistedModelMetadata({
       ...model,
       variants,
     });
+    return model.sizeResolutionState
+      ? { ...normalized, sizeResolutionState: model.sizeResolutionState }
+      : normalized;
   }
 
-  public async getModelDetails(modelId: string): Promise<ModelMetadata> {
-    await this.waitForPersistentCacheHydrationAttempt();
-    return this.getModelDetailsInternal(modelId, 0);
+  public createSearchSession(): CatalogSearchSession {
+    let session!: CatalogSearchSession;
+    session = {
+      cancelPendingRequests: (reason = 'consumer') => {
+        this.cancelPendingSearchRequests(session, reason);
+      },
+      dispose: () => {
+        this.disposeCatalogSearchSession(session);
+      },
+    };
+
+    this.catalogSearchSessionSequence += 1;
+    this.catalogSearchGeneration += 1;
+    this.catalogSearchSessions.set(session, {
+      id: this.catalogSearchSessionSequence,
+      generation: this.catalogSearchGeneration,
+      controller: new AbortController(),
+      disposed: false,
+    });
+    return session;
   }
 
-  private async getModelDetailsInternal(modelId: string, retryCount: number): Promise<ModelMetadata> {
-    const requestContext = await this.createRequestContext();
-    const memoryFitContext = await this.getCurrentMemoryFitContext();
+  private getDefaultSearchSession(): CatalogSearchSession {
+    if (!this.defaultCatalogSearchSession) {
+      this.defaultCatalogSearchSession = this.createSearchSession();
+    }
+    return this.defaultCatalogSearchSession;
+  }
 
+  private captureCatalogSearchRequestScope(
+    session: CatalogSearchSession | undefined,
+  ): CatalogSearchRequestScope {
+    const resolvedSession = session ?? this.getDefaultSearchSession();
+    const state = this.catalogSearchSessions.get(resolvedSession);
+    if (!state || state.disposed || state.controller.signal.aborted) {
+      throw new ModelCatalogError('cancelled', 'Catalog search session is no longer active');
+    }
+
+    return {
+      session: resolvedSession,
+      sessionId: state.id,
+      generation: state.generation,
+      signal: state.controller.signal,
+    };
+  }
+
+  private assertCatalogSearchIsCurrent(scope: CatalogSearchRequestScope): void {
+    const state = this.catalogSearchSessions.get(scope.session);
+    if (
+      this.isDisposed
+      || scope.signal.aborted
+      || !state
+      || state.disposed
+      || state.generation !== scope.generation
+    ) {
+      throw new StaleCatalogRequestError();
+    }
+  }
+
+  public cancelPendingSearchRequests(
+    session?: CatalogSearchSession,
+    reason: CatalogSearchCancellationReason = 'consumer',
+  ): void {
+    const targetSession = session ?? this.defaultCatalogSearchSession;
+    if (!targetSession) {
+      return;
+    }
+
+    const state = this.catalogSearchSessions.get(targetSession);
+    if (!state || state.disposed) {
+      return;
+    }
+
+    state.controller.abort();
+    this.catalogSearchGeneration += 1;
+    state.generation = this.catalogSearchGeneration;
+    state.controller = new AbortController();
+    performanceMonitor.incrementCounter('catalog.search.cancel', 1, { reason });
+  }
+
+  private disposeCatalogSearchSession(session: CatalogSearchSession): void {
+    const state = this.catalogSearchSessions.get(session);
+    if (!state || state.disposed) {
+      return;
+    }
+
+    state.controller.abort();
+    state.disposed = true;
+    this.catalogSearchSessions.delete(session);
+    if (this.defaultCatalogSearchSession === session) {
+      this.defaultCatalogSearchSession = null;
+    }
+    performanceMonitor.incrementCounter('catalog.search.cancel', 1, { reason: 'unmount' });
+  }
+
+  private abortSharedCatalogRequests(
+    requestMap: Map<string, SharedCatalogRequestEntry<unknown>>,
+    predicate: (entry: SharedCatalogRequestEntry<unknown>) => boolean = () => true,
+  ): void {
+    for (const entry of requestMap.values()) {
+      if (predicate(entry)) {
+        entry.controller.abort();
+      }
+    }
+  }
+
+  private cancelAllPendingNetworkRequests(reason: CatalogSearchCancellationReason): void {
+    this.catalogSearchGeneration += 1;
+    this.cacheOperationGeneration += 1;
+    for (const state of this.catalogSearchSessions.values()) {
+      if (state.disposed) {
+        continue;
+      }
+      state.controller.abort();
+      this.catalogSearchGeneration += 1;
+      state.generation = this.catalogSearchGeneration;
+      state.controller = new AbortController();
+    }
+    performanceMonitor.incrementCounter('catalog.search.cancel', 1, { reason, scope: 'all' });
+
+    this.abortSharedCatalogRequests(
+      this.deferredMetadataRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    this.abortSharedCatalogRequests(
+      this.treeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    this.abortSharedCatalogRequests(
+      this.readmeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    this.abortSharedCatalogRequests(
+      this.resolvedFileProbeCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+    );
+    for (const controller of this.activeNetworkRequestControllers.keys()) {
+      controller.abort();
+    }
+    this.activeNetworkRequestControllers.clear();
+  }
+
+  private invalidateAuthScopedCatalogState(): void {
+    const isStaleAuthEntry = (entry: SharedCatalogRequestEntry<unknown>) => (
+      entry.authScope === 'auth' && entry.authVersion !== this.authCacheVersion
+    );
+    this.abortSharedCatalogRequests(
+      this.deferredMetadataRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+    this.abortSharedCatalogRequests(
+      this.treeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+    this.abortSharedCatalogRequests(
+      this.readmeRequestCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+    this.abortSharedCatalogRequests(
+      this.resolvedFileProbeCache as Map<string, SharedCatalogRequestEntry<unknown>>,
+      isStaleAuthEntry,
+    );
+
+    for (const [controller, request] of this.activeNetworkRequestControllers.entries()) {
+      if (request.authScope === 'auth' && request.authVersion !== this.authCacheVersion) {
+        controller.abort();
+      }
+    }
+    for (const key of this.searchCache.keys()) {
+      if (key.startsWith('auth::')) {
+        this.searchCache.delete(key);
+      }
+    }
+    for (const key of this.searchRequestCache.keys()) {
+      if (key.startsWith('auth::')) {
+        this.searchRequestCache.delete(key);
+      }
+    }
+    // Anonymous snapshots can contain token-derived visibility reconciliation,
+    // so invalidate snapshot state without cancelling compatible anonymous work.
+    this.modelSnapshotCache.clear();
+    this.resolvedFileProbeStateCache.clear();
+    this.rateLimitUntilByAuthScope.auth = 0;
+    this.rateLimitBackoffMsByAuthScope.auth = 0;
+  }
+
+  private createInterruptedCatalogRequestError(requestContext?: CatalogRequestContext): Error {
+    return requestContext
+      && requestContext.hasAuthToken
+      && requestContext.authVersion !== this.authCacheVersion
+      ? new StaleCatalogAuthError()
+      : new StaleCatalogRequestError();
+  }
+
+  private async fetchCatalogResource<T = Response>(
+    url: string,
+    init: RequestInit = {},
+    options: CatalogResourceFetchOptions<T> = {},
+  ): Promise<T> {
+    if (typeof AbortController === 'undefined') {
+      const result = await fetchWithTimeout(url, init, options.timeoutMs, options.consume);
+      if (init.signal?.aborted) {
+        throw this.createInterruptedCatalogRequestError(options.requestContext);
+      }
+      return result;
+    }
+
+    const controller = new AbortController();
+    const externalSignal = init.signal;
+    const abortListener = () => controller.abort();
+    let controllerAbortListener: (() => void) | undefined;
+    const interruptedRequestPromise = new Promise<never>((_resolve, reject) => {
+      controllerAbortListener = () => reject(
+        this.createInterruptedCatalogRequestError(options.requestContext),
+      );
+      if (controller.signal.aborted) {
+        controllerAbortListener();
+      } else {
+        controller.signal.addEventListener('abort', controllerAbortListener, { once: true });
+      }
+    });
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else if (typeof externalSignal.addEventListener === 'function') {
+        externalSignal.addEventListener('abort', abortListener);
+      }
+    }
+
+    const authScope = this.getAuthScope(options.requestContext?.hasAuthToken === true);
+    const authVersion = options.requestContext?.authVersion ?? this.authCacheVersion;
+    const requestScope = options.scope ?? 'background';
+    this.activeNetworkRequestControllers.set(controller, { scope: requestScope, authScope, authVersion });
+    performanceMonitor.incrementCounter('catalog.resource.request', 1, {
+      scope: requestScope,
+      authScope,
+      activeRequests: this.activeNetworkRequestControllers.size,
+    });
     try {
+      const result = await Promise.race([
+        fetchWithTimeout(
+          url,
+          { ...init, signal: controller.signal },
+          options.timeoutMs,
+          options.consume,
+        ),
+        interruptedRequestPromise,
+      ]);
+      if (controller.signal.aborted || externalSignal?.aborted) {
+        throw this.createInterruptedCatalogRequestError(options.requestContext);
+      }
+      return result;
+    } catch (error) {
+      if (
+        controller.signal.aborted
+        && !(error instanceof ModelCatalogError && error.code === 'timeout')
+      ) {
+        throw this.createInterruptedCatalogRequestError(options.requestContext);
+      }
+      throw error;
+    } finally {
+      this.activeNetworkRequestControllers.delete(controller);
+      if (controllerAbortListener) {
+        controller.signal.removeEventListener('abort', controllerAbortListener);
+      }
+      if (externalSignal && typeof externalSignal.removeEventListener === 'function') {
+        externalSignal.removeEventListener('abort', abortListener);
+      }
+    }
+  }
+
+  private fetchCatalogJson<T>(
+    url: string,
+    init: RequestInit = {},
+    options: Omit<CatalogResourceFetchOptions<CatalogResponseBody<T>>, 'consume'> = {},
+  ): Promise<CatalogResponseBody<T>> {
+    return this.fetchCatalogResource(url, init, {
+      ...options,
+      consume: async (response) => ({
+        response,
+        body: response.ok ? await response.json() as T : undefined,
+      }),
+    });
+  }
+
+  private fetchCatalogText(
+    url: string,
+    init: RequestInit = {},
+    options: Omit<CatalogResourceFetchOptions<CatalogResponseBody<string>>, 'consume'> = {},
+  ): Promise<CatalogResponseBody<string>> {
+    return this.fetchCatalogResource(url, init, {
+      ...options,
+      consume: async (response) => ({
+        response,
+        body: response.ok ? await response.text() : undefined,
+      }),
+    });
+  }
+
+  private hasKnownDisplaySize(model: ModelMetadata): boolean {
+    const size = getModelDisplayArtifactSizeBytes(model);
+    return typeof size === 'number' && Number.isFinite(size) && size > 0;
+  }
+
+  private withPendingSizeResolution(
+    model: ModelMetadata,
+    requestContext: CatalogRequestContext,
+  ): ModelMetadata {
+    if (this.hasKnownDisplaySize(model) || !this.shouldResolveDeferredMetadata(model, requestContext)) {
+      return model;
+    }
+
+    return { ...model, sizeResolutionState: 'resolving' };
+  }
+
+  private withCompletedSizeResolution(model: ModelMetadata): ModelMetadata {
+    return {
+      ...model,
+      sizeResolutionState: this.hasKnownDisplaySize(model) ? 'resolved' : 'unavailable',
+    };
+  }
+
+  private copySizeResolutionStates(
+    sources: ModelMetadata[],
+    targets: ModelMetadata[],
+  ): ModelMetadata[] {
+    const states = new Map(sources.flatMap((model) => (
+      model.sizeResolutionState ? [[model.id, model.sizeResolutionState] as const] : []
+    )));
+    if (states.size === 0) {
+      return targets;
+    }
+
+    return targets.map((model) => {
+      const sizeResolutionState = states.get(model.id);
+      return sizeResolutionState ? { ...model, sizeResolutionState } : model;
+    });
+  }
+
+  public async getModelDetails(
+    modelId: string,
+    options: CatalogRequestOptions = {},
+  ): Promise<ModelMetadata> {
+    const cacheOperationGeneration = this.cacheOperationGeneration;
+    try {
+      await this.waitForPersistentCacheHydrationAttempt();
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
+      return await this.getModelDetailsInternal(
+        modelId,
+        0,
+        cacheOperationGeneration,
+        options.signal,
+      );
+    } catch (error) {
+      if (error instanceof StaleCatalogRequestError) {
+        throw new ModelCatalogError('cancelled', 'Catalog request was cancelled');
+      }
+      throw error;
+    }
+  }
+
+  private async getModelDetailsInternal(
+    modelId: string,
+    retryCount: number,
+    cacheOperationGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<ModelMetadata> {
+    try {
+      const requestContext = await this.createRequestContext();
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(signal);
+      const memoryFitContext = await this.getCurrentMemoryFitContext(cacheOperationGeneration);
+      this.assertRequestContextIsCurrent(requestContext);
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(signal);
       const cachedModel = this.getCachedModel(modelId);
       const fallbackModel = cachedModel ?? createFallbackModel(modelId);
       const requiresAuthHint = fallbackModel.isGated
@@ -1225,9 +1961,13 @@ export class ModelCatalogService {
         || fallbackModel.accessState !== ModelAccessState.PUBLIC;
       const detailsUrl = buildHuggingFaceModelApiUrl(modelId);
       let detailsAuthToken: string | null = null;
-      let response = await fetchWithTimeout(detailsUrl, {
+      let detailsResponse = await this.fetchCatalogJson<HuggingFaceModelSummary>(detailsUrl, {
         headers: buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
+        signal,
+      }, {
+        requestContext,
       });
+      let { response, body: detailsPayload } = detailsResponse;
       this.assertRequestContextIsCurrent(requestContext);
 
       if (
@@ -1236,16 +1976,23 @@ export class ModelCatalogService {
         && requestContext.hasAuthToken
       ) {
         detailsAuthToken = requestContext.authToken;
-        response = await fetchWithTimeout(detailsUrl, {
+        detailsResponse = await this.fetchCatalogJson<HuggingFaceModelSummary>(detailsUrl, {
           headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+          signal,
+        }, {
+          requestContext,
         });
+        ({ response, body: detailsPayload } = detailsResponse);
         this.assertRequestContextIsCurrent(requestContext);
       }
       let detailedModel = fallbackModel;
       let hasVerifiedContextWindow = fallbackModel.hasVerifiedContextWindow === true;
 
       if (response.ok) {
-        const payload = await response.json() as HuggingFaceModelSummary;
+        const payload = detailsPayload;
+        if (!payload) {
+          throw new ModelCatalogError('network', 'HF model details returned an empty payload');
+        }
         this.assertRequestContextIsCurrent(requestContext);
         const payloadMaxContextTokens = resolveSummaryMaxContextTokens(payload);
         detailedModel = buildModelMetadataFromPayload(
@@ -1259,9 +2006,12 @@ export class ModelCatalogService {
           [detailedModel],
           memoryFitContext,
           requestContext,
-          { treeProbeMode: 'full' },
+          { treeProbeMode: 'full', signal },
         );
         if (!resolvedModel && detailedModel.requiresTreeProbe === true) {
+          this.assertRequestContextIsCurrent(requestContext);
+          this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+          this.assertRequestSignalIsCurrent(signal);
           return this.finalizeUnresolvedTreeProbeMissModel(detailedModel);
         }
 
@@ -1295,13 +2045,17 @@ export class ModelCatalogService {
         requestContext,
         {
           retryNotFoundWithAuth: this.isAuthRestrictedModel(detailedModel),
+          signal,
         },
       ).catch((error) => {
-        if (error instanceof StaleCatalogAuthError) {
+        if (error instanceof StaleCatalogAuthError || error instanceof StaleCatalogRequestError) {
           throw error;
         }
 
-        console.warn(`[ModelCatalogService] Failed to load README summary for ${modelId}`, error);
+        console.warn(
+          `[ModelCatalogService] Failed to load README summary for ${modelId}`,
+          getPrivacySafeErrorLogDetails(error),
+        );
         return undefined;
       });
 
@@ -1354,6 +2108,8 @@ export class ModelCatalogService {
       });
 
       this.assertRequestContextIsCurrent(requestContext);
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(signal);
       if (detailsAuthToken) {
         this.upsertModelSnapshots([detailedModel], 'auth');
         this.reconcileAnonymousModelVisibility([detailedModel]);
@@ -1369,7 +2125,14 @@ export class ModelCatalogService {
       return this.syncRegistryModelIfPresent(detailedModel);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
-        return this.getModelDetailsInternal(modelId, retryCount + 1);
+        this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+        this.assertRequestSignalIsCurrent(signal);
+        return this.getModelDetailsInternal(
+          modelId,
+          retryCount + 1,
+          cacheOperationGeneration,
+          signal,
+        );
       }
 
       throw error;
@@ -1380,19 +2143,33 @@ export class ModelCatalogService {
     model: ModelMetadata,
     options?: RefreshModelMetadataOptions,
   ): Promise<ModelMetadata> {
-    await this.waitForPersistentCacheHydrationAttempt();
-    return this.refreshModelMetadataInternal(model, 0, {
-      includeDetails: options?.includeDetails !== false,
-    });
+    const cacheOperationGeneration = this.cacheOperationGeneration;
+    try {
+      await this.waitForPersistentCacheHydrationAttempt();
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options?.signal);
+      return await this.refreshModelMetadataInternal(model, 0, {
+        includeDetails: options?.includeDetails !== false,
+        signal: options?.signal,
+      }, cacheOperationGeneration);
+    } catch (error) {
+      if (error instanceof StaleCatalogRequestError) {
+        throw new ModelCatalogError('cancelled', 'Catalog request was cancelled');
+      }
+      throw error;
+    }
   }
 
   private async refreshModelMetadataInternal(
     model: ModelMetadata,
     retryCount: number,
-    options: { includeDetails: boolean },
+    options: { includeDetails: boolean; signal?: AbortSignal },
+    cacheOperationGeneration: number,
   ): Promise<ModelMetadata> {
-    const requestContext = await this.createRequestContext();
     try {
+      const requestContext = await this.createRequestContext();
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
       const canRefreshDetailsForContextWindow = (
         model.hasVerifiedContextWindow !== true
         && (
@@ -1402,14 +2179,25 @@ export class ModelCatalogService {
       );
 
       if (options.includeDetails && canRefreshDetailsForContextWindow) {
-        return this.getModelDetailsInternal(model.id, retryCount);
+        return this.getModelDetailsInternal(
+          model.id,
+          retryCount,
+          cacheOperationGeneration,
+          options.signal,
+        );
       }
 
-      const memoryFitContext = await this.getCurrentMemoryFitContext();
+      const memoryFitContext = await this.getCurrentMemoryFitContext(cacheOperationGeneration);
+      this.assertRequestContextIsCurrent(requestContext);
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
       const [resolved] = await this.resolveMissingModelMetadata([model], memoryFitContext, requestContext, {
         treeProbeMode: options.includeDetails ? 'full' : 'bounded',
+        signal: options.signal,
       });
       this.assertRequestContextIsCurrent(requestContext);
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestSignalIsCurrent(options.signal);
       if (!resolved && model.requiresTreeProbe === true) {
         return this.finalizeUnresolvedTreeProbeMissModel(model);
       }
@@ -1427,7 +2215,14 @@ export class ModelCatalogService {
       return this.syncRegistryModelIfPresent(refreshed);
     } catch (error) {
       if (error instanceof StaleCatalogAuthError && retryCount < 1) {
-        return this.refreshModelMetadataInternal(model, retryCount + 1, options);
+        this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+        this.assertRequestSignalIsCurrent(options.signal);
+        return this.refreshModelMetadataInternal(
+          model,
+          retryCount + 1,
+          options,
+          cacheOperationGeneration,
+        );
       }
 
       throw error;
@@ -1435,14 +2230,19 @@ export class ModelCatalogService {
   }
 
   public async getLocalModels(): Promise<ModelMetadata[]> {
+    const cacheOperationGeneration = this.cacheOperationGeneration;
     await this.waitForPersistentCacheHydrationAttempt();
-    await this.getCurrentMemoryFitContext();
+    await this.getCurrentMemoryFitContext(cacheOperationGeneration);
     const localModels = registry.getModels().map((model) => (
       this.getCachedModel(model.id) ?? model
     ));
     // A timed-out or failed hydration must not turn this registry-only fallback
     // into the mutation that hydrates and overwrites richer persisted snapshots.
-    if (this.persistentCacheHydrated) {
+    if (
+      this.persistentCacheHydrated
+      && cacheOperationGeneration === this.cacheOperationGeneration
+      && !this.isDisposed
+    ) {
       this.upsertModelSnapshots(localModels, 'anon');
     }
     return localModels;
@@ -1479,7 +2279,9 @@ export class ModelCatalogService {
     }
   }
 
-  private async getCurrentMemoryFitContext(): Promise<CatalogMemoryFitContext> {
+  private async getCurrentMemoryFitContext(
+    cacheOperationGeneration: number = this.cacheOperationGeneration,
+  ): Promise<CatalogMemoryFitContext> {
     const remembered = this.lastMemoryFitContext;
     if (remembered && remembered.totalMemoryBytes !== null) {
       return remembered;
@@ -1491,7 +2293,9 @@ export class ModelCatalogService {
       totalMemoryBytes,
       systemMemorySnapshot: null,
     };
-    this.lastMemoryFitContext = memoryFitContext;
+    if (cacheOperationGeneration === this.cacheOperationGeneration && !this.isDisposed) {
+      this.lastMemoryFitContext = memoryFitContext;
+    }
     return memoryFitContext;
   }
 
@@ -1635,6 +2439,7 @@ export class ModelCatalogService {
     performanceMonitor.incrementCounter('catalog.resolveMissingModelMetadata.calls');
 
     const resolveModel = async (model: ModelMetadata): Promise<ModelMetadata | null> => {
+      this.assertRequestSignalIsCurrent(options.signal);
       const hasKnownSize = typeof model.size === 'number' && model.size > 0;
       const shouldCollectProjectorCandidates = this.isProjectorAwareModel(model);
       const requiresAuthValidation = requestContext.hasAuthToken && (
@@ -1658,7 +2463,9 @@ export class ModelCatalogService {
         && model.requiresTreeProbe !== true
         && (!shouldCollectProjectorCandidates || options.resolveProjectorAwareModels === false)
       ) {
-        const probedAccessState = await this.probeResolvedModelAccess(model, requestContext);
+        const probedAccessState = await this.probeResolvedModelAccess(model, requestContext, {
+          signal: options.signal,
+        });
         if (probedAccessState) {
           return normalizePersistedModelMetadata({
             ...model,
@@ -1690,6 +2497,7 @@ export class ModelCatalogService {
               ? HF_TREE_PROJECTOR_PAGINATION_MAX_PAGES
               : options.treeProbeMaxPages
                 ?? (useFullTreeProbe ? HF_TREE_DETAIL_PAGINATION_MAX_PAGES : HF_TREE_SEARCH_PAGINATION_MAX_PAGES),
+            signal: options.signal,
           },
         );
         const selectedEntry = selectTreeEntryForModel(model, treeResponse.entries);
@@ -2051,24 +2859,43 @@ export class ModelCatalogService {
           ...filteredProjectorMetadataPatch,
         }), hasAuthoritativeEmptyProjectorResult, chatModalities);
       } catch (error) {
-        if (error instanceof StaleCatalogAuthError) {
+        if (error instanceof StaleCatalogAuthError || error instanceof StaleCatalogRequestError) {
           throw error;
         }
 
-        console.warn(`[ModelCatalogService] Failed to resolve tree metadata for ${model.id}`, error);
+        console.warn(
+          `[ModelCatalogService] Failed to resolve tree metadata for ${model.id}`,
+          getPrivacySafeErrorLogDetails(error),
+        );
       }
 
       return model;
     };
 
     let results: ModelMetadata[] = [];
-    let outcome: 'success' | 'error' = 'success';
+    let outcome: 'success' | 'stale' | 'error' = 'success';
 
     try {
       for (let index = 0; index < models.length; index += batchSize) {
+        this.assertRequestSignalIsCurrent(options.signal);
+        if (options.shouldContinue?.() === false) {
+          outcome = 'stale';
+          break;
+        }
         const batch = models.slice(index, index + batchSize);
-        const batchResults = await Promise.all(batch.map(resolveModel));
-        const resolvedBatch = batchResults.filter((model): model is ModelMetadata => model !== null);
+        const batchSpan = options.onBatchResolved
+          ? performanceMonitor.startSpan('catalog.deferredMetadata.batch', {
+            requested: batch.length,
+            batchSize,
+          })
+          : null;
+        let resolvedBatch: ModelMetadata[] = [];
+        try {
+          const batchResults = await Promise.all(batch.map(resolveModel));
+          resolvedBatch = batchResults.filter((model): model is ModelMetadata => model !== null);
+        } finally {
+          batchSpan?.end({ resolved: resolvedBatch.length });
+        }
         results.push(...resolvedBatch);
         options.onBatchResolved?.({
           requestedModelIds: batch.map((model) => model.id),
@@ -2130,38 +2957,121 @@ export class ModelCatalogService {
 
   private scheduleDeferredMetadataResolution(input: DeferredMetadataResolutionInput): void {
     const models = input.models.filter((model) => this.shouldResolveDeferredMetadata(model, input.requestContext));
-    if (models.length === 0 || this.isDisposed) {
+    if (!this.isDeferredMetadataInputCurrent(input)) {
       return;
     }
 
     const requestKey = `${input.cacheKey}::request:${input.cacheRequestId}`;
-    if (this.deferredMetadataRequestCache.has(requestKey)) {
+    void this.withInFlightDedup(
+      this.deferredMetadataRequestCache,
+      requestKey,
+      async (sharedSignal) => {
+        const sharedInput = { ...input, signal: sharedSignal, models };
+        try {
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          if (!this.isDeferredMetadataInputCurrent(sharedInput)) {
+            throw new StaleCatalogRequestError();
+          }
+
+          if (models.length === 0) {
+            this.completeDeferredSearchWithoutEnrichment(sharedInput);
+            return;
+          }
+
+          await this.runDeferredMetadataResolution(sharedInput);
+        } catch (error) {
+          const isStale = sharedSignal.aborted
+            || error instanceof StaleCatalogAuthError
+            || error instanceof StaleCatalogRequestError;
+          if (isStale) {
+            this.discardCancelledDeferredSearch(sharedInput);
+            if (
+              !(error instanceof StaleCatalogAuthError)
+              && !(error instanceof StaleCatalogRequestError)
+            ) {
+              throw new StaleCatalogRequestError();
+            }
+            throw error;
+          }
+          if (process.env.NODE_ENV !== 'test') {
+            console.warn(
+              '[ModelCatalogService] Deferred catalog metadata resolution failed',
+              getPrivacySafeErrorLogDetails(error),
+            );
+          }
+          throw error;
+        }
+      },
+      {
+        signal: input.signal,
+        authScope: this.getAuthScope(input.catalogSearchHasAuthScope),
+        authVersion: input.requestContext.authVersion,
+      },
+    ).catch(() => undefined);
+  }
+
+  private attachDeferredMetadataConsumer(requestKey: string, signal: AbortSignal): boolean {
+    const entry = this.deferredMetadataRequestCache.get(requestKey);
+    if (!entry || entry.settled || entry.controller.signal.aborted) {
+      return false;
+    }
+
+    performanceMonitor.incrementCounter('catalog.resource.dedupHit', 1, {
+      authScope: entry.authScope,
+      resource: 'deferred_metadata',
+    });
+    void this.attachSharedCatalogRequestConsumer(entry, signal).catch(() => undefined);
+    return true;
+  }
+
+  private isDeferredMetadataInputCurrent(input: DeferredMetadataResolutionInput): boolean {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    return !this.isDisposed
+      && !input.signal.aborted
+      && input.cacheOperationGeneration === this.cacheOperationGeneration
+      && currentEntry?.requestId === input.cacheRequestId;
+  }
+
+  private completeDeferredSearchWithoutEnrichment(input: DeferredMetadataResolutionInput): void {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (!this.isDeferredMetadataInputCurrent(input) || currentEntry?.requestId !== input.cacheRequestId) {
       return;
     }
 
-    const requestPromise = new Promise<void>((resolve) => {
-      setTimeout(() => {
-        if (this.isDisposed) {
-          resolve();
-          return;
-        }
-
-        void this.runDeferredMetadataResolution({ ...input, models })
-          .catch((error) => {
-            if (!(error instanceof StaleCatalogAuthError) && process.env.NODE_ENV !== 'test') {
-              console.warn('[ModelCatalogService] Deferred catalog metadata resolution failed', error);
-            }
-          })
-          .finally(() => resolve());
-      }, 0);
+    const authScope = this.getAuthScope(input.catalogSearchHasAuthScope);
+    this.upsertModelSnapshots(currentEntry.result.models, authScope);
+    if (input.catalogSearchHasAuthScope && currentEntry.result.models.length > 0) {
+      this.reconcileAnonymousModelVisibility(currentEntry.result.models);
+    }
+    this.persistAnonymousFirstPageSearch({
+      normalizedQuery: input.normalizedQuery,
+      cursor: input.cursor,
+      pageSize: input.pageSize,
+      sort: input.sort,
+      gated: input.gated,
+      catalogSearchHasAuthScope: input.catalogSearchHasAuthScope,
+      result: currentEntry.result,
     });
+    this.markDeferredMetadataComplete(input);
+  }
 
-    this.deferredMetadataRequestCache.set(requestKey, requestPromise);
-    void requestPromise.finally(() => {
-      if (this.deferredMetadataRequestCache.get(requestKey) === requestPromise) {
-        this.deferredMetadataRequestCache.delete(requestKey);
-      }
+  private markDeferredMetadataComplete(input: DeferredMetadataResolutionInput): void {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (currentEntry?.requestId !== input.cacheRequestId) {
+      return;
+    }
+    this.searchCache.set(input.cacheKey, {
+      ...currentEntry,
+      deferredMetadataPending: false,
+      deferredMetadataRequestKey: undefined,
     });
+  }
+
+  private discardCancelledDeferredSearch(input: DeferredMetadataResolutionInput): void {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (currentEntry?.requestId === input.cacheRequestId && currentEntry.deferredMetadataPending) {
+      this.searchCache.delete(input.cacheKey);
+    }
   }
 
   private async runDeferredMetadataResolution(input: DeferredMetadataResolutionInput): Promise<void> {
@@ -2183,12 +3093,16 @@ export class ModelCatalogService {
           treeProbeMaxPages: DEFERRED_METADATA_TREE_MAX_PAGES,
           resolveProjectorAwareModels: false,
           batchSize: DEFERRED_METADATA_BATCH_SIZE,
+          signal: input.signal,
           onBatchResolved: ({ requestedModelIds, models }) => {
             this.applyDeferredMetadataBatch(input, requestedModelIds, models);
           },
+          shouldContinue: () => this.isDeferredMetadataInputCurrent(input),
         },
       );
       this.assertRequestContextIsCurrent(input.requestContext);
+      this.assertRequestSignalIsCurrent(input.signal);
+      this.assertCacheOperationIsCurrent(input.cacheOperationGeneration);
 
       const currentEntry = this.searchCache.get(input.cacheKey);
       if (!currentEntry || currentEntry.requestId !== input.cacheRequestId || this.isDisposed) {
@@ -2210,8 +3124,18 @@ export class ModelCatalogService {
         catalogSearchHasAuthScope: input.catalogSearchHasAuthScope,
         result: currentEntry.result,
       });
+      this.markDeferredMetadataComplete(input);
     } catch (error) {
-      outcome = error instanceof StaleCatalogAuthError ? 'stale' : 'error';
+      const isStale = input.signal.aborted
+        || error instanceof StaleCatalogAuthError
+        || error instanceof StaleCatalogRequestError;
+      outcome = isStale ? 'stale' : 'error';
+      if (isStale) {
+        this.discardCancelledDeferredSearch(input);
+      } else {
+        this.completeUnresolvedSizeStatesAfterFailure(input);
+        this.markDeferredMetadataComplete(input);
+      }
       throw error;
     } finally {
       span.end({ outcome });
@@ -2224,7 +3148,7 @@ export class ModelCatalogService {
     resolvedModels: ModelMetadata[],
   ): void {
     this.assertRequestContextIsCurrent(input.requestContext);
-    if (this.isDisposed) {
+    if (!this.isDeferredMetadataInputCurrent(input)) {
       return;
     }
 
@@ -2236,7 +3160,10 @@ export class ModelCatalogService {
     const mergedModels = filterCatalogSearchModels(resolvedModels).map((model) => (
       this.mergeModelWithRegistry(model, input.memoryFitContext) ?? model
     ));
-    const replacements = new Map(mergedModels.map((model) => [model.id, this.toSearchResultModel(model)]));
+    const completedModels = mergedModels.map((model) => (
+      this.withCompletedSizeResolution(this.toSearchResultModel(model))
+    ));
+    const replacements = new Map(completedModels.map((model) => [model.id, model]));
     const requestedIds = new Set(requestedModelIds);
     const removedModelIds = requestedModelIds.filter((modelId) => !replacements.has(modelId));
 
@@ -2277,9 +3204,30 @@ export class ModelCatalogService {
       query: input.query,
       sort: input.sort,
       gated: input.gated,
-      models: mergedModels,
+      models: completedModels,
       removedModelIds,
     });
+  }
+
+  private completeUnresolvedSizeStatesAfterFailure(input: DeferredMetadataResolutionInput): void {
+    const currentEntry = this.searchCache.get(input.cacheKey);
+    if (!currentEntry || currentEntry.requestId !== input.cacheRequestId || this.isDisposed) {
+      return;
+    }
+
+    const requestedIds = new Set(input.models.map((model) => model.id));
+    const unresolvedModels = currentEntry.result.models.filter((model) => (
+      requestedIds.has(model.id) && model.sizeResolutionState === 'resolving'
+    ));
+    if (unresolvedModels.length === 0) {
+      return;
+    }
+
+    this.applyDeferredMetadataBatch(
+      input,
+      unresolvedModels.map((model) => model.id),
+      unresolvedModels,
+    );
   }
 
   private async fetchCatalogBatch(
@@ -2292,7 +3240,8 @@ export class ModelCatalogService {
     gated: boolean | undefined,
     catalogAuthPolicy: RequestAuthPolicy = REQUEST_AUTH_POLICY.ANONYMOUS,
     metadataResolution: CatalogMetadataResolution = 'blocking',
-  ): Promise<CatalogBatchResult> {
+    searchScope?: CatalogSearchRequestScope,
+  ): Promise<ModelCatalogBatchResult> {
     const catalogAuthToken = resolveRequestAuthToken(catalogAuthPolicy, requestContext.authToken);
     const hasAuthToken = Boolean(catalogAuthToken);
     const span = performanceMonitor.startSpan('catalog.fetchCatalogBatch', {
@@ -2317,6 +3266,9 @@ export class ModelCatalogService {
 
     try {
       while (models.length < resolvedPageSize && !exhausted) {
+        if (searchScope) {
+          this.assertCatalogSearchIsCurrent(searchScope);
+        }
         pagesFetched += 1;
         const requestedCursor = nextCursor;
         if (requestedCursor !== null) {
@@ -2331,21 +3283,48 @@ export class ModelCatalogService {
           requestedCursor,
           sort,
           gated,
+          searchScope?.signal,
         );
-        const baseModels = transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
+        const transformSpan = performanceMonitor.startSpan('catalog.transformSearchSummaries', {
+          items: page.items.length,
+          metadataResolution,
+        });
+        let baseModels: ModelMetadata[] = [];
+        try {
+          baseModels = transformHFResponse(page.items, memoryFitContext, requestContext.authToken);
+        } finally {
+          transformSpan.end({ models: baseModels.length });
+        }
         const hydratedModels = metadataResolution === 'deferred'
           ? baseModels
           : await this.resolveMissingModelMetadata(
             baseModels,
             memoryFitContext,
             requestContext,
-            { treeProbeMode: 'bounded' },
+            {
+              treeProbeMode: 'bounded',
+              signal: searchScope?.signal,
+              shouldContinue: searchScope === undefined
+                ? undefined
+                : () => {
+                  try {
+                    this.assertCatalogSearchIsCurrent(searchScope);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                },
+            },
           );
         // Merge with the local registry so downloaded entries don't disappear just because the
         // remote payload omitted some metadata or a tree lookup failed.
+        const mergeSpan = performanceMonitor.startSpan('catalog.mergeSearchRegistry', {
+          models: hydratedModels.length,
+        });
         const mergedHydratedModels = hydratedModels.map((model) => (
           this.mergeModelWithRegistry(model, memoryFitContext) ?? model
         ));
+        mergeSpan.end({ models: mergedHydratedModels.length });
         models = this.mergeUniqueModelsById([...models, ...mergedHydratedModels]);
         nextCursor = this.resolveNextCatalogCursor(requestedCursor, page.nextCursor, visitedCursors);
         exhausted = nextCursor === null;
@@ -2371,6 +3350,7 @@ export class ModelCatalogService {
         hasAuthToken,
         gated,
         metadataResolution,
+        requestContext,
       );
     } catch (error) {
       outcome = 'error';
@@ -2401,8 +3381,9 @@ export class ModelCatalogService {
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
     gated: boolean | undefined,
-    metadataResolution: CatalogMetadataResolution = 'blocking',
-  ): CatalogBatchResult {
+    metadataResolution: CatalogMetadataResolution,
+    requestContext: CatalogRequestContext,
+  ): ModelCatalogBatchResult {
     if (models.length <= pageSize) {
       return {
         models,
@@ -2410,18 +3391,21 @@ export class ModelCatalogService {
       };
     }
 
+    const bufferedPages = this.cacheBufferedCursorPages(
+      normalizedQuery,
+      models.slice(pageSize),
+      nextCursor,
+      pageSize,
+      sort,
+      hasAuthToken,
+      gated,
+      metadataResolution,
+      requestContext,
+    );
     return {
       models: models.slice(0, pageSize),
-      nextCursor: this.cacheBufferedCursorPages(
-        normalizedQuery,
-        models.slice(pageSize),
-        nextCursor,
-        pageSize,
-        sort,
-        hasAuthToken,
-        gated,
-        metadataResolution,
-      ),
+      nextCursor: bufferedPages.nextCursor,
+      bufferedCacheKeys: bufferedPages.cacheKeys,
     };
   }
 
@@ -2433,16 +3417,24 @@ export class ModelCatalogService {
     sort: CatalogServerSort | null,
     hasAuthToken: boolean,
     gated: boolean | undefined,
-    metadataResolution: CatalogMetadataResolution = 'blocking',
-  ): string {
+    metadataResolution: CatalogMetadataResolution,
+    requestContext: CatalogRequestContext,
+  ): { nextCursor: string; cacheKeys: string[] } {
+    this.assertRequestContextIsCurrent(requestContext);
     const timestamp = Date.now();
+    const authVersion = hasAuthToken
+      ? requestContext.authVersion
+      : 0;
     let nextCursor = finalNextCursor;
+    const cacheKeys: string[] = [];
 
     for (let end = models.length; end > 0; end -= pageSize) {
       const start = Math.max(0, end - pageSize);
-      const bufferedCursor = this.createBufferedCursorToken();
-      this.searchCache.set(
-        this.buildMemorySearchCacheKey(
+      const bufferedCursor = this.createBufferedCursorToken(
+        this.getAuthScope(hasAuthToken),
+        authVersion,
+      );
+      const cacheKey = this.buildMemorySearchCacheKey(
           normalizedQuery,
           bufferedCursor,
           pageSize,
@@ -2450,7 +3442,10 @@ export class ModelCatalogService {
           hasAuthToken,
           gated,
           metadataResolution,
-        ),
+          authVersion,
+        );
+      this.searchCache.set(
+        cacheKey,
         {
           result: {
             models: models.slice(start, end),
@@ -2459,18 +3454,31 @@ export class ModelCatalogService {
           },
           timestamp,
           isBufferedCursor: true,
+          isReusableFirstPage: false,
+          lastAccessSequence: this.nextSearchCacheAccessSequence(),
         },
       );
+      cacheKeys.push(cacheKey);
       nextCursor = bufferedCursor;
     }
 
-    this.pruneSearchCache();
-    return nextCursor ?? this.createBufferedCursorToken();
+    const protectedKeys = new Set(cacheKeys);
+    this.pruneSearchCache(protectedKeys);
+    return {
+      nextCursor: nextCursor ?? this.createBufferedCursorToken(
+        this.getAuthScope(hasAuthToken),
+        authVersion,
+      ),
+      cacheKeys,
+    };
   }
 
-  private createBufferedCursorToken(): string {
+  private createBufferedCursorToken(
+    authScope: CatalogCacheAuthScope,
+    authVersion: number = this.authCacheVersion,
+  ): string {
     this.bufferedCursorSequence += 1;
-    return `catalog-buffer:${this.authCacheVersion}:${this.bufferedCursorSequence}`;
+    return `catalog-buffer:${authScope}:${authVersion}:${this.bufferedCursorSequence}`;
   }
 
   private async fetchHuggingFaceModels(
@@ -2481,6 +3489,7 @@ export class ModelCatalogService {
     nextCursor: string | null = null,
     sort: CatalogServerSort | null = null,
     gated?: boolean,
+    signal?: AbortSignal,
   ): Promise<HuggingFaceModelsPage> {
     const cursorType = nextCursor ? 'cursor' : 'initial';
     const authToken = resolveRequestAuthToken(authPolicy, requestContext.authToken);
@@ -2502,8 +3511,13 @@ export class ModelCatalogService {
     const url = nextCursor ?? this.buildSearchUrl(normalizedQuery, limit, sort, gated);
 
     try {
-      const response = await fetchWithTimeout(url, {
+      const { response, body } = await this.fetchCatalogJson<HuggingFaceModelSummary[]>(url, {
         headers: buildHeaders(authPolicy, authToken),
+        signal,
+      }, {
+        scope: 'search',
+        timeoutMs: CATALOG_SEARCH_REQUEST_TIMEOUT_MS,
+        requestContext,
       });
       status = response.status;
       this.assertRequestContextIsCurrent(requestContext);
@@ -2535,7 +3549,10 @@ export class ModelCatalogService {
       }
 
       this.rateLimitBackoffMsByAuthScope[this.getAuthScope(hasAuthToken)] = 0;
-      const items = await response.json() as HuggingFaceModelSummary[];
+      if (!Array.isArray(body)) {
+        throw new ModelCatalogError('network', 'HF Search returned an invalid JSON payload');
+      }
+      const items = body;
       itemsCount = items.length;
       this.assertRequestContextIsCurrent(requestContext);
 
@@ -2637,16 +3654,9 @@ export class ModelCatalogService {
     const merged = remoteModels.map((model) => (
       this.mergeModelWithRegistry(model, memoryFitContext) ?? model
     ));
-    // Keep summary and persisted-cache paints free of a second synchronous
-    // persistence write. Full snapshots are persisted after deferred enrichment.
-    this.cacheModelSnapshotsInMemory(merged, authScope);
-    const authScopedModels = merged.filter((model) => (
-      model.accessState === ModelAccessState.AUTHORIZED
-      || model.accessState === ModelAccessState.ACCESS_DENIED
-    ));
-    if (authScopedModels.length > 0) {
-      this.cacheModelSnapshotsInMemory(authScopedModels, 'auth');
-    }
+    // The search cache already owns these summary objects. Snapshot
+    // normalization is deliberately deferred with tree enrichment so the
+    // first catalog paint never pays the persisted-model migration cost.
     return merged;
   }
 
@@ -3802,7 +4812,7 @@ export class ModelCatalogService {
     }
 
     for (const [key, entry] of this.searchCache.entries()) {
-      if (!key.includes('::anon::')) {
+      if (!key.startsWith('anon::')) {
         continue;
       }
 
@@ -3857,6 +4867,8 @@ export class ModelCatalogService {
     authPolicy: RequestAuthPolicy,
     options?: FetchModelTreeOptions,
   ): Promise<HuggingFaceTreeResponse> {
+    this.assertRequestContextIsCurrent(requestContext);
+    this.assertRequestSignalIsCurrent(options?.signal);
     const expectedFileName = typeof options?.expectedFileName === 'string'
       ? options.expectedFileName.trim()
       : '';
@@ -3869,6 +4881,7 @@ export class ModelCatalogService {
       : 'target:__none__';
     const targetEarlyStopCacheSegment = allowTargetEarlyStop ? 'target-stop:early' : 'target-stop:full';
     const treeCacheSegment = `${expectedFileNameCacheSegment}:${targetEarlyStopCacheSegment}:max-pages:${maxPages}`;
+    const requestAuthScope = this.resolveRequestAuthScope(authPolicy, requestContext.authToken);
 
     return this.withInFlightDedup(
       this.treeRequestCache,
@@ -3880,7 +4893,7 @@ export class ModelCatalogService {
         authPolicy,
         treeCacheSegment,
       ),
-      async () => {
+      async (sharedSignal) => {
         const span = performanceMonitor.startSpan('catalog.fetchHuggingFaceModelTree', {
           repoId,
           revision: revision ?? 'main',
@@ -3902,6 +4915,7 @@ export class ModelCatalogService {
 
         try {
           while (nextCursor !== null) {
+            this.assertRequestSignalIsCurrent(sharedSignal);
             if (pageCount >= maxPages) {
               isComplete = false;
               stopReason = 'max_pages';
@@ -3912,8 +4926,11 @@ export class ModelCatalogService {
             const requestedCursor = nextCursor;
             visitedCursors.add(requestedCursor);
 
-            const response = await fetchWithTimeout(requestedCursor, {
+            const { response, body } = await this.fetchCatalogJson<HuggingFaceTreeEntry[]>(requestedCursor, {
               headers: buildHeaders(authPolicy, requestContext.authToken),
+              signal: sharedSignal,
+            }, {
+              requestContext,
             });
             status = response.status;
             this.assertRequestContextIsCurrent(requestContext);
@@ -3931,7 +4948,7 @@ export class ModelCatalogService {
                   revision,
                   requestContext,
                   REQUEST_AUTH_POLICY.REQUIRED_AUTH,
-                  options,
+                  { ...options, signal: sharedSignal },
                 );
               }
 
@@ -3954,7 +4971,10 @@ export class ModelCatalogService {
               };
             }
 
-            const pageEntries = await response.json() as HuggingFaceTreeEntry[];
+            if (!Array.isArray(body)) {
+              throw new ModelCatalogError('network', 'HF tree returned an invalid JSON payload');
+            }
+            const pageEntries = body;
             entries.push(...pageEntries);
             this.assertRequestContextIsCurrent(requestContext);
 
@@ -4044,6 +5064,11 @@ export class ModelCatalogService {
           });
         }
       },
+      {
+        signal: options?.signal,
+        authScope: requestAuthScope,
+        authVersion: requestContext.authVersion,
+      },
     );
   }
 
@@ -4051,12 +5076,15 @@ export class ModelCatalogService {
     repoId: string,
     revision: string | undefined,
     requestContext: CatalogRequestContext,
-    options?: { retryNotFoundWithAuth?: boolean },
+    options?: { retryNotFoundWithAuth?: boolean; signal?: AbortSignal },
   ): Promise<ReadmeModelData | undefined> {
+    this.assertRequestContextIsCurrent(requestContext);
+    this.assertRequestSignalIsCurrent(options?.signal);
     const authPolicy = requestContext.hasAuthToken
       ? REQUEST_AUTH_POLICY.OPTIONAL_AUTH
       : REQUEST_AUTH_POLICY.ANONYMOUS;
     const retryNotFoundWithAuth = options?.retryNotFoundWithAuth === true;
+    const requestAuthScope = this.resolveRequestAuthScope(authPolicy, requestContext.authToken);
     return this.withInFlightDedup(
       this.readmeRequestCache,
       this.buildRequestCacheKey(
@@ -4067,11 +5095,15 @@ export class ModelCatalogService {
         authPolicy,
         retryNotFoundWithAuth ? 'hidden-404-auth-retry' : 'default',
       ),
-      async () => {
+      async (sharedSignal) => {
         const readmeUrl = buildHuggingFaceRawUrl(repoId, 'README.md', revision);
-        let response = await fetchWithTimeout(readmeUrl, {
+        let readmeResponse = await this.fetchCatalogText(readmeUrl, {
           headers: buildHeaders(REQUEST_AUTH_POLICY.ANONYMOUS, requestContext.authToken),
+          signal: sharedSignal,
+        }, {
+          requestContext,
         });
+        let { response, body: markdown } = readmeResponse;
         this.assertRequestContextIsCurrent(requestContext);
 
         if (
@@ -4083,9 +5115,13 @@ export class ModelCatalogService {
           )
           && requestContext.hasAuthToken
         ) {
-          response = await fetchWithTimeout(readmeUrl, {
+          readmeResponse = await this.fetchCatalogText(readmeUrl, {
             headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+            signal: sharedSignal,
+          }, {
+            requestContext,
           });
+          ({ response, body: markdown } = readmeResponse);
           this.assertRequestContextIsCurrent(requestContext);
         }
 
@@ -4093,7 +5129,9 @@ export class ModelCatalogService {
           return undefined;
         }
 
-        const markdown = await response.text();
+        if (markdown === undefined) {
+          return undefined;
+        }
         this.assertRequestContextIsCurrent(requestContext);
         const readmeData = extractReadmeData(markdown);
         return (
@@ -4104,13 +5142,21 @@ export class ModelCatalogService {
           ? readmeData
           : undefined;
       },
+      {
+        signal: options?.signal,
+        authScope: requestAuthScope,
+        authVersion: requestContext.authVersion,
+      },
     );
   }
 
   private async probeResolvedModelAccess(
     model: Pick<ModelMetadata, 'id' | 'resolvedFileName' | 'hfRevision' | 'accessState' | 'isGated' | 'isPrivate'>,
     requestContext: CatalogRequestContext,
+    options: { signal?: AbortSignal } = {},
   ): Promise<ModelAccessState | null> {
+    this.assertRequestContextIsCurrent(requestContext);
+    this.assertRequestSignalIsCurrent(options.signal);
     const resolvedFileName = model.resolvedFileName;
     if (!requestContext.authToken || !resolvedFileName) {
       return null;
@@ -4132,13 +5178,15 @@ export class ModelCatalogService {
     return this.withInFlightDedup(
       this.resolvedFileProbeCache,
       cacheKey,
-      async () => {
+      async (sharedSignal) => {
         const probeUrl = buildHuggingFaceResolveUrl(
           model.id,
           resolvedFileName,
           model.hfRevision,
         );
         const cacheResolvedProbeState = (state: ModelAccessState | null): ModelAccessState | null => {
+          this.assertRequestContextIsCurrent(requestContext);
+          this.assertRequestSignalIsCurrent(sharedSignal);
           if (state === ModelAccessState.AUTHORIZED && this.isAuthRestrictedModel(model)) {
             this.resolvedFileProbeStateCache.delete(cacheKey);
             return state;
@@ -4149,9 +5197,12 @@ export class ModelCatalogService {
         };
 
         try {
-          const headResponse = await fetchWithTimeout(probeUrl, {
+          const headResponse = await this.fetchCatalogResource(probeUrl, {
             method: 'HEAD',
             headers: buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken),
+            signal: sharedSignal,
+          }, {
+            requestContext,
           });
           this.assertRequestContextIsCurrent(requestContext);
           const headState = this.resolveResolvedFileProbeState(
@@ -4171,12 +5222,15 @@ export class ModelCatalogService {
             return cacheResolvedProbeState(null);
           }
 
-          const getResponse = await fetchWithTimeout(probeUrl, {
+          const getResponse = await this.fetchCatalogResource(probeUrl, {
             method: 'GET',
             headers: {
               ...(buildHeaders(REQUEST_AUTH_POLICY.REQUIRED_AUTH, requestContext.authToken) ?? {}),
               Range: 'bytes=0-0',
             },
+            signal: sharedSignal,
+          }, {
+            requestContext,
           });
           this.assertRequestContextIsCurrent(requestContext);
           const getState = this.resolveResolvedFileProbeState(
@@ -4190,12 +5244,17 @@ export class ModelCatalogService {
 
           return cacheResolvedProbeState(getResponse.ok ? ModelAccessState.AUTHORIZED : null);
         } catch (error) {
-          if (error instanceof StaleCatalogAuthError) {
+          if (error instanceof StaleCatalogAuthError || error instanceof StaleCatalogRequestError) {
             throw error;
           }
 
           return cacheResolvedProbeState(null);
         }
+      },
+      {
+        signal: options.signal,
+        authScope: 'auth',
+        authVersion: requestContext.authVersion,
       },
     );
   }
@@ -4262,23 +5321,121 @@ export class ModelCatalogService {
   }
 
   private async withInFlightDedup<T>(
-    requestMap: Map<string, Promise<T>>,
+    requestMap: Map<string, SharedCatalogRequestEntry<T>>,
     key: string,
-    load: () => Promise<T>,
+    load: (signal: AbortSignal) => Promise<T>,
+    options: {
+      signal?: AbortSignal;
+      authScope: CatalogCacheAuthScope;
+      authVersion: number;
+    },
   ): Promise<T> {
-    const cachedPromise = requestMap.get(key);
-    if (cachedPromise) {
-      return cachedPromise;
-    }
-
-    const requestPromise = load().finally(() => {
-      if (requestMap.get(key) === requestPromise) {
+    let entry = requestMap.get(key);
+    if (entry && (entry.settled || entry.controller.signal.aborted)) {
+      if (requestMap.get(key) === entry) {
         requestMap.delete(key);
       }
-    });
+      entry = undefined;
+    }
+    if (entry) {
+      performanceMonitor.incrementCounter('catalog.resource.dedupHit', 1, {
+        authScope: entry.authScope,
+      });
+      return this.attachSharedCatalogRequestConsumer(entry, options.signal);
+    }
 
-    requestMap.set(key, requestPromise);
-    return requestPromise;
+    const controller = new AbortController();
+    const requestPromise = Promise.resolve().then(() => load(controller.signal));
+    entry = {
+      promise: requestPromise,
+      controller,
+      consumers: new Map(),
+      settled: false,
+      authScope: options.authScope,
+      authVersion: options.authVersion,
+    };
+    const createdEntry = entry;
+    requestMap.set(key, createdEntry);
+    void requestPromise.then(
+      () => {
+        createdEntry.settled = true;
+        if (requestMap.get(key) === createdEntry) {
+          requestMap.delete(key);
+        }
+      },
+      () => {
+        createdEntry.settled = true;
+        if (requestMap.get(key) === createdEntry) {
+          requestMap.delete(key);
+        }
+      },
+    );
+
+    return this.attachSharedCatalogRequestConsumer(createdEntry, options.signal);
+  }
+
+  private attachSharedCatalogRequestConsumer<T>(
+    entry: SharedCatalogRequestEntry<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (entry.settled || entry.controller.signal.aborted) {
+      return Promise.reject(new StaleCatalogRequestError());
+    }
+    if (signal?.aborted) {
+      if (entry.consumers.size === 0 && !entry.settled) {
+        entry.controller.abort();
+      }
+      return Promise.reject(new StaleCatalogRequestError());
+    }
+
+    this.sharedRequestConsumerSequence += 1;
+    const consumerId = this.sharedRequestConsumerSequence;
+
+    return new Promise<T>((resolve, reject) => {
+      let completed = false;
+      const detach = (cancelledByConsumer: boolean) => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        const consumer = entry.consumers.get(consumerId);
+        if (consumer?.signal && consumer.abortListener) {
+          consumer.signal.removeEventListener('abort', consumer.abortListener);
+        }
+        entry.consumers.delete(consumerId);
+        if (cancelledByConsumer) {
+          performanceMonitor.incrementCounter('catalog.resource.consumerDetached', 1, {
+            authScope: entry.authScope,
+          });
+        }
+        if (entry.consumers.size === 0 && !entry.settled) {
+          entry.controller.abort();
+        }
+      };
+      const abortListener = () => {
+        detach(true);
+        reject(new StaleCatalogRequestError());
+      };
+      entry.consumers.set(consumerId, { signal, abortListener: signal ? abortListener : undefined });
+      signal?.addEventListener('abort', abortListener, { once: true });
+
+      void entry.promise.then(
+        (value) => {
+          if (completed) {
+            return;
+          }
+          detach(false);
+          resolve(value);
+        },
+        (error) => {
+          if (completed) {
+            return;
+          }
+          detach(false);
+          reject(error);
+        },
+      );
+    });
   }
 
   private resolveNextCatalogCursor(
@@ -4397,15 +5554,27 @@ export class ModelCatalogService {
     hasAuthToken: boolean,
     gated: boolean | undefined,
     metadataResolution: CatalogMetadataResolution = 'blocking',
+    authVersion: number = this.authCacheVersion,
   ): string {
     const cursorKey = cursor ?? '__initial__';
     const sortKey = sort ?? '__default__';
     const gatedKey = typeof gated === 'boolean' ? String(gated) : '__any__';
-    return `${normalizedQuery}::${cursorKey}::${pageSize}::${sortKey}::${this.getAuthScope(hasAuthToken)}::gated:${gatedKey}::metadata:${metadataResolution}::${this.authCacheVersion}`;
+    const authScope = this.getAuthScope(hasAuthToken);
+    const cacheEpoch = authScope === 'auth' ? authVersion : 0;
+    return `${authScope}::${cacheEpoch}::${normalizedQuery}::${cursorKey}::${pageSize}::${sortKey}::gated:${gatedKey}::metadata:${metadataResolution}`;
   }
 
   private isBufferedCursor(cursor: string | null): boolean {
-    return typeof cursor === 'string' && cursor.startsWith('catalog-buffer:');
+    return this.getBufferedCursorAuthScope(cursor) !== null;
+  }
+
+  private getBufferedCursorAuthScope(cursor: string | null): CatalogCacheAuthScope | null {
+    if (typeof cursor !== 'string') {
+      return null;
+    }
+
+    const match = /^catalog-buffer:(anon|auth):\d+:\d+$/.exec(cursor);
+    return match?.[1] === 'anon' || match?.[1] === 'auth' ? match[1] : null;
   }
 
   private normalizeCatalogSearchCursor(cursor: string | null): string | null {

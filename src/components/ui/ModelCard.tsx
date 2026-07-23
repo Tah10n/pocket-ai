@@ -54,9 +54,13 @@ const ModelCardComponent = ({
   const { t } = useTranslation();
   const activeVariant = getActiveModelVariant(model);
   const displaySize = getModelDisplayArtifactSizeBytes(model);
-  const sizeLabel = formatModelFileSize(displaySize, t('models.sizeUnknown'));
-  const quantizationLabel = activeVariant?.quantizationLabel ?? model.gguf?.sizeLabel?.trim();
   const hasKnownFileSize = typeof displaySize === 'number' && Number.isFinite(displaySize) && displaySize > 0;
+  const isSizeResolving = !hasKnownFileSize && model.sizeResolutionState === 'resolving';
+  const sizeLabel = formatModelFileSize(
+    displaySize,
+    t(isSizeResolving ? 'models.sizeResolving' : 'models.sizeUnknown'),
+  );
+  const quantizationLabel = activeVariant?.quantizationLabel ?? model.gguf?.sizeLabel?.trim();
   const quantizationAndSize = quantizationLabel
     ? `${quantizationLabel} - ${sizeLabel}`
     : null;
@@ -147,8 +151,12 @@ const ModelCardComponent = ({
           </ScreenBadge>
         ) : null}
         {displaySize === null && !quantizationAndSize ? (
-          <ScreenBadge tone="warning" size="micro" iconName="help">
-            {t('models.sizeUnknownBadge')}
+          <ScreenBadge
+            tone={isSizeResolving ? 'neutral' : 'warning'}
+            size="micro"
+            iconName={isSizeResolving ? undefined : 'help'}
+          >
+            {t(isSizeResolving ? 'models.sizeResolvingBadge' : 'models.sizeUnknownBadge')}
           </ScreenBadge>
         ) : !quantizationLabel && hasKnownFileSize ? (
           <ScreenBadge tone="neutral" size="micro">
@@ -402,6 +410,7 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
            prevProps.model.gguf?.sizeLabel === nextProps.model.gguf?.sizeLabel &&
            prevProps.model.gguf?.totalBytes === nextProps.model.gguf?.totalBytes &&
            prevProps.model.size === nextProps.model.size &&
+           prevProps.model.sizeResolutionState === nextProps.model.sizeResolutionState &&
            modelVariantsEqual(prevProps.model, nextProps.model) &&
            modelVisionFieldsEqual(prevProps.model, nextProps.model) &&
            multimodalReadinessEqual(prevProps.model.multimodalReadiness, nextProps.model.multimodalReadiness) &&

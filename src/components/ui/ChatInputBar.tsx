@@ -22,6 +22,7 @@ import {
 import type { AttachmentDraft } from '../../types/multimodal';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../types/attachments';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
+import { markInteractiveWorkStarted } from '../../utils/idleTask';
 
 interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
@@ -405,6 +406,11 @@ export const ChatInputBar = ({
         setInternalMessage(value);
     };
 
+    const handleMessageChange = (value: string) => {
+        markInteractiveWorkStarted();
+        setMessage(value);
+    };
+
     const handleSend = async () => {
         if (!canSend || submitLockRef.current) {
             return;
@@ -429,6 +435,7 @@ export const ChatInputBar = ({
     };
 
     const handlePrimaryAction = async () => {
+        markInteractiveWorkStarted();
         try {
             if (isSending) {
                 await onStopGeneration?.();
@@ -449,6 +456,7 @@ export const ChatInputBar = ({
             return;
         }
 
+        markInteractiveWorkStarted();
         try {
             await onAttachImages?.();
         } catch (error: any) {
@@ -464,6 +472,7 @@ export const ChatInputBar = ({
             return;
         }
 
+        markInteractiveWorkStarted();
         try {
             await onAttachDocuments?.();
         } catch (error: any) {
@@ -479,6 +488,7 @@ export const ChatInputBar = ({
             return;
         }
 
+        markInteractiveWorkStarted();
         try {
             await onAttachAudio?.();
         } catch (error: any) {
@@ -490,6 +500,7 @@ export const ChatInputBar = ({
     };
 
     const closeAttachmentMenu = () => {
+        markInteractiveWorkStarted();
         setIsAttachmentMenuVisible(false);
     };
 
@@ -522,6 +533,7 @@ export const ChatInputBar = ({
         : undefined;
     const resolvedTrailingActions = trailingActions ?? (
         <ScreenIconButton
+            testID={isSending ? 'chat-primary-action-stop' : 'chat-primary-action-send'}
             onPress={handlePrimaryAction}
             disabled={!isSending && !canSend}
             accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
@@ -716,7 +728,10 @@ export const ChatInputBar = ({
     const hasAttachmentMenuItems = attachmentMenuItems.length > 0;
     const attachmentAction = hasAttachmentMenuItems ? (
         <ScreenIconButton
-            onPress={() => setIsAttachmentMenuVisible(true)}
+            onPress={() => {
+                markInteractiveWorkStarted();
+                setIsAttachmentMenuVisible(true);
+            }}
             accessibilityLabel={t('chat.attachments.attachMenuAccessibilityLabel')}
             accessibilityHint={attachmentStatusAnnouncement ?? undefined}
             accessibilityState={isAnyAttachmentActionBusy ? { busy: true } : undefined}
@@ -752,6 +767,7 @@ export const ChatInputBar = ({
             ) : null}
 
             <ScreenInlineInput
+                testID="chat-message-input"
                 variant="composer"
                 applyGlassFrame={appearance.surfaceKind !== 'glass'}
                 className={disabled
@@ -768,7 +784,8 @@ export const ChatInputBar = ({
                 submitBehavior="submit"
                 textAlignVertical="center"
                 value={message}
-                onChangeText={setMessage}
+                onChangeText={handleMessageChange}
+                onFocus={markInteractiveWorkStarted}
                 onSubmitEditing={() => {
                     void handlePrimaryAction();
                 }}
@@ -913,7 +930,10 @@ export const ChatInputBar = ({
                                 {onRemoveAttachmentDraft ? (
                                     <Box className="absolute -right-1 -top-1">
                                         <ScreenIconButton
-                                            onPress={() => onRemoveAttachmentDraft(draft, index)}
+                                            onPress={() => {
+                                                markInteractiveWorkStarted();
+                                                onRemoveAttachmentDraft(draft, index);
+                                            }}
                                             accessibilityLabel={t('chat.attachments.removeImageIndexedAccessibilityLabel', attachmentLabelOptions)}
                                             iconName="close"
                                             iconSize="xs"
@@ -979,7 +999,10 @@ export const ChatInputBar = ({
                                 {onRemoveDocumentAttachmentDraft ? (
                                     <Box className="absolute -right-1 -top-1">
                                         <ScreenIconButton
-                                            onPress={() => onRemoveDocumentAttachmentDraft(draft, index)}
+                                            onPress={() => {
+                                                markInteractiveWorkStarted();
+                                                onRemoveDocumentAttachmentDraft(draft, index);
+                                            }}
                                             accessibilityLabel={t('chat.attachments.removeDocumentIndexedAccessibilityLabel', attachmentLabelOptions)}
                                             iconName="close"
                                             iconSize="xs"
@@ -1047,7 +1070,10 @@ export const ChatInputBar = ({
                                 {onRemoveMediaAttachmentDraft ? (
                                     <Box className="absolute -right-1 -top-1">
                                         <ScreenIconButton
-                                            onPress={() => onRemoveMediaAttachmentDraft(draft, index)}
+                                            onPress={() => {
+                                                markInteractiveWorkStarted();
+                                                onRemoveMediaAttachmentDraft(draft, index);
+                                            }}
                                             accessibilityLabel={t('chat.attachments.removeMediaIndexedAccessibilityLabel', {
                                                 ...attachmentLabelOptions,
                                                 kind: draft.kind,
@@ -1080,6 +1106,7 @@ export const ChatInputBar = ({
 
     const modeBanner = modeLabel ? (
         <ScreenSurface
+            testID="chat-regeneration-mode"
             tone={isDarkGlass ? 'default' : 'accent'}
             withControlTint={!isDarkGlass}
             className={modeBannerClassName}
@@ -1109,7 +1136,10 @@ export const ChatInputBar = ({
 
                 {onCancelMode ? (
                     <ScreenIconButton
-                        onPress={onCancelMode}
+                        onPress={() => {
+                            markInteractiveWorkStarted();
+                            onCancelMode();
+                        }}
                         accessibilityLabel={t('common.cancel')}
                         iconName="close"
                         iconSize="xs"

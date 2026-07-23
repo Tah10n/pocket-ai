@@ -2,6 +2,7 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { hardwareListenerService } from '../../src/services/HardwareListenerService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { inferenceBackendService } from '../../src/services/InferenceBackendService';
+import { createStorage } from '../../src/services/storage';
 import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
 
@@ -89,6 +90,7 @@ describe('LLMEngineService Stability', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        createStorage('pocket-ai-last-good-profiles', { tier: 'private' }).clearAll();
         (initLlama as jest.Mock).mockReset();
         (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
         (releaseAllLlama as jest.Mock).mockResolvedValue(undefined);
@@ -231,7 +233,10 @@ describe('LLMEngineService Stability', () => {
     it('reports low-memory unload failures without an unhandled rejection', async () => {
         (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
         (initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => createMockContext(options));
-        (releaseAllLlama as jest.Mock).mockRejectedValueOnce(new Error('native release failed'));
+        const nativeFailureSentinel = 'hf_PRIVATE_LOW_MEMORY_UNLOAD_SENTINEL';
+        (releaseAllLlama as jest.Mock).mockRejectedValueOnce(
+            new Error(`native release failed ${nativeFailureSentinel} at C:\\Users\\private\\model.gguf`),
+        );
 
         await llmEngineService.load(mockModel.id);
         expect(llmEngineService.getState().status).toBe('ready');
@@ -245,12 +250,14 @@ describe('LLMEngineService Stability', () => {
 
         expect(llmEngineService.getState()).toEqual(expect.objectContaining({
             status: 'error',
-            lastError: 'native release failed',
+            lastError: 'Failed to unload the model after a low-memory warning',
             diagnostics: expect.objectContaining({
                 lastLifecycleEvent: 'low_memory_unload_failed',
-                lastLifecycleError: 'native release failed',
+                lastLifecycleError: 'Failed to unload the model after a low-memory warning',
             }),
         }));
+        expect(JSON.stringify(llmEngineService.getState())).not.toContain(nativeFailureSentinel);
+        expect(JSON.stringify(llmEngineService.getState())).not.toContain('C:\\Users\\private');
     });
 
     it('serializes concurrent load requests and leaves the newest model active', async () => {
@@ -455,7 +462,7 @@ describe('LLMEngineService Stability', () => {
 
             await expect(observedUnload).resolves.toMatchObject({ code: 'engine_unloading' });
             await expect(observedCompletion).resolves.toMatchObject({ code: 'engine_busy' });
-            await expect(observedBlockedCount).resolves.toMatchObject({ code: 'engine_unloading' });
+            await expect(observedBlockedCount).resolves.toMatchObject({ code: 'engine_busy' });
             expect(completion).not.toHaveBeenCalled();
             expect(releaseAllLlama).not.toHaveBeenCalled();
             expect(llmEngineService.hasActiveContextOperation()).toBe(true);
@@ -643,7 +650,7 @@ describe('LLMEngineService Stability', () => {
             await expect(observedUnload).resolves.toMatchObject({ code: 'engine_unloading' });
 
             await expect(observedFirstCount).resolves.toMatchObject({ code: 'engine_unloading' });
-            await expect(observedQueuedCount).resolves.toMatchObject({ code: 'engine_unloading' });
+            await expect(observedQueuedCount).resolves.toMatchObject({ code: 'engine_busy' });
             expect(releaseAllLlama).not.toHaveBeenCalled();
             expect(llmEngineService.hasActiveContextOperation()).toBe(true);
 
@@ -841,7 +848,7 @@ describe('LLMEngineService Stability', () => {
         }
     });
 
-    it('does not detach the context when a stopped chat operation drains but a background operation is hung', async () => {
+    it('rejects new background work while completion owns the context without detaching it', async () => {
         let resolvePromptPreparation: (() => void) | undefined;
         const getFormattedChat = jest.fn(() => new Promise((resolve) => {
             resolvePromptPreparation = () => resolve({ prompt: 'Prompt after stop', additional_stops: [] });
@@ -894,7 +901,7 @@ describe('LLMEngineService Stability', () => {
             activeModelId: mockModel.id,
         }));
         expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
-        expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+        expect(llmEngineService.hasActiveContextOperation()).toBe(false);
         expect(releaseAllLlama).not.toHaveBeenCalled();
     });
 

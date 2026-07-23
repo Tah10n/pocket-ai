@@ -609,6 +609,32 @@ describe('ModelParametersSheet', () => {
     expect(onRunAutotune).toHaveBeenCalledTimes(1);
   });
 
+  it('does not render legacy raw autotune diagnostics', () => {
+    const sentinel = 'hf_PRIVATE_LEGACY_AUTOTUNE_SENTINEL';
+    const screen = renderSheet({
+      autotuneResult: {
+        candidates: [{
+          success: false,
+          profile: {
+            backendMode: 'npu',
+            nGpuLayers: 8,
+            deviceCount: 1,
+            devices: [sentinel],
+          },
+          initDeviceCount: 2,
+          initDevices: [sentinel],
+          error: sentinel,
+          reasonNoGPU: sentinel,
+        }],
+      } as any,
+    });
+
+    const serializedTree = JSON.stringify(screen.toJSON());
+    expect(serializedTree).not.toContain(sentinel);
+    expect(screen.getByText(/Failed/)).toBeTruthy();
+    expect(screen.getByText(/devices: 2/)).toBeTruthy();
+  });
+
   it('shows running autotune progress and allows cancelling', () => {
     const onCancelAutotune = jest.fn();
     const screen = renderSheet({

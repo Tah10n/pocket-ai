@@ -1,6 +1,6 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
-import { getCacheDir, getModelsDir, setupFileSystem } from '@/services/FileSystemSetup';
+import { getAppCacheRootDir, getCacheDir, getModelsDir, setupFileSystem } from '@/services/FileSystemSetup';
 
 jest.mock('expo-file-system/legacy', () => ({
   documentDirectory: 'doc/',
@@ -16,6 +16,7 @@ describe('FileSystemSetup', () => {
 
   it('resolves models and cache dirs', () => {
     expect(getModelsDir()).toBe('doc/models/');
+    expect(getAppCacheRootDir()).toBe('cache/');
     expect(getCacheDir()).toBe('cache/models-cache/');
   });
 

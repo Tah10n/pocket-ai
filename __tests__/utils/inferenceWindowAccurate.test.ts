@@ -199,4 +199,69 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
       ],
     })).toBeGreaterThan(textOnlyEstimate);
   });
+
+  it('never sends heuristic-truncated attachment messages to exact-count preparation', async () => {
+    const thread: ChatThread = {
+      id: 'thread-window-first',
+      title: 'Window first',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 64,
+        seed: null,
+      },
+      messages: Array.from({ length: 1_000 }, (_, index) => ({
+        id: `message-${index}`,
+        role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+        content: index < 900 ? `Old attachment turn ${index}` : `Retained tail turn ${index}`,
+        createdAt: index + 1,
+        state: 'complete' as const,
+        ...(index < 900
+          ? {
+              attachments: [{
+                ...copiedImageAttachment,
+                id: `attachment-${index}`,
+                localUri: `test-dir/chat-attachments/truncated-${index}.jpg`,
+              }],
+            }
+          : null),
+      })),
+      createdAt: 1,
+      updatedAt: 1_000,
+      status: 'idle',
+    };
+    const exactPreparationCalls: LlmChatMessage[][] = [];
+
+    const result = await buildInferenceWindowWithAccurateTokenCounts(
+      thread,
+      {
+        maxContextMessages: Number.MAX_SAFE_INTEGER,
+        maxContextTokens: 900,
+        responseReserveTokens: 64,
+        promptSafetyMarginTokens: 64,
+      },
+      async (messages) => {
+        exactPreparationCalls.push(messages);
+        return messages.length * 8;
+      },
+    );
+
+    expect(result.truncatedMessageIds).toContain('message-899');
+    expect(exactPreparationCalls.flat().some((message) => (
+      message.content.startsWith('Old attachment turn') || Boolean(message.attachments?.length)
+    ))).toBe(false);
+    expect(result.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Retained tail turn 999',
+    }));
+  });
 });

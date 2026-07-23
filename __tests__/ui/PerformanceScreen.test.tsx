@@ -125,7 +125,9 @@ describe('PerformanceScreen', () => {
   });
 
   it('copies the trace JSON to the clipboard', async () => {
+    const snapshotSpy = jest.spyOn(performanceMonitor, 'snapshot');
     const { getByTestId, unmount } = await renderScreen();
+    snapshotSpy.mockClear();
 
     await act(async () => {
       fireEvent.press(getByTestId('performance-copy-trace'));
@@ -133,7 +135,9 @@ describe('PerformanceScreen', () => {
     });
 
     expect(Clipboard.setStringAsync).toHaveBeenCalledWith('{"ok":true}');
-    expect(performanceMonitor.snapshot().counters['perf.export.bytes']).toBe(11);
+    expect(snapshotSpy).not.toHaveBeenCalled();
+    expect(performanceMonitor.getCounter('perf.export.bytes')).toBe(11);
+    snapshotSpy.mockRestore();
     unmount();
   });
 
@@ -219,6 +223,7 @@ describe('PerformanceScreen', () => {
     spanLong.end();
     performanceMonitor.mark('mark-x');
     performanceMonitor.incrementCounter('counter-x', 5, { source: 'test' });
+    performanceMonitor.setGauge('gauge-x', 2.5, { source: 'test' });
 
     const { queryAllByText, unmount } = await renderScreen();
 
@@ -233,6 +238,8 @@ describe('PerformanceScreen', () => {
     // Counter and mark events.
     expect(queryAllByText('counter-x').length).toBeGreaterThan(0);
     expect(queryAllByText('5').length).toBeGreaterThan(0);
+    expect(queryAllByText('gauge-x').length).toBeGreaterThan(0);
+    expect(queryAllByText('2.5').length).toBeGreaterThan(0);
     expect(queryAllByText('mark-x').length).toBeGreaterThan(0);
     expect(queryAllByText('mark').length).toBeGreaterThan(0);
 

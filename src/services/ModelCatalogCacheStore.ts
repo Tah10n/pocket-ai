@@ -3,6 +3,7 @@ import {
   ModelAccessState,
   type ModelArtifactMetadata,
   type ModelArtifactRequiredInput,
+  type ModelGgufMetadata,
   type ModelMetadata,
   type ModelVariant,
 } from '../types/models';
@@ -84,6 +85,7 @@ type SnapshotCacheEntry = {
 
 type PersistedPayload<T> = {
   version: number;
+  sanitized?: boolean;
   entries: T[];
 };
 
@@ -100,17 +102,43 @@ export type ModelCatalogCacheStoreOptions = {
 const STORAGE_ID = 'model-catalog-cache';
 const SEARCH_CACHE_KEY = 'catalog-search-cache-v1';
 const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
+const CACHE_MAINTENANCE_VERSION_KEY = 'catalog-cache-maintenance-version';
+const CACHE_MAINTENANCE_VERSION = 1;
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 8;
-export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 1_500_000;
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 10;
+export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 192_000;
+// v8/v9 payloads could retain the full GGUF metadata map (including large chat
+// templates) and block the JS thread during startup normalization. Drop those
+// optional generations before parsing; older compact payloads still migrate.
 const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, 7, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
+const INCREMENTAL_HYDRATION_MODELS_PER_BATCH = 4;
 const PERSISTED_CACHE_KEYS = [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY] as const;
 const CATALOG_SAFE_VISION_SOURCES = new Set<VisionCapabilitySource>(['catalog_metadata', 'tree_probe']);
 const CATALOG_SAFE_ARTIFACT_REQUIRED_INPUTS = new Set<ModelArtifactRequiredInput>(['text', 'image', 'audio']);
+const PERSISTED_GGUF_DIRECT_KEYS = [
+  'architecture',
+  'sizeLabel',
+  'size_label',
+  'totalBytes',
+  'total',
+  'contextLengthTokens',
+  'context_length',
+  'slidingWindowTokens',
+  'sliding_window',
+  'nLayers',
+  'n_layers',
+  'n_layer',
+  'block_count',
+  'nHeadKv',
+  'nEmbdHeadK',
+  'nEmbdHeadV',
+  'general.architecture',
+  'general.type',
+] as const;
 
 type CatalogVisionRuntimeSource = Pick<ModelMetadata | ModelVariant, 'visionSource'> & Partial<Pick<
   ModelMetadata | ModelVariant,
@@ -124,6 +152,41 @@ export type CatalogSafeNativeCapabilityContext = {
   projectorEvidenceIdentityKeys: ReadonlySet<string>;
   projectorCandidateScopeIds: ReadonlySet<string>;
 };
+
+function compactPersistedGgufMetadata(
+  gguf: ModelGgufMetadata | undefined,
+): ModelGgufMetadata | undefined {
+  if (!gguf) {
+    return undefined;
+  }
+
+  const compact = PERSISTED_GGUF_DIRECT_KEYS.reduce<ModelGgufMetadata>((result, key) => {
+    const value = gguf[key];
+    if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'string') {
+      (result as Record<string, string | number | undefined>)[key] = value;
+    }
+    return result;
+  }, {});
+  const architecture = typeof compact.architecture === 'string'
+    ? compact.architecture.trim().toLowerCase()
+    : typeof compact['general.architecture'] === 'string'
+      ? compact['general.architecture'].trim().toLowerCase()
+      : '';
+  const architecturePrefixes = new Set([
+    architecture,
+    architecture.replace(/\d+$/u, ''),
+  ].filter((value) => value.length > 0));
+
+  architecturePrefixes.forEach((prefix) => {
+    const key = `${prefix}.block_count`;
+    const value = gguf[key];
+    if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'string') {
+      compact[key] = value;
+    }
+  });
+
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
 
 type CatalogSanitizationOptions = {
   persistedVersion?: number;
@@ -143,14 +206,17 @@ type CatalogProjectorIdentityAudit = {
   evidenceIdentityKeys: ReadonlySet<string>;
 };
 
-type JsonComparableValue = null | boolean | number | string | JsonComparableValue[] | {
-  [key: string]: JsonComparableValue;
-};
-
 function isPublicAnonymousModel(model: ModelMetadata): boolean {
   return model.accessState === ModelAccessState.PUBLIC
     && model.isGated !== true
     && model.isPrivate !== true;
+}
+
+function hasSafeAnonymousPersistedAccessState(model: ModelMetadata): boolean {
+  return model.isPrivate !== true && (
+    isPublicAnonymousModel(model)
+    || model.accessState === ModelAccessState.AUTH_REQUIRED
+  );
 }
 
 function sanitizeCatalogProjectorMatchStatus(projector: ProjectorArtifact): ProjectorMatchStatus {
@@ -1283,6 +1349,10 @@ export function sanitizeCatalogModelRuntimeState(
     downloadErrorAt: undefined,
     downloadErrorCode: undefined,
     downloadErrorMessage: undefined,
+    // Catalog cards and runtime heuristics need only this compact digest. Raw
+    // GGUF maps can contain multi-kilobyte tokenizer templates and thousands of
+    // scalar keys that are expensive to parse and normalize during app launch.
+    gguf: compactPersistedGgufMetadata(model.gguf),
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
     metadataTrust: model.metadataTrust === 'verified_local' ? undefined : model.metadataTrust,
@@ -1389,7 +1459,11 @@ function isSort(value: unknown): value is CatalogCacheSort {
     || value === 'lastModified';
 }
 
-function normalizeModels(models: unknown, persistedVersion?: number): ModelMetadata[] {
+function normalizeModels(
+  models: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): ModelMetadata[] {
   if (!Array.isArray(models)) {
     return [];
   }
@@ -1401,89 +1475,76 @@ function normalizeModels(models: unknown, persistedVersion?: number): ModelMetad
       && typeof (entry as { id?: unknown }).id === 'string'
     ))
     .flatMap((entry) => {
-      const normalized = normalizePersistedModelMetadata(entry);
-      if (typeof persistedVersion !== 'number') {
-        return [normalized];
-      }
-
-      const sanitized = sanitizeAnonymousCatalogModel(normalized, {
-        persistedVersion,
-        rawModel: entry,
-      });
-      return sanitized ? [sanitized] : [];
+      const normalized = normalizeModelEntry(entry, persistedVersion, payloadAlreadySanitized);
+      return normalized ? [normalized] : [];
     });
 }
 
-function toJsonComparableValue(value: unknown): JsonComparableValue | undefined {
-  if (
-    value === null
-    || typeof value === 'boolean'
-    || typeof value === 'string'
-  ) {
-    return value;
+function normalizeModelEntry(
+  entry: Partial<ModelMetadata> & { id: string },
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): ModelMetadata | null {
+  const normalized = normalizePersistedModelMetadata(entry);
+  if (typeof persistedVersion !== 'number' || payloadAlreadySanitized) {
+    return payloadAlreadySanitized && !hasSafeAnonymousPersistedAccessState(normalized)
+      ? null
+      : normalized;
   }
 
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
+  return sanitizeAnonymousCatalogModel(normalized, {
+    persistedVersion,
+    rawModel: entry,
+  });
+}
+
+function yieldToUiThread(): Promise<void> {
+  return new Promise((resolve) => {
+    const setImmediateIfAvailable = (globalThis as typeof globalThis & {
+      setImmediate?: (callback: () => void) => unknown;
+    }).setImmediate;
+    if (typeof setImmediateIfAvailable === 'function') {
+      setImmediateIfAvailable(resolve);
+      return;
+    }
+
+    setTimeout(resolve, 0);
+  });
+}
+
+async function normalizeModelsIncrementally(
+  models: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): Promise<ModelMetadata[]> {
+  if (!Array.isArray(models)) {
+    return [];
   }
 
-  if (Array.isArray(value)) {
-    return value.map((entry) => toJsonComparableValue(entry) ?? null);
-  }
+  const normalizedModels: ModelMetadata[] = [];
+  const entries = models.filter((entry): entry is Partial<ModelMetadata> & { id: string } => (
+    Boolean(entry)
+    && typeof entry === 'object'
+    && typeof (entry as { id?: unknown }).id === 'string'
+  ));
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index] as Partial<ModelMetadata> & { id: string };
+    const normalized = normalizeModelEntry(entry, persistedVersion, payloadAlreadySanitized);
+    if (normalized) {
+      normalizedModels.push(normalized);
+    }
 
-  if (!value || typeof value !== 'object') {
-    return undefined;
-  }
-
-  const comparable: { [key: string]: JsonComparableValue } = {};
-  for (const key of Object.keys(value).sort()) {
-    const entry = toJsonComparableValue((value as Record<string, unknown>)[key]);
-    if (entry !== undefined) {
-      comparable[key] = entry;
+    // Keep each Hermes work quantum bounded without flooding the JS timer queue
+    // with one callback per model on a busy device.
+    if (
+      index < entries.length - 1
+      && (index + 1) % INCREMENTAL_HYDRATION_MODELS_PER_BATCH === 0
+    ) {
+      await yieldToUiThread();
     }
   }
 
-  return comparable;
-}
-
-function rawPersistedModelNeedsAnonymousRewrite(value: unknown): boolean {
-  const normalizedModel = normalizeModels([value])[0];
-  if (!normalizedModel) {
-    return true;
-  }
-
-  const sanitizedModel = sanitizeAnonymousCatalogModel(normalizedModel);
-  return sanitizedModel === null
-    || JSON.stringify(toJsonComparableValue(value))
-      !== JSON.stringify(toJsonComparableValue(sanitizedModel));
-}
-
-function rawSearchEntryNeedsAnonymousRewrite(value: unknown): boolean {
-  if (!value || typeof value !== 'object') {
-    return true;
-  }
-
-  const candidate = value as { key?: unknown; scope?: unknown; result?: unknown };
-  const scope = normalizeSearchScope(candidate.scope);
-  if (!scope || candidate.key !== buildCatalogSearchKey(scope)) {
-    return true;
-  }
-
-  const result = candidate.result;
-  if (!result || typeof result !== 'object') {
-    return true;
-  }
-
-  const models = (result as { models?: unknown }).models;
-  return !Array.isArray(models) || models.some((model) => rawPersistedModelNeedsAnonymousRewrite(model));
-}
-
-function rawSnapshotEntryNeedsAnonymousRewrite(value: unknown): boolean {
-  if (!value || typeof value !== 'object') {
-    return true;
-  }
-
-  return rawPersistedModelNeedsAnonymousRewrite((value as { model?: unknown }).model);
+  return normalizedModels;
 }
 
 function inferSnapshotAuthScope(model: ModelMetadata): CatalogCacheAuthScope {
@@ -1509,7 +1570,11 @@ function buildCatalogSearchKey(scope: CatalogCacheScope): string {
   ].join('::');
 }
 
-function normalizeSearchResult(value: unknown, persistedVersion?: number): CatalogCacheResult | null {
+function normalizeSearchResult(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): CatalogCacheResult | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -1519,7 +1584,7 @@ function normalizeSearchResult(value: unknown, persistedVersion?: number): Catal
     hasMore?: unknown;
     nextCursor?: unknown;
   };
-  const models = normalizeModels(candidate.models, persistedVersion);
+  const models = normalizeModels(candidate.models, persistedVersion, payloadAlreadySanitized);
   const hasMore = candidate.hasMore === true;
   const nextCursor = typeof candidate.nextCursor === 'string' ? candidate.nextCursor : null;
 
@@ -1552,7 +1617,11 @@ function normalizeSearchScope(value: unknown): CatalogCacheScope | null {
   };
 }
 
-function normalizeSearchEntry(value: unknown, persistedVersion?: number): SearchCacheEntry | null {
+function normalizeSearchEntry(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): SearchCacheEntry | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -1564,9 +1633,20 @@ function normalizeSearchEntry(value: unknown, persistedVersion?: number): Search
     result?: unknown;
   };
   const scope = normalizeSearchScope(candidate.scope);
-  const result = normalizeSearchResult(candidate.result, persistedVersion);
+  const result = normalizeSearchResult(candidate.result, persistedVersion, payloadAlreadySanitized);
+  const rawModels = candidate.result && typeof candidate.result === 'object'
+    ? (candidate.result as { models?: unknown }).models
+    : undefined;
 
-  if (!scope || !result || typeof candidate.key !== 'string') {
+  if (
+    !scope
+    || !result
+    || typeof candidate.key !== 'string'
+    || (
+      payloadAlreadySanitized
+      && (!Array.isArray(rawModels) || rawModels.length !== result.models.length)
+    )
+  ) {
     return null;
   }
 
@@ -1580,7 +1660,66 @@ function normalizeSearchEntry(value: unknown, persistedVersion?: number): Search
   };
 }
 
-function normalizeSnapshotEntry(value: unknown, persistedVersion?: number): SnapshotCacheEntry | null {
+async function normalizeSearchEntryIncrementally(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): Promise<SearchCacheEntry | null> {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as {
+    key?: unknown;
+    timestamp?: unknown;
+    scope?: unknown;
+    result?: unknown;
+  };
+  if (!candidate.result || typeof candidate.result !== 'object') {
+    return null;
+  }
+
+  const scope = normalizeSearchScope(candidate.scope);
+  const rawResult = candidate.result as {
+    models?: unknown;
+    hasMore?: unknown;
+    nextCursor?: unknown;
+  };
+  const models = await normalizeModelsIncrementally(
+    rawResult.models,
+    persistedVersion,
+    payloadAlreadySanitized,
+  );
+  if (
+    !scope
+    || typeof candidate.key !== 'string'
+    || (
+      payloadAlreadySanitized
+      && (!Array.isArray(rawResult.models) || rawResult.models.length !== models.length)
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    key: buildCatalogSearchKey(scope),
+    timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
+      ? Math.round(candidate.timestamp)
+      : 0,
+    scope,
+    result: {
+      models,
+      hasMore: rawResult.hasMore === true,
+      nextCursor: typeof rawResult.nextCursor === 'string' ? rawResult.nextCursor : null,
+    },
+  };
+}
+
+function normalizeSnapshotEntry(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): SnapshotCacheEntry | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -1597,7 +1736,11 @@ function normalizeSnapshotEntry(value: unknown, persistedVersion?: number): Snap
     return null;
   }
 
-  const models = normalizeModels(candidate.model ? [candidate.model] : [], persistedVersion);
+  const models = normalizeModels(
+    candidate.model ? [candidate.model] : [],
+    persistedVersion,
+    payloadAlreadySanitized,
+  );
   const model = models[0];
   if (!model) {
     return null;
@@ -1620,12 +1763,60 @@ function normalizeSnapshotEntry(value: unknown, persistedVersion?: number): Snap
   };
 }
 
+async function normalizeSnapshotEntryIncrementally(
+  value: unknown,
+  persistedVersion?: number,
+  payloadAlreadySanitized = false,
+): Promise<SnapshotCacheEntry | null> {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as {
+    key?: unknown;
+    id?: unknown;
+    authScope?: unknown;
+    timestamp?: unknown;
+    model?: unknown;
+  };
+  if (typeof candidate.id !== 'string') {
+    return null;
+  }
+
+  const models = await normalizeModelsIncrementally(
+    candidate.model ? [candidate.model] : [],
+    persistedVersion,
+    payloadAlreadySanitized,
+  );
+  const model = models[0];
+  if (!model) {
+    return null;
+  }
+
+  const authScope = candidate.authScope === 'auth' || candidate.authScope === 'anon'
+    ? candidate.authScope
+    : inferSnapshotAuthScope(model);
+  return {
+    key: typeof candidate.key === 'string'
+      ? candidate.key
+      : buildSnapshotKey(candidate.id, authScope),
+    id: candidate.id,
+    authScope,
+    timestamp: typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp)
+      ? Math.round(candidate.timestamp)
+      : 0,
+    model,
+  };
+}
+
 export class ModelCatalogCacheStore {
   private storage = createStorage(STORAGE_ID, { tier: 'cache' });
   private searchEntries = new Map<string, SearchCacheEntry>();
   private snapshotEntries = new Map<string, SnapshotCacheEntry>();
   private isHydrated = false;
   private isPersistenceDisabled = false;
+  private incrementalHydrationPromise: Promise<boolean> | null = null;
+  private hydrationGeneration = 0;
 
   constructor(options: ModelCatalogCacheStoreOptions = {}) {
     if (options.hydrateOnCreate !== false) {
@@ -1638,6 +1829,11 @@ export class ModelCatalogCacheStore {
       return;
     }
 
+    // A synchronous hydration is also a write barrier: callers use it before
+    // mutating the cache. Invalidate any incremental parser that may already
+    // have captured the previous persisted payload so it cannot commit after
+    // the fresh mutation.
+    this.hydrationGeneration += 1;
     try {
       this.loadPersistedEntries();
       // Only commit the state after both payloads were read successfully. A
@@ -1861,6 +2057,10 @@ export class ModelCatalogCacheStore {
   }
 
   public clearAll(): void {
+    // Invalidate any incremental read that already captured the old payload.
+    // The parser deliberately yields between batches, so clearing memory and
+    // MMKV alone is not enough to stop that stale payload from being applied.
+    this.hydrationGeneration += 1;
     this.isHydrated = true;
     this.searchEntries.clear();
     this.snapshotEntries.clear();
@@ -1881,19 +2081,28 @@ export class ModelCatalogCacheStore {
     if (didFail) {
       throw firstError;
     }
+
+    this.trimPersistedStorageBestEffort();
   }
 
   public clearSnapshots(): void {
+    // Preserve search entries while making this operation authoritative over
+    // an in-flight incremental hydration. hydrateForMutation() synchronously
+    // loads the search tier and invalidates the older parser generation.
+    this.hydrateForMutation();
     this.snapshotEntries.clear();
     this.removePersistedValue(SNAPSHOT_CACHE_KEY);
   }
 
   public clearSnapshotsForScope(authScope: CatalogCacheAuthScope): void {
     if (!this.isHydrated) {
-      if (authScope === 'anon') {
-        this.removePersistedValue(SNAPSHOT_CACHE_KEY);
+      // Incremental hydration only restores persisted anonymous snapshots.
+      // There cannot be an auth-scoped entry to clear until hydration settles.
+      if (authScope === 'auth') {
+        return;
       }
-      return;
+
+      this.hydrateForMutation();
     }
 
     for (const [key, entry] of this.snapshotEntries.entries()) {
@@ -1913,16 +2122,21 @@ export class ModelCatalogCacheStore {
   }
 
   private loadPersistedEntries(): void {
+    // Older builds may already have removed the retired keys while leaving the
+    // dedicated MMKV data file at its previous multi-megabyte size. Detect that
+    // keyless tombstone state too, otherwise those users keep paying the scan
+    // cost forever and never reach the invalid-payload branch again.
+    let shouldTrimPersistedStorage = this.persistedStorageNeedsTrim();
     let shouldRewriteSearchPayload = false;
     const searchPayloadResult = this.parsePayload<SearchCacheEntry>(
       this.storage.getString(SEARCH_CACHE_KEY),
       normalizeSearchEntry,
-      rawSearchEntryNeedsAnonymousRewrite,
     );
     shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
 
     if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
       this.storage.remove(SEARCH_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
     }
 
     searchPayloadResult.entries.forEach((entry) => {
@@ -1931,12 +2145,6 @@ export class ModelCatalogCacheStore {
         return;
       }
 
-      const sanitizedModels = sanitizeAnonymousPersistedModels(entry.result.models);
-      if (sanitizedModels.length !== entry.result.models.length) {
-        shouldRewriteSearchPayload = true;
-      }
-
-      entry.result.models = sanitizedModels;
       this.searchEntries.set(entry.key, entry);
     });
 
@@ -1944,12 +2152,12 @@ export class ModelCatalogCacheStore {
     const snapshotPayloadResult = this.parsePayload<SnapshotCacheEntry>(
       this.storage.getString(SNAPSHOT_CACHE_KEY),
       normalizeSnapshotEntry,
-      rawSnapshotEntryNeedsAnonymousRewrite,
     );
     shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
 
     if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
       this.storage.remove(SNAPSHOT_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
     }
 
     snapshotPayloadResult.entries.forEach((entry) => {
@@ -1958,13 +2166,7 @@ export class ModelCatalogCacheStore {
         return;
       }
 
-      const sanitizedModel = sanitizeAnonymousCatalogModel(entry.model);
-      if (sanitizedModel) {
-        entry.model = sanitizedModel;
-        this.snapshotEntries.set(entry.key, entry);
-      } else {
-        shouldRewriteSnapshotPayload = true;
-      }
+      this.snapshotEntries.set(entry.key, entry);
     });
 
     const searchEntriesBeforePrune = this.searchEntries.size;
@@ -1986,15 +2188,141 @@ export class ModelCatalogCacheStore {
     if (shouldRewriteSnapshotPayload) {
       this.persistSnapshotEntries();
     }
+
+    if (shouldTrimPersistedStorage) {
+      // MMKV does not shrink its backing file when keys are removed. Without an
+      // explicit trim, retired multi-megabyte catalog payloads are scanned again
+      // on every app launch even though both cache keys are already gone.
+      this.trimPersistedStorageBestEffort();
+    }
   }
 
-  private parsePayload<T>(
+  private async loadPersistedEntriesIncrementally(hydrationGeneration: number): Promise<boolean> {
+    let shouldTrimPersistedStorage = this.persistedStorageNeedsTrim();
+    let shouldRewriteSearchPayload = false;
+    const searchPayloadResult = await this.parsePayloadIncrementally<SearchCacheEntry>(
+      this.storage.getString(SEARCH_CACHE_KEY),
+      normalizeSearchEntryIncrementally,
+    );
+    shouldRewriteSearchPayload = searchPayloadResult.needsRewrite;
+
+    if (hydrationGeneration !== this.hydrationGeneration) {
+      return false;
+    }
+
+    const snapshotPayloadResult = await this.parsePayloadIncrementally<SnapshotCacheEntry>(
+      this.storage.getString(SNAPSHOT_CACHE_KEY),
+      normalizeSnapshotEntryIncrementally,
+    );
+    let shouldRewriteSnapshotPayload = snapshotPayloadResult.needsRewrite;
+
+    // Do not apply or rewrite payloads captured before an explicit clear. No
+    // async work occurs after this guard until both maps have been committed.
+    if (hydrationGeneration !== this.hydrationGeneration) {
+      return false;
+    }
+
+    if (searchPayloadResult.status === 'invalid' || searchPayloadResult.status === 'oversized') {
+      this.storage.remove(SEARCH_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
+    }
+
+    searchPayloadResult.entries.forEach((entry) => {
+      if (entry.scope.authScope !== 'anon') {
+        shouldRewriteSearchPayload = true;
+        return;
+      }
+      this.searchEntries.set(entry.key, entry);
+    });
+
+    if (snapshotPayloadResult.status === 'invalid' || snapshotPayloadResult.status === 'oversized') {
+      this.storage.remove(SNAPSHOT_CACHE_KEY);
+      shouldTrimPersistedStorage = true;
+    }
+
+    snapshotPayloadResult.entries.forEach((entry) => {
+      if (entry.authScope !== 'anon') {
+        shouldRewriteSnapshotPayload = true;
+        return;
+      }
+      this.snapshotEntries.set(entry.key, entry);
+    });
+
+    const searchEntriesBeforePrune = this.searchEntries.size;
+    this.pruneSearchEntries();
+    if (searchEntriesBeforePrune !== this.searchEntries.size) {
+      shouldRewriteSearchPayload = true;
+    }
+
+    const snapshotEntriesBeforePrune = this.snapshotEntries.size;
+    this.pruneSnapshotEntries();
+    if (snapshotEntriesBeforePrune !== this.snapshotEntries.size) {
+      shouldRewriteSnapshotPayload = true;
+    }
+
+    if (shouldRewriteSearchPayload) {
+      this.persistSearchEntries();
+    }
+    if (shouldRewriteSnapshotPayload) {
+      this.persistSnapshotEntries();
+    }
+    if (shouldTrimPersistedStorage) {
+      this.trimPersistedStorageBestEffort();
+    }
+
+    return true;
+  }
+
+  public hydrateIncrementally(): Promise<boolean> {
+    if (this.isHydrated) {
+      return Promise.resolve(false);
+    }
+
+    if (this.incrementalHydrationPromise) {
+      return this.incrementalHydrationPromise;
+    }
+
+    const hydrationGeneration = this.hydrationGeneration;
+    const hydrationPromise = this.loadPersistedEntriesIncrementally(hydrationGeneration)
+      .then((didApplyHydration) => {
+        const didCommitHydration = didApplyHydration && hydrationGeneration === this.hydrationGeneration;
+        if (didCommitHydration) {
+          this.isHydrated = true;
+        }
+        return didCommitHydration;
+      })
+      .catch((error) => {
+        if (hydrationGeneration !== this.hydrationGeneration) {
+          return false;
+        }
+        this.searchEntries.clear();
+        this.snapshotEntries.clear();
+        throw error;
+      })
+      .finally(() => {
+        if (this.incrementalHydrationPromise === hydrationPromise) {
+          this.incrementalHydrationPromise = null;
+        }
+      });
+    this.incrementalHydrationPromise = hydrationPromise;
+    return hydrationPromise;
+  }
+
+  private async parsePayloadIncrementally<T>(
     rawValue: string | undefined,
-    normalizeEntry: (value: unknown, persistedVersion: number) => T | null,
-    rawEntryNeedsRewrite: (value: unknown) => boolean = () => false,
-  ): ParsedPayload<T> {
+    normalizeEntry: (
+      value: unknown,
+      persistedVersion: number,
+      payloadAlreadySanitized: boolean,
+    ) => Promise<T | null>,
+  ): Promise<ParsedPayload<T>> {
     if (!rawValue) {
       return { status: 'empty', entries: [], needsRewrite: false };
+    }
+
+    const versionMatch = /^\s*\{\s*"version"\s*:\s*(\d+)/.exec(rawValue.slice(0, 128));
+    if (versionMatch && !SUPPORTED_PERSISTED_CACHE_VERSIONS.has(Number(versionMatch[1]))) {
+      return { status: 'invalid', entries: [], needsRewrite: false };
     }
 
     if (
@@ -2016,15 +2344,94 @@ export class ModelCatalogCacheStore {
         return { status: 'invalid', entries: [], needsRewrite: false };
       }
 
-      const normalizedEntries = parsed.entries.map((entry) => normalizeEntry(entry, parsed.version));
+      const payloadAlreadySanitized = parsed.version === MODEL_CATALOG_CACHE_PERSISTED_VERSION
+        && parsed.sanitized === true;
+      const entries: T[] = [];
+      let discardedEntry = false;
+      for (let index = 0; index < parsed.entries.length; index += 1) {
+        const normalized = await normalizeEntry(
+          parsed.entries[index],
+          parsed.version,
+          payloadAlreadySanitized,
+        );
+        if (normalized) {
+          entries.push(normalized);
+        } else {
+          discardedEntry = true;
+        }
+
+        if (
+          index < parsed.entries.length - 1
+          && (index + 1) % INCREMENTAL_HYDRATION_MODELS_PER_BATCH === 0
+        ) {
+          await yieldToUiThread();
+        }
+      }
+
+      return {
+        status: 'ok',
+        entries,
+        needsRewrite: parsed.version !== MODEL_CATALOG_CACHE_PERSISTED_VERSION
+          || parsed.sanitized !== true
+          || discardedEntry,
+      };
+    } catch {
+      return { status: 'invalid', entries: [], needsRewrite: false };
+    }
+  }
+
+  private parsePayload<T>(
+    rawValue: string | undefined,
+    normalizeEntry: (
+      value: unknown,
+      persistedVersion: number,
+      payloadAlreadySanitized: boolean,
+    ) => T | null,
+  ): ParsedPayload<T> {
+    if (!rawValue) {
+      return { status: 'empty', entries: [], needsRewrite: false };
+    }
+
+    // App-written envelopes always put the version first. Reject retired or
+    // unknown versions from a small prefix so a pathological payload never
+    // reaches the byte encoder, JSON.parse, or the model normalizer.
+    const versionMatch = /^\s*\{\s*"version"\s*:\s*(\d+)/.exec(rawValue.slice(0, 128));
+    if (versionMatch && !SUPPORTED_PERSISTED_CACHE_VERSIONS.has(Number(versionMatch[1]))) {
+      return { status: 'invalid', entries: [], needsRewrite: false };
+    }
+
+    if (
+      rawValue.length > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+      || getTextByteLength(rawValue) > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES
+    ) {
+      return { status: 'oversized', entries: [], needsRewrite: false };
+    }
+
+    try {
+      const parsed = JSON.parse(rawValue) as PersistedPayload<unknown>;
+      if (
+        !parsed
+        || typeof parsed !== 'object'
+        || typeof parsed.version !== 'number'
+        || !SUPPORTED_PERSISTED_CACHE_VERSIONS.has(parsed.version)
+        || !Array.isArray(parsed.entries)
+      ) {
+        return { status: 'invalid', entries: [], needsRewrite: false };
+      }
+
+      const payloadAlreadySanitized = parsed.version === MODEL_CATALOG_CACHE_PERSISTED_VERSION
+        && parsed.sanitized === true;
+      const normalizedEntries = parsed.entries.map((entry) => (
+        normalizeEntry(entry, parsed.version, payloadAlreadySanitized)
+      ));
       const entries = normalizedEntries.filter((entry): entry is T => entry !== null);
 
       return {
         status: 'ok',
         entries,
         needsRewrite: parsed.version !== MODEL_CATALOG_CACHE_PERSISTED_VERSION
-          || normalizedEntries.some((entry) => entry === null)
-          || parsed.entries.some((entry) => rawEntryNeedsRewrite(entry)),
+          || parsed.sanitized !== true
+          || normalizedEntries.some((entry) => entry === null),
       };
     } catch {
       return { status: 'invalid', entries: [], needsRewrite: false };
@@ -2033,29 +2440,13 @@ export class ModelCatalogCacheStore {
 
   private persistSearchEntries(): void {
     const entries = this.getSortedSearchEntries()
-      .filter((entry) => entry.scope.authScope === 'anon')
-      .map((entry) => ({
-        ...entry,
-        result: {
-          ...entry.result,
-          models: sanitizeAnonymousPersistedModels(entry.result.models),
-        },
-      }));
+      .filter((entry) => entry.scope.authScope === 'anon');
     this.persistBoundedPayload(SEARCH_CACHE_KEY, entries);
   }
 
   private persistSnapshotEntries(): void {
     const entries = this.getSortedSnapshotEntries()
-      .filter((entry) => entry.authScope === 'anon')
-      .flatMap((entry) => {
-        const sanitizedModel = sanitizeAnonymousCatalogModel(entry.model);
-        return sanitizedModel
-          ? [{
-            ...entry,
-            model: sanitizedModel,
-          }]
-          : [];
-      });
+      .filter((entry) => entry.authScope === 'anon');
     this.persistBoundedPayload(SNAPSHOT_CACHE_KEY, entries);
   }
 
@@ -2064,7 +2455,7 @@ export class ModelCatalogCacheStore {
       return;
     }
 
-    const prefix = `{"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION},"entries":[`;
+    const prefix = `{"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION},"sanitized":true,"entries":[`;
     const suffix = ']}';
     const serializedEntries: string[] = [];
     let serializedBytes = getTextByteLength(prefix) + getTextByteLength(suffix);
@@ -2130,6 +2521,36 @@ export class ModelCatalogCacheStore {
       if (options.failOpen !== true) {
         throw error;
       }
+    }
+  }
+
+  private trimPersistedStorageBestEffort(): void {
+    try {
+      this.storage.trim();
+      // MMKV exposes the logical live-data size, not the physical backing-file
+      // size. Persist a dedicated maintenance marker only after trim succeeds
+      // so keyless legacy files are compacted once without paying this cost on
+      // every subsequent launch.
+      this.storage.set(CACHE_MAINTENANCE_VERSION_KEY, CACHE_MAINTENANCE_VERSION);
+    } catch {
+      // Compaction is a performance maintenance step. Cache deletion already
+      // succeeded, so a trim failure must not turn optional cache hydration or
+      // an explicit clear into an app-start failure.
+    }
+  }
+
+  private persistedStorageNeedsTrim(): boolean {
+    try {
+      if (this.storage.getNumber(CACHE_MAINTENANCE_VERSION_KEY) !== CACHE_MAINTENANCE_VERSION) {
+        return true;
+      }
+
+      const byteSize = this.storage.byteSize;
+      return typeof byteSize === 'number'
+        && Number.isFinite(byteSize)
+        && byteSize > MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES;
+    } catch {
+      return false;
     }
   }
 

@@ -111,7 +111,7 @@
 
 ### Prerequisites
 
-- Node.js 20+ and npm
+- Node.js 20.19.4+ and npm
 - Android Studio (Android) or Xcode (iOS)
 
 ### Quick start
@@ -123,6 +123,20 @@ npm run android    # Run on Android
 npm run ios        # Run on iOS
 ```
 
+`npm run android` prefers a connected phone. When no phone is available, it reuses a
+running emulator or starts an available AVD; pass `--emulator` to force emulator use or
+`--serial <serial>` to select an exact target.
+
+If Metro reports `Unable to deserialize cloned data`, or a connected debug build keeps
+showing behavior from an older bundle, restart through the cache-reset path:
+
+```bash
+npm run android -- --clear-metro-cache
+```
+
+The launcher avoids reusing an already-running Metro for this explicit reset and connects
+the device to a fresh instance.
+
 For release builds and signing setup, see the [Android Build Guide](docs/android-build.md) and [iOS Build Guide](docs/ios-build.md).
 
 ## Tests and coverage
@@ -130,6 +144,31 @@ For release builds and signing setup, see the [Android Build Guide](docs/android
 ```bash
 npm test
 ```
+
+With a connected Android debug device, the explicit Storage Manager cache-clear flow can be verified against a real private-cache sentinel:
+
+```bash
+npm run android:scenarios:storage -- --skip-build
+```
+
+This check clears rebuildable app cache data and is intentionally not part of the default or `all` scenario packs.
+
+For current-source Android validation, run the fail-closed runtime and attachment packs. The
+branch-regeneration pack builds and installs a provenance-verified release APK and then runs
+an ordered, destructive recovery matrix:
+
+```bash
+npm run android:scenarios:runtime -- --fail-on-skip
+npm run android:scenarios:attachments -- --fail-on-skip
+npm run android:scenarios:branch-regeneration -- --fail-on-skip
+```
+
+The branch pack requires a prepared disposable conversation fixture and clears chat history
+at the end. Use synthetic, non-sensitive fixture content because screenshots and UI
+hierarchy evidence preserve visible text. See the
+[Android Build Guide](docs/android-build.md#current-head-release-apk-qa) and
+[Release Checklist](docs/release-checklist.md#destructive-branch-regeneration-pack) before
+running it.
 
 Generate a Jest coverage report locally:
 
@@ -153,7 +192,8 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
-| [Android Build Guide](docs/android-build.md) | Android release signing and bundling |
+| [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
+| [Android Build Guide](docs/android-build.md) | Deterministic Android release builds, signing, provenance, and current-head QA |
 | [iOS Build Guide](docs/ios-build.md) | iOS archive, distribution, and signing |
 | [UI Architecture](docs/ui-architecture.md) | Component and layout guidelines |
 | [New Architecture](docs/new-architecture.md) | React Native new architecture notes |
@@ -166,7 +206,6 @@ Auto-generated from open GitHub issues labeled `roadmap:*`.
 <!-- ROADMAP:START -->
 ### Now
 
-- [\[Feature\]: Multimodal (vision) models — attach images in chat](https://github.com/Tah10n/pocket-ai/issues/29) (#29)
 - [\[Feature\]: Chat UI — document attachments (picker, preview, remove)](https://github.com/Tah10n/pocket-ai/issues/43) (#43)
 
 ### Next

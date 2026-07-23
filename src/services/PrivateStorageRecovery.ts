@@ -13,7 +13,10 @@ import {
   resetModelDownloadManagerForPrivateStorageReset,
   stopModelDownloadManagerForPrivateStorageBlocked,
 } from './ModelDownloadManager';
-import { stopActiveChatGenerationForPrivateStorageBlocked } from '../hooks/useChatSession';
+import {
+  resetActiveChatGenerationRuntimeForPrivateStorageReset,
+  stopActiveChatGenerationForPrivateStorageBlocked,
+} from '../hooks/useChatSession';
 import { resetChatStoreForPrivateStorageReset } from '../store/chatStore';
 import { resetDownloadStoreForPrivateStorageReset } from '../store/downloadStore';
 import { resetModelsStoreForPrivateStorageReset } from '../store/modelsStore';
@@ -29,6 +32,7 @@ export function invalidatePrivateStorageRuntimeHandles(): void {
 }
 
 export function resetPrivatePersistedRuntimeStateForStorageReset(): void {
+  resetActiveChatGenerationRuntimeForPrivateStorageReset();
   resetChatStoreForPrivateStorageReset();
   resetDownloadStoreForPrivateStorageReset();
   resetModelsStoreForPrivateStorageReset();

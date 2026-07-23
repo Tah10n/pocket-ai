@@ -1,6 +1,17 @@
 import * as SecureStore from 'expo-secure-store';
 import { HuggingFaceTokenService } from '../../src/services/HuggingFaceTokenService';
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, reject, resolve };
+}
+
 describe('HuggingFaceTokenService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -71,6 +82,98 @@ describe('HuggingFaceTokenService', () => {
 
     expect(listener).toHaveBeenCalledWith(expect.objectContaining({ hasToken: true }), 'hydrate');
     await expect(service.getToken()).resolves.toBe('hf_token_b');
+  });
+
+  it('returns atomic token snapshots across anonymous, replacement, and removal epochs', async () => {
+    const service = new HuggingFaceTokenService();
+
+    await expect(service.getSnapshot()).resolves.toEqual({ token: null, revision: 0 });
+
+    await service.saveToken('hf_token_a');
+    await expect(service.getSnapshot()).resolves.toEqual({ token: 'hf_token_a', revision: 1 });
+
+    await service.saveToken('hf_token_b');
+    await expect(service.getSnapshot()).resolves.toEqual({ token: 'hf_token_b', revision: 2 });
+
+    await service.clearToken();
+    await expect(service.getSnapshot()).resolves.toEqual({ token: null, revision: 3 });
+  });
+
+  it('serializes rapid mutations so the final snapshot has the matching revision', async () => {
+    const service = new HuggingFaceTokenService();
+
+    await Promise.all([
+      service.saveToken('hf_token_a'),
+      service.saveToken('hf_token_b'),
+      service.clearToken(),
+      service.saveToken('hf_token_c'),
+    ]);
+
+    await expect(service.getSnapshot()).resolves.toEqual({ token: 'hf_token_c', revision: 4 });
+    expect(service.getCachedRevision()).toBe(4);
+  });
+
+  it('linearizes a mutation that arrives while a snapshot is reading secure storage', async () => {
+    const service = new HuggingFaceTokenService();
+    const pendingRead = createDeferred<string | null>();
+    (SecureStore.getItemAsync as jest.Mock).mockImplementationOnce(() => pendingRead.promise);
+
+    const snapshotBeforeMutation = service.getSnapshot();
+    await Promise.resolve();
+    const pendingMutation = service.saveToken('hf_token_after_read');
+
+    pendingRead.resolve(null);
+    await expect(snapshotBeforeMutation).resolves.toEqual({ token: null, revision: 0 });
+    await pendingMutation;
+    await expect(service.getSnapshot()).resolves.toEqual({
+      token: 'hf_token_after_read',
+      revision: 1,
+    });
+  });
+
+  it('hydrates an externally stored token into the same snapshot epoch', async () => {
+    await SecureStore.setItemAsync('huggingface-access-token', 'hf_external_token');
+    const service = new HuggingFaceTokenService();
+    const listener = jest.fn();
+    service.subscribe(listener);
+    listener.mockClear();
+
+    await expect(service.getSnapshot()).resolves.toEqual({
+      token: 'hf_external_token',
+      revision: 1,
+    });
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ hasToken: true }),
+      'hydrate',
+    );
+  });
+
+  it('commits the epoch for every subscriber even when an earlier listener throws', async () => {
+    const service = new HuggingFaceTokenService();
+    const consoleWarn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const laterListener = jest.fn();
+    service.subscribe((_state, source) => {
+      if (source === 'mutation') {
+        throw new Error('listener failed');
+      }
+    });
+    service.subscribe(laterListener);
+    laterListener.mockClear();
+
+    await service.saveToken('hf_listener_token');
+
+    await expect(service.getSnapshot()).resolves.toEqual({
+      token: 'hf_listener_token',
+      revision: 1,
+    });
+    expect(laterListener).toHaveBeenCalledWith(
+      expect.objectContaining({ hasToken: true }),
+      'mutation',
+    );
+    expect(consoleWarn).toHaveBeenCalledWith(
+      '[HuggingFaceTokenService] Token state listener failed',
+    );
+    consoleWarn.mockRestore();
   });
 
   it('rejects token saves when secure storage is unavailable', async () => {

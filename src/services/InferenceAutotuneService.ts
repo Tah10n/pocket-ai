@@ -11,9 +11,11 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { safeJoinModelPath } from '../utils/safeFilePath';
+import { getPrivacySafeErrorLogDetails } from './AppError';
 import {
   type AutotuneBackendMode,
   type AutotuneBestStableProfile,
+  type AutotuneCandidateProfile,
   type AutotuneCandidateReport,
   type AutotuneResult,
   readAutotuneResult,
@@ -36,7 +38,7 @@ export interface AutotuneProgressSnapshot {
   stage: AutotuneProgressStage;
   step: number;
   totalSteps: number;
-  candidate?: AutotuneBestStableProfile;
+  candidate?: AutotuneCandidateProfile;
   candidateIndex?: number;
   candidateCount?: number;
 }
@@ -72,7 +74,7 @@ function resolveAutotuneCandidates({
     const resolvedSelectors = Array.isArray(npuDeviceSelectors)
       ? npuDeviceSelectors
           .map((device) => (typeof device === 'string' ? device.trim() : ''))
-          .filter(isSafeBackendDeviceSelector)
+          .filter(isPrivacySafeBackendDeviceSelector)
       : [];
 
     const dedupedSelectors = Array.from(new Set(resolvedSelectors)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
@@ -94,16 +96,61 @@ function mapBackendModeToPolicy(mode: AutotuneBackendMode): ModelLoadParameters[
 }
 
 function formatErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  if (typeof error === 'string') {
-    return error;
-  }
-  return 'Unknown error';
+  const details = getPrivacySafeErrorLogDetails(error);
+  return details.errorCode ?? details.errorName ?? details.errorType ?? 'operation_failed';
 }
 
-function resolveRestoreLoadParamsOverride(diagnostics: EngineDiagnostics | undefined): Partial<ModelLoadParameters> | null {
+const SAFE_AUTOTUNE_FAILURE_CATEGORIES = new Set([
+  'attempt_limit',
+  'backend_unavailable',
+  'cancelled',
+  'invalid_configuration',
+  'known_oom_upper_bound',
+  'model_incompatible',
+  'native_error',
+  'out_of_memory',
+]);
+
+function sanitizeAutotuneFailureCategory(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) {
+    return undefined;
+  }
+  return SAFE_AUTOTUNE_FAILURE_CATEGORIES.has(value) ? value : 'native_error';
+}
+
+const PRIVATE_TOKEN_LIKE_SELECTOR = /^(?:hf_|sk[-_]|gh[pousr]_)/i;
+
+function isPrivacySafeBackendDeviceSelector(value: unknown): value is string {
+  return isSafeBackendDeviceSelector(value) && !PRIVATE_TOKEN_LIKE_SELECTOR.test(value);
+}
+
+function toPublicCandidateProfile(candidate: AutotuneBestStableProfile): AutotuneCandidateProfile {
+  const deviceCount = Array.isArray(candidate.devices)
+    ? Math.min(candidate.devices.length, MAX_BACKEND_DEVICE_SELECTORS)
+    : 0;
+  return {
+    backendMode: candidate.backendMode,
+    nGpuLayers: Math.max(0, Math.round(candidate.nGpuLayers)),
+    ...(deviceCount > 0 ? { deviceCount } : null),
+  };
+}
+
+function getInitDeviceSelectorsForAutotune(): string[] {
+  try {
+    return llmEngineService
+      .getLastInitDeviceSelectorsForAutotune()
+      .map((device) => (typeof device === 'string' ? device.trim() : ''))
+      .filter(isPrivacySafeBackendDeviceSelector)
+      .slice(0, MAX_BACKEND_DEVICE_SELECTORS);
+  } catch {
+    return [];
+  }
+}
+
+function resolveRestoreLoadParamsOverride(
+  diagnostics: EngineDiagnostics | undefined,
+  initDeviceSelectors: readonly string[],
+): Partial<ModelLoadParameters> | null {
   const backendMode = diagnostics?.backendMode;
   const actualGpu = diagnostics?.actualGpuAccelerated === true;
   const loadedGpuLayers = typeof diagnostics?.loadedGpuLayers === 'number' && Number.isFinite(diagnostics.loadedGpuLayers)
@@ -111,11 +158,7 @@ function resolveRestoreLoadParamsOverride(diagnostics: EngineDiagnostics | undef
     : 0;
 
   if (backendMode === 'npu' && actualGpu) {
-    const initDevices = Array.isArray(diagnostics?.initDevices)
-      ? diagnostics.initDevices
-          .map((device) => (typeof device === 'string' ? device.trim() : ''))
-          .filter(isSafeBackendDeviceSelector)
-      : [];
+    const initDevices = initDeviceSelectors.filter(isPrivacySafeBackendDeviceSelector);
 
     const dedupedInitDevices = Array.from(new Set(initDevices)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
     return {
@@ -239,8 +282,11 @@ class InferenceAutotuneService {
     try {
       const previousActiveModelId = engineState.activeModelId ?? null;
       const shouldRestorePreviousModel = engineState.status === EngineStatus.READY && Boolean(previousActiveModelId);
+      const restoreInitDeviceSelectors = shouldRestorePreviousModel
+        ? getInitDeviceSelectorsForAutotune()
+        : [];
       const restoreLoadParamsOverride = shouldRestorePreviousModel
-        ? resolveRestoreLoadParamsOverride(engineState.diagnostics)
+        ? resolveRestoreLoadParamsOverride(engineState.diagnostics, restoreInitDeviceSelectors)
         : null;
 
       let didUnloadPreviousModel = false;
@@ -293,7 +339,7 @@ class InferenceAutotuneService {
       const gpuAttemptable = gpuAvailable;
       const npuAttemptable = npuAvailable;
       const npuDeviceSelectors = Array.isArray(capabilities?.npu.deviceNames) && capabilities.npu.deviceNames.length > 0
-        ? capabilities.npu.deviceNames.filter((device) => isSafeBackendDeviceSelector(device))
+        ? capabilities.npu.deviceNames.filter((device) => isPrivacySafeBackendDeviceSelector(device))
         : null;
 
       const candidateProfiles = resolveAutotuneCandidates({
@@ -353,6 +399,7 @@ class InferenceAutotuneService {
       });
       const cpuProfile: AutotuneBestStableProfile = { backendMode: 'cpu', nGpuLayers: 0 };
       const candidates: AutotuneCandidateReport[] = [];
+      const candidateInitDeviceSelectors = new WeakMap<AutotuneCandidateReport, string[]>();
 
       try {
         let tokenCount = 0;
@@ -381,42 +428,42 @@ class InferenceAutotuneService {
         const initGpuLayers = typeof diagnostics?.initGpuLayers === 'number' && Number.isFinite(diagnostics.initGpuLayers)
           ? Math.max(0, Math.round(diagnostics.initGpuLayers))
           : undefined;
-        const initDevices = Array.isArray(diagnostics?.initDevices) && diagnostics.initDevices.length > 0
-          ? diagnostics.initDevices
-          : undefined;
+        const initDevices = getInitDeviceSelectorsForAutotune();
 
-        candidates.push({
-          profile: cpuProfile,
+        const candidateReport: AutotuneCandidateReport = {
+          profile: toPublicCandidateProfile(cpuProfile),
           success: true,
           tokensPerSec,
           ttftMs: firstTokenMs !== null ? Math.max(0, firstTokenMs - startMs) : undefined,
           durationMs,
           initGpuLayers,
-          initDevices,
+          initDeviceCount: initDevices.length > 0 ? initDevices.length : undefined,
           actualBackendMode: diagnostics?.backendMode,
           actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
           loadedGpuLayers: diagnostics?.loadedGpuLayers,
-          reasonNoGPU: diagnostics?.reasonNoGPU,
-        });
+          reasonNoGPU: sanitizeAutotuneFailureCategory(diagnostics?.reasonNoGPU),
+        };
+        candidates.push(candidateReport);
+        candidateInitDeviceSelectors.set(candidateReport, initDevices);
       } catch (error) {
         const diagnostics = llmEngineService.getState().diagnostics;
         const initGpuLayers = typeof diagnostics?.initGpuLayers === 'number' && Number.isFinite(diagnostics.initGpuLayers)
           ? Math.max(0, Math.round(diagnostics.initGpuLayers))
           : undefined;
-        const initDevices = Array.isArray(diagnostics?.initDevices) && diagnostics.initDevices.length > 0
-          ? diagnostics.initDevices
-          : undefined;
-        candidates.push({
-          profile: cpuProfile,
+        const initDevices = getInitDeviceSelectorsForAutotune();
+        const candidateReport: AutotuneCandidateReport = {
+          profile: toPublicCandidateProfile(cpuProfile),
           success: false,
           initGpuLayers,
-          initDevices,
+          initDeviceCount: initDevices.length > 0 ? initDevices.length : undefined,
           actualBackendMode: diagnostics?.backendMode,
           actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
           loadedGpuLayers: diagnostics?.loadedGpuLayers,
-          reasonNoGPU: diagnostics?.reasonNoGPU,
+          reasonNoGPU: sanitizeAutotuneFailureCategory(diagnostics?.reasonNoGPU),
           error: cancelled ? 'Cancelled' : formatErrorMessage(error),
-        });
+        };
+        candidates.push(candidateReport);
+        candidateInitDeviceSelectors.set(candidateReport, initDevices);
       }
 
       const eligible = candidates.filter((candidate) => {
@@ -462,11 +509,7 @@ class InferenceAutotuneService {
                 return { backendMode, nGpuLayers: resolvedGpuLayers };
               }
 
-              const initDevices = Array.isArray(acceleratorCandidate.initDevices)
-                ? acceleratorCandidate.initDevices
-                    .map((device) => (typeof device === 'string' ? device.trim() : ''))
-                    .filter(isSafeBackendDeviceSelector)
-                : [];
+              const initDevices = candidateInitDeviceSelectors.get(acceleratorCandidate) ?? [];
               const dedupedInitDevices = Array.from(new Set(initDevices)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
 
               return {
@@ -513,6 +556,8 @@ class InferenceAutotuneService {
       didUnloadPreviousModel = true;
 
       const candidates: AutotuneCandidateReport[] = [];
+      const candidateInitDeviceSelectors = new WeakMap<AutotuneCandidateReport, string[]>();
+      const candidateRequestedDeviceSelectors = new WeakMap<AutotuneCandidateReport, string[]>();
 
       for (const candidate of candidateProfiles) {
         if (cancelled) {
@@ -521,7 +566,7 @@ class InferenceAutotuneService {
 
         advanceAndEmit({
           stage: 'loadingCandidate',
-          candidate,
+          candidate: toPublicCandidateProfile(candidate),
           candidateIndex: candidates.length + 1,
           candidateCount,
         });
@@ -544,27 +589,28 @@ class InferenceAutotuneService {
             const initGpuLayers = typeof diagnostics?.initGpuLayers === 'number' && Number.isFinite(diagnostics.initGpuLayers)
               ? Math.max(0, Math.round(diagnostics.initGpuLayers))
               : undefined;
-            const initDevices = Array.isArray(diagnostics?.initDevices) && diagnostics.initDevices.length > 0
-              ? diagnostics.initDevices
-              : undefined;
+            const initDevices = getInitDeviceSelectorsForAutotune();
 
-            candidates.push({
-              profile: candidate,
+            const candidateReport: AutotuneCandidateReport = {
+              profile: toPublicCandidateProfile(candidate),
               success: false,
               initGpuLayers,
-              initDevices,
+              initDeviceCount: initDevices.length > 0 ? initDevices.length : undefined,
               actualBackendMode: diagnostics?.backendMode,
               actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
               loadedGpuLayers: diagnostics?.loadedGpuLayers,
-              reasonNoGPU: diagnostics?.reasonNoGPU,
+              reasonNoGPU: sanitizeAutotuneFailureCategory(diagnostics?.reasonNoGPU),
               error: 'Cancelled',
-            });
+            };
+            candidates.push(candidateReport);
+            candidateInitDeviceSelectors.set(candidateReport, initDevices);
+            candidateRequestedDeviceSelectors.set(candidateReport, candidate.devices ?? []);
             break;
           }
 
           advanceAndEmit({
             stage: 'benchmarkingCandidate',
-            candidate,
+            candidate: toPublicCandidateProfile(candidate),
             candidateIndex: candidates.length + 1,
             candidateCount,
           });
@@ -595,46 +641,48 @@ class InferenceAutotuneService {
           const initGpuLayers = typeof diagnostics?.initGpuLayers === 'number' && Number.isFinite(diagnostics.initGpuLayers)
             ? Math.max(0, Math.round(diagnostics.initGpuLayers))
             : undefined;
-          const initDevices = Array.isArray(diagnostics?.initDevices) && diagnostics.initDevices.length > 0
-            ? diagnostics.initDevices
-            : undefined;
+          const initDevices = getInitDeviceSelectorsForAutotune();
 
-          candidates.push({
-            profile: candidate,
+          const candidateReport: AutotuneCandidateReport = {
+            profile: toPublicCandidateProfile(candidate),
             success: true,
             tokensPerSec,
             ttftMs: firstTokenMs !== null ? Math.max(0, firstTokenMs - startMs) : undefined,
             durationMs,
             initGpuLayers,
-            initDevices,
+            initDeviceCount: initDevices.length > 0 ? initDevices.length : undefined,
             actualBackendMode: diagnostics?.backendMode,
             actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
             loadedGpuLayers: diagnostics?.loadedGpuLayers,
-            reasonNoGPU: diagnostics?.reasonNoGPU,
-          });
+            reasonNoGPU: sanitizeAutotuneFailureCategory(diagnostics?.reasonNoGPU),
+          };
+          candidates.push(candidateReport);
+          candidateInitDeviceSelectors.set(candidateReport, initDevices);
+          candidateRequestedDeviceSelectors.set(candidateReport, candidate.devices ?? []);
         } catch (error) {
           const diagnostics = llmEngineService.getState().diagnostics;
           const initGpuLayers = typeof diagnostics?.initGpuLayers === 'number' && Number.isFinite(diagnostics.initGpuLayers)
             ? Math.max(0, Math.round(diagnostics.initGpuLayers))
             : undefined;
-          const initDevices = Array.isArray(diagnostics?.initDevices) && diagnostics.initDevices.length > 0
-            ? diagnostics.initDevices
-            : undefined;
-          candidates.push({
-            profile: candidate,
+          const initDevices = getInitDeviceSelectorsForAutotune();
+          const candidateReport: AutotuneCandidateReport = {
+            profile: toPublicCandidateProfile(candidate),
             success: false,
             initGpuLayers,
-            initDevices,
+            initDeviceCount: initDevices.length > 0 ? initDevices.length : undefined,
             actualBackendMode: diagnostics?.backendMode,
             actualGpuAccelerated: diagnostics?.actualGpuAccelerated,
             loadedGpuLayers: diagnostics?.loadedGpuLayers,
-            reasonNoGPU: diagnostics?.reasonNoGPU,
+            reasonNoGPU: sanitizeAutotuneFailureCategory(diagnostics?.reasonNoGPU),
             error: cancelled ? 'Cancelled' : formatErrorMessage(error),
-          });
+          };
+          candidates.push(candidateReport);
+          candidateInitDeviceSelectors.set(candidateReport, initDevices);
+          candidateRequestedDeviceSelectors.set(candidateReport, candidate.devices ?? []);
         } finally {
           advanceAndEmit({
             stage: 'unloadingCandidate',
-            candidate,
+            candidate: toPublicCandidateProfile(candidate),
             candidateIndex: candidates.length,
             candidateCount,
           });
@@ -689,12 +737,8 @@ class InferenceAutotuneService {
               ? Math.max(0, Math.round(promotedBestCandidate.initGpuLayers))
               : Math.max(0, Math.round(promotedBestCandidate.profile.nGpuLayers));
 
-            const initDevices = Array.isArray(promotedBestCandidate.initDevices)
-              ? promotedBestCandidate.initDevices.filter((device): device is string => typeof device === 'string')
-              : [];
-            const profileDevices = Array.isArray(promotedBestCandidate.profile.devices)
-              ? promotedBestCandidate.profile.devices.filter((device): device is string => typeof device === 'string')
-              : [];
+            const initDevices = candidateInitDeviceSelectors.get(promotedBestCandidate) ?? [];
+            const profileDevices = candidateRequestedDeviceSelectors.get(promotedBestCandidate) ?? [];
 
             const capDevices = (values: string[]): string[] =>
               Array.from(new Set(values)).slice(0, MAX_BACKEND_DEVICE_SELECTORS);
@@ -703,14 +747,14 @@ class InferenceAutotuneService {
               if (backendMode === 'npu') {
                 const initSelectors = initDevices
                   .map((device) => device.trim())
-                  .filter(isSafeBackendDeviceSelector);
+                  .filter(isPrivacySafeBackendDeviceSelector);
                 if (initSelectors.length > 0) {
                   return capDevices(initSelectors);
                 }
 
                 const profileSelectors = profileDevices
                   .map((device) => device.trim())
-                  .filter(isSafeBackendDeviceSelector);
+                  .filter(isPrivacySafeBackendDeviceSelector);
                 if (profileSelectors.length > 0) {
                   return capDevices(profileSelectors);
                 }
@@ -718,13 +762,7 @@ class InferenceAutotuneService {
                 return undefined;
               }
 
-              const initResolved = initDevices.map((device) => device.trim()).filter((device) => device.length > 0);
-              if (initResolved.length > 0) {
-                return capDevices(initResolved);
-              }
-
-              const profileResolved = profileDevices.map((device) => device.trim()).filter((device) => device.length > 0);
-              return profileResolved.length > 0 ? capDevices(profileResolved) : undefined;
+              return undefined;
             };
 
             const devices = resolveDevicesForBestStable();
@@ -772,7 +810,10 @@ class InferenceAutotuneService {
           });
         } catch (restoreError) {
           const message = formatErrorMessage(restoreError);
-          console.warn('[InferenceAutotune] Failed to restore previously loaded model', restoreError);
+          console.warn(
+            '[InferenceAutotune] Failed to restore previously loaded model',
+            getPrivacySafeErrorLogDetails(restoreError),
+          );
 
           // Best-effort safety: avoid leaving the app in a broken state.
           // Prefer keeping a working model loaded when possible, but if we're cancelled

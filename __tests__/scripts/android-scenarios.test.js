@@ -73,6 +73,7 @@ const {
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
   resolveBranchRegenerationReplacement,
+  resolveAndroidPackageUid,
   resolveAndroidQaGenerationGateObservation,
   resolveTargetAttachmentIds,
   selectScenarios,
@@ -4136,6 +4137,71 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       provenance: universalProvenance,
       currentBuildProvenance: { ...universalManifest, digest: universalDigest },
     })).not.toThrow();
+  });
+
+  it('resolves Android package UIDs across platform package metadata formats', () => {
+    const packageName = 'com.github.tah10n.pocketai';
+    const legacyCapture = jest.fn(() => (
+      `Package [${packageName}]\n  userId=10234\n`
+    ));
+
+    expect(resolveAndroidPackageUid(
+      'adb',
+      'device-1',
+      packageName,
+      { runCapture: legacyCapture }
+    )).toBe('10234');
+    expect(legacyCapture).toHaveBeenCalledTimes(1);
+
+    const vendorCapture = jest.fn((command, args) => (
+      args.includes('dumpsys')
+        ? `Package [${packageName}]\n  uid=10338 gids=[]\n  appId=10338\n`
+        : `package:${packageName} uid:10338\n`
+    ));
+    expect(resolveAndroidPackageUid(
+      'adb',
+      'device-1',
+      packageName,
+      { runCapture: vendorCapture }
+    )).toBe('10338');
+    expect(vendorCapture).toHaveBeenNthCalledWith(
+      2,
+      'adb',
+      [
+        '-s',
+        'device-1',
+        'shell',
+        'cmd',
+        'package',
+        'list',
+        'packages',
+        '-U',
+        packageName,
+      ]
+    );
+  });
+
+  it('fails closed when the package UID fallback is mismatched or ambiguous', () => {
+    const packageName = 'com.github.tah10n.pocketai';
+    const resolveWithPackageList = (packageList) => resolveAndroidPackageUid(
+      'adb',
+      'device-1',
+      packageName,
+      {
+        runCapture: jest.fn((command, args) => (
+          args.includes('dumpsys')
+            ? `Package [${packageName}]\n  appId=10338\n`
+            : packageList
+        )),
+      }
+    );
+
+    expect(() => resolveWithPackageList(
+      'package:com.github.tah10n.pocketai.preview uid:10338\n'
+    )).toThrow(/no unambiguous exact-package UID/);
+    expect(() => resolveWithPackageList(
+      `package:${packageName} uid:10338\npackage:${packageName} uid:20338\n`
+    )).toThrow(/no unambiguous exact-package UID/);
   });
 
   it('streams app UID logs and a server-filtered exact system ANR interval into private owned files', async () => {

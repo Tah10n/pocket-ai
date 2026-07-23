@@ -6197,28 +6197,59 @@ function sanitizeArtifactStem(value) {
   return `${value || "artifact"}`.replace(/[^a-zA-Z0-9._-]+/g, "-");
 }
 
+function parseExactAndroidPackageListUid(output, packageName) {
+  const matchingUids = new Set();
+  for (const rawLine of `${output}`.split(/\r?\n/)) {
+    const match = rawLine.trim().match(/^package:(\S+)\s+uid:(\d+)$/);
+    if (match?.[1] === packageName) {
+      matchingUids.add(match[2]);
+    }
+  }
+  return matchingUids.size === 1 ? [...matchingUids][0] : null;
+}
+
 function resolveAndroidPackageUid(adbPath, serial, packageName, options = {}) {
   const capture = options.runCapture || runCapture;
-  let packageDump;
+  let packageDump = null;
+  let packageDumpError = null;
   try {
     packageDump = capture(
       adbPath,
       ["-s", serial, "shell", "dumpsys", "package", packageName]
     );
   } catch (error) {
-    throw new ScenarioPreconditionFailureError(
-      `Could not resolve the Android UID for ${packageName}: ${error.message}`,
-      { cause: error }
-    );
+    packageDumpError = error;
   }
 
-  const uid = packageDump.match(/(?:^|\s)userId=(\d+)\b/m)?.[1] || null;
-  if (!uid) {
-    throw new ScenarioPreconditionFailureError(
-      `Could not resolve the Android UID for ${packageName}; the installed package dump has no userId.`
-    );
+  const packageDumpUid = packageDump?.match(/(?:^|\s)userId=(\d+)\b/m)?.[1] || null;
+  if (packageDumpUid) {
+    return packageDumpUid;
   }
-  return uid;
+
+  let packageList = null;
+  let packageListError = null;
+  try {
+    packageList = capture(
+      adbPath,
+      ["-s", serial, "shell", "cmd", "package", "list", "packages", "-U", packageName]
+    );
+  } catch (error) {
+    packageListError = error;
+  }
+
+  const packageListUid = parseExactAndroidPackageListUid(packageList || "", packageName);
+  if (packageListUid) {
+    return packageListUid;
+  }
+
+  const bothInspectionsFailed = packageDumpError && packageListError;
+  const detail = bothInspectionsFailed
+    ? "both package inspection commands failed"
+    : "installed package metadata has no unambiguous exact-package UID";
+  throw new ScenarioPreconditionFailureError(
+    `Could not resolve the Android UID for ${packageName}; ${detail}.`,
+    { cause: packageListError || packageDumpError || undefined }
+  );
 }
 
 function readAndroidLogcatStartEpoch(adbPath, serial, options = {}) {

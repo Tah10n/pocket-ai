@@ -30,6 +30,7 @@ import {
   parseChatPendingIndexCommit,
   parseChatThreadRecord,
   readChatStreamingProgressRecord,
+  removeChatStreamingProgressRecord,
   recoverChatThreadFromStreamingProgress,
   recoverStaleStreamingThread,
   sanitizeChatThreadForPersistence,
@@ -1142,6 +1143,64 @@ describe('chatPersistence', () => {
     expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
   });
 
+  it('removes only the three artifacts used by a short progress checkpoint', () => {
+    const threadId = 'thread-progress-short-cleanup-count';
+    const set = jest.fn(storage.set.bind(storage));
+    const remove = jest.fn(storage.remove.bind(storage));
+    const instrumentedStorage = { ...storage, set, remove };
+
+    expect(writeChatStreamingProgressRecord(
+      instrumentedStorage,
+      buildProgress(threadId),
+    )).toEqual({ status: 'written', kind: 'checkpoint' });
+    expect(set).toHaveBeenCalledTimes(3);
+    remove.mockClear();
+
+    removeChatStreamingProgressRecord(instrumentedStorage, threadId);
+
+    const removedKeys = remove.mock.calls.map(([key]) => key);
+    expect(1 + 2 + 2 + MAX_CHAT_PROGRESS_CHUNKS).toBe(133);
+    expect(removedKeys).toEqual([
+      getChatStreamingProgressStorageKey(threadId),
+      getChatStreamingOperationStorageKey(threadId, 0),
+      getChatStreamingProgressCheckpointStorageKey(threadId, 0),
+    ]);
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
+  it('removes only actually written artifacts from a long progress chain', () => {
+    const threadId = 'thread-progress-long-cleanup-count';
+    const set = jest.fn(storage.set.bind(storage));
+    const remove = jest.fn(storage.remove.bind(storage));
+    const instrumentedStorage = { ...storage, set, remove };
+    const writeCount = 64;
+
+    for (let revision = 1; revision <= writeCount; revision += 1) {
+      expect(writeChatStreamingProgressRecord(
+        instrumentedStorage,
+        buildProgress(threadId, {
+          content: 'x'.repeat(revision * 16),
+          thoughtContent: undefined,
+          tokensPerSec: undefined,
+          revision,
+          persistedAt: 1_000 + revision,
+        }),
+      ).status).toBe('written');
+    }
+    const artifactKeys = listChatStreamingProgressStorageKeys(storage);
+    expect(set).toHaveBeenCalledTimes((writeCount * 2) + 1);
+    expect(artifactKeys).toHaveLength(66);
+    remove.mockClear();
+
+    removeChatStreamingProgressRecord(instrumentedStorage, threadId);
+
+    const removedKeys = remove.mock.calls.map(([key]) => key);
+    expect(removedKeys).toHaveLength(artifactKeys.length);
+    expect(new Set(removedKeys)).toEqual(new Set(artifactKeys));
+    expect(removedKeys).toHaveLength(66);
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
   it('keeps a readable chain when removing the authoritative head fails', () => {
     const threadId = 'thread-progress-head-remove-fault';
     const progress = buildProgress(threadId);
@@ -1190,9 +1249,11 @@ describe('chatPersistence', () => {
       .toEqual({ ok: false, reason: 'missing' });
     expect(storage.getString(operationKey)).toBeDefined();
     expect(removedKeys).toContain(getChatStreamingProgressCheckpointStorageKey(threadId, 0));
-    expect(removedKeys).toContain(
-      getChatStreamingProgressChunkStorageKey(threadId, MAX_CHAT_PROGRESS_CHUNKS - 1),
-    );
+    expect(removedKeys.some((key) => key.startsWith(
+      `chat-store:progress-chunk:${encodeURIComponent(threadId)}:`,
+    ))).toBe(false);
+    expect(() => removeChatStreamingProgressRecord(storage, threadId)).not.toThrow();
+    expect(storage.getString(operationKey)).toBeUndefined();
   });
 
   it('removes malformed thread and noncanonical progress artifacts during destructive clear', () => {

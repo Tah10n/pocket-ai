@@ -53,6 +53,7 @@ export const MAX_CHAT_PROGRESS_OPERATION_BYTES = 512 * 1024;
 export const MAX_CHAT_PROGRESS_MANIFEST_BYTES = 64 * 1024;
 export const MAX_CHAT_PROGRESS_CHUNK_BYTES = 64 * 1024;
 export const MAX_CHAT_PROGRESS_CHUNKS = 128;
+export const MAX_CHAT_PROGRESS_ORPHAN_SWEEP_KEYS = MAX_CHAT_PROGRESS_CHUNKS + 4;
 export const MAX_CHAT_PROGRESS_AGGREGATE_BYTES = 16 * 1024 * 1024;
 export const MAX_ASSISTANT_PROGRESS_CONTENT_CHARS = 768 * 1024;
 export const MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS = 768 * 1024;
@@ -186,6 +187,7 @@ interface ChatStreamingProgressWriterState {
   operationSlot: ChatStreamingProgressSlot;
   checkpointSlot: ChatStreamingProgressSlot;
   activeChunkSlots: Set<number>;
+  ownedArtifactKeys: Set<string>;
   operationBytes: number;
   checkpointBytes: number;
   manifestBytes: number;
@@ -1716,6 +1718,18 @@ function parseChatStreamingManifestValue(
   };
 }
 
+function getChatStreamingProgressManifestArtifactKeys(
+  manifest: ChatStreamingProgressManifest,
+): string[] {
+  return [
+    getChatStreamingOperationStorageKey(manifest.threadId, manifest.operationSlot),
+    getChatStreamingProgressCheckpointStorageKey(manifest.threadId, manifest.checkpointSlot),
+    ...manifest.chunks.map((chunk) => (
+      getChatStreamingProgressChunkStorageKey(manifest.threadId, chunk.slot)
+    )),
+  ];
+}
+
 function applyRequiredProgressTextUpdate(
   current: string,
   update: ChatStreamingProgressTextUpdate | undefined,
@@ -1908,6 +1922,7 @@ function readChatStreamingProgressState(
       operationSlot: manifest.operationSlot,
       checkpointSlot: manifest.checkpointSlot,
       activeChunkSlots: new Set(manifest.chunks.map((chunk) => chunk.slot)),
+      ownedArtifactKeys: new Set(getChatStreamingProgressManifestArtifactKeys(manifest)),
       operationBytes: operationRead.bytes,
       checkpointBytes: checkpointRead.bytes,
       manifestBytes: rawManifestBytes,
@@ -1930,6 +1945,10 @@ const chatStreamingProgressWriterStates = new WeakMap<
   object,
   Map<string, ChatStreamingProgressWriterState>
 >();
+const chatStreamingProgressOwnedArtifactKeys = new WeakMap<
+  object,
+  Map<string, Set<string>>
+>();
 
 function getChatStreamingProgressWriterStateMap(
   storage: AppStorageFacade,
@@ -1943,6 +1962,49 @@ function getChatStreamingProgressWriterStateMap(
   const created = new Map<string, ChatStreamingProgressWriterState>();
   chatStreamingProgressWriterStates.set(storageIdentity, created);
   return created;
+}
+
+function getChatStreamingProgressOwnedArtifactKeyMap(
+  storage: AppStorageFacade,
+): Map<string, Set<string>> {
+  const storageIdentity = storage as object;
+  const current = chatStreamingProgressOwnedArtifactKeys.get(storageIdentity);
+  if (current) {
+    return current;
+  }
+
+  const created = new Map<string, Set<string>>();
+  chatStreamingProgressOwnedArtifactKeys.set(storageIdentity, created);
+  return created;
+}
+
+function recordChatStreamingProgressOwnedArtifactKey(
+  storage: AppStorageFacade,
+  threadId: string,
+  key: string,
+): void {
+  const ownedKeysByThread = getChatStreamingProgressOwnedArtifactKeyMap(storage);
+  const ownedKeys = ownedKeysByThread.get(threadId) ?? new Set<string>();
+  ownedKeys.add(key);
+  ownedKeysByThread.set(threadId, ownedKeys);
+}
+
+function collectChatStreamingProgressOwnedArtifactKeys(
+  storage: AppStorageFacade,
+  threadId: string,
+  ...sources: (Iterable<string> | undefined)[]
+): Set<string> {
+  const ownedKeys = new Set(
+    getChatStreamingProgressOwnedArtifactKeyMap(storage).get(threadId) ?? [],
+  );
+  sources.forEach((source) => {
+    if (source) {
+      for (const key of source) {
+        ownedKeys.add(key);
+      }
+    }
+  });
+  return ownedKeys;
 }
 
 function hasSameProgressOperationIdentity(
@@ -2117,20 +2179,27 @@ function writeInitialProgressCheckpoint(
     return { status: 'rejected', reason: 'record_too_large' };
   }
 
+  const operationKey = getChatStreamingOperationStorageKey(progress.threadId, operationSlot);
   writeSerializedChatRecord(
     storage,
-    getChatStreamingOperationStorageKey(progress.threadId, operationSlot),
+    operationKey,
     operationSerialization.serialized,
     operationSerialization.bytes,
     'progress_operation',
   );
+  recordChatStreamingProgressOwnedArtifactKey(storage, progress.threadId, operationKey);
+  const checkpointKey = getChatStreamingProgressCheckpointStorageKey(
+    progress.threadId,
+    checkpointSlot,
+  );
   writeSerializedChatRecord(
     storage,
-    getChatStreamingProgressCheckpointStorageKey(progress.threadId, checkpointSlot),
+    checkpointKey,
     checkpointSerialization.serialized,
     checkpointSerialization.bytes,
     'progress_checkpoint',
   );
+  recordChatStreamingProgressOwnedArtifactKey(storage, progress.threadId, checkpointKey);
   writeSerializedChatRecord(
     storage,
     getChatStreamingProgressStorageKey(progress.threadId),
@@ -2145,6 +2214,12 @@ function writeInitialProgressCheckpoint(
     operationSlot,
     checkpointSlot,
     activeChunkSlots: new Set(),
+    ownedArtifactKeys: collectChatStreamingProgressOwnedArtifactKeys(
+      storage,
+      progress.threadId,
+      previousState?.ownedArtifactKeys,
+      getChatStreamingProgressManifestArtifactKeys(manifest),
+    ),
     operationBytes: operationSerialization.bytes,
     checkpointBytes: checkpointSerialization.bytes,
     manifestBytes: manifestSerialization.bytes,
@@ -2196,13 +2271,18 @@ function writeCompactedProgressCheckpoint(
     return { status: 'rejected', reason: 'record_too_large' };
   }
 
+  const checkpointKey = getChatStreamingProgressCheckpointStorageKey(
+    progress.threadId,
+    checkpointSlot,
+  );
   writeSerializedChatRecord(
     storage,
-    getChatStreamingProgressCheckpointStorageKey(progress.threadId, checkpointSlot),
+    checkpointKey,
     checkpointSerialization.serialized,
     checkpointSerialization.bytes,
     'progress_checkpoint',
   );
+  recordChatStreamingProgressOwnedArtifactKey(storage, progress.threadId, checkpointKey);
   writeSerializedChatRecord(
     storage,
     getChatStreamingProgressStorageKey(progress.threadId),
@@ -2217,6 +2297,12 @@ function writeCompactedProgressCheckpoint(
     operationSlot: currentState.operationSlot,
     checkpointSlot,
     activeChunkSlots: new Set(),
+    ownedArtifactKeys: collectChatStreamingProgressOwnedArtifactKeys(
+      storage,
+      progress.threadId,
+      currentState.ownedArtifactKeys,
+      getChatStreamingProgressManifestArtifactKeys(manifest),
+    ),
     operationBytes: currentState.operationBytes,
     checkpointBytes: checkpointSerialization.bytes,
     manifestBytes: manifestSerialization.bytes,
@@ -2294,13 +2380,15 @@ function writeProgressDelta(
     return writeCompactedProgressCheckpoint(storage, progress, currentState, writerStates);
   }
 
+  const chunkKey = getChatStreamingProgressChunkStorageKey(progress.threadId, slot);
   writeSerializedChatRecord(
     storage,
-    getChatStreamingProgressChunkStorageKey(progress.threadId, slot),
+    chunkKey,
     chunkSerialization.serialized,
     chunkSerialization.bytes,
     'progress_chunk',
   );
+  recordChatStreamingProgressOwnedArtifactKey(storage, progress.threadId, chunkKey);
   writeSerializedChatRecord(
     storage,
     getChatStreamingProgressStorageKey(progress.threadId),
@@ -2317,6 +2405,12 @@ function writeProgressDelta(
     operationSlot: currentState.operationSlot,
     checkpointSlot: currentState.checkpointSlot,
     activeChunkSlots,
+    ownedArtifactKeys: collectChatStreamingProgressOwnedArtifactKeys(
+      storage,
+      progress.threadId,
+      currentState.ownedArtifactKeys,
+      getChatStreamingProgressManifestArtifactKeys(manifest),
+    ),
     operationBytes: currentState.operationBytes,
     checkpointBytes: currentState.checkpointBytes,
     manifestBytes: manifestSerialization.bytes,
@@ -2396,28 +2490,80 @@ export function writeChatStreamingProgressRecord(
   return writeProgressDelta(storage, progress, currentState, writerStates);
 }
 
-export function removeChatStreamingProgressRecord(storage: AppStorageFacade, threadId: string): void {
-  storage.remove(getChatStreamingProgressStorageKey(threadId));
-  getChatStreamingProgressWriterStateMap(storage).delete(threadId);
-
-  const artifactKeys = [
-    getChatStreamingOperationStorageKey(threadId, 0),
-    getChatStreamingOperationStorageKey(threadId, 1),
-    getChatStreamingProgressCheckpointStorageKey(threadId, 0),
-    getChatStreamingProgressCheckpointStorageKey(threadId, 1),
-    ...Array.from(
-      { length: MAX_CHAT_PROGRESS_CHUNKS },
-      (_unused, slot) => getChatStreamingProgressChunkStorageKey(threadId, slot),
-    ),
+function listBoundedChatStreamingProgressOrphanArtifactKeys(
+  storage: Pick<AppStorageFacade, 'getAllKeys'>,
+  threadId: string,
+): string[] {
+  const encodedThreadId = encodeURIComponent(threadId);
+  const headKey = getChatStreamingProgressStorageKey(threadId);
+  const slottedPrefixes = [
+    `${CHAT_STREAM_OPERATION_STORAGE_KEY_PREFIX}${encodedThreadId}:`,
+    `${CHAT_STREAM_PROGRESS_CHECKPOINT_STORAGE_KEY_PREFIX}${encodedThreadId}:`,
+    `${CHAT_STREAM_PROGRESS_CHUNK_STORAGE_KEY_PREFIX}${encodedThreadId}:`,
   ];
+  const matchingKeys = storage.getAllKeys().filter((key) => (
+    key !== headKey && slottedPrefixes.some((prefix) => key.startsWith(prefix))
+  ));
+  const canonicalKeys: string[] = [];
+  const malformedKeys: string[] = [];
+  matchingKeys.forEach((key) => {
+    if (getThreadIdFromChatStreamingProgressArtifactStorageKey(key) === threadId) {
+      canonicalKeys.push(key);
+    } else {
+      malformedKeys.push(key);
+    }
+  });
+
+  return [...canonicalKeys, ...malformedKeys].slice(
+    0,
+    MAX_CHAT_PROGRESS_ORPHAN_SWEEP_KEYS,
+  );
+}
+
+export function removeChatStreamingProgressRecord(storage: AppStorageFacade, threadId: string): void {
+  const writerStates = getChatStreamingProgressWriterStateMap(storage);
+  const cachedWriterState = writerStates.get(threadId);
+  const currentResult = readChatStreamingProgressState(storage, threadId);
+  const currentWriterState = currentResult.ok ? currentResult.writerState : undefined;
+  const artifactKeys = collectChatStreamingProgressOwnedArtifactKeys(
+    storage,
+    threadId,
+    cachedWriterState?.ownedArtifactKeys,
+    currentWriterState?.ownedArtifactKeys,
+  );
+  const headKey = getChatStreamingProgressStorageKey(threadId);
+
+  // The head is the authoritative publication point. If it cannot be removed,
+  // keep every referenced data record and the writer cache intact.
+  storage.remove(headKey);
+  writerStates.delete(threadId);
+
   let firstError: unknown;
+  if (!currentResult.ok) {
+    try {
+      listBoundedChatStreamingProgressOrphanArtifactKeys(storage, threadId)
+        .forEach((key) => artifactKeys.add(key));
+    } catch (error) {
+      firstError = error;
+    }
+  }
+
+  const failedArtifactKeys = new Set<string>();
   artifactKeys.forEach((key) => {
     try {
       storage.remove(key);
     } catch (error) {
+      failedArtifactKeys.add(key);
       firstError ??= error;
     }
   });
+
+  const ownedKeysByThread = getChatStreamingProgressOwnedArtifactKeyMap(storage);
+  if (failedArtifactKeys.size > 0) {
+    ownedKeysByThread.set(threadId, failedArtifactKeys);
+  } else {
+    ownedKeysByThread.delete(threadId);
+  }
   if (firstError) {
     throw firstError;
   }
@@ -2466,6 +2612,7 @@ export function clearChatStreamingProgressRecords(storage: AppStorageFacade): vo
     throw firstError;
   }
   chatStreamingProgressWriterStates.delete(storage as object);
+  chatStreamingProgressOwnedArtifactKeys.delete(storage as object);
 }
 
 function resolveClearTombstoneTimestamp(storage: AppStorageFacade, now = Date.now()): number {

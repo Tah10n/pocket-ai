@@ -124,7 +124,7 @@
     "pako": "^2.1.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "react-i18next": "^17.0.8",
+    "react-i18next": "^17.0.10",
     "react-native": "0.83.6",
     "react-native-background-actions": "^4.1.0",
     "react-native-device-info": "^15.0.2",

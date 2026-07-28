@@ -151,7 +151,10 @@ import {
   type LlamaFormattedChatResult,
   type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
-import { DISABLED_PROMPT_STATE_CACHE_CONTEXT_PARAMS } from './PromptStateCachePolicy';
+import {
+  resolvePromptStateCachePolicy,
+  type PromptStateCachePolicy,
+} from './PromptStateCachePolicy';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from './ProjectorArtifactService';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
@@ -684,6 +687,7 @@ function sanitizeMemoryFit(value: unknown): Record<string, unknown> | undefined 
   const breakdown = sanitizeNumericRecord(getOwnDataProperty(source, 'breakdown'), [
     'weightsBytes',
     'kvCacheBytes',
+    'promptStateCacheBytes',
     'computeBytes',
     'multimodalBytes',
     'overheadBytes',
@@ -5288,6 +5292,8 @@ class LLMEngineService {
         rawSystemMemorySnapshot,
         recentUnloadReclaim,
       );
+      const lowMemorySignal = systemMemorySnapshot?.lowMemory
+        ?? hardwareListenerService.getCurrentStatus().isLowMemory;
       const observedRawBudgetBytes = this.resolveObservedRawBudgetBytes(rawSystemMemorySnapshot);
       let totalMemoryBytes: number | null = null;
       try {
@@ -5763,7 +5769,6 @@ class LLMEngineService {
           };
         }
 
-        const lowMemorySignal = systemMemorySnapshot?.lowMemory ?? hardwareListenerService.getCurrentStatus().isLowMemory;
         const configuredContextCeilingTokens = (
           typeof loadParams.contextSize === 'number'
           && Number.isFinite(loadParams.contextSize)
@@ -6243,7 +6248,102 @@ class LLMEngineService {
         });
       };
 
-      const applyCalibrationForGpuLayers = (nextGpuLayers: number) => {
+      const estimateMemoryFitForInitProfile = ({
+        profile,
+        layers,
+        stateCacheBudgetMb,
+      }: {
+        profile: InitInferenceProfile;
+        layers: number;
+        stateCacheBudgetMb: number;
+      }): MemoryFitResult | null => {
+        if (
+          typeof resolvedModelSizeBytes !== 'number'
+          || !Number.isFinite(resolvedModelSizeBytes)
+          || resolvedModelSizeBytes <= 0
+        ) {
+          return null;
+        }
+
+        const normalizedLayers = Math.max(0, Math.round(layers));
+        const calibrationKey = verifiedFileSizeBytes !== null
+          ? this.buildCalibrationKeyString({
+              ggufMetadata,
+              verifiedFileSizeBytes,
+              contextTokens: finalContextSize,
+              gpuLayers: normalizedLayers,
+              cacheTypeK,
+              cacheTypeV,
+              useMmap: profile.useMmap,
+              hasMmproj: hasLoadTimeMmproj,
+              nBatch: profile.nBatch,
+              nUbatch: profile.nUbatch,
+            })
+          : null;
+        const calibrationRecord = calibrationKey
+          ? registry.getCalibrationRecord(calibrationKey)
+          : undefined;
+
+        return estimateAccurateMemoryFit({
+          input: {
+            ...requestedEstimatorInput,
+            runtimeParams: {
+              ...requestedEstimatorInput.runtimeParams,
+              contextTokens: finalContextSize,
+              gpuLayers: normalizedLayers,
+              useMmap: profile.useMmap,
+              stateCacheBudgetMb,
+              ...(typeof profile.nBatch === 'number' && typeof profile.nUbatch === 'number'
+                ? {
+                    nBatch: profile.nBatch,
+                    nUbatch: profile.nUbatch,
+                  }
+                : null),
+            },
+            calibrationRecord,
+          },
+          totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number'
+            && Number.isFinite(resolvedTotalMemoryBytes)
+            && resolvedTotalMemoryBytes > 0
+            ? resolvedTotalMemoryBytes
+            : null,
+        });
+      };
+
+      const resolvePromptStateCachePolicyForInitProfile = (
+        profile: InitInferenceProfile,
+        layers: number,
+      ): PromptStateCachePolicy => {
+        const baseMemoryFit = estimateMemoryFitForInitProfile({
+          profile,
+          layers,
+          stateCacheBudgetMb: 0,
+        });
+
+        return resolvePromptStateCachePolicy({
+          ggufMetadata,
+          backendMode: profile.backendMode,
+          backendDevices: profile.devices,
+          baseMemoryFit,
+          lowMemory: lowMemorySignal,
+          pressureLevel: systemMemorySnapshot?.pressureLevel ?? null,
+          allowAdditionalMemory: !shouldUseSafeLoadProfile
+            && !shouldUseLowMemoryContextParams
+            && !safeLoadValidation.unsafeMemoryBypassedHardBlock,
+          estimateCandidateMemoryFit: (stateCacheBudgetMb) => (
+            estimateMemoryFitForInitProfile({
+              profile,
+              layers,
+              stateCacheBudgetMb,
+            }) ?? baseMemoryFit!
+          ),
+        });
+      };
+
+      const applyCalibrationForGpuLayers = (
+        nextGpuLayers: number,
+        promptStateCachePolicy: PromptStateCachePolicy,
+      ) => {
         const normalized = Math.max(0, Math.round(nextGpuLayers));
         resolvedGpuLayers = normalized;
         calibrationKeyForLoad = verifiedFileSizeBytes !== null
@@ -6278,6 +6378,7 @@ class LLMEngineService {
                 contextTokens: finalContextSize,
                 gpuLayers: normalized,
                 useMmap: requestedUseMmap,
+                stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
                 ...(effectiveBatchParams
                   ? {
                       nBatch: effectiveBatchParams.nBatch,
@@ -6292,7 +6393,7 @@ class LLMEngineService {
               : null,
           });
         } else {
-          predictedFitForLoad = memoryFit;
+          predictedFitForLoad = promptStateCachePolicy.finalMemoryFit ?? memoryFit;
         }
       };
 
@@ -6301,6 +6402,7 @@ class LLMEngineService {
         resolvedGpuLayers: number;
         successfulAttempt: EngineBackendInitAttempt;
         successfulFailureBoundIdentity: ModelInitFailureBoundIdentity;
+        promptStateCachePolicy: PromptStateCachePolicy;
       } | null> => {
         const {
           backendMode: candidate,
@@ -6321,6 +6423,7 @@ class LLMEngineService {
         const buildOptions = (
           layers: number,
           speculativeConfig: ModelSpeculativeDecodingConfig | null,
+          promptStateCachePolicy: PromptStateCachePolicy,
         ): LlamaContextInitParams => {
           // llama.cpp requires Flash Attention when using quantized V cache.
           // Some candidate profiles force flashAttnType='off' (e.g., CPU fallback). When
@@ -6330,7 +6433,8 @@ class LLMEngineService {
 
           return {
             model: modelPath,
-            ...DISABLED_PROMPT_STATE_CACHE_CONTEXT_PARAMS,
+            state_cache_budget_mb: promptStateCachePolicy.budgetMb,
+            state_cache_max_checkpoints: promptStateCachePolicy.maxCheckpoints,
             ...(speculativeConfig
               ? {
                   speculative: {
@@ -6416,6 +6520,7 @@ class LLMEngineService {
               context: LlamaContext;
               attempt: EngineBackendInitAttempt;
               failureBoundIdentity: ModelInitFailureBoundIdentity;
+              promptStateCachePolicy: PromptStateCachePolicy;
             }
           | { status: 'skipped'; decision: Exclude<ModelInitAttemptDecision, 'started'> };
 
@@ -6432,6 +6537,10 @@ class LLMEngineService {
         }): Promise<NativeInitAttemptResult> => {
           const normalizedAttemptLayers = Math.max(0, Math.round(layers));
           const speculativeEnabled = speculativeConfig !== null;
+          const promptStateCachePolicy = resolvePromptStateCachePolicyForInitProfile(
+            profile,
+            normalizedAttemptLayers,
+          );
           const identity = buildInitAttemptIdentity(profile, normalizedAttemptLayers, speculativeEnabled);
           const persistentIdentity = buildPersistentFailureBoundIdentity(
             profile,
@@ -6477,7 +6586,11 @@ class LLMEngineService {
           );
           try {
             const context = await initLlamaContext(
-              buildOptions(normalizedAttemptLayers, speculativeConfig),
+              buildOptions(
+                normalizedAttemptLayers,
+                speculativeConfig,
+                promptStateCachePolicy,
+              ),
               onProgress,
             );
             const durationMs = Math.max(0, Date.now() - startedAtMs);
@@ -6501,6 +6614,7 @@ class LLMEngineService {
               context,
               attempt,
               failureBoundIdentity: persistentIdentity,
+              promptStateCachePolicy,
             };
           } catch (error) {
             const durationMs = Math.max(0, Date.now() - startedAtMs);
@@ -6611,12 +6725,13 @@ class LLMEngineService {
           if (result.status === 'skipped') {
             return null;
           }
-          applyCalibrationForGpuLayers(0);
+          applyCalibrationForGpuLayers(0, result.promptStateCachePolicy);
           return {
             context: result.context,
             resolvedGpuLayers: 0,
             successfulAttempt: result.attempt,
             successfulFailureBoundIdentity: result.failureBoundIdentity,
+            promptStateCachePolicy: result.promptStateCachePolicy,
           };
         }
 
@@ -6643,12 +6758,16 @@ class LLMEngineService {
                 ?? normalizedLayers,
             );
           } else {
-            applyCalibrationForGpuLayers(normalizedLayers);
+            applyCalibrationForGpuLayers(
+              normalizedLayers,
+              result.promptStateCachePolicy,
+            );
             return {
               context: result.context,
               resolvedGpuLayers: normalizedLayers,
               successfulAttempt: result.attempt,
               successfulFailureBoundIdentity: result.failureBoundIdentity,
+              promptStateCachePolicy: result.promptStateCachePolicy,
             };
           }
         } catch (error) {
@@ -6725,12 +6844,16 @@ class LLMEngineService {
             if (result.status === 'skipped') {
               continue;
             }
-            applyCalibrationForGpuLayers(candidateLayers);
+            applyCalibrationForGpuLayers(
+              candidateLayers,
+              result.promptStateCachePolicy,
+            );
             return {
               context: result.context,
               resolvedGpuLayers: candidateLayers,
               successfulAttempt: result.attempt,
               successfulFailureBoundIdentity: result.failureBoundIdentity,
+              promptStateCachePolicy: result.promptStateCachePolicy,
             };
           } catch (retryError) {
             lastError = retryError;
@@ -7036,6 +7159,7 @@ class LLMEngineService {
       let resolvedInitGpuLayers: number | null = null;
       let resolvedRuntimeDevices: string[] | null = null;
       let resolvedInitActualGpu: boolean | null = null;
+      let resolvedPromptStateCachePolicy: PromptStateCachePolicy | null = null;
       let lastBackendInitError: unknown | null = null;
       for (let i = 0; i < inferenceCandidatesForInit.length; i += 1) {
         const profile = inferenceCandidatesForInit[i];
@@ -7052,6 +7176,7 @@ class LLMEngineService {
             resolvedGpuLayers: candidateGpuLayers,
             successfulAttempt,
             successfulFailureBoundIdentity,
+            promptStateCachePolicy,
           } = initResult;
           const reasonNoGPU = typeof context.reasonNoGPU === 'string' ? context.reasonNoGPU.trim() : '';
           const runtimeAccelerationEnabled = candidate === 'npu'
@@ -7095,6 +7220,7 @@ class LLMEngineService {
           resolvedInitProfile = profile;
           resolvedInitGpuLayers = candidateGpuLayers;
           resolvedInitActualGpu = actualGpu;
+          resolvedPromptStateCachePolicy = promptStateCachePolicy;
           resolvedRuntimeDevices = Array.isArray(context.devices)
             ? context.devices
                 .filter((device): device is string => typeof device === 'string')
@@ -7103,9 +7229,9 @@ class LLMEngineService {
             : null;
 
           if (!actualGpu) {
-            applyCalibrationForGpuLayers(0);
+            applyCalibrationForGpuLayers(0, promptStateCachePolicy);
           } else if (candidateGpuLayers !== resolvedGpuLayers) {
-            applyCalibrationForGpuLayers(candidateGpuLayers);
+            applyCalibrationForGpuLayers(candidateGpuLayers, promptStateCachePolicy);
           }
 
           this.setContext(context);
@@ -7177,6 +7303,22 @@ class LLMEngineService {
         initDiagnostics = {
           ...initDiagnostics,
           resolvedGpuLayers,
+          ...(resolvedPromptStateCachePolicy
+            ? {
+                promptStateCachePolicy: {
+                  budgetMb: resolvedPromptStateCachePolicy.budgetMb,
+                  maxCheckpoints: resolvedPromptStateCachePolicy.maxCheckpoints,
+                  enabled: resolvedPromptStateCachePolicy.enabled,
+                  eligibility: resolvedPromptStateCachePolicy.eligibility,
+                  reason: resolvedPromptStateCachePolicy.reason,
+                  policyVersion: resolvedPromptStateCachePolicy.policyVersion,
+                  architecture: resolvedPromptStateCachePolicy.architecture,
+                  backendMode: resolvedPromptStateCachePolicy.backendMode,
+                  promptStateCacheBytes:
+                    resolvedPromptStateCachePolicy.finalMemoryFit?.breakdown.promptStateCacheBytes ?? 0,
+                },
+              }
+            : null),
         };
       }
 

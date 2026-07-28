@@ -496,6 +496,37 @@ describe('LLMEngineService', () => {
     }
   });
 
+  it('enables the largest memory-safe prompt state cache tier for eligible runtime metadata', async () => {
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
+      'general.architecture': 'mamba',
+      'general.type': 'model',
+      'mamba.block_count': 32,
+      'mamba.embedding_length': 4096,
+    });
+
+    await expect(llmEngineService.load('test/model', { forceReload: true })).resolves.toBeUndefined();
+
+    const initParams = (llamaRn.initLlama as jest.Mock).mock.calls.map(([params]) => params);
+    expect(initParams.length).toBeGreaterThan(0);
+    for (const params of initParams) {
+      expect(params).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 160,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
+  });
+
   it('blocks completion at the service boundary when the expected thread model differs', async () => {
     await llmEngineService.load('test/model');
 

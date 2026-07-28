@@ -274,6 +274,7 @@ export function applySuccessfulCalibrationObservation({
   );
   const predictedOtherBytes = sumPositiveByteCounts(
     predictedBreakdown.kvCacheBytes,
+    predictedBreakdown.promptStateCacheBytes,
     predictedBreakdown.multimodalBytes,
   );
 

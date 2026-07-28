@@ -72,6 +72,7 @@ describe('memory calibration', () => {
     const predictedBreakdown = {
       weightsBytes: 100,
       kvCacheBytes: 10,
+      promptStateCacheBytes: 0,
       computeBytes: 50,
       multimodalBytes: 0,
       overheadBytes: 50,

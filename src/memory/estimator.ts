@@ -18,9 +18,18 @@ const MAX_SAFETY_MARGIN_BYTES = 1024 * 1024 * 1024;
 const FAST_ESTIMATE_DEFAULT_CONTEXT_TOKENS = 4096;
 const FAST_ESTIMATE_MIN_APP_BASELINE_BYTES = 256 * 1024 * 1024;
 const FAST_ESTIMATE_DEFAULT_THRESHOLD_BYTES = 432 * 1024 * 1024;
+const RECURRENT_ARCHITECTURES_WITHOUT_ATTENTION_KV = new Set([
+  'mamba',
+  'mamba2',
+  'rwkv6',
+  'rwkv6qwen2',
+  'rwkv7',
+  'arwkv7',
+]);
 const UNKNOWN_BREAKDOWN: MemoryBreakdown = {
   weightsBytes: 0,
   kvCacheBytes: 0,
+  promptStateCacheBytes: 0,
   computeBytes: 0,
   multimodalBytes: 0,
   overheadBytes: 0,
@@ -85,6 +94,26 @@ function readNumericRuntimeParam(runtimeParams: Record<string, unknown>, keys: s
   return null;
 }
 
+function readNonNegativeNumericRuntimeParam(
+  runtimeParams: Record<string, unknown>,
+  keys: string[],
+): number | null {
+  for (const key of keys) {
+    const value = runtimeParams[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
 function readBooleanRuntimeParam(runtimeParams: Record<string, unknown>, keys: string[]): boolean | null {
   for (const key of keys) {
     const value = runtimeParams[key];
@@ -109,6 +138,7 @@ function sumBreakdown(breakdown: MemoryBreakdown): number {
   return (
     breakdown.weightsBytes
     + breakdown.kvCacheBytes
+    + breakdown.promptStateCacheBytes
     + breakdown.computeBytes
     + breakdown.multimodalBytes
     + breakdown.overheadBytes
@@ -122,6 +152,7 @@ function createBaseBreakdownForModelSize(modelSizeBytes: number): MemoryBreakdow
   return {
     weightsBytes,
     kvCacheBytes: 0,
+    promptStateCacheBytes: 0,
     computeBytes: 0,
     multimodalBytes: 0,
     overheadBytes,
@@ -221,6 +252,13 @@ function resolveGgufArchitecturePrefixes(ggufMetadata?: Record<string, unknown>)
   }
 
   return Array.from(prefixes);
+}
+
+function architectureRequiresAttentionKvMetadata(
+  ggufMetadata: Record<string, unknown> | undefined,
+): boolean {
+  const [architecture] = resolveGgufArchitecturePrefixes(ggufMetadata);
+  return !architecture || !RECURRENT_ARCHITECTURES_WITHOUT_ATTENTION_KV.has(architecture);
 }
 
 function withPrefixes(prefixes: string[], suffixes: string[]): string[] {
@@ -437,6 +475,18 @@ function estimateRuntimeOverheadBytes({
   return Math.round(overhead);
 }
 
+function resolvePromptStateCacheBytes(runtimeParams: Record<string, unknown>): number {
+  const budgetMb = readNonNegativeNumericRuntimeParam(
+    runtimeParams,
+    ['stateCacheBudgetMb', 'state_cache_budget_mb'],
+  ) ?? 0;
+  const bytes = budgetMb * 1024 * 1024;
+
+  return Number.isFinite(bytes) && bytes >= 0 && bytes <= Number.MAX_SAFE_INTEGER
+    ? Math.round(bytes)
+    : 0;
+}
+
 function estimateSafetyMarginBytes({
   baseBytes,
   snapshotLowMemory,
@@ -479,6 +529,7 @@ function createComponentBreakdown(input: EstimatorInput): {
         : null
   );
   const { kvCacheBytes, hasKvMetadata } = estimateKvCacheBytes({ ggufMetadata, runtimeParams: input.runtimeParams });
+  const promptStateCacheBytes = resolvePromptStateCacheBytes(input.runtimeParams);
   const computeBufferBytes = estimateComputeBufferBytes({
     architecture,
     weightsBytes: weightsResidentBytes,
@@ -519,6 +570,7 @@ function createComponentBreakdown(input: EstimatorInput): {
     breakdown: {
       weightsBytes: calibratedWeightsResidentBytes,
       kvCacheBytes,
+      promptStateCacheBytes,
       computeBytes: calibratedComputeBufferBytes,
       multimodalBytes: multimodalProjectionBytes,
       overheadBytes: calibratedRuntimeOverheadBytes,
@@ -755,7 +807,7 @@ export function estimateAccurateMemoryFit({
   const requiredBytesTotal = sumBreakdown(breakdown);
   const needsKvMetadata = Boolean(
     readNumericRuntimeParam(input.runtimeParams, ['contextTokens', 'contextSize', 'n_ctx', 'nCtx']),
-  );
+  ) && architectureRequiresAttentionKvMetadata(input.ggufMetadata);
 
   const {
     effectiveBudgetBytes: baseEffectiveBudgetBytes,

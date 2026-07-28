@@ -946,6 +946,69 @@ describe('useChatSession', () => {
     });
   });
 
+  it('stops in-flight document processing before it can mutate chat state', async () => {
+    const getSession = renderHookHarness();
+    const documentRead = createDeferred<string>();
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'document-stop-1',
+      pickerUri: 'content://documents/document-stop-1.txt',
+      localUri: 'test-dir/chat-attachments/document-stop-1.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'document-stop-1.txt',
+      displayName: 'Stop during processing.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    (FileSystem.readAsStringAsync as jest.Mock).mockReturnValueOnce(documentRead.promise);
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    let sendPromise: Promise<void> | undefined;
+
+    act(() => {
+      sendPromise = getSession()?.appendUserMessage('', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    await waitFor(() => {
+      expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith(
+        documentDraft.localUri,
+        { encoding: FileSystem.EncodingType.UTF8 },
+      );
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await sendPromise;
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+
+    await act(async () => {
+      documentRead.resolve('Late document text must stay detached');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
   it('resolves each stable retained attachment URI once and reuses the prepared payload for completion', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
@@ -1275,7 +1338,10 @@ describe('useChatSession', () => {
     expect(llmEngineService.stopCompletion).toHaveBeenCalled();
     expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(tokenizerCallsAtStop);
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
-    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    const stoppedThread = useChatStore.getState().getActiveThread()!;
+    expect(stoppedThread.status).toBe('stopped');
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expectNoStreamingProgressArtifacts(stoppedThread.id);
   });
 
   it('stops scheduling filesystem lookups after candidate attachment preparation is cancelled', async () => {
@@ -6089,7 +6155,81 @@ describe('useChatSession', () => {
     expect(afterLatePromptPreparation.status).toBe('idle');
     expect(afterLatePromptPreparation.messages.map((message) => message.id)).toEqual(originalMessageIds);
     expectNoStreamingProgressArtifacts(prepared.threadId);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a normal send during prompt counting and isolates the next generation', async () => {
+    const getSession = renderHookHarness();
+    const oldPromptCount = createDeferred<number>();
+    let blockingPromptCountCalls = 0;
+    exactPromptTokenCache.clear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+
+        blockingPromptCountCalls += 1;
+        if (blockingPromptCountCalls === 1) {
+          return oldPromptCount.promise;
+        }
+        return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+      },
+    );
+    let oldSendPromise: Promise<void> | undefined;
+
+    act(() => {
+      oldSendPromise = getSession()?.appendUserMessage('Request cleared during prompt count');
+    });
+    await waitFor(() => {
+      expect(blockingPromptCountCalls).toBe(1);
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+    const clearedThreadId = useChatStore.getState().activeThreadId!;
+
+    await act(async () => {
+      await expect(clearChatHistory()).resolves.toBe(1);
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(storage.getString(getChatThreadStorageKey(clearedThreadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(clearedThreadId);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh request after clear');
+    });
+
+    const freshThread = useChatStore.getState().getActiveThread()!;
+    expect(freshThread.id).not.toBe(clearedThreadId);
+    expect(freshThread.messages.map((message) => message.content)).toEqual([
+      'Fresh request after clear',
+      'Hello back',
+    ]);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+
+    await act(async () => {
+      oldPromptCount.resolve(16);
+      await oldSendPromise;
+    });
+
+    expect(useChatStore.getState().getActiveThread()).toEqual(freshThread);
+    expect(useChatStore.getState().getActiveThread()?.messages.map(
+      (message) => message.content,
+    )).toEqual([
+      'Fresh request after clear',
+      'Hello back',
+    ]);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expectNoStreamingProgressArtifacts(clearedThreadId);
   });
 
   it('clears history during pre-native branch regeneration without a late restore', async () => {
@@ -6128,6 +6268,7 @@ describe('useChatSession', () => {
       threads: {},
     }));
     expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBeUndefined();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
 
     await act(async () => {
       resolvePromptCount?.();
@@ -6182,6 +6323,8 @@ describe('useChatSession', () => {
     }));
     expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBeUndefined();
     expectNoStreamingProgressArtifacts(prepared.threadId);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
   it('prompt preparation error before first token restores the previous branch', async () => {

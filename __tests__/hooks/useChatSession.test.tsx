@@ -6921,6 +6921,31 @@ describe('useChatSession', () => {
     expect(useChatStore.getState().activeThreadId).toBe(threadTwoId);
   });
 
+  it('dismisses the thread inference notification after deleting the conversation', async () => {
+    const dismissSpy = jest.spyOn(
+      notificationService,
+      'dismissInferenceNotificationForThread',
+    ).mockResolvedValueOnce(undefined);
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Conversation to delete');
+    });
+    const threadId = useChatStore.getState().activeThreadId!;
+
+    try {
+      act(() => {
+        getSession()?.deleteThread(threadId);
+      });
+
+      expect(useChatStore.getState().getThread(threadId)).toBeNull();
+      expect(dismissSpy).toHaveBeenCalledTimes(1);
+      expect(dismissSpy).toHaveBeenCalledWith(threadId);
+    } finally {
+      dismissSpy.mockRestore();
+    }
+  });
+
   it('blocks deleting a live generating thread from another hook instance', async () => {
     let resolveCompletion: (() => void) | undefined;
 

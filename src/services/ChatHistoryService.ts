@@ -1,6 +1,7 @@
 import { useChatStore } from '../store/chatStore';
 import { AppError } from './AppError';
 import { stopAllGenerationWork } from './ChatGenerationService';
+import { notificationService } from './NotificationService';
 import { clearLegacyChatHistory } from './SettingsStore';
 
 function getChatHistoryPostcondition() {
@@ -18,6 +19,7 @@ function getChatHistoryPostcondition() {
 export async function clearChatHistory(): Promise<number> {
   const drainResult = await stopAllGenerationWork();
   const store = useChatStore.getState();
+  const removedThreadIds = Object.keys(store.threads);
   let removedThreads = store.clearAllThreads();
   let postcondition = getChatHistoryPostcondition();
 
@@ -43,5 +45,8 @@ export async function clearChatHistory(): Promise<number> {
   }
 
   const removedLegacyEntries = clearLegacyChatHistory();
+  removedThreadIds.forEach((threadId) => {
+    void notificationService.dismissInferenceNotificationForThread(threadId);
+  });
   return removedThreads + removedLegacyEntries;
 }

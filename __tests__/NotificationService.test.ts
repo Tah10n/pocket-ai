@@ -218,6 +218,7 @@ describe('NotificationService', () => {
     await notificationService.sendInferenceErrorNotification({ threadId: 'thread-3' });
 
     expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(1, {
+      identifier: 'pocket-ai:inference:thread-1',
       content: expect.objectContaining({
         title: 'notifications.inference.complete.title',
         data: { taskType: 'inference', threadId: 'thread-1' },
@@ -225,6 +226,7 @@ describe('NotificationService', () => {
       trigger: { channelId: 'inference' },
     });
     expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(2, {
+      identifier: 'pocket-ai:inference:thread-2',
       content: expect.objectContaining({
         title: 'notifications.inference.interrupted.title',
         data: { taskType: 'inference', threadId: 'thread-2' },
@@ -232,12 +234,45 @@ describe('NotificationService', () => {
       trigger: { channelId: 'inference' },
     });
     expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(3, {
+      identifier: 'pocket-ai:inference:thread-3',
       content: expect.objectContaining({
         title: 'notifications.inference.error.title',
         data: { taskType: 'inference', threadId: 'thread-3' },
       }),
       trigger: { channelId: 'inference' },
     });
+  });
+
+  it('dismisses only the deterministic inference notification for a deleted thread', async () => {
+    await expect(
+      notificationService.dismissInferenceNotificationForThread('thread/with space'),
+    ).resolves.toBeUndefined();
+
+    expect(Notifications.dismissNotificationAsync).toHaveBeenCalledTimes(1);
+    expect(Notifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'pocket-ai:inference:thread%2Fwith%20space',
+    );
+  });
+
+  it('does not let inference notification dismissal failures block deletion flows', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (Notifications.dismissNotificationAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('native dismiss failed'),
+    );
+
+    await expect(
+      notificationService.dismissInferenceNotificationForThread('thread-1'),
+    ).resolves.toBeUndefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[NotificationService] Failed to dismiss inference notification',
+      expect.objectContaining({
+        scope: 'inference_notification_dismiss',
+        errorName: 'Error',
+      }),
+    );
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it('refuses to start foreground-service notifications on Android when notifications are denied', async () => {

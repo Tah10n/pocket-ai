@@ -3093,7 +3093,12 @@ export const useChatSession = () => {
           paramsSnapshot: newThreadModelParams,
         });
 
-      setActiveThread(threadId);
+      if (!setActiveThread(threadId)) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed before it could become active. Try again.',
+        );
+      }
 
       const threadForSend = assertThreadModelExecutionInvariant(threadId, targetModelId);
       const threadModelId = getThreadActiveModelId(threadForSend);
@@ -3402,7 +3407,9 @@ export const useChatSession = () => {
       throw new Error('Stop the current response before starting a new chat.');
     }
 
-    setActiveThread(null);
+    if (!setActiveThread(null)) {
+      throw new Error('The new conversation could not be opened.');
+    }
   }, [activeThread, setActiveThread]);
 
   const openThread = useCallback((threadId: string) => {
@@ -3418,7 +3425,9 @@ export const useChatSession = () => {
     assertPrivateStorageWritableForChatMutation();
 
     syncThreadParametersCallback(thread);
-    setActiveThread(threadId);
+    if (!setActiveThread(threadId)) {
+      throw new Error('The selected conversation is no longer available.');
+    }
   }, [activeThread, setActiveThread, syncThreadParametersCallback]);
 
   const deleteThread = useCallback((threadId: string) => {
@@ -3430,6 +3439,9 @@ export const useChatSession = () => {
     assertPrivateStorageWritableForChatMutation();
 
     deleteThreadState(threadId);
+    if (thread && !useChatStore.getState().getThread(threadId)) {
+      void notificationService.dismissInferenceNotificationForThread(threadId);
+    }
   }, [deleteThreadState]);
 
   const renameThread = useCallback((threadId: string, title: string) => {

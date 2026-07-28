@@ -41,6 +41,12 @@ jest.mock('../../src/services/ChatGenerationService', () => ({
   stopAllGenerationWork: jest.fn().mockResolvedValue('drained'),
 }));
 
+jest.mock('../../src/services/NotificationService', () => ({
+  notificationService: {
+    dismissInferenceNotificationForThread: jest.fn().mockResolvedValue(undefined),
+  },
+}));
+
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
     getModels: jest.fn().mockReturnValue([]),
@@ -83,6 +89,7 @@ import { offloadModel } from '../../src/services/StorageManagerService';
 import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { stopAllGenerationWork } from '../../src/services/ChatGenerationService';
+import { notificationService } from '../../src/services/NotificationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { modelCatalogService } from '../../src/services/ModelCatalogService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
@@ -176,6 +183,7 @@ describe('StorageManagerService', () => {
       threads: mockThreads,
     }));
     (stopAllGenerationWork as jest.Mock).mockResolvedValue('drained');
+    (notificationService.dismissInferenceNotificationForThread as jest.Mock).mockResolvedValue(undefined);
     mockedRegistry.getModels.mockReturnValue([]);
     mockedRegistry.getModel.mockReturnValue(undefined);
     mockedRegistry.validateRegistry.mockResolvedValue(undefined);
@@ -214,6 +222,9 @@ describe('StorageManagerService', () => {
     expect(stopAllGenerationWork).toHaveBeenCalledTimes(1);
     expect(mockClearAllThreads).toHaveBeenCalledTimes(1);
     expect(clearLegacyChatHistory).toHaveBeenCalledTimes(1);
+    expect(notificationService.dismissInferenceNotificationForThread).toHaveBeenCalledTimes(2);
+    expect(notificationService.dismissInferenceNotificationForThread).toHaveBeenCalledWith('first');
+    expect(notificationService.dismissInferenceNotificationForThread).toHaveBeenCalledWith('second');
     expect(
       (stopAllGenerationWork as jest.Mock).mock.invocationCallOrder[0],
     ).toBeLessThan(mockClearAllThreads.mock.invocationCallOrder[0]);

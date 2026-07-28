@@ -4753,6 +4753,30 @@ describe('chatStore', () => {
     expect(readPersistedChatIndex().activeThreadId).toBeNull();
   });
 
+  it('rejects a missing active thread without damaging the valid selection', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    expect(useChatStore.getState().setActiveThread(threadId)).toBe(true);
+    expect(useChatStore.getState().setActiveThread('missing-notification-thread')).toBe(false);
+
+    expect(useChatStore.getState().activeThreadId).toBe(threadId);
+    expect(readPersistedChatIndex().activeThreadId).toBe(threadId);
+  });
+
   it('recovers a pending thread commit when the record was written before the index update', async () => {
     const thread = buildThread('thread-pending-record-first', 20);
 

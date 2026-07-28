@@ -1,5 +1,5 @@
 import BackgroundService from 'react-native-background-actions';
-import { Linking, Platform } from 'react-native';
+import { Alert, Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 
@@ -8,9 +8,13 @@ jest.mock('../../src/i18n', () => ({
 }));
 
 const mockSetActiveThread = jest.fn();
+let mockActiveThreadId: string | null;
+let mockThreads: Record<string, { id: string }>;
 jest.mock('../../src/store/chatStore', () => ({
   useChatStore: {
     getState: () => ({
+      activeThreadId: mockActiveThreadId,
+      threads: mockThreads,
       setActiveThread: mockSetActiveThread,
     }),
   },
@@ -31,6 +35,18 @@ describe('NotificationService (behavior)', () => {
     (notificationService as any).permissionState = 'unknown';
     (notificationService as any).hasHandledInitialResponse = false;
     (notificationService as any).responseSubscription = undefined;
+    mockThreads = {
+      'thread-1': { id: 'thread-1' },
+      'thread-current': { id: 'thread-current' },
+    };
+    mockActiveThreadId = 'thread-current';
+    mockSetActiveThread.mockImplementation((threadId: string | null) => {
+      if (threadId !== null && !mockThreads[threadId]) {
+        return false;
+      }
+      mockActiveThreadId = threadId;
+      return true;
+    });
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
     (Notifications.requestPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
     (Notifications.getNotificationChannelsAsync as jest.Mock).mockResolvedValue([]);
@@ -74,10 +90,40 @@ describe('NotificationService (behavior)', () => {
     });
 
     expect(mockSetActiveThread).toHaveBeenCalledWith('thread-1');
+    expect(mockActiveThreadId).toBe('thread-1');
     expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
+    expect(router.push).toHaveBeenCalledTimes(1);
   });
 
-  it('navigates to chat from an initial inference notification response without changing thread when none is provided', async () => {
+  it('routes a stale inference target safely without changing the valid active thread', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await notificationService.initialize();
+    delete mockThreads['thread-1'];
+
+    const listener = (Notifications.addNotificationResponseReceivedListener as jest.Mock).mock.calls[0][0];
+    listener({
+      notification: {
+        request: {
+          content: {
+            data: { taskType: 'inference', threadId: 'thread-1' },
+          },
+        },
+      },
+    });
+
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/conversations');
+    expect(alertSpy).toHaveBeenCalledWith(
+      'notifications.conversationUnavailable.title',
+      'notifications.conversationUnavailable.body',
+    );
+    alertSpy.mockRestore();
+  });
+
+  it('routes an initial inference response without threadId to the safe conversation list', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
     (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValueOnce({
       notification: {
         request: {
@@ -90,8 +136,63 @@ describe('NotificationService (behavior)', () => {
 
     await notificationService.initialize();
 
-    expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/conversations');
     expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(alertSpy).toHaveBeenCalledWith(
+      'notifications.conversationUnavailable.title',
+      'notifications.conversationUnavailable.body',
+    );
+    alertSpy.mockRestore();
+  });
+
+  it('routes an inference payload with a non-string threadId safely', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await notificationService.initialize();
+
+    const listener = (Notifications.addNotificationResponseReceivedListener as jest.Mock).mock.calls[0][0];
+    listener({
+      notification: {
+        request: {
+          content: {
+            data: { taskType: 'inference', threadId: 42 },
+          },
+        },
+      },
+    });
+
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/conversations');
+    expect(alertSpy).toHaveBeenCalled();
+    alertSpy.mockRestore();
+  });
+
+  it('routes an old inference notification safely after all history is cleared', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    await notificationService.initialize();
+    mockThreads = {};
+    mockActiveThreadId = null;
+
+    const listener = (Notifications.addNotificationResponseReceivedListener as jest.Mock).mock.calls[0][0];
+    listener({
+      notification: {
+        request: {
+          content: {
+            data: { taskType: 'inference', threadId: 'thread-1' },
+          },
+        },
+      },
+    });
+
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBeNull();
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/conversations');
+    expect(alertSpy).toHaveBeenCalled();
+    alertSpy.mockRestore();
   });
 
   it('ignores notification taps with missing or unknown task types', async () => {

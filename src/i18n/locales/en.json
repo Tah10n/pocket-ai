@@ -93,6 +93,10 @@
     }
   },
   "notifications": {
+    "conversationUnavailable": {
+      "title": "Conversation unavailable",
+      "body": "This conversation is no longer available."
+    },
     "download": {
       "progress": {
         "title": "Downloading {{modelName}}",

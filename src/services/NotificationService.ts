@@ -1,4 +1,4 @@
-import { Linking, Platform } from 'react-native';
+import { Alert, Linking, Platform } from 'react-native';
 import BackgroundService, { type BackgroundTaskOptions } from 'react-native-background-actions';
 import * as Notifications from 'expo-notifications';
 import { createURL } from 'expo-linking';
@@ -7,6 +7,7 @@ import { router } from 'expo-router';
 import i18n from '../i18n';
 import { useChatStore } from '../store/chatStore';
 import { semanticColorTokens } from '../utils/themeTokens';
+import { getPrivacySafeErrorLogDetails } from './AppError';
 
 export type NotificationTaskType = 'download' | 'inference';
 
@@ -34,6 +35,11 @@ const CHANNEL_IDS = {
 
 const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
 const FOREGROUND_SERVICE_NOTIFICATION_COLOR = semanticColorTokens.primary[500];
+const INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX = 'pocket-ai:inference:';
+
+function getInferenceNotificationIdentifier(threadId: string): string {
+    return `${INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX}${encodeURIComponent(threadId)}`;
+}
 
 function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -181,10 +187,23 @@ class NotificationService {
         }
 
         if (taskType === 'inference') {
-            const threadId = typeof data.threadId === 'string' ? data.threadId : null;
-            if (threadId) {
-                useChatStore.getState().setActiveThread(threadId);
+            const threadId = typeof data.threadId === 'string' && data.threadId.trim().length > 0
+                ? data.threadId
+                : null;
+            const chatState = useChatStore.getState();
+            if (
+                !threadId
+                || chatState.threads[threadId] == null
+                || !chatState.setActiveThread(threadId)
+            ) {
+                Alert.alert(
+                    i18n.t('notifications.conversationUnavailable.title'),
+                    i18n.t('notifications.conversationUnavailable.body'),
+                );
+                router.push('/conversations');
+                return;
             }
+
             router.push('/(tabs)/chat');
         }
     };
@@ -312,7 +331,7 @@ class NotificationService {
 
     async sendLocalNotification(
         content: Notifications.NotificationContentInput,
-        options: { channelId?: string } = {},
+        options: { channelId?: string; identifier?: string } = {},
     ): Promise<string | null> {
         await this.ensureInitialized();
 
@@ -322,7 +341,31 @@ class NotificationService {
         }
 
         const trigger = options.channelId ? { channelId: options.channelId } : null;
-        return await Notifications.scheduleNotificationAsync({ content, trigger });
+        return await Notifications.scheduleNotificationAsync({
+            ...(options.identifier ? { identifier: options.identifier } : null),
+            content,
+            trigger,
+        });
+    }
+
+    async dismissInferenceNotificationForThread(threadId: string): Promise<void> {
+        if (typeof threadId !== 'string' || threadId.trim().length === 0) {
+            return;
+        }
+
+        try {
+            await Notifications.dismissNotificationAsync(
+                getInferenceNotificationIdentifier(threadId),
+            );
+        } catch (error) {
+            console.warn(
+                '[NotificationService] Failed to dismiss inference notification',
+                {
+                    scope: 'inference_notification_dismiss',
+                    ...getPrivacySafeErrorLogDetails(error),
+                },
+            );
+        }
     }
 
     async updateNotification(update: NotificationUpdate): Promise<void> {
@@ -385,7 +428,12 @@ class NotificationService {
                 body: i18n.t('notifications.inference.complete.body'),
                 data: { taskType, threadId: params.threadId },
             },
-            { channelId: CHANNEL_IDS.inference },
+            {
+                channelId: CHANNEL_IDS.inference,
+                ...(params.threadId
+                    ? { identifier: getInferenceNotificationIdentifier(params.threadId) }
+                    : null),
+            },
         );
     }
 
@@ -396,7 +444,12 @@ class NotificationService {
                 body: i18n.t('notifications.inference.interrupted.body'),
                 data: { taskType: 'inference', threadId: params.threadId },
             },
-            { channelId: CHANNEL_IDS.inference },
+            {
+                channelId: CHANNEL_IDS.inference,
+                ...(params.threadId
+                    ? { identifier: getInferenceNotificationIdentifier(params.threadId) }
+                    : null),
+            },
         );
     }
 
@@ -407,7 +460,12 @@ class NotificationService {
                 body: i18n.t('notifications.inference.error.body'),
                 data: { taskType: 'inference', threadId: params.threadId },
             },
-            { channelId: CHANNEL_IDS.inference },
+            {
+                channelId: CHANNEL_IDS.inference,
+                ...(params.threadId
+                    ? { identifier: getInferenceNotificationIdentifier(params.threadId) }
+                    : null),
+            },
         );
     }
 

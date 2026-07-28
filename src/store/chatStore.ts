@@ -172,7 +172,7 @@ interface ChatStoreState {
   mergeImportedThreads: (threads: ChatThread[]) => number;
   pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
   clearAllThreads: () => number;
-  setActiveThread: (threadId: string | null) => void;
+  setActiveThread: (threadId: string | null) => boolean;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
   switchThreadModel: (threadId: string, nextModelId: string, at?: number) => string | null;
@@ -2835,7 +2835,22 @@ export const useChatStore = create<ChatStoreState>()(
         return threadCount;
         },
 
-        setActiveThread: (threadId) => setWhenPrivateStorageWritable({ activeThreadId: threadId }),
+        setActiveThread: (threadId) => {
+          let didSetActiveThread = false;
+          setWhenPrivateStorageWritable((state) => {
+            if (threadId !== null && !state.threads[threadId]) {
+              return state;
+            }
+
+            didSetActiveThread = true;
+            if (state.activeThreadId === threadId) {
+              return state;
+            }
+
+            return { activeThreadId: threadId };
+          });
+          return didSetActiveThread;
+        },
 
         updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) => {
           if (getActiveBranchReplacementRuntime(get().threads[threadId])) {

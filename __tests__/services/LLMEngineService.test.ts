@@ -577,7 +577,7 @@ describe('LLMEngineService', () => {
     }
   });
 
-  it('enables the largest memory-safe prompt state cache tier for eligible runtime metadata', async () => {
+  it('keeps recurrent runtime metadata fail-closed even with ample memory', async () => {
     (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
       timestampMs: 1,
       platform: 'android',
@@ -602,18 +602,18 @@ describe('LLMEngineService', () => {
     expect(initParams.length).toBeGreaterThan(0);
     for (const params of initParams) {
       expect(params).toEqual(expect.objectContaining({
-        state_cache_budget_mb: 160,
+        state_cache_budget_mb: 0,
         state_cache_max_checkpoints: 8,
       }));
     }
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
-      stateCacheBudgetMb: 160,
+      stateCacheBudgetMb: 0,
       stateCacheMaxCheckpoints: 8,
-      stateCacheEnabled: true,
+      stateCacheEnabled: false,
       stateCacheEligibility: 'eligible',
-      stateCachePolicyReason: 'maximum_safe_budget',
-      stateCachePolicyVersion: 1,
-      promptStateCacheBytes: 160 * 1024 * 1024,
+      stateCachePolicyReason: 'native_memory_bound_unverified',
+      stateCachePolicyVersion: 2,
+      promptStateCacheBytes: 0,
       stateCacheArchitecture: 'mamba',
     }));
   });
@@ -657,7 +657,9 @@ describe('LLMEngineService', () => {
 
     await llmEngineService.load('test/mamba', { forceReload: true });
     expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
-      stateCacheBudgetMb: 160,
+      stateCacheBudgetMb: 0,
+      stateCacheEnabled: false,
+      stateCachePolicyReason: 'native_memory_bound_unverified',
       stateCacheArchitecture: 'mamba',
     }));
 
@@ -715,13 +717,15 @@ describe('LLMEngineService', () => {
     expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
     expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
     expect((llamaRn.initLlama as jest.Mock).mock.calls[0]?.[0]).toEqual(expect.objectContaining({
-      state_cache_budget_mb: 160,
+      state_cache_budget_mb: 0,
       state_cache_max_checkpoints: 8,
     }));
     expect(llmEngineService.getState()).toEqual(expect.objectContaining({
       activeModelId: 'test/model-b',
       diagnostics: expect.objectContaining({
-        stateCacheBudgetMb: 160,
+        stateCacheBudgetMb: 0,
+        stateCacheEnabled: false,
+        stateCachePolicyReason: 'native_memory_bound_unverified',
         stateCacheArchitecture: 'mamba',
       }),
     }));
@@ -4957,7 +4961,7 @@ describe('LLMEngineService', () => {
         stateCacheEnabled: false,
         stateCacheEligibility: 'ineligible',
         stateCachePolicyReason: 'architecture_ineligible',
-        stateCachePolicyVersion: 1,
+        stateCachePolicyVersion: 2,
         promptStateCacheBytes: 0,
         stateCacheArchitecture: 'llama',
         probableOom: false,
@@ -5563,6 +5567,12 @@ describe('LLMEngineService', () => {
       .map(([options]) => options?.n_gpu_layers ?? 0);
     expect(attemptedLayers).toEqual([3, 2, 1, 0]);
     expect(new Set(attemptedLayers).size).toBe(attemptedLayers.length);
+    for (const [options] of (llamaRn.initLlama as jest.Mock).mock.calls) {
+      expect(options).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
   });
 
   it('reports requested and loaded GPU layers separately after retrying with fewer layers', async () => {
@@ -5999,6 +6009,12 @@ describe('LLMEngineService', () => {
       devices: nativeCalls[0].devices,
     }));
     expect(nativeCalls[1]).not.toHaveProperty('speculative');
+    for (const options of nativeCalls) {
+      expect(options).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
   });
 
   it('keeps malicious native failure text out of logs, diagnostics, and traces', async () => {
@@ -6020,6 +6036,23 @@ describe('LLMEngineService', () => {
       contextSize: 4096,
       gpuLayers: 1,
       kvCacheType: 'f16',
+    });
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValueOnce({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.architecture': 'mamba',
+      'general.type': 'model',
+      'mamba.block_count': 32,
+      'mamba.embedding_length': 4096,
     });
     (llamaRn.initLlama as jest.Mock).mockImplementation(async () => {
       const maliciousDetails: Record<string, unknown> = {
@@ -6087,7 +6120,14 @@ describe('LLMEngineService', () => {
         cpuInitFailureCategory: 'native_error',
         nativeLogCount: 1,
         backendInitAttempts: expect.arrayContaining([
-          expect.objectContaining({ failureCategory: 'native_error' }),
+          expect.objectContaining({
+            failureCategory: 'native_error',
+            stateCacheBudgetMb: 0,
+            stateCacheEnabled: false,
+            stateCachePolicyReason: 'native_memory_bound_unverified',
+            stateCachePolicyVersion: 2,
+            promptStateCacheBytes: 0,
+          }),
         ]),
       }));
       expect(privacyWarnSpy).toHaveBeenCalled();
@@ -6395,6 +6435,8 @@ describe('LLMEngineService', () => {
         n_ctx: 4096,
         n_gpu_layers: 12,
         devices: ['HTP0'],
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
       }),
       expect.any(Function),
     );

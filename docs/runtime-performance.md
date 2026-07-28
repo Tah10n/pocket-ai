@@ -48,7 +48,7 @@ invalidation, or diagnostics privacy.
 | Prompt-window display | [`useTruncationTracking.ts`](../src/hooks/useTruncationTracking.ts) | Reuse the last idle result while a thread is generating |
 | Inference request preparation | [`useChatSession.ts`](../src/hooks/useChatSession.ts) | Resolve attachments and final messages once per request |
 | Exact prompt counts | [`ExactPromptTokenCache.ts`](../src/services/ExactPromptTokenCache.ts) | Bounded LRU keyed by context and formatting identity |
-| Cross-turn prompt state | [`PromptStateCachePolicy.ts`](../src/services/PromptStateCachePolicy.ts) | Explicit memory-validated llama.rn budget; no implicit native default |
+| Cross-turn prompt state | [`PromptStateCachePolicy.ts`](../src/services/PromptStateCachePolicy.ts) | Explicit fail-closed llama.rn parameters; no implicit native default |
 | Transient assistant output | [`chatStore.ts`](../src/store/chatStore.ts) | Keep durable history stable during token patches |
 | Branch replacement | [`chatBranchReplacement.ts`](../src/store/chatBranchReplacement.ts) | Build and validate one canonical replacement plan for presentation, recovery, and terminal commit |
 | Streaming crash recovery | [`chatPersistence.ts`](../src/store/chatPersistence.ts) | Publish bounded checkpoints/deltas through a head-last commit, not the full thread |
@@ -192,40 +192,44 @@ Pocket AI integrates the prompt state cache exposed by `llama.rn` 0.12.7. This c
 is separate from the ordinary KV cache:
 
 - the KV cache is the model's token-generation state for the active context;
-- the prompt state cache keeps bounded native checkpoints that may avoid reprocessing a
-  matching prompt prefix across turns.
+- the prompt state cache may keep native checkpoints that avoid reprocessing a matching
+  prompt prefix across turns.
 
 Pocket AI does not implement a second JavaScript or native checkpoint format and does not
 construct media cache keys. Each native context receives both
 `state_cache_budget_mb` and `state_cache_max_checkpoints` explicitly, so the upstream
 default can never enable optional memory silently. Ordinary turns and regeneration do not
-call `clearCache`; a native prefix can therefore be reused when it actually matches.
-Every completion still receives the full current request payload. Changing conversations
-cannot inject another chat's messages, changing models releases the old context, and
-changing or removing media changes the request payload and prompt identity.
+call `clearCache`; this preserves the native lifecycle without claiming that the current
+0 MiB profile reuses prefixes. Every completion still receives the full current request
+payload. Changing conversations cannot inject another chat's messages, changing models
+releases the old context, and changing or removing media changes the request payload and
+prompt identity.
 
-The runtime evaluates budgets in descending order: 160 MiB, 128 MiB, 64 MiB, then
-disabled at 0 MiB. Enabled profiles use at most 8 checkpoints. A non-zero tier is allowed
-only for known recurrent or hybrid GGUF architectures after an accurate, high-confidence
-memory fit. Pure-attention, pure sliding-window attention, unknown architectures,
-low-memory/critical-pressure states, restricted safe-load decisions, and unsafe or
-uncertain fits receive 0 MiB. Granite 4 hybrid and Mamba 2 remain disabled on
-Hexagon/HTP because that backend/architecture combination is not supported by this gate.
+Production uses `state_cache_budget_mb: 0` and `state_cache_max_checkpoints: 8` on every
+context initialization. A compile-time gate keeps the 64/128/160 MiB candidate-selection
+infrastructure disabled, and the runtime adapter overwrites any accidental non-zero input.
+This applies equally to requested, speculative fallback, OOM retry, CPU fallback, NPU,
+and last-good warmup attempts.
 
-The complete configured budget is recorded once as `promptStateCacheBytes` and added once
-to required memory. Calibration may adjust measured model or runtime components, but it
-cannot scale down this hard cap. Candidate selection repeats the final fit after adding
-the budget. Calibration keys, initialization-attempt identity, persisted OOM bounds, and
-last-good profile identity all include the budget, checkpoint count, and policy version.
-A successful disabled profile therefore does not authorize 160 MiB, an OOM at 160 MiB
-does not block 0 MiB, and legacy records without cache dimensions load as disabled until
-the current policy validates them.
+The fail-closed policy does not treat the configured native budget as a hard memory cap.
+The runtime may keep a pinned checkpoint and may allocate a new checkpoint before evicting
+the old one; generic recurrent checkpoint size is not known in advance. Consequently, the
+accurate production estimate records `promptStateCacheBytes: 0`, diagnostics report
+`stateCacheEnabled: false`, and otherwise eligible architectures use the
+`native_memory_bound_unverified` policy reason.
 
-Expected benefit is concentrated in repeated long prefixes, regeneration, edits,
-recurrent/hybrid architectures, and some multimodal flows. It is not a speed guarantee
-for every model or request. Current llama.rn APIs do not expose authoritative hit count,
-restored-token count, checkpoint count, or actual allocated cache bytes, so Pocket AI does
-not synthesize those metrics.
+Calibration keys, initialization-attempt identity, persisted OOM bounds, and last-good
+profile identity still include budget, checkpoint count, and policy version. Version 2
+isolates the fail-closed policy from older non-zero records. A legacy non-zero profile
+cannot authorize caching, and a successful 0 MiB load is not evidence for future
+non-zero safety.
+
+Current production makes no prompt state-cache performance claim. Enabling a non-zero
+tier requires a corrected or upgraded native runtime with a verifiable strict memory
+bound, followed by physical-device correctness, peak-memory, and performance validation.
+Current llama.rn APIs also do not expose authoritative hit count, restored-token count,
+checkpoint count, or actual allocated cache bytes, so Pocket AI does not synthesize those
+metrics.
 
 ### Streaming persistence and recovery
 

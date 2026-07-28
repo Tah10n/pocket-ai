@@ -1,6 +1,12 @@
 import type { MMKV } from 'react-native-mmkv';
 import llamaPackageJson from 'llama.rn/package.json';
 import { assertPrivateStorageWritable, createStorage } from './storage';
+import {
+  DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+  ENABLE_NONZERO_PROMPT_STATE_CACHE,
+  PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+  PROMPT_STATE_CACHE_POLICY_VERSION,
+} from './PromptStateCachePolicy';
 
 const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
 
@@ -489,9 +495,17 @@ export function readLastGoodInferenceProfile({
     ) {
       return clearAndReturnNull();
     }
+    const policyCompatibleProfile = ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizedProfile
+      : {
+          ...normalizedProfile,
+          stateCacheBudgetMb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+          stateCacheMaxCheckpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+          stateCachePolicyVersion: PROMPT_STATE_CACHE_POLICY_VERSION,
+        };
     return {
-      ...normalizedProfile,
-      profileIdentity,
+      ...policyCompatibleProfile,
+      profileIdentity: buildLastGoodInferenceProfileIdentity(policyCompatibleProfile),
     };
   } catch (error) {
     console.warn('[InferenceLastGoodProfileStore] Corrupted last-good payload, clearing.', error);
@@ -529,11 +543,16 @@ export function writeLastGoodInferenceProfile(profile: LastGoodInferenceProfile)
     nativeModuleVersion: profile.nativeModuleVersion ?? getCurrentNativeModuleVersion(),
     backendMode: normalizedBackendMode,
     nGpuLayers: normalizedBackendMode === 'cpu' ? 0 : normalizedGpuLayers,
-    stateCacheBudgetMb: normalizeIdentityInteger(profile.stateCacheBudgetMb) ?? 0,
-    stateCacheMaxCheckpoints:
-      normalizeIdentityInteger(profile.stateCacheMaxCheckpoints)
-      ?? LEGACY_LAST_GOOD_STATE_CACHE_MAX_CHECKPOINTS,
-    stateCachePolicyVersion: normalizeIdentityInteger(profile.stateCachePolicyVersion) ?? 0,
+    stateCacheBudgetMb: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizeIdentityInteger(profile.stateCacheBudgetMb) ?? DISABLED_PROMPT_STATE_CACHE_BUDGET_MB
+      : DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+    stateCacheMaxCheckpoints: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizeIdentityInteger(profile.stateCacheMaxCheckpoints)
+        ?? LEGACY_LAST_GOOD_STATE_CACHE_MAX_CHECKPOINTS
+      : PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+    stateCachePolicyVersion: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizeIdentityInteger(profile.stateCachePolicyVersion) ?? 0
+      : PROMPT_STATE_CACHE_POLICY_VERSION,
     ...(devices ? { devices } : null),
   };
   const persistable: LastGoodInferenceProfile = {

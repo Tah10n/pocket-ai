@@ -104,6 +104,24 @@ describe('model init retry policy', () => {
     expect(guard.tryStart(disabled)).toBe('started');
   });
 
+  it('does not reuse a policy-v1 failure bound for the fail-closed policy version', () => {
+    const guard = new ModelInitAttemptGuard();
+    const legacy = createAttempt({
+      stateCacheBudgetMb: 160,
+      stateCachePolicyVersion: 1,
+    });
+    const failClosed = createAttempt({
+      stateCacheBudgetMb: 0,
+      stateCachePolicyVersion: 2,
+    });
+
+    expect(guard.tryStart(legacy)).toBe('started');
+    guard.recordProbableOom(legacy);
+
+    expect(guard.getKnownOomUpperBound(failClosed)).toBeNull();
+    expect(guard.tryStart(failClosed)).toBe('started');
+  });
+
   it('canonicalizes equivalent backend device sets before duplicate detection', () => {
     const guard = new ModelInitAttemptGuard();
 

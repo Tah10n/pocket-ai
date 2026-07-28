@@ -1,7 +1,8 @@
 import type { MemoryFitDecision, MemoryFitResult } from '../../src/memory/types';
 import {
-  MAXIMUM_PROMPT_STATE_CACHE_BUDGET_MB,
+  ENABLE_NONZERO_PROMPT_STATE_CACHE,
   PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+  PROMPT_STATE_CACHE_POLICY_VERSION,
   resolvePromptStateCachePolicy,
 } from '../../src/services/PromptStateCachePolicy';
 
@@ -67,72 +68,35 @@ describe('PromptStateCachePolicy', () => {
   it.each([
     ['mamba', 'cpu'],
     ['rwkv7', 'gpu'],
-    ['jamba', 'cpu'],
+    ['jamba', 'npu'],
     ['qwen3next', 'gpu'],
-  ] as const)('enables the largest safe tier for eligible %s on %s', (architecture, backendMode) => {
+  ] as const)('keeps eligible %s fail-closed on %s even with ample memory', (
+    architecture,
+    backendMode,
+  ) => {
+    const estimateCandidateMemoryFit = jest.fn(
+      (budgetMb: number) => createMemoryFit({ budgetMb }),
+    );
     const policy = resolvePolicy({
       ggufMetadata: { 'general.architecture': architecture },
       backendMode,
+      estimateCandidateMemoryFit,
     });
 
-    expect(policy).toEqual(expect.objectContaining({
-      budgetMb: MAXIMUM_PROMPT_STATE_CACHE_BUDGET_MB,
-      maxCheckpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
-      enabled: true,
-      eligibility: 'eligible',
-      reason: 'maximum_safe_budget',
-      architecture,
-      backendMode,
-    }));
-    expect(policy.finalMemoryFit?.breakdown.promptStateCacheBytes).toBe(160 * MIB);
-  });
-
-  it.each([
-    {
-      unsafeBudgets: [160],
-      expectedBudgetMb: 128,
-      expectedEvaluated: [160, 128],
-    },
-    {
-      unsafeBudgets: [160, 128],
-      expectedBudgetMb: 64,
-      expectedEvaluated: [160, 128, 64],
-    },
-  ])('downgrades to $expectedBudgetMb MiB when larger candidates are unsafe', ({
-    unsafeBudgets,
-    expectedBudgetMb,
-    expectedEvaluated,
-  }) => {
-    const policy = resolvePolicy({
-      estimateCandidateMemoryFit: (budgetMb) => createMemoryFit({
-        budgetMb,
-        decision: unsafeBudgets.includes(budgetMb) ? 'borderline' : 'fits_high_confidence',
-      }),
-    });
-
-    expect(policy).toEqual(expect.objectContaining({
-      budgetMb: expectedBudgetMb,
-      enabled: true,
-      reason: 'reduced_to_memory_fit',
-      evaluatedBudgetsMb: expectedEvaluated,
-    }));
-  });
-
-  it('falls back from 64 MiB to disabled when no non-zero candidate is safe', () => {
-    const policy = resolvePolicy({
-      estimateCandidateMemoryFit: (budgetMb) => createMemoryFit({
-        budgetMb,
-        decision: 'borderline',
-      }),
-    });
-
+    expect(ENABLE_NONZERO_PROMPT_STATE_CACHE).toBe(false);
     expect(policy).toEqual(expect.objectContaining({
       budgetMb: 0,
+      maxCheckpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
       enabled: false,
       eligibility: 'eligible',
-      reason: 'no_safe_budget',
-      evaluatedBudgetsMb: [160, 128, 64],
+      reason: 'native_memory_bound_unverified',
+      policyVersion: PROMPT_STATE_CACHE_POLICY_VERSION,
+      architecture,
+      backendMode,
+      evaluatedBudgetsMb: [],
     }));
+    expect(policy.finalMemoryFit?.breakdown.promptStateCacheBytes).toBe(0);
+    expect(estimateCandidateMemoryFit).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -237,8 +201,9 @@ describe('PromptStateCachePolicy', () => {
     expect(resolvePolicy({
       ggufMetadata: { 'general.architecture': 'qwen3next' },
     })).toEqual(expect.objectContaining({
-      budgetMb: 160,
-      enabled: true,
+      budgetMb: 0,
+      enabled: false,
+      reason: 'native_memory_bound_unverified',
     }));
   });
 });

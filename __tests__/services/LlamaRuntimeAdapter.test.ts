@@ -16,7 +16,7 @@ function createContext(overrides: Record<string, unknown>): LlamaContext {
 }
 
 describe('LlamaRuntimeAdapter', () => {
-  it('applies the disabled prompt state cache gate without overriding an explicit policy', async () => {
+  it('forces the disabled prompt state cache profile for every native init caller', async () => {
     const onProgress = jest.fn();
     const initLlamaMock = initLlama as jest.Mock;
     initLlamaMock.mockClear();
@@ -38,8 +38,8 @@ describe('LlamaRuntimeAdapter', () => {
     }, onProgress);
     expect(initLlamaMock).toHaveBeenNthCalledWith(2, {
       model: 'recurrent-model.gguf',
-      state_cache_budget_mb: 64,
-      state_cache_max_checkpoints: 4,
+      state_cache_budget_mb: 0,
+      state_cache_max_checkpoints: 8,
     }, undefined);
   });
 

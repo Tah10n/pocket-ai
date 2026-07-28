@@ -39,6 +39,7 @@ const {
   recordModelInitFailureBound,
   writeLastGoodInferenceProfile,
 } = lastGoodStore;
+type LastGoodInferenceProfile = import('../../src/services/InferenceLastGoodProfileStore').LastGoodInferenceProfile;
 type ModelInitFailureBoundIdentity = import('../../src/services/InferenceLastGoodProfileStore').ModelInitFailureBoundIdentity;
 
 function createFailureBoundIdentity(
@@ -155,9 +156,9 @@ describe('InferenceLastGoodProfileStore', () => {
       backendMode: 'gpu',
       nGpuLayers: 12.9 as unknown as number,
       devices: ['HTP0'],
-      stateCacheBudgetMb: 160,
+      stateCacheBudgetMb: 0,
       stateCacheMaxCheckpoints: 8,
-      stateCachePolicyVersion: 1,
+      stateCachePolicyVersion: 2,
     });
 
     const read = readLastGoodInferenceProfile({
@@ -177,9 +178,9 @@ describe('InferenceLastGoodProfileStore', () => {
       nGpuLayers: 13,
       nativeModuleVersion: '1.2.3-test',
       schemaVersion: 2,
-      stateCacheBudgetMb: 160,
+      stateCacheBudgetMb: 0,
       stateCacheMaxCheckpoints: 8,
-      stateCachePolicyVersion: 1,
+      stateCachePolicyVersion: 2,
     }));
     // Devices are only persisted for NPU.
     expect(read?.devices).toBeUndefined();
@@ -217,9 +218,41 @@ describe('InferenceLastGoodProfileStore', () => {
       schemaVersion: 1,
       stateCacheBudgetMb: 0,
       stateCacheMaxCheckpoints: 8,
-      stateCachePolicyVersion: 0,
+      stateCachePolicyVersion: 2,
     }));
     expect(mockStorage.contains(legacyKey)).toBe(true);
+  });
+
+  it('normalizes an old non-zero current-schema profile to the fail-closed dimensions', () => {
+    writeLastGoodInferenceProfile({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu',
+      nGpuLayers: 12,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    });
+    const key = mockStorage.getAllKeys().find((entry) => entry.startsWith('last-good:'))!;
+    const oldProfile = JSON.parse(mockStorage.getString(key)!) as LastGoodInferenceProfile;
+    oldProfile.stateCacheBudgetMb = 160;
+    oldProfile.stateCachePolicyVersion = 1;
+    oldProfile.profileIdentity = buildLastGoodInferenceProfileIdentity(oldProfile);
+    mockStorage.set(key, JSON.stringify(oldProfile));
+
+    expect(readLastGoodInferenceProfile({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '1.2.3-test',
+    })).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    }));
   });
 
   it('does not treat a successful disabled-cache profile as proof that 160 MiB is safe', () => {
@@ -233,7 +266,7 @@ describe('InferenceLastGoodProfileStore', () => {
       nGpuLayers: 12,
       stateCacheBudgetMb: 0,
       stateCacheMaxCheckpoints: 8,
-      stateCachePolicyVersion: 1,
+      stateCachePolicyVersion: 2,
     });
 
     expect(readLastGoodInferenceProfile({
@@ -243,7 +276,7 @@ describe('InferenceLastGoodProfileStore', () => {
       expectedNativeModuleVersion: '1.2.3-test',
     })).toEqual(expect.objectContaining({
       stateCacheBudgetMb: 0,
-      stateCachePolicyVersion: 1,
+      stateCachePolicyVersion: 2,
     }));
   });
 
@@ -258,7 +291,7 @@ describe('InferenceLastGoodProfileStore', () => {
       backendMode: 'gpu' as const,
       nGpuLayers: 12,
       stateCacheMaxCheckpoints: 8,
-      stateCachePolicyVersion: 1,
+      stateCachePolicyVersion: 2,
     };
 
     expect(buildLastGoodInferenceProfileIdentity({

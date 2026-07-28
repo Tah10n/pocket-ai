@@ -104,57 +104,61 @@ Vision-capable model loads also apply an internal multimodal safety rule when a 
 - If a vision-capable model is loaded before a projector is ready, the text-only context keeps the default `llama.rn` context-shifting behavior, then reloads with context shifting disabled before image chat becomes ready.
 - This is not exposed as a user setting; text-only model contexts and vision-capable contexts without a ready projector keep the default `llama.rn` behavior.
 
-### Automatic prompt state cache
+### Prompt state cache safety policy
 
-`llama.rn` 0.12.7 adds bounded cross-turn prompt state caching. Pocket AI controls it as
-an internal load-profile dimension; it is not a user-facing model parameter.
+`llama.rn` 0.12.7 exposes cross-turn prompt state caching. Pocket AI keeps the policy
+infrastructure as an internal load-profile dimension; it is not a user-facing model
+parameter.
 
 This is different from the normal KV cache precision control:
 
 - KV cache precision changes the memory format used by the active model context.
-- Prompt state caching reserves optional memory for native checkpoints that can restore a
-  matching prompt prefix on a later completion.
+- Prompt state caching may retain native checkpoints that can restore a matching prompt
+  prefix on a later completion.
 
 Every native initialization path passes an explicit budget and an explicit checkpoint
-limit. The initial compatibility gate is 0 MiB, and runtime policy can select the largest
-high-confidence fit from 160, 128, or 64 MiB. Enabled profiles use a maximum of 8
-checkpoints. If no candidate is safe, the explicit budget remains 0 MiB; the app never
-inherits llama.rn's upstream default implicitly.
+limit. Production always passes `state_cache_budget_mb: 0` and
+`state_cache_max_checkpoints: 8`; the runtime adapter enforces those values even if a
+caller supplies a non-zero budget. The app therefore never inherits llama.rn's upstream
+default or accidentally enables the cache through a test helper, environment variable, or
+fallback path.
 
-Eligibility comes from normalized GGUF architecture metadata, not model names:
+The non-zero candidate tiers and normalized GGUF architecture detection remain available
+as future-ready policy infrastructure:
 
 - recurrent: Mamba/Mamba 2 and RWKV 6/7 families;
 - hybrid: Jamba, Falcon H1, PLaMo 2, Granite hybrid, LFM2, Nemotron H,
   Qwen 3 Next/3.5, Kimi Linear, and their supported MoE variants;
-- disabled: pure-attention, pure sliding-window attention, and unknown architectures.
+- ineligible: pure-attention and pure sliding-window attention architectures;
+- unknown: unrecognized or missing architecture metadata.
 
-CPU and supported GPU profiles can use an eligible tier. Mamba 2 and Granite 4 hybrid are
-kept at 0 MiB on Hexagon/HTP. Low-memory signals, critical pressure, an uncertain or
-borderline base fit, a likely OOM, or a restricted safe-load decision also force 0 MiB.
+That classification does not enable caching in the current production build. Recurrent,
+hybrid, CPU, GPU, NPU, low-memory, and memory-pressure profiles all receive 0 MiB. The
+reason for an otherwise eligible profile is `native_memory_bound_unverified`.
 
-The whole selected budget is counted once as `promptStateCacheBytes` in the accurate
-memory estimate. Calibration cannot shrink that hard cap. Cache budget, checkpoint count,
-and policy version are part of calibration, retry, OOM-bound, and last-good identities, so
-a safe disabled profile cannot be mistaken for proof that a non-zero profile is safe.
-Legacy profiles without these dimensions are read as disabled and must pass the current
-policy before a non-zero budget can be used.
+The fail-closed policy is necessary because the native budget is not a proven hard memory
+cap: at least one checkpoint may remain pinned, a replacement can allocate before eviction,
+and a recurrent checkpoint's size may be unknown before allocation. Treating a configured
+64/128/160 MiB budget as the complete additional peak would therefore make the memory fit
+unsafe.
 
-Ordinary turns and regeneration leave the native cache available for safe prefix matching.
-Changing the loaded model releases the old context and its checkpoints. Each chat request
-still sends its complete conversation-scoped prompt and current media set; Pocket AI does
-not maintain a separate app-level checkpoint or media cache key.
+The accurate production estimate records `promptStateCacheBytes: 0`. Cache budget,
+checkpoint count, and policy version remain part of calibration, retry, OOM-bound, and
+last-good identities. Policy version 2 separates the fail-closed profile from older
+non-zero records. An old non-zero last-good profile cannot enable the cache, and a
+successful 0 MiB load is not evidence that a future non-zero profile is safe.
 
 Diagnostics expose the selected `stateCacheBudgetMb`, `stateCacheMaxCheckpoints`,
 `stateCacheEnabled`, `stateCacheEligibility`, `stateCachePolicyReason`,
 `stateCachePolicyVersion`, `promptStateCacheBytes`, normalized architecture, and backend
-mode (`stateCacheArchitecture` and the existing `backendMode`). They deliberately do not
-claim cache hits, restored tokens, actual checkpoint count,
-or actual allocated bytes because the native API does not report those values.
+mode (`stateCacheArchitecture` and the existing `backendMode`). Production diagnostics
+must report a 0 MiB budget, `stateCacheEnabled: false`, and
+`promptStateCacheBytes: 0`. They deliberately do not claim cache hits, restored tokens,
+actual checkpoint count, allocated bytes, or a performance improvement.
 
-The most likely gains are repeated long prefixes, regeneration, edits, recurrent/hybrid
-architectures, and some multimodal scenarios. Do not assume a speedup for every model,
-backend, prompt, or device; use the
-[device validation runbook](./runtime-hardening-device-validation.md) for A/B evidence.
+Future enablement requires a runtime with a verifiable strict native memory bound plus the
+[physical-device validation matrix](./runtime-hardening-device-validation.md). It is
+separate follow-up work, not a release toggle in this version.
 
 ### Backend discovery (llama.rn)
 

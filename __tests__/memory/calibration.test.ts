@@ -95,6 +95,28 @@ describe('memory calibration', () => {
     expect(JSON.parse(serializeCalibrationKey(enabled))).toEqual(enabled);
   });
 
+  it('isolates the fail-closed policy version from older cache calibration records', () => {
+    const createKey = (stateCachePolicyVersion: number) => createCalibrationKey({
+      deviceModel: 'Pixel 7',
+      osMajor: 'android:14',
+      ggufMetadata: { 'general.architecture': 'mamba' },
+      verifiedFileSizeBytes: 1234,
+      contextTokens: 4096,
+      gpuLayers: 12,
+      cacheTypeK: 'f16',
+      cacheTypeV: 'f16',
+      useMmap: true,
+      hasMmproj: false,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion,
+    })!;
+
+    expect(serializeCalibrationKey(createKey(1))).not.toBe(
+      serializeCalibrationKey(createKey(2)),
+    );
+  });
+
   it('updates bounded factors on success and failure observations', () => {
     const baseline = {
       ...createEmptyCalibrationRecord('k'),

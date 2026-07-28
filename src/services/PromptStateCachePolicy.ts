@@ -7,7 +7,8 @@ export const LOW_PROMPT_STATE_CACHE_BUDGET_MB = 64;
 export const MEDIUM_PROMPT_STATE_CACHE_BUDGET_MB = 128;
 export const MAXIMUM_PROMPT_STATE_CACHE_BUDGET_MB = 160;
 export const PROMPT_STATE_CACHE_MAX_CHECKPOINTS = 8;
-export const PROMPT_STATE_CACHE_POLICY_VERSION = 1;
+export const PROMPT_STATE_CACHE_POLICY_VERSION = 2;
+export const ENABLE_NONZERO_PROMPT_STATE_CACHE = false;
 
 export const PROMPT_STATE_CACHE_CANDIDATE_BUDGETS_MB = Object.freeze([
   MAXIMUM_PROMPT_STATE_CACHE_BUDGET_MB,
@@ -36,7 +37,8 @@ export type PromptStateCachePolicyReason =
   | 'base_fit_unknown'
   | 'insufficient_confidence'
   | 'safe_load_restricted'
-  | 'memory_estimate_failed';
+  | 'memory_estimate_failed'
+  | 'native_memory_bound_unverified';
 
 export interface PromptStateCachePolicy {
   budgetMb: number;
@@ -446,6 +448,16 @@ export function resolvePromptStateCachePolicy({
     });
   }
 
+  if (!ENABLE_NONZERO_PROMPT_STATE_CACHE) {
+    return buildDisabledPolicy({
+      architecture,
+      backendMode,
+      eligibility: 'eligible',
+      reason: 'native_memory_bound_unverified',
+      finalMemoryFit: baseMemoryFit,
+    });
+  }
+
   const evaluatedBudgetsMb: number[] = [];
   let lastFit = baseMemoryFit;
   try {
@@ -499,9 +511,11 @@ export function applyPromptStateCacheSafetyGate<T extends ContextParams>(
 ): T & ExplicitPromptStateCacheContextParams {
   return {
     ...params,
-    state_cache_budget_mb:
-      params.state_cache_budget_mb ?? DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
-    state_cache_max_checkpoints:
-      params.state_cache_max_checkpoints ?? PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+    state_cache_budget_mb: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? params.state_cache_budget_mb ?? DISABLED_PROMPT_STATE_CACHE_BUDGET_MB
+      : DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+    state_cache_max_checkpoints: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? params.state_cache_max_checkpoints ?? PROMPT_STATE_CACHE_MAX_CHECKPOINTS
+      : PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
   };
 }

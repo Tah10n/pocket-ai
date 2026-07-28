@@ -620,6 +620,7 @@ const SAFE_PROMPT_STATE_CACHE_POLICY_REASONS = new Set([
   'insufficient_confidence',
   'safe_load_restricted',
   'memory_estimate_failed',
+  'native_memory_bound_unverified',
 ]);
 
 function getOwnDataProperty(record: Record<string, unknown>, key: string): unknown {

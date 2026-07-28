@@ -77,12 +77,12 @@ describe('LLMEngineService MTP diagnostics', () => {
 describe('LLMEngineService prompt state cache diagnostics', () => {
   it('reports only policy and reserved-memory facts supplied by the runtime policy', () => {
     const policy: PromptStateCachePolicy = {
-      budgetMb: 160,
+      budgetMb: 0,
       maxCheckpoints: 8,
-      enabled: true,
+      enabled: false,
       eligibility: 'eligible',
-      reason: 'maximum_safe_budget',
-      policyVersion: 1,
+      reason: 'native_memory_bound_unverified',
+      policyVersion: 2,
       architecture: 'mamba',
       backendMode: 'gpu',
       finalMemoryFit: {
@@ -93,7 +93,7 @@ describe('LLMEngineService prompt state cache diagnostics', () => {
         breakdown: {
           weightsBytes: 1_000,
           kvCacheBytes: 100,
-          promptStateCacheBytes: 160 * 1024 * 1024,
+          promptStateCacheBytes: 0,
           computeBytes: 100,
           multimodalBytes: 0,
           overheadBytes: 100,
@@ -105,7 +105,7 @@ describe('LLMEngineService prompt state cache diagnostics', () => {
         },
         recommendations: [],
       },
-      evaluatedBudgetsMb: [160],
+      evaluatedBudgetsMb: [],
       source: 'runtime_accurate_memory_fit',
     };
     const snapshot = buildEngineDiagnosticsSnapshot({
@@ -126,13 +126,13 @@ describe('LLMEngineService prompt state cache diagnostics', () => {
         contextSize: 4096,
         cacheTypeK: 'f16',
         cacheTypeV: 'f16',
-        stateCacheBudgetMb: 160,
+        stateCacheBudgetMb: 0,
         stateCacheMaxCheckpoints: 8,
-        stateCacheEnabled: true,
+        stateCacheEnabled: false,
         stateCacheEligibility: 'eligible',
-        stateCachePolicyReason: 'maximum_safe_budget',
-        stateCachePolicyVersion: 1,
-        promptStateCacheBytes: 160 * 1024 * 1024,
+        stateCachePolicyReason: 'native_memory_bound_unverified',
+        stateCachePolicyVersion: 2,
+        promptStateCacheBytes: 0,
         stateCacheArchitecture: 'mamba',
         speculativeEnabled: false,
         profileSource: 'requested',
@@ -163,18 +163,20 @@ describe('LLMEngineService prompt state cache diagnostics', () => {
 
     expect(snapshot).toEqual(expect.objectContaining({
       backendMode: 'gpu',
-      stateCacheBudgetMb: 160,
+      stateCacheBudgetMb: 0,
       stateCacheMaxCheckpoints: 8,
-      stateCacheEnabled: true,
+      stateCacheEnabled: false,
       stateCacheEligibility: 'eligible',
-      stateCachePolicyReason: 'maximum_safe_budget',
-      stateCachePolicyVersion: 1,
-      promptStateCacheBytes: 160 * 1024 * 1024,
+      stateCachePolicyReason: 'native_memory_bound_unverified',
+      stateCachePolicyVersion: 2,
+      promptStateCacheBytes: 0,
       stateCacheArchitecture: 'mamba',
     }));
     expect(snapshot.backendDevices).toEqual(['gpu']);
     expect(snapshot.backendInitAttempts?.[0]).toEqual(expect.objectContaining({
-      stateCacheBudgetMb: 160,
+      stateCacheBudgetMb: 0,
+      stateCacheEnabled: false,
+      stateCachePolicyReason: 'native_memory_bound_unverified',
       stateCacheArchitecture: 'mamba',
     }));
     expect(snapshot).not.toHaveProperty('stateCacheHits');

@@ -320,6 +320,10 @@ part of the production app surface.
 - Try loading a model or load profile that exceeds the estimated RAM budget and confirm the app shows a memory warning or blocks the load instead of crashing during native initialization.
 - Try loading a model that only fits at the minimum context window (512 tokens) and confirm it is marked as `Won't fit RAM` and loading is disabled.
 - Load the model and confirm the app reports the engine as ready.
+- For recurrent/hybrid, pure-attention, CPU, GPU, and NPU loads, confirm diagnostics report
+  `stateCacheBudgetMb: 0`, `stateCacheEnabled: false`, and
+  `promptStateCacheBytes: 0`; inspect native-init evidence for explicit
+  `state_cache_budget_mb: 0` and `state_cache_max_checkpoints: 8` on retries and fallbacks.
 - With the model active, apply a changed load profile and confirm the model reloads successfully with the updated settings.
 - Unload the model and confirm the UI returns to the unloaded state.
 

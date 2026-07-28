@@ -90,9 +90,9 @@ Use at least the following when artifacts and hardware are available:
 
 | Role | Examples | Required cache expectation |
 |---|---|---|
-| Recurrent/hybrid text | LFM2/LFM2.5, Granite 4 hybrid, Qwen 3.5, Mamba/RWKV | Adaptive 64/128/160 MiB only after a high-confidence fit |
+| Recurrent/hybrid text | LFM2/LFM2.5, Granite 4 hybrid, Qwen 3.5, Mamba/RWKV | Explicit 0 MiB; eligible profiles report `native_memory_bound_unverified` |
 | Pure-attention control | Llama, Qwen 2/3, Gemma | Explicit 0 MiB |
-| Multimodal | A compatible model plus its projector | Policy-selected tier with media identity checks |
+| Multimodal | A compatible model plus its projector | Explicit 0 MiB with media identity checks |
 
 Exercise:
 
@@ -100,8 +100,8 @@ Exercise:
 - OpenCL GPU, when discovered and actually selected;
 - Hexagon/HTP NPU, when discovered and actually selected.
 
-Granite 4 hybrid and Mamba 2 must report 0 MiB on Hexagon/HTP. Do not infer an accelerator
-result from the requested profile; confirm the actual runtime backend and device list.
+Every current production backend must report 0 MiB. Do not infer an accelerator result
+from the requested profile; confirm the actual runtime backend and device list.
 
 ## Prompt state-cache checks
 
@@ -117,9 +117,11 @@ Before testing, inspect runtime diagnostics. Each context must report:
 - `stateCacheArchitecture`;
 - `backendMode`.
 
-The native init parameters must be explicit even when the budget is 0 MiB. Enabled cache
-uses 8 maximum checkpoints. Verify that the accurate memory estimate includes the complete
-configured budget and that the selected candidate still fits after the budget is added.
+The native init parameters must be exactly `state_cache_budget_mb: 0` and
+`state_cache_max_checkpoints: 8` on every attempt. Diagnostics must report
+`stateCacheEnabled: false` and `promptStateCacheBytes: 0`. For an otherwise eligible
+recurrent or hybrid architecture, the expected reason is
+`native_memory_bound_unverified`.
 
 Run these scenarios:
 
@@ -129,10 +131,10 @@ Run these scenarios:
 4. Edit an earlier user message and regenerate the branch.
 5. Create a new chat with the same system prompt but different synthetic facts.
 6. Create another chat with a different system prompt.
-7. Confirm a naturally disabled 0 MiB profile with the pure-attention control.
-8. Confirm a non-zero adaptive profile on an eligible architecture with sufficient
-   headroom.
-9. Repeat under low headroom or memory pressure and confirm a safe downgrade, ideally to
+7. Confirm a 0 MiB profile with the pure-attention control.
+8. Confirm eligible recurrent/hybrid models remain at 0 MiB on CPU, GPU, and NPU even
+   with ample headroom.
+9. Repeat under low headroom and critical memory pressure and confirm the budget remains
    0 MiB.
 10. Switch model A to B and back to A.
 
@@ -141,10 +143,11 @@ Correctness gates:
 - no ordinary turn or regeneration performs an unconditional full cache clear;
 - the answer in a new chat does not contain facts supplied only to another chat;
 - model switch releases the old context and does not transfer checkpoints;
-- low-memory, critical-pressure, unknown, borderline, likely-OOM, and insufficient-
-  confidence decisions never get a non-zero tier;
-- a 160 MiB OOM does not prevent the corresponding 0 MiB profile from loading;
-- a successful 0 MiB profile is not treated as proof that 160 MiB is safe.
+- requested, speculative fallback, OOM retry, CPU fallback, NPU, and last-good warmup
+  initialization attempts all include explicit `0/8` parameters;
+- legacy non-zero cache records do not enable a non-zero native load;
+- a successful 0 MiB profile is not treated as proof that a future non-zero profile is
+  safe.
 
 Current llama.rn APIs do not expose authoritative cache-hit, restored-token, checkpoint-
 count, or actual-allocation metrics. Do not derive them by parsing unstable native log
@@ -222,13 +225,19 @@ contain notification content or conversation names.
 
 ## A/B measurement protocol
 
-For each supported model/backend/profile combination:
+The shipping build has only the 0 MiB control and must not be described as an adaptive
+cache experiment. Use the following comparison only in future follow-up work after the
+native runtime provides a verifiable strict memory bound and a separate candidate build
+intentionally enables a non-zero profile.
+
+For each approved future model/backend/profile combination:
 
 1. Stabilize thermal state and close unrelated memory-heavy apps.
 2. Record one cold request after a fresh model load.
 3. Record at least three warm turns with the same long prefix.
 4. Record one regeneration and one edit/regeneration.
-5. Repeat the same scenario for the available 0 MiB control and adaptive profile.
+5. Repeat the same scenario for the 0 MiB control and the explicitly approved candidate
+   profile.
 6. Capture median TTFT, prompt evaluation duration, and RSS/PSS; also retain each raw
    sample and any crash/OOM.
 

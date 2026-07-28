@@ -12,15 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add a memory-validated, architecture-aware cross-turn prompt state-cache policy with
-  explicit 0/64/128/160 MiB tiers, isolated persistence identities, and privacy-safe
-  diagnostics.
+- Add architecture-aware prompt state-cache policy infrastructure, isolated persistence
+  identities, and privacy-safe diagnostics while keeping production fail-closed at 0 MiB.
 - Add a physical-device runtime hardening and A/B validation runbook.
 
 ### Changed
 
-- Upgrade `llama.rn` from 0.12.6 to exactly 0.12.7 and pass explicit prompt state-cache
-  parameters on every native context initialization path.
+- Upgrade `llama.rn` from 0.12.6 to exactly 0.12.7 and pass an explicit 0 MiB budget with
+  an 8-checkpoint limit on every native context initialization path. Non-zero caching
+  remains disabled until the native runtime provides a verifiable strict memory bound.
 
 ### Fixed
 

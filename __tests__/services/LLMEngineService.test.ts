@@ -474,6 +474,28 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('passes explicit disabled prompt state cache parameters to every native init attempt', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+    const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+      if (options?.speculative) {
+        throw new Error('MTP init failed');
+      }
+      return baseInitImplementation?.(options);
+    });
+
+    await expect(llmEngineService.load('test/model', { forceReload: true })).resolves.toBeUndefined();
+
+    const initParams = (llamaRn.initLlama as jest.Mock).mock.calls.map(([params]) => params);
+    expect(initParams).toHaveLength(2);
+    for (const params of initParams) {
+      expect(params).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
+  });
+
   it('blocks completion at the service boundary when the expected thread model differs', async () => {
     await llmEngineService.load('test/model');
 

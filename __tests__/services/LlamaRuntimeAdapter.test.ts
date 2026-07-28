@@ -1,7 +1,8 @@
-import type { LlamaContext } from 'llama.rn';
+import { initLlama, type LlamaContext } from 'llama.rn';
 import {
   getFormattedChatFromContext,
   getMultimodalSupportFromContext,
+  initLlamaContext,
   initMultimodalOnContext,
   normalizeBackendDeviceInfoList,
   normalizeCompletionResult,
@@ -15,6 +16,33 @@ function createContext(overrides: Record<string, unknown>): LlamaContext {
 }
 
 describe('LlamaRuntimeAdapter', () => {
+  it('applies the disabled prompt state cache gate without overriding an explicit policy', async () => {
+    const onProgress = jest.fn();
+    const initLlamaMock = initLlama as jest.Mock;
+    initLlamaMock.mockClear();
+
+    await expect(initLlamaContext(
+      { model: 'model.gguf' },
+      onProgress,
+    )).resolves.toBeUndefined();
+    await expect(initLlamaContext({
+      model: 'recurrent-model.gguf',
+      state_cache_budget_mb: 64,
+      state_cache_max_checkpoints: 4,
+    })).resolves.toBeUndefined();
+
+    expect(initLlamaMock).toHaveBeenNthCalledWith(1, {
+      model: 'model.gguf',
+      state_cache_budget_mb: 0,
+      state_cache_max_checkpoints: 8,
+    }, onProgress);
+    expect(initLlamaMock).toHaveBeenNthCalledWith(2, {
+      model: 'recurrent-model.gguf',
+      state_cache_budget_mb: 64,
+      state_cache_max_checkpoints: 4,
+    }, undefined);
+  });
+
   it('normalizes formatted chat payloads from llama.rn', async () => {
     const getFormattedChat = jest.fn().mockResolvedValue({
       type: ' jinja ',

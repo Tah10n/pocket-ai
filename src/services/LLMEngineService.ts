@@ -151,6 +151,7 @@ import {
   type LlamaFormattedChatResult,
   type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
+import { DISABLED_PROMPT_STATE_CACHE_CONTEXT_PARAMS } from './PromptStateCachePolicy';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from './ProjectorArtifactService';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
@@ -6329,6 +6330,7 @@ class LLMEngineService {
 
           return {
             model: modelPath,
+            ...DISABLED_PROMPT_STATE_CACHE_CONTEXT_PARAMS,
             ...(speculativeConfig
               ? {
                   speculative: {

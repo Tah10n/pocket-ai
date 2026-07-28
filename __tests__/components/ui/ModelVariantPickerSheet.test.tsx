@@ -136,6 +136,27 @@ describe('ModelVariantPickerSheet', () => {
     expect(mockLastListPickerProps.items).toEqual([]);
   });
 
+  it('shows a loading label for unresolved variants during deferred metadata resolution', () => {
+    const model = buildModel();
+    model.size = null;
+    model.sizeResolutionState = 'resolving';
+    model.variants = model.variants?.map((variant) => ({ ...variant, size: null }));
+
+    render(
+      <ModelVariantPickerSheet
+        visible
+        model={model}
+        onSelectVariant={jest.fn()}
+        onClose={jest.fn()}
+      />,
+    );
+
+    expect(mockLastListPickerProps.items.map((item: { title: string }) => item.title)).toEqual([
+      'Q4_K_M - models.sizeResolving',
+      'Q8_0 - models.sizeResolving',
+    ]);
+  });
+
   it('keeps embedded MTP variants while filtering projector companion files out of the picker rows', () => {
     const model = buildModel();
     model.variants = [

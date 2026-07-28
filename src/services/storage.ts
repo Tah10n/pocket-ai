@@ -1268,6 +1268,10 @@ export function createStorage(
             },
             remove: (key: string) => map.delete(key),
             clearAll: () => map.clear(),
+            // Memory-backed storage has no backing file to compact, but callers
+            // should be able to use the same MMKV maintenance contract in tests
+            // and unsupported runtimes.
+            trim: () => { },
             contains: (key: string) => map.has(key),
             getAllKeys: () => Array.from(map.keys()),
             recrypt: () => { },

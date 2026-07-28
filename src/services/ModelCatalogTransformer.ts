@@ -690,7 +690,7 @@ function buildArtifactMetadataPatch(options: {
 }
 
 export function createFallbackModel(modelId: string): ModelMetadata {
-  return normalizePersistedModelMetadata({
+  return {
     id: modelId,
     name: getShortModelLabel(modelId) || modelId,
     author: modelId.split('/')[0] || 'unknown',
@@ -702,7 +702,7 @@ export function createFallbackModel(modelId: string): ModelMetadata {
     isPrivate: false,
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
-  });
+  };
 }
 
 function createTreeProbeCandidate(
@@ -761,7 +761,7 @@ function createTreeProbeCandidate(
     source: 'catalog_metadata',
   });
 
-  return normalizePersistedModelMetadata({
+  return {
     id: repoId,
     name: getShortModelLabel(repoId) || repoId,
     author: item.author || repoId.split('/')[0],
@@ -785,7 +785,7 @@ function createTreeProbeCandidate(
     likes: item.likes ?? null,
     ...visionMetadata,
     ...inputCapabilityMetadata,
-  });
+  };
 }
 
 function hasOnlyCompanionGgufSiblings(
@@ -936,7 +936,15 @@ export function transformHFResponse(
       size,
       speculativeDraftArtifact,
     });
-    results.push(normalizePersistedModelMetadata({
+    const runtimeArtifacts = artifactMetadata.artifacts?.map((artifact) => ({
+      ...artifact,
+      requiredFor: [...artifact.requiredFor].sort(),
+    }));
+    // These values are built from the validated HF response above. The full
+    // persisted-model normalizer is intentionally reserved for disk/cache
+    // boundaries; running its migration and projector-repair passes here made
+    // a 20-card cold catalog render block the JS thread for more than 10s.
+    results.push({
       id: repoId,
       name: getShortModelLabel(repoId) || repoId,
       author: item.author || repoId.split('/')[0],
@@ -958,6 +966,7 @@ export function transformHFResponse(
       downloadProgress: 0,
       sha256: getFileSha(ggufSibling),
       maxContextTokens,
+      parameterSizeLabel: undefined,
       downloads: item.downloads ?? null,
       likes: item.likes ?? null,
       variants,
@@ -965,8 +974,8 @@ export function transformHFResponse(
       ...(speculativeDecoding ? { speculativeDecoding } : {}),
       ...visionMetadata,
       ...inputCapabilityMetadata,
-      ...artifactMetadata,
-    }));
+      artifacts: runtimeArtifacts,
+    });
   }
 
   return results;

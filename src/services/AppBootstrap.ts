@@ -317,12 +317,42 @@ function scheduleAfterFirstFrame(task: () => void): void {
 
 const MODEL_CATALOG_CACHE_HYDRATION_MAX_ATTEMPTS = 3;
 const MODEL_CATALOG_CACHE_HYDRATION_RETRY_DELAY_MS = 1000;
+const MODEL_CATALOG_CACHE_MODEL_INIT_WAIT_TIMEOUT_MS = 15_000;
 
-function hydrateModelCatalogCacheWithRetry(attempt: number = 1): void {
+function waitForActiveModelInitialization(): Promise<void> {
+  if (llmEngineService.getState().status !== EngineStatus.INITIALIZING) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe: (() => void) | undefined;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      unsubscribe?.();
+      resolve();
+    };
+    const timeout = setTimeout(finish, MODEL_CATALOG_CACHE_MODEL_INIT_WAIT_TIMEOUT_MS);
+    unsubscribe = llmEngineService.subscribe((state) => {
+      if (state.status !== EngineStatus.INITIALIZING) {
+        finish();
+      }
+    });
+    if (settled) {
+      unsubscribe();
+    }
+  });
+}
+
+async function hydrateModelCatalogCacheWithRetry(attempt: number = 1): Promise<void> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const module = require('./ModelCatalogService') as typeof import('./ModelCatalogService');
-    module.modelCatalogService.hydratePersistentCache();
+    await module.modelCatalogService.hydratePersistentCacheIncrementally();
   } catch (error) {
     const hasRetryRemaining = attempt < MODEL_CATALOG_CACHE_HYDRATION_MAX_ATTEMPTS;
     if (!isRuntimeTestEnvironment()) {
@@ -343,7 +373,9 @@ function hydrateModelCatalogCacheWithRetry(attempt: number = 1): void {
 
     if (hasRetryRemaining) {
       setTimeout(
-        () => hydrateModelCatalogCacheWithRetry(attempt + 1),
+        () => {
+          void hydrateModelCatalogCacheWithRetry(attempt + 1);
+        },
         MODEL_CATALOG_CACHE_HYDRATION_RETRY_DELAY_MS * attempt,
       );
     }
@@ -353,10 +385,16 @@ function hydrateModelCatalogCacheWithRetry(attempt: number = 1): void {
 export function scheduleModelCatalogCacheHydrationAfterFirstFrame(): void {
   scheduleAfterFirstFrame(() => {
     // Cache-tier hydration can parse a bounded JSON payload. Load it only
-    // after the app shell has committed its first frame. A short bounded retry
-    // window recovers transient private-storage readiness failures without
-    // moving cache parsing back onto the startup critical path.
-    hydrateModelCatalogCacheWithRetry();
+    // after the app shell has committed its first frame and active-model restore
+    // has released its CPU/memory pressure. A short bounded retry window
+    // recovers transient private-storage readiness failures without competing
+    // with model initialization or moving parsing onto the critical path.
+    if (llmEngineService.getState().status === EngineStatus.INITIALIZING) {
+      void waitForActiveModelInitialization().then(() => hydrateModelCatalogCacheWithRetry());
+      return;
+    }
+
+    void hydrateModelCatalogCacheWithRetry();
   });
 }
 

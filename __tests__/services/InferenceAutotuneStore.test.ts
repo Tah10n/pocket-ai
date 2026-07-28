@@ -154,6 +154,83 @@ describe('InferenceAutotuneStore', () => {
     });
   });
 
+  it('migrates legacy candidate diagnostics to counts and fixed categories', () => {
+    const sentinel = 'hf_PRIVATE_LEGACY_AUTOTUNE_SENTINEL';
+    mockStorageValues.set('autotune:test/model:4096:f16', JSON.stringify({
+      createdAtMs: 1_700_000_000_000,
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: nativeVersion,
+      bestStable: {
+        backendMode: 'npu',
+        nGpuLayers: 12,
+        devices: ['HTP0'],
+      },
+      candidates: [{
+        profile: {
+          backendMode: 'npu',
+          nGpuLayers: 12,
+          devices: [sentinel],
+        },
+        success: false,
+        initDevices: [sentinel, 'C:\\Users\\private\\device'],
+        reasonNoGPU: sentinel,
+        error: sentinel,
+      }],
+    }));
+
+    const result = readAutotuneResult({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      bestStable: {
+        backendMode: 'npu',
+        nGpuLayers: 12,
+        devices: ['HTP0'],
+      },
+      candidates: [{
+        profile: {
+          backendMode: 'npu',
+          nGpuLayers: 12,
+          deviceCount: 1,
+        },
+        success: false,
+        initDeviceCount: 2,
+        reasonNoGPU: 'native_error',
+        error: 'operation_failed',
+      }],
+    }));
+    expect(JSON.stringify(result)).not.toContain(sentinel);
+    expect(JSON.stringify(result)).not.toContain('C:\\Users\\private');
+  });
+
+  it('logs only a strict error identifier for corrupt payloads', () => {
+    const warningSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const sentinel = 'hf_PRIVATE_CORRUPT_JSON_SENTINEL';
+    mockStorageValues.set('autotune:test/model:4096:f16', `{${sentinel}`);
+
+    try {
+      expect(readAutotuneResult({
+        modelId: 'test/model',
+        contextSize: 4096,
+        kvCacheType: 'f16',
+      })).toBeNull();
+
+      expect(warningSpy).toHaveBeenCalledWith(
+        '[InferenceAutotuneStore] Corrupted autotune payload, clearing.',
+        { errorName: 'SyntaxError' },
+      );
+      expect(JSON.stringify(warningSpy.mock.calls)).not.toContain(sentinel);
+      expect(mockStorage.remove).toHaveBeenCalledWith('autotune:test/model:4096:f16');
+    } finally {
+      warningSpy.mockRestore();
+    }
+  });
+
   it('rejects results when the model signature does not match', () => {
     writeAutotuneResult({
       createdAtMs: 1_700_000_000_000,

@@ -8,18 +8,29 @@ import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types
 import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
 import { AppState } from 'react-native';
 import { getAppStorage, storage } from '../../src/store/storage';
-import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
+import {
+  CHAT_PERSISTENCE_INDEX_KEY,
+  CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
+  getThreadIdFromChatStreamingProgressArtifactStorageKey,
+  getChatThreadStorageKey,
+  listChatStreamingProgressStorageKeys,
+  readChatStreamingProgressRecord,
+} from '../../src/store/chatPersistence';
 import {
   buildInferenceMessagesForThread,
   getThreadTruncationState,
   LONG_STREAM_PATCH_INTERVAL_MS,
+  resetActiveChatGenerationRuntimeForPrivateStorageReset,
   resetSharedGenerationStateForTests,
   resolveAssistantStreamPatchInterval,
   resolvePresetSnapshot,
   shouldFlushAssistantStreamPatchOnBoundary,
   stopActiveChatGenerationForPrivateStorageBlocked,
 } from '../../src/hooks/useChatSession';
-import { DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER } from '../../src/types/chat';
+import {
+  DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+  type LlmChatCompletionOptions,
+} from '../../src/types/chat';
 import { presetManager } from '../../src/services/PresetManager';
 import { AppError } from '../../src/services/AppError';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
@@ -35,13 +46,29 @@ import {
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/multimodal';
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
+import {
+  armAndroidQaGenerationGate,
+  getAndroidQaGenerationEvidenceSnapshot,
+  resetAndroidQaGenerationEvidenceForTests,
+} from '../../src/services/AndroidQaGenerationEvidence';
+
+function expectNoStreamingProgressArtifacts(threadId: string): void {
+  expect(listChatStreamingProgressStorageKeys(storage).filter(
+    (key) => getThreadIdFromChatStreamingProgressArtifactStorageKey(key) === threadId,
+  )).toEqual([]);
+}
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
+    subscribe: jest.fn(() => () => undefined),
     getState: jest.fn(),
+    getPromptContextIdentity: jest.fn(),
     getContextSize: jest.fn(),
     getLastCompletionTelemetry: jest.fn(),
+    beginPromptPreparation: jest.fn(() => jest.fn()),
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     assertActiveMultimodalReadyForMediaPaths: jest.fn(),
@@ -134,6 +161,17 @@ jest.mock('../../src/services/storage', () => {
 
 describe('useChatSession', () => {
   let appStateListeners: Array<(state: 'active' | 'background' | 'inactive') => void>;
+  type ChatTokenCallback = NonNullable<LlmChatCompletionOptions['onToken']>;
+
+  function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    return { promise, reject, resolve };
+  }
 
   function renderHookHarness() {
     let session: ReturnType<typeof useChatSession> | null = null;
@@ -152,6 +190,10 @@ describe('useChatSession', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(true);
+    exactPromptTokenCache.clear();
+    resetAndroidQaGenerationEvidenceForTests();
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',
@@ -178,8 +220,12 @@ describe('useChatSession', () => {
     (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
       temperature: 0.7,
       topP: 0.9,
+      topK: 40,
+      minP: 0.05,
+      repetitionPenalty: 1,
       maxTokens: modelId ? 1024 : 512,
       reasoningEffort: 'auto',
+      seed: null,
     }));
     (isPrivateStorageWritable as jest.Mock).mockReturnValue(true);
     (getPrivateStorageHealthSnapshot as jest.Mock).mockReturnValue({
@@ -193,8 +239,12 @@ describe('useChatSession', () => {
       status: EngineStatus.READY,
       activeModelId: 'author/model-q4',
     });
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:1\u0001author/model-q4',
+    );
     (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
     (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(null);
+    (llmEngineService.beginPromptPreparation as jest.Mock).mockImplementation(() => jest.fn());
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
         onToken?.('Hello back');
@@ -243,6 +293,40 @@ describe('useChatSession', () => {
         status?: string;
         messages?: Array<Record<string, unknown>>;
       };
+    };
+  }
+
+  async function prepareTrailingModelSwitchRegeneration(
+    getSession: () => ReturnType<typeof useChatSession> | null,
+    prompt = 'Original model-switch prompt',
+  ) {
+    await act(async () => {
+      await getSession()?.appendUserMessage(prompt);
+    });
+
+    const completedThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessageId = completedThread.messages.find(
+      (message) => message.role === 'user',
+    )!.id;
+    await act(async () => {
+      useChatStore.getState().switchThreadModel(completedThread.id, 'author/model-q8');
+    });
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.READY,
+      activeModelId: 'author/model-q8',
+    });
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:1\u0001author/model-q8',
+    );
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.activeModelId).toBe('author/model-q8');
+    });
+
+    return {
+      threadId: completedThread.id,
+      targetUserMessageId,
+      rawThread: useChatStore.getState().threads[completedThread.id],
+      durableRecord: storage.getString(getChatThreadStorageKey(completedThread.id)),
     };
   }
 
@@ -330,25 +414,34 @@ describe('useChatSession', () => {
 
   it('creates and persists a thread-backed conversation', async () => {
     const getSession = renderHookHarness();
+    const snapshotSpy = jest.spyOn(performanceMonitor, 'snapshot');
+    const setGaugeSpy = jest.spyOn(performanceMonitor, 'setGauge');
 
-    await act(async () => {
-      await getSession()?.appendUserMessage('Hello there');
-    });
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Hello there');
+      });
 
-    await waitFor(() => {
-      expect(useChatStore.getState().getConversationIndex()).toHaveLength(1);
-    });
+      await waitFor(() => {
+        expect(useChatStore.getState().getConversationIndex()).toHaveLength(1);
+      });
 
-    const thread = useChatStore.getState().getActiveThread();
-    expect(thread?.modelId).toBe('author/model-q4');
-    expect(thread?.presetId).toBe('preset-1');
-    expect(thread?.presetSnapshot).toEqual({
-      id: 'preset-1',
-      name: 'Helpful Assistant',
-      systemPrompt: 'Be concise.',
-    });
-    expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
-    expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+      const thread = useChatStore.getState().getActiveThread();
+      expect(thread?.modelId).toBe('author/model-q4');
+      expect(thread?.presetId).toBe('preset-1');
+      expect(thread?.presetSnapshot).toEqual({
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      });
+      expect(thread?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+      expect(thread?.messages.at(-1)?.content).toBe('Hello back');
+      expect(setGaugeSpy).toHaveBeenCalledWith('chat.tokensPerSec', expect.any(Number));
+      expect(snapshotSpy).not.toHaveBeenCalled();
+    } finally {
+      snapshotSpy.mockRestore();
+      setGaugeSpy.mockRestore();
+    }
   });
 
   it('persists native MTP completion telemetry on the assistant message', async () => {
@@ -368,13 +461,40 @@ describe('useChatSession', () => {
     };
     (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(telemetry);
     const getSession = renderHookHarness();
-
-    await act(async () => {
-      await getSession()?.appendUserMessage('Benchmark MTP');
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const durableWritesWithTelemetry: string[] = [];
+    appStorage.set = jest.fn(function setWithTerminalWriteCapture(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (
+        key.startsWith('chat-store:v2:thread:')
+        && typeof value === 'string'
+        && value.includes('"inferenceMetrics"')
+      ) {
+        durableWritesWithTelemetry.push(value);
+      }
+      return originalSet.call(this, key, value);
     });
 
-    const assistant = useChatStore.getState().getActiveThread()?.messages.at(-1);
-    expect(assistant?.inferenceMetrics).toEqual(telemetry);
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Benchmark MTP');
+      });
+
+      const assistant = useChatStore.getState().getActiveThread()?.messages.at(-1);
+      expect(assistant?.inferenceMetrics).toEqual(telemetry);
+      expect(durableWritesWithTelemetry).toHaveLength(1);
+      expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+        'chat.turn.finalize': 1,
+        'chat.turn.storeMutations': 1,
+        'chat.turn.persistenceTransactions': 1,
+      }));
+    } finally {
+      appStorage.set = originalSet;
+    }
   });
 
   it('sanitizes prompt token fallback warnings without logging raw attachment paths', async () => {
@@ -398,12 +518,284 @@ describe('useChatSession', () => {
       );
       expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
       expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('file:///private/chat-attachments/image.jpg');
+
+      const tokenizerCallsAfterRejectedEntry = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+      await act(async () => {
+        await getSession()?.regenerateLastResponse();
+      });
+
+      expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.length).toBeGreaterThan(
+        tokenizerCallsAfterRejectedEntry,
+      );
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2);
     } finally {
       warnSpy.mockRestore();
     }
   });
 
-  it('persists copied image attachments on the user message and passes media paths to inference', async () => {
+  it('reuses exact prompt counts for identical regeneration and misses after context recreation', async () => {
+    registry.saveModels([{
+      id: 'author/model-q4',
+      name: 'Qwen3-4B-Instruct-GGUF',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      downloadUrl: 'https://example.com/author/model-q4.gguf',
+      localPath: 'author-model-q4.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      modelType: 'qwen3',
+      tags: ['gguf', 'chat'],
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: true,
+        canDisableThinking: true,
+      },
+    }]);
+    (getGenerationParametersForModel as jest.Mock).mockImplementation((modelId: string | null | undefined) => ({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: modelId ? 1024 : 512,
+      reasoningEffort: 'off',
+    }));
+    const getSession = renderHookHarness();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    const getGenerationTokenCountCallCount = () => (
+      (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+        .filter(([call]) => call.chatBlocking !== false).length
+    );
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Cache this exact prompt');
+    });
+
+    const callsAfterFirstRequest = getGenerationTokenCountCallCount();
+    expect(callsAfterFirstRequest).toBeGreaterThan(0);
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(getGenerationTokenCountCallCount()).toBe(callsAfterFirstRequest);
+    const cacheHitSnapshot = performanceMonitor.snapshot();
+    expect(cacheHitSnapshot.counters).toEqual(expect.objectContaining({
+      'chat.prompt.cache.hit': expect.any(Number),
+      'chat.prompt.cache.miss': expect.any(Number),
+    }));
+    expect(cacheHitSnapshot.events.some((event) => (
+      event.name === 'chat.prompt.total'
+      && event.meta?.outcome === 'success'
+      && event.meta?.tokenCountSource === 'cache'
+    ))).toBe(true);
+    expect(JSON.stringify(cacheHitSnapshot)).not.toContain('Cache this exact prompt');
+
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+      'context-generation:2\u0001author/model-q4',
+    );
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsAfterFirstRequest,
+    );
+
+    const threadAfterContextMiss = useChatStore.getState().getActiveThread();
+    expect(threadAfterContextMiss).toBeTruthy();
+    const callsBeforeSystemPromptChange = getGenerationTokenCountCallCount();
+    act(() => {
+      useChatStore.getState().updateThreadPresetSnapshot(
+        threadAfterContextMiss!.id,
+        'preset-cache-system-change',
+        {
+          id: 'preset-cache-system-change',
+          name: 'Detailed Assistant',
+          systemPrompt: 'Answer with deliberate detail.',
+        },
+      );
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.presetSnapshot.systemPrompt).toBe('Answer with deliberate detail.');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsBeforeSystemPromptChange,
+    );
+
+    const callsBeforeSummaryChange = getGenerationTokenCountCallCount();
+    act(() => {
+      useChatStore.getState().setThreadSummary(threadAfterContextMiss!.id, {
+        content: 'The user asked about exact token caching.',
+        createdAt: Date.now(),
+        sourceMessageIds: [threadAfterContextMiss!.messages[0]!.id],
+      });
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.summary?.content).toBe('The user asked about exact token caching.');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsBeforeSummaryChange,
+    );
+
+    const threadWithSummary = useChatStore.getState().getActiveThread();
+    const callsBeforeReasoningChange = getGenerationTokenCountCallCount();
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 1024,
+      reasoningEffort: 'medium',
+    });
+    act(() => {
+      useChatStore.getState().updateThreadParamsSnapshot(threadWithSummary!.id, {
+        ...threadWithSummary!.paramsSnapshot,
+        reasoningEffort: 'medium',
+      });
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.paramsSnapshot.reasoningEffort).toBe('medium');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(
+      callsBeforeReasoningChange,
+    );
+
+    const callsBeforeModelSwitch = getGenerationTokenCountCallCount();
+    act(() => {
+      (llmEngineService.getState as jest.Mock).mockReturnValue({
+        status: EngineStatus.READY,
+        activeModelId: 'author/model-q8',
+      });
+      (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(
+        'context-generation:3\u0001author/model-q8',
+      );
+      useChatStore.getState().switchThreadModel(threadWithSummary!.id, 'author/model-q8', Date.now());
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.activeModelId).toBe('author/model-q8');
+    });
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBeGreaterThan(callsBeforeModelSwitch);
+  });
+
+  it('misses the exact prompt cache when a prepared attachment identity changes', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    registry.saveModels([{
+      id: 'author/model-q4',
+      name: 'Vision Model',
+      author: 'Test',
+      size: 512 * 1024 * 1024,
+      downloadUrl: 'https://example.com/author/model-q4.gguf',
+      localPath: 'author-model-q4.gguf',
+      fitsInRam: true,
+      accessState: ModelAccessState.PUBLIC,
+      isGated: false,
+      isPrivate: false,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      tags: ['gguf', 'chat', 'vision'],
+      multimodalReadiness: readyVision,
+    }]);
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({
+      temperature: 0.7,
+      topP: 0.9,
+      maxTokens: 512,
+      reasoningEffort: 'off',
+    });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(1600);
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => (
+        messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100
+      ),
+    );
+    const getSession = renderHookHarness();
+    const getGenerationTokenCountCallCount = () => (
+      (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+        .filter(([call]) => call.chatBlocking !== false).length
+    );
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Describe this image', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    const callsAfterFirstRequest = getGenerationTokenCountCallCount();
+    expect(callsAfterFirstRequest).toBeGreaterThan(0);
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+    expect(getGenerationTokenCountCallCount()).toBe(callsAfterFirstRequest);
+
+    const activeThread = useChatStore.getState().getActiveThread();
+    const userMessage = activeThread?.messages.find((message) => message.role === 'user');
+    const changedAttachmentUri = 'test-dir/chat-attachments/draft-image-2.jpg';
+    expect(activeThread).toBeTruthy();
+    expect(userMessage?.attachments).toHaveLength(1);
+    act(() => {
+      useChatStore.setState((state) => {
+        const currentThread = state.threads[activeThread!.id]!;
+        return {
+          threads: {
+            ...state.threads,
+            [currentThread.id]: {
+              ...currentThread,
+              updatedAt: currentThread.updatedAt + 1,
+              messages: currentThread.messages.map((message) => (
+                message.id === userMessage!.id
+                  ? {
+                      ...message,
+                      attachments: message.attachments?.map((attachment) => ({
+                        ...attachment,
+                        localUri: changedAttachmentUri,
+                      })),
+                    }
+                  : message
+              )),
+            },
+          },
+        };
+      });
+    });
+    await waitFor(() => {
+      expect(getSession()?.activeThread?.messages
+        .find((message) => message.id === userMessage!.id)
+        ?.attachments?.[0]?.localUri).toBe(changedAttachmentUri);
+    });
+
+    const nativeCallIndexBeforeAttachmentChange = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(getGenerationTokenCountCallCount()).toBe(callsAfterFirstRequest + 1);
+    const changedAttachmentCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+      .slice(nativeCallIndexBeforeAttachmentChange)
+      .filter(([call]) => call.chatBlocking !== false);
+    expect(changedAttachmentCalls).toHaveLength(1);
+    expect(changedAttachmentCalls[0]?.[0].messages.some((message: any) => (
+      message.mediaPaths?.includes(changedAttachmentUri)
+    ))).toBe(true);
+  });
+
+  it('persists copied image attachments and revalidates the latest file before inference', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
       modelId: 'author/model-q4',
@@ -469,6 +861,8 @@ describe('useChatSession', () => {
     expect(generationCountCalls.some(([call]) => (
       call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
     ))).toBe(false);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/draft-image-1.jpg');
   });
 
   it('processes copied document drafts into persisted attachments and text content parts for inference', async () => {
@@ -541,9 +935,14 @@ describe('useChatSession', () => {
         ]),
       }),
     );
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toEqual({
+      userMessageId: userMessage?.id,
+      assistantMessageId: thread?.messages[1]?.id,
+      attachments: [{ id: 'document-1', kind: 'document' }],
+    });
   });
 
-  it('revalidates retained attachments before completion and recounts changed final payloads', async () => {
+  it('resolves each stable retained attachment URI once and reuses the prepared payload for completion', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
       modelId: 'author/model-q4',
@@ -568,26 +967,18 @@ describe('useChatSession', () => {
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri.includes('draft-image-1.jpg')) {
         retainedImageChecks += 1;
-        return { exists: retainedImageChecks === 1, size: 123_456 };
       }
 
       return { exists: true, size: 123_456 };
     });
     const tokenCountSnapshots: Array<{
       attachmentChecks: number;
-      signature: string;
       mediaPaths: string[];
     }> = [];
-    const toTokenCountSignature = (messages: any[]) => JSON.stringify(messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      mediaPaths: message.mediaPaths ?? [],
-    })));
     (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
       async ({ messages }: { messages: any[] }) => {
         tokenCountSnapshots.push({
           attachmentChecks: retainedImageChecks,
-          signature: toTokenCountSignature(messages),
           mediaPaths: messages.flatMap((message) => message.mediaPaths ?? []),
         });
         return messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100;
@@ -602,23 +993,236 @@ describe('useChatSession', () => {
 
     const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
     const completionMediaPaths = completionCall?.messages.flatMap((message: any) => message.mediaPaths ?? []);
-    const mediaTokenCountCalls = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.filter(([call]) => (
-      call.messages.flatMap((message: any) => message.mediaPaths ?? []).length > 0
-    ));
-
-    expect(retainedImageChecks).toBe(2);
-    expect(completionMediaPaths).toEqual([]);
-    expect(mediaTokenCountCalls.length).toBeGreaterThan(0);
-    const finalRecountSnapshots = tokenCountSnapshots.filter((snapshot) => (
-      snapshot.attachmentChecks >= 2
-      && snapshot.signature === toTokenCountSignature(completionCall.messages)
-    ));
-    expect(finalRecountSnapshots).toHaveLength(1);
-    expect(finalRecountSnapshots[0]?.mediaPaths).toEqual([]);
+    expect(retainedImageChecks).toBe(1);
+    expect(completionMediaPaths).toEqual(['test-dir/chat-attachments/draft-image-1.jpg']);
+    expect(tokenCountSnapshots.some((snapshot) => (
+      snapshot.attachmentChecks === 1
+    ))).toBe(true);
+    const performanceSnapshot = performanceMonitor.snapshot();
+    expect(performanceSnapshot.events.map((event) => event.name)).toEqual(expect.arrayContaining([
+      'chat.prompt.total',
+      'chat.prompt.attachments',
+      'chat.prompt.tokenize',
+      'chat.prompt.finalize',
+    ]));
+    expect(performanceSnapshot.events.some((event) => (
+      event.name === 'chat.prompt.total'
+      && event.meta?.attachmentLookups === 1
+    ))).toBe(true);
+    expect(JSON.stringify(performanceSnapshot)).not.toContain('test-dir/chat-attachments');
     expect(completionCall?.params.n_predict).toBe(1024);
   });
 
-  it('does not final-recount or complete when stopped during retained attachment revalidation', async () => {
+  it('reserves foreground prompt work before validating draft attachments', async () => {
+    const events: string[] = [];
+    const releases: jest.Mock[] = [];
+    let resolveAttachmentCheck: (() => void) | undefined;
+    (llmEngineService.beginPromptPreparation as jest.Mock).mockImplementation(() => {
+      events.push('reserve');
+      const release = jest.fn(() => events.push('release'));
+      releases.push(release);
+      return release;
+    });
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockImplementationOnce(() => {
+        events.push('attachment_check');
+        return new Promise((resolve) => {
+          resolveAttachmentCheck = () => resolve({ exists: true, size: 123_456 });
+        });
+      })
+      .mockResolvedValue({ exists: true, size: 123_456 });
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Reserve before attachment work', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(events).toEqual(['reserve', 'attachment_check']);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveAttachmentCheck?.();
+      await sendPromise;
+    });
+
+    expect(llmEngineService.beginPromptPreparation).toHaveBeenCalledTimes(2);
+    expect(releases).toHaveLength(2);
+    expect(releases.every((release) => release.mock.calls.length === 1)).toBe(true);
+    expect(events.indexOf('reserve')).toBeLessThan(events.indexOf('attachment_check'));
+  });
+
+  it('does not append after prompt semantics change during draft validation', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Existing prompt');
+    });
+
+    const thread = useChatStore.getState().getActiveThread()!;
+    const messageIdsBefore = thread.messages.map((message) => message.id);
+    let resolveAttachmentCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAttachmentCheck = () => resolve({ exists: true, size: 123_456 });
+    }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    let sendPromise: Promise<void> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Must not be appended', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalled();
+    });
+
+    act(() => {
+      useChatStore.getState().updateThreadPresetSnapshot(
+        thread.id,
+        'preset-during-attachment-validation',
+        {
+          id: 'preset-during-attachment-validation',
+          name: 'Changed during validation',
+          systemPrompt: 'Use the new semantics.',
+        },
+      );
+    });
+    await act(async () => {
+      resolveAttachmentCheck?.();
+      try {
+        await sendPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'action_failed' }));
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id))
+      .toEqual(messageIdsBefore);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['engine unload', { status: EngineStatus.IDLE, activeModelId: undefined }, 'context-generation:2\u0001none'],
+    ['model replacement', { status: EngineStatus.READY, activeModelId: 'author/model-q8' }, 'context-generation:2\u0001author/model-q8'],
+  ])('does not append after %s during draft validation', async (
+    _label,
+    nextEngineState,
+    nextContextIdentity,
+  ) => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Existing prompt');
+    });
+
+    const thread = useChatStore.getState().getActiveThread()!;
+    const messageIdsBefore = thread.messages.map((message) => message.id);
+    let resolveAttachmentCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAttachmentCheck = () => resolve({ exists: true, size: 123_456 });
+    }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    let sendPromise: Promise<void> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      sendPromise = getSession()?.appendUserMessage('Must not survive engine replacement', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalled();
+    });
+
+    (llmEngineService.getState as jest.Mock).mockReturnValue(nextEngineState);
+    (llmEngineService.getPromptContextIdentity as jest.Mock).mockReturnValue(nextContextIdentity);
+    await act(async () => {
+      resolveAttachmentCheck?.();
+      try {
+        await sendPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'engine_not_ready' }));
+    expect(useChatStore.getState().getThread(thread.id)?.messages.map((message) => message.id))
+      .toEqual(messageIdsBefore);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('rejects a latest attachment removed after tokenization before native completion starts', async () => {
+    const getSession = renderHookHarness();
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    let attachmentExists = true;
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async () => ({
+      exists: attachmentExists,
+      size: 123_456,
+    }));
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      async ({ messages }: { messages: any[] }) => {
+        attachmentExists = false;
+        return estimateLlmMessagesTokens(messages as any);
+      },
+    );
+
+    let thrown: unknown;
+    await act(async () => {
+      try {
+        await getSession()?.appendUserMessage('Describe this image', {
+          attachmentDrafts: [copiedDraftImageAttachment],
+          multimodalReadiness: readyVision,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({ code: 'chat_attachment_missing' }));
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.map(([uri]) => uri)).toEqual([
+      copiedDraftImageAttachment.localUri,
+      copiedDraftImageAttachment.localUri,
+    ]);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('stops attachment preparation without starting further tokenizer or completion work', async () => {
     const getSession = renderHookHarness();
     const readyVision = {
       modelId: 'author/model-q4',
@@ -640,35 +1244,22 @@ describe('useChatSession', () => {
 
     let retainedImageChecks = 0;
     let stopPromise: Promise<void> | undefined;
+    let tokenizerCallsAtStop = 0;
     (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => {
       if (uri.includes('draft-image-1.jpg')) {
         retainedImageChecks += 1;
-        if (retainedImageChecks === 2) {
-          (llmEngineService.getState as jest.Mock).mockReturnValue({
-            status: EngineStatus.IDLE,
-            activeModelId: 'author/model-q4',
-          });
-          stopPromise = getSession()?.stopGeneration();
-        }
-        return { exists: retainedImageChecks === 1, size: 123_456 };
+        tokenizerCallsAtStop = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+        (llmEngineService.getState as jest.Mock).mockReturnValue({
+          status: EngineStatus.IDLE,
+          activeModelId: 'author/model-q4',
+        });
+        stopPromise = getSession()?.stopGeneration();
+        await stopPromise;
+        return { exists: true, size: 123_456 };
       }
 
       return { exists: true, size: 123_456 };
     });
-    const tokenCountSnapshots: Array<{
-      attachmentChecks: number;
-      mediaPaths: string[];
-    }> = [];
-    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
-      async ({ messages }: { messages: any[] }) => {
-        tokenCountSnapshots.push({
-          attachmentChecks: retainedImageChecks,
-          mediaPaths: messages.flatMap((message) => message.mediaPaths ?? []),
-        });
-        return messages.flatMap((message) => message.mediaPaths ?? []).length > 0 ? 900 : 100;
-      },
-    );
-
     await act(async () => {
       await getSession()?.appendUserMessage('Follow up using the same image', {
         multimodalReadiness: { ...readyVision, checkedAt: 2 },
@@ -676,12 +1267,102 @@ describe('useChatSession', () => {
       await stopPromise;
     });
 
-    expect(retainedImageChecks).toBe(2);
+    expect(retainedImageChecks).toBe(1);
     expect(llmEngineService.stopCompletion).toHaveBeenCalled();
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(tokenizerCallsAtStop);
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
-    expect(tokenCountSnapshots.filter((snapshot) => (
-      snapshot.attachmentChecks >= 2 && snapshot.mediaPaths.length === 0
-    ))).toHaveLength(0);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('stops scheduling filesystem lookups after candidate attachment preparation is cancelled', async () => {
+    const expectedConcurrentLookups = 8;
+    const threadId = 'thread-cancel-window-attachments';
+    const messageId = 'message-many-documents';
+    const documentAttachments: ChatAttachment[] = Array.from({ length: 32 }, (_, index) => ({
+      id: `document-${index}`,
+      kind: 'document',
+      state: 'ready',
+      threadId,
+      messageId,
+      localUri: `test-dir/chat-attachments/document-${index}.txt`,
+      pathCategory: 'chat_attachment',
+      fileName: `document-${index}.txt`,
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: index + 1,
+      document: {
+        processorId: 'document-text',
+        processorVersion: 1,
+        extractedCharCount: 16,
+        isScanned: false,
+      },
+    }));
+    useChatStore.setState({
+      threads: {
+        [threadId]: {
+          id: threadId,
+          title: 'Cancellation window',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 256,
+            seed: null,
+          },
+          messages: [{
+            id: messageId,
+            role: 'user',
+            content: 'Use the retained documents.',
+            createdAt: 1,
+            state: 'complete',
+            kind: 'message',
+            modelId: 'author/model-q4',
+            attachments: documentAttachments,
+            contentParts: [{ type: 'text', text: 'Retained document content.' }],
+          }],
+          createdAt: 1,
+          updatedAt: 1,
+          status: 'idle',
+        },
+      },
+      activeThreadId: threadId,
+    });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(8_192);
+    const releaseLookups: Array<() => void> = [];
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementation(() => new Promise((resolve) => {
+      releaseLookups.push(() => resolve({ exists: true, size: 128 }));
+    }));
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    act(() => {
+      sendPromise = getSession()?.appendUserMessage('Cancel this preparation');
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(expectedConcurrentLookups);
+    });
+    const tokenizerCallsAtCancellation = (llmEngineService.countPromptTokens as jest.Mock).mock.calls.length;
+
+    await act(async () => {
+      const stopPromise = getSession()?.stopGeneration();
+      releaseLookups.splice(0).forEach((release) => release());
+      await stopPromise;
+      await sendPromise;
+    });
+
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(expectedConcurrentLookups);
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(tokenizerCallsAtCancellation);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
   });
 
@@ -1154,13 +1835,6 @@ describe('useChatSession', () => {
         localUri: 'test-dir/chat-attachments/draft-image-1.jpg',
       }),
     ]);
-    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
-      call.messages.some((message: any) => message.content === 'Continue with text only')
-      && call.messages.flatMap((message: any) => [
-        ...(message.mediaPaths ?? []),
-        ...(message.attachments ?? []),
-      ]).length > 0
-    ))).toBe(true);
     expect(useChatStore.getState().getActiveThread()?.messages[0]?.attachments).toBe(persistedAttachmentBefore);
   });
 
@@ -1235,10 +1909,6 @@ describe('useChatSession', () => {
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-1.jpg');
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-2.jpg');
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/old-image-3.jpg');
-    expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(([call]) => (
-      call.messages.some((message: any) => message.content === 'Use these latest images')
-      && call.messages.flatMap((message: any) => message.mediaPaths ?? []).join('|') === mediaPaths.join('|')
-    ))).toBe(true);
     expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments).toHaveLength(3);
   });
 
@@ -1347,10 +2017,92 @@ describe('useChatSession', () => {
       });
     });
 
-    expect(FileSystem.getInfoAsync).toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
+    expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith('test-dir/chat-attachments/missing-outside.jpg');
     expect(llmEngineService.chatCompletion).toHaveBeenCalled();
     expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
       .toBe('test-dir/chat-attachments/missing-outside.jpg');
+  });
+
+  it('never resolves attachments from 900 messages outside the conservative inference window', async () => {
+    const threadId = 'thread-window-first-attachments';
+    const messages = Array.from({ length: 1_000 }, (_, index) => {
+      const messageId = `window-message-${index}`;
+      const hasTruncatedAttachment = index < 900;
+      return {
+        id: messageId,
+        role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+        content: index < 900 ? `Old attachment turn ${index}` : `Retained tail turn ${index}`,
+        createdAt: index + 1,
+        state: 'complete' as const,
+        kind: 'message' as const,
+        modelId: 'author/model-q4',
+        ...(hasTruncatedAttachment
+          ? {
+              attachments: [{
+                ...copiedImageAttachment,
+                id: `truncated-attachment-${index}`,
+                threadId,
+                messageId,
+                localUri: `test-dir/chat-attachments/truncated-${index}.jpg`,
+                fileName: `truncated-${index}.jpg`,
+              }],
+            }
+          : null),
+      };
+    });
+
+    useChatStore.setState({
+      threads: {
+        [threadId]: {
+          id: threadId,
+          title: 'Window-first attachments',
+          modelId: 'author/model-q4',
+          presetId: 'preset-1',
+          presetSnapshot: {
+            id: 'preset-1',
+            name: 'Helpful Assistant',
+            systemPrompt: 'Be concise.',
+          },
+          paramsSnapshot: {
+            temperature: 0.7,
+            topP: 0.9,
+            maxTokens: 64,
+            seed: null,
+          },
+          messages,
+          createdAt: 1,
+          updatedAt: 1_000,
+          status: 'idle',
+        },
+      },
+      activeThreadId: threadId,
+    });
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(900);
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 123_456 });
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh prompt at the retained tail', {
+        multimodalReadiness: {
+          modelId: 'author/model-q4',
+          status: 'ready',
+          support: ['vision'],
+          checkedAt: 1,
+        },
+      });
+    });
+
+    const lookedUpUris = (FileSystem.getInfoAsync as jest.Mock).mock.calls.map(([uri]) => String(uri));
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages ?? [];
+    expect(lookedUpUris.some((uri) => uri.includes('/truncated-'))).toBe(false);
+    expect(completionMessages.some((message: any) => message.content === 'Old attachment turn 899')).toBe(false);
+    expect(completionMessages.at(-1)).toEqual(expect.objectContaining({
+      role: 'user',
+      content: 'Fresh prompt at the retained tail',
+    }));
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]?.attachments?.[0]?.localUri)
+      .toBe('test-dir/chat-attachments/truncated-0.jpg');
   });
 
   it('drops empty historical image-only turns when their retained image is missing', async () => {
@@ -1595,7 +2347,8 @@ describe('useChatSession', () => {
     const generationError = new Error('native generation failed');
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
-        onToken?.('Partial before failure');
+        onToken?.('Partial ');
+        onToken?.('before failure');
         throw generationError;
       },
     );
@@ -1639,6 +2392,11 @@ describe('useChatSession', () => {
     }));
     expect(record.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(storage.getString('chat-store') ?? '').not.toContain('Partial before failure');
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.turn.finalize': 1,
+      'chat.turn.storeMutations': 1,
+      'chat.turn.persistenceTransactions': 1,
+    }));
   });
 
   it('redacts native multimodal paths from persisted and thrown assistant generation errors', async () => {
@@ -1794,6 +2552,404 @@ describe('useChatSession', () => {
     );
   });
 
+  it('clears previously flushed reasoning when the authoritative cumulative snapshot ends empty', async () => {
+    const telemetry = {
+      tokensPredicted: 40,
+      tokensEvaluated: 12,
+      predictedPerSecond: 5,
+      mtp: {
+        requested: true,
+        attempted: true,
+        fallbackUsed: false,
+        draftTokens: 16,
+        draftTokensAccepted: 8,
+        acceptanceRate: 0.5,
+      },
+    };
+    let thoughtAfterFirstFlush: string | undefined;
+    (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(telemetry);
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: 'reasoning',
+          reasoningContent: 'stale thought',
+          reasoningContentMode: 'cumulative',
+        });
+        thoughtAfterFirstFlush = useChatStore
+          .getState()
+          .getActiveThread()
+          ?.messages.at(-1)
+          ?.thoughtContent;
+        onToken?.({
+          token: '',
+          reasoningContent: '',
+          reasoningContentMode: 'cumulative',
+        });
+
+        return {
+          text: 'Visible answer',
+          content: 'Visible answer',
+          reasoning_content: '',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Replace the reasoning snapshot');
+    });
+
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thoughtAfterFirstFlush).toBe('stale thought');
+    expect(thread?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: undefined,
+        inferenceMetrics: telemetry,
+        state: 'complete',
+      }),
+    );
+    const persistedRecord = thread
+      ? storage.getString(getChatThreadStorageKey(thread.id))
+      : undefined;
+    expect(persistedRecord).toBeTruthy();
+    expect(persistedRecord).not.toContain('stale thought');
+    expect(persistedRecord).not.toContain('"thoughtContent":""');
+  });
+
+  it('removes an empty-success append placeholder and stale streamed text across rehydration', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: 'stale',
+          content: 'Stale streamed answer',
+          contentMode: 'cumulative',
+        });
+
+        return {
+          text: 'Stale raw completion text',
+          content: '',
+          reasoning_content: null,
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Return an empty answer');
+    });
+
+    const completedThread = useChatStore.getState().getActiveThread()!;
+    expect(completedThread.messages).toEqual([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Return an empty answer',
+        state: 'complete',
+      }),
+    ]);
+    expect(JSON.stringify(completedThread.messages)).not.toContain('Stale streamed answer');
+    expect(readPersistedThreadRecord(completedThread.id).thread?.messages).toEqual(
+      completedThread.messages,
+    );
+
+    await act(async () => {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+    });
+
+    expect(useChatStore.getState().getThread(completedThread.id)?.messages).toEqual(
+      completedThread.messages,
+    );
+  });
+
+  it('uses final text authoritatively when parsed content is genuinely absent', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Stale streamed answer');
+        return { text: 'Final answer from raw text' };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Use final raw text');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: 'Final answer from raw text',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('preserves marker-like authoritative parsed content without reparsing it', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Stale streamed answer');
+        return {
+          text: '<think>Raw reasoning</think>Stale raw answer',
+          content: '[THINK]literal user-facing text[/THINK]Exact answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Preserve parsed content literally');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: '[THINK]literal user-facing text[/THINK]Exact answer',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('treats marker-only final text as an empty visible answer instead of stale streamed text', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Stale visible answer');
+        return { text: '<think>Only final reasoning</think>' };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Reason without a visible answer');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: '',
+        thoughtContent: 'Only final reasoning',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('uses a newer reasoning-only raw snapshot to clear older native visible content', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: 'stale',
+          content: 'Stale native visible answer',
+          contentMode: 'cumulative',
+        });
+        onToken?.({
+          token: 'reasoning',
+          reasoningContent: 'Final reasoning only',
+          reasoningContentMode: 'cumulative',
+          accumulatedText: '<think>Final reasoning only</think>',
+        });
+        return { reasoning_content: 'Final reasoning only' };
+      },
+    );
+
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Finish with reasoning only');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: '',
+        thoughtContent: 'Final reasoning only',
+        state: 'complete',
+      }),
+    );
+  });
+
+  it('preserves the old branch when authoritative branch regeneration succeeds empty', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original branch prompt');
+    });
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = originalThread.messages.find((message) => message.role === 'user')!;
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Transient regenerated answer');
+        return { text: 'Stale regenerated raw text', content: '' };
+      },
+    );
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited branch prompt',
+      );
+    });
+
+    const regeneratedThread = useChatStore.getState().getActiveThread()!;
+    expect(regeneratedThread.messages).toEqual(originalThread.messages);
+    expect(JSON.stringify(regeneratedThread.messages)).toContain('Hello back');
+    expect(JSON.stringify(regeneratedThread.messages)).not.toContain('Edited branch prompt');
+    expect(JSON.stringify(regeneratedThread.messages)).not.toContain('Transient regenerated answer');
+    expect(readPersistedThreadRecord(regeneratedThread.id).thread?.messages).toEqual(
+      originalThread.messages,
+    );
+  });
+
+  it('parses reasoning markers split across string token callbacks', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('<thi');
+        onToken?.('nk>Plan the answer</th');
+        onToken?.('ink>Visible ');
+        onToken?.('answer');
+
+        return {
+          text: '<think>Plan the answer</think>Visible answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Plan the answer',
+        state: 'complete',
+      }),
+    );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.stream.nativeCallback': 4,
+      'chat.stream.presentation': 4,
+    }));
+  });
+
+  it('processes cumulative native content snapshots once in total', async () => {
+    const deltas = Array.from({ length: 256 }, (_, index) => String(index % 10));
+    const finalContent = deltas.join('');
+
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        let cumulativeContent = '';
+        deltas.forEach((delta) => {
+          cumulativeContent += delta;
+          onToken?.({
+            token: delta,
+            content: cumulativeContent,
+            contentMode: 'cumulative',
+          });
+        });
+
+        return {
+          text: finalContent,
+          content: finalContent,
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Count steadily');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: finalContent,
+        state: 'complete',
+      }),
+    );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.stream.nativeCallback': deltas.length,
+      'chat.stream.presentation': deltas.length,
+      'chat.stream.presentationCharacters': finalContent.length,
+    }));
+  });
+
+  it('resynchronizes when native streaming switches from raw accumulated text to filtered content', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: ChatTokenCallback }) => {
+        onToken?.({
+          token: '<think>',
+          accumulatedText: '<think>',
+        });
+        onToken?.({
+          token: 'Visible answer',
+          content: 'Visible answer',
+          contentMode: 'cumulative',
+          reasoningContent: 'Plan',
+          reasoningContentMode: 'cumulative',
+        });
+
+        return {
+          reasoning_content: 'Plan',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Plan',
+        state: 'complete',
+      }),
+    );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.stream.nativeCallback': 2,
+      'chat.stream.presentation': 2,
+      'chat.stream.presentationCharacters': '<think>'.length + 'Visible answer'.length + 'Plan'.length,
+    }));
+  });
+
+  it('recovers final content from a reasoning-only accumulated snapshot', async () => {
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: any) => void }) => {
+        onToken?.({
+          token: 'reasoning',
+          reasoningContent: 'Plan the answer',
+          accumulatedText: '<think>Plan the answer',
+        });
+        onToken?.({
+          token: 'answer',
+          reasoningContent: 'Plan the answer',
+          accumulatedText: '<think>Plan the answer</think>Visible answer',
+        });
+
+        return {
+          reasoning_content: 'Plan the answer',
+        };
+      },
+    );
+
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain this');
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        role: 'assistant',
+        content: 'Visible answer',
+        thoughtContent: 'Plan the answer',
+        state: 'complete',
+      }),
+    );
+  });
+
   it('keeps raw think tags out of the visible answer when accumulatedText still includes reasoning', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: any) => void }) => {
@@ -1810,7 +2966,7 @@ describe('useChatSession', () => {
 
         return {
           text: '<think>Thinking through the answer</think>Visible answer',
-          content: '',
+          content: 'Visible answer',
           reasoning_content: 'Thinking through the answer',
         };
       },
@@ -1871,7 +3027,7 @@ describe('useChatSession', () => {
 
         return {
           text: '[THINK]Thinking through the answer[/THINK]Visible answer',
-          content: '',
+          content: 'Visible answer',
           reasoning_content: 'Thinking through the answer',
         };
       },
@@ -2014,16 +3170,18 @@ describe('useChatSession', () => {
     expect(call?.params.thinking_budget_tokens).toBeUndefined();
   });
 
-  it('accumulates streamed reasoning deltas when reasoning_content is not returned', async () => {
+  it('accumulates explicitly tagged reasoning deltas even when a delta extends the current prefix', async () => {
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: any) => void }) => {
         onToken?.({
           token: 'reason-1',
-          reasoningContent: 'Think ',
+          reasoningContent: 'Plan',
+          reasoningContentMode: 'delta',
         });
         onToken?.({
           token: 'reason-2',
-          reasoningContent: 'through',
+          reasoningContent: 'Plan more',
+          reasoningContentMode: 'delta',
         });
         onToken?.({
           token: 'answer-1',
@@ -2031,7 +3189,7 @@ describe('useChatSession', () => {
         });
 
         return {
-          text: '<think>Think through</think>Visible answer',
+          text: '<think>PlanPlan more</think>Visible answer',
           content: 'Visible answer',
         };
       },
@@ -2049,7 +3207,7 @@ describe('useChatSession', () => {
       expect.objectContaining({
         role: 'assistant',
         content: 'Visible answer',
-        thoughtContent: 'Think through',
+        thoughtContent: 'PlanPlan more',
         state: 'complete',
       }),
     );
@@ -2190,10 +3348,10 @@ describe('useChatSession', () => {
     }));
   });
 
-  it('interrupts active generation when a pending flush cannot persist after storage blocks', async () => {
+  it('interrupts active generation when atomic terminal finalization cannot persist after storage blocks', async () => {
     let onToken: ((token: string) => void) | undefined;
     let resolveCompletion: (() => void) | undefined;
-    const originalPatchAssistantMessage = useChatStore.getState().patchAssistantMessage;
+    const originalFinalizeAssistantTurn = useChatStore.getState().finalizeAssistantTurn;
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const privateStorageError = new PrivateStorageUnavailableError('encrypted_open_failed', {
       status: 'blocked',
@@ -2203,17 +3361,24 @@ describe('useChatSession', () => {
       lastUpdatedAt: 1,
     });
 
-    let patchCallCount = 0;
+    let shouldFailFinalization = true;
+    const failingFinalize = jest.fn((
+      threadId: string,
+      messageId: string,
+      finalization: any,
+    ) => {
+      if (shouldFailFinalization) {
+        shouldFailFinalization = false;
+        return {
+          status: 'persistence_failed' as const,
+          error: privateStorageError,
+          recovery: { threadId, messageId, finalization },
+        };
+      }
+      return originalFinalizeAssistantTurn(threadId, messageId, finalization);
+    });
     useChatStore.setState({
-      patchAssistantMessage: jest.fn((...args: Parameters<typeof originalPatchAssistantMessage>) => {
-        patchCallCount += 1;
-        if (patchCallCount === 1) {
-          originalPatchAssistantMessage(...args);
-          return;
-        }
-
-        throw privateStorageError;
-      }),
+      finalizeAssistantTurn: failingFinalize,
     } as Partial<ReturnType<typeof useChatStore.getState>>);
 
     try {
@@ -2243,18 +3408,83 @@ describe('useChatSession', () => {
 
       expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
       expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('pending assistant patch'),
-        privateStorageError,
+        '[ChatSession] Terminal persistence remains pending while private storage is blocked',
+        { errorName: privateStorageError.name },
       );
 
       await act(async () => {
         resolveCompletion?.();
-        await expect(sendPromise).rejects.toBe(privateStorageError);
+        await expect(sendPromise).resolves.toBeUndefined();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await stopActiveChatGenerationForPrivateStorageBlocked();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(2);
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    } finally {
+      await act(async () => {
+        useChatStore.setState({
+          finalizeAssistantTurn: originalFinalizeAssistantTurn,
+        } as Partial<ReturnType<typeof useChatStore.getState>>);
+      });
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('discards a retained terminal recovery controller after confirmed private-storage reset', async () => {
+    let resolveCompletion: (() => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      () => new Promise((resolve) => {
+        resolveCompletion = () => resolve({ text: 'Completion settled after reset' });
+      }),
+    );
+
+    const originalFinalizeAssistantTurn = useChatStore.getState().finalizeAssistantTurn;
+    const terminalError = new Error('private storage remains blocked');
+    const failingFinalize = jest.fn((
+      threadId: string,
+      messageId: string,
+      finalization: any,
+    ) => ({
+      status: 'persistence_failed' as const,
+      error: terminalError,
+      recovery: { threadId, messageId, finalization },
+    }));
+    useChatStore.setState({ finalizeAssistantTurn: failingFinalize });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const getSession = renderHookHarness();
+      let sendPromise: Promise<void> | undefined;
+      await act(async () => {
+        sendPromise = getSession()?.appendUserMessage('Keep terminal recovery pending');
+      });
+      await waitFor(() => {
+        expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+      });
+
+      await act(async () => {
+        await stopActiveChatGenerationForPrivateStorageBlocked();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
+
+      resetActiveChatGenerationRuntimeForPrivateStorageReset();
+      await act(async () => {
+        await stopActiveChatGenerationForPrivateStorageBlocked();
+      });
+      expect(failingFinalize).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveCompletion?.();
+        await expect(sendPromise).resolves.toBeUndefined();
       });
     } finally {
       await act(async () => {
-        useChatStore.setState({ patchAssistantMessage: originalPatchAssistantMessage } as Partial<ReturnType<typeof useChatStore.getState>>);
+        useChatStore.setState({ finalizeAssistantTurn: originalFinalizeAssistantTurn });
       });
       warnSpy.mockRestore();
     }
@@ -2945,6 +4175,45 @@ describe('useChatSession', () => {
     );
   });
 
+  it('restores the previous assistant when regeneration fails before first output', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Keep the original answer if retry fails');
+    });
+
+    const threadBeforeRegenerate = useChatStore.getState().getActiveThread()!;
+    const originalAssistant = threadBeforeRegenerate.messages.at(-1)!;
+    const completionError = new Error('regeneration failed before first output');
+    (llmEngineService.chatCompletion as jest.Mock).mockRejectedValueOnce(completionError);
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.regenerateLastResponse();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeTruthy();
+    const restoredThread = useChatStore.getState().getActiveThread()!;
+    expect(restoredThread.status).toBe('idle');
+    expect(restoredThread.messages).toHaveLength(threadBeforeRegenerate.messages.length);
+    expect(restoredThread.messages.at(-1)).toBe(originalAssistant);
+    expect(restoredThread.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Hello back',
+      state: 'complete',
+      errorCode: undefined,
+      errorMessage: undefined,
+    }));
+    expect(storage.getString(getChatThreadStorageKey(restoredThread.id))).toContain('Hello back');
+    expect(storage.getString(getChatThreadStorageKey(restoredThread.id))).not.toContain(
+      completionError.message,
+    );
+    expectNoStreamingProgressArtifacts(restoredThread.id);
+  });
+
   it('appends a new assistant when the last image-only user has no following assistant', async () => {
     const readyVision = {
       modelId: 'author/model-q4',
@@ -2992,6 +4261,7 @@ describe('useChatSession', () => {
 
     const replaceLastAssistantSpy = jest.spyOn(useChatStore.getState(), 'replaceLastAssistantMessage');
     const getRegenerateSession = renderHookHarness();
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
     (llmEngineService.chatCompletion as jest.Mock).mockClear();
     (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
@@ -3033,6 +4303,8 @@ describe('useChatSession', () => {
           ]),
         }),
       );
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledWith(copiedDraftImageAttachment.localUri);
     } finally {
       replaceLastAssistantSpy.mockRestore();
     }
@@ -3279,6 +4551,11 @@ describe('useChatSession', () => {
         ]),
       }),
     );
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toEqual({
+      userMessageId: userMessage?.id,
+      assistantMessageId: thread?.messages[1]?.id,
+      attachments: [{ id: persistedAttachments?.[0]?.id, kind: 'image' }],
+    });
   });
 
   it('regenerates an audio-only user message without requiring vision readiness', async () => {
@@ -3339,6 +4616,105 @@ describe('useChatSession', () => {
       role: 'assistant',
       content: 'Fresh audio reply',
       state: 'complete',
+    }));
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toEqual({
+      userMessageId: userMessage?.id,
+      assistantMessageId: useChatStore.getState().getActiveThread()?.messages[1]?.id,
+      attachments: [{ id: persistedAttachments?.[0]?.id, kind: 'audio' }],
+    });
+  });
+
+  it('holds a QA generation before the first native output so Stop persists no delta', async () => {
+    let onToken: ChatTokenCallback | undefined;
+    const completion = createDeferred<{ text: string }>();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken: callback }: LlmChatCompletionOptions) => {
+        onToken = callback;
+        return completion.promise;
+      },
+    );
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(async () => {
+      completion.resolve({ text: 'must not become authoritative' });
+    });
+    const getSession = renderHookHarness();
+    expect(armAndroidQaGenerationGate('before-first-output')).toBe(true);
+
+    let generationPromise: Promise<void> | undefined;
+    await act(async () => {
+      generationPromise = getSession()?.appendUserMessage('Gate before first output');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      onToken?.('blocked first output');
+    });
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate?.phase).toBe('before-first-output');
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: '',
+      state: 'streaming',
+    }));
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await generationPromise;
+    });
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: '',
+      thoughtContent: undefined,
+      state: 'stopped',
+    }));
+  });
+
+  it('holds a QA generation immediately after the first durable patch', async () => {
+    let onToken: ChatTokenCallback | undefined;
+    const completion = createDeferred<{ text: string }>();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken: callback }: LlmChatCompletionOptions) => {
+        onToken = callback;
+        return completion.promise;
+      },
+    );
+    (llmEngineService.interruptActiveCompletion as jest.Mock).mockImplementationOnce(async () => {
+      completion.resolve({ text: 'partial output plus forbidden tail' });
+    });
+    const getSession = renderHookHarness();
+    expect(armAndroidQaGenerationGate('after-first-durable-output')).toBe(true);
+
+    let generationPromise: Promise<void> | undefined;
+    await act(async () => {
+      generationPromise = getSession()?.appendUserMessage('Gate after first durable patch');
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      onToken?.('partial output');
+      onToken?.(' plus forbidden tail');
+    });
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate?.phase)
+      .toBe('after-first-durable-output');
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: 'partial output',
+      state: 'streaming',
+    }));
+    const threadId = useChatStore.getState().activeThreadId ?? '';
+    expect(readChatStreamingProgressRecord(storage, threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        threadId,
+        content: 'partial output',
+        state: 'streaming',
+      }),
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await generationPromise;
+    });
+    expect(useChatStore.getState().getActiveThread()?.messages[1]).toEqual(expect.objectContaining({
+      content: 'partial output',
+      state: 'stopped',
     }));
   });
 
@@ -3741,19 +5117,26 @@ describe('useChatSession', () => {
       expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
     });
 
+    const threadId = useChatStore.getState().activeThreadId;
+    expect(threadId).toBeTruthy();
+    const durableRecordBeforeBackground = storage.getString(getChatThreadStorageKey(threadId ?? ''));
+
     await act(async () => {
       onToken?.('Partial before background');
       emitAppState('background');
     });
 
-    const threadId = useChatStore.getState().activeThreadId;
-    expect(threadId).toBeTruthy();
-    expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toContain('Partial before background');
+    expect(storage.getString(getChatThreadStorageKey(threadId ?? ''))).toBe(durableRecordBeforeBackground);
+    expect(readChatStreamingProgressRecord(storage, threadId ?? '')).toEqual({
+      ok: true,
+      value: expect.objectContaining({ content: 'Partial before background' }),
+    });
 
     await act(async () => {
       resolveCompletion?.();
       await sendPromise;
     });
+    expectNoStreamingProgressArtifacts(threadId ?? '');
   });
 
   it('does not throw when background persistence flush hits blocked private storage', async () => {
@@ -3802,7 +5185,7 @@ describe('useChatSession', () => {
       });
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('background chat persistence'),
-        privateStorageError,
+        { errorName: privateStorageError.name },
       );
     } finally {
       appStorage.set = originalSet;
@@ -3856,6 +5239,175 @@ describe('useChatSession', () => {
     });
 
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+  });
+
+  it('keeps foreground orphan thread-status persistence failures controllable with Stop', async () => {
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      useChatStore.setState({
+        threads: {
+          'thread-foreground-orphan-status': {
+            id: 'thread-foreground-orphan-status',
+            title: 'Recovered thread',
+            modelId: 'author/model-q4',
+            presetId: 'preset-1',
+            presetSnapshot: {
+              id: 'preset-1',
+              name: 'Helpful Assistant',
+              systemPrompt: 'Be concise.',
+            },
+            paramsSnapshot: {
+              temperature: 0.7,
+              topP: 0.9,
+              maxTokens: 1024,
+              seed: null,
+            },
+            messages: [{
+              id: 'assistant-foreground-orphan-status',
+              role: 'assistant',
+              content: 'Recovered partial',
+              createdAt: 1,
+              state: 'stopped',
+            }],
+            createdAt: 1,
+            updatedAt: 1,
+            status: 'generating',
+          },
+        },
+        activeThreadId: 'thread-foreground-orphan-status',
+      });
+    });
+
+    const terminalError = new Error('simulated orphan thread-status write failure');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const finalizeThreadStatus = useChatStore.getState().finalizeThreadStatus;
+    const failingFinalizeThreadStatus = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        throw terminalError;
+      })
+      .mockImplementation(finalizeThreadStatus);
+    useChatStore.setState({ finalizeThreadStatus: failingFinalizeThreadStatus });
+
+    try {
+      await act(async () => {
+        expect(() => {
+          emitAppState('background');
+          emitAppState('active');
+        }).not.toThrow();
+      });
+
+      expect(failingFinalizeThreadStatus).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatSession] Foreground orphan recovery is waiting for private storage',
+        { errorName: terminalError.name },
+      );
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+
+      await act(async () => {
+        await getSession()?.stopGeneration();
+      });
+
+      expect(failingFinalizeThreadStatus).toHaveBeenCalledTimes(2);
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    } finally {
+      await act(async () => {
+        useChatStore.setState({ finalizeThreadStatus });
+      });
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps foreground orphan recovery controllable when its terminal write fails', async () => {
+    const getSession = renderHookHarness();
+    let threadId = '';
+    let assistantMessageId = '';
+    await act(async () => {
+      threadId = useChatStore.getState().createThread({
+        modelId: 'author/model-q4',
+        presetId: 'preset-1',
+        presetSnapshot: {
+          id: 'preset-1',
+          name: 'Helpful Assistant',
+          systemPrompt: 'Be concise.',
+        },
+        paramsSnapshot: {
+          temperature: 0.7,
+          topP: 0.9,
+          maxTokens: 1024,
+          seed: null,
+        },
+      });
+      useChatStore.getState().setActiveThread(threadId);
+      assistantMessageId = useChatStore.getState().createAssistantPlaceholder(threadId);
+      useChatStore.getState().patchAssistantMessage(threadId, assistantMessageId, {
+        content: 'Recoverable foreground partial',
+      });
+      flushPendingChatPersistenceWrites('background');
+      resetSharedGenerationStateForTests();
+    });
+
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const terminalError = new Error('simulated foreground terminal write failure');
+    let didFail = false;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    appStorage.set = jest.fn(function failForegroundTerminalWrite(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (
+        !didFail
+        && key === getChatThreadStorageKey(threadId)
+        && typeof value === 'string'
+        && value.includes('Recoverable foreground partial')
+      ) {
+        didFail = true;
+        throw terminalError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      await act(async () => {
+        expect(() => {
+          emitAppState('background');
+          emitAppState('active');
+        }).not.toThrow();
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(didFail).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[ChatSession] Foreground recovery is waiting for private storage',
+      { errorName: terminalError.name },
+    );
+    warnSpy.mockRestore();
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantMessageId,
+        content: 'Recoverable foreground partial',
+        state: 'streaming',
+      }),
+    );
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        id: assistantMessageId,
+        content: 'Recoverable foreground partial',
+        state: 'stopped',
+      }),
+    );
   });
 
   it('does not stop a live generation when another hook instance returns to foreground', async () => {
@@ -4049,6 +5601,11 @@ describe('useChatSession', () => {
     }));
     expect(persistedRecord.thread?.messages?.some((message) => message.state === 'streaming')).toBe(false);
     expect(interruptedSpy).toHaveBeenCalledTimes(1);
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'chat.turn.finalize': 1,
+      'chat.turn.storeMutations': 1,
+      'chat.turn.persistenceTransactions': 1,
+    }));
   });
 
   it('logs rejected expiration stop without changing stopped notification flow', async () => {
@@ -4092,7 +5649,10 @@ describe('useChatSession', () => {
       });
 
       expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
-      expect(warnSpy).toHaveBeenCalledWith('[ChatSession] Failed to stop expired completion', stopError);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[ChatSession] Failed to stop expired completion',
+        { errorName: 'Error' },
+      );
       expect(interruptedSpy).toHaveBeenCalledTimes(1);
 
       await act(async () => {
@@ -4151,6 +5711,72 @@ describe('useChatSession', () => {
       role: 'assistant',
       state: 'stopped',
     }));
+  });
+
+  it('rejects a prompt mutation while a prepared regeneration owns the thread', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Initial prompt');
+    });
+
+    const thread = useChatStore.getState().getActiveThread()!;
+    const fixedNow = thread.updatedAt;
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    let resolvePromptCount: ((tokens: number) => void) | undefined;
+    let regenerationPromise: Promise<boolean> | undefined;
+    let regenerationResult: boolean | undefined;
+    exactPromptTokenCache.clear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+
+        return new Promise<number>((resolve) => {
+          resolvePromptCount = resolve;
+        });
+      },
+    );
+
+    try {
+      await act(async () => {
+        regenerationPromise = getSession()?.regenerateLastResponse();
+      });
+      await waitFor(() => {
+        expect((llmEngineService.countPromptTokens as jest.Mock).mock.calls.some(
+          ([call]) => call.chatBlocking !== false,
+        )).toBe(true);
+      });
+
+      const revisionBeforeMutation = useChatStore.getState().inferenceRevision;
+      act(() => {
+        useChatStore.getState().updateThreadPresetSnapshot(
+          thread.id,
+          'preset-fixed-clock-change',
+          {
+            id: 'preset-fixed-clock-change',
+            name: 'Fixed clock change',
+            systemPrompt: 'Prompt semantics changed while tokenization was pending.',
+          },
+        );
+      });
+      expect(useChatStore.getState().getThread(thread.id)?.updatedAt).toBe(fixedNow);
+      expect(useChatStore.getState().inferenceRevision).toBe(revisionBeforeMutation);
+
+      await act(async () => {
+        resolvePromptCount?.(32);
+        regenerationResult = await regenerationPromise;
+      });
+    } finally {
+      resolvePromptCount?.(32);
+      nowSpy.mockRestore();
+    }
+
+    expect(regenerationResult).toBe(true);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getThread(thread.id)?.presetSnapshot.systemPrompt)
+      .toBe(thread.presetSnapshot.systemPrompt);
   });
 
   it('builds inference context from frozen preset snapshot, history, and params', async () => {
@@ -4314,6 +5940,797 @@ describe('useChatSession', () => {
 
     expect(didRegenerate).toBe(true);
     expect(useChatStore.getState().getActiveThread()?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+  });
+
+  it('regenerateLastResponse after trailing model_switch uses transient branch replacement', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+          resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    try {
+      await act(async () => {
+        regenerationPromise = getSession()?.regenerateLastResponse();
+      });
+      await waitFor(() => {
+        expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      });
+
+      expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+      expect(useChatStore.getState().getThread(prepared.threadId)).toEqual(expect.objectContaining({
+        status: 'generating',
+        messages: [
+          expect.objectContaining({
+            id: prepared.targetUserMessageId,
+            modelId: 'author/model-q8',
+          }),
+          expect.objectContaining({
+            role: 'assistant',
+            content: '',
+            state: 'streaming',
+            modelId: 'author/model-q8',
+          }),
+        ],
+      }));
+    } finally {
+      await act(async () => {
+        await getSession()?.stopGeneration();
+        resolvePromptCount?.();
+        await regenerationPromise;
+      });
+    }
+  });
+
+  it('regenerateLastResponse after trailing model_switch does not write durable history before first token', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({
+      temperature: 0.35,
+      topP: 0.8,
+      topK: 32,
+      minP: 0.02,
+      repetitionPenalty: 1.1,
+      maxTokens: 768,
+      reasoningEffort: 'medium',
+      seed: 7,
+    });
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writtenKeys: string[] = [];
+    appStorage.set = jest.fn(function capturePreOutputWrite(this: unknown, key: string, value: unknown) {
+      writtenKeys.push(key);
+      return originalSet.call(this, key, value);
+    });
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    try {
+      await act(async () => {
+        regenerationPromise = getSession()?.regenerateLastResponse();
+      });
+      await waitFor(() => {
+        expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+      });
+
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+        prepared.durableRecord,
+      );
+      expect(useChatStore.getState().threads[prepared.threadId].paramsSnapshot.temperature).toBe(0.7);
+      expect(useChatStore.getState().getThread(prepared.threadId)?.paramsSnapshot).toEqual(
+        expect.objectContaining({
+          temperature: 0.35,
+          maxTokens: 768,
+          reasoningEffort: 'medium',
+        }),
+      );
+      expect(writtenKeys).not.toContain(getChatThreadStorageKey(prepared.threadId));
+      expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
+      expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_INDEX_KEY);
+      expectNoStreamingProgressArtifacts(prepared.threadId);
+    } finally {
+      appStorage.set = originalSet;
+      await act(async () => {
+        await getSession()?.stopGeneration();
+        resolvePromptCount?.();
+        await regenerationPromise;
+      });
+    }
+  });
+
+  it('stop during prompt preparation restores the previous model-switch branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    const originalMessageIds = prepared.rawThread.messages.map((message) => message.id);
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    const restored = useChatStore.getState().getActiveThread()!;
+    expect(restored.status).toBe('idle');
+    expect(restored.messages.map((message) => message.id)).toEqual(originalMessageIds);
+    expect(restored.messages[1]).toEqual(expect.objectContaining({
+      content: 'Hello back',
+      state: 'complete',
+    }));
+    expect(restored.messages.at(-1)?.kind).toBe('model_switch');
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await regenerationPromise;
+    });
+
+    const afterLatePromptPreparation = useChatStore.getState().getActiveThread()!;
+    expect(afterLatePromptPreparation.status).toBe('idle');
+    expect(afterLatePromptPreparation.messages.map((message) => message.id)).toEqual(originalMessageIds);
+    expectNoStreamingProgressArtifacts(prepared.threadId);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('prompt preparation error before first token restores the previous branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    const originalMessageIds = prepared.rawThread.messages.map((message) => message.id);
+    const promptError = new AppError(
+      'message_too_long',
+      'branch prompt preparation failed',
+    );
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    let didRejectGenerationCount = false;
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        if (!didRejectGenerationCount) {
+          didRejectGenerationCount = true;
+          return Promise.reject(promptError);
+        }
+        return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+      },
+    );
+    let thrown: unknown;
+
+    await act(async () => {
+      try {
+        await getSession()?.regenerateLastResponse();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeTruthy();
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.map(
+      (message) => message.id,
+    )).toEqual(originalMessageIds);
+    expect(useChatStore.getState().getActiveThread()?.status).toBe('idle');
+    expectNoStreamingProgressArtifacts(prepared.threadId);
+  });
+
+  it('partial output followed by stop commits the partial new branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolveCompletion: (() => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        onToken?.('Partial branch output');
+        resolveCompletion = () => resolve({ text: 'Partial branch output' });
+      }),
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.content).toBe(
+        'Partial branch output',
+      );
+    });
+    await act(async () => {
+      await getSession()?.stopGeneration();
+    });
+
+    const stopped = useChatStore.getState().getActiveThread()!;
+    expect(stopped.messages).toHaveLength(2);
+    expect(stopped.messages[0]).toEqual(expect.objectContaining({
+      id: prepared.targetUserMessageId,
+      modelId: 'author/model-q8',
+    }));
+    expect(stopped.messages[1]).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: 'Partial branch output',
+      state: 'stopped',
+      modelId: 'author/model-q8',
+    }));
+    expect(stopped.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+    const stoppedMessageIds = stopped.messages.map((message) => message.id);
+    const completionCallCount = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+
+    await act(async () => {
+      resolveCompletion?.();
+      await regenerationPromise;
+    });
+
+    const afterLateCompletion = useChatStore.getState().getActiveThread()!;
+    expect(afterLateCompletion.status).toBe('stopped');
+    expect(afterLateCompletion.messages.map((message) => message.id)).toEqual(stoppedMessageIds);
+    expect(afterLateCompletion.messages.at(-1)).toEqual(expect.objectContaining({
+      content: 'Partial branch output',
+      state: 'stopped',
+    }));
+    expectNoStreamingProgressArtifacts(prepared.threadId);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallCount);
+  });
+
+  it('retains an exact recovery controller when a terminal durable write fails', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    performanceMonitor.clear();
+    const completionNotificationSpy = jest
+      .spyOn(notificationService, 'sendCompletionNotification')
+      .mockResolvedValue(undefined);
+    const errorNotificationSpy = jest
+      .spyOn(notificationService, 'sendInferenceErrorNotification')
+      .mockResolvedValue(undefined);
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'background',
+    });
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Recoverable terminal-write partial');
+        return { text: 'Recoverable terminal-write partial' };
+      },
+    );
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    let didFailTerminalWrite = false;
+    const threadWriteValues: string[] = [];
+    appStorage.set = jest.fn(function failOneTerminalWrite(this: unknown, key: string, value: unknown) {
+      if (key === getChatThreadStorageKey(prepared.threadId) && typeof value === 'string') {
+        threadWriteValues.push(value);
+        if (!didFailTerminalWrite && value.includes('Recoverable terminal-write partial')) {
+          didFailTerminalWrite = true;
+          throw new Error('simulated hook terminal write failure');
+        }
+      }
+      return originalSet.call(this, key, value);
+    });
+    let thrown: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.regenerateLastResponse();
+        } catch (error) {
+          thrown = error;
+        }
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(thrown).toBeTruthy();
+    expect(performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'chat.generation.outcome',
+    ).map((event) => event.meta?.outcome)).toEqual(['persistence_failed']);
+    expect(completionNotificationSpy).not.toHaveBeenCalled();
+    expect(errorNotificationSpy).not.toHaveBeenCalled();
+    expect(didFailTerminalWrite).toBe(true);
+    expect(threadWriteValues.filter((value) => (
+      value.includes('Recoverable terminal-write partial')
+    ))).toHaveLength(1);
+    expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+    expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+      expect.objectContaining({
+        content: 'Recoverable terminal-write partial',
+        state: 'streaming',
+      }),
+    );
+    expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+      prepared.durableRecord,
+    );
+    expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        content: 'Recoverable terminal-write partial',
+        branchReplacement: expect.any(Object),
+      }),
+    });
+
+    const retryThreadWrites: string[] = [];
+    appStorage.set = jest.fn(function captureRecoveryWrite(this: unknown, key: string, value: unknown) {
+      if (key === getChatThreadStorageKey(prepared.threadId) && typeof value === 'string') {
+        retryThreadWrites.push(value);
+      }
+      return originalSet.call(this, key, value);
+    });
+    try {
+      await act(async () => {
+        await getSession()?.stopGeneration();
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(retryThreadWrites.filter((value) => (
+      value.includes('Recoverable terminal-write partial')
+    ))).toHaveLength(1);
+    expect(useChatStore.getState().getThread(prepared.threadId)?.status).toBe('idle');
+    expect(useChatStore.getState().getThread(prepared.threadId)?.messages).toEqual([
+      expect.objectContaining({ id: prepared.targetUserMessageId }),
+      expect.objectContaining({
+        content: 'Recoverable terminal-write partial',
+        state: 'complete',
+      }),
+    ]);
+    expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+      ok: false,
+      reason: 'missing',
+    });
+    expect(performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'chat.generation.outcome',
+    ).map((event) => event.meta?.outcome)).toEqual(['persistence_failed']);
+    expect(completionNotificationSpy).not.toHaveBeenCalled();
+    expect(errorNotificationSpy).not.toHaveBeenCalled();
+  });
+
+  it('interrupts branch generation and preserves recovery state when stop persistence fails', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolveCompletion: (() => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      ({ onToken }: { onToken?: (token: string) => void }) => new Promise((resolve) => {
+        onToken?.('Recoverable failed-stop partial');
+        resolveCompletion = () => resolve({ text: 'Recoverable failed-stop partial' });
+      }),
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          branchReplacement: expect.any(Object),
+        }),
+      });
+    });
+
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const persistenceSentinel = 'hf_PRIVATE_PERSISTENCE_SENTINEL';
+    const terminalWriteError = new Error(`simulated stop terminal write failure ${persistenceSentinel}`);
+    terminalWriteError.name = 'PROMPT_PERSISTENCE_NAME_SENTINEL';
+    const terminalThreadWrites: string[] = [];
+    let shouldFailTerminalWrite = true;
+    appStorage.set = jest.fn(function failStopTerminalWrite(
+      this: unknown,
+      key: string,
+      value: unknown,
+    ) {
+      if (key === getChatThreadStorageKey(prepared.threadId) && typeof value === 'string') {
+        terminalThreadWrites.push(value);
+        if (shouldFailTerminalWrite && value.includes('Recoverable failed-stop partial')) {
+          shouldFailTerminalWrite = false;
+          throw terminalWriteError;
+        }
+      }
+      return originalSet.call(this, key, value);
+    });
+    let stopError: unknown;
+
+    try {
+      await act(async () => {
+        try {
+          await getSession()?.stopGeneration();
+        } catch (error) {
+          stopError = error;
+        }
+      });
+
+      expect(stopError).toEqual(expect.objectContaining({
+        name: 'AppError',
+        cause: undefined,
+        details: { errorName: 'Error' },
+      }));
+      expect(JSON.stringify(stopError)).not.toContain(persistenceSentinel);
+      expect(JSON.stringify(stopError)).not.toContain('PROMPT_PERSISTENCE_NAME_SENTINEL');
+      expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+      expect(terminalThreadWrites.filter((value) => (
+        value.includes('Recoverable failed-stop partial')
+      ))).toHaveLength(1);
+      expect(terminalThreadWrites.at(-1)).toBe(prepared.durableRecord);
+      expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages.at(-1)).toEqual(
+        expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          state: 'streaming',
+        }),
+      );
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+        prepared.durableRecord,
+      );
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: true,
+        value: expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          branchReplacement: expect.any(Object),
+        }),
+      });
+
+      await act(async () => {
+        resolveCompletion?.();
+        await regenerationPromise;
+      });
+
+      expect(terminalThreadWrites.filter((value) => (
+        value.includes('Recoverable failed-stop partial')
+      ))).toHaveLength(1);
+      expect(useChatStore.getState().threads[prepared.threadId]).toBe(prepared.rawThread);
+      expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBe(
+        prepared.durableRecord,
+      );
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId).ok).toBe(true);
+
+      await act(async () => {
+        await getSession()?.stopGeneration();
+      });
+
+      expect(terminalThreadWrites.filter((value) => (
+        value.includes('Recoverable failed-stop partial')
+      ))).toHaveLength(2);
+      expect(useChatStore.getState().getThread(prepared.threadId)?.messages).toEqual([
+        expect.objectContaining({ id: prepared.targetUserMessageId }),
+        expect.objectContaining({
+          content: 'Recoverable failed-stop partial',
+          state: 'stopped',
+        }),
+      ]);
+      expect(readChatStreamingProgressRecord(storage, prepared.threadId)).toEqual({
+        ok: false,
+        reason: 'missing',
+      });
+      expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    } finally {
+      appStorage.set = originalSet;
+      resolveCompletion?.();
+      if (regenerationPromise) {
+        await regenerationPromise.catch(() => undefined);
+      }
+    }
+  });
+
+  it('edited earlier user message remains transient until recoverable output', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('First branch prompt');
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Second branch prompt');
+    });
+    const rawThread = useChatStore.getState().getActiveThread()!;
+    const rawMessages = rawThread.messages;
+    const targetUserMessageId = rawMessages.find((message) => message.role === 'user')!.id;
+    const durableRecord = storage.getString(getChatThreadStorageKey(rawThread.id));
+    let resolvePromptCount: (() => void) | undefined;
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+        resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateFromUserMessage(
+        targetUserMessageId,
+        'Edited first branch prompt',
+      );
+    });
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    expect(useChatStore.getState().threads[rawThread.id]).toBe(rawThread);
+    expect(useChatStore.getState().threads[rawThread.id].messages).toBe(rawMessages);
+    expect(storage.getString(getChatThreadStorageKey(rawThread.id))).toBe(durableRecord);
+    expect(useChatStore.getState().getThread(rawThread.id)?.messages).toEqual([
+      expect.objectContaining({
+        id: targetUserMessageId,
+        content: 'Edited first branch prompt',
+      }),
+      expect.objectContaining({ role: 'assistant', state: 'streaming' }),
+    ]);
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      resolvePromptCount?.();
+      await regenerationPromise;
+    });
+  });
+
+  it('branch prompt uses edited user content and clears stale summary', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original summarized prompt');
+    });
+    const thread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessageId = thread.messages[0].id;
+    await act(async () => {
+      useChatStore.getState().setThreadSummary(thread.id, {
+        content: 'STALE SUMMARY MUST NOT ENTER THE PROMPT',
+        createdAt: Date.now(),
+        sourceMessageIds: thread.messages.map((message) => message.id),
+      });
+    });
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(
+      async ({ onToken }: { onToken?: (token: string) => void }) => {
+        onToken?.('Edited summarized reply');
+        return { text: 'Edited summarized reply' };
+      },
+    );
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        targetUserMessageId,
+        'Edited summarized prompt',
+      );
+    });
+
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(completionMessages).toEqual([
+      { role: 'system', content: 'Be concise.' },
+      { role: 'user', content: 'Edited summarized prompt' },
+    ]);
+    expect(JSON.stringify(completionMessages)).not.toContain('STALE SUMMARY');
+    expect(useChatStore.getState().getActiveThread()?.summary).toBeUndefined();
+  });
+
+  it('prepared attachment resolution remains reused in branch regeneration', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original attached branch', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Later branch to discard', {
+        multimodalReadiness: readyVision,
+      });
+    });
+    const thread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = thread.messages.find((message) => message.attachments?.length)!;
+    (FileSystem.getInfoAsync as jest.Mock).mockClear();
+    performanceMonitor.clear();
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited attached branch',
+        { multimodalReadiness: readyVision },
+      );
+    });
+
+    const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+    expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(2);
+    expect((FileSystem.getInfoAsync as jest.Mock).mock.calls.map(([uri]) => uri)).toEqual([
+      copiedDraftImageAttachment.localUri,
+      copiedDraftImageAttachment.localUri,
+    ]);
+    expect(completionCall?.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: 'Edited attached branch',
+        mediaPaths: [copiedDraftImageAttachment.localUri],
+        attachments: [expect.objectContaining({ id: targetUserMessage.attachments?.[0]?.id })],
+      }),
+    ]));
+    expect(JSON.stringify(completionCall?.messages)).not.toContain('Later branch to discard');
+    expect(performanceMonitor.snapshot().events.some((event) => (
+      event.name === 'chat.prompt.total'
+      && event.meta?.attachmentLookups === 2
+    ))).toBe(true);
+  });
+
+  it('aborts attached branch regeneration when the thread model changes during preflight', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original attached race branch', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Later branch to preserve after abort');
+    });
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = originalThread.messages.find((message) => message.attachments?.length)!;
+    let releaseFileCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockClear()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseFileCheck = () => resolve({ exists: true, size: 123_456 });
+      }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (getGenerationParametersForModel as jest.Mock).mockClear();
+    let regenerationPromise: Promise<boolean> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited attached race branch',
+        { multimodalReadiness: readyVision },
+      );
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(releaseFileCheck).toEqual(expect.any(Function));
+    });
+
+    await act(async () => {
+      useChatStore.getState().switchThreadModel(originalThread.id, 'author/model-q8');
+    });
+    const switchedRawThread = useChatStore.getState().threads[originalThread.id];
+    const durableAfterSwitch = storage.getString(getChatThreadStorageKey(originalThread.id));
+
+    await act(async () => {
+      releaseFileCheck?.();
+      try {
+        await regenerationPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      message: 'The conversation changed while preparing regeneration. Try again.',
+    }));
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(getGenerationParametersForModel).not.toHaveBeenCalled();
+    expect(useChatStore.getState().threads[originalThread.id]).toBe(switchedRawThread);
+    expect(useChatStore.getState().getThread(originalThread.id)).toBe(switchedRawThread);
+    expect(switchedRawThread.activeModelId).toBe('author/model-q8');
+    expect(switchedRawThread.status).toBe('idle');
+    expect(storage.getString(getChatThreadStorageKey(originalThread.id))).toBe(durableAfterSwitch);
+    expectNoStreamingProgressArtifacts(originalThread.id);
+  });
+
+  it('aborts attached branch regeneration when the active chat changes during preflight', async () => {
+    const readyVision = {
+      modelId: 'author/model-q4',
+      status: 'ready' as const,
+      support: ['vision' as const],
+      checkedAt: 1,
+    };
+    saveAuthorModelWithMultimodalReadiness(readyVision);
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original attached active-chat race branch', {
+        attachmentDrafts: [copiedDraftImageAttachment],
+        multimodalReadiness: readyVision,
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Later branch to preserve after active-chat abort');
+    });
+    const originalThread = useChatStore.getState().getActiveThread()!;
+    const targetUserMessage = originalThread.messages.find((message) => message.attachments?.length)!;
+    const durableBeforeSwitch = storage.getString(getChatThreadStorageKey(originalThread.id));
+    let releaseFileCheck: (() => void) | undefined;
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockClear()
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        releaseFileCheck = () => resolve({ exists: true, size: 123_456 });
+      }));
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (getGenerationParametersForModel as jest.Mock).mockClear();
+    let regenerationPromise: Promise<boolean> | undefined;
+    let thrown: unknown;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateFromUserMessage(
+        targetUserMessage.id,
+        'Edited attached active-chat race branch',
+        { multimodalReadiness: readyVision },
+      );
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(FileSystem.getInfoAsync).toHaveBeenCalledTimes(1);
+      expect(releaseFileCheck).toEqual(expect.any(Function));
+    });
+
+    await act(async () => {
+      getSession()?.startNewChat();
+    });
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+
+    await act(async () => {
+      releaseFileCheck?.();
+      try {
+        await regenerationPromise;
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toEqual(expect.objectContaining({
+      message: 'The conversation changed while preparing regeneration. Try again.',
+    }));
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(getGenerationParametersForModel).not.toHaveBeenCalled();
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(useChatStore.getState().threads[originalThread.id]).toBe(originalThread);
+    expect(useChatStore.getState().getThread(originalThread.id)).toBe(originalThread);
+    expect(storage.getString(getChatThreadStorageKey(originalThread.id))).toBe(durableBeforeSwitch);
+    expectNoStreamingProgressArtifacts(originalThread.id);
   });
 
   it('rebuilds the last turn instead of leaving a trailing model switch after regenerate', async () => {

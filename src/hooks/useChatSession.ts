@@ -2,10 +2,15 @@ import { AppState, AppStateStatus } from 'react-native';
 import { useCallback, useEffect, useRef } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
+import {
+  buildExactPromptTokenCacheKey,
+  buildPromptMultimodalReadinessIdentity,
+  exactPromptTokenCache,
+} from '../services/ExactPromptTokenCache';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
-import { AppError, toAppError } from '../services/AppError';
+import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
 import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
@@ -26,7 +31,13 @@ import {
 } from '../types/chat';
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../types/attachments';
 import type { AttachmentDraft, MultimodalReadinessState } from '../types/multimodal';
-import { flushPendingChatPersistenceWrites, useChatStore } from '../store/chatStore';
+import {
+  flushChatStreamingProgressForAndroidQa,
+  flushPendingChatPersistenceWrites,
+  useChatStore,
+  type AssistantTurnCommitResult,
+  type AssistantTurnFinalization,
+} from '../store/chatStore';
 import {
   DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS,
   buildInferenceWindowWithAccurateTokenCounts,
@@ -36,11 +47,17 @@ import {
   resolveThreadInferenceWindowOptions,
   type InferenceBudgetOptions,
 } from '../utils/inferenceWindow';
-import { getVisibleAssistantContent } from '../utils/chatPresentation';
+import {
+  createIncrementalAssistantPresentationParser,
+  doesAssistantContentEndAtSentenceBoundary,
+  getAssistantPresentation,
+  getVisibleAssistantContent,
+} from '../utils/chatPresentation';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
 import { syncThreadParameters } from '../utils/chatThreadParameters';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
+import { markInteractiveWorkStarted } from '../utils/idleTask';
 import {
   materializeAttachmentDraftsForMessage,
   materializeDocumentDraftsForProcessing,
@@ -66,7 +83,19 @@ import {
   validateChatDocumentAttachmentLimit,
   validateChatMediaAttachmentLimit,
 } from '../utils/chatAttachments';
-import { getLlmContentPartSignatureEntry } from '../utils/llmContentPartSignature';
+import { buildLlmInferenceMessagesSignature } from '../utils/llmInferenceMessageSignature';
+import {
+  activateAndroidQaGenerationAfterFirstDurableOutput,
+  beginAndroidQaGeneration,
+  buildAndroidQaPreparedGenerationEvidence,
+  isAndroidQaGenerationEvidenceEnabled,
+  isAndroidQaGenerationGateArmed,
+  isAndroidQaGenerationHeld,
+  recordAndroidQaPreparedGenerationEvidence,
+  releaseAndroidQaGenerationGate,
+  shouldHoldAndroidQaGenerationBeforeFirstOutput,
+  waitForAndroidQaGenerationGateRelease,
+} from '../services/AndroidQaGenerationEvidence';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -75,7 +104,6 @@ export const DEFAULT_STREAM_PATCH_INTERVAL_MS = 140;
 export const LONG_STREAM_PATCH_INTERVAL_MS = 320;
 export const LONG_STREAM_PATCH_TOKEN_THRESHOLD = 64;
 export const LONG_STREAM_PATCH_CHAR_THRESHOLD = 1200;
-const STREAM_BOUNDARY_PATTERN = /[.!?。！？](?:["')\]}]|[\s])*$/;
 const ATTACHMENT_FILE_CHECK_CONCURRENCY = 8;
 const ESTIMATED_MEDIA_PROMPT_TOKENS_PER_INPUT = 576;
 const EXACT_MEDIA_PROMPT_RECOUNT_MARGIN_TOKENS_PER_INPUT = 1024;
@@ -85,12 +113,89 @@ type ProcessedDocumentAttachmentDraftsForInference = {
   contentParts: LlmTextContentPart[];
 };
 
+type AttachmentFileResolution = {
+  normalizedUri: string | null;
+  exists: boolean;
+};
+
+type AttachmentFileResolver = (localUri: string) => Promise<AttachmentFileResolution>;
+
+type PreparedAttachmentResolution = {
+  readonly readinessIdentity: string;
+  readonly uniqueFilesystemLookupCount: number;
+  readonly finalFilesystemLookupCount: number;
+  resolveFile: AttachmentFileResolver;
+  resolveFileForFinalValidation: AttachmentFileResolver;
+  setCancellationCheck: (check: () => void) => void;
+  updateReadinessIdentity: (
+    readiness: MultimodalReadinessState | undefined,
+    expectedModelId: string | null,
+  ) => void;
+};
+
+type PreparedInferenceRequest = {
+  messages: LlmChatMessage[];
+  promptTokens: number;
+  promptSafetyMarginTokens: number;
+  modelId: string;
+  contextIdentity: string;
+  inferenceRevision: number;
+  messageSignature: string;
+  tokenCountSource: 'exact' | 'conservative' | 'cache';
+  attachmentResolution: PreparedAttachmentResolution;
+};
+
+type PromptTokenFormattingParams = {
+  enable_thinking: boolean;
+  reasoning_format: 'none' | 'auto' | 'deepseek';
+  add_generation_prompt?: boolean;
+};
+
+type TerminalCommitResult =
+  | { status: 'committed' | 'restored_without_write' | 'stale' }
+  | { status: 'persistence_failed'; error: unknown };
+
+type PromptPreparationEngineSnapshot = {
+  readonly modelId: string;
+  readonly contextIdentity: string;
+};
+
+function capturePromptPreparationEngineSnapshot(expectedModelId: string): PromptPreparationEngineSnapshot {
+  const engineState = llmEngineService.getState();
+  if (engineState.status !== EngineStatus.READY || engineState.activeModelId !== expectedModelId) {
+    throw new AppError(
+      'engine_not_ready',
+      'The model context changed before prompt preparation started. Try again.',
+    );
+  }
+
+  return {
+    modelId: expectedModelId,
+    contextIdentity: llmEngineService.getPromptContextIdentity(),
+  };
+}
+
+function assertPromptPreparationEngineSnapshotCurrent(snapshot: PromptPreparationEngineSnapshot): void {
+  const engineState = llmEngineService.getState();
+  if (
+    engineState.status !== EngineStatus.READY
+    || engineState.activeModelId !== snapshot.modelId
+    || llmEngineService.getPromptContextIdentity() !== snapshot.contextIdentity
+  ) {
+    throw new AppError(
+      'engine_not_ready',
+      'The model context changed while preparing the prompt. Try again.',
+    );
+  }
+}
+
 interface ActiveGenerationState {
   threadId: string;
   messageId: string;
   stopRequested: boolean;
   nativeCompletionStarted: boolean;
   flushPendingAssistantPatch?: () => void;
+  commitTerminalState?: () => TerminalCommitResult;
 }
 
 export type AppendUserMessageOptions = {
@@ -108,6 +213,87 @@ export type RegenerateUserMessageOptions = {
 const sharedGenerationState: { current: ActiveGenerationState | null } = {
   current: null,
 };
+
+function createPreparedAttachmentResolution(
+  readiness: MultimodalReadinessState | undefined,
+  expectedModelId: string | null,
+): PreparedAttachmentResolution {
+  const fileResolutionByInputUri = new Map<string, Promise<AttachmentFileResolution>>();
+  const fileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
+  const finalFileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
+  let cancellationCheck: () => void = () => undefined;
+  let readinessIdentity = buildPromptMultimodalReadinessIdentity(readiness, expectedModelId);
+  let uniqueFilesystemLookupCount = 0;
+  let finalFilesystemLookupCount = 0;
+
+  return {
+    get readinessIdentity() {
+      return readinessIdentity;
+    },
+    get uniqueFilesystemLookupCount() {
+      return uniqueFilesystemLookupCount;
+    },
+    get finalFilesystemLookupCount() {
+      return finalFilesystemLookupCount;
+    },
+    resolveFile: (localUri) => {
+      cancellationCheck();
+      const existing = fileResolutionByInputUri.get(localUri);
+      if (existing) {
+        return existing;
+      }
+      const resolution = resolvePreparedAttachmentFile(localUri);
+      fileResolutionByInputUri.set(localUri, resolution);
+      return resolution;
+    },
+    resolveFileForFinalValidation: (localUri) => {
+      cancellationCheck();
+      const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
+      if (!normalizedUri) {
+        return Promise.resolve({ normalizedUri: null, exists: false });
+      }
+
+      let lookup = finalFileExistenceByNormalizedUri.get(normalizedUri);
+      if (!lookup) {
+        finalFilesystemLookupCount += 1;
+        lookup = (async () => {
+          const exists = await doesChatAttachmentFileExist(normalizedUri);
+          cancellationCheck();
+          return exists;
+        })();
+        finalFileExistenceByNormalizedUri.set(normalizedUri, lookup);
+      }
+
+      return lookup.then((exists) => ({ normalizedUri, exists }));
+    },
+    setCancellationCheck: (check) => {
+      cancellationCheck = check;
+    },
+    updateReadinessIdentity: (nextReadiness, nextExpectedModelId) => {
+      readinessIdentity = buildPromptMultimodalReadinessIdentity(nextReadiness, nextExpectedModelId);
+    },
+  };
+
+  function resolvePreparedAttachmentFile(localUri: string): Promise<AttachmentFileResolution> {
+    const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
+    if (!normalizedUri) {
+      return Promise.resolve({ normalizedUri: null, exists: false });
+    }
+
+    let lookup = fileExistenceByNormalizedUri.get(normalizedUri);
+    if (!lookup) {
+      uniqueFilesystemLookupCount += 1;
+      lookup = (async () => {
+        const exists = await doesChatAttachmentFileExist(normalizedUri);
+        cancellationCheck();
+        return exists;
+      })();
+      fileExistenceByNormalizedUri.set(normalizedUri, lookup);
+    }
+
+    return lookup.then((exists) => ({ normalizedUri, exists }));
+  }
+}
 
 function resolveReadyAttachmentDrafts({
   drafts,
@@ -291,10 +477,20 @@ function getDraftImageAttachmentMediaPaths(drafts: readonly AttachmentDraft[]): 
     .filter((mediaPath): mediaPath is string => mediaPath !== null)));
 }
 
-function getSanitizedErrorDetails(error: unknown): { errorName: string } | { errorType: string } {
-  return error instanceof Error
-    ? { errorName: error.name || 'Error' }
-    : { errorType: typeof error };
+function isAssistantTurnSettled(result: TerminalCommitResult): boolean {
+  return result.status === 'committed' || result.status === 'restored_without_write';
+}
+
+function createAssistantTurnPersistenceError(
+  result: Extract<TerminalCommitResult, { status: 'persistence_failed' }>,
+): AppError {
+  return new AppError(
+    'action_failed',
+    'The response is waiting to be saved. Restore private storage, then tap Stop to retry.',
+    {
+      details: getPrivacySafeErrorLogDetails(result.error),
+    },
+  );
 }
 
 function isMatchingGeneration(threadId: string, messageId: string) {
@@ -333,16 +529,22 @@ export function resolveAssistantStreamPatchInterval({
 }
 
 export function shouldFlushAssistantStreamPatchOnBoundary(content: string) {
-  return STREAM_BOUNDARY_PATTERN.test(content.trimEnd());
+  return doesAssistantContentEndAtSentenceBoundary(content);
 }
 
 export function resetSharedGenerationStateForTests() {
+  resetActiveChatGenerationRuntimeForPrivateStorageReset();
+}
+
+export function resetActiveChatGenerationRuntimeForPrivateStorageReset(): void {
   sharedGenerationState.current = null;
 }
 
 function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope: string): boolean {
   if (error instanceof PrivateStorageUnavailableError) {
-    console.warn(`[ChatSession] Skipped persisting ${scope} while private storage is blocked`, error);
+    console.warn(`[ChatSession] Skipped persisting ${scope} while private storage is blocked`, {
+      ...getPrivacySafeErrorLogDetails(error),
+    });
     return true;
   }
 
@@ -352,32 +554,29 @@ function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope:
 export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promise<void> {
   const generation = sharedGenerationState.current;
   let deferredStateError: unknown = null;
+  let settlementResult: TerminalCommitResult | null = null;
 
   if (generation) {
     generation.stopRequested = true;
-
-    try {
-      generation.flushPendingAssistantPatch?.();
-    } catch (error) {
-      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'pending assistant patch')) {
-        deferredStateError = error;
-      }
-    }
+    releaseAndroidQaGenerationGate(generation.messageId);
 
     const chatState = useChatStore.getState();
     try {
-      chatState.stopAssistantMessage(generation.threadId, generation.messageId);
-    } catch (error) {
-      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'assistant stop state')) {
-        throw error;
+      settlementResult = generation.commitTerminalState
+        ? generation.commitTerminalState()
+        : chatState.finalizeAssistantTurn(
+          generation.threadId,
+          generation.messageId,
+          { outcome: 'stopped' },
+        );
+      if (settlementResult.status === 'persistence_failed') {
+        console.warn('[ChatSession] Terminal persistence remains pending while private storage is blocked', {
+          ...getPrivacySafeErrorLogDetails(settlementResult.error),
+        });
       }
-    }
-
-    try {
-      chatState.finalizeThreadStatus(generation.threadId, 'stopped');
     } catch (error) {
-      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'thread stop state')) {
-        throw error;
+      if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'assistant turn stop')) {
+        deferredStateError = error;
       }
     }
   }
@@ -392,6 +591,16 @@ export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promis
     if (backgroundTaskService.isTaskActive('inference')) {
       await backgroundTaskService.stopBackgroundTask('inference');
     }
+  }
+
+  if (
+    generation
+    && sharedGenerationState.current === generation
+    && settlementResult
+    && settlementResult.status !== 'persistence_failed'
+    && !generation.nativeCompletionStarted
+  ) {
+    sharedGenerationState.current = null;
   }
 
   if (deferredStateError) {
@@ -446,6 +655,14 @@ async function doesChatAttachmentFileExist(localUri: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function resolveAttachmentFileUncached(localUri: string): Promise<AttachmentFileResolution> {
+  const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
+  return {
+    normalizedUri,
+    exists: normalizedUri ? await doesChatAttachmentFileExist(normalizedUri) : false,
+  };
 }
 
 function isVisionReady(readiness?: MultimodalReadinessState, expectedModelId?: string | null): boolean {
@@ -659,54 +876,12 @@ function resolveExactMediaPromptRecountMarginTokens(messages: readonly LlmChatMe
   );
 }
 
-function getLlmInferenceMessageContentPartSignatureEntries(message: LlmChatMessage): string[] {
-  return message.contentParts?.map(getLlmContentPartSignatureEntry) ?? [];
-}
-
 function getLlmInferenceMessageContentPartMediaCount(message: LlmChatMessage): number {
   return message.contentParts?.filter((part) => part.type !== 'text').length ?? 0;
 }
 
 function getLlmInferenceMessageContentPartTextCount(message: LlmChatMessage): number {
   return message.contentParts?.filter((part) => part.type === 'text' && part.text.trim().length > 0).length ?? 0;
-}
-
-function buildLlmInferenceMessagesSignature(messages: readonly LlmChatMessage[]): string {
-  let hash = 2166136261;
-
-  for (const message of messages) {
-    hash = updateLlmInferenceSignatureHash(hash, message.role);
-    hash = updateLlmInferenceSignatureHash(hash, '\u0000');
-    hash = updateLlmInferenceSignatureHash(hash, String(message.content.length));
-    hash = updateLlmInferenceSignatureHash(hash, '\u0001');
-    hash = updateLlmInferenceSignatureHash(hash, message.content);
-    hash = updateLlmInferenceSignatureHash(hash, '\u0002');
-    const mediaPaths = getLlmInferenceMessageMediaPaths(message);
-    hash = updateLlmInferenceSignatureHash(hash, String(mediaPaths.length));
-    hash = updateLlmInferenceSignatureHash(hash, '\u0003');
-    for (const mediaPath of mediaPaths) {
-      hash = updateLlmInferenceSignatureHash(hash, mediaPath);
-      hash = updateLlmInferenceSignatureHash(hash, '\u0004');
-    }
-    const contentPartEntries = getLlmInferenceMessageContentPartSignatureEntries(message);
-    hash = updateLlmInferenceSignatureHash(hash, String(contentPartEntries.length));
-    hash = updateLlmInferenceSignatureHash(hash, '\u0005');
-    for (const contentPartEntry of contentPartEntries) {
-      hash = updateLlmInferenceSignatureHash(hash, contentPartEntry);
-      hash = updateLlmInferenceSignatureHash(hash, '\u0006');
-    }
-  }
-
-  return `${messages.length}:${hash.toString(36)}`;
-}
-
-function updateLlmInferenceSignatureHash(hash: number, value: string): number {
-  let nextHash = hash >>> 0;
-  for (let index = 0; index < value.length; index += 1) {
-    nextHash ^= value.charCodeAt(index);
-    nextHash = Math.imul(nextHash, 16777619) >>> 0;
-  }
-  return nextHash;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -756,7 +931,10 @@ function throwMissingAttachments(
   );
 }
 
-async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[]): Promise<void> {
+async function assertDraftAttachmentFilesExist(
+  drafts: readonly AttachmentDraft[],
+  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
+): Promise<void> {
   if (drafts.length === 0) {
     return;
   }
@@ -765,11 +943,11 @@ async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[
     drafts,
     ATTACHMENT_FILE_CHECK_CONCURRENCY,
     async (draft) => {
-      const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+      const resolution = await resolveAttachmentFile(draft.localUri ?? '');
       return {
         draft,
-        localUri,
-        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+        localUri: resolution.normalizedUri,
+        exists: resolution.exists,
       };
     },
   );
@@ -786,7 +964,10 @@ async function assertDraftAttachmentFilesExist(drafts: readonly AttachmentDraft[
   }
 }
 
-async function assertMediaDraftAttachmentFilesExist(drafts: readonly ChatMediaAttachmentDraft[]): Promise<void> {
+async function assertMediaDraftAttachmentFilesExist(
+  drafts: readonly ChatMediaAttachmentDraft[],
+  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
+): Promise<void> {
   if (drafts.length === 0) {
     return;
   }
@@ -800,11 +981,11 @@ async function assertMediaDraftAttachmentFilesExist(drafts: readonly ChatMediaAt
     fileDrafts,
     ATTACHMENT_FILE_CHECK_CONCURRENCY,
     async (draft) => {
-      const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
+      const resolution = await resolveAttachmentFile(draft.localUri ?? '');
       return {
         draft,
-        localUri,
-        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+        localUri: resolution.normalizedUri,
+        exists: resolution.exists,
       };
     },
   );
@@ -821,7 +1002,10 @@ async function assertMediaDraftAttachmentFilesExist(drafts: readonly ChatMediaAt
   }
 }
 
-async function assertMessageAttachmentFilesExist(message: ChatMessage): Promise<void> {
+async function assertMessageAttachmentFilesExist(
+  message: ChatMessage,
+  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
+): Promise<void> {
   const attachments = message.attachments;
   if (!attachments?.length) {
     return;
@@ -831,11 +1015,11 @@ async function assertMessageAttachmentFilesExist(message: ChatMessage): Promise<
     attachments,
     ATTACHMENT_FILE_CHECK_CONCURRENCY,
     async (attachment) => {
-      const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+      const resolution = await resolveAttachmentFile(attachment.localUri);
       return {
         attachment,
-        localUri,
-        exists: localUri ? await doesChatAttachmentFileExist(localUri) : false,
+        localUri: resolution.normalizedUri,
+        exists: resolution.exists,
       };
     },
   );
@@ -912,59 +1096,11 @@ function stripUnsupportedThreadInferenceAttachments(
   };
 }
 
-async function resolveChatMessageAudioAttachmentsForInference(
-  message: ChatMessage,
-  isLatestUserMessage: boolean,
-  latestUserMessageId?: string | null,
-  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
-  readiness?: MultimodalReadinessState,
-  expectedModelId?: string | null,
-): Promise<ChatMessage> {
-  const attachments = message.attachments;
-  const hasInputAudioContentParts = message.contentParts?.some((part) => part.type === 'input_audio') === true;
-  if (!attachments?.length) {
-    return hasInputAudioContentParts
-      ? withResolvedChatMessageInferenceContent(message, undefined)
-      : message;
-  }
-
-  const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
-  let didInspectAudioAttachments = false;
-  for (const attachment of attachments) {
-    if (!isGenericChatAttachment(attachment) || attachment.kind !== 'audio') {
-      nextAttachments.push(attachment);
-      continue;
-    }
-
-    didInspectAudioAttachments = true;
-    const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
-    const exists = localUri ? await resolveAttachmentExists(localUri) : false;
-    if (!localUri || !exists) {
-      if (isLatestUserMessage) {
-        throwMissingAttachments(latestUserMessageId ?? undefined, [attachment]);
-      }
-      continue;
-    }
-
-    const resolvedAttachment = localUri !== attachment.localUri
-      ? { ...attachment, localUri }
-      : attachment;
-    if (!shouldRetainAttachmentForInference(resolvedAttachment, readiness, expectedModelId)) {
-      continue;
-    }
-
-    nextAttachments.push(resolvedAttachment);
-  }
-
-  return didInspectAudioAttachments || hasInputAudioContentParts
-    ? withResolvedChatMessageInferenceContent(message, nextAttachments)
-    : message;
-}
-
 async function assertUserMessageAttachmentsReadyForRegeneration(
   message: ChatMessage,
   readiness?: MultimodalReadinessState,
   expectedModelId?: string | null,
+  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
 ): Promise<MultimodalReadinessState | undefined> {
   if (!messageHasAttachments(message)) {
     return readiness;
@@ -986,7 +1122,7 @@ async function assertUserMessageAttachmentsReadyForRegeneration(
   const attachments = message.attachments ?? [];
   const mediaPaths = getChatImageAttachmentMediaPaths(attachments);
   if (mediaPaths.length === 0) {
-    await assertMessageAttachmentFilesExist(message);
+    await assertMessageAttachmentFilesExist(message, resolveAttachmentFile);
     return readiness;
   }
 
@@ -996,7 +1132,7 @@ async function assertUserMessageAttachmentsReadyForRegeneration(
     expectedModelId,
     mediaPathOccurrenceCount: mediaPaths.length,
   });
-  await assertMessageAttachmentFilesExist(message);
+  await assertMessageAttachmentFilesExist(message, resolveAttachmentFile);
   return latestReadiness;
 }
 
@@ -1004,7 +1140,7 @@ async function resolveLlmMessageAttachmentsForInference(
   message: LlmChatMessage,
   isLatestUserMessage: boolean,
   latestUserMessageId?: string | null,
-  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
   readiness?: MultimodalReadinessState,
   expectedModelId?: string | null,
 ): Promise<LlmChatMessage> {
@@ -1030,11 +1166,11 @@ async function resolveLlmMessageAttachmentsForInference(
     attachments,
     ATTACHMENT_FILE_CHECK_CONCURRENCY,
     async (attachment) => {
-      const localUri = normalizeChatAttachmentLocalUri(attachment.localUri);
+      const resolution = await resolveAttachmentFile(attachment.localUri);
       return {
         attachment,
-        localUri,
-        exists: localUri ? await resolveAttachmentExists(localUri) : false,
+        localUri: resolution.normalizedUri,
+        exists: resolution.exists,
       };
     },
   );
@@ -1121,26 +1257,11 @@ function normalizeLlmInferenceMessagePairs(messages: readonly LlmChatMessage[]):
   return normalized;
 }
 
-function createChatAttachmentExistenceResolver(): (localUri: string) => Promise<boolean> {
-  const cache = new Map<string, Promise<boolean>>();
-
-  return (localUri: string) => {
-    const existing = cache.get(localUri);
-    if (existing) {
-      return existing;
-    }
-
-    const result = doesChatAttachmentFileExist(localUri);
-    cache.set(localUri, result);
-    return result;
-  };
-}
-
 async function resolveRetainedMessagesForInferenceAttachments(
   messages: readonly LlmChatMessage[],
   multimodalReadiness?: MultimodalReadinessState,
   latestUserMessageId?: string | null,
-  resolveAttachmentExists: (localUri: string) => Promise<boolean> = doesChatAttachmentFileExist,
+  resolveAttachmentFile: AttachmentFileResolver = resolveAttachmentFileUncached,
   expectedModelId?: string | null,
 ): Promise<LlmChatMessage[]> {
   const boundedMessages = constrainInferenceAttachmentsToRequestLimit(messages);
@@ -1157,7 +1278,7 @@ async function resolveRetainedMessagesForInferenceAttachments(
       message,
       index === latestUserMessageIndex,
       latestUserMessageId,
-      resolveAttachmentExists,
+      resolveAttachmentFile,
       multimodalReadiness,
       expectedModelId,
     ),
@@ -1166,20 +1287,6 @@ async function resolveRetainedMessagesForInferenceAttachments(
   assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness, expectedModelId);
   assertAudioReadyForLlmMessages(resolvedMessages, multimodalReadiness, expectedModelId);
   return normalizeLlmInferenceMessagePairs(filterEmptyLlmInferenceMessages(resolvedMessages));
-}
-
-async function resolveLatestUserMessageAttachmentsForInference(
-  message: ChatMessage | undefined,
-  readiness?: MultimodalReadinessState,
-  expectedModelId?: string | null,
-): Promise<void> {
-  if (!message || !messageHasAttachments(message)) {
-    return;
-  }
-
-  assertMultimodalReadyForInferenceAttachments([message], readiness, expectedModelId);
-  assertAudioReadyForInferenceAttachments([message], readiness, expectedModelId);
-  await assertMessageAttachmentFilesExist(message);
 }
 
 function assertMultimodalReadyForInferenceAttachments(
@@ -1361,46 +1468,6 @@ function constrainInferenceAttachmentsToRequestLimit<T extends InferenceAttachme
   return didConstrain ? nextMessages : messages as T[];
 }
 
-async function resolveThreadForInferenceAttachments({
-  thread,
-  latestUserMessageId,
-  multimodalReadiness,
-  expectedModelId,
-}: {
-  thread: ChatThread;
-  latestUserMessageId: string | null;
-  multimodalReadiness?: MultimodalReadinessState;
-  expectedModelId?: string | null;
-}): Promise<ChatThread> {
-  const latestUserMessage = latestUserMessageId
-    ? thread.messages.find((message) => message.id === latestUserMessageId)
-    : undefined;
-  await resolveLatestUserMessageAttachmentsForInference(latestUserMessage, multimodalReadiness, expectedModelId);
-  const readinessFilteredThread = stripUnsupportedThreadInferenceAttachments(
-    thread,
-    multimodalReadiness,
-    expectedModelId,
-  );
-  const resolveAttachmentExists = createChatAttachmentExistenceResolver();
-  const resolvedMessages = await mapWithConcurrency(
-    readinessFilteredThread.messages,
-    ATTACHMENT_FILE_CHECK_CONCURRENCY,
-    (message) => resolveChatMessageAudioAttachmentsForInference(
-      message,
-      Boolean(latestUserMessageId && message.id === latestUserMessageId),
-      latestUserMessageId,
-      resolveAttachmentExists,
-      multimodalReadiness,
-      expectedModelId,
-    ),
-  );
-
-  return {
-    ...readinessFilteredThread,
-    messages: resolvedMessages,
-  };
-}
-
 export function resolvePresetSnapshot(presetId: string | null): PresetSnapshot {
   if (!presetId) {
     return { ...DEFAULT_PRESET_SNAPSHOT };
@@ -1442,22 +1509,51 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   };
 }
 
-function resolveVisibleAssistantContentFromCandidates(
-  fallback: string,
-  ...candidates: (string | undefined)[]
-) {
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string') {
-      continue;
-    }
-
-    const visibleContent = getVisibleAssistantContent(candidate);
-    if (visibleContent.length > 0) {
-      return visibleContent;
-    }
+function resolveSuccessfulAssistantContent({
+  completionContent,
+  completionText,
+  preferRawSnapshot,
+  streamedContent,
+  rawSnapshot,
+}: {
+  completionContent: string | null | undefined;
+  completionText: string | undefined;
+  preferRawSnapshot: boolean;
+  streamedContent: string;
+  rawSnapshot: string | undefined;
+}): string {
+  if (completionContent !== undefined) {
+    return completionContent ?? '';
+  }
+  if (completionText !== undefined) {
+    return getVisibleAssistantContent(completionText);
+  }
+  if (preferRawSnapshot && rawSnapshot !== undefined) {
+    return getVisibleAssistantContent(rawSnapshot);
   }
 
-  return fallback;
+  return streamedContent;
+}
+
+function resolveSuccessfulAssistantThought({
+  completionContent,
+  completionReasoningContent,
+  completionText,
+  streamedThoughtContent,
+}: {
+  completionContent: string | null | undefined;
+  completionReasoningContent: string | null | undefined;
+  completionText: string | undefined;
+  streamedThoughtContent: string;
+}): string {
+  if (completionReasoningContent !== undefined) {
+    return completionReasoningContent ?? '';
+  }
+  if (completionContent === undefined && completionText !== undefined) {
+    return getAssistantPresentation(completionText).thoughtContent;
+  }
+
+  return streamedThoughtContent;
 }
 
 export function buildInferenceMessagesForThread(thread: ChatThread, options?: InferenceBudgetOptions) {
@@ -1481,19 +1577,19 @@ export function getThreadTruncationState(thread: ChatThread, options?: Inference
 
 export const useChatSession = () => {
   const activeThread = useChatStore((state) => state.getActiveThread());
+  const messageListRevision = useChatStore((state) => state.streamingRevision);
+  const inferenceRevision = useChatStore((state) => state.inferenceRevision);
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
   const switchThreadModel = useChatStore((state) => state.switchThreadModel);
   const deleteMessageBranch = useChatStore((state) => state.deleteMessageBranch);
   const deleteThreadState = useChatStore((state) => state.deleteThread);
-  const stopAssistantMessage = useChatStore((state) => state.stopAssistantMessage);
-  const finalizeAssistantMessage = useChatStore((state) => state.finalizeAssistantMessage);
+  const finalizeAssistantTurn = useChatStore((state) => state.finalizeAssistantTurn);
   const patchAssistantMessage = useChatStore((state) => state.patchAssistantMessage);
   const replaceBranchFromUserMessage = useChatStore((state) => state.replaceBranchFromUserMessage);
   const replaceLastAssistantMessage = useChatStore((state) => state.replaceLastAssistantMessage);
   const renameThreadState = useChatStore((state) => state.renameThread);
-  const finalizeThreadStatus = useChatStore((state) => state.finalizeThreadStatus);
   const setActiveThread = useChatStore((state) => state.setActiveThread);
   const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
 
@@ -1512,7 +1608,11 @@ export const useChatSession = () => {
       : undefined;
   })();
 
-  const truncationState = useTruncationTracking(activeThread, activeContextTokenBudget);
+  const truncationState = useTruncationTracking(
+    activeThread,
+    activeContextTokenBudget,
+    inferenceRevision,
+  );
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -1524,14 +1624,20 @@ export const useChatSession = () => {
           sharedGenerationState.current?.flushPendingAssistantPatch?.();
         } catch (error) {
           if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'background assistant patch')) {
-            console.warn('[ChatSession] Failed to flush background assistant patch', error);
+            console.warn(
+              '[ChatSession] Failed to flush background assistant patch',
+              getPrivacySafeErrorLogDetails(error),
+            );
           }
         }
         try {
           flushPendingChatPersistenceWrites('background');
         } catch (error) {
           if (!ignorePrivateStorageUnavailableDuringRuntimeStop(error, 'background chat persistence')) {
-            console.warn('[ChatSession] Failed to flush background chat persistence', error);
+            console.warn(
+              '[ChatSession] Failed to flush background chat persistence',
+              getPrivacySafeErrorLogDetails(error),
+            );
           }
         }
       }
@@ -1558,7 +1664,50 @@ export const useChatSession = () => {
           return;
         }
 
-        state.finalizeThreadStatus(activeThread.id, 'stopped');
+        const assistantMessage = activeThread.messages.at(-1);
+        if (assistantMessage?.role === 'assistant' && assistantMessage.state === 'streaming') {
+          const recoveryFinalization = { outcome: 'stopped' } as const;
+          const retryRecoveryCommit = () => useChatStore.getState().finalizeAssistantTurn(
+            activeThread.id,
+            assistantMessage.id,
+            recoveryFinalization,
+          );
+          const result = retryRecoveryCommit();
+          if (result.status === 'persistence_failed') {
+            sharedGenerationState.current = {
+              threadId: activeThread.id,
+              messageId: assistantMessage.id,
+              stopRequested: true,
+              nativeCompletionStarted: false,
+              commitTerminalState: retryRecoveryCommit,
+            };
+            console.warn('[ChatSession] Foreground recovery is waiting for private storage', {
+              ...getPrivacySafeErrorLogDetails(result.error),
+            });
+          }
+        } else {
+          const retryThreadStatusCommit = (): TerminalCommitResult => {
+            try {
+              useChatStore.getState().finalizeThreadStatus(activeThread.id, 'stopped');
+              return { status: 'committed' };
+            } catch (error) {
+              return { status: 'persistence_failed', error };
+            }
+          };
+          const result = retryThreadStatusCommit();
+          if (result.status === 'persistence_failed') {
+            sharedGenerationState.current = {
+              threadId: activeThread.id,
+              messageId: assistantMessage?.id ?? activeThread.id,
+              stopRequested: true,
+              nativeCompletionStarted: false,
+              commitTerminalState: retryThreadStatusCommit,
+            };
+            console.warn('[ChatSession] Foreground orphan recovery is waiting for private storage', {
+              ...getPrivacySafeErrorLogDetails(result.error),
+            });
+          }
+        }
       }
     });
 
@@ -1570,12 +1719,16 @@ export const useChatSession = () => {
   const runAssistantCompletion = useCallback(async (
     threadId: string,
     assistantMessageId: string,
-    completionOptions: { multimodalReadiness?: MultimodalReadinessState } = {},
+    completionOptions: {
+      multimodalReadiness?: MultimodalReadinessState;
+      attachmentResolution?: PreparedAttachmentResolution;
+    } = {},
   ) => {
     const storedThread = useChatStore.getState().getThread(threadId);
     if (!storedThread) {
       throw new Error('Thread not found');
     }
+    const inferenceRevisionAtPromptStart = useChatStore.getState().inferenceRevision;
 
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
@@ -1592,10 +1745,44 @@ export const useChatSession = () => {
       nativeCompletionStarted: false,
     };
     sharedGenerationState.current = generationState;
+    const isAndroidQaEvidenceEnabled = isAndroidQaGenerationEvidenceEnabled();
+    if (isAndroidQaEvidenceEnabled) {
+      beginAndroidQaGeneration(assistantMessageId);
+    }
 
-    let currentText = '';
-    let currentRawText = '';
-    let currentThoughtText = '';
+    const throwIfGenerationStopped = () => {
+      if (generationState.stopRequested) {
+        throw new Error('Generation was stopped before native completion started.');
+      }
+      if (useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while preparing the prompt. Try again.',
+        );
+      }
+    };
+    const promptPreparationSpan = performanceMonitor.isEnabled()
+      ? performanceMonitor.startSpan('chat.prompt.total')
+      : null;
+    const endPromptPreparationSpan = promptPreparationSpan
+      ? (
+          outcome: 'success' | 'cancelled' | 'error',
+          preparedRequest?: PreparedInferenceRequest,
+        ) => {
+          promptPreparationSpan.end({
+            outcome,
+            tokenCountSource: preparedRequest?.tokenCountSource,
+            attachmentLookups: preparedRequest
+              ? preparedRequest.attachmentResolution.uniqueFilesystemLookupCount
+                + preparedRequest.attachmentResolution.finalFilesystemLookupCount
+              : undefined,
+            finalAttachmentRechecks: preparedRequest?.attachmentResolution.finalFilesystemLookupCount,
+          });
+        }
+      : null;
+
+    const presentationParser = createIncrementalAssistantPresentationParser();
+    let presentationSnapshotSource: 'raw' | 'native-content' | null = null;
     let tokensCount = 0;
     let hasMarkedFirstToken = false;
     const startTime = Date.now();
@@ -1604,30 +1791,41 @@ export const useChatSession = () => {
     let unsubscribeExpiration: (() => void) | null = null;
     let sentBackgroundOutcomeNotification: 'interrupted' | 'error' | null = null;
     let hasFlushedFirstAssistantPatch = false;
-    let lastFlushedVisibleContent = '';
+    let lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
+    let latestRawAssistantSnapshot: string | undefined;
+    let latestRawAssistantSnapshotRevision = 0;
+    let latestPresentationUpdateRevision = 0;
+    let streamingCallbackRevision = 0;
+    let hasRecordedCompletionStats = false;
 
-    let needsVisibleRefresh = false;
-
-    const refreshVisibleAssistantContent = () => {
-      if (!needsVisibleRefresh) {
-        return;
+    const applyCumulativePresentationSnapshot = (
+      snapshot: string,
+      source: Exclude<typeof presentationSnapshotSource, null>,
+    ) => {
+      if (presentationSnapshotSource !== null && presentationSnapshotSource !== source) {
+        presentationParser.applySnapshot(snapshot);
+      } else {
+        presentationParser.applyCumulativeSnapshot(snapshot);
       }
-
-      if (currentRawText.length === 0) {
-        needsVisibleRefresh = false;
-        return;
-      }
-
-      currentText = getVisibleAssistantContent(currentRawText, { isStreaming: true });
-      needsVisibleRefresh = false;
+      presentationSnapshotSource = source;
     };
 
-    const recordCompletionStats = (outcome: 'success' | 'stopped' | 'error') => {
+    const appendPresentationDelta = (delta: string) => {
+      presentationParser.appendDelta(delta);
+      presentationSnapshotSource ??= 'raw';
+    };
+
+    const recordCompletionStats = (
+      outcome: 'success' | 'stopped' | 'error' | 'persistence_failed' | 'stale',
+    ) => {
+      if (hasRecordedCompletionStats) {
+        return;
+      }
+      hasRecordedCompletionStats = true;
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
 
-      const existingTokensPerSec = performanceMonitor.snapshot().counters['chat.tokensPerSec'] ?? 0;
-      performanceMonitor.incrementCounter('chat.tokensPerSec', tokensPerSec - existingTokensPerSec);
+      performanceMonitor.setGauge('chat.tokensPerSec', tokensPerSec);
 
       performanceMonitor.mark('chat.generation.outcome', {
         outcome,
@@ -1649,31 +1847,33 @@ export const useChatSession = () => {
       && (options?.allowStopped === true || !generationState.stopRequested)
     );
 
-    const hasBufferedAssistantContent = () => (
-      currentRawText.length > 0 ||
-      currentText.length > 0 ||
-      currentThoughtText.length > 0
-    );
+    const hasBufferedAssistantContent = () => {
+      const presentation = presentationParser.getPresentation();
+      return presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0;
+    };
 
-    const flushAssistantPatch = (options?: { allowStopped?: boolean; includeStreamingState?: boolean }) => {
+    const cancelScheduledAssistantPatch = () => {
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         flushTimeout = null;
         scheduledFlushDelayMs = null;
       }
+    };
+
+    const flushAssistantPatch = (options?: { allowStopped?: boolean; includeStreamingState?: boolean }) => {
+      cancelScheduledAssistantPatch();
 
       if (!canMutateAssistantMessage(options)) {
         return;
       }
 
-      refreshVisibleAssistantContent();
-
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+      const presentation = presentationParser.getPresentation();
 
       const updates: Partial<ChatMessage> = {
-        content: currentText,
-        thoughtContent: currentThoughtText || undefined,
+        content: presentation.finalContent,
+        thoughtContent: presentation.thoughtContent || undefined,
         tokensPerSec,
       };
 
@@ -1682,10 +1882,77 @@ export const useChatSession = () => {
       }
 
       patchAssistantMessage(threadId, assistantMessageId, updates);
-      if (hasBufferedAssistantContent()) {
+      if (presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0) {
+        const isFirstDurableAssistantPatch = !hasFlushedFirstAssistantPatch;
         hasFlushedFirstAssistantPatch = true;
-        lastFlushedVisibleContent = currentText || currentRawText;
+        lastFlushedVisibleRevision = presentationParser.getVisibleContentRevision();
+        if (
+          isFirstDurableAssistantPatch
+          && isAndroidQaEvidenceEnabled
+          && isAndroidQaGenerationGateArmed('after-first-durable-output')
+        ) {
+          if (!flushChatStreamingProgressForAndroidQa(threadId, assistantMessageId)) {
+            throw new Error('Unable to verify the first durable Android QA generation patch.');
+          }
+          activateAndroidQaGenerationAfterFirstDurableOutput(assistantMessageId);
+        }
       }
+    };
+
+    const terminalSettlement: { result: AssistantTurnCommitResult | null } = { result: null };
+    let pendingTerminalFinalization: AssistantTurnFinalization | null = null;
+    const finalizeBufferedAssistantTurn = (
+      finalization: AssistantTurnFinalization,
+      options?: { allowStopped?: boolean },
+    ): AssistantTurnCommitResult => {
+      cancelScheduledAssistantPatch();
+      if (terminalSettlement.result && terminalSettlement.result.status !== 'persistence_failed') {
+        return terminalSettlement.result;
+      }
+      if (!canMutateAssistantMessage(options)) {
+        terminalSettlement.result = { status: 'stale' };
+        return terminalSettlement.result;
+      }
+
+      if (!pendingTerminalFinalization) {
+        const elapsedSec = (Date.now() - startTime) / 1000;
+        const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
+        const presentation = presentationParser.getPresentation();
+        const bufferedThoughtContent = presentation.thoughtContent.length > 0
+          ? presentation.thoughtContent
+          : null;
+        pendingTerminalFinalization = {
+          ...finalization,
+          content: finalization.content ?? presentation.finalContent,
+          thoughtContent: finalization.thoughtContent === undefined
+            ? bufferedThoughtContent
+            : finalization.thoughtContent,
+          tokensPerSec: finalization.tokensPerSec ?? tokensPerSec,
+        };
+      }
+
+      terminalSettlement.result = finalizeAssistantTurn(
+        threadId,
+        assistantMessageId,
+        pendingTerminalFinalization,
+      );
+      return terminalSettlement.result;
+    };
+
+    const resolveTerminalCommitError = (result: AssistantTurnCommitResult): AppError | null => {
+      if (result.status === 'persistence_failed') {
+        recordCompletionStats('persistence_failed');
+        return createAssistantTurnPersistenceError(result);
+      }
+      if (result.status === 'stale') {
+        recordCompletionStats('stale');
+        return new AppError(
+          'action_failed',
+          'The response was not saved because the conversation changed. Try again.',
+        );
+      }
+
+      return null;
     };
 
     const scheduleAssistantPatch = (options?: { sentenceBoundary?: boolean }) => {
@@ -1699,10 +1966,11 @@ export const useChatSession = () => {
         return;
       }
 
+      const presentation = presentationParser.getPresentation();
       const delayMs = resolveAssistantStreamPatchInterval({
         tokensCount,
-        visibleCharCount: Math.max(currentText.length, currentRawText.length),
-        thoughtCharCount: currentThoughtText.length,
+        visibleCharCount: presentation.finalContent.length,
+        thoughtCharCount: presentation.thoughtContent.length,
       });
 
       if (flushTimeout) {
@@ -1732,6 +2000,10 @@ export const useChatSession = () => {
         ? { allowStopped: true, includeStreamingState: false }
         : undefined);
     };
+    generationState.commitTerminalState = () => finalizeBufferedAssistantTurn(
+      { outcome: 'stopped' },
+      { allowStopped: true },
+    );
 
     const sendOutcomeNotificationOnce = (outcome: 'interrupted' | 'error') => {
       if (AppState.currentState === 'active') {
@@ -1756,7 +2028,9 @@ export const useChatSession = () => {
       void notificationService.sendInferenceErrorNotification({ threadId });
     };
 
+    let releasePromptPreparation: (() => void) | null = null;
     try {
+      releasePromptPreparation = llmEngineService.beginPromptPreparation();
       const {
         activeModelId,
         model,
@@ -1765,6 +2039,11 @@ export const useChatSession = () => {
       } = resolveThreadReasoningRuntimeConfig(storedThread);
       const effectiveMultimodalReadiness = completionOptions.multimodalReadiness
         ?? model?.multimodalReadiness;
+      const attachmentResolution = completionOptions.attachmentResolution
+        ?? createPreparedAttachmentResolution(effectiveMultimodalReadiness, activeModelId);
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      attachmentResolution.setCancellationCheck(throwIfGenerationStopped);
+      const promptContextIdentity = llmEngineService.getPromptContextIdentity();
 
       await backgroundTaskService.startBackgroundInference(modelName);
 
@@ -1774,11 +2053,18 @@ export const useChatSession = () => {
         }
 
         try {
-          flushAssistantPatch();
-          stopAssistantMessage(threadId, assistantMessageId);
-          finalizeThreadStatus(threadId, 'stopped');
           generationState.stopRequested = true;
-          sendOutcomeNotificationOnce('interrupted');
+          releaseAndroidQaGenerationGate(assistantMessageId);
+          const result = finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
+          }
         } finally {
           void (async () => {
             if (generationState.nativeCompletionStarted) {
@@ -1794,21 +2080,24 @@ export const useChatSession = () => {
             }
             await llmEngineService.stopCompletion();
           })().catch((error) => {
-            console.warn('[ChatSession] Failed to stop expired completion', error);
+            console.warn(
+              '[ChatSession] Failed to stop expired completion',
+              getPrivacySafeErrorLogDetails(error),
+            );
           });
         }
       });
 
+      // Capability filtering is metadata-only and safe across the full thread.
+      // Filesystem validation begins only after the conservative window is selected.
+      thread = stripUnsupportedThreadInferenceAttachments(
+        storedThread,
+        effectiveMultimodalReadiness,
+        activeModelId,
+      );
       const windowOptions = resolveThreadInferenceWindowOptions(thread, {
         maxContextTokens: maxContextSize,
         responseReserveTokens: reasoningRuntimeConfig.responseReserveTokens,
-      });
-
-      thread = await resolveThreadForInferenceAttachments({
-        thread: storedThread,
-        latestUserMessageId,
-        multimodalReadiness: effectiveMultimodalReadiness,
-        expectedModelId: activeModelId,
       });
 
       const MESSAGE_TOO_LONG_ERROR_MESSAGE =
@@ -1818,61 +2107,127 @@ export const useChatSession = () => {
       let messages: LlmChatMessage[] = [];
       let promptTokens = 0;
       let promptSafetyMarginTokens = 0;
-      const resolveAttachmentExistsForTokenCount = createChatAttachmentExistenceResolver();
-      const exactPromptTokenCache = new Map<string, Promise<number>>();
-      let selectedTokenCountParams = {
+      let selectedTokenCountParams: PromptTokenFormattingParams = {
         enable_thinking: reasoningRuntimeConfig.enableThinking,
         reasoning_format: reasoningRuntimeConfig.reasoningFormat,
       };
       let didUseHeuristicPromptTokens = false;
       let didUseEstimatedMediaPromptTokens = false;
+      const preparedMessagesBySignature = new Map<string, Promise<LlmChatMessage[]>>();
+      const tokenCountSourceByCacheKey = new Map<string, 'exact' | 'cache'>();
 
-      const throwIfGenerationStopped = () => {
-        if (generationState.stopRequested) {
-          throw new Error('Generation was stopped before native completion started.');
+      const resolvePreparedMessages = (windowMessages: LlmChatMessage[]) => {
+        throwIfGenerationStopped();
+        const preparationKey = [
+          attachmentResolution.readinessIdentity,
+          latestUserMessageId,
+          buildLlmInferenceMessagesSignature(windowMessages),
+        ].join('\u0001');
+        const existing = preparedMessagesBySignature.get(preparationKey);
+        if (existing) {
+          return existing;
         }
+
+        const attachmentPreparationSpan = performanceMonitor.isEnabled()
+          ? performanceMonitor.startSpan('chat.prompt.attachments')
+          : null;
+        const filesystemLookupsAtStart = attachmentResolution.uniqueFilesystemLookupCount;
+        let preparation!: Promise<LlmChatMessage[]>;
+        preparation = resolveRetainedMessagesForInferenceAttachments(
+          windowMessages,
+          effectiveMultimodalReadiness,
+          latestUserMessageId,
+          attachmentResolution.resolveFile,
+          activeModelId,
+        ).then(
+          (resolvedMessages) => {
+            attachmentPreparationSpan?.end({
+              outcome: 'success',
+              uniqueFilesystemLookups:
+                attachmentResolution.uniqueFilesystemLookupCount - filesystemLookupsAtStart,
+            });
+            return resolvedMessages;
+          },
+          (error) => {
+            attachmentPreparationSpan?.end({
+              outcome: 'error',
+              uniqueFilesystemLookups:
+                attachmentResolution.uniqueFilesystemLookupCount - filesystemLookupsAtStart,
+            });
+            if (preparedMessagesBySignature.get(preparationKey) === preparation) {
+              preparedMessagesBySignature.delete(preparationKey);
+            }
+            throw error;
+          },
+        );
+        preparedMessagesBySignature.set(preparationKey, preparation);
+        return preparation;
       };
+
       const buildPromptTokenCacheKey = (
         messagesToCount: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-      ) => [
-        params.enable_thinking ? 'thinking' : 'plain',
-        params.reasoning_format,
-        buildLlmInferenceMessagesSignature(messagesToCount),
-      ].join('\u0001');
+        params: PromptTokenFormattingParams,
+      ) => buildExactPromptTokenCacheKey({
+        contextIdentity: promptContextIdentity,
+        modelId: activeModelId,
+        multimodalReadinessIdentity: attachmentResolution.readinessIdentity,
+        messageSignature: buildLlmInferenceMessagesSignature(messagesToCount),
+        enableThinking: params.enable_thinking,
+        reasoningFormat: params.reasoning_format,
+        addGenerationPrompt: params.add_generation_prompt,
+      });
+      const resolvePromptTokenMessages = (messagesToCount: LlmChatMessage[]) => messagesToCount.map((message) => (
+        resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
+      ));
       const countExactPromptTokens = async (
         messagesToCount: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-        options: { bypassCache?: boolean } = {},
+        params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
-        const sanitizedMessagesToCount = messagesToCount.map((message) => (
-          resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
-        ));
+        const sanitizedMessagesToCount = resolvePromptTokenMessages(messagesToCount);
         const cacheKey = buildPromptTokenCacheKey(sanitizedMessagesToCount, params);
-        let cachedCount = options.bypassCache ? undefined : exactPromptTokenCache.get(cacheKey);
-        if (!cachedCount) {
-          cachedCount = llmEngineService.countPromptTokens({
+        const lookup = exactPromptTokenCache.getOrCreate(cacheKey, () => {
+          throwIfGenerationStopped();
+          const tokenizeSpan = performanceMonitor.isEnabled()
+            ? performanceMonitor.startSpan('chat.prompt.tokenize')
+            : null;
+          const tokenCountPromise = llmEngineService.countPromptTokens({
             messages: sanitizedMessagesToCount,
             params,
             multimodalReadiness: effectiveMultimodalReadiness,
             expectedModelId: activeModelId,
-          }).catch((error) => {
-            exactPromptTokenCache.delete(cacheKey);
-            throw error;
           });
-          exactPromptTokenCache.set(cacheKey, cachedCount);
+          return tokenizeSpan
+            ? tokenCountPromise.then((tokens) => {
+                tokenizeSpan.end({ outcome: 'success' });
+                return tokens;
+              }).catch((error) => {
+                tokenizeSpan.end({ outcome: 'error' });
+                throw error;
+              })
+            : tokenCountPromise;
+        });
+        tokenCountSourceByCacheKey.set(cacheKey, lookup.hit ? 'cache' : 'exact');
+        if (performanceMonitor.isEnabled()) {
+          performanceMonitor.incrementCounter(
+            lookup.hit ? 'chat.prompt.cache.hit' : 'chat.prompt.cache.miss',
+          );
         }
 
-        const tokens = await cachedCount;
-        throwIfGenerationStopped();
-        return tokens;
+        let cacheOutcome: 'success' | 'discard' = 'discard';
+        try {
+          const tokens = await lookup.promise;
+          throwIfGenerationStopped();
+          cacheOutcome = 'success';
+          return tokens;
+        } finally {
+          lookup.release(cacheOutcome);
+        }
       };
 
       const countResolvedPromptTokens = async (
         resolvedWindowMessages: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
-        options: { bypassCache?: boolean } = {},
+        params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
 
@@ -1883,7 +2238,7 @@ export const useChatSession = () => {
           try {
             textOnlyPromptTokens = await countExactPromptTokens(textOnlyMessages, params);
           } catch {
-            return countExactPromptTokens(resolvedWindowMessages, params, options);
+            return countExactPromptTokens(resolvedWindowMessages, params);
           }
 
           didUseEstimatedMediaPromptTokens = true;
@@ -1891,21 +2246,15 @@ export const useChatSession = () => {
           return textOnlyPromptTokens + estimateLlmInferenceMediaPromptTokens(resolvedWindowMessages);
         }
 
-        return countExactPromptTokens(resolvedWindowMessages, params, options);
+        return countExactPromptTokens(resolvedWindowMessages, params);
       };
 
       const countPromptTokens = async (
         windowMessages: LlmChatMessage[],
-        params: { enable_thinking: boolean; reasoning_format: 'none' | 'auto' | 'deepseek' },
+        params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
-        const resolvedWindowMessages = await resolveRetainedMessagesForInferenceAttachments(
-          windowMessages,
-          effectiveMultimodalReadiness,
-          latestUserMessageId,
-          resolveAttachmentExistsForTokenCount,
-          activeModelId,
-        );
+        const resolvedWindowMessages = await resolvePreparedMessages(windowMessages);
         throwIfGenerationStopped();
 
         return countResolvedPromptTokens(resolvedWindowMessages, params);
@@ -1931,6 +2280,11 @@ export const useChatSession = () => {
         if (generationState.stopRequested) {
           throw error;
         }
+
+        // A prompt-semantic mutation can arrive while native tokenization is
+        // pending. It must abort this preparation instead of being mistaken
+        // for a tokenizer failure and continuing through the heuristic path.
+        throwIfGenerationStopped();
 
         const appError = toAppError(error);
 
@@ -1961,16 +2315,10 @@ export const useChatSession = () => {
         } else {
           console.warn('[ChatSession] Failed to count prompt tokens accurately, falling back to heuristics', {
             context: 'prompt_token_count_fallback',
-            ...getSanitizedErrorDetails(error),
+            ...getPrivacySafeErrorLogDetails(error),
           });
           didUseHeuristicPromptTokens = true;
-          messages = await resolveRetainedMessagesForInferenceAttachments(
-            getThreadInferenceWindow(thread, windowOptions).messages,
-            effectiveMultimodalReadiness,
-            latestUserMessageId,
-            resolveAttachmentExistsForTokenCount,
-            activeModelId,
-          );
+          messages = await resolvePreparedMessages(getThreadInferenceWindow(thread, windowOptions).messages);
           promptTokens = estimateLlmMessagesTokens(messages);
           promptSafetyMarginTokens = Math.max(
             0,
@@ -1980,74 +2328,109 @@ export const useChatSession = () => {
       }
 
       throwIfGenerationStopped();
-      const tokenCountResolvedMessages = await resolveRetainedMessagesForInferenceAttachments(
-        messages,
-        effectiveMultimodalReadiness,
-        latestUserMessageId,
-        resolveAttachmentExistsForTokenCount,
-        activeModelId,
-      );
-      throwIfGenerationStopped();
-      const finalMessages = await resolveRetainedMessagesForInferenceAttachments(
-        messages,
-        effectiveMultimodalReadiness,
-        latestUserMessageId,
-        doesChatAttachmentFileExist,
-        activeModelId,
-      );
-      throwIfGenerationStopped();
-      const finalMessagesSignature = buildLlmInferenceMessagesSignature(finalMessages);
-      const tokenCountResolvedMessagesSignature = buildLlmInferenceMessagesSignature(tokenCountResolvedMessages);
-      const finalPromptTokenCacheKey = buildPromptTokenCacheKey(finalMessages, selectedTokenCountParams);
-      const shouldRecountFinalPrompt = finalMessagesSignature !== tokenCountResolvedMessagesSignature;
-      if (shouldRecountFinalPrompt) {
-        if (didUseHeuristicPromptTokens) {
-          promptTokens = estimateLlmMessagesTokens(finalMessages);
-        } else {
-          throwIfGenerationStopped();
-          promptTokens = await countResolvedPromptTokens(finalMessages, selectedTokenCountParams, {
-            bypassCache: finalMessagesSignature !== tokenCountResolvedMessagesSignature,
-          });
-          throwIfGenerationStopped();
-        }
-      }
-      messages = finalMessages;
-
-      const nonSystemMessages = messages.filter((message) => message.role !== 'system');
-      const lastNonSystemRole = nonSystemMessages.length > 0
-        ? nonSystemMessages[nonSystemMessages.length - 1]?.role
+      const finalizationSpan = performanceMonitor.isEnabled()
+        ? performanceMonitor.startSpan('chat.prompt.finalize')
         : null;
-      if (lastNonSystemRole !== 'user') {
-        throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE);
-      }
+      let preparedRequest: PreparedInferenceRequest;
+      try {
+        const buildPreparedRequest = async (
+          preparedMessages: LlmChatMessage[],
+          resolvedPromptTokens: number,
+        ): Promise<PreparedInferenceRequest> => {
+          const messageSignature = buildLlmInferenceMessagesSignature(preparedMessages);
+          const finalPromptTokenMessages = resolvePromptTokenMessages(preparedMessages);
+          const finalPromptTokenCacheKey = buildPromptTokenCacheKey(
+            finalPromptTokenMessages,
+            selectedTokenCountParams,
+          );
 
-      let availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
-      if (
-        !didUseHeuristicPromptTokens
-        && didUseEstimatedMediaPromptTokens
-        && getLlmInferenceMessagesMediaPaths(messages).length > 0
-        && availablePredictTokens <= resolveExactMediaPromptRecountMarginTokens(messages)
-        && !exactPromptTokenCache.has(finalPromptTokenCacheKey)
-      ) {
-        throwIfGenerationStopped();
-        promptTokens = await countExactPromptTokens(messages, selectedTokenCountParams);
-        throwIfGenerationStopped();
-        availablePredictTokens = maxContextSize - promptTokens - promptSafetyMarginTokens;
-      }
+          const nonSystemMessages = preparedMessages.filter((message) => message.role !== 'system');
+          const lastNonSystemRole = nonSystemMessages.length > 0
+            ? nonSystemMessages[nonSystemMessages.length - 1]?.role
+            : null;
+          if (lastNonSystemRole !== 'user') {
+            throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE);
+          }
 
-      if (availablePredictTokens <= 0) {
-        throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE, {
-          details: {
-            maxContextSize,
-            promptTokens,
+          let finalPromptTokens = resolvedPromptTokens;
+          let tokenCountSource: PreparedInferenceRequest['tokenCountSource'] =
+            didUseHeuristicPromptTokens || didUseEstimatedMediaPromptTokens
+              ? 'conservative'
+              : (tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact');
+          let availablePredictTokens = maxContextSize - finalPromptTokens - promptSafetyMarginTokens;
+          if (
+            !didUseHeuristicPromptTokens
+            && didUseEstimatedMediaPromptTokens
+            && getLlmInferenceMessagesMediaPaths(preparedMessages).length > 0
+            && availablePredictTokens <= resolveExactMediaPromptRecountMarginTokens(preparedMessages)
+          ) {
+            throwIfGenerationStopped();
+            finalPromptTokens = await countExactPromptTokens(preparedMessages, selectedTokenCountParams);
+            throwIfGenerationStopped();
+            tokenCountSource = tokenCountSourceByCacheKey.get(finalPromptTokenCacheKey) ?? 'exact';
+            availablePredictTokens = maxContextSize - finalPromptTokens - promptSafetyMarginTokens;
+          }
+
+          if (availablePredictTokens <= 0) {
+            throw new AppError('message_too_long', MESSAGE_TOO_LONG_ERROR_MESSAGE, {
+              details: {
+                maxContextSize,
+                promptTokens: finalPromptTokens,
+                promptSafetyMarginTokens,
+              },
+            });
+          }
+
+          return {
+            messages: preparedMessages,
+            promptTokens: finalPromptTokens,
             promptSafetyMarginTokens,
-          },
-        });
+            modelId: activeModelId,
+            contextIdentity: promptContextIdentity,
+            inferenceRevision: inferenceRevisionAtPromptStart,
+            messageSignature,
+            tokenCountSource,
+            attachmentResolution,
+          };
+        };
+
+        const preparedMessages = await resolvePreparedMessages(messages);
+        throwIfGenerationStopped();
+        preparedRequest = await buildPreparedRequest(preparedMessages, promptTokens);
+
+        const latestPreparedUserMessageIndex = getLatestUserLlmMessageIndex(preparedRequest.messages);
+        const latestPreparedUserMessage = preparedRequest.messages[latestPreparedUserMessageIndex];
+        if (latestPreparedUserMessage?.attachments?.length) {
+          const revalidatedLatestUserMessage = await resolveLlmMessageAttachmentsForInference(
+            latestPreparedUserMessage,
+            true,
+            latestUserMessageId,
+            attachmentResolution.resolveFileForFinalValidation,
+            effectiveMultimodalReadiness,
+            activeModelId,
+          );
+          throwIfGenerationStopped();
+
+          if (revalidatedLatestUserMessage !== latestPreparedUserMessage) {
+            const revalidatedMessages = [...preparedRequest.messages];
+            revalidatedMessages[latestPreparedUserMessageIndex] = revalidatedLatestUserMessage;
+            const revalidatedPromptTokens = didUseHeuristicPromptTokens
+              ? estimateLlmMessagesTokens(revalidatedMessages)
+              : await countResolvedPromptTokens(revalidatedMessages, selectedTokenCountParams);
+            throwIfGenerationStopped();
+            preparedRequest = await buildPreparedRequest(revalidatedMessages, revalidatedPromptTokens);
+          }
+        }
+      } finally {
+        finalizationSpan?.end();
       }
 
+      messages = preparedRequest.messages;
+      promptTokens = preparedRequest.promptTokens;
+      promptSafetyMarginTokens = preparedRequest.promptSafetyMarginTokens;
       const maxPredictTokens = Math.max(
         1,
-        maxContextSize - promptTokens - promptSafetyMarginTokens,
+        maxContextSize - preparedRequest.promptTokens - preparedRequest.promptSafetyMarginTokens,
       );
       const visiblePredictTokens = Math.max(1, Math.round(thread.paramsSnapshot.maxTokens));
       const guaranteedVisibleTokens = Math.min(visiblePredictTokens, maxPredictTokens);
@@ -2059,22 +2442,48 @@ export const useChatSession = () => {
         ? reasoningRuntimeConfig.reasoningFormat
         : 'none';
 
+      endPromptPreparationSpan?.('success', preparedRequest);
+
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          flushAssistantPatch();
-          stopAssistantMessage(threadId, assistantMessageId);
-          finalizeThreadStatus(threadId, 'stopped');
-          recordCompletionStats('stopped');
-
-          sendOutcomeNotificationOnce('interrupted');
+          const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
+          }
         }
         return;
+      }
+
+      if (llmEngineService.getPromptContextIdentity() !== preparedRequest.contextIdentity) {
+        throw new AppError(
+          'engine_not_ready',
+          'The model context changed while preparing the prompt. Try again.',
+        );
+      }
+      if (useChatStore.getState().inferenceRevision !== preparedRequest.inferenceRevision) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while preparing the prompt. Try again.',
+        );
       }
 
       if (llmEngineService.hasActiveCompletion() || isNativeCompletionSettlingAfterStop()) {
         throw new Error('Wait for the current response to finish stopping before starting another response.');
       }
 
+      if (isAndroidQaEvidenceEnabled) {
+        recordAndroidQaPreparedGenerationEvidence(buildAndroidQaPreparedGenerationEvidence({
+          userMessageId: latestUserMessageId,
+          assistantMessageId,
+          preparedMessages: messages,
+        }));
+      }
       generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
@@ -2097,6 +2506,20 @@ export const useChatSession = () => {
           reasoning_format: reasoningFormatForRequest,
         },
         onToken: (token) => {
+          if (isAndroidQaEvidenceEnabled && (
+            shouldHoldAndroidQaGenerationBeforeFirstOutput(assistantMessageId)
+            || isAndroidQaGenerationHeld(assistantMessageId)
+          )) {
+            return;
+          }
+          const isStreamingTraceEnabled = performanceMonitor.isEnabled();
+          const processedCharactersBefore = isStreamingTraceEnabled
+            ? presentationParser.getProcessedCharacterCount()
+            : 0;
+          if (isStreamingTraceEnabled) {
+            performanceMonitor.incrementCounter('chat.stream.nativeCallback');
+          }
+
           if (!canMutateAssistantMessage()) {
             return;
           }
@@ -2105,136 +2528,173 @@ export const useChatSession = () => {
             hasMarkedFirstToken = true;
             performanceMonitor.mark('chat.firstToken', { modelId });
           }
+          streamingCallbackRevision += 1;
+          const callbackRevision = streamingCallbackRevision;
 
           if (typeof token === 'string') {
-            if (currentRawText.length === 0 && currentText.length > 0) {
-              currentRawText = currentText;
+            appendPresentationDelta(token);
+            if (token.length > 0) {
+              latestPresentationUpdateRevision = callbackRevision;
             }
-            currentRawText += token;
-            needsVisibleRefresh = true;
           } else {
             const hasReasoningUpdate = token.reasoningContent !== undefined;
-
-            if (token.content !== undefined) {
-              currentText = getVisibleAssistantContent(token.content);
-              needsVisibleRefresh = false;
-              if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
-                currentRawText = token.accumulatedText;
-              } else {
-                currentRawText = token.content;
-              }
-            } else if (hasReasoningUpdate) {
-              // When the engine is still producing reasoning (no parsed `content` yet), never derive
-              // the visible assistant message from raw accumulated text. Some templates use non-<think>
-              // markers (e.g. [THINK] or <|channel>thought) which would otherwise leak into the main bubble.
-              if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
-                currentRawText = token.accumulatedText;
-              }
-              needsVisibleRefresh = false;
-            } else if (typeof token.accumulatedText === 'string' && token.accumulatedText.length >= currentRawText.length) {
-              currentRawText = token.accumulatedText;
-              needsVisibleRefresh = true;
-            } else {
-              if (currentRawText.length === 0 && currentText.length > 0) {
-                currentRawText = currentText;
-              }
-              currentRawText += token.token;
-              needsVisibleRefresh = true;
+            if (typeof token.accumulatedText === 'string') {
+              latestRawAssistantSnapshot = token.accumulatedText;
+              latestRawAssistantSnapshotRevision = callbackRevision;
             }
 
-            if (token.reasoningContent !== undefined) {
-              const nextReasoning = token.reasoningContent;
+            if (token.content !== undefined) {
+              if (token.contentMode === 'cumulative') {
+                applyCumulativePresentationSnapshot(token.content, 'native-content');
+              } else {
+                presentationParser.applySnapshot(token.content);
+                presentationSnapshotSource = 'native-content';
+              }
+              latestPresentationUpdateRevision = callbackRevision;
+            } else if (!hasReasoningUpdate) {
+              if (typeof token.accumulatedText === 'string') {
+                applyCumulativePresentationSnapshot(token.accumulatedText, 'raw');
+                latestPresentationUpdateRevision = callbackRevision;
+              } else {
+                appendPresentationDelta(token.token);
+                if (token.token.length > 0) {
+                  latestPresentationUpdateRevision = callbackRevision;
+                }
+              }
+            }
+            // Reasoning-only native updates intentionally ignore raw accumulated text. Its
+            // template-specific markers must never leak into the visible assistant bubble.
 
-              // `reasoningContent` may be streamed either as an accumulated buffer or as deltas.
-              // Prefer treating it as accumulated when it prefixes the existing buffer.
-              currentThoughtText = nextReasoning.startsWith(currentThoughtText)
-                ? nextReasoning
-                : (currentThoughtText + nextReasoning);
+            if (token.reasoningContent !== undefined) {
+              if (token.reasoningContentMode === 'delta') {
+                presentationParser.appendExplicitReasoningDelta(token.reasoningContent);
+              } else if (token.reasoningContentMode === 'cumulative') {
+                presentationParser.applyCumulativeExplicitReasoningSnapshot(
+                  token.reasoningContent,
+                );
+              } else {
+                presentationParser.applyExplicitReasoningSnapshot(token.reasoningContent);
+              }
             }
           }
 
+          if (isStreamingTraceEnabled) {
+            performanceMonitor.incrementCounter('chat.stream.presentation');
+            const processedCharacterCount = presentationParser.getProcessedCharacterCount()
+              - processedCharactersBefore;
+            if (processedCharacterCount > 0) {
+              performanceMonitor.incrementCounter(
+                'chat.stream.presentationCharacters',
+                processedCharacterCount,
+              );
+            }
+          }
           tokensCount += 1;
-          const boundaryCandidate = needsVisibleRefresh
-            ? currentRawText
-            : (currentText || currentRawText);
           scheduleAssistantPatch({
             sentenceBoundary:
-              boundaryCandidate !== lastFlushedVisibleContent &&
-              shouldFlushAssistantStreamPatchOnBoundary(boundaryCandidate),
+              presentationParser.getVisibleContentRevision() !== lastFlushedVisibleRevision &&
+              presentationParser.doesVisibleContentEndAtSentenceBoundary(),
           });
         },
       });
+      if (isAndroidQaEvidenceEnabled) {
+        await waitForAndroidQaGenerationGateRelease(assistantMessageId);
+      }
+      generationState.nativeCompletionStarted = false;
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          flushAssistantPatch({ allowStopped: true, includeStreamingState: false });
-          stopAssistantMessage(threadId, assistantMessageId);
-          finalizeThreadStatus(threadId, 'stopped');
-          recordCompletionStats('stopped');
-
-          sendOutcomeNotificationOnce('interrupted');
+          const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
+          }
         }
         return;
       }
 
-      flushAssistantPatch();
-      const finalThoughtContent = completion.reasoning_content || currentThoughtText || undefined;
+      const currentPresentation = presentationParser.getPresentation();
+      const finalThoughtContent = resolveSuccessfulAssistantThought({
+        completionContent: completion.content,
+        completionReasoningContent: completion.reasoning_content,
+        completionText: completion.text,
+        streamedThoughtContent: currentPresentation.thoughtContent,
+      });
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
-      if (completionTelemetry) {
-        patchAssistantMessage(threadId, assistantMessageId, {
-          inferenceMetrics: completionTelemetry,
-        });
+      const successResult = finalizeBufferedAssistantTurn({
+        outcome: 'success',
+        content: resolveSuccessfulAssistantContent({
+          completionContent: completion.content,
+          completionText: completion.text,
+          preferRawSnapshot:
+            latestRawAssistantSnapshotRevision > latestPresentationUpdateRevision,
+          streamedContent: currentPresentation.finalContent,
+          rawSnapshot: latestRawAssistantSnapshot,
+        }),
+        thoughtContent: finalThoughtContent.length > 0 ? finalThoughtContent : null,
+        inferenceMetrics: completionTelemetry ?? undefined,
+      });
+      const successCommitError = resolveTerminalCommitError(successResult);
+      if (successCommitError) {
+        throw successCommitError;
       }
-      finalizeAssistantMessage(
-        threadId,
-        assistantMessageId,
-        resolveVisibleAssistantContentFromCandidates(
-          '',
-          completion.content,
-          currentText,
-          completion.text,
-          currentRawText,
-        ),
-        finalThoughtContent,
-      );
-      finalizeThreadStatus(threadId, 'idle');
       recordCompletionStats('success');
 
       if (AppState.currentState !== 'active') {
         void notificationService.sendCompletionNotification('inference', { threadId });
       }
     } catch (error) {
+      generationState.nativeCompletionStarted = false;
+      endPromptPreparationSpan?.(generationState.stopRequested ? 'cancelled' : 'error');
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
-          flushAssistantPatch({ allowStopped: true, includeStreamingState: false });
-          stopAssistantMessage(threadId, assistantMessageId);
-          finalizeThreadStatus(threadId, 'stopped');
-          recordCompletionStats('stopped');
-
-          sendOutcomeNotificationOnce('interrupted');
+          const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
+            { outcome: 'stopped' },
+            { allowStopped: true },
+          );
+          if (isAssistantTurnSettled(result)) {
+            recordCompletionStats('stopped');
+            sendOutcomeNotificationOnce('interrupted');
+          } else {
+            resolveTerminalCommitError(result);
+          }
         }
         return;
+      }
+
+      if (terminalSettlement.result && !isAssistantTurnSettled(terminalSettlement.result)) {
+        throw resolveTerminalCommitError(terminalSettlement.result) ?? error;
       }
 
       const message = resolvePersistedAssistantErrorMessage(error);
       const userFacingError = resolveUserFacingGenerationError(error, message);
 
-      flushAssistantPatch();
-      patchAssistantMessage(threadId, assistantMessageId, {
-        content: currentText,
-        thoughtContent: currentThoughtText || undefined,
-        state: 'error',
-        errorCode: 'generation_failed',
-        errorMessage: message,
+      const errorResult = finalizeBufferedAssistantTurn({
+          outcome: 'error',
+          errorCode: 'generation_failed',
+          errorMessage: message,
       });
-      finalizeThreadStatus(threadId, 'error');
+      const errorCommitError = resolveTerminalCommitError(errorResult);
+      if (errorCommitError) {
+        throw errorCommitError;
+      }
       recordCompletionStats('error');
 
       sendOutcomeNotificationOnce('error');
       throw userFacingError;
     } finally {
+      if (isAndroidQaEvidenceEnabled) {
+        releaseAndroidQaGenerationGate(assistantMessageId);
+      }
+      releasePromptPreparation?.();
+      releasePromptPreparation = null;
       if (flushTimeout) {
         clearTimeout(flushTimeout);
         scheduledFlushDelayMs = null;
@@ -2244,7 +2704,8 @@ export const useChatSession = () => {
       unsubscribeExpiration = null;
 
       const wasCurrentGeneration = isMatchingGeneration(threadId, assistantMessageId);
-      if (wasCurrentGeneration) {
+      const shouldRetainRecoveryController = terminalSettlement.result?.status === 'persistence_failed';
+      if (wasCurrentGeneration && !shouldRetainRecoveryController) {
         sharedGenerationState.current = null;
       }
 
@@ -2252,7 +2713,7 @@ export const useChatSession = () => {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
     }
-  }, [finalizeAssistantMessage, finalizeThreadStatus, patchAssistantMessage, stopAssistantMessage]);
+  }, [finalizeAssistantTurn, patchAssistantMessage]);
 
   const syncThreadParametersCallback = useCallback(
     (thread: ChatThread, nextParams?: GenerationParameters) => syncThreadParameters(
@@ -2298,6 +2759,7 @@ export const useChatSession = () => {
   }, [switchThreadModel, updateThreadParamsSnapshot]);
 
   const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
+    markInteractiveWorkStarted();
     assertPrivateStorageWritableForChatMutation();
     const settings = getSettings();
     const activeModelId = settings.activeModelId;
@@ -2339,100 +2801,156 @@ export const useChatSession = () => {
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 
-    await assertDraftAttachmentFilesExist(attachmentDrafts);
-    await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts);
-    const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
-    const documentContentParts = processedDocumentAttachments.contentParts;
-    const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
-    const effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
-      ? assertActiveMultimodalReadyForAttachmentMediaPaths({
-          mediaPaths: imageAttachmentMediaPaths,
-          multimodalReadiness: options.multimodalReadiness,
-          expectedModelId: activeModelId,
-          mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
-        })
-      : options.multimodalReadiness;
-
-    const threadId = activeThread?.id
-      ?? createThread({
-        modelId: activeModelId,
-        presetId: settings.activePresetId,
-        presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
-        paramsSnapshot: activeModelParams,
-      });
-
-    setActiveThread(threadId);
-
-    const existingThread = activeThread;
-    if (existingThread) {
-      ensureThreadUsesModelForSend(existingThread, activeModelId);
-      const nextThread = useChatStore.getState().getThread(threadId);
-      if (nextThread) {
-        syncThreadParametersCallback(nextThread, activeModelParams);
-      }
+    const attachmentResolution = createPreparedAttachmentResolution(
+      options.multimodalReadiness,
+      activeModelId,
+    );
+    const interactiveStateAtStart = useChatStore.getState();
+    const interactiveRevisionAtStart = interactiveStateAtStart.inferenceRevision;
+    const activeThreadIdAtStart = interactiveStateAtStart.activeThreadId;
+    if ((activeThread?.id ?? null) !== activeThreadIdAtStart) {
+      throw new AppError(
+        'action_failed',
+        'The conversation changed before prompt preparation started. Try again.',
+      );
     }
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    try {
+      await assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile);
+      await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile);
+      const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
+      const currentState = useChatStore.getState();
+      if (
+        currentState.inferenceRevision !== interactiveRevisionAtStart
+        || currentState.activeThreadId !== activeThreadIdAtStart
+      ) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while preparing the prompt. Try again.',
+        );
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
 
-    const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
-    const threadModelId = threadAfterPossibleSwitch
-      ? getThreadActiveModelId(threadAfterPossibleSwitch)
-      : activeModelId;
+      const documentContentParts = processedDocumentAttachments.contentParts;
+      const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
+      const effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
+        ? assertActiveMultimodalReadyForAttachmentMediaPaths({
+            mediaPaths: imageAttachmentMediaPaths,
+            multimodalReadiness: options.multimodalReadiness,
+            expectedModelId: activeModelId,
+            mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
+          })
+        : options.multimodalReadiness;
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
 
-    const userMessageId = createChatId('message');
-    const normalizedText = text.trim();
-    const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
-      ? normalizedText
-      : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
-    const messageAttachments = [
-      ...materializeAttachmentDraftsForMessage({
-        threadId,
-        messageId: userMessageId,
-        drafts: attachmentDrafts,
-      }),
-      ...processedDocumentAttachments.attachments.map((attachment) => ({
-        ...attachment,
-        threadId,
-        messageId: userMessageId,
-      })),
-      ...materializeMediaDraftsForMessage({
-        threadId,
-        messageId: userMessageId,
-        drafts: mediaAttachmentDrafts,
-      }),
-    ];
-    const userMessage: ChatMessage = {
-      id: userMessageId,
-      role: 'user',
-      content: userMessageContent,
-      createdAt: Date.now(),
-      state: 'complete',
-      kind: 'message',
-      modelId: threadModelId,
-      ...(documentContentParts.length > 0 ? { contentParts: documentContentParts } : null),
-      ...(messageAttachments.length > 0
-        ? { attachments: messageAttachments }
-        : null),
-    };
+      const threadId = activeThread?.id
+        ?? createThread({
+          modelId: activeModelId,
+          presetId: settings.activePresetId,
+          presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
+          paramsSnapshot: activeModelParams,
+        });
 
-    appendMessage(threadId, userMessage);
-    options.onUserMessageAppended?.(userMessage);
+      setActiveThread(threadId);
 
-    const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
+      const existingThread = activeThread;
+      if (existingThread) {
+        ensureThreadUsesModelForSend(existingThread, activeModelId);
+        const nextThread = useChatStore.getState().getThread(threadId);
+        if (nextThread) {
+          syncThreadParametersCallback(nextThread, activeModelParams);
+        }
+      }
 
-    await runAssistantCompletion(threadId, assistantMessageId, {
-      multimodalReadiness: effectiveMultimodalReadiness,
-    });
+      const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
+      const threadModelId = threadAfterPossibleSwitch
+        ? getThreadActiveModelId(threadAfterPossibleSwitch)
+        : activeModelId;
+
+      const userMessageId = createChatId('message');
+      const normalizedText = text.trim();
+      const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
+        ? normalizedText
+        : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
+      const messageAttachments = [
+        ...materializeAttachmentDraftsForMessage({
+          threadId,
+          messageId: userMessageId,
+          drafts: attachmentDrafts,
+        }),
+        ...processedDocumentAttachments.attachments.map((attachment) => ({
+          ...attachment,
+          threadId,
+          messageId: userMessageId,
+        })),
+        ...materializeMediaDraftsForMessage({
+          threadId,
+          messageId: userMessageId,
+          drafts: mediaAttachmentDrafts,
+        }),
+      ];
+      const userMessage: ChatMessage = {
+        id: userMessageId,
+        role: 'user',
+        content: userMessageContent,
+        createdAt: Date.now(),
+        state: 'complete',
+        kind: 'message',
+        modelId: threadModelId,
+        ...(documentContentParts.length > 0 ? { contentParts: documentContentParts } : null),
+        ...(messageAttachments.length > 0
+          ? { attachments: messageAttachments }
+          : null),
+      };
+
+      appendMessage(threadId, userMessage);
+      options.onUserMessageAppended?.(userMessage);
+
+      const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
+
+      await runAssistantCompletion(threadId, assistantMessageId, {
+        multimodalReadiness: effectiveMultimodalReadiness,
+        attachmentResolution,
+      });
+    } finally {
+      releaseInteractivePromptPreparation();
+    }
   }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
 
   const stopGeneration = useCallback(async () => {
+    markInteractiveWorkStarted();
     const generation = sharedGenerationState.current;
     if (!generation) {
       return;
     }
 
-    generation.flushPendingAssistantPatch?.();
     generation.stopRequested = true;
-    stopAssistantMessage(generation.threadId, generation.messageId);
-    finalizeThreadStatus(generation.threadId, 'stopped');
+    releaseAndroidQaGenerationGate(generation.messageId);
+    let firstStopError: unknown;
+    let hasStopError = false;
+    let settlementResult: TerminalCommitResult | null = null;
+    const captureFirstStopError = (error: unknown) => {
+      if (!hasStopError) {
+        firstStopError = error;
+        hasStopError = true;
+      }
+    };
+
+    try {
+      settlementResult = generation.commitTerminalState
+        ? generation.commitTerminalState()
+        : useChatStore.getState().finalizeAssistantTurn(
+          generation.threadId,
+          generation.messageId,
+          { outcome: 'stopped' },
+        );
+      if (settlementResult.status === 'persistence_failed') {
+        captureFirstStopError(createAssistantTurnPersistenceError(settlementResult));
+      }
+    } catch (error) {
+      captureFirstStopError(error);
+    }
 
     try {
       if (generation.nativeCompletionStarted) {
@@ -2446,18 +2964,38 @@ export const useChatSession = () => {
         }
         await llmEngineService.stopCompletion();
       }
-    } finally {
+    } catch (error) {
+      captureFirstStopError(error);
+    }
+
+    try {
       if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
+    } catch (error) {
+      captureFirstStopError(error);
     }
-  }, [finalizeThreadStatus, stopAssistantMessage]);
+
+    if (
+      sharedGenerationState.current === generation
+      && settlementResult
+      && settlementResult.status !== 'persistence_failed'
+      && !generation.nativeCompletionStarted
+    ) {
+      sharedGenerationState.current = null;
+    }
+
+    if (hasStopError) {
+      throw firstStopError;
+    }
+  }, []);
 
   const regenerateFromUserMessage = useCallback(async (
     messageId: string,
     nextContent: string,
     options: RegenerateUserMessageOptions = {},
   ) => {
+    markInteractiveWorkStarted();
     if (!activeThread) {
       return false;
     }
@@ -2475,30 +3013,56 @@ export const useChatSession = () => {
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
     const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
-    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-      targetMessage,
-      options.multimodalReadiness ?? model?.multimodalReadiness,
+    const requestedMultimodalReadiness = options.multimodalReadiness ?? model?.multimodalReadiness;
+    const attachmentResolution = createPreparedAttachmentResolution(
+      requestedMultimodalReadiness,
       activeModelId,
     );
-    const syncedThread = syncThreadParametersCallback(activeThread);
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    try {
+      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
+        targetMessage,
+        requestedMultimodalReadiness,
+        activeModelId,
+        attachmentResolution.resolveFile,
+      );
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      const currentState = useChatStore.getState();
+      const currentThread = currentState.threads[activeThread.id];
+      if (
+        currentState.activeThreadId !== activeThread.id
+        || currentThread !== activeThread
+        || getThreadActiveModelId(currentThread) !== activeModelId
+      ) {
+        throw new Error('The conversation changed while preparing regeneration. Try again.');
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
 
-    const assistantMessageId = replaceBranchFromUserMessage(
-      syncedThread.id,
-      messageId,
-      normalizedContent,
-    );
-    if (!assistantMessageId) {
-      throw new Error('The selected message could not be regenerated.');
+      const assistantMessageId = replaceBranchFromUserMessage(
+        activeThread.id,
+        messageId,
+        normalizedContent,
+        branchParamsSnapshot,
+      );
+      if (!assistantMessageId) {
+        throw new Error('The selected message could not be regenerated.');
+      }
+
+      await runAssistantCompletion(activeThread.id, assistantMessageId, {
+        multimodalReadiness: effectiveMultimodalReadiness,
+        attachmentResolution,
+      });
+
+      return true;
+    } finally {
+      releaseInteractivePromptPreparation();
     }
-
-    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
-      multimodalReadiness: effectiveMultimodalReadiness,
-    });
-
-    return true;
-  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion, syncThreadParametersCallback]);
+  }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
 
   const regenerateLastResponse = useCallback(async () => {
+    markInteractiveWorkStarted();
     if (!activeThread) {
       return false;
     }
@@ -2534,44 +3098,88 @@ export const useChatSession = () => {
     ensureThreadCanGenerate(activeThread, 'regenerating this response');
     assertPrivateStorageWritableForChatMutation();
     const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
-    const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-      lastUserMessage,
+    const attachmentResolution = createPreparedAttachmentResolution(
       model?.multimodalReadiness,
       activeModelId,
     );
-    const syncedThread = syncThreadParametersCallback(activeThread);
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    try {
+      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
+        lastUserMessage,
+        model?.multimodalReadiness,
+        activeModelId,
+        attachmentResolution.resolveFile,
+      );
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      const currentState = useChatStore.getState();
+      const currentThread = currentState.threads[activeThread.id];
+      if (
+        currentState.activeThreadId !== activeThread.id
+        || currentThread !== activeThread
+        || getThreadActiveModelId(currentThread) !== activeModelId
+      ) {
+        throw new Error('The conversation changed while preparing regeneration. Try again.');
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
 
-    const lastAssistantMessageIndex = (() => {
-      for (let index = syncedThread.messages.length - 1; index >= 0; index -= 1) {
-        if (syncedThread.messages[index]?.role === 'assistant') {
-          return index;
+      const lastAssistantMessageIndex = (() => {
+        for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+          if (activeThread.messages[index]?.role === 'assistant') {
+            return index;
+          }
         }
+
+        return -1;
+      })();
+      const canReplaceCurrentTurnAssistant =
+        lastAssistantMessageIndex > lastUserMessageIndex &&
+        lastAssistantMessageIndex === activeThread.messages.length - 1;
+
+      const regenerateFromLastUserWithPreparedAttachments = async () => {
+        const assistantMessageId = replaceBranchFromUserMessage(
+          activeThread.id,
+          lastUserMessage.id,
+          lastUserMessage.content.trim(),
+          branchParamsSnapshot,
+        );
+        if (!assistantMessageId) {
+          throw new Error('The selected message could not be regenerated.');
+        }
+
+        await runAssistantCompletion(activeThread.id, assistantMessageId, {
+          multimodalReadiness: effectiveMultimodalReadiness,
+          attachmentResolution,
+        });
+
+        return true;
+      };
+
+      if (!canReplaceCurrentTurnAssistant) {
+        return regenerateFromLastUserWithPreparedAttachments();
       }
 
-      return -1;
-    })();
-    const canReplaceCurrentTurnAssistant =
-      lastAssistantMessageIndex > lastUserMessageIndex &&
-      lastAssistantMessageIndex === syncedThread.messages.length - 1;
+      const syncedThread = syncThreadParametersCallback(activeThread);
+      const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
+      if (!assistantMessageId) {
+        return regenerateFromLastUserWithPreparedAttachments();
+      }
 
-    if (!canReplaceCurrentTurnAssistant) {
-      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
+      await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+        multimodalReadiness: effectiveMultimodalReadiness,
+        attachmentResolution,
+      });
+
+      return true;
+    } finally {
+      releaseInteractivePromptPreparation();
     }
-
-    const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
-    if (!assistantMessageId) {
-      return regenerateFromUserMessage(lastUserMessage.id, lastUserMessage.content);
-    }
-
-    await runAssistantCompletion(syncedThread.id, assistantMessageId, {
-      multimodalReadiness: effectiveMultimodalReadiness,
-    });
-
-    return true;
   }, [
     activeThread,
     ensureThreadCanGenerate,
     regenerateFromUserMessage,
+    replaceBranchFromUserMessage,
     replaceLastAssistantMessage,
     runAssistantCompletion,
     syncThreadParametersCallback,
@@ -2643,6 +3251,7 @@ export const useChatSession = () => {
   return {
     activeThread,
     messages: activeThread?.messages ?? [],
+    messageListRevision,
     isGenerating: activeThread?.status === 'generating',
     shouldOfferSummary: truncationState.shouldOfferSummary,
     truncatedMessageCount: truncationState.truncatedMessageIds.length,

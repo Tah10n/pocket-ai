@@ -6,6 +6,11 @@ export interface HuggingFaceTokenState {
   updatedAt: number;
 }
 
+export interface HuggingFaceTokenSnapshot {
+  token: string | null;
+  revision: number;
+}
+
 export type HuggingFaceTokenStateChangeSource = 'replay' | 'hydrate' | 'mutation';
 
 type Listener = (state: HuggingFaceTokenState, source: HuggingFaceTokenStateChangeSource) => void;
@@ -18,11 +23,17 @@ export class HuggingFaceTokenService {
     hasToken: false,
     updatedAt: Date.now(),
   };
-  private tokenFingerprint: string | null = null;
+  private committedToken: string | null = null;
   private availabilityPromise: Promise<boolean> | null = null;
+  private revision = 0;
+  private operationTail: Promise<void> = Promise.resolve();
 
   public getCachedState(): HuggingFaceTokenState {
     return { ...this.state };
+  }
+
+  public getCachedRevision(): number {
+    return this.revision;
   }
 
   public subscribe(listener: Listener) {
@@ -34,9 +45,21 @@ export class HuggingFaceTokenService {
   }
 
   public async getToken(): Promise<string | null> {
-    const stored = await this.readToken();
-    const normalized = typeof stored === 'string' ? stored.trim() : '';
-    return normalized.length > 0 ? normalized : null;
+    return this.runExclusive(() => this.readNormalizedToken());
+  }
+
+  public async getSnapshot(): Promise<HuggingFaceTokenSnapshot> {
+    return this.runExclusive(async () => {
+      const token = await this.readNormalizedToken();
+      if (this.state.hasToken !== Boolean(token) || this.committedToken !== token) {
+        this.commitTokenState(token, 'hydrate');
+      }
+
+      return {
+        token,
+        revision: this.revision,
+      };
+    });
   }
 
   public async hasToken(): Promise<boolean> {
@@ -49,74 +72,81 @@ export class HuggingFaceTokenService {
       return this.clearToken();
     }
 
-    if (!await this.isSecureStoreAvailable()) {
-      throw new AppError(
-        'action_failed',
-        'Secure storage is unavailable on this device. Hugging Face tokens cannot be saved.',
-      );
-    }
+    return this.runExclusive(async () => {
+      if (!await this.isSecureStoreAvailable()) {
+        throw new AppError(
+          'action_failed',
+          'Secure storage is unavailable on this device. Hugging Face tokens cannot be saved.',
+        );
+      }
 
-    await SecureStore.setItemAsync(HF_TOKEN_KEY, trimmed);
+      await SecureStore.setItemAsync(HF_TOKEN_KEY, trimmed);
 
-    this.emit(true, this.fingerprintToken(trimmed));
-    return this.getCachedState();
+      this.commitTokenState(trimmed, 'mutation', true);
+      return this.getCachedState();
+    });
   }
 
   public async clearToken(): Promise<HuggingFaceTokenState> {
-    await this.requireSecureStoreAvailableForClear();
+    return this.runExclusive(async () => {
+      await this.requireSecureStoreAvailableForClear();
 
-    let stored: string | null;
-    try {
-      stored = await SecureStore.getItemAsync(HF_TOKEN_KEY);
-    } catch (error) {
-      throw this.createClearFailure(
-        'Unable to read Hugging Face token state from secure storage.',
-        error,
-      );
-    }
-
-    const hasStoredValue = stored !== null;
-
-    if (hasStoredValue) {
+      let stored: string | null;
       try {
-        await SecureStore.deleteItemAsync(HF_TOKEN_KEY);
+        stored = await SecureStore.getItemAsync(HF_TOKEN_KEY);
       } catch (error) {
         throw this.createClearFailure(
-          'Unable to clear Hugging Face token from secure storage.',
+          'Unable to read Hugging Face token state from secure storage.',
           error,
         );
       }
-    }
 
-    if (hasStoredValue || this.state.hasToken) {
-      this.emit(false, null);
-    } else {
-      this.state = {
-        hasToken: false,
-        updatedAt: Date.now(),
-      };
-    }
+      const hasStoredValue = stored !== null;
 
-    return this.getCachedState();
+      if (hasStoredValue) {
+        try {
+          await SecureStore.deleteItemAsync(HF_TOKEN_KEY);
+        } catch (error) {
+          throw this.createClearFailure(
+            'Unable to clear Hugging Face token from secure storage.',
+            error,
+          );
+        }
+      }
+
+      if (hasStoredValue || this.state.hasToken) {
+        this.commitTokenState(null, 'mutation', true);
+      } else {
+        this.state = {
+          hasToken: false,
+          updatedAt: Date.now(),
+        };
+      }
+
+      return this.getCachedState();
+    });
   }
 
   public async refreshState(): Promise<HuggingFaceTokenState> {
-    const token = await this.getToken();
-    const hasToken = Boolean(token);
-    const tokenFingerprint = token ? this.fingerprintToken(token) : null;
-    const previousHasToken = this.state.hasToken;
-    const previousTokenFingerprint = this.tokenFingerprint;
-    this.state = {
-      hasToken,
-      updatedAt: Date.now(),
-    };
-    this.tokenFingerprint = tokenFingerprint;
+    return this.runExclusive(async () => {
+      const token = await this.readNormalizedToken();
+      if (this.state.hasToken !== Boolean(token) || this.committedToken !== token) {
+        this.commitTokenState(token, 'hydrate');
+      } else {
+        this.state = {
+          hasToken: Boolean(token),
+          updatedAt: Date.now(),
+        };
+      }
 
-    if (previousHasToken !== hasToken || previousTokenFingerprint !== tokenFingerprint) {
-      this.listeners.forEach((listener) => listener(this.getCachedState(), 'hydrate'));
-    }
+      return this.getCachedState();
+    });
+  }
 
-    return this.getCachedState();
+  private async readNormalizedToken(): Promise<string | null> {
+    const stored = await this.readToken();
+    const normalized = typeof stored === 'string' ? stored.trim() : '';
+    return normalized.length > 0 ? normalized : null;
   }
 
   private async readToken(): Promise<string | null> {
@@ -186,24 +216,46 @@ export class HuggingFaceTokenService {
     return new AppError('action_failed', message, { cause });
   }
 
-  private emit(hasToken: boolean, tokenFingerprint: string | null) {
+  private commitTokenState(
+    token: string | null,
+    source: Exclude<HuggingFaceTokenStateChangeSource, 'replay'>,
+    forceEpoch = false,
+  ): void {
+    const hasToken = Boolean(token);
+    const didChange = this.state.hasToken !== hasToken || this.committedToken !== token;
     this.state = {
       hasToken,
       updatedAt: Date.now(),
     };
-    this.tokenFingerprint = tokenFingerprint;
+    this.committedToken = token;
 
-    this.listeners.forEach((listener) => listener(this.getCachedState(), 'mutation'));
-  }
-
-  private fingerprintToken(token: string): string {
-    let hash = 2166136261;
-    for (let index = 0; index < token.length; index += 1) {
-      hash ^= token.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
+    if (!didChange && !forceEpoch) {
+      return;
     }
 
-    return `${token.length}:${(hash >>> 0).toString(16)}`;
+    this.revision += 1;
+    this.listeners.forEach((listener) => {
+      try {
+        listener(this.getCachedState(), source);
+      } catch {
+        console.warn('[HuggingFaceTokenService] Token state listener failed');
+      }
+    });
+  }
+
+  private async runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const previousOperation = this.operationTail;
+    let releaseOperation!: () => void;
+    this.operationTail = new Promise<void>((resolve) => {
+      releaseOperation = resolve;
+    });
+
+    await previousOperation;
+    try {
+      return await operation();
+    } finally {
+      releaseOperation();
+    }
   }
 }
 

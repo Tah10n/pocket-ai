@@ -1,6 +1,7 @@
 import type { MMKV } from 'react-native-mmkv';
 import llamaPackageJson from 'llama.rn/package.json';
 import { assertPrivateStorageWritable, createStorage } from './storage';
+import { getPrivacySafeErrorLogDetails, getSafeAppErrorCode } from './AppError';
 
 const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
 
@@ -18,14 +19,20 @@ export type AutotuneBestStableProfile = {
   devices?: string[];
 };
 
+export type AutotuneCandidateProfile = {
+  backendMode: AutotuneBackendMode;
+  nGpuLayers: number;
+  deviceCount?: number;
+};
+
 export type AutotuneCandidateReport = {
-  profile: AutotuneBestStableProfile;
+  profile: AutotuneCandidateProfile;
   success: boolean;
   tokensPerSec?: number;
   ttftMs?: number;
   durationMs?: number;
   initGpuLayers?: number;
-  initDevices?: string[];
+  initDeviceCount?: number;
   actualBackendMode?: 'cpu' | 'gpu' | 'npu' | 'unknown';
   actualGpuAccelerated?: boolean;
   loadedGpuLayers?: number;
@@ -49,6 +56,185 @@ export type AutotuneResult = {
 };
 
 let autotuneStorageInstance: MMKV | null = null;
+
+const MAX_PUBLIC_DEVICE_COUNT = 10;
+const SAFE_AUTOTUNE_FAILURE_CATEGORIES = new Set([
+  'attempt_limit',
+  'backend_unavailable',
+  'cancelled',
+  'invalid_configuration',
+  'known_oom_upper_bound',
+  'model_incompatible',
+  'native_error',
+  'out_of_memory',
+]);
+const SAFE_AUTOTUNE_ERROR_TYPES = new Set([
+  'AbortError',
+  'AggregateError',
+  'Cancelled',
+  'Error',
+  'EvalError',
+  'NetworkError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TimeoutError',
+  'TypeError',
+  'URIError',
+  'bigint',
+  'boolean',
+  'function',
+  'number',
+  'object',
+  'operation_failed',
+  'string',
+  'symbol',
+  'undefined',
+]);
+
+function toOptionalNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.max(0, value)
+    : undefined;
+}
+
+function toOptionalCount(value: unknown): number | undefined {
+  const numberValue = toOptionalNonNegativeNumber(value);
+  return numberValue === undefined
+    ? undefined
+    : Math.min(MAX_PUBLIC_DEVICE_COUNT, Math.round(numberValue));
+}
+
+function sanitizeAutotuneBackendMode(value: unknown): AutotuneBackendMode | null {
+  return value === 'cpu' || value === 'gpu' || value === 'npu' ? value : null;
+}
+
+function sanitizeCandidateError(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) {
+    return undefined;
+  }
+  if (SAFE_AUTOTUNE_ERROR_TYPES.has(value) || getSafeAppErrorCode(value as never) === value) {
+    return value;
+  }
+  return 'operation_failed';
+}
+
+function sanitizeFailureCategory(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) {
+    return undefined;
+  }
+  return SAFE_AUTOTUNE_FAILURE_CATEGORIES.has(value) ? value : 'native_error';
+}
+
+function sanitizeBestStableProfile(value: unknown): AutotuneBestStableProfile | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+  const source = value as Record<string, unknown>;
+  const backendMode = sanitizeAutotuneBackendMode(source.backendMode);
+  const nGpuLayers = toOptionalNonNegativeNumber(source.nGpuLayers);
+  if (!backendMode || nGpuLayers === undefined) {
+    return undefined;
+  }
+  const devices = Array.isArray(source.devices)
+    ? source.devices
+        .filter((device): device is string => typeof device === 'string')
+        .map((device) => device.trim())
+        .filter((device) => device.length > 0)
+        .slice(0, MAX_PUBLIC_DEVICE_COUNT)
+    : [];
+
+  return {
+    backendMode,
+    nGpuLayers: Math.round(nGpuLayers),
+    ...(devices.length > 0 ? { devices } : null),
+  };
+}
+
+function sanitizeCandidateReport(value: unknown): AutotuneCandidateReport | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const source = value as Record<string, unknown>;
+  const rawProfile = source.profile && typeof source.profile === 'object'
+    ? source.profile as Record<string, unknown>
+    : null;
+  const backendMode = sanitizeAutotuneBackendMode(rawProfile?.backendMode);
+  const nGpuLayers = toOptionalNonNegativeNumber(rawProfile?.nGpuLayers);
+  if (!backendMode || nGpuLayers === undefined) {
+    return null;
+  }
+  const requestedDeviceCount = toOptionalCount(rawProfile?.deviceCount)
+    ?? (Array.isArray(rawProfile?.devices)
+      ? Math.min(rawProfile.devices.length, MAX_PUBLIC_DEVICE_COUNT)
+      : undefined);
+  const legacyInitDevices = Array.isArray(source.initDevices) ? source.initDevices : null;
+  const initDeviceCount = toOptionalCount(source.initDeviceCount)
+    ?? (legacyInitDevices ? Math.min(legacyInitDevices.length, MAX_PUBLIC_DEVICE_COUNT) : undefined);
+  const actualBackendMode = source.actualBackendMode === 'cpu'
+    || source.actualBackendMode === 'gpu'
+    || source.actualBackendMode === 'npu'
+    || source.actualBackendMode === 'unknown'
+    ? source.actualBackendMode
+    : undefined;
+  const error = sanitizeCandidateError(source.error);
+  const reasonNoGPU = sanitizeFailureCategory(source.reasonNoGPU);
+
+  return {
+    profile: {
+      backendMode,
+      nGpuLayers: Math.round(nGpuLayers),
+      ...(requestedDeviceCount !== undefined ? { deviceCount: requestedDeviceCount } : null),
+    },
+    success: source.success === true,
+    ...(toOptionalNonNegativeNumber(source.tokensPerSec) !== undefined
+      ? { tokensPerSec: toOptionalNonNegativeNumber(source.tokensPerSec) }
+      : null),
+    ...(toOptionalNonNegativeNumber(source.ttftMs) !== undefined
+      ? { ttftMs: toOptionalNonNegativeNumber(source.ttftMs) }
+      : null),
+    ...(toOptionalNonNegativeNumber(source.durationMs) !== undefined
+      ? { durationMs: toOptionalNonNegativeNumber(source.durationMs) }
+      : null),
+    ...(toOptionalNonNegativeNumber(source.initGpuLayers) !== undefined
+      ? { initGpuLayers: Math.round(toOptionalNonNegativeNumber(source.initGpuLayers)!) }
+      : null),
+    ...(initDeviceCount !== undefined ? { initDeviceCount } : null),
+    ...(actualBackendMode ? { actualBackendMode } : null),
+    ...(typeof source.actualGpuAccelerated === 'boolean'
+      ? { actualGpuAccelerated: source.actualGpuAccelerated }
+      : null),
+    ...(toOptionalNonNegativeNumber(source.loadedGpuLayers) !== undefined
+      ? { loadedGpuLayers: Math.round(toOptionalNonNegativeNumber(source.loadedGpuLayers)!) }
+      : null),
+    ...(reasonNoGPU ? { reasonNoGPU } : null),
+    ...(error ? { error } : null),
+  };
+}
+
+function sanitizeAutotuneResult(value: AutotuneResult): AutotuneResult {
+  const bestStable = sanitizeBestStableProfile(value.bestStable);
+  return {
+    createdAtMs: toOptionalNonNegativeNumber(value.createdAtMs) ?? 0,
+    modelId: typeof value.modelId === 'string' ? value.modelId : '',
+    contextSize: Math.round(toOptionalNonNegativeNumber(value.contextSize) ?? 0),
+    kvCacheType: typeof value.kvCacheType === 'string' ? value.kvCacheType : 'auto',
+    ...(toOptionalNonNegativeNumber(value.modelFileSizeBytes) !== undefined
+      ? { modelFileSizeBytes: Math.round(toOptionalNonNegativeNumber(value.modelFileSizeBytes)!) }
+      : null),
+    ...(typeof value.modelSha256 === 'string' ? { modelSha256: value.modelSha256 } : null),
+    ...(typeof value.nativeModuleVersion === 'string'
+      ? { nativeModuleVersion: value.nativeModuleVersion }
+      : null),
+    ...(typeof value.backendDiscoveryKnown === 'boolean'
+      ? { backendDiscoveryKnown: value.backendDiscoveryKnown }
+      : null),
+    ...(bestStable ? { bestStable } : null),
+    candidates: value.candidates
+      .map(sanitizeCandidateReport)
+      .filter((candidate): candidate is AutotuneCandidateReport => candidate !== null),
+  };
+}
 
 export function invalidateAutotuneStorageForPrivateReset(): void {
   autotuneStorageInstance = null;
@@ -151,9 +337,12 @@ export function readAutotuneResult({
       }
     }
 
-    return parsed;
+    return sanitizeAutotuneResult(parsed);
   } catch (error) {
-    console.warn('[InferenceAutotuneStore] Corrupted autotune payload, clearing.', error);
+    console.warn(
+      '[InferenceAutotuneStore] Corrupted autotune payload, clearing.',
+      getPrivacySafeErrorLogDetails(error),
+    );
     getAutotuneStorage().remove(key);
     return null;
   }
@@ -171,10 +360,10 @@ export function writeAutotuneResult(result: AutotuneResult): void {
   });
   // restorationError/cancelled are transient runtime signals, never persisted.
   const { restorationError: _restorationError, cancelled: _cancelled, ...rest } = result;
-  const persistable: AutotuneResult = {
+  const persistable = sanitizeAutotuneResult({
     ...rest,
     nativeModuleVersion: result.nativeModuleVersion ?? getCurrentNativeModuleVersion(),
-  };
+  });
   getAutotuneStorage().set(key, JSON.stringify(persistable));
 }
 

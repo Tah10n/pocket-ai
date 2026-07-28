@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  type CatalogSearchSession,
   type CatalogServerSort,
   getModelCatalogErrorMessage,
   modelCatalogService,
@@ -57,9 +58,22 @@ export function useModelsCatalogData({
     loadMoreError: null,
   });
   const latestFetchIdRef = useRef(0);
+  const catalogSearchSessionRef = useRef<CatalogSearchSession | null>(null);
   const appendInFlightRef = useRef(false);
   const lastAutoLoadCursorRef = useRef<string | null>(null);
   const hasUserScrolledCatalogRef = useRef(false);
+
+  useEffect(() => {
+    const session = modelCatalogService.createSearchSession();
+    catalogSearchSessionRef.current = session;
+    return () => {
+      latestFetchIdRef.current += 1;
+      if (catalogSearchSessionRef.current === session) {
+        catalogSearchSessionRef.current = null;
+      }
+      session.dispose();
+    };
+  }, []);
 
   const effectiveSearchSessionKey = searchSessionKey ?? searchQuery;
   const sizeRangesSessionKey = useMemo(
@@ -115,6 +129,10 @@ export function useModelsCatalogData({
       preserveExistingResults: boolean = false,
       forceRefresh: boolean = false,
     ) => {
+      const catalogSearchSession = catalogSearchSessionRef.current;
+      if (!catalogSearchSession) {
+        return;
+      }
       const fetchId = latestFetchIdRef.current + 1;
       latestFetchIdRef.current = fetchId;
       const fetchSpan = performanceMonitor.startSpan(
@@ -147,14 +165,18 @@ export function useModelsCatalogData({
       }
 
       try {
-        const result = await modelCatalogService.searchModels(query, {
-          cursor,
-          pageSize: MODELS_PAGE_SIZE,
-          sort: serverSort,
-          forceRefresh,
-          gated: filters.noTokenRequiredOnly ? false : undefined,
-          metadataResolution: 'deferred',
-        });
+        const result = await modelCatalogService.searchModels(
+          query,
+          {
+            cursor,
+            pageSize: MODELS_PAGE_SIZE,
+            sort: serverSort,
+            forceRefresh,
+            gated: filters.noTokenRequiredOnly ? false : undefined,
+            metadataResolution: 'deferred',
+          },
+          catalogSearchSession,
+        );
         resultCount = result.models.length;
         resultHasMore = result.hasMore;
 
@@ -226,7 +248,17 @@ export function useModelsCatalogData({
 
   useEffect(() => {
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
-      if (source !== 'manual' && source !== 'hydrate') {
+      if (source === 'manual') {
+        latestFetchIdRef.current += 1;
+        appendInFlightRef.current = false;
+        setLoading(false);
+        setIsFetchingMore(false);
+        setIsRefreshing(false);
+        setFetchState({ warningMessage: null, loadMoreError: null });
+        return;
+      }
+
+      if (source !== 'hydrate') {
         return;
       }
 
@@ -324,6 +356,7 @@ export function useModelsCatalogData({
       return;
     }
 
+    catalogSearchSessionRef.current?.cancelPendingRequests('superseded');
     latestFetchIdRef.current += 1;
     appendInFlightRef.current = false;
     lastAutoLoadCursorRef.current = null;
@@ -433,6 +466,7 @@ export function useModelsCatalogData({
     setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
 
     if (activeTab === 'all') {
+      catalogSearchSessionRef.current?.cancelPendingRequests('superseded');
       void fetchModels(searchQuery, null, false, true, true).finally(() => {
         setIsRefreshing(false);
       });

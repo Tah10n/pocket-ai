@@ -29,6 +29,7 @@ import {
 const STORAGE_ID = 'model-catalog-cache';
 const SEARCH_CACHE_KEY = 'catalog-search-cache-v1';
 const SNAPSHOT_CACHE_KEY = 'catalog-snapshot-cache-v1';
+const CACHE_MAINTENANCE_VERSION_KEY = 'catalog-cache-maintenance-version';
 
 function clearCacheStorage() {
   createStorage(STORAGE_ID, { tier: 'cache' }).clearAll();
@@ -134,7 +135,7 @@ function getCurrentProjectorId(
 
 function hydrateLegacyAnonymousModel(
   model: ModelMetadata,
-  persistedVersion = MODEL_CATALOG_CACHE_PERSISTED_VERSION - 1,
+  persistedVersion = 7,
 ): [ModelMetadata | undefined, ModelMetadata | null] {
   const storage = createStorage(STORAGE_ID, { tier: 'cache' });
   const scope = {
@@ -830,13 +831,266 @@ describe('ModelCatalogCacheStore', () => {
         MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES,
       )}"}`,
     );
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
     const parseSpy = jest.spyOn(JSON, 'parse');
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
 
-    new ModelCatalogCacheStore();
+    store.hydrate();
 
     expect(parseSpy).not.toHaveBeenCalled();
     expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    trimSpy.mockRestore();
     parseSpy.mockRestore();
+  });
+
+  it('hydrates persisted models incrementally and shares one in-flight attempt', async () => {
+    const scope = { query: 'incremental', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [
+        buildModel({ id: 'org/incremental-a' }),
+        buildModel({ id: 'org/incremental-b' }),
+        buildModel({ id: 'org/incremental-c' }),
+        buildModel({ id: 'org/incremental-d' }),
+        buildModel({ id: 'org/incremental-e' }),
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const immediateSpy = jest.spyOn(globalThis, 'setImmediate');
+
+    const firstAttempt = deferredStore.hydrateIncrementally();
+    const sharedAttempt = deferredStore.hydrateIncrementally();
+
+    expect(sharedAttempt).toBe(firstAttempt);
+    expect(deferredStore.getSearch(scope, 1000)).toBeNull();
+    await jest.runAllTimersAsync();
+    await firstAttempt;
+
+    expect(immediateSpy).toHaveBeenCalled();
+    expect(deferredStore.getSearch(scope, 1000)?.models.map((model) => model.id)).toEqual([
+      'org/incremental-a',
+      'org/incremental-b',
+      'org/incremental-c',
+      'org/incremental-d',
+      'org/incremental-e',
+    ]);
+    immediateSpy.mockRestore();
+  });
+
+  it('does not restore a payload that was cleared while incremental hydration was yielding', async () => {
+    const scope = { query: 'clear-during-hydration', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [
+        buildModel({ id: 'org/clear-a' }),
+        buildModel({ id: 'org/clear-b' }),
+        buildModel({ id: 'org/clear-c' }),
+        buildModel({ id: 'org/clear-d' }),
+        buildModel({ id: 'org/clear-e' }),
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const persistedPayload = storage.getString(SEARCH_CACHE_KEY);
+    expect(persistedPayload).toBeDefined();
+    storage.set(
+      SEARCH_CACHE_KEY,
+      persistedPayload!
+        .replace(`"version":${MODEL_CATALOG_CACHE_PERSISTED_VERSION}`, '"version":7')
+        .replace(',"sanitized":true', ''),
+    );
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const freshScope = { ...scope, query: 'fresh-after-clear' };
+
+    const hydrationAttempt = deferredStore.hydrateIncrementally();
+    deferredStore.clearAll();
+    deferredStore.putSearch(freshScope, {
+      models: [buildModel({ id: 'org/fresh-after-clear' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    await jest.runAllTimersAsync();
+    await hydrationAttempt;
+
+    expect(deferredStore.getSearch(scope, 1000)).toBeNull();
+    expect(deferredStore.getSearch(freshScope, 1000)?.models.map((model) => model.id)).toEqual([
+      'org/fresh-after-clear',
+    ]);
+    expect(storage.getString(SEARCH_CACHE_KEY)).toContain('org/fresh-after-clear');
+    expect(storage.getString(SEARCH_CACHE_KEY)).not.toContain('org/clear-a');
+  });
+
+  it('does not overwrite a fresh mutation with an older incremental payload', async () => {
+    const scope = { query: 'mutation-during-hydration', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putSearch(scope, {
+      models: [
+        buildModel({ id: 'org/stale-a' }),
+        buildModel({ id: 'org/stale-b' }),
+        buildModel({ id: 'org/stale-c' }),
+        buildModel({ id: 'org/stale-d' }),
+        buildModel({ id: 'org/stale-e' }),
+      ],
+      hasMore: false,
+      nextCursor: null,
+    });
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+
+    const hydrationAttempt = deferredStore.hydrateIncrementally();
+    deferredStore.putSearch(scope, {
+      models: [buildModel({ id: 'org/fresh-mutation' })],
+      hasMore: false,
+      nextCursor: null,
+    });
+    await jest.runAllTimersAsync();
+    await hydrationAttempt;
+
+    expect(deferredStore.getSearch(scope, 1000)?.models.map((model) => model.id)).toEqual([
+      'org/fresh-mutation',
+    ]);
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SEARCH_CACHE_KEY)).toContain(
+      'org/fresh-mutation',
+    );
+  });
+
+  it('does not restore snapshots cleared during incremental hydration', async () => {
+    const staleModels = ['a', 'b', 'c', 'd', 'e'].map((suffix) => (
+      buildModel({ id: `org/stale-snapshot-${suffix}` })
+    ));
+    const eagerStore = new ModelCatalogCacheStore();
+    eagerStore.putModelSnapshots(staleModels, 'anon');
+    const deferredStore = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+
+    const hydrationAttempt = deferredStore.hydrateIncrementally();
+    deferredStore.clearSnapshots();
+    await jest.runAllTimersAsync();
+    await hydrationAttempt;
+
+    staleModels.forEach((model) => {
+      expect(deferredStore.getModelSnapshot(model.id, 'anon', 1000)).toBeNull();
+    });
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
+  });
+
+  it.each([8, 9])('drops retired v%s payloads before JSON parsing', (retiredVersion) => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(SEARCH_CACHE_KEY, `{"version":${retiredVersion},"entries":[]}`);
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const parseSpy = jest.spyOn(JSON, 'parse');
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
+
+    store.hydrate();
+
+    expect(parseSpy).not.toHaveBeenCalled();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    trimSpy.mockRestore();
+    parseSpy.mockRestore();
+  });
+
+  it('keeps retired-payload hydration fail-open when MMKV compaction fails', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(SEARCH_CACHE_KEY, '{"version":9,"entries":[]}');
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const trimSpy = jest.spyOn(storeStorage, 'trim').mockImplementation(() => {
+      throw new Error('trim failed');
+    });
+
+    expect(() => store.hydrate()).not.toThrow();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(storage.getNumber(CACHE_MAINTENANCE_VERSION_KEY)).toBeUndefined();
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    trimSpy.mockRestore();
+  });
+
+  it('does not compact an already maintained current bounded payload during hydration', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    storage.set(CACHE_MAINTENANCE_VERSION_KEY, 1);
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      sanitized: true,
+      entries: [],
+    }));
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
+
+    store.hydrate();
+
+    expect(trimSpy).not.toHaveBeenCalled();
+    trimSpy.mockRestore();
+  });
+
+  it('compacts an oversized keyless MMKV file left by an earlier migration', () => {
+    const store = new ModelCatalogCacheStore({ hydrateOnCreate: false });
+    const storeStorage = (store as unknown as {
+      storage: ReturnType<typeof createStorage>;
+    }).storage;
+    Object.defineProperty(storeStorage, 'byteSize', {
+      configurable: true,
+      value: MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES + 1,
+    });
+    const trimSpy = jest.spyOn(storeStorage, 'trim');
+
+    store.hydrate();
+
+    expect(trimSpy).toHaveBeenCalledTimes(1);
+    expect(createStorage(STORAGE_ID, { tier: 'cache' }).getNumber(CACHE_MAINTENANCE_VERSION_KEY)).toBe(1);
+    trimSpy.mockRestore();
+  });
+
+  it('fails closed when a marked current payload is no longer anonymous-public', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const id = 'org/marked-private-model';
+    const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const unsafeModel = buildModel({
+      id,
+      accessState: ModelAccessState.AUTHORIZED,
+      isPrivate: true,
+    });
+    storage.set(SEARCH_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      sanitized: true,
+      entries: [{
+        key: `${id}::__initial__::20::__default__::anon`,
+        timestamp: Date.now(),
+        scope,
+        result: { models: [unsafeModel], hasMore: false, nextCursor: null },
+      }],
+    }));
+    storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
+      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      sanitized: true,
+      entries: [{
+        key: `${id}::anon`,
+        id,
+        authScope: 'anon',
+        timestamp: Date.now(),
+        model: unsafeModel,
+      }],
+    }));
+
+    const store = new ModelCatalogCacheStore();
+
+    expect(store.getSearch(scope, 1000)).toBeNull();
+    expect(store.getModelSnapshot(id, 'anon', 1000)).toBeNull();
+    expect(storage.getString(SEARCH_CACHE_KEY)).toBeUndefined();
+    expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBeUndefined();
   });
 
   it('bounds persisted payload bytes without evicting smaller recent entries from memory', () => {
@@ -864,6 +1118,44 @@ describe('ModelCatalogCacheStore', () => {
     expect(raw).toContain('org/small-cache-model');
     expect(raw).not.toContain('org/oversized-cache-model');
     expect(store.getSearch(largeScope, 1000)?.models[0]?.id).toBe('org/oversized-cache-model');
+  });
+
+  it('persists a compact GGUF digest instead of raw tokenizer metadata', () => {
+    const storage = createStorage(STORAGE_ID, { tier: 'cache' });
+    const store = new ModelCatalogCacheStore();
+    const scope = { query: 'compact-gguf', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const model = buildModel({
+      id: 'org/compact-gguf-model',
+      gguf: {
+        architecture: 'qwen3',
+        sizeLabel: 'Q4_K_M',
+        totalBytes: 1024,
+        contextLengthTokens: 32_768,
+        'general.architecture': 'qwen3',
+        'general.type': 'model',
+        'qwen3.block_count': 36,
+        'tokenizer.chat_template': 'large-template-that-must-not-reach-startup-storage',
+        'tokenizer.ggml.model': 'gpt2',
+      },
+    });
+
+    store.putSearch(scope, { models: [model], hasMore: false, nextCursor: null });
+
+    const raw = storage.getString(SEARCH_CACHE_KEY) as string;
+    const persistedModel = JSON.parse(raw).entries[0].result.models[0] as ModelMetadata;
+    expect(persistedModel.gguf).toEqual({
+      architecture: 'qwen3',
+      sizeLabel: 'Q4_K_M',
+      totalBytes: 1024,
+      contextLengthTokens: 32_768,
+      'general.architecture': 'qwen3',
+      'general.type': 'model',
+      'qwen3.block_count': 36,
+    });
+    expect(raw).not.toContain('large-template-that-must-not-reach-startup-storage');
+    expect(raw).not.toContain('tokenizer.ggml.model');
+    expect(new ModelCatalogCacheStore().getSearch(scope, 1000)?.models[0]?.gguf)
+      .toEqual(persistedModel.gguf);
   });
 
   it('preserves an explicit empty projector result across search and snapshot cache round-trips', () => {
@@ -2135,7 +2427,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBe(rewrittenSnapshot);
   });
 
-  it('rewrites current v7 search and snapshot payloads after field-level sanitization', () => {
+  it('rewrites unmarked current-version search and snapshot payloads after field-level sanitization', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const id = 'rewrite/current-version-runtime-state';
     const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
@@ -2186,7 +2478,9 @@ describe('ModelCatalogCacheStore', () => {
 
     for (const key of [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY]) {
       const raw = storage.getString(key) as string;
-      expect(JSON.parse(raw).version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+      const persisted = JSON.parse(raw);
+      expect(persisted.version).toBe(MODEL_CATALOG_CACHE_PERSISTED_VERSION);
+      expect(persisted.sanitized).toBe(true);
       expect(raw).not.toContain('private-current-version-model.gguf');
       expect(raw).not.toContain('private-current-version-resume-token');
       expect(raw).not.toContain('"source":"runtime"');

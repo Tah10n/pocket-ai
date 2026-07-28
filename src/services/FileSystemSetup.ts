@@ -13,8 +13,12 @@ export function getModelsDir(): string | null {
   return resolveBaseDirectory(FileSystem.documentDirectory ?? null, 'models/');
 }
 
+export function getAppCacheRootDir(): string | null {
+  return FileSystem.cacheDirectory ?? null;
+}
+
 export function getCacheDir(): string | null {
-  return resolveBaseDirectory(FileSystem.cacheDirectory ?? null, 'models-cache/');
+  return resolveBaseDirectory(getAppCacheRootDir(), 'models-cache/');
 }
 
 export async function setupFileSystem(): Promise<void> {

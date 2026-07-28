@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     Alert,
     BackHandler,
@@ -75,6 +75,12 @@ import { resolveEffectiveActiveVariantNativeSupport } from '../../utils/modelCap
 import { isMultimodalReadinessReusableForModel } from '../../utils/multimodalReadiness';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
+import {
+    armAndroidQaGenerationGate,
+    getAndroidQaGenerationEvidenceSnapshot,
+    isAndroidQaGenerationEvidenceEnabled,
+    subscribeAndroidQaGenerationEvidence,
+} from '../../services/AndroidQaGenerationEvidence';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -584,10 +590,88 @@ export function handleAndroidBackNavigation({
     return true;
 }
 
+function AndroidQaGenerationEvidenceSurface() {
+    if (!isAndroidQaGenerationEvidenceEnabled()) {
+        return null;
+    }
+    return <EnabledAndroidQaGenerationEvidenceSurface />;
+}
+
+function EnabledAndroidQaGenerationEvidenceSurface() {
+    const evidence = useSyncExternalStore(
+        subscribeAndroidQaGenerationEvidence,
+        getAndroidQaGenerationEvidenceSnapshot,
+        getAndroidQaGenerationEvidenceSnapshot,
+    );
+
+    return (
+        <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
+            <View style={styles.androidQaEvidenceActions}>
+                <Button
+                    size="xs"
+                    action="secondary"
+                    testID="chat-qa-arm-before-first-output"
+                    onPress={() => armAndroidQaGenerationGate('before-first-output')}
+                >
+                    <ButtonText>QA pre-output</ButtonText>
+                </Button>
+                <Button
+                    size="xs"
+                    action="secondary"
+                    testID="chat-qa-arm-after-first-durable-output"
+                    onPress={() => armAndroidQaGenerationGate('after-first-durable-output')}
+                >
+                    <ButtonText>QA first patch</ButtonText>
+                </Button>
+            </View>
+            {evidence.armedGate ? (
+                <View
+                    accessible
+                    accessibilityLabel={`chat-qa-generation-armed-${evidence.armedGate}`}
+                    collapsable={false}
+                    testID={`chat-qa-generation-armed-${evidence.armedGate}`}
+                    style={styles.androidQaEvidenceMarker}
+                />
+            ) : null}
+            {evidence.activeGate ? (
+                <View
+                    accessible
+                    accessibilityLabel={`chat-qa-generation-gate-${evidence.activeGate.phase}-${evidence.activeGate.operationId}`}
+                    collapsable={false}
+                    testID={`chat-qa-generation-gate-${evidence.activeGate.phase}-${evidence.activeGate.operationId}`}
+                    style={styles.androidQaEvidenceMarker}
+                />
+            ) : null}
+            {evidence.preparedGeneration ? (
+                <>
+                    <View
+                        accessible
+                        accessibilityLabel={`chat-prepared-generation-${evidence.preparedGeneration.userMessageId}-${evidence.preparedGeneration.assistantMessageId}`}
+                        collapsable={false}
+                        testID={`chat-prepared-generation-${evidence.preparedGeneration.userMessageId}-${evidence.preparedGeneration.assistantMessageId}`}
+                        style={styles.androidQaEvidenceMarker}
+                    />
+                    {evidence.preparedGeneration.attachments.map((attachment) => (
+                        <View
+                            key={`${attachment.kind}:${attachment.id}`}
+                            accessible
+                            accessibilityLabel={`chat-prepared-attachment-${evidence.preparedGeneration?.assistantMessageId}-${attachment.kind}-${attachment.id}`}
+                            collapsable={false}
+                            testID={`chat-prepared-attachment-${evidence.preparedGeneration?.assistantMessageId}-${attachment.kind}-${attachment.id}`}
+                            style={styles.androidQaEvidenceMarker}
+                        />
+                    ))}
+                </>
+            ) : null}
+        </View>
+    );
+}
+
 export const ChatScreen = () => {
     const {
         activeThread,
         messages,
+        messageListRevision,
         isGenerating,
         shouldOfferSummary,
         truncatedMessageCount,
@@ -864,8 +948,8 @@ export const ChatScreen = () => {
     const hasMessages = displayMessages.length > 0;
     const lastMessage = messages[messages.length - 1];
     const lastMessageSignature = lastMessage
-        ? `${lastMessage.id}:${lastMessage.state}:${lastMessage.content.length}:${lastMessage.tokensPerSec ?? -1}`
-        : 'empty';
+        ? `${lastMessage.id}:${lastMessage.state}:${lastMessage.content.length}:${lastMessage.tokensPerSec ?? -1}:${messageListRevision}`
+        : `empty:${messageListRevision}`;
     const modelLabel = displayedChatActiveModelId
         ? (getShortModelLabel(displayedChatActiveModelId) || displayedChatActiveModelId)
         : t('chat.modelUnavailable');
@@ -1989,6 +2073,7 @@ export const ChatScreen = () => {
                 thoughtContent={msg.thoughtContent}
                 errorMessage={msg.errorMessage}
                 isStreaming={msg.state === 'streaming'}
+                messageState={msg.state}
                 tokensPerSec={msg.tokensPerSec}
                 inferenceMetrics={msg.inferenceMetrics}
                 canDelete={msg.state !== 'streaming'}
@@ -2073,6 +2158,7 @@ export const ChatScreen = () => {
                     {activeThread?.status === 'stopped' ? (
                         <Box className="mb-3">
                             <ChatStatusBanner
+                                testID="chat-stopped-banner"
                                 title={t('chat.statusStopped')}
                                 description={t('chat.generationStopped')}
                                 tone="info"
@@ -2125,6 +2211,8 @@ export const ChatScreen = () => {
                         </Box>
                     ) : null}
 
+                    <AndroidQaGenerationEvidenceSurface />
+
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>
                         {hasMessages ? (
                             <FlashList
@@ -2148,6 +2236,15 @@ export const ChatScreen = () => {
                                 onMomentumScrollBegin={handleListMomentumScrollBegin}
                                 onMomentumScrollEnd={handleListMomentumScrollEnd}
                                 ItemSeparatorComponent={() => <Box className="h-2" />}
+                                ListHeaderComponent={isAndroidQaGenerationEvidenceEnabled() ? (
+                                    <View
+                                        accessible
+                                        accessibilityLabel="chat-history-start-anchor"
+                                        collapsable={false}
+                                        testID="chat-history-start-anchor"
+                                        style={styles.chatHistoryStartAnchor}
+                                    />
+                                ) : null}
                                 keyExtractor={(item) => item.id}
                                 renderItem={renderChatMessage}
                             />
@@ -2409,6 +2506,23 @@ export const ChatScreen = () => {
 };
 
 const styles = StyleSheet.create({
+    androidQaEvidenceSurface: {
+        gap: 2,
+        paddingHorizontal: 4,
+        paddingVertical: 2,
+    },
+    androidQaEvidenceActions: {
+        flexDirection: 'row',
+        gap: 4,
+    },
+    androidQaEvidenceMarker: {
+        height: 1,
+        width: 1,
+    },
+    chatHistoryStartAnchor: {
+        height: 1,
+        width: 1,
+    },
     warmupContentBlurTarget: {
         flex: 1,
     },

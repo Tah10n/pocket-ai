@@ -75,7 +75,7 @@ Pocket AI is a native Expo / React Native project. A native development environm
 
 ### Prerequisites
 
-- Node.js and npm
+- Node.js 20.19.4+ and npm
 - Android Studio for Android work
 - Xcode for iOS work
 - A working native toolchain for Expo native builds
@@ -107,6 +107,10 @@ npm start
 ```bash
 npm run android
 ```
+
+The Android launcher prefers a connected phone and falls back to a running or available
+emulator when no phone is connected. Pass `--emulator` to force emulator use or
+`--serial <serial>` to select an exact target.
 
 ```bash
 npm run ios
@@ -148,18 +152,22 @@ If your change affects Android behavior or visible UI flows, also run:
 npm run verify:mobile-change:android
 ```
 
-This command expects a connected Android phone by default and runs the fast `core` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
+This command expects a connected Android phone by default and runs the fail-closed `runtime` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
 
-Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state/storage dependency changes, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation:
+Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `branch-regeneration` for the destructive prepared 15-step branch replacement matrix, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The state-mutating `storage` and `branch-regeneration` packs are intentionally excluded from `all`:
 
 ```bash
 npm run android:scenarios -- --pack catalog
 npm run android:scenarios -- --pack dependency-ui
 npm run android:scenarios -- --pack runtime
+npm run android:scenarios:storage -- --skip-build
+npm run android:scenarios:branch-regeneration
 npm run android:scenarios -- --pack native
 ```
 
-In GitHub PRs, `Run Android checks` runs the core pack. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
+In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+
+`android-pack-branch-regeneration` does not run on the empty hosted emulator. It dispatches the existing 15-step release pack, with `--fail-on-skip`, to the serialized, ephemeral self-hosted runner labeled `pocket-ai-branch-regeneration`. That isolated runner must accept only one job, retain no credentials or personal data, expose `adb`, provide a disposable connected device through `POCKET_AI_BRANCH_QA_SERIAL`, and find an installed same-signature QA app containing a loaded local model plus the prepared fixture and sentinel conversations. Missing runner state or pack preconditions fail CI. Discard the runner instance after the job. A successful run destroys the prepared conversations, so reprepare the device before applying the label again. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
 
 ## Localization
 

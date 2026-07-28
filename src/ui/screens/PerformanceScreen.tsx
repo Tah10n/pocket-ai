@@ -88,7 +88,7 @@ function getEventDisplayValue(event: PerformanceEvent): { value: string | null; 
     };
   }
 
-  if (event.type === 'counter') {
+  if (event.type === 'counter' || event.type === 'gauge') {
     return {
       value: typeof event.value === 'number' ? `${event.value}` : null,
       tone: 'neutral',
@@ -136,8 +136,7 @@ export function PerformanceScreen() {
   const sessionInfo = performanceMonitor.getSessionInfo();
 
   const setExportBytesCounter = useCallback((bytes: number) => {
-    const currentValue = performanceMonitor.snapshot().counters['perf.export.bytes'] ?? 0;
-    performanceMonitor.incrementCounter('perf.export.bytes', bytes - currentValue);
+    performanceMonitor.setGauge('perf.export.bytes', bytes);
   }, []);
 
   const handleBack = useCallback(() => {

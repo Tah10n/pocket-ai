@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.6.1](https://github.com/Tah10n/pocket-ai/compare/v1.6.0...v1.6.1) (2026-07-24)
+
+
+### Performance Improvements
+
+* harden chat runtime and release-critical workflows ([#130](https://github.com/Tah10n/pocket-ai/issues/130)) ([fab6eb4](https://github.com/Tah10n/pocket-ai/commit/fab6eb4c097b1c81ab524275adfb2954a7241bbe))
+
 ## [1.6.0](https://github.com/Tah10n/pocket-ai/compare/v1.5.0...v1.6.0) (2026-07-17)
 
 

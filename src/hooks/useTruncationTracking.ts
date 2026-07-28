@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { getThreadActiveModelId, type ChatThread, type LlmChatMessage } from '../types/chat';
 import { llmEngineService } from '../services/LLMEngineService';
 import { registry } from '../services/LocalStorageRegistry';
@@ -11,6 +11,15 @@ import {
   resolveThreadInferenceWindowOptions,
 } from '../utils/inferenceWindow';
 import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
+import { performanceMonitor } from '../services/PerformanceMonitor';
+import { AppError } from '../services/AppError';
+import {
+  buildExactPromptTokenCacheKey,
+  buildPromptMultimodalReadinessIdentity,
+  exactPromptTokenCache,
+} from '../services/ExactPromptTokenCache';
+import { buildLlmInferenceMessagesSignature } from '../utils/llmInferenceMessageSignature';
+import { scheduleIdleTask } from '../utils/idleTask';
 
 type TruncationState = ReturnType<typeof createTruncationState>;
 
@@ -18,6 +27,34 @@ const EMPTY_TRUNCATION_STATE: TruncationState = {
   truncatedMessageIds: [],
   shouldOfferSummary: false,
 };
+
+function subscribeToPromptContextIdentity(onStoreChange: () => void): () => void {
+  return llmEngineService.subscribe(() => onStoreChange());
+}
+
+function getPromptContextIdentitySnapshot(): string {
+  return llmEngineService.getPromptContextIdentity();
+}
+
+function computeHeuristicTruncationState(
+  thread: ChatThread,
+  windowOptions: Parameters<typeof getThreadInferenceWindow>[1],
+): TruncationState {
+  const instrumentationEnabled = performanceMonitor.isEnabled();
+  const span = instrumentationEnabled
+    ? performanceMonitor.startSpan('chat.prompt.window.heuristic')
+    : null;
+  if (instrumentationEnabled && thread.status === 'generating') {
+    performanceMonitor.incrementCounter('chat.stream.historyTraversal');
+  }
+
+  try {
+    const { truncatedMessageIds } = getThreadInferenceWindow(thread, windowOptions);
+    return createTruncationState(truncatedMessageIds);
+  } finally {
+    span?.end();
+  }
+}
 
 function isAudioReady(readiness: MultimodalReadinessState | undefined, expectedModelId: string | null): boolean {
   return readiness?.status === 'ready'
@@ -69,11 +106,18 @@ function sanitizeTruncationProbeMessages(
 export function useTruncationTracking(
   activeThread: ChatThread | null,
   activeContextTokenBudget: number | undefined,
+  inferenceRevision: number,
 ): TruncationState {
+  const promptContextIdentity = useSyncExternalStore(
+    subscribeToPromptContextIdentity,
+    getPromptContextIdentitySnapshot,
+    getPromptContextIdentitySnapshot,
+  );
   const modelRegistryRevision = useModelRegistryRevision();
   const activeThreadId = activeThread?.id ?? null;
   const activeThreadStatus = activeThread?.status ?? null;
   const [accurateTruncationState, setAccurateTruncationState] = useState<{
+    identity: string;
     threadId: string;
     state: TruncationState;
   } | null>(null);
@@ -85,6 +129,11 @@ export function useTruncationTracking(
     threadId: null,
     state: EMPTY_TRUNCATION_STATE,
   });
+  const heuristicTruncationCacheRef = useRef<{ key: string | null; state: TruncationState }>({
+    key: null,
+    state: EMPTY_TRUNCATION_STATE,
+  });
+  const currentAccurateIdentityRef = useRef<string | null>(null);
 
   const activeThreadModelId = activeThread ? getThreadActiveModelId(activeThread) : null;
   const activeThreadModel = activeThreadModelId ? registry.getModel(activeThreadModelId) : undefined;
@@ -105,63 +154,107 @@ export function useTruncationTracking(
     activeThreadResponseReserveTokens = runtimeConfig.responseReserveTokens;
   }
 
-  const heuristicTruncationState = useMemo(() => {
-    if (!activeThread) {
-      return EMPTY_TRUNCATION_STATE;
-    }
-
-    const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
+  const activeWindowOptions = activeThread
+    ? resolveThreadInferenceWindowOptions(activeThread, {
       maxContextTokens: activeContextTokenBudget,
       responseReserveTokens: activeThreadResponseReserveTokens,
-    });
-    const { truncatedMessageIds } = getThreadInferenceWindow(activeThread, windowOptions);
-    return createTruncationState(truncatedMessageIds);
-  }, [activeContextTokenBudget, activeThread, activeThreadResponseReserveTokens]);
+    })
+    : null;
+  const readinessIdentity = buildPromptMultimodalReadinessIdentity(
+    activeThreadMultimodalReadiness,
+    activeThreadModelId,
+  );
+  const accurateIdentity = activeThread
+    && activeThread.status !== 'generating'
+    && activeContextTokenBudget !== undefined
+    && activeWindowOptions
+    ? JSON.stringify([
+        activeThread.id,
+        inferenceRevision,
+        activeContextTokenBudget,
+        activeWindowOptions.responseReserveTokens ?? null,
+        activeWindowOptions.promptSafetyMarginTokens ?? null,
+        activeThreadReasoningEnabled ? 1 : 0,
+        activeThreadReasoningFormat,
+        activeThreadModelId,
+        promptContextIdentity,
+        readinessIdentity,
+        modelRegistryRevision,
+      ])
+    : null;
+  currentAccurateIdentityRef.current = accurateIdentity;
+
+  const probeInputRef = useRef<{
+    identity: string;
+    thread: ChatThread;
+    windowOptions: NonNullable<typeof activeWindowOptions>;
+    modelId: string | null;
+    multimodalReadiness: MultimodalReadinessState | undefined;
+    reasoningEnabled: boolean;
+    reasoningFormat: 'none' | 'auto' | 'deepseek';
+    contextIdentity: string;
+    readinessIdentity: string;
+  } | null>(null);
+  probeInputRef.current = accurateIdentity && activeThread && activeWindowOptions
+    ? {
+        identity: accurateIdentity,
+        thread: activeThread,
+        windowOptions: activeWindowOptions,
+        modelId: activeThreadModelId,
+        multimodalReadiness: activeThreadMultimodalReadiness,
+        reasoningEnabled: activeThreadReasoningEnabled,
+        reasoningFormat: activeThreadReasoningFormat,
+        contextIdentity: promptContextIdentity,
+        readinessIdentity,
+      }
+    : null;
+
+  let heuristicTruncationState = EMPTY_TRUNCATION_STATE;
+  if (activeThread) {
+    if (activeThread.status === 'generating') {
+      heuristicTruncationState = truncationCacheRef.current.threadId === activeThread.id
+        ? truncationCacheRef.current.state
+        : EMPTY_TRUNCATION_STATE;
+    } else if (activeWindowOptions) {
+      const heuristicKey = JSON.stringify([
+        activeThread.id,
+        inferenceRevision,
+        activeContextTokenBudget ?? null,
+        activeWindowOptions.responseReserveTokens ?? null,
+        activeWindowOptions.promptSafetyMarginTokens ?? null,
+        activeThreadModelId,
+        modelRegistryRevision,
+      ]);
+      if (heuristicTruncationCacheRef.current.key !== heuristicKey) {
+        heuristicTruncationCacheRef.current = {
+          key: heuristicKey,
+          state: computeHeuristicTruncationState(activeThread, activeWindowOptions),
+        };
+      }
+      heuristicTruncationState = heuristicTruncationCacheRef.current.state;
+    }
+  }
 
   useEffect(() => {
-    if (!activeThread || activeThread.status === 'generating') {
-      setAccurateTruncationState(null);
-      return;
-    }
-
-    if (activeContextTokenBudget === undefined) {
+    const input = probeInputRef.current;
+    if (!accurateIdentity || !input || input.identity !== accurateIdentity) {
       setAccurateTruncationState(null);
       return;
     }
 
     let isCancelled = false;
-    const windowOptions = resolveThreadInferenceWindowOptions(activeThread, {
-      maxContextTokens: activeContextTokenBudget,
-      responseReserveTokens: activeThreadResponseReserveTokens,
-    });
-    const cacheKey = [
-      activeThread.id,
-      activeThread.updatedAt,
-      activeContextTokenBudget,
-      windowOptions.responseReserveTokens ?? null,
-      windowOptions.promptSafetyMarginTokens ?? null,
-      activeThreadReasoningEnabled ? 1 : 0,
-      activeThreadReasoningFormat,
-      activeThreadModelId,
-      activeThreadMultimodalReadiness?.modelId ?? null,
-      activeThreadMultimodalReadiness?.status ?? null,
-      activeThreadMultimodalReadiness?.projectorId ?? null,
-      activeThreadMultimodalReadiness?.support.join(',') ?? null,
-      activeThread.messages
-        .map((message) => `${message.id}:${message.attachments?.map((attachment) => attachment.localUri).join(',') ?? ''}`)
-        .join('|'),
-      modelRegistryRevision,
-    ].join(':');
+    const cacheKey = accurateIdentity;
 
     if (accurateTruncationCacheRef.current.key === cacheKey) {
       const cachedState = accurateTruncationCacheRef.current.state;
       setAccurateTruncationState((currentState) => {
-        if (currentState?.threadId === activeThread.id && currentState.state === cachedState) {
+        if (currentState?.identity === cacheKey && currentState.state === cachedState) {
           return currentState;
         }
 
         return {
-          threadId: activeThread.id,
+          identity: cacheKey,
+          threadId: input.thread.id,
           state: cachedState,
         };
       });
@@ -171,43 +264,102 @@ export function useTruncationTracking(
     setAccurateTruncationState(null);
 
     const tokenCountParams = {
-      enable_thinking: activeThreadReasoningEnabled,
-      reasoning_format: activeThreadReasoningFormat,
+      enable_thinking: input.reasoningEnabled,
+      reasoning_format: input.reasoningFormat,
     };
 
     const throwIfCancelled = () => {
-      if (isCancelled) {
+      if (isCancelled || currentAccurateIdentityRef.current !== cacheKey) {
         throw new Error('Accurate truncation probe was cancelled.');
+      }
+      if (llmEngineService.getPromptContextIdentity() !== input.contextIdentity) {
+        throw new AppError('engine_not_ready', 'Engine context changed during prompt tokenization.');
       }
     };
 
-    const countPromptTokens = async (messages: LlmChatMessage[]) =>
-      llmEngineService.countPromptTokens({
-        messages: sanitizeTruncationProbeMessages(
-          messages,
-          activeThreadMultimodalReadiness,
-          activeThreadModelId,
-        ),
-        params: tokenCountParams,
-        multimodalReadiness: activeThreadMultimodalReadiness,
-        expectedModelId: activeThreadModelId,
-        chatBlocking: false,
+    const countPromptTokens = async (messages: LlmChatMessage[]) => {
+      throwIfCancelled();
+      const sanitizedMessages = sanitizeTruncationProbeMessages(
+        messages,
+        input.multimodalReadiness,
+        input.modelId,
+      );
+      const promptTokenCacheKey = buildExactPromptTokenCacheKey({
+        contextIdentity: input.contextIdentity,
+        modelId: input.modelId ?? 'none',
+        multimodalReadinessIdentity: input.readinessIdentity,
+        messageSignature: buildLlmInferenceMessagesSignature(sanitizedMessages),
+        enableThinking: tokenCountParams.enable_thinking,
+        reasoningFormat: tokenCountParams.reasoning_format,
         allowMediaFallback: true,
       });
+      const lookup = exactPromptTokenCache.getOrCreate(promptTokenCacheKey, () => {
+        throwIfCancelled();
+        return llmEngineService.countPromptTokens({
+          messages: sanitizedMessages,
+          params: tokenCountParams,
+          multimodalReadiness: input.multimodalReadiness,
+          expectedModelId: input.modelId,
+          chatBlocking: false,
+          allowMediaFallback: true,
+        });
+      });
+      if (performanceMonitor.isEnabled()) {
+        performanceMonitor.incrementCounter(
+          lookup.hit ? 'chat.prompt.cache.hit' : 'chat.prompt.cache.miss',
+        );
+      }
 
-    void buildInferenceWindowWithAccurateTokenCounts(activeThread, windowOptions, countPromptTokens, { throwIfCancelled })
-      .then(({ truncatedMessageIds }) => {
-        if (!isCancelled) {
+      let cacheOutcome: 'success' | 'discard' = 'discard';
+      try {
+        const tokens = await lookup.promise;
+        throwIfCancelled();
+        cacheOutcome = 'success';
+        return tokens;
+      } finally {
+        lookup.release(cacheOutcome);
+      }
+    };
+
+    let exactSpan: ReturnType<typeof performanceMonitor.startSpan> | null = null;
+    const endExactSpan = (outcome: 'success' | 'cancelled' | 'error') => {
+      const span = exactSpan;
+      exactSpan = null;
+      span?.end({ outcome });
+    };
+    const cancelScheduledProbe = scheduleIdleTask(() => {
+      if (
+        isCancelled
+        || currentAccurateIdentityRef.current !== cacheKey
+        || llmEngineService.getPromptContextIdentity() !== input.contextIdentity
+      ) {
+        return;
+      }
+
+      exactSpan = performanceMonitor.isEnabled()
+        ? performanceMonitor.startSpan('chat.prompt.window.exact')
+        : null;
+
+      void buildInferenceWindowWithAccurateTokenCounts(
+        input.thread,
+        input.windowOptions,
+        countPromptTokens,
+        { throwIfCancelled },
+      ).then(({ truncatedMessageIds }) => {
+        if (!isCancelled && currentAccurateIdentityRef.current === cacheKey) {
           const state = createTruncationState(truncatedMessageIds);
           accurateTruncationCacheRef.current = { key: cacheKey, state };
           setAccurateTruncationState({
-            threadId: activeThread.id,
+            identity: cacheKey,
+            threadId: input.thread.id,
             state,
           });
+          endExactSpan('success');
         }
-      })
-      .catch((error) => {
-        if (!isCancelled) {
+      }).catch((error) => {
+        const probeWasCancelled = isCancelled || currentAccurateIdentityRef.current !== cacheKey;
+        endExactSpan(probeWasCancelled ? 'cancelled' : 'error');
+        if (!probeWasCancelled) {
           const errorCode = error && typeof error === 'object' && 'code' in error
             ? String((error as { code?: unknown }).code)
             : null;
@@ -233,14 +385,20 @@ export function useTruncationTracking(
             return;
           }
 
-          console.warn('[ChatSession] Failed to resolve truncation state accurately, falling back to heuristics', error);
+          console.warn('[ChatSession] Failed to resolve truncation state accurately, falling back to heuristics', {
+            errorCode,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+          });
         }
       });
+    });
 
     return () => {
       isCancelled = true;
+      cancelScheduledProbe();
+      endExactSpan('cancelled');
     };
-  }, [activeContextTokenBudget, activeThread, activeThreadModelId, activeThreadMultimodalReadiness, activeThreadReasoningEnabled, activeThreadReasoningFormat, activeThreadResponseReserveTokens, modelRegistryRevision]);
+  }, [accurateIdentity]);
 
   const truncationState = useMemo(() => {
     if (!activeThread) {
@@ -253,12 +411,15 @@ export function useTruncationTracking(
         : EMPTY_TRUNCATION_STATE;
     }
 
-    if (accurateTruncationState?.threadId === activeThread.id) {
+    if (
+      accurateTruncationState?.threadId === activeThread.id
+      && accurateTruncationState.identity === accurateIdentity
+    ) {
       return accurateTruncationState.state;
     }
 
     return heuristicTruncationState;
-  }, [accurateTruncationState, activeThread, heuristicTruncationState]);
+  }, [accurateIdentity, accurateTruncationState, activeThread, heuristicTruncationState]);
 
   useEffect(() => {
     if (!activeThreadId) {

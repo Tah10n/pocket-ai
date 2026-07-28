@@ -128,6 +128,24 @@ const modelParametersSheetFooterFallbackHeightByKind = {
   apply: 104,
   saveConfirmation: 88,
 } as const;
+const safeAutotuneFailureCategories = new Set([
+  'attempt_limit',
+  'backend_unavailable',
+  'cancelled',
+  'invalid_configuration',
+  'known_oom_upper_bound',
+  'model_incompatible',
+  'native_error',
+  'out_of_memory',
+]);
+
+function formatPublicAutotuneFailure(value: unknown): string {
+  return value === 'Cancelled' ? 'Cancelled' : 'Failed';
+}
+
+function formatPublicAutotuneFailureCategory(value: unknown): string | null {
+  return typeof value === 'string' && safeAutotuneFailureCategories.has(value) ? value : null;
+}
 const modelParametersSheetFixedHeaderFallbackHeight = 76;
 const modelParametersSheetButtonHitSlopBySize = {
   xs: { top: 6, right: 6, bottom: 6, left: 6 },
@@ -440,20 +458,8 @@ export function ModelParametersSheet({
   const [fixedHeaderHeight, setFixedHeaderHeight] = useState(0);
   const [fixedApplyFooterHeight, setFixedApplyFooterHeight] = useState(0);
   const [fixedSaveConfirmationFooterHeight, setFixedSaveConfirmationFooterHeight] = useState(0);
-  const runtimeBackendDevicesText = (
-    Array.isArray(engineDiagnostics?.backendDevices) && engineDiagnostics.backendDevices.length > 0
-      ? engineDiagnostics.backendDevices.join(' ')
-      : Array.isArray(engineDiagnostics?.initDevices) && engineDiagnostics.initDevices.length > 0
-        ? engineDiagnostics.initDevices.join(' ')
-        : ''
-  ).toLowerCase();
-  const runtimeReportsNpuBackend = engineDiagnostics?.backendMode === 'npu'
-    || runtimeBackendDevicesText.includes('htp')
-    || runtimeBackendDevicesText.includes('hexagon')
-    || runtimeBackendDevicesText.includes('qnn');
-  const runtimeReportsGpuBackend = engineDiagnostics?.backendMode === 'gpu'
-    || runtimeBackendDevicesText.includes('opencl')
-    || runtimeBackendDevicesText.includes('metal');
+  const runtimeReportsNpuBackend = engineDiagnostics?.backendMode === 'npu';
+  const runtimeReportsGpuBackend = engineDiagnostics?.backendMode === 'gpu';
   const runtimeReportsAnyBackend = runtimeReportsNpuBackend || runtimeReportsGpuBackend;
   const backendDiscoveryUnavailable = isBackendDiscoveryUnavailable === true && !runtimeReportsAnyBackend;
   const mtpDiagnostics = engineDiagnostics?.speculativeDecoding;
@@ -752,8 +758,15 @@ export function ModelParametersSheet({
   const initGpuLayers = typeof engineDiagnostics?.initGpuLayers === 'number' && Number.isFinite(engineDiagnostics.initGpuLayers)
     ? Math.max(0, Math.round(engineDiagnostics.initGpuLayers))
     : null;
-  const initDevicesText = Array.isArray(engineDiagnostics?.initDevices) && engineDiagnostics.initDevices.length > 0
-    ? engineDiagnostics.initDevices.join(', ')
+  const initDeviceCount = typeof engineDiagnostics?.initDeviceCount === 'number'
+    && Number.isFinite(engineDiagnostics.initDeviceCount)
+    && engineDiagnostics.initDeviceCount > 0
+    ? Math.round(engineDiagnostics.initDeviceCount)
+    : null;
+  const backendDeviceCount = typeof engineDiagnostics?.backendDeviceCount === 'number'
+    && Number.isFinite(engineDiagnostics.backendDeviceCount)
+    && engineDiagnostics.backendDeviceCount > 0
+    ? Math.round(engineDiagnostics.backendDeviceCount)
     : null;
   const initCacheTypeK = typeof engineDiagnostics?.initCacheTypeK === 'string' ? engineDiagnostics.initCacheTypeK.trim() : '';
   const initCacheTypeV = typeof engineDiagnostics?.initCacheTypeV === 'string' ? engineDiagnostics.initCacheTypeV.trim() : '';
@@ -1264,27 +1277,33 @@ export function ModelParametersSheet({
                             const requestedBackend = formatAutotuneCandidateBackendLabel(candidate.profile?.backendMode);
                             const requestedLayers = Math.max(0, Math.round(candidate.profile?.nGpuLayers ?? 0));
                             const actualBackend = formatAutotuneCandidateBackendLabel(candidate.actualBackendMode);
+                            const failureLabel = formatPublicAutotuneFailure(candidate.error);
+                            const failureCategory = formatPublicAutotuneFailureCategory(candidate.reasonNoGPU);
                             const loadedLayers = typeof candidate.loadedGpuLayers === 'number' && Number.isFinite(candidate.loadedGpuLayers)
                               ? Math.max(0, Math.round(candidate.loadedGpuLayers))
                               : null;
                             const initLayers = typeof candidate.initGpuLayers === 'number' && Number.isFinite(candidate.initGpuLayers)
                               ? Math.max(0, Math.round(candidate.initGpuLayers))
                               : null;
-                            const devicesText = Array.isArray(candidate.initDevices) && candidate.initDevices.length > 0
-                              ? candidate.initDevices.join(', ')
-                              : Array.isArray(candidate.profile?.devices) && candidate.profile.devices.length > 0
-                                ? candidate.profile.devices.join(', ')
+                            const deviceCount = typeof candidate.initDeviceCount === 'number'
+                              && Number.isFinite(candidate.initDeviceCount)
+                              && candidate.initDeviceCount > 0
+                              ? Math.round(candidate.initDeviceCount)
+                              : typeof candidate.profile?.deviceCount === 'number'
+                                && Number.isFinite(candidate.profile.deviceCount)
+                                && candidate.profile.deviceCount > 0
+                                ? Math.round(candidate.profile.deviceCount)
                                 : null;
 
                             const primaryLine = candidate.success
                               ? `✓ ${requestedBackend} (${requestedLayers}): ${formatAutotuneCandidateSpeed(candidate.tokensPerSec)} • TTFT ${formatAutotuneCandidateMs(candidate.ttftMs)} • ${formatAutotuneCandidateMs(candidate.durationMs)}`
-                              : `✗ ${requestedBackend} (${requestedLayers}): ${candidate.error ?? 'Failed'}`;
+                              : `✗ ${requestedBackend} (${requestedLayers}): ${failureLabel}`;
 
                             const details = [
                               candidate.actualBackendMode ? `actual: ${actualBackend}` : null,
                               loadedLayers !== null ? `loaded: ${loadedLayers}` : null,
                               initLayers !== null ? `init: ${initLayers}` : null,
-                              devicesText ? `devices: ${devicesText}` : null,
+                              deviceCount !== null ? `devices: ${deviceCount}` : null,
                             ].filter((value): value is string => typeof value === 'string' && value.length > 0);
 
                             return (
@@ -1299,9 +1318,9 @@ export function ModelParametersSheet({
                                   </Text>
                                 ) : null}
 
-                                {candidate.reasonNoGPU ? (
+                                {failureCategory ? (
                                   <Text className="text-xs leading-5 text-typography-500 dark:text-typography-400">
-                                    {candidate.reasonNoGPU}
+                                    {failureCategory}
                                   </Text>
                                 ) : null}
                               </Box>
@@ -1405,15 +1424,15 @@ export function ModelParametersSheet({
                         </Text>
                       ) : null}
 
-                      {initDevicesText ? (
+                      {initDeviceCount !== null ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
-                          {t('chat.modelControls.runtimeBackendInitDevices', { devices: initDevicesText })}
+                          {t('chat.modelControls.runtimeBackendInitDevices', { devices: initDeviceCount })}
                         </Text>
                       ) : null}
 
-                      {engineDiagnostics.backendDevices.length > 0 ? (
+                      {backendDeviceCount !== null ? (
                         <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
-                          {t('chat.modelControls.runtimeBackendDevices', { devices: engineDiagnostics.backendDevices.join(', ') })}
+                          {t('chat.modelControls.runtimeBackendDevices', { devices: backendDeviceCount })}
                         </Text>
                       ) : null}
 
@@ -1534,10 +1553,10 @@ export function ModelParametersSheet({
                                 : t('chat.modelControls.runtimeBackendAttemptOutcomeSkipped');
                             const attemptDetails = [
                               `layers=${attempt.nGpuLayers}`,
-                              Array.isArray(attempt.devices) && attempt.devices.length > 0 ? `devices=${attempt.devices.join(', ')}` : null,
+                              typeof attempt.deviceCount === 'number' && attempt.deviceCount > 0 ? `devices=${attempt.deviceCount}` : null,
                               typeof attempt.actualGpu === 'boolean' ? `gpu=${attempt.actualGpu ? 'yes' : 'no'}` : null,
                               attempt.reasonNoGPU ? `reason=${attempt.reasonNoGPU}` : null,
-                              attempt.error ? `error=${attempt.error}` : null,
+                              attempt.failureCategory ? `failure=${attempt.failureCategory}` : null,
                             ].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' | ');
 
                             return (

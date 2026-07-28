@@ -2,20 +2,45 @@ import {
   CHAT_PERSISTENCE_INDEX_KEY,
   CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY,
   CHAT_PERSISTENCE_SCHEMA_VERSION,
+  CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+  CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION,
+  MAX_ASSISTANT_PROGRESS_CONTENT_CHARS,
+  MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS,
+  MAX_CHAT_PROGRESS_CHUNKS,
+  MAX_CHAT_PROGRESS_OPERATION_BYTES,
+  MAX_CHAT_PROGRESS_RECORD_BYTES,
+  MAX_CHAT_PROGRESS_TOTAL_VALUE_BYTES,
   type ChatPersistencePendingIndexCommit,
+  type ChatStreamingProgressRecord,
+  clearChatStreamingProgressRecords,
+  clearPersistedChatRecords,
   createChatPersistenceWriteScheduler,
+  getChatStreamingOperationStorageKey,
+  getChatStreamingProgressOperationByteLength,
+  getChatStreamingProgressCheckpointStorageKey,
+  getChatStreamingProgressChunkStorageKey,
+  getChatStreamingProgressStorageKey,
   getChatThreadStorageKey,
+  getThreadIdFromChatStreamingProgressStorageKey,
   getThreadIdFromChatThreadStorageKey,
+  isChatStreamingProgressOperationWithinBounds,
+  listChatStreamingProgressStorageKeys,
+  parseChatStreamingProgressRecord,
   parseChatPersistenceIndex,
   parseChatPendingIndexCommit,
   parseChatThreadRecord,
+  readChatStreamingProgressRecord,
+  removeChatStreamingProgressRecord,
+  recoverChatThreadFromStreamingProgress,
   recoverStaleStreamingThread,
   sanitizeChatThreadForPersistence,
   writeChatPendingIndexCommit,
   writeChatPersistenceIndex,
+  writeChatStreamingProgressRecord,
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
 import { storage } from '../../src/store/storage';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import type { ChatAttachment } from '../../src/types/attachments';
 import type { ChatThread } from '../../src/types/chat';
 import {
@@ -27,6 +52,9 @@ import {
   copiedImageAttachment,
   secondCopiedImageAttachment,
 } from '../fixtures/chatImageAttachmentFixtures';
+import {
+  createChatBranchBaseSemanticIdentity,
+} from '../../src/store/chatBranchReplacement';
 
 const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
@@ -62,14 +90,184 @@ function buildThread(id: string): ChatThread {
   };
 }
 
+function buildProgress(
+  threadId: string,
+  overrides: Partial<ChatStreamingProgressRecord> = {},
+): ChatStreamingProgressRecord {
+  return {
+    schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION,
+    threadId,
+    messageId: `${threadId}-assistant-progress`,
+    modelId: 'author/model-q4',
+    createdAt: 2,
+    content: 'Latest partial response',
+    thoughtContent: 'Partial reasoning',
+    tokensPerSec: 12.5,
+    state: 'streaming',
+    persistedAt: 20,
+    revision: 3,
+    ...overrides,
+  };
+}
+
+function buildBranchRecoveryThread(id: string): ChatThread {
+  return {
+    ...buildThread(id),
+    activeModelId: 'author/model-q8',
+    messages: [
+      {
+        id: `${id}-prefix-user`,
+        role: 'user',
+        content: 'Prefix prompt',
+        createdAt: 1,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-prefix-assistant`,
+        role: 'assistant',
+        content: 'Prefix answer',
+        createdAt: 2,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-target-user`,
+        role: 'user',
+        content: 'Original target prompt',
+        createdAt: 3,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-old-assistant`,
+        role: 'assistant',
+        content: 'Old answer',
+        createdAt: 4,
+        state: 'complete',
+        kind: 'message',
+        modelId: 'author/model-q4',
+      },
+      {
+        id: `${id}-trailing-switch`,
+        role: 'system',
+        content: '',
+        createdAt: 5,
+        state: 'complete',
+        kind: 'model_switch',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      },
+    ],
+    summary: {
+      content: 'Stale branch summary',
+      createdAt: 5,
+      sourceMessageIds: [`${id}-target-user`, `${id}-old-assistant`],
+    },
+    updatedAt: 5,
+    status: 'idle',
+  };
+}
+
+function buildBranchProgress(
+  threadId: string,
+  overrides: Partial<ChatStreamingProgressRecord> = {},
+): ChatStreamingProgressRecord {
+  return buildProgress(threadId, {
+    messageId: `${threadId}-replacement-assistant`,
+    modelId: 'author/model-q8',
+    createdAt: 6,
+    persistedAt: 120,
+    regeneratesMessageId: undefined,
+    branchReplacement: {
+      targetUserMessageId: `${threadId}-target-user`,
+      targetUserCreatedAt: 3,
+      baseDurablePersistedAt: 100,
+      baseCommitRevision: 7,
+      replacementUserMessage: {
+        id: `${threadId}-target-user`,
+        role: 'user',
+        kind: 'message',
+        content: 'Edited target prompt',
+        createdAt: 3,
+        state: 'complete',
+        modelId: 'author/model-q8',
+      },
+      insertedModelSwitchMessage: {
+        id: `${threadId}-replacement-switch`,
+        role: 'system',
+        kind: 'model_switch',
+        content: '',
+        createdAt: 3,
+        state: 'complete',
+        modelId: 'author/model-q8',
+        switchFromModelId: 'author/model-q4',
+        switchToModelId: 'author/model-q8',
+      },
+      paramsSnapshot: {
+        temperature: 0.4,
+        topP: 0.8,
+        topK: 32,
+        minP: 0.05,
+        repetitionPenalty: 1.1,
+        maxTokens: 768,
+        reasoningEffort: 'medium',
+        seed: 42,
+      },
+    },
+    ...overrides,
+  });
+}
+
 describe('chatPersistence', () => {
   beforeEach(() => {
+    clearChatStreamingProgressRecords(storage);
     storage.getAllKeys().forEach((key) => storage.remove(key));
     jest.useRealTimers();
   });
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('bounds the complete branch operation at UTF-8 limit - 1, exact limit, and limit + 1', () => {
+    const base = buildBranchProgress('thread-branch-operation-utf8-boundary');
+    const fixedContent = 'a'.repeat(100_000);
+    const withContentPart = (text: string): ChatStreamingProgressRecord => ({
+      ...base,
+      branchReplacement: {
+        ...base.branchReplacement!,
+        replacementUserMessage: {
+          ...base.branchReplacement!.replacementUserMessage,
+          content: fixedContent,
+          contentParts: [{ type: 'text', text }],
+        },
+      },
+    });
+    const baseBytes = getChatStreamingProgressOperationByteLength(withContentPart(''));
+    const remainingBytes = MAX_CHAT_PROGRESS_OPERATION_BYTES - baseBytes;
+    const multiByteCharacters = Math.floor((remainingBytes - 1) / 3);
+    const asciiCharacters = remainingBytes - (multiByteCharacters * 3);
+    const exactText = `${'界'.repeat(multiByteCharacters)}${'x'.repeat(asciiCharacters)}`;
+    const belowLimit = withContentPart(exactText.slice(0, -1));
+    const exactLimit = withContentPart(exactText);
+    const aboveLimit = withContentPart(`${exactText}x`);
+
+    expect(remainingBytes).toBeGreaterThan(0);
+    expect(asciiCharacters).toBeGreaterThanOrEqual(1);
+    expect(getChatStreamingProgressOperationByteLength(belowLimit))
+      .toBe(MAX_CHAT_PROGRESS_OPERATION_BYTES - 1);
+    expect(getChatStreamingProgressOperationByteLength(exactLimit))
+      .toBe(MAX_CHAT_PROGRESS_OPERATION_BYTES);
+    expect(getChatStreamingProgressOperationByteLength(aboveLimit))
+      .toBe(MAX_CHAT_PROGRESS_OPERATION_BYTES + 1);
+    expect(isChatStreamingProgressOperationWithinBounds(belowLimit)).toBe(true);
+    expect(isChatStreamingProgressOperationWithinBounds(exactLimit)).toBe(true);
+    expect(isChatStreamingProgressOperationWithinBounds(aboveLimit)).toBe(false);
   });
 
   it('encodes thread ids into reversible v2 storage keys', () => {
@@ -80,6 +278,1051 @@ describe('chatPersistence', () => {
     expect(getThreadIdFromChatThreadStorageKey(key)).toBe(threadId);
     expect(getThreadIdFromChatThreadStorageKey('other:key')).toBeNull();
     expect(getThreadIdFromChatThreadStorageKey('chat-store:v2:thread:%E0%A4%A')).toBeNull();
+  });
+
+  it('encodes progress keys and parses only bounded streaming progress envelopes', () => {
+    const threadId = 'model/thread id/with spaces';
+    const progress = buildProgress(threadId);
+    const key = getChatStreamingProgressStorageKey(threadId);
+
+    expect(key).toBe('chat-store:progress:model%2Fthread%20id%2Fwith%20spaces');
+    expect(getThreadIdFromChatStreamingProgressStorageKey(key)).toBe(threadId);
+    expect(getThreadIdFromChatStreamingProgressStorageKey('chat-store:progress:%E0%A4%A')).toBeNull();
+    expect(parseChatStreamingProgressRecord(JSON.stringify(progress), threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({ ...progress, threadId: 'other' }), threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_shape',
+    });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({ ...progress, revision: -1 }), threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_shape',
+    });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      persistedAt: Number.MAX_VALUE,
+    }), threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_shape',
+    });
+    expect(parseChatStreamingProgressRecord('{broken', threadId)).toEqual({
+      ok: false,
+      reason: 'invalid_json',
+    });
+  });
+
+  it('parses valid branch progress without changing the progress schema version', () => {
+    const progress = buildBranchProgress('thread-valid-branch-progress');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify(progress), progress.threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+    expect(progress.schemaVersion).toBe(CHAT_STREAM_PROGRESS_SCHEMA_VERSION);
+  });
+
+  it('rejects malformed branch progress instead of downgrading it to append recovery', () => {
+    const progress = buildBranchProgress('thread-malformed-branch-progress');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: null,
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        baseCommitRevision: null,
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        insertedModelSwitchMessage: null,
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        paramsSnapshot: {
+          ...progress.branchReplacement?.paramsSnapshot,
+          topK: null,
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        baseDurablePersistedAt: -1,
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        baseSemanticIdentity: 'raw prompt text is not a valid identity',
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        unexpectedOldTail: ['old-1', 'old-2'],
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects noncanonical branch generation parameters instead of repairing corrupt progress', () => {
+    const progress = buildBranchProgress('thread-invalid-branch-params');
+    const validParams = progress.branchReplacement!.paramsSnapshot;
+    const invalidParams: Array<[string, Record<string, unknown>]> = [
+      ['temperature below range', { ...validParams, temperature: -0.01 }],
+      ['temperature above range', { ...validParams, temperature: 2.01 }],
+      ['topP below range', { ...validParams, topP: -0.01 }],
+      ['topP above range', { ...validParams, topP: 1.01 }],
+      ['fractional topK', { ...validParams, topK: 12.5 }],
+      ['topK above range', { ...validParams, topK: 201 }],
+      ['minP below range', { ...validParams, minP: -0.01 }],
+      ['minP above range', { ...validParams, minP: 1.01 }],
+      ['repetition penalty below range', { ...validParams, repetitionPenalty: -0.01 }],
+      ['repetition penalty above range', { ...validParams, repetitionPenalty: 2.01 }],
+      ['fractional maxTokens', { ...validParams, maxTokens: 768.5 }],
+      ['maxTokens below range', { ...validParams, maxTokens: 0 }],
+      ['maxTokens above range', { ...validParams, maxTokens: 8193 }],
+      ['negative seed', { ...validParams, seed: -1 }],
+      ['fractional seed', { ...validParams, seed: 42.5 }],
+      ['seed above range', { ...validParams, seed: 2_147_483_648 }],
+    ];
+
+    invalidParams.forEach(([description, paramsSnapshot]) => {
+      const result = parseChatStreamingProgressRecord(JSON.stringify({
+        ...progress,
+        branchReplacement: {
+          ...progress.branchReplacement,
+          paramsSnapshot,
+        },
+      }), progress.threadId);
+
+      expect([description, result]).toEqual([
+        description,
+        { ok: false, reason: 'invalid_shape' },
+      ]);
+    });
+  });
+
+  it('rejects a branch replacement user with an invalid role', () => {
+    const progress = buildBranchProgress('thread-invalid-branch-user-role');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        replacementUserMessage: {
+          ...progress.branchReplacement?.replacementUserMessage,
+          role: 'assistant',
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects an impossible empty branch replacement user', () => {
+    const progress = buildBranchProgress('thread-invalid-empty-branch-user');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        replacementUserMessage: {
+          ...progress.branchReplacement?.replacementUserMessage,
+          content: '   ',
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects an invalid branch model-switch shape', () => {
+    const progress = buildBranchProgress('thread-invalid-branch-switch');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        insertedModelSwitchMessage: {
+          ...progress.branchReplacement?.insertedModelSwitchMessage,
+          switchFromModelId: 'author/model-q8',
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects a branch model-switch id that collides with the replacement assistant id', () => {
+    const progress = buildBranchProgress('thread-duplicate-branch-message-id');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        insertedModelSwitchMessage: {
+          ...progress.branchReplacement?.insertedModelSwitchMessage,
+          id: progress.messageId,
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('rejects branch recovery when the target user is missing', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-missing-target');
+    const progress = buildBranchProgress(thread.id);
+
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...thread,
+        messages: thread.messages.filter(
+          (message) => message.id !== `${thread.id}-target-user`,
+        ),
+      },
+      100,
+      progress,
+      130,
+      7,
+    )).toEqual({ outcome: 'mismatched' });
+  });
+
+  it('rejects branch recovery for a stale base persistedAt', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-stale-base');
+    const progress = buildBranchProgress(thread.id);
+
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      101,
+      progress,
+      130,
+      7,
+    )).toEqual({ outcome: 'stale' });
+  });
+
+  it('rejects branch recovery for a mismatched commit revision', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-stale-revision');
+    const progress = buildBranchProgress(thread.id);
+
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      100,
+      progress,
+      130,
+      8,
+    )).toEqual({ outcome: 'stale' });
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      100,
+      {
+        ...progress,
+        branchReplacement: {
+          ...progress.branchReplacement!,
+          baseCommitRevision: undefined,
+        },
+      },
+      130,
+      7,
+    )).toEqual({ outcome: 'stale' });
+  });
+
+  it('recovers branch progress across rename-only durable metadata', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-renamed-base');
+    const progress = buildBranchProgress(thread.id, {
+      branchReplacement: {
+        ...buildBranchProgress(thread.id).branchReplacement!,
+        baseSemanticIdentity: createChatBranchBaseSemanticIdentity(thread),
+      },
+    });
+    const renamedThread: ChatThread = {
+      ...thread,
+      title: 'Manual title after branch output',
+      titleSource: 'manual',
+      updatedAt: 110,
+    };
+
+    expect(recoverChatThreadFromStreamingProgress(
+      renamedThread,
+      110,
+      progress,
+      130,
+      8,
+    )).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        title: 'Manual title after branch output',
+        titleSource: 'manual',
+        status: 'stopped',
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            id: progress.messageId,
+            content: progress.content,
+            state: 'stopped',
+          }),
+        ]),
+      }),
+    });
+  });
+
+  it('rejects semantic branch recovery after a prompt-affecting durable mutation', () => {
+    const thread = buildBranchRecoveryThread('thread-branch-prompt-mutated-base');
+    const progress = buildBranchProgress(thread.id, {
+      branchReplacement: {
+        ...buildBranchProgress(thread.id).branchReplacement!,
+        baseSemanticIdentity: createChatBranchBaseSemanticIdentity(thread),
+      },
+    });
+    const promptMutatedThread: ChatThread = {
+      ...thread,
+      presetSnapshot: {
+        ...thread.presetSnapshot,
+        systemPrompt: 'A newer durable system prompt',
+      },
+      updatedAt: 110,
+    };
+
+    expect(recoverChatThreadFromStreamingProgress(
+      promptMutatedThread,
+      110,
+      progress,
+      130,
+      8,
+    )).toEqual({ outcome: 'stale' });
+  });
+
+  it('rejects corrupt attachment metadata in branch progress', () => {
+    const progress = buildBranchProgress('thread-branch-corrupt-attachment');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify({
+      ...progress,
+      branchReplacement: {
+        ...progress.branchReplacement,
+        replacementUserMessage: {
+          ...progress.branchReplacement?.replacementUserMessage,
+          attachments: [{
+            id: 'corrupt-attachment',
+            kind: 'image',
+            localUri: '../outside-private-storage.jpg',
+          }],
+        },
+      },
+    }), progress.threadId)).toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it('keeps old progress records without branch metadata backward compatible', () => {
+    const progress = buildProgress('thread-legacy-progress-without-branch');
+
+    expect(parseChatStreamingProgressRecord(JSON.stringify(progress), progress.threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+    expect(parseChatStreamingProgressRecord(
+      JSON.stringify(progress),
+      progress.threadId,
+    ).ok).toBe(true);
+  });
+
+  it('materializes valid branch recovery through the canonical branch builder', () => {
+    const thread = buildBranchRecoveryThread('thread-valid-branch-recovery');
+    const progress = buildBranchProgress(thread.id);
+
+    const recovery = recoverChatThreadFromStreamingProgress(thread, 100, progress, 130, 7);
+
+    expect(recovery).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        activeModelId: 'author/model-q8',
+        paramsSnapshot: progress.branchReplacement?.paramsSnapshot,
+        summary: undefined,
+        status: 'stopped',
+        messages: [
+          thread.messages[0],
+          thread.messages[1],
+          progress.branchReplacement?.insertedModelSwitchMessage,
+          progress.branchReplacement?.replacementUserMessage,
+          expect.objectContaining({
+            id: progress.messageId,
+            content: progress.content,
+            thoughtContent: progress.thoughtContent,
+            state: 'stopped',
+          }),
+        ],
+      }),
+    });
+  });
+
+  it('rejects stale progress writes by message revision and replaces them for a newer turn', () => {
+    const first = buildProgress('thread-progress', { revision: 5, persistedAt: 50 });
+    expect(writeChatStreamingProgressRecord(storage, first)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(writeChatStreamingProgressRecord(storage, {
+      ...first,
+      content: 'Older callback',
+      revision: 4,
+      persistedAt: 60,
+    })).toEqual({ status: 'stale' });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({ ok: true, value: first });
+
+    const nextTurn = buildProgress(first.threadId, {
+      messageId: 'assistant-new-turn',
+      createdAt: 70,
+      revision: 1,
+      persistedAt: 70,
+    });
+    expect(writeChatStreamingProgressRecord(storage, nextTurn)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({ ok: true, value: nextTurn });
+  });
+
+  it('persists append, clear, and non-prefix replacement updates as bounded V2 deltas', () => {
+    const first = buildProgress('thread-progress-v2-deltas', {
+      content: 'Visible',
+      thoughtContent: 'Thinking',
+      revision: 1,
+      persistedAt: 10,
+    });
+    expect(writeChatStreamingProgressRecord(storage, first)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    const operationKey = getChatStreamingOperationStorageKey(first.threadId, 0);
+    const immutableOperation = storage.getString(operationKey);
+
+    const appended = {
+      ...first,
+      content: 'Visible output',
+      thoughtContent: 'Thinking carefully',
+      revision: 2,
+      persistedAt: 11,
+    };
+    expect(writeChatStreamingProgressRecord(storage, appended)).toEqual({
+      status: 'written',
+      kind: 'delta',
+    });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: appended,
+    });
+
+    const clearedThought = {
+      ...appended,
+      thoughtContent: undefined,
+      revision: 3,
+      persistedAt: 12,
+    };
+    expect(writeChatStreamingProgressRecord(storage, clearedThought)).toEqual({
+      status: 'written',
+      kind: 'delta',
+    });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: clearedThought,
+    });
+
+    const replaced = {
+      ...clearedThought,
+      content: 'Authoritative replacement',
+      thoughtContent: 'Replacement thought',
+      tokensPerSec: undefined,
+      revision: 4,
+      persistedAt: 13,
+    };
+    expect(writeChatStreamingProgressRecord(storage, replaced)).toEqual({
+      status: 'written',
+      kind: 'delta',
+    });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: replaced,
+    });
+    expect(storage.getString(operationKey)).toBe(immutableOperation);
+    expect(listChatStreamingProgressStorageKeys(storage)).toHaveLength(6);
+  });
+
+  it('rejects same-message writes that mutate immutable branch operation metadata', () => {
+    const first = buildBranchProgress('thread-progress-immutable-branch', {
+      revision: 1,
+      persistedAt: 10,
+    });
+    expect(writeChatStreamingProgressRecord(storage, first).status).toBe('written');
+    const changedBranch = {
+      ...first,
+      revision: 2,
+      persistedAt: 11,
+      branchReplacement: {
+        ...first.branchReplacement!,
+        replacementUserMessage: {
+          ...first.branchReplacement!.replacementUserMessage,
+          content: 'Changed immutable branch prompt',
+        },
+      },
+    };
+
+    expect(writeChatStreamingProgressRecord(storage, changedBranch))
+      .toEqual({ status: 'stale' });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: first,
+    });
+  });
+
+  it('invalidates cached writer ordering after a successful global progress clear', () => {
+    const facade = { ...storage };
+    const first = buildProgress('thread-progress-cache-clear', {
+      revision: 50,
+      persistedAt: 50,
+    });
+    expect(writeChatStreamingProgressRecord(facade, first).status).toBe('written');
+
+    storage.clearAll();
+    clearChatStreamingProgressRecords(facade);
+    const restarted = {
+      ...first,
+      content: 'fresh process generation',
+      revision: 1,
+      persistedAt: 1,
+    };
+    expect(writeChatStreamingProgressRecord(facade, restarted)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(readChatStreamingProgressRecord(facade, first.threadId)).toEqual({
+      ok: true,
+      value: restarted,
+    });
+  });
+
+  it('reads V1 progress and lazily rotates it to V2 on the next accepted write', () => {
+    const legacy = buildProgress('thread-progress-v1-migration', {
+      content: 'Legacy prefix',
+      revision: 4,
+      persistedAt: 40,
+    });
+    storage.set(getChatStreamingProgressStorageKey(legacy.threadId), JSON.stringify(legacy));
+
+    expect(readChatStreamingProgressRecord(storage, legacy.threadId)).toEqual({
+      ok: true,
+      value: legacy,
+    });
+
+    const migrated = {
+      ...legacy,
+      content: 'Legacy prefix plus V2 delta',
+      revision: 5,
+      persistedAt: 41,
+    };
+    expect(writeChatStreamingProgressRecord(storage, migrated)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(JSON.parse(storage.getString(
+      getChatStreamingProgressStorageKey(legacy.threadId),
+    )!).schemaVersion).toBe(CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION);
+    expect(storage.getString(getChatStreamingOperationStorageKey(legacy.threadId, 0)))
+      .toContain(legacy.messageId);
+    expect(readChatStreamingProgressRecord(storage, legacy.threadId)).toEqual({
+      ok: true,
+      value: migrated,
+    });
+  });
+
+  it('does not reread or parse the previous full snapshot during normal V2 flushes', () => {
+    const getString = jest.fn(storage.getString.bind(storage));
+    const set = jest.fn(storage.set.bind(storage));
+    const instrumentedStorage = { ...storage, getString, set };
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
+
+    try {
+      const first = buildProgress('thread-progress-no-reread', {
+        content: 'a',
+        thoughtContent: undefined,
+        revision: 1,
+        persistedAt: 1,
+      });
+      expect(writeChatStreamingProgressRecord(instrumentedStorage, first)).toEqual({
+        status: 'written',
+        kind: 'checkpoint',
+      });
+      expect(getString).toHaveBeenCalledTimes(1);
+      getString.mockClear();
+
+      const second = {
+        ...first,
+        content: 'ab',
+        revision: 2,
+        persistedAt: 2,
+      };
+      expect(writeChatStreamingProgressRecord(instrumentedStorage, second)).toEqual({
+        status: 'written',
+        kind: 'delta',
+      });
+      expect(getString).not.toHaveBeenCalled();
+      expect(set.mock.calls.filter(
+        ([key]) => key.startsWith('chat-store:operation:'),
+      )).toHaveLength(1);
+      expect(performanceMonitor.snapshot().counters['chat.persist.parse'] ?? 0).toBe(0);
+    } finally {
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+    }
+  });
+
+  it('keeps the last committed delta readable when the next manifest commit fails', () => {
+    let failManifestWrite = false;
+    const faultingStorage = {
+      ...storage,
+      set: (key: string, value: Parameters<typeof storage.set>[1]) => {
+        if (failManifestWrite && key.startsWith('chat-store:progress:')) {
+          throw new Error('simulated manifest commit failure');
+        }
+        storage.set(key, value);
+      },
+    };
+    const first = buildProgress('thread-progress-delta-fault', {
+      content: 'last good prefix',
+      thoughtContent: undefined,
+      revision: 1,
+      persistedAt: 1,
+    });
+    expect(writeChatStreamingProgressRecord(faultingStorage, first).status).toBe('written');
+    const next = {
+      ...first,
+      content: 'last good prefix plus uncommitted delta',
+      revision: 2,
+      persistedAt: 2,
+    };
+
+    failManifestWrite = true;
+    expect(() => writeChatStreamingProgressRecord(faultingStorage, next))
+      .toThrow('simulated manifest commit failure');
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: first,
+    });
+
+    failManifestWrite = false;
+    expect(writeChatStreamingProgressRecord(faultingStorage, next)).toEqual({
+      status: 'written',
+      kind: 'delta',
+    });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: next,
+    });
+  });
+
+  it('keeps the prior chain readable when checkpoint compaction is interrupted', () => {
+    let failManifestWrite = false;
+    const faultingStorage = {
+      ...storage,
+      set: (key: string, value: Parameters<typeof storage.set>[1]) => {
+        if (failManifestWrite && key.startsWith('chat-store:progress:')) {
+          throw new Error('simulated checkpoint manifest failure');
+        }
+        storage.set(key, value);
+      },
+    };
+    const first = buildProgress('thread-progress-checkpoint-fault', {
+      content: 'last good checkpoint',
+      thoughtContent: undefined,
+      revision: 1,
+      persistedAt: 1,
+    });
+    expect(writeChatStreamingProgressRecord(faultingStorage, first).status).toBe('written');
+    const compacted = {
+      ...first,
+      content: 'x'.repeat(70 * 1024),
+      revision: 2,
+      persistedAt: 2,
+    };
+
+    failManifestWrite = true;
+    expect(() => writeChatStreamingProgressRecord(faultingStorage, compacted))
+      .toThrow('simulated checkpoint manifest failure');
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: first,
+    });
+
+    failManifestWrite = false;
+    expect(writeChatStreamingProgressRecord(faultingStorage, compacted)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(readChatStreamingProgressRecord(storage, first.threadId)).toEqual({
+      ok: true,
+      value: compacted,
+    });
+  });
+
+  it('fails closed for missing, corrupt, and cross-epoch V2 chunks', () => {
+    const first = buildProgress('thread-progress-corrupt-chain', {
+      content: 'prefix',
+      thoughtContent: undefined,
+      revision: 1,
+      persistedAt: 1,
+    });
+    const next = {
+      ...first,
+      content: 'prefix plus delta',
+      revision: 2,
+      persistedAt: 2,
+    };
+    writeChatStreamingProgressRecord(storage, first);
+    writeChatStreamingProgressRecord(storage, next);
+
+    const manifest = JSON.parse(storage.getString(
+      getChatStreamingProgressStorageKey(first.threadId),
+    )!) as { chunks: { slot: number; revision: number }[] };
+    const chunkKey = getChatStreamingProgressChunkStorageKey(
+      first.threadId,
+      manifest.chunks[0].slot,
+    );
+    const rawChunk = storage.getString(chunkKey)!;
+
+    storage.remove(chunkKey);
+    expect(readChatStreamingProgressRecord(storage, first.threadId))
+      .toEqual({ ok: false, reason: 'invalid_shape' });
+
+    storage.set(chunkKey, '{broken');
+    expect(readChatStreamingProgressRecord(storage, first.threadId))
+      .toEqual({ ok: false, reason: 'invalid_json' });
+
+    const crossEpochChunk = JSON.parse(rawChunk) as Record<string, unknown>;
+    crossEpochChunk.messageId = 'different-message';
+    storage.set(chunkKey, JSON.stringify(crossEpochChunk));
+    expect(readChatStreamingProgressRecord(storage, first.threadId))
+      .toEqual({ ok: false, reason: 'invalid_shape' });
+
+    storage.set(chunkKey, rawChunk);
+    manifest.chunks[0].revision += 1;
+    storage.set(getChatStreamingProgressStorageKey(first.threadId), JSON.stringify(manifest));
+    expect(readChatStreamingProgressRecord(storage, first.threadId))
+      .toEqual({ ok: false, reason: 'invalid_shape' });
+  });
+
+  it.each([
+    ['1 KiB', 1 * 1024],
+    ['64 KiB', 64 * 1024],
+    ['512 KiB', 512 * 1024],
+  ])('bounds serialized assistant work for a %s streamed output', (_label, finalSize) => {
+    const getString = jest.fn(storage.getString.bind(storage));
+    const set = jest.fn(storage.set.bind(storage));
+    const instrumentedStorage = { ...storage, getString, set };
+    const threadId = `thread-progress-work-${finalSize}`;
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
+
+    try {
+      let content = '';
+      const writeCount = finalSize / 1024;
+      for (let step = 1; step <= writeCount; step += 1) {
+        content += 'x'.repeat(1024);
+        expect(writeChatStreamingProgressRecord(
+          instrumentedStorage,
+          buildProgress(threadId, {
+            content,
+            thoughtContent: undefined,
+            tokensPerSec: undefined,
+            revision: step,
+            persistedAt: 1_000 + step,
+          }),
+        ).status).toBe('written');
+      }
+
+      const snapshot = performanceMonitor.snapshot();
+      const checkpointCount = snapshot.counters['chat.persist.progress.checkpoint'] ?? 0;
+      expect(getString).toHaveBeenCalledTimes(1);
+      expect(set).toHaveBeenCalledTimes((writeCount * 2) + 1);
+      expect(snapshot.counters['chat.persist.parse'] ?? 0).toBe(0);
+      expect(snapshot.counters['chat.persist.progress.operation']).toBe(1);
+      expect(snapshot.counters['chat.persist.progress.manifest']).toBe(writeCount);
+      expect(checkpointCount).toBeGreaterThanOrEqual(1);
+      expect(checkpointCount).toBeLessThanOrEqual(5);
+      expect(snapshot.counters['chat.persist.progress.delta'] ?? 0)
+        .toBe(writeCount - checkpointCount);
+      expect(snapshot.counters['chat.persist.stringify']).toBe((writeCount * 2) + 1);
+      expect(snapshot.counters['chat.persist.assistantChars'])
+        .toBeLessThanOrEqual(finalSize * 3);
+      expect(readChatStreamingProgressRecord(instrumentedStorage, threadId)).toEqual({
+        ok: true,
+        value: expect.objectContaining({ content, revision: writeCount }),
+      });
+      const artifactKeys = listChatStreamingProgressStorageKeys(instrumentedStorage);
+      expect(artifactKeys.length).toBeLessThanOrEqual(MAX_CHAT_PROGRESS_CHUNKS + 5);
+      const artifactValueBytes = artifactKeys.reduce((total, key) => (
+        total + new TextEncoder().encode(instrumentedStorage.getString(key) ?? '').length
+      ), 0);
+      expect(artifactValueBytes).toBeLessThanOrEqual(MAX_CHAT_PROGRESS_TOTAL_VALUE_BYTES);
+    } finally {
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+    }
+  });
+
+  it('rejects assistant content and thought snapshots beyond their hard limits', () => {
+    const exactContent = buildProgress('thread-progress-content-limit', {
+      content: 'x'.repeat(MAX_ASSISTANT_PROGRESS_CONTENT_CHARS),
+      thoughtContent: undefined,
+    });
+    expect(writeChatStreamingProgressRecord(storage, exactContent).status).toBe('written');
+    expect(writeChatStreamingProgressRecord(storage, buildProgress('thread-progress-content-over', {
+      content: 'x'.repeat(MAX_ASSISTANT_PROGRESS_CONTENT_CHARS + 1),
+      thoughtContent: undefined,
+    }))).toEqual({ status: 'rejected', reason: 'content_too_large' });
+
+    const exactThought = buildProgress('thread-progress-thought-limit', {
+      content: '',
+      thoughtContent: 'x'.repeat(MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS),
+    });
+    expect(writeChatStreamingProgressRecord(storage, exactThought).status).toBe('written');
+    expect(writeChatStreamingProgressRecord(storage, buildProgress('thread-progress-thought-over', {
+      content: '',
+      thoughtContent: 'x'.repeat(MAX_ASSISTANT_PROGRESS_THOUGHT_CHARS + 1),
+    }))).toEqual({ status: 'rejected', reason: 'thought_too_large' });
+  });
+
+  it('checks raw UTF-8 record size before parsing oversized progress JSON', () => {
+    const previousEnabled = performanceMonitor.isEnabled();
+    performanceMonitor.setEnabled(true);
+    performanceMonitor.clear();
+    const prefix = '{"padding":"';
+    const suffix = '"}';
+    const exact = `${prefix}${'é'.repeat(Math.floor(
+      (MAX_CHAT_PROGRESS_RECORD_BYTES - prefix.length - suffix.length - 2) / 2,
+    ))}${suffix}`;
+    const exactBytes = new TextEncoder().encode(exact).length;
+    const paddedExact = `${exact}${' '.repeat(MAX_CHAT_PROGRESS_RECORD_BYTES - exactBytes)}`;
+
+    try {
+      expect(new TextEncoder().encode(paddedExact)).toHaveLength(MAX_CHAT_PROGRESS_RECORD_BYTES);
+      expect(parseChatStreamingProgressRecord(paddedExact.slice(0, -1)))
+        .toEqual({ ok: false, reason: 'invalid_shape' });
+      expect(performanceMonitor.snapshot().counters['chat.persist.parse']).toBe(1);
+
+      performanceMonitor.clear();
+      expect(parseChatStreamingProgressRecord(paddedExact))
+        .toEqual({ ok: false, reason: 'invalid_shape' });
+      expect(performanceMonitor.snapshot().counters['chat.persist.parse']).toBe(1);
+
+      performanceMonitor.clear();
+      expect(parseChatStreamingProgressRecord(`${paddedExact} `))
+        .toEqual({ ok: false, reason: 'invalid_shape' });
+      expect(performanceMonitor.snapshot().counters['chat.persist.parse'] ?? 0).toBe(0);
+    } finally {
+      performanceMonitor.clear();
+      performanceMonitor.setEnabled(previousEnabled);
+    }
+  });
+
+  it('clears valid progress artifacts and malformed out-of-range slots', () => {
+    const progress = buildProgress('thread-progress-clear-artifacts');
+    writeChatStreamingProgressRecord(storage, progress);
+    storage.set(`chat-store:operation:${encodeURIComponent(progress.threadId)}:2`, 'orphan');
+    storage.set(`chat-store:progress-checkpoint:${encodeURIComponent(progress.threadId)}:2`, 'orphan');
+    storage.set(
+      `chat-store:progress-chunk:${encodeURIComponent(progress.threadId)}:${MAX_CHAT_PROGRESS_CHUNKS}`,
+      'orphan',
+    );
+
+    expect(listChatStreamingProgressStorageKeys(storage).length).toBeGreaterThan(3);
+    clearChatStreamingProgressRecords(storage);
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
+  it('removes only the three artifacts used by a short progress checkpoint', () => {
+    const threadId = 'thread-progress-short-cleanup-count';
+    const set = jest.fn(storage.set.bind(storage));
+    const getString = jest.fn(storage.getString.bind(storage));
+    const getAllKeys = jest.fn(storage.getAllKeys.bind(storage));
+    const remove = jest.fn(storage.remove.bind(storage));
+    const instrumentedStorage = { ...storage, set, getString, getAllKeys, remove };
+
+    expect(writeChatStreamingProgressRecord(
+      instrumentedStorage,
+      buildProgress(threadId),
+    )).toEqual({ status: 'written', kind: 'checkpoint' });
+    expect(set).toHaveBeenCalledTimes(3);
+    getString.mockClear();
+    remove.mockClear();
+
+    removeChatStreamingProgressRecord(instrumentedStorage, threadId);
+
+    expect(getString).not.toHaveBeenCalled();
+    expect(getAllKeys).not.toHaveBeenCalled();
+    const removedKeys = remove.mock.calls.map(([key]) => key);
+    expect(1 + 2 + 2 + MAX_CHAT_PROGRESS_CHUNKS).toBe(133);
+    expect(removedKeys).toEqual([
+      getChatStreamingProgressStorageKey(threadId),
+      getChatStreamingOperationStorageKey(threadId, 0),
+      getChatStreamingProgressCheckpointStorageKey(threadId, 0),
+    ]);
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
+  it('removes only actually written artifacts from a long progress chain', () => {
+    const threadId = 'thread-progress-long-cleanup-count';
+    const set = jest.fn(storage.set.bind(storage));
+    const getString = jest.fn(storage.getString.bind(storage));
+    const getAllKeys = jest.fn(storage.getAllKeys.bind(storage));
+    const remove = jest.fn(storage.remove.bind(storage));
+    const instrumentedStorage = { ...storage, set, getString, getAllKeys, remove };
+    const writeCount = 64;
+
+    for (let revision = 1; revision <= writeCount; revision += 1) {
+      expect(writeChatStreamingProgressRecord(
+        instrumentedStorage,
+        buildProgress(threadId, {
+          content: 'x'.repeat(revision * 16),
+          thoughtContent: undefined,
+          tokensPerSec: undefined,
+          revision,
+          persistedAt: 1_000 + revision,
+        }),
+      ).status).toBe('written');
+    }
+    const artifactKeys = listChatStreamingProgressStorageKeys(storage);
+    expect(set).toHaveBeenCalledTimes((writeCount * 2) + 1);
+    expect(artifactKeys).toHaveLength(66);
+    getString.mockClear();
+    remove.mockClear();
+
+    removeChatStreamingProgressRecord(instrumentedStorage, threadId);
+
+    expect(getString).not.toHaveBeenCalled();
+    expect(getAllKeys).not.toHaveBeenCalled();
+    const removedKeys = remove.mock.calls.map(([key]) => key);
+    expect(removedKeys).toHaveLength(artifactKeys.length);
+    expect(new Set(removedKeys)).toEqual(new Set(artifactKeys));
+    expect(removedKeys).toHaveLength(66);
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
+  it('removes obsolete crash-safe slots after a writer-cache restart', () => {
+    const threadId = 'thread-progress-restart-cleanup';
+    const first = buildProgress(threadId, {
+      content: 'initial checkpoint',
+      thoughtContent: undefined,
+      revision: 1,
+      persistedAt: 1,
+    });
+    expect(writeChatStreamingProgressRecord(storage, first)).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    expect(writeChatStreamingProgressRecord(storage, {
+      ...first,
+      content: 'x'.repeat(70 * 1024),
+      revision: 2,
+      persistedAt: 2,
+    })).toEqual({
+      status: 'written',
+      kind: 'checkpoint',
+    });
+    const artifactKeys = listChatStreamingProgressStorageKeys(storage);
+    expect(artifactKeys).toHaveLength(4);
+
+    const getString = jest.fn(storage.getString.bind(storage));
+    const getAllKeys = jest.fn(storage.getAllKeys.bind(storage));
+    const remove = jest.fn(storage.remove.bind(storage));
+    const restartedStorage = {
+      ...storage,
+      getString,
+      getAllKeys,
+      remove,
+    };
+
+    removeChatStreamingProgressRecord(restartedStorage, threadId);
+
+    expect(getString).toHaveBeenCalled();
+    expect(getAllKeys).toHaveBeenCalledTimes(1);
+    const removedKeys = remove.mock.calls.map(([key]) => key);
+    expect(removedKeys).toHaveLength(artifactKeys.length);
+    expect(new Set(removedKeys)).toEqual(new Set(artifactKeys));
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+  });
+
+  it('keeps a readable chain when removing the authoritative head fails', () => {
+    const threadId = 'thread-progress-head-remove-fault';
+    const progress = buildProgress(threadId);
+    const headKey = getChatStreamingProgressStorageKey(threadId);
+    const faultingStorage = {
+      ...storage,
+      remove: (key: string) => {
+        if (key === headKey) {
+          throw new Error('simulated head removal failure');
+        }
+        return storage.remove(key);
+      },
+    };
+    writeChatStreamingProgressRecord(faultingStorage, progress);
+    const artifactsBefore = listChatStreamingProgressStorageKeys(storage);
+
+    expect(() => clearChatStreamingProgressRecords(faultingStorage))
+      .toThrow('simulated head removal failure');
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual(artifactsBefore);
+    expect(readChatStreamingProgressRecord(storage, threadId)).toEqual({
+      ok: true,
+      value: progress,
+    });
+  });
+
+  it('makes progress logically missing while continuing cleanup after a data removal failure', () => {
+    const threadId = 'thread-progress-data-remove-fault';
+    const progress = buildProgress(threadId);
+    const operationKey = getChatStreamingOperationStorageKey(threadId, 0);
+    const removedKeys: string[] = [];
+    const faultingStorage = {
+      ...storage,
+      remove: (key: string) => {
+        if (key === operationKey) {
+          throw new Error('simulated data removal failure');
+        }
+        removedKeys.push(key);
+        return storage.remove(key);
+      },
+    };
+    writeChatStreamingProgressRecord(faultingStorage, progress);
+
+    expect(() => clearChatStreamingProgressRecords(faultingStorage))
+      .toThrow('simulated data removal failure');
+    expect(readChatStreamingProgressRecord(storage, threadId))
+      .toEqual({ ok: false, reason: 'missing' });
+    expect(storage.getString(operationKey)).toBeDefined();
+    expect(removedKeys).toContain(getChatStreamingProgressCheckpointStorageKey(threadId, 0));
+    expect(removedKeys.some((key) => key.startsWith(
+      `chat-store:progress-chunk:${encodeURIComponent(threadId)}:`,
+    ))).toBe(false);
+    expect(() => removeChatStreamingProgressRecord(storage, threadId)).not.toThrow();
+    expect(storage.getString(operationKey)).toBeUndefined();
+  });
+
+  it('removes malformed thread and noncanonical progress artifacts during destructive clear', () => {
+    const malformedThreadKey = 'chat-store:v2:thread:%E0%A4%A';
+    const lowercaseEncodedProgressKey = 'chat-store:operation:model%2fthread:00';
+    const rawColonProgressKey = 'chat-store:progress-chunk:model:thread:001';
+    storage.set(malformedThreadKey, 'corrupt private thread');
+    storage.set(lowercaseEncodedProgressKey, 'corrupt operation');
+    storage.set(rawColonProgressKey, 'corrupt chunk');
+
+    clearPersistedChatRecords(storage);
+
+    expect(storage.getString(malformedThreadKey)).toBeUndefined();
+    expect(storage.getString(lowercaseEncodedProgressKey)).toBeUndefined();
+    expect(storage.getString(rawColonProgressKey)).toBeUndefined();
   });
 
   it('parses only valid v2 index and thread record envelopes', () => {
@@ -571,6 +1814,267 @@ describe('chatPersistence', () => {
         ],
       }),
     );
+  });
+
+  it('merges newer progress as a stopped assistant without duplicating durable history', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-progress-recovery'),
+      messages: [
+        {
+          id: 'user-1',
+          role: 'user',
+          content: 'Prompt with an attachment',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+      ],
+      status: 'idle',
+    };
+    const progress = buildProgress(thread.id, {
+      messageId: 'assistant-progress',
+      createdAt: 2,
+      persistedAt: 11,
+    });
+
+    const recovered = recoverChatThreadFromStreamingProgress(thread, 10, progress, 20);
+
+    expect(recovered).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        status: 'stopped',
+        updatedAt: 20,
+        messages: [
+          expect.objectContaining({
+            id: 'user-1',
+            attachments: [copiedImageAttachment],
+          }),
+          expect.objectContaining({
+            id: 'assistant-progress',
+            content: 'Latest partial response',
+            thoughtContent: 'Partial reasoning',
+            tokensPerSec: 12.5,
+            state: 'stopped',
+          }),
+        ],
+      }),
+    });
+
+    if (recovered.outcome !== 'recovered') {
+      throw new Error('Expected progress recovery');
+    }
+    const replacementProgress = buildProgress(thread.id, {
+      ...progress,
+      content: 'Newer partial response',
+      persistedAt: 12,
+      revision: 4,
+    });
+    const replaced = recoverChatThreadFromStreamingProgress(
+      {
+        ...recovered.thread,
+        messages: recovered.thread.messages.map((message) => (
+          message.id === progress.messageId ? { ...message, state: 'streaming' as const } : message
+        )),
+      },
+      11,
+      replacementProgress,
+      21,
+    );
+    expect(replaced.outcome === 'recovered' ? replaced.thread.messages : []).toHaveLength(2);
+  });
+
+  it('recovers regenerated progress by replacing the original assistant answer', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-regenerated-progress'),
+      messages: [
+        {
+          id: 'user-before-regeneration',
+          role: 'user',
+          content: 'Regenerate the answer',
+          createdAt: 1,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+        {
+          id: 'assistant-original',
+          role: 'assistant',
+          content: 'Original durable answer',
+          createdAt: 2,
+          state: 'complete',
+          kind: 'message',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'idle',
+    };
+    const progress = buildProgress(thread.id, {
+      messageId: 'assistant-regenerated',
+      createdAt: 3,
+      persistedAt: 11,
+      regeneratesMessageId: 'assistant-original',
+    });
+
+    const recovered = recoverChatThreadFromStreamingProgress(thread, 10, progress, 20);
+
+    expect(recovered).toEqual({
+      outcome: 'recovered',
+      thread: expect.objectContaining({
+        status: 'stopped',
+        messages: [
+          expect.objectContaining({
+            id: 'user-before-regeneration',
+            attachments: [copiedImageAttachment],
+          }),
+          expect.objectContaining({
+            id: 'assistant-regenerated',
+            content: 'Latest partial response',
+            state: 'stopped',
+            regeneratesMessageId: 'assistant-original',
+          }),
+        ],
+      }),
+    });
+    expect(recovered.outcome === 'recovered'
+      ? recovered.thread.messages.some((message) => message.id === 'assistant-original')
+      : true).toBe(false);
+  });
+
+  it('rejects stale regenerated progress targeting an unrelated or replaced message', () => {
+    const targetMessage = {
+      id: 'assistant-original',
+      role: 'assistant' as const,
+      content: 'Original durable answer',
+      createdAt: 2,
+      state: 'complete' as const,
+      modelId: 'author/model-q4',
+    };
+    const baseThread: ChatThread = {
+      ...buildThread('thread-regenerated-progress-rejected'),
+      messages: [targetMessage],
+      status: 'idle',
+    };
+    const progress = buildProgress(baseThread.id, {
+      messageId: 'assistant-regenerated',
+      createdAt: 3,
+      persistedAt: 11,
+      regeneratesMessageId: targetMessage.id,
+    });
+
+    expect(recoverChatThreadFromStreamingProgress(
+      { ...baseThread, messages: [] },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [
+          targetMessage,
+          {
+            id: 'unrelated-later-user',
+            role: 'user',
+            content: 'A later turn now owns the tail',
+            createdAt: 4,
+            state: 'complete',
+          },
+        ],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [{ ...targetMessage, role: 'user' }],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [{ ...targetMessage, createdAt: 4 }],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'stale' });
+    expect(recoverChatThreadFromStreamingProgress(
+      {
+        ...baseThread,
+        messages: [{
+          ...targetMessage,
+          id: progress.messageId,
+          createdAt: progress.createdAt,
+          state: 'stopped',
+          regeneratesMessageId: 'different-original',
+        }],
+      },
+      10,
+      progress,
+    )).toEqual({ outcome: 'mismatched' });
+  });
+
+  it('refuses stale, terminal-conflicting, model-mismatched, and empty progress', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-progress-rejected'),
+      messages: [
+        {
+          id: 'assistant-terminal',
+          role: 'assistant',
+          content: 'Durable final answer',
+          createdAt: 2,
+          state: 'complete',
+          modelId: 'author/model-q4',
+        },
+      ],
+      status: 'idle',
+    };
+
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      20,
+      buildProgress(thread.id, { persistedAt: 20 }),
+    )).toEqual({ outcome: 'stale' });
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      20,
+      buildProgress(thread.id, {
+        messageId: 'assistant-terminal',
+        createdAt: 2,
+        persistedAt: 21,
+      }),
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      thread,
+      20,
+      buildProgress(thread.id, { modelId: 'author/other-model', persistedAt: 21 }),
+    )).toEqual({ outcome: 'mismatched' });
+    expect(recoverChatThreadFromStreamingProgress(
+      { ...thread, messages: [] },
+      20,
+      buildProgress(thread.id, { content: ' ', thoughtContent: '', persistedAt: 21 }),
+    )).toEqual({ outcome: 'empty' });
+  });
+
+  it('clears progress records together with v2 records and advances the clear tombstone', () => {
+    const thread = buildThread('thread-progress-clear');
+    const progress = buildProgress(thread.id, { persistedAt: 500 });
+    writeChatThreadRecord(storage, thread, 100);
+    writeChatStreamingProgressRecord(storage, progress);
+
+    clearPersistedChatRecords(storage);
+
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toBeUndefined();
+    expect(storage.getString(getChatStreamingProgressStorageKey(thread.id))).toBeUndefined();
+    expect(parseChatPersistenceIndex(storage.getString(CHAT_PERSISTENCE_INDEX_KEY))).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        threadIds: [],
+        clearedAt: expect.any(Number),
+      }),
+    });
+    const index = parseChatPersistenceIndex(storage.getString(CHAT_PERSISTENCE_INDEX_KEY));
+    expect(index.ok ? index.value.clearedAt : 0).toBeGreaterThan(500);
   });
 
   it('drops empty streaming and stopped assistant placeholders during cold recovery', () => {

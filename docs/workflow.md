@@ -41,7 +41,7 @@ Bootstrap note:
 Releases are automated with **Release Please**:
 
 - It opens/updates a Release PR after changes land on `main`.
-- Merging the Release PR updates versions + `CHANGELOG.md` and creates a git tag and GitHub Release.
+- Merging the Release PR updates versions, `.release-please-manifest.json`, and `CHANGELOG.md`, then creates a git tag and GitHub Release.
 
 If `main` is protected with required checks, configure a PAT secret (for example `RELEASE_PLEASE_TOKEN`) so CI runs on Release PRs.
 
@@ -57,3 +57,4 @@ Canonical version locations:
 
 - `app.json -> expo.version`
 - `package.json -> version` (kept equal to `expo.version`)
+- `.release-please-manifest.json` (Release Please's current release state)

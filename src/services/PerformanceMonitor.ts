@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 
-export type PerformanceEventType = 'mark' | 'span' | 'counter';
+export type PerformanceEventType = 'mark' | 'span' | 'counter' | 'gauge';
 
 export type PerformanceEvent = {
   type: PerformanceEventType;
@@ -185,6 +185,37 @@ class PerformanceMonitor {
           t: getMonotonicNowMs(),
           wallTime: getWallTimeMs(),
           value: nextValue,
+          meta,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  public getCounter(name: string): number {
+    try {
+      return this.counters.get(name) ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  public setGauge(name: string, value: number, meta?: Record<string, unknown>): void {
+    try {
+      if (!this.enabled || !Number.isFinite(value)) {
+        return;
+      }
+
+      this.counters.set(name, value);
+
+      if (meta) {
+        this.pushEvent({
+          type: 'gauge',
+          name,
+          t: getMonotonicNowMs(),
+          wallTime: getWallTimeMs(),
+          value,
           meta,
         });
       }

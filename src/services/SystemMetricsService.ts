@@ -1,4 +1,5 @@
 import { NativeModules, Platform } from 'react-native';
+import { performanceMonitor } from './PerformanceMonitor';
 
 export type MemoryPressureLevel = 'normal' | 'warning' | 'critical' | 'unknown';
 
@@ -22,6 +23,8 @@ export interface SystemMemorySnapshot {
 
 interface NativeSystemMetricsModule {
   getMemorySnapshot(): Promise<Partial<SystemMemorySnapshot>>;
+  getCacheDirectorySize?: () => Promise<unknown>;
+  invalidateCacheDirectorySizeMeasurement?: () => void;
 }
 
 function toSafeByteCount(value: unknown) {
@@ -94,6 +97,14 @@ function resolveSystemMetricsModule(): NativeSystemMetricsModule | null {
 
 let cachedSnapshot: SystemMemorySnapshot | null = null;
 let inflightSnapshotPromise: Promise<SystemMemorySnapshot | null> | null = null;
+
+type AppCacheDirectorySizeRequest = {
+  generation: number;
+  promise: Promise<number | null>;
+};
+
+let appCacheDirectorySizeGeneration = 0;
+let inflightAppCacheDirectorySizeRequest: AppCacheDirectorySizeRequest | null = null;
 
 async function readNativeSnapshot(): Promise<SystemMemorySnapshot | null> {
   const platform = normalizePlatform();
@@ -173,4 +184,73 @@ export async function getFreshMemorySnapshot(maxAgeMs: number): Promise<SystemMe
 
 export async function getSystemMemorySnapshot(): Promise<SystemMemorySnapshot | null> {
   return getFreshMemorySnapshot(0);
+}
+
+export function invalidateAppCacheDirectorySizeMeasurement(): void {
+  appCacheDirectorySizeGeneration += 1;
+  inflightAppCacheDirectorySizeRequest = null;
+
+  if (Platform.OS !== 'android') {
+    return;
+  }
+
+  const nativeModule = resolveSystemMetricsModule();
+  if (!nativeModule || typeof nativeModule.invalidateCacheDirectorySizeMeasurement !== 'function') {
+    return;
+  }
+
+  try {
+    nativeModule.invalidateCacheDirectorySizeMeasurement();
+  } catch {
+    performanceMonitor.incrementCounter('storage.cacheScan.nativeInvalidationFailed', 1);
+  }
+}
+
+export function getAppCacheDirectorySizeBytes(): Promise<number | null> {
+  if (Platform.OS !== 'android') {
+    return Promise.resolve(null);
+  }
+
+  const nativeModule = resolveSystemMetricsModule();
+  if (!nativeModule || typeof nativeModule.getCacheDirectorySize !== 'function') {
+    return Promise.resolve(null);
+  }
+
+  const generation = appCacheDirectorySizeGeneration;
+  const existingRequest = inflightAppCacheDirectorySizeRequest;
+  if (existingRequest && existingRequest.generation === generation) {
+    performanceMonitor.incrementCounter('storage.cacheScan.deduped', 1, {
+      level: 'native_bridge',
+    });
+    return existingRequest.promise;
+  }
+
+  performanceMonitor.incrementCounter('storage.cacheScan.native', 1);
+
+  const nativeRequest = (async () => {
+    const sizeBytes = await nativeModule.getCacheDirectorySize!();
+    return toOptionalByteCount(sizeBytes) ?? null;
+  })();
+  let sharedRequest!: Promise<number | null>;
+  const clearIfCurrent = () => {
+    if (inflightAppCacheDirectorySizeRequest?.promise === sharedRequest) {
+      inflightAppCacheDirectorySizeRequest = null;
+    }
+  };
+  sharedRequest = nativeRequest.then(
+    (sizeBytes) => {
+      clearIfCurrent();
+      return sizeBytes;
+    },
+    (error) => {
+      clearIfCurrent();
+      throw error;
+    },
+  );
+  inflightAppCacheDirectorySizeRequest = {
+    generation,
+    promise: sharedRequest,
+  };
+
+  return sharedRequest;
 }

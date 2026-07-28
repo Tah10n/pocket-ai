@@ -126,7 +126,9 @@ export interface LlmChatCompletionOptions {
   onToken?: (token: string | {
     token: string;
     content?: string;
+    contentMode?: 'snapshot' | 'cumulative';
     reasoningContent?: string;
+    reasoningContentMode?: 'snapshot' | 'cumulative' | 'delta';
     accumulatedText?: string;
   }) => void;
   params?: {

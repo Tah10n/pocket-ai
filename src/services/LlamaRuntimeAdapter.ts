@@ -16,6 +16,15 @@ export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFor
 export type LlamaContextInitParams = ContextParams;
 export type NativeLogListenerHandle = { remove: () => void };
 export type LlamaMultimodalSupport = { vision: boolean; audio: boolean };
+export type LlamaCompletionResult = Omit<
+  NativeCompletionResult,
+  'content' | 'reasoning_content' | 'text'
+> & {
+  content?: string | null;
+  reasoning_content?: string | null;
+  text?: string;
+  accumulated_text?: string;
+};
 export type LlamaMultimodalInitOptions = {
   context: LlamaContext;
   path: string;
@@ -339,7 +348,7 @@ export function normalizeTokenData(value: unknown): TokenData {
   };
 }
 
-export function normalizeCompletionResult(value: unknown): NativeCompletionResult {
+export function normalizeCompletionResult(value: unknown): LlamaCompletionResult {
   const record = assertRecord(value, 'completion result');
   const text = record.text;
   if (text !== undefined && typeof text !== 'string') {
@@ -347,16 +356,59 @@ export function normalizeCompletionResult(value: unknown): NativeCompletionResul
   }
 
   const content = record.content;
-  if (content !== undefined && typeof content !== 'string') {
-    throw new Error('[LLMEngine] Invalid llama.rn completion result: content must be a string');
+  if (content !== undefined && content !== null && typeof content !== 'string') {
+    throw new Error('[LLMEngine] Invalid llama.rn completion result: content must be a string or null');
   }
 
   const reasoningContent = record.reasoning_content;
-  if (reasoningContent !== undefined && typeof reasoningContent !== 'string') {
-    throw new Error('[LLMEngine] Invalid llama.rn completion result: reasoning_content must be a string');
+  if (
+    reasoningContent !== undefined
+    && reasoningContent !== null
+    && typeof reasoningContent !== 'string'
+  ) {
+    throw new Error(
+      '[LLMEngine] Invalid llama.rn completion result: reasoning_content must be a string or null',
+    );
   }
 
-  return record as NativeCompletionResult;
+  const accumulatedText = record.accumulated_text;
+  if (accumulatedText !== undefined && typeof accumulatedText !== 'string') {
+    throw new Error(
+      '[LLMEngine] Invalid llama.rn completion result: accumulated_text must be a string',
+    );
+  }
+
+  const hasExplicitContent = content !== undefined;
+  const hasExplicitReasoningContent = reasoningContent !== undefined;
+  const hasParsedOutputEvidence = (typeof content === 'string' && content.length > 0)
+    || (typeof reasoningContent === 'string' && reasoningContent.length > 0)
+    || (typeof accumulatedText === 'string' && accumulatedText.length > 0)
+    || (Array.isArray(record.tool_calls) && record.tool_calls.length > 0);
+
+  // llama.rn 0.12.6 always exports raw `text`, but its JSI bridge omits parsed
+  // content/reasoning fields when their native strings are empty. Once another
+  // parsed field proves parsing succeeded, restore that omission as an explicit
+  // clear. With only raw text, absence stays undefined so callers can parse/fallback.
+  const normalized = { ...record };
+  if (text === undefined) {
+    delete normalized.text;
+  }
+  if (hasExplicitContent) {
+    normalized.content = content;
+  } else if (hasParsedOutputEvidence) {
+    normalized.content = null;
+  } else {
+    delete normalized.content;
+  }
+  if (hasExplicitReasoningContent) {
+    normalized.reasoning_content = reasoningContent;
+  } else if (hasParsedOutputEvidence) {
+    normalized.reasoning_content = null;
+  } else {
+    delete normalized.reasoning_content;
+  }
+
+  return normalized as unknown as LlamaCompletionResult;
 }
 
 function normalizeBackendDeviceInfo(value: unknown): NativeBackendDeviceInfo | null {
@@ -420,7 +472,7 @@ export async function runCompletionOnContext({
   context: LlamaContext;
   params: CompletionParams;
   onToken?: (data: TokenData) => void;
-}): Promise<NativeCompletionResult> {
+}): Promise<LlamaCompletionResult> {
   const rawMessages = (params as { messages?: unknown }).messages;
   const normalizedParams = shouldNormalizeCompletionMessages(rawMessages)
     ? {

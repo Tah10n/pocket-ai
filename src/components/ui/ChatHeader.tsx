@@ -92,6 +92,7 @@ export const ChatHeader = ({
 
           <Box className="min-w-0 flex-1">
             <Text
+              testID="chat-header-title"
               numberOfLines={2}
               className={composeTextRole('screenTitle')}
             >
@@ -102,6 +103,7 @@ export const ChatHeader = ({
           <Box className={`shrink-0 flex-row items-center ${screenChromeTokens.headerContentGapClassName}`}>
             {onOpenModelControls ? (
               <HeaderActionButton
+                testID="chat-header-model-controls"
                 iconName="tune"
                 accessibilityLabel={t('chat.headerModelControlsAccessibilityLabel')}
                 onPress={onOpenModelControls}
@@ -142,6 +144,7 @@ export const ChatHeader = ({
 
                 {modelLabel ? (
                   <ScreenChip
+                    testID="chat-header-model-selector"
                     label={modelLabel}
                     tone={isModelUnavailable ? 'warning' : 'neutral'}
                     leadingIconName={isModelUnavailable ? 'warning' : 'memory'}

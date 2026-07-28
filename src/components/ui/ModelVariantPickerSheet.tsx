@@ -30,7 +30,11 @@ export function ModelVariantPickerSheet({
     }
 
     return getSelectableModelVariants(model).map((variant) => {
-      const sizeLabel = formatModelFileSize(variant.size, t('models.sizeUnknown'));
+      const isSizeResolving = variant.size === null && model.sizeResolutionState === 'resolving';
+      const sizeLabel = formatModelFileSize(
+        variant.size,
+        t(isSizeResolving ? 'models.sizeResolving' : 'models.sizeUnknown'),
+      );
       const selected = variant.variantId === activeVariant?.variantId;
       const memoryBadge = getVariantMemoryBadgePresentation(model, variant, { useModelFallback: selected });
       const title = `${variant.quantizationLabel} - ${sizeLabel}`;

@@ -8,6 +8,7 @@ import { useDownloadStore } from '../../src/store/downloadStore';
 import { useModelsStore } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
+import * as chatSession from '../../src/hooks/useChatSession';
 
 jest.mock('expo-secure-store', () => ({
   isAvailableAsync: jest.fn(async () => true),
@@ -62,6 +63,10 @@ describe('PrivateStorageRecovery', () => {
   it('clears cached private handles and in-memory private persisted state after explicit reset', async () => {
     const preResetAppStorage = getAppStorage();
     preResetAppStorage.set('stale-private-key', 'stale-value');
+    preResetAppStorage.set('chat-store:progress:reset-thread', '{"head":true}');
+    preResetAppStorage.set('chat-store:operation:reset-thread:0', '{"operation":true}');
+    preResetAppStorage.set('chat-store:progress-checkpoint:reset-thread:0', '{"checkpoint":true}');
+    preResetAppStorage.set('chat-store:progress-chunk:reset-thread:0', '{"chunk":true}');
 
     useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -80,6 +85,12 @@ describe('PrivateStorageRecovery', () => {
     const postResetAppStorage = getAppStorage();
     expect(postResetAppStorage).not.toBe(preResetAppStorage);
     expect(postResetAppStorage.getString('stale-private-key')).toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:progress:reset-thread')).toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:operation:reset-thread:0')).toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:progress-checkpoint:reset-thread:0'))
+      .toBeUndefined();
+    expect(postResetAppStorage.getString('chat-store:progress-chunk:reset-thread:0'))
+      .toBeUndefined();
     expect(useChatStore.getState().getConversationIndex()).toEqual([]);
     expect(useChatStore.getState().activeThreadId).toBeNull();
     expect(useDownloadStore.getState().queue).toEqual([]);
@@ -115,6 +126,30 @@ describe('PrivateStorageRecovery', () => {
     expect(registry.preserveExistingModelFilesForPrivateStorageReset).toHaveBeenCalledTimes(1);
     expect(chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset).not.toHaveBeenCalled();
     expect(registry.hasAnyDownloadedModels()).toBe(true);
+  });
+
+  it('continues a confirmed reset after chat stop and discards the retained generation controller', async () => {
+    const stopChatSpy = jest
+      .spyOn(chatSession, 'stopActiveChatGenerationForPrivateStorageBlocked')
+      .mockResolvedValue(undefined);
+    const resetChatRuntimeSpy = jest
+      .spyOn(chatSession, 'resetActiveChatGenerationRuntimeForPrivateStorageReset')
+      .mockImplementation(() => undefined);
+    const resetStorageSpy = jest.spyOn(privateStorage, 'resetPrivateAppStorageAfterConfirmation');
+
+    await expect(resetPrivateAppStorageAndRuntimeStateAfterConfirmation()).resolves.toEqual(
+      expect.objectContaining({ status: 'ready' }),
+    );
+
+    expect(stopChatSpy).toHaveBeenCalledTimes(1);
+    expect(resetStorageSpy).toHaveBeenCalledTimes(1);
+    expect(resetChatRuntimeSpy).toHaveBeenCalledTimes(1);
+    expect(stopChatSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      resetStorageSpy.mock.invocationCallOrder[0],
+    );
+    expect(resetStorageSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      resetChatRuntimeSpy.mock.invocationCallOrder[0],
+    );
   });
 
   it('returns blocked reset health when chat attachment cleanup fails after private storage reset', async () => {

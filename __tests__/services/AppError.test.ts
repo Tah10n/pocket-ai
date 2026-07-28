@@ -1,9 +1,118 @@
-import { AppError, getErrorMessage, getReportedErrorMessage, reportError, toAppError } from '../../src/services/AppError';
+import {
+  AppError,
+  getErrorMessage,
+  getPrivacySafeErrorLogDetails,
+  getReportedErrorMessage,
+  reportError,
+  reportPrivacySafeError,
+  toAppError,
+} from '../../src/services/AppError';
 
 describe('AppError', () => {
   it('keeps existing AppError instances', () => {
     const appError = new AppError('engine_busy', 'already being generated');
     expect(toAppError(appError)).toBe(appError);
+  });
+
+  it('reduces arbitrary errors to bounded identifiers', () => {
+    const error = new Error('PROMPT_SENTINEL hf_secret C:\\Users\\private\\model.gguf');
+    error.name = 'hf_PRIVATE_TOKEN_SENTINEL';
+
+    expect(getPrivacySafeErrorLogDetails(error)).toEqual({ errorName: 'Error' });
+    expect(getPrivacySafeErrorLogDetails(new AppError('engine_busy', 'PROMPT_SENTINEL'))).toEqual({
+      errorCode: 'engine_busy',
+      errorName: 'AppError',
+    });
+    expect(getPrivacySafeErrorLogDetails({ token: 'hf_secret' })).toEqual({ errorType: 'object' });
+  });
+
+  it('only exposes allowlisted built-in error names', () => {
+    expect(getPrivacySafeErrorLogDetails(new TypeError('private payload'))).toEqual({
+      errorName: 'TypeError',
+    });
+
+    const maliciousAppError = new AppError('action_failed', 'private payload');
+    maliciousAppError.name = 'PROMPT_SENTINEL_IDENTIFIER';
+    (maliciousAppError as unknown as { code: string }).code = 'hf_PRIVATE_CODE_SENTINEL';
+    expect(getPrivacySafeErrorLogDetails(maliciousAppError)).toEqual({
+      errorCode: 'action_failed',
+      errorName: 'AppError',
+    });
+  });
+
+  it('normalizes mutated AppError identifiers before reporting', () => {
+    const originalDevFlag = (globalThis as any).__DEV__;
+    const originalSentry = (globalThis as any).Sentry;
+    const reporter = { captureException: jest.fn() };
+    const nameSentinel = 'PROMPT_NAME_SENTINEL';
+    const codeSentinel = 'hf_PRIVATE_CODE_SENTINEL';
+
+    try {
+      (globalThis as any).__DEV__ = false;
+      (globalThis as any).Sentry = reporter;
+      const maliciousError = new AppError('action_failed', 'Fixed failure');
+      maliciousError.name = nameSentinel;
+      (maliciousError as unknown as { code: string }).code = codeSentinel;
+
+      const result = reportError('safe.scope', maliciousError);
+
+      expect(result).toMatchObject({
+        name: 'AppError',
+        code: 'action_failed',
+        message: 'Fixed failure',
+      });
+      expect(reporter.captureException).toHaveBeenCalledWith(result, expect.objectContaining({
+        tags: {
+          scope: 'safe.scope',
+          code: 'action_failed',
+        },
+      }));
+      const serializedReport = JSON.stringify({ result, calls: reporter.captureException.mock.calls });
+      expect(serializedReport).not.toContain(nameSentinel);
+      expect(serializedReport).not.toContain(codeSentinel);
+    } finally {
+      (globalThis as any).__DEV__ = originalDevFlag;
+      (globalThis as any).Sentry = originalSentry;
+    }
+  });
+
+  it('reports a fixed safe category without forwarding the original message or cause', () => {
+    const originalDevFlag = (globalThis as any).__DEV__;
+    const originalSentry = (globalThis as any).Sentry;
+    const reporter = { captureException: jest.fn() };
+    const promptSentinel = 'PROMPT_SENTINEL_PRIVATE';
+    const tokenSentinel = 'hf_PRIVATE_TOKEN_SENTINEL';
+    const pathSentinel = 'C:\\Users\\private\\model.gguf';
+
+    try {
+      (globalThis as any).__DEV__ = false;
+      (globalThis as any).Sentry = reporter;
+      const sourceError = new Error(`${promptSentinel} ${tokenSentinel} ${pathSentinel}`);
+      Object.assign(sourceError, { authorization: tokenSentinel, localPath: pathSentinel });
+
+      const result = reportPrivacySafeError(
+        'safe.scope',
+        sourceError,
+        'storage_metrics_load_failed',
+      );
+
+      expect(result).toMatchObject({
+        code: 'action_failed',
+        message: 'action_failed',
+        cause: undefined,
+        details: {
+          category: 'storage_metrics_load_failed',
+          errorName: 'Error',
+        },
+      });
+      const serializedReport = JSON.stringify(reporter.captureException.mock.calls);
+      expect(serializedReport).not.toContain(promptSentinel);
+      expect(serializedReport).not.toContain(tokenSentinel);
+      expect(serializedReport).not.toContain(pathSentinel);
+    } finally {
+      (globalThis as any).__DEV__ = originalDevFlag;
+      (globalThis as any).Sentry = originalSentry;
+    }
   });
 
   it.each([

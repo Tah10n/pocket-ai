@@ -28,6 +28,7 @@ export enum ModelAccessState {
 }
 
 export type ModelMetadataTrust = 'verified_local' | 'trusted_remote' | 'inferred' | 'unknown';
+export type ModelSizeResolutionState = 'resolving' | 'resolved' | 'unavailable';
 
 export type ModelMemoryFitDecision =
   | 'fits_high_confidence'
@@ -199,6 +200,8 @@ export interface ModelMetadata {
   name: string;
   author: string;
   size: number | null;
+  /** Runtime-only catalog state; intentionally omitted from persistent normalization. */
+  sizeResolutionState?: ModelSizeResolutionState;
   downloadUrl: string; // HF resolve URL
   allowUnknownSizeDownload?: boolean;
   requiresTreeProbe?: boolean;
@@ -270,19 +273,49 @@ export type EngineLifecycleEvent =
   | 'context_operation_unload_timeout'
   | 'active_completion_unload_timeout';
 
+export type EngineModelInitProfileSource =
+  | 'requested'
+  | 'conservative_probe'
+  | 'autotune'
+  | 'last_good'
+  | 'oom_retry'
+  | 'cpu_fallback'
+  | 'speculative_fallback'
+  | 'backend_discovery';
+
+export type EngineModelInitFailureCategory =
+  | 'out_of_memory'
+  | 'backend_unavailable'
+  | 'invalid_configuration'
+  | 'model_incompatible'
+  | 'cancelled'
+  | 'native_error'
+  | 'known_oom_upper_bound'
+  | 'attempt_limit';
+
 export type EngineBackendInitAttempt = {
   candidate: 'npu' | 'gpu' | 'cpu';
   nGpuLayers: number;
-  devices?: string[];
+  deviceCount?: number;
+  contextSize: number;
+  nBatch?: number;
+  nUbatch?: number;
+  cacheTypeK: string;
+  cacheTypeV: string;
+  speculativeEnabled: boolean;
+  profileSource: EngineModelInitProfileSource;
+  probableOom: boolean;
+  durationMs: number;
   outcome: 'success' | 'error' | 'skipped';
+  failureCategory?: EngineModelInitFailureCategory;
   actualGpu?: boolean;
   reasonNoGPU?: string;
-  error?: string;
 };
 
 export interface EngineDiagnostics {
   backendMode: EngineBackendMode;
   backendDevices: string[];
+  backendDeviceCount?: number;
   reasonNoGPU?: string;
   systemInfo?: string;
   androidLib?: string;
@@ -295,6 +328,7 @@ export interface EngineDiagnostics {
   backendInitAttempts?: EngineBackendInitAttempt[];
   initGpuLayers?: number;
   initDevices?: string[];
+  initDeviceCount?: number;
   initCacheTypeK?: string;
   initCacheTypeV?: string;
   initFlashAttnType?: 'auto' | 'on' | 'off';

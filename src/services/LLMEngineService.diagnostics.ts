@@ -7,6 +7,7 @@ import type {
   EngineState,
   InferenceCompletionTelemetry,
   MtpFallbackReason,
+  EngineModelInitFailureCategory,
 } from '../types/models';
 import type {
   MultimodalDiagnosticsSummary,
@@ -33,6 +34,36 @@ function toOptionalPositiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? value
     : undefined;
+}
+
+const MAX_DIAGNOSTIC_DEVICE_COUNT = 10;
+const SAFE_MODEL_INIT_FAILURE_CATEGORIES = new Set<EngineModelInitFailureCategory>([
+  'out_of_memory',
+  'backend_unavailable',
+  'invalid_configuration',
+  'model_incompatible',
+  'cancelled',
+  'native_error',
+  'known_oom_upper_bound',
+  'attempt_limit',
+]);
+
+function sanitizeFailureCategory(value: unknown): EngineModelInitFailureCategory | undefined {
+  return typeof value === 'string'
+    && SAFE_MODEL_INIT_FAILURE_CATEGORIES.has(value as EngineModelInitFailureCategory)
+    ? value as EngineModelInitFailureCategory
+    : undefined;
+}
+
+function buildSafeDeviceCategories(
+  countSource: readonly unknown[] | null | undefined,
+  backendMode: EngineBackendMode | 'unknown',
+): string[] | undefined {
+  if (!Array.isArray(countSource) || countSource.length === 0) {
+    return undefined;
+  }
+
+  return Array(Math.min(countSource.length, MAX_DIAGNOSTIC_DEVICE_COUNT)).fill(backendMode);
 }
 
 export function buildInferenceCompletionTelemetry(source: {
@@ -240,12 +271,15 @@ export function buildEngineDiagnosticsSnapshot(source: {
   multimodalDiagnostics: MultimodalDiagnosticsSummary | null;
   speculativeDecodingDiagnostics?: EngineSpeculativeDecodingDiagnostics | null;
 }): NonNullable<EngineState['diagnostics']> {
+  const backendDevices = buildSafeDeviceCategories(source.activeBackendDevices, source.activeBackendMode) ?? [];
+  const initDevices = buildSafeDeviceCategories(source.initDevices, source.activeBackendMode);
   return {
     backendMode: source.activeBackendMode,
-    backendDevices: [...source.activeBackendDevices],
-    reasonNoGPU: source.activeBackendReasonNoGpu ?? undefined,
-    systemInfo: source.activeBackendSystemInfo ?? undefined,
-    androidLib: source.activeBackendAndroidLib ?? undefined,
+    backendDevices,
+    backendDeviceCount: backendDevices.length > 0 ? backendDevices.length : undefined,
+    reasonNoGPU: sanitizeFailureCategory(source.activeBackendReasonNoGpu),
+    systemInfo: source.activeBackendSystemInfo ? 'available' : undefined,
+    androidLib: source.activeBackendAndroidLib ? 'available' : undefined,
     requestedGpuLayers: source.requestedGpuLayers ?? undefined,
     loadedGpuLayers: source.activeGpuLayers ?? undefined,
     actualGpuAccelerated: source.actualGpuAccelerated ?? undefined,
@@ -253,13 +287,24 @@ export function buildEngineDiagnosticsSnapshot(source: {
     effectiveBackendPolicy: source.effectiveBackendPolicy ?? undefined,
     backendPolicyReasons: source.backendPolicyReasons.length > 0 ? [...source.backendPolicyReasons] : undefined,
     backendInitAttempts: source.backendInitAttemptsSnapshot.length > 0
-      ? source.backendInitAttemptsSnapshot.map((attempt) => ({
-          ...attempt,
-          devices: Array.isArray(attempt.devices) ? [...attempt.devices] : undefined,
-        }))
+      ? source.backendInitAttemptsSnapshot.map((attempt) => {
+          const legacyAttempt = attempt as EngineBackendInitAttempt & { devices?: unknown; error?: unknown };
+          const {
+            devices: _devices,
+            error: _error,
+            reasonNoGPU,
+            ...safeAttempt
+          } = legacyAttempt;
+          return {
+            ...safeAttempt,
+            deviceCount: toOptionalNonNegativeNumber(attempt.deviceCount),
+            reasonNoGPU: sanitizeFailureCategory(reasonNoGPU),
+          };
+        })
       : undefined,
     initGpuLayers: source.initGpuLayers ?? undefined,
-    initDevices: Array.isArray(source.initDevices) ? [...source.initDevices] : undefined,
+    initDevices,
+    initDeviceCount: initDevices?.length,
     initCacheTypeK: source.initCacheTypeK ?? undefined,
     initCacheTypeV: source.initCacheTypeV ?? undefined,
     initFlashAttnType: source.initFlashAttnType ?? undefined,

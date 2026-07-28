@@ -6,6 +6,7 @@ import {
   type ModelCatalogCacheInvalidationSource,
   modelCatalogService,
 } from '../../src/services/ModelCatalogService';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 
 jest.mock('../../src/services/HuggingFaceTokenService', () => ({
@@ -21,9 +22,11 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
     error instanceof Error ? error.message : String(error)
   )),
   modelCatalogService: {
+    createSearchSession: jest.fn(),
     getCachedSearchResult: jest.fn(),
     getLocalModels: jest.fn(),
     searchModels: jest.fn(),
+    cancelPendingSearchRequests: jest.fn(),
     subscribeCacheInvalidations: jest.fn(() => jest.fn()),
     subscribeMetadataUpdates: jest.fn(() => jest.fn()),
   },
@@ -46,6 +49,17 @@ const baseSort = {
   field: 'downloads' as const,
   direction: 'desc' as const,
 };
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, reject, resolve };
+}
 
 function createModel(id: string): ModelMetadata {
   return {
@@ -108,6 +122,10 @@ async function flushMicrotasks() {
 describe('useModelsCatalogData', () => {
   const mockTokenService = huggingFaceTokenService as jest.Mocked<typeof huggingFaceTokenService>;
   const mockCatalogService = modelCatalogService as jest.Mocked<typeof modelCatalogService>;
+  const mockCatalogSearchSession = {
+    cancelPendingRequests: jest.fn(),
+    dispose: jest.fn(),
+  };
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -117,6 +135,7 @@ describe('useModelsCatalogData', () => {
     mockTokenService.subscribe.mockReturnValue(jest.fn());
     mockCatalogService.subscribeCacheInvalidations.mockImplementation(() => jest.fn());
     mockCatalogService.subscribeMetadataUpdates.mockImplementation(() => jest.fn());
+    mockCatalogService.createSearchSession.mockReturnValue(mockCatalogSearchSession);
     mockCatalogService.getLocalModels.mockResolvedValue([]);
     mockCatalogService.getCachedSearchResult.mockReturnValue({
       models: [createModel('org/first-model')],
@@ -128,6 +147,7 @@ describe('useModelsCatalogData', () => {
       hasMore: true,
       nextCursor: 'https://huggingface.co/api/models?cursor=page-3',
     });
+    mockCatalogService.cancelPendingSearchRequests.mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -143,6 +163,59 @@ describe('useModelsCatalogData', () => {
     expect(getCurrentValue()?.isTokenStateHydrated).toBe(true);
     expect(getCurrentValue()?.hasTokenConfigured).toBe(false);
     expect(syncDiscoveryTokenState).toHaveBeenCalledWith(false);
+  });
+
+  it('disposes only the unmounted catalog consumer session', async () => {
+    const sessionA = {
+      cancelPendingRequests: jest.fn(),
+      dispose: jest.fn(),
+    };
+    const sessionB = {
+      cancelPendingRequests: jest.fn(),
+      dispose: jest.fn(),
+    };
+    mockCatalogService.createSearchSession
+      .mockReturnValueOnce(sessionA)
+      .mockReturnValueOnce(sessionB);
+
+    const consumerA = renderHookHarness();
+    const consumerB = renderHookHarness();
+    await flushMicrotasks();
+
+    consumerA.unmount();
+
+    expect(sessionA.dispose).toHaveBeenCalledTimes(1);
+    expect(sessionB.dispose).not.toHaveBeenCalled();
+    expect(mockCatalogService.cancelPendingSearchRequests).not.toHaveBeenCalled();
+
+    consumerB.unmount();
+    expect(sessionB.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks an in-flight catalog request stale when its consumer unmounts', async () => {
+    const deferredSearch = createDeferred<Awaited<ReturnType<typeof modelCatalogService.searchModels>>>();
+    const fetchSpanEnd = jest.fn();
+    (performanceMonitor.startSpan as jest.Mock).mockReturnValue({ end: fetchSpanEnd });
+    mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+    mockCatalogService.searchModels.mockReturnValue(deferredSearch.promise);
+
+    const consumer = renderHookHarness();
+    await flushMicrotasks();
+
+    await act(async () => {
+      jest.advanceTimersByTime(400);
+      await Promise.resolve();
+    });
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+
+    consumer.unmount();
+    deferredSearch.reject(new Error('consumer detached'));
+    await act(async () => {
+      await deferredSearch.promise.catch(() => undefined);
+    });
+
+    expect(mockCatalogSearchSession.dispose).toHaveBeenCalledTimes(1);
+    expect(fetchSpanEnd).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'stale' }));
   });
 
   it('refreshes the active catalog session after late persistent-cache hydration', async () => {
@@ -184,6 +257,27 @@ describe('useModelsCatalogData', () => {
       'org/persisted-hydration-model',
     ]);
     expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(2);
+    expect(mockCatalogService.searchModels).not.toHaveBeenCalled();
+  });
+
+  it('cancels active requests without repopulating the catalog after a manual cache clear', async () => {
+    let invalidationListener: ((revision: number, source: ModelCatalogCacheInvalidationSource) => void) | undefined;
+    mockCatalogService.subscribeCacheInvalidations.mockImplementation((listener) => {
+      invalidationListener = listener;
+      listener(0, 'replay');
+      return jest.fn();
+    });
+
+    renderHookHarness();
+    await flushMicrotasks();
+
+    await act(async () => {
+      invalidationListener?.(1, 'manual');
+      await Promise.resolve();
+    });
+
+    expect(mockCatalogService.cancelPendingSearchRequests).not.toHaveBeenCalled();
+    expect(mockCatalogSearchSession.cancelPendingRequests).toHaveBeenCalledWith('superseded');
     expect(mockCatalogService.searchModels).not.toHaveBeenCalled();
   });
 
@@ -229,9 +323,9 @@ describe('useModelsCatalogData', () => {
 
     expect(mockCatalogService.searchModels).toHaveBeenCalledWith('phi', expect.objectContaining({
       cursor: null,
-      pageSize: 20,
+      pageSize: 8,
       metadataResolution: 'deferred',
-    }));
+    }), mockCatalogSearchSession);
     expect(getCurrentValue()?.models).toEqual([summaryModel]);
     expect(getCurrentValue()?.loading).toBe(false);
 
@@ -286,9 +380,9 @@ describe('useModelsCatalogData', () => {
     expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
     expect(mockCatalogService.searchModels).toHaveBeenCalledWith('phi', expect.objectContaining({
       cursor: 'https://huggingface.co/api/models?cursor=page-2',
-      pageSize: 20,
+      pageSize: 8,
       sort: 'downloads',
-    }));
+    }), mockCatalogSearchSession);
 
     await act(async () => {
       getCurrentValue()?.handleLoadMore('auto');

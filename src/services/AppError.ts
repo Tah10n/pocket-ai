@@ -97,6 +97,95 @@ export class AppError extends Error {
   }
 }
 
+const SAFE_ERROR_NAMES = new Set([
+  'AbortError',
+  'AggregateError',
+  'DirectorySizeTraversalLimitError',
+  'Error',
+  'EvalError',
+  'NetworkError',
+  'PrivateStorageUnavailableError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TimeoutError',
+  'TypeError',
+  'URIError',
+]);
+
+const SAFE_APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
+  'action_failed',
+  'engine_not_ready',
+  'engine_busy',
+  'engine_unloading',
+  'model_not_found',
+  'model_load_blocked',
+  'model_load_failed',
+  'model_incompatible',
+  'model_memory_insufficient',
+  'model_memory_warning',
+  'download_disk_space_low',
+  'download_size_unknown',
+  'download_metadata_unavailable',
+  'download_http_error',
+  'download_verification_failed',
+  'download_file_missing',
+  'storage_private_unavailable',
+  'message_empty',
+  'message_too_long',
+  'multimodal_not_ready',
+  'chat_attachment_copy_failed',
+  'chat_attachment_limit_exceeded',
+  'chat_attachment_missing',
+  'chat_attachment_not_ready',
+  'chat_attachment_unsupported_type',
+  'chat_attachment_corrupt',
+  'chat_attachment_parse_failed',
+  'chat_attachment_too_large_for_context',
+  'chat_attachment_document_encrypted',
+  'chat_attachment_document_no_extractable_text',
+]);
+
+const SAFE_PRIVACY_REPORT_CATEGORIES = new Set([
+  'storage_metrics_load_failed',
+]);
+
+function getSafeErrorName(error: Error): string {
+  return SAFE_ERROR_NAMES.has(error.name) ? error.name : 'Error';
+}
+
+function getSafePrivacyReportCategory(category: string): string {
+  return SAFE_PRIVACY_REPORT_CATEGORIES.has(category) ? category : 'operation_failed';
+}
+
+export function getSafeAppErrorCode(
+  code: unknown,
+  fallbackCode: AppErrorCode = 'action_failed',
+): AppErrorCode {
+  if (typeof code === 'string' && SAFE_APP_ERROR_CODES.has(code)) {
+    return code as AppErrorCode;
+  }
+
+  return SAFE_APP_ERROR_CODES.has(fallbackCode) ? fallbackCode : 'action_failed';
+}
+
+export function getPrivacySafeErrorLogDetails(error: unknown): Record<string, string> {
+  if (error instanceof AppError) {
+    return {
+      errorCode: getSafeAppErrorCode(error.code),
+      errorName: 'AppError',
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      errorName: getSafeErrorName(error),
+    };
+  }
+
+  return { errorType: typeof error };
+}
+
 function inferErrorCode(message: string): AppErrorCode | null {
   const normalizedMessage = message.trim();
   if (!normalizedMessage) {
@@ -131,12 +220,13 @@ export function reportError(
   context?: Record<string, unknown>,
 ): AppError {
   const appError = toAppError(error);
+  const safeCode = getSafeAppErrorCode(appError.code);
   const sanitizedReport = sanitizeErrorForReport(appError, { includeStack: true });
-  const sanitizedError = new AppError(appError.code, sanitizedReport.message, {
+  const sanitizedError = new AppError(safeCode, sanitizedReport.message, {
     cause: sanitizedReport.cause,
     details: sanitizedReport.details,
   });
-  sanitizedError.name = sanitizedReport.name ?? appError.name;
+  sanitizedError.name = 'AppError';
   if (sanitizedReport.stack) {
     sanitizedError.stack = sanitizedReport.stack;
   }
@@ -149,7 +239,7 @@ export function reportError(
 
   if (!isDev && reporter?.captureException) {
     reporter.captureException(sanitizedError, {
-      tags: { scope, code: appError.code },
+      tags: { scope, code: safeCode },
       extra,
     });
     return sanitizedError;
@@ -157,6 +247,24 @@ export function reportError(
 
   console.error(`[${scope}]`, sanitizedError, Object.keys(extra).length > 0 ? extra : undefined);
   return sanitizedError;
+}
+
+export function reportPrivacySafeError(
+  scope: string,
+  error: unknown,
+  category: string,
+  fallbackCode: AppErrorCode = 'action_failed',
+): AppError {
+  const safeFallbackCode = getSafeAppErrorCode(fallbackCode);
+  return reportError(
+    scope,
+    new AppError(safeFallbackCode, safeFallbackCode, {
+      details: {
+        category: getSafePrivacyReportCategory(category),
+        ...getPrivacySafeErrorLogDetails(error),
+      },
+    }),
+  );
 }
 
 export function getErrorMessage(

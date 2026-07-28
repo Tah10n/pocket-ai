@@ -1311,6 +1311,28 @@ describe('ModelCard', () => {
     expect(onOpenVariantSelector).toHaveBeenCalledWith('org/model');
   });
 
+  it('shows a loading label while deferred catalog size metadata is resolving', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          size: null,
+          sizeResolutionState: 'resolving',
+          resolvedFileName: 'model.Q4_K_M.gguf',
+          activeVariantId: 'model.Q4_K_M.gguf',
+          variants: [
+            { variantId: 'model.Q4_K_M.gguf', fileName: 'model.Q4_K_M.gguf', quantizationLabel: 'Q4_K_M', size: null },
+          ],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('Q4_K_M - models.sizeResolving')).toBeTruthy();
+    expect(screen.queryByText('Q4_K_M - models.sizeUnknown')).toBeNull();
+  });
+
   it('rerenders when catalog refresh changes active variant metadata without changing variant count', () => {
     const handlers = buildModelCardHandlers({ onOpenVariantSelector: jest.fn() });
     const baseModel = {

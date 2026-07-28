@@ -1,5 +1,4 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { useChatStore } from '../store/chatStore';
 import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { storage as appStorage } from '../store/storage';
 import { getAppCacheRootDir, getCacheDir, getModelsDir } from './FileSystemSetup';
@@ -11,7 +10,6 @@ import {
   CHAT_HISTORY_INDEX_KEY,
   CHAT_HISTORY_PREFIX,
   SETTINGS_KEY,
-  clearLegacyChatHistory,
   resetAllParametersForModel,
   resetSettings,
   storage as settingsStorage,
@@ -42,6 +40,7 @@ import {
 } from './SystemMetricsService';
 import { performanceMonitor } from './PerformanceMonitor';
 import { getPrivacySafeErrorLogDetails } from './AppError';
+export { clearChatHistory } from './ChatHistoryService';
 
 const CHAT_STORE_KEY = LEGACY_CHAT_STORE_STORAGE_KEY;
 const MIN_DIRECTORY_SIZE_FALLBACK_BYTES = 0;
@@ -1272,13 +1271,6 @@ export async function cleanupQuarantinedModelFiles() {
   }
 
   return deletedCount;
-}
-
-export async function clearChatHistory() {
-  await llmEngineService.interruptActiveCompletion();
-  const removedThreads = useChatStore.getState().clearAllThreads();
-  const removedLegacyEntries = clearLegacyChatHistory();
-  return removedThreads + removedLegacyEntries;
 }
 
 export async function resetAppSettings() {

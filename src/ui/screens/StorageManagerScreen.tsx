@@ -20,7 +20,7 @@ import {
     resetAppSettings,
     type AppStorageMetrics,
 } from '../../services/StorageManagerService';
-import { getReportedErrorMessage, reportPrivacySafeError } from '../../services/AppError';
+import { getReportedErrorMessage, reportPrivacySafeError, toAppError } from '../../services/AppError';
 import { formatModelFileSize } from '../../utils/modelSize';
 import { toTestIdSegment } from '../../utils/testIds';
 
@@ -163,15 +163,21 @@ export function StorageManagerScreen() {
         }, [refreshAll]),
     );
 
-    const runBusyAction = useCallback(async (key: Exclude<BusyAction, null>, action: () => Promise<void>) => {
+    const runBusyAction = useCallback(async (
+        key: Exclude<BusyAction, null>,
+        action: () => Promise<void>,
+        options?: { onError?: (error: unknown) => boolean },
+    ) => {
         try {
             setBusyAction(key);
             await action();
-        } catch (error: any) {
-            Alert.alert(
-                t('storageManager.actionFailedTitle'),
-                getReportedErrorMessage('StorageManagerScreen.runBusyAction', error, t),
-            );
+        } catch (error: unknown) {
+            if (!options?.onError?.(error)) {
+                Alert.alert(
+                    t('storageManager.actionFailedTitle'),
+                    getReportedErrorMessage('StorageManagerScreen.runBusyAction', error, t),
+                );
+            }
         } finally {
             if (mountedRef.current) {
                 setBusyAction(null);
@@ -257,6 +263,35 @@ export function StorageManagerScreen() {
     }, [runBusyAction, t]);
 
     const handleClearChatHistory = useCallback(() => {
+        function runClear(): void {
+            void runBusyAction(
+                'chat',
+                async () => {
+                    await clearChatHistory();
+                },
+                {
+                    onError: (error) => {
+                        if (toAppError(error).code !== 'chat_history_busy') {
+                            return false;
+                        }
+
+                        Alert.alert(
+                            t('storageManager.clearChatHistoryBusyTitle'),
+                            t('storageManager.clearChatHistoryBusyMessage'),
+                            [
+                                { text: t('common.cancel'), style: 'cancel' },
+                                {
+                                    text: t('storageManager.retryClearChatHistory'),
+                                    onPress: runClear,
+                                },
+                            ],
+                        );
+                        return true;
+                    },
+                },
+            );
+        }
+
         Alert.alert(
             t('storageManager.clearChatHistoryTitle'),
             t('storageManager.clearChatHistoryMessage'),
@@ -265,11 +300,7 @@ export function StorageManagerScreen() {
                 {
                     text: t('common.clear'),
                     style: 'destructive',
-                    onPress: () => {
-                        void runBusyAction('chat', async () => {
-                            await clearChatHistory();
-                        });
-                    },
+                    onPress: runClear,
                 },
             ],
         );

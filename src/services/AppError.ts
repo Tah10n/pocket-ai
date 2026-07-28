@@ -23,6 +23,7 @@ export type AppErrorCode =
   | 'message_too_long'
   | 'chat_model_not_loaded'
   | 'chat_model_mismatch'
+  | 'chat_history_busy'
   | 'multimodal_not_ready'
   | 'chat_attachment_copy_failed'
   | 'chat_attachment_limit_exceeded'
@@ -56,6 +57,7 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   message_too_long: 'common.errors.messageTooLong',
   chat_model_not_loaded: 'common.errors.chatModelNotLoaded',
   chat_model_mismatch: 'common.errors.chatModelMismatch',
+  chat_history_busy: 'common.errors.chatHistoryBusy',
   multimodal_not_ready: 'common.errors.multimodalNotReady',
   chat_attachment_copy_failed: 'common.errors.chatAttachmentCopyFailed',
   chat_attachment_limit_exceeded: 'common.errors.chatAttachmentLimitExceeded',
@@ -139,6 +141,7 @@ const SAFE_APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
   'message_too_long',
   'chat_model_not_loaded',
   'chat_model_mismatch',
+  'chat_history_busy',
   'multimodal_not_ready',
   'chat_attachment_copy_failed',
   'chat_attachment_limit_exceeded',

@@ -48,6 +48,7 @@ import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
+import { clearChatHistory } from '../../src/services/ChatHistoryService';
 import {
   armAndroidQaGenerationGate,
   getAndroidQaGenerationEvidenceSnapshot,
@@ -82,6 +83,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  clearLegacyChatHistory: jest.fn().mockReturnValue(0),
   getSettings: jest.fn(),
   getGenerationParametersForModel: jest.fn(),
 }));
@@ -6088,6 +6090,98 @@ describe('useChatSession', () => {
     expect(afterLatePromptPreparation.messages.map((message) => message.id)).toEqual(originalMessageIds);
     expectNoStreamingProgressArtifacts(prepared.threadId);
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears history during pre-native branch regeneration without a late restore', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolvePromptCount: (() => void) | undefined;
+    exactPromptTokenCache.clear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+          resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      await expect(clearChatHistory()).resolves.toBe(1);
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBeUndefined();
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await regenerationPromise;
+    });
+
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expectNoStreamingProgressArtifacts(prepared.threadId);
+  });
+
+  it('clears history at the native-completion boundary without resurrecting the branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    const completion = createDeferred<{ text: string }>();
+    let clearPromise: Promise<number> | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => {
+      clearPromise = clearChatHistory();
+      return completion.promise;
+    });
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(clearPromise).toBeDefined();
+    });
+    await act(async () => {
+      await expect(clearPromise).resolves.toBe(1);
+    });
+
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+
+    await act(async () => {
+      completion.resolve({ text: 'Late branch completion' });
+      await regenerationPromise;
+    });
+
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(prepared.threadId);
   });
 
   it('prompt preparation error before first token restores the previous branch', async () => {

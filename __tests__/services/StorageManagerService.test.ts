@@ -37,6 +37,10 @@ jest.mock('../../src/services/LLMEngineService', () => ({
   },
 }));
 
+jest.mock('../../src/services/ChatGenerationService', () => ({
+  stopAllGenerationWork: jest.fn().mockResolvedValue('drained'),
+}));
+
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
     getModels: jest.fn().mockReturnValue([]),
@@ -78,6 +82,7 @@ import { __resetStorageManagerDirectorySizeCacheForTests } from '../../src/servi
 import { offloadModel } from '../../src/services/StorageManagerService';
 import { resetAppSettings } from '../../src/services/StorageManagerService';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { stopAllGenerationWork } from '../../src/services/ChatGenerationService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { modelCatalogService } from '../../src/services/ModelCatalogService';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
@@ -145,17 +150,32 @@ function createDownloadedProjector(overrides: Partial<ProjectorArtifact> = {}): 
 
 describe('StorageManagerService', () => {
   const mockClearAllThreads = jest.fn();
+  let mockThreads: Record<string, unknown>;
+  let mockActiveThreadId: string | null;
 
   beforeEach(() => {
     jest.clearAllMocks();
     __resetStorageManagerDirectorySizeCacheForTests();
     performanceMonitor.clear();
     performanceMonitor.setEnabled(true);
-    mockClearAllThreads.mockReturnValue(2);
-    (clearLegacyChatHistory as jest.Mock).mockReturnValue(3);
-    (useChatStore.getState as jest.Mock).mockReturnValue({
-      clearAllThreads: mockClearAllThreads,
+    mockThreads = {
+      first: { id: 'first' },
+      second: { id: 'second' },
+    };
+    mockActiveThreadId = 'first';
+    mockClearAllThreads.mockImplementation(() => {
+      const removedCount = Object.keys(mockThreads).length;
+      mockThreads = {};
+      mockActiveThreadId = null;
+      return removedCount;
     });
+    (clearLegacyChatHistory as jest.Mock).mockReturnValue(3);
+    (useChatStore.getState as jest.Mock).mockImplementation(() => ({
+      activeThreadId: mockActiveThreadId,
+      clearAllThreads: mockClearAllThreads,
+      threads: mockThreads,
+    }));
+    (stopAllGenerationWork as jest.Mock).mockResolvedValue('drained');
     mockedRegistry.getModels.mockReturnValue([]);
     mockedRegistry.getModel.mockReturnValue(undefined);
     mockedRegistry.validateRegistry.mockResolvedValue(undefined);
@@ -188,15 +208,59 @@ describe('StorageManagerService', () => {
     performanceMonitor.setEnabled(false);
   });
 
-  it('interrupts active completions before clearing persisted chat history', async () => {
+  it('drains all generation work before clearing persisted chat history', async () => {
     await expect(clearChatHistory()).resolves.toBe(5);
 
-    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(stopAllGenerationWork).toHaveBeenCalledTimes(1);
     expect(mockClearAllThreads).toHaveBeenCalledTimes(1);
     expect(clearLegacyChatHistory).toHaveBeenCalledTimes(1);
     expect(
-      (llmEngineService.interruptActiveCompletion as jest.Mock).mock.invocationCallOrder[0],
+      (stopAllGenerationWork as jest.Mock).mock.invocationCallOrder[0],
     ).toBeLessThan(mockClearAllThreads.mock.invocationCallOrder[0]);
+  });
+
+  it('throws chat_history_busy when clear returns zero and threads remain after one retry', async () => {
+    mockClearAllThreads.mockReturnValue(0);
+
+    await expect(clearChatHistory()).rejects.toMatchObject({
+      code: 'chat_history_busy',
+      details: {
+        drainResult: 'drained',
+        remainingThreadCount: 2,
+      },
+    });
+
+    expect(mockClearAllThreads).toHaveBeenCalledTimes(2);
+    expect(clearLegacyChatHistory).not.toHaveBeenCalled();
+    expect(mockThreads).toHaveProperty('first');
+  });
+
+  it('accepts a zero clear count when chat history is already empty', async () => {
+    mockThreads = {};
+    mockActiveThreadId = null;
+    mockClearAllThreads.mockReturnValue(0);
+
+    await expect(clearChatHistory()).resolves.toBe(3);
+
+    expect(mockClearAllThreads).toHaveBeenCalledTimes(1);
+    expect(clearLegacyChatHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a partial clear postcondition instead of reporting false success', async () => {
+    mockClearAllThreads.mockImplementation(() => {
+      delete mockThreads.first;
+      mockActiveThreadId = 'second';
+      return 1;
+    });
+
+    await expect(clearChatHistory()).rejects.toMatchObject({
+      code: 'chat_history_busy',
+      details: {
+        remainingThreadCount: 1,
+      },
+    });
+
+    expect(clearLegacyChatHistory).not.toHaveBeenCalled();
   });
 
   it('uses the actual downloaded file size when persisted model metadata is unknown', async () => {

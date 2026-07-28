@@ -16,6 +16,15 @@ import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
 import { registry } from '../services/LocalStorageRegistry';
 import {
+  __resetChatGenerationServiceForTests,
+  beginChatGenerationWork,
+  isChatGenerationCancelledError,
+  registerActiveChatGenerationStop,
+  registerChatGenerationFallbackStop,
+  stopAllGenerationWork,
+  type ChatGenerationWorkHandle,
+} from '../services/ChatGenerationService';
+import {
   ChatMessage,
   ChatThread,
   LlmChatMessage,
@@ -118,12 +127,22 @@ type AttachmentFileResolution = {
   exists: boolean;
 };
 
-type AttachmentFileResolver = (localUri: string) => Promise<AttachmentFileResolution>;
+type AttachmentCancellationGate = {
+  getCancellationError: () => unknown;
+  isCancellationRequested: () => boolean;
+};
+
+type AttachmentFileResolver = (
+  (localUri: string) => Promise<AttachmentFileResolution>
+) & {
+  cancellationGate?: AttachmentCancellationGate;
+};
 
 type PreparedAttachmentResolution = {
   readonly readinessIdentity: string;
   readonly uniqueFilesystemLookupCount: number;
   readonly finalFilesystemLookupCount: number;
+  readonly cancellationGate: AttachmentCancellationGate;
   resolveFile: AttachmentFileResolver;
   resolveFileForFinalValidation: AttachmentFileResolver;
   setCancellationCheck: (check: () => void) => void;
@@ -309,11 +328,69 @@ function createPreparedAttachmentResolution(
   const fileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
   const finalFileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
   let cancellationCheck: () => void = () => undefined;
+  let cancellationError: unknown = null;
   let readinessIdentity = buildPromptMultimodalReadinessIdentity(readiness, expectedModelId);
   let uniqueFilesystemLookupCount = 0;
   let finalFilesystemLookupCount = 0;
 
+  const cancellationGate: AttachmentCancellationGate = {
+    getCancellationError: () => (
+      cancellationError ?? new Error('Attachment preparation was cancelled.')
+    ),
+    isCancellationRequested: () => {
+      if (cancellationError) {
+        return true;
+      }
+      try {
+        cancellationCheck();
+        return false;
+      } catch (error) {
+        cancellationError = error;
+        return true;
+      }
+    },
+  };
+
+  const resolveFile: AttachmentFileResolver = (localUri) => {
+    if (cancellationGate.isCancellationRequested()) {
+      return Promise.reject(cancellationGate.getCancellationError());
+    }
+    const existing = fileResolutionByInputUri.get(localUri);
+    if (existing) {
+      return existing;
+    }
+    const resolution = resolvePreparedAttachmentFile(localUri);
+    fileResolutionByInputUri.set(localUri, resolution);
+    return resolution;
+  };
+  resolveFile.cancellationGate = cancellationGate;
+
+  const resolveFileForFinalValidation: AttachmentFileResolver = (localUri) => {
+    if (cancellationGate.isCancellationRequested()) {
+      return Promise.reject(cancellationGate.getCancellationError());
+    }
+    const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
+    if (!normalizedUri) {
+      return Promise.resolve({ normalizedUri: null, exists: false });
+    }
+
+    let lookup = finalFileExistenceByNormalizedUri.get(normalizedUri);
+    if (!lookup) {
+      finalFilesystemLookupCount += 1;
+      lookup = (async () => {
+        const exists = await doesChatAttachmentFileExist(normalizedUri);
+        cancellationGate.isCancellationRequested();
+        return exists;
+      })();
+      finalFileExistenceByNormalizedUri.set(normalizedUri, lookup);
+    }
+
+    return lookup.then((exists) => ({ normalizedUri, exists }));
+  };
+  resolveFileForFinalValidation.cancellationGate = cancellationGate;
+
   return {
+    cancellationGate,
     get readinessIdentity() {
       return readinessIdentity;
     },
@@ -323,38 +400,11 @@ function createPreparedAttachmentResolution(
     get finalFilesystemLookupCount() {
       return finalFilesystemLookupCount;
     },
-    resolveFile: (localUri) => {
-      cancellationCheck();
-      const existing = fileResolutionByInputUri.get(localUri);
-      if (existing) {
-        return existing;
-      }
-      const resolution = resolvePreparedAttachmentFile(localUri);
-      fileResolutionByInputUri.set(localUri, resolution);
-      return resolution;
-    },
-    resolveFileForFinalValidation: (localUri) => {
-      cancellationCheck();
-      const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
-      if (!normalizedUri) {
-        return Promise.resolve({ normalizedUri: null, exists: false });
-      }
-
-      let lookup = finalFileExistenceByNormalizedUri.get(normalizedUri);
-      if (!lookup) {
-        finalFilesystemLookupCount += 1;
-        lookup = (async () => {
-          const exists = await doesChatAttachmentFileExist(normalizedUri);
-          cancellationCheck();
-          return exists;
-        })();
-        finalFileExistenceByNormalizedUri.set(normalizedUri, lookup);
-      }
-
-      return lookup.then((exists) => ({ normalizedUri, exists }));
-    },
+    resolveFile,
+    resolveFileForFinalValidation,
     setCancellationCheck: (check) => {
       cancellationCheck = check;
+      cancellationError = null;
     },
     updateReadinessIdentity: (nextReadiness, nextExpectedModelId) => {
       readinessIdentity = buildPromptMultimodalReadinessIdentity(nextReadiness, nextExpectedModelId);
@@ -372,7 +422,7 @@ function createPreparedAttachmentResolution(
       uniqueFilesystemLookupCount += 1;
       lookup = (async () => {
         const exists = await doesChatAttachmentFileExist(normalizedUri);
-        cancellationCheck();
+        cancellationGate.isCancellationRequested();
         return exists;
       })();
       fileExistenceByNormalizedUri.set(normalizedUri, lookup);
@@ -509,6 +559,7 @@ function resolveReadyMediaAttachmentDrafts({
 
 async function processDocumentAttachmentDraftsForInference(
   drafts: readonly ChatDocumentAttachmentDraft[],
+  cancellationGate?: AttachmentCancellationGate,
 ): Promise<ProcessedDocumentAttachmentDraftsForInference> {
   if (drafts.length === 0) {
     return { attachments: [], contentParts: [] };
@@ -529,6 +580,7 @@ async function processDocumentAttachmentDraftsForInference(
         contentPart: buildDocumentAttachmentTextPart(result),
       };
     },
+    cancellationGate,
   );
 
   return {
@@ -580,6 +632,42 @@ function createAssistantTurnPersistenceError(
   );
 }
 
+async function settleActiveChatGenerationForStop(
+  generation: ActiveGenerationState,
+): Promise<void> {
+  generation.stopRequested = true;
+  releaseAndroidQaGenerationGate(generation.messageId);
+
+  const settlementResult = generation.commitTerminalState
+    ? generation.commitTerminalState()
+    : useChatStore.getState().finalizeAssistantTurn(
+        generation.threadId,
+        generation.messageId,
+        { outcome: 'stopped' },
+      );
+  if (settlementResult.status === 'persistence_failed') {
+    throw createAssistantTurnPersistenceError(settlementResult);
+  }
+
+  if (
+    sharedGenerationState.current === generation
+    && !generation.nativeCompletionStarted
+  ) {
+    sharedGenerationState.current = null;
+  }
+}
+
+registerChatGenerationFallbackStop({
+  isActive: () => sharedGenerationState.current !== null,
+  hasNativeCompletion: () => sharedGenerationState.current?.nativeCompletionStarted === true,
+  stop: async () => {
+    const generation = sharedGenerationState.current;
+    if (generation) {
+      await settleActiveChatGenerationForStop(generation);
+    }
+  },
+});
+
 function isMatchingGeneration(threadId: string, messageId: string) {
   return (
     sharedGenerationState.current?.threadId === threadId &&
@@ -621,6 +709,7 @@ export function shouldFlushAssistantStreamPatchOnBoundary(content: string) {
 
 export function resetSharedGenerationStateForTests() {
   resetActiveChatGenerationRuntimeForPrivateStorageReset();
+  __resetChatGenerationServiceForTests();
 }
 
 export function resetActiveChatGenerationRuntimeForPrivateStorageReset(): void {
@@ -975,6 +1064,7 @@ async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
   mapper: (item: T, index: number) => Promise<R>,
+  cancellationGate?: AttachmentCancellationGate,
 ): Promise<R[]> {
   if (items.length === 0) {
     return [];
@@ -986,11 +1076,21 @@ async function mapWithConcurrency<T, R>(
 
   await Promise.all(Array.from({ length: workerCount }, async () => {
     while (nextIndex < items.length) {
+      if (cancellationGate?.isCancellationRequested()) {
+        return;
+      }
       const currentIndex = nextIndex;
       nextIndex += 1;
       results[currentIndex] = await mapper(items[currentIndex], currentIndex);
     }
   }));
+
+  if (cancellationGate?.isCancellationRequested()) {
+    // The owning generationWork waiter delivers the cancellation to the active
+    // pipeline. Returning only completed items lets already-started workers
+    // settle without producing a second, detached rejection.
+    return results.filter((result): result is R => result !== undefined);
+  }
 
   return results;
 }
@@ -1037,6 +1137,7 @@ async function assertDraftAttachmentFilesExist(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const missingDrafts = attachmentChecks
@@ -1075,6 +1176,7 @@ async function assertMediaDraftAttachmentFilesExist(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const missingDrafts = attachmentChecks
@@ -1109,6 +1211,7 @@ async function assertMessageAttachmentFilesExist(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const missingAttachments = attachmentChecks
@@ -1260,6 +1363,7 @@ async function resolveLlmMessageAttachmentsForInference(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
@@ -1369,6 +1473,7 @@ async function resolveRetainedMessagesForInferenceAttachments(
       multimodalReadiness,
       expectedModelId,
     ),
+    resolveAttachmentFile.cancellationGate,
   );
 
   assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness, expectedModelId);
@@ -1809,6 +1914,7 @@ export const useChatSession = () => {
       expectedModelId?: string;
       multimodalReadiness?: MultimodalReadinessState;
       attachmentResolution?: PreparedAttachmentResolution;
+      generationWork?: ChatGenerationWorkHandle;
     } = {},
   ) => {
     const storedThread = assertThreadModelExecutionInvariant(
@@ -1835,12 +1941,14 @@ export const useChatSession = () => {
       nativeCompletionStarted: false,
     };
     sharedGenerationState.current = generationState;
+    let unregisterGenerationStop: () => void = () => undefined;
     const isAndroidQaEvidenceEnabled = isAndroidQaGenerationEvidenceEnabled();
     if (isAndroidQaEvidenceEnabled) {
       beginAndroidQaGeneration(assistantMessageId);
     }
 
     const throwIfGenerationStopped = () => {
+      completionOptions.generationWork?.assertCurrent();
       if (generationState.stopRequested) {
         throw new Error('Generation was stopped before native completion started.');
       }
@@ -1855,6 +1963,9 @@ export const useChatSession = () => {
     const promptPreparationSpan = performanceMonitor.isEnabled()
       ? performanceMonitor.startSpan('chat.prompt.total')
       : null;
+    const waitForGenerationWork = <T>(promise: Promise<T>): Promise<T> => (
+      completionOptions.generationWork?.waitFor(promise) ?? promise
+    );
     const endPromptPreparationSpan = promptPreparationSpan
       ? (
           outcome: 'success' | 'cancelled' | 'error',
@@ -2127,6 +2238,10 @@ export const useChatSession = () => {
     };
 
     let releasePromptPreparation: (() => void) | null = null;
+    unregisterGenerationStop = registerActiveChatGenerationStop({
+      hasNativeCompletion: () => generationState.nativeCompletionStarted,
+      stop: () => settleActiveChatGenerationForStop(generationState),
+    });
     try {
       releasePromptPreparation = llmEngineService.beginPromptPreparation();
       const {
@@ -2143,7 +2258,7 @@ export const useChatSession = () => {
       attachmentResolution.setCancellationCheck(throwIfGenerationStopped);
       const promptContextIdentity = llmEngineService.getPromptContextIdentity();
 
-      await backgroundTaskService.startBackgroundInference(modelName);
+      await waitForGenerationWork(backgroundTaskService.startBackgroundInference(modelName));
 
       unsubscribeExpiration = backgroundTaskService.subscribeToExpiration(() => {
         if (!isMatchingGeneration(threadId, assistantMessageId)) {
@@ -2352,7 +2467,9 @@ export const useChatSession = () => {
         params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
-        const resolvedWindowMessages = await resolvePreparedMessages(windowMessages);
+        const resolvedWindowMessages = await waitForGenerationWork(
+          resolvePreparedMessages(windowMessages),
+        );
         throwIfGenerationStopped();
 
         return countResolvedPromptTokens(resolvedWindowMessages, params);
@@ -2416,7 +2533,9 @@ export const useChatSession = () => {
             ...getPrivacySafeErrorLogDetails(error),
           });
           didUseHeuristicPromptTokens = true;
-          messages = await resolvePreparedMessages(getThreadInferenceWindow(thread, windowOptions).messages);
+          messages = await waitForGenerationWork(
+            resolvePreparedMessages(getThreadInferenceWindow(thread, windowOptions).messages),
+          );
           promptTokens = estimateLlmMessagesTokens(messages);
           promptSafetyMarginTokens = Math.max(
             0,
@@ -2492,20 +2611,24 @@ export const useChatSession = () => {
           };
         };
 
-        const preparedMessages = await resolvePreparedMessages(messages);
+        const preparedMessages = await waitForGenerationWork(resolvePreparedMessages(messages));
         throwIfGenerationStopped();
-        preparedRequest = await buildPreparedRequest(preparedMessages, promptTokens);
+        preparedRequest = await waitForGenerationWork(
+          buildPreparedRequest(preparedMessages, promptTokens),
+        );
 
         const latestPreparedUserMessageIndex = getLatestUserLlmMessageIndex(preparedRequest.messages);
         const latestPreparedUserMessage = preparedRequest.messages[latestPreparedUserMessageIndex];
         if (latestPreparedUserMessage?.attachments?.length) {
-          const revalidatedLatestUserMessage = await resolveLlmMessageAttachmentsForInference(
-            latestPreparedUserMessage,
-            true,
-            latestUserMessageId,
-            attachmentResolution.resolveFileForFinalValidation,
-            effectiveMultimodalReadiness,
-            activeModelId,
+          const revalidatedLatestUserMessage = await waitForGenerationWork(
+            resolveLlmMessageAttachmentsForInference(
+              latestPreparedUserMessage,
+              true,
+              latestUserMessageId,
+              attachmentResolution.resolveFileForFinalValidation,
+              effectiveMultimodalReadiness,
+              activeModelId,
+            ),
           );
           throwIfGenerationStopped();
 
@@ -2514,9 +2637,13 @@ export const useChatSession = () => {
             revalidatedMessages[latestPreparedUserMessageIndex] = revalidatedLatestUserMessage;
             const revalidatedPromptTokens = didUseHeuristicPromptTokens
               ? estimateLlmMessagesTokens(revalidatedMessages)
-              : await countResolvedPromptTokens(revalidatedMessages, selectedTokenCountParams);
+              : await waitForGenerationWork(
+                  countResolvedPromptTokens(revalidatedMessages, selectedTokenCountParams),
+                );
             throwIfGenerationStopped();
-            preparedRequest = await buildPreparedRequest(revalidatedMessages, revalidatedPromptTokens);
+            preparedRequest = await waitForGenerationWork(
+              buildPreparedRequest(revalidatedMessages, revalidatedPromptTokens),
+            );
           }
         }
       } finally {
@@ -2814,6 +2941,7 @@ export const useChatSession = () => {
         sharedGenerationState.current = null;
       }
 
+      unregisterGenerationStop();
       if (wasCurrentGeneration && backgroundTaskService.isTaskActive('inference')) {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
@@ -2908,11 +3036,24 @@ export const useChatSession = () => {
       targetModelId,
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(targetModelId);
-    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    const generationWork = beginChatGenerationWork('append_user_message');
+    attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
+    let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
-      await assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile);
-      await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile);
-      const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
+      releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+      await generationWork.waitFor(
+        assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile),
+      );
+      await generationWork.waitFor(
+        assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile),
+      );
+      const processedDocumentAttachments = await generationWork.waitFor(
+        processDocumentAttachmentDraftsForInference(
+          documentAttachmentDrafts,
+          attachmentResolution.cancellationGate,
+        ),
+      );
+      generationWork.assertCurrent();
       const currentState = useChatStore.getState();
       if (
         currentState.inferenceRevision !== interactiveRevisionAtStart
@@ -3002,9 +3143,16 @@ export const useChatSession = () => {
         expectedModelId: threadModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
+        generationWork,
       });
+    } catch (error) {
+      if (isChatGenerationCancelledError(error)) {
+        return;
+      }
+      throw error;
     } finally {
-      releaseInteractivePromptPreparation();
+      releaseInteractivePromptPreparation?.();
+      generationWork.finish();
     }
   }, [
     appendMessage,
@@ -3017,74 +3165,7 @@ export const useChatSession = () => {
 
   const stopGeneration = useCallback(async () => {
     markInteractiveWorkStarted();
-    const generation = sharedGenerationState.current;
-    if (!generation) {
-      return;
-    }
-
-    generation.stopRequested = true;
-    releaseAndroidQaGenerationGate(generation.messageId);
-    let firstStopError: unknown;
-    let hasStopError = false;
-    let settlementResult: TerminalCommitResult | null = null;
-    const captureFirstStopError = (error: unknown) => {
-      if (!hasStopError) {
-        firstStopError = error;
-        hasStopError = true;
-      }
-    };
-
-    try {
-      settlementResult = generation.commitTerminalState
-        ? generation.commitTerminalState()
-        : useChatStore.getState().finalizeAssistantTurn(
-          generation.threadId,
-          generation.messageId,
-          { outcome: 'stopped' },
-        );
-      if (settlementResult.status === 'persistence_failed') {
-        captureFirstStopError(createAssistantTurnPersistenceError(settlementResult));
-      }
-    } catch (error) {
-      captureFirstStopError(error);
-    }
-
-    try {
-      if (generation.nativeCompletionStarted) {
-        await llmEngineService.interruptActiveCompletion();
-      } else {
-        if (typeof llmEngineService.cancelActiveContextOperations === 'function') {
-          const drainResult = await llmEngineService.cancelActiveContextOperations();
-          if (drainResult === 'timed_out') {
-            console.warn('[ChatSession] Timed out waiting for prompt preparation to stop');
-          }
-        }
-        await llmEngineService.stopCompletion();
-      }
-    } catch (error) {
-      captureFirstStopError(error);
-    }
-
-    try {
-      if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
-        await backgroundTaskService.stopBackgroundTask('inference');
-      }
-    } catch (error) {
-      captureFirstStopError(error);
-    }
-
-    if (
-      sharedGenerationState.current === generation
-      && settlementResult
-      && settlementResult.status !== 'persistence_failed'
-      && !generation.nativeCompletionStarted
-    ) {
-      sharedGenerationState.current = null;
-    }
-
-    if (hasStopError) {
-      throw firstStopError;
-    }
+    await stopAllGenerationWork({ blockNewWork: false });
   }, []);
 
   const regenerateFromUserMessage = useCallback(async (
@@ -3116,14 +3197,20 @@ export const useChatSession = () => {
       activeModelId,
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
-    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    const generationWork = beginChatGenerationWork('regenerate_user_message');
+    attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
+    let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
-      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-        targetMessage,
-        requestedMultimodalReadiness,
-        activeModelId,
-        attachmentResolution.resolveFile,
+      releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+      const effectiveMultimodalReadiness = await generationWork.waitFor(
+        assertUserMessageAttachmentsReadyForRegeneration(
+          targetMessage,
+          requestedMultimodalReadiness,
+          activeModelId,
+          attachmentResolution.resolveFile,
+        ),
       );
+      generationWork.assertCurrent();
       attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
       const currentState = useChatStore.getState();
       const currentThread = currentState.threads[activeThread.id];
@@ -3151,11 +3238,18 @@ export const useChatSession = () => {
         expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
+        generationWork,
       });
 
       return true;
+    } catch (error) {
+      if (isChatGenerationCancelledError(error)) {
+        return false;
+      }
+      throw error;
     } finally {
-      releaseInteractivePromptPreparation();
+      releaseInteractivePromptPreparation?.();
+      generationWork.finish();
     }
   }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
 
@@ -3201,14 +3295,20 @@ export const useChatSession = () => {
       activeModelId,
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
-    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    const generationWork = beginChatGenerationWork('regenerate_last_response');
+    attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
+    let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
-      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-        lastUserMessage,
-        model?.multimodalReadiness,
-        activeModelId,
-        attachmentResolution.resolveFile,
+      releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+      const effectiveMultimodalReadiness = await generationWork.waitFor(
+        assertUserMessageAttachmentsReadyForRegeneration(
+          lastUserMessage,
+          model?.multimodalReadiness,
+          activeModelId,
+          attachmentResolution.resolveFile,
+        ),
       );
+      generationWork.assertCurrent();
       attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
       const currentState = useChatStore.getState();
       const currentThread = currentState.threads[activeThread.id];
@@ -3250,30 +3350,38 @@ export const useChatSession = () => {
           expectedModelId: activeModelId,
           multimodalReadiness: effectiveMultimodalReadiness,
           attachmentResolution,
+          generationWork,
         });
 
         return true;
       };
 
       if (!canReplaceCurrentTurnAssistant) {
-        return regenerateFromLastUserWithPreparedAttachments();
+        return await regenerateFromLastUserWithPreparedAttachments();
       }
 
       const syncedThread = syncThreadParametersCallback(activeThread);
       const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
       if (!assistantMessageId) {
-        return regenerateFromLastUserWithPreparedAttachments();
+        return await regenerateFromLastUserWithPreparedAttachments();
       }
 
       await runAssistantCompletion(syncedThread.id, assistantMessageId, {
         expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
+        generationWork,
       });
 
       return true;
+    } catch (error) {
+      if (isChatGenerationCancelledError(error)) {
+        return false;
+      }
+      throw error;
     } finally {
-      releaseInteractivePromptPreparation();
+      releaseInteractivePromptPreparation?.();
+      generationWork.finish();
     }
   }, [
     activeThread,

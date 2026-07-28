@@ -302,6 +302,9 @@ class NotificationService {
                 || chatState.threads[threadId] == null
                 || !chatState.setActiveThread(threadId)
             ) {
+                performanceMonitor.incrementCounter('notification.staleTarget', 1, {
+                    staleNotificationTarget: true,
+                });
                 Alert.alert(
                     i18n.t('notifications.conversationUnavailable.title'),
                     i18n.t('notifications.conversationUnavailable.body'),

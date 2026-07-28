@@ -228,6 +228,15 @@ describe('StorageManagerService', () => {
     expect(
       (stopAllGenerationWork as jest.Mock).mock.invocationCallOrder[0],
     ).toBeLessThan(mockClearAllThreads.mock.invocationCallOrder[0]);
+    expect(performanceMonitor.snapshot().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'chat.history.clear',
+        meta: {
+          generationWorkStopped: true,
+          clearHistoryOutcome: 'success',
+        },
+      }),
+    ]));
   });
 
   it('throws chat_history_busy when clear returns zero and threads remain after one retry', async () => {
@@ -244,6 +253,16 @@ describe('StorageManagerService', () => {
     expect(mockClearAllThreads).toHaveBeenCalledTimes(2);
     expect(clearLegacyChatHistory).not.toHaveBeenCalled();
     expect(mockThreads).toHaveProperty('first');
+    expect(performanceMonitor.snapshot().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'chat.history.clear',
+        meta: {
+          generationWorkStopped: true,
+          clearHistoryOutcome: 'failure',
+          clearHistoryFailureCategory: 'chat_history_busy',
+        },
+      }),
+    ]));
   });
 
   it('accepts a zero clear count when chat history is already empty', async () => {

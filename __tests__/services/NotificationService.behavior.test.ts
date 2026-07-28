@@ -266,6 +266,7 @@ describe('NotificationService (behavior)', () => {
 
   it('routes a stale inference target safely without changing the valid active thread', async () => {
     const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    performanceMonitor.setEnabled(true);
     await notificationService.initialize();
     delete mockThreads['thread-1'];
 
@@ -288,6 +289,20 @@ describe('NotificationService (behavior)', () => {
       'notifications.conversationUnavailable.title',
       'notifications.conversationUnavailable.body',
     );
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'notification.staleTarget': 1,
+    }));
+    const staleTargetEvents = performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'notification.staleTarget',
+    );
+    expect(staleTargetEvents).toEqual([
+      expect.objectContaining({
+        meta: {
+          staleNotificationTarget: true,
+        },
+      }),
+    ]);
+    expect(JSON.stringify(staleTargetEvents)).not.toContain('thread-1');
     alertSpy.mockRestore();
   });
 

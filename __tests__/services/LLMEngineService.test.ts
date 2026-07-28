@@ -474,6 +474,87 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('keeps prompt state available across two normal turns without an unconditional cache clear', async () => {
+    await llmEngineService.load('test/model');
+    const clearCache = jest.fn().mockResolvedValue(undefined);
+    (llmEngineService as any).context.clearCache = clearCache;
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'First turn' }],
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [
+        { role: 'user', content: 'First turn' },
+        { role: 'assistant', content: 'First answer' },
+        { role: 'user', content: 'Second turn' },
+      ],
+    });
+
+    expect(
+      (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+    ).toHaveBeenCalledTimes(2);
+    expect(clearCache).not.toHaveBeenCalled();
+  });
+
+  it('keeps the common prefix reusable when regenerating without clearing the whole native cache', async () => {
+    await llmEngineService.load('test/model');
+    const clearCache = jest.fn().mockResolvedValue(undefined);
+    (llmEngineService as any).context.clearCache = clearCache;
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [
+        { role: 'system', content: 'Use the shared system prefix.' },
+        { role: 'user', content: 'Regenerate this turn.' },
+        { role: 'assistant', content: 'Previous answer' },
+      ],
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [
+        { role: 'system', content: 'Use the shared system prefix.' },
+        { role: 'user', content: 'Regenerate this turn.' },
+      ],
+    });
+
+    expect(clearCache).not.toHaveBeenCalled();
+    expect(
+      (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: [
+          { role: 'system', content: 'Use the shared system prefix.' },
+          { role: 'user', content: 'Regenerate this turn.' },
+        ],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('sends only the selected chat payload after switching conversations', async () => {
+    await llmEngineService.load('test/model');
+    const completionMock = (
+      llamaRn as unknown as { __completionMock: jest.Mock }
+    ).__completionMock;
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'Synthetic fact from chat A' }],
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'Independent question from chat B' }],
+    });
+
+    const secondRequest = completionMock.mock.calls[1]?.[0];
+    expect(secondRequest).toEqual(expect.objectContaining({
+      messages: [{ role: 'user', content: 'Independent question from chat B' }],
+    }));
+    expect(JSON.stringify(secondRequest)).not.toContain('Synthetic fact from chat A');
+  });
+
   it('passes explicit disabled prompt state cache parameters to every native init attempt', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
     const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
@@ -590,6 +671,59 @@ describe('LLMEngineService', () => {
     expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
       state_cache_budget_mb: 0,
       state_cache_max_checkpoints: 8,
+    }));
+  });
+
+  it('releases the old context and initializes a fresh model-specific cache on model switch', async () => {
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      id: modelId,
+      localPath: `${modelId.replace('/', '-')}.gguf`,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: false,
+        canDisableThinking: true,
+      },
+    }));
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
+      'general.architecture': 'mamba',
+      'general.type': 'model',
+      'mamba.block_count': 32,
+      'mamba.embedding_length': 4096,
+    });
+
+    await llmEngineService.load('test/model-a', { forceReload: true });
+    const firstContext = (llmEngineService as any).context;
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    (llamaRn.initLlama as jest.Mock).mockClear();
+
+    await llmEngineService.load('test/model-b');
+    const secondContext = (llmEngineService as any).context;
+
+    expect(secondContext).not.toBe(firstContext);
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      state_cache_budget_mb: 160,
+      state_cache_max_checkpoints: 8,
+    }));
+    expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+      activeModelId: 'test/model-b',
+      diagnostics: expect.objectContaining({
+        stateCacheBudgetMb: 160,
+        stateCacheArchitecture: 'mamba',
+      }),
     }));
   });
 
@@ -755,6 +889,53 @@ describe('LLMEngineService', () => {
     expect(serializedDiagnostics).not.toContain('test-dir/chat-attachments/image.jpg');
     expect(serializedDiagnostics).not.toContain('chat-attachments');
     expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('replaces image A with image B and removes media from a later text-only request', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    await llmEngineService.load('test/model');
+    const completionMock = (
+      llamaRn as unknown as { __completionMock: jest.Mock }
+    ).__completionMock;
+    const readiness = createReadyMultimodalReadiness();
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{
+        role: 'user',
+        content: 'Inspect image A',
+        mediaPaths: ['test-dir/chat-attachments/image-a.jpg'],
+      }],
+      multimodalReadiness: readiness,
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{
+        role: 'user',
+        content: 'Inspect image B',
+        mediaPaths: ['test-dir/chat-attachments/image-b.jpg'],
+      }],
+      multimodalReadiness: readiness,
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'Continue without an image' }],
+      multimodalReadiness: readiness,
+    });
+
+    expect(completionMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      media_paths: ['test-dir/chat-attachments/image-a.jpg'],
+    }));
+    expect(completionMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      media_paths: ['test-dir/chat-attachments/image-b.jpg'],
+    }));
+    expect(completionMock.mock.calls[1]?.[0]).not.toEqual(expect.objectContaining({
+      media_paths: expect.arrayContaining(['test-dir/chat-attachments/image-a.jpg']),
+    }));
+    expect(completionMock.mock.calls[2]?.[0]).not.toHaveProperty('media_paths');
+    expect(getFormattedChatMock().mock.calls[2]?.[0]).toEqual([
+      { role: 'user', content: 'Continue without an image' },
+    ]);
   });
 
   it('disables MTP per request when native image input is present', async () => {

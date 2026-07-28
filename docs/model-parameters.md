@@ -104,6 +104,58 @@ Vision-capable model loads also apply an internal multimodal safety rule when a 
 - If a vision-capable model is loaded before a projector is ready, the text-only context keeps the default `llama.rn` context-shifting behavior, then reloads with context shifting disabled before image chat becomes ready.
 - This is not exposed as a user setting; text-only model contexts and vision-capable contexts without a ready projector keep the default `llama.rn` behavior.
 
+### Automatic prompt state cache
+
+`llama.rn` 0.12.7 adds bounded cross-turn prompt state caching. Pocket AI controls it as
+an internal load-profile dimension; it is not a user-facing model parameter.
+
+This is different from the normal KV cache precision control:
+
+- KV cache precision changes the memory format used by the active model context.
+- Prompt state caching reserves optional memory for native checkpoints that can restore a
+  matching prompt prefix on a later completion.
+
+Every native initialization path passes an explicit budget and an explicit checkpoint
+limit. The initial compatibility gate is 0 MiB, and runtime policy can select the largest
+high-confidence fit from 160, 128, or 64 MiB. Enabled profiles use a maximum of 8
+checkpoints. If no candidate is safe, the explicit budget remains 0 MiB; the app never
+inherits llama.rn's upstream default implicitly.
+
+Eligibility comes from normalized GGUF architecture metadata, not model names:
+
+- recurrent: Mamba/Mamba 2 and RWKV 6/7 families;
+- hybrid: Jamba, Falcon H1, PLaMo 2, Granite hybrid, LFM2, Nemotron H,
+  Qwen 3 Next/3.5, Kimi Linear, and their supported MoE variants;
+- disabled: pure-attention, pure sliding-window attention, and unknown architectures.
+
+CPU and supported GPU profiles can use an eligible tier. Mamba 2 and Granite 4 hybrid are
+kept at 0 MiB on Hexagon/HTP. Low-memory signals, critical pressure, an uncertain or
+borderline base fit, a likely OOM, or a restricted safe-load decision also force 0 MiB.
+
+The whole selected budget is counted once as `promptStateCacheBytes` in the accurate
+memory estimate. Calibration cannot shrink that hard cap. Cache budget, checkpoint count,
+and policy version are part of calibration, retry, OOM-bound, and last-good identities, so
+a safe disabled profile cannot be mistaken for proof that a non-zero profile is safe.
+Legacy profiles without these dimensions are read as disabled and must pass the current
+policy before a non-zero budget can be used.
+
+Ordinary turns and regeneration leave the native cache available for safe prefix matching.
+Changing the loaded model releases the old context and its checkpoints. Each chat request
+still sends its complete conversation-scoped prompt and current media set; Pocket AI does
+not maintain a separate app-level checkpoint or media cache key.
+
+Diagnostics expose the selected `stateCacheBudgetMb`, `stateCacheMaxCheckpoints`,
+`stateCacheEnabled`, `stateCacheEligibility`, `stateCachePolicyReason`,
+`stateCachePolicyVersion`, `promptStateCacheBytes`, normalized architecture, and backend
+mode (`stateCacheArchitecture` and the existing `backendMode`). They deliberately do not
+claim cache hits, restored tokens, actual checkpoint count,
+or actual allocated bytes because the native API does not report those values.
+
+The most likely gains are repeated long prefixes, regeneration, edits, recurrent/hybrid
+architectures, and some multimodal scenarios. Do not assume a speedup for every model,
+backend, prompt, or device; use the
+[device validation runbook](./runtime-hardening-device-validation.md) for A/B evidence.
+
 ### Backend discovery (llama.rn)
 
 Pocket AI uses llama.rn backend discovery to decide whether it is safe to attempt GPU/NPU initialization:

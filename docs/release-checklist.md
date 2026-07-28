@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-07-22
+Last updated: 2026-07-28
 
 ## Purpose
 
@@ -97,6 +97,13 @@ The branch-regeneration command already selects a release APK and requires curre
 build/install provenance. Do not add `--skip-build` or `--preserve-running-app` to that
 command. Record the device model, serial, supported ABI list, selected ABI, final Git HEAD,
 APK SHA-256, report path, and the result of every step in the release evidence.
+
+When a release changes llama.rn, prompt state caching, model/context switching, memory
+policy, multimodal prompt identity, or notification routing, also complete the
+[Runtime Hardening Device Validation](./runtime-hardening-device-validation.md) matrix.
+Record every unavailable physical device, model, projector, accelerator backend, and
+memory-pressure scenario as unverified; an emulator build does not substitute for those
+combinations.
 
 For PR CI, `android-pack-catalog` selects the hosted catalog pack.
 `android-pack-branch-regeneration` instead dispatches the destructive 15-step release pack

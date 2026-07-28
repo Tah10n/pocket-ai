@@ -1,6 +1,6 @@
 # Runtime Performance Architecture
 
-Last updated: 2026-07-21
+Last updated: 2026-07-28
 
 ## Purpose
 
@@ -27,6 +27,12 @@ invalidation, or diagnostics privacy.
   progress is removed only after a successful terminal commit.
 - Editing or regenerating an earlier user turn keeps the complete old branch durable until
   recoverable replacement output exists and the replacement can be committed atomically.
+- A saved conversation's active model is authoritative. Sending stays blocked until that
+  exact model is loaded, and the engine repeats the model check immediately before native
+  completion.
+- Native prompt state is not cleared before ordinary turns or regeneration. Model/context
+  replacement is the hard isolation boundary, while every request still supplies its
+  complete, conversation-scoped prompt and current media set.
 - Success, stop, and error finalization update the message, metrics, and thread state in
   one store mutation and one logical persistence transaction.
 - Reasoning presentation parses normal delta streams in linear total character work.
@@ -42,6 +48,7 @@ invalidation, or diagnostics privacy.
 | Prompt-window display | [`useTruncationTracking.ts`](../src/hooks/useTruncationTracking.ts) | Reuse the last idle result while a thread is generating |
 | Inference request preparation | [`useChatSession.ts`](../src/hooks/useChatSession.ts) | Resolve attachments and final messages once per request |
 | Exact prompt counts | [`ExactPromptTokenCache.ts`](../src/services/ExactPromptTokenCache.ts) | Bounded LRU keyed by context and formatting identity |
+| Cross-turn prompt state | [`PromptStateCachePolicy.ts`](../src/services/PromptStateCachePolicy.ts) | Explicit memory-validated llama.rn budget; no implicit native default |
 | Transient assistant output | [`chatStore.ts`](../src/store/chatStore.ts) | Keep durable history stable during token patches |
 | Branch replacement | [`chatBranchReplacement.ts`](../src/store/chatBranchReplacement.ts) | Build and validate one canonical replacement plan for presentation, recovery, and terminal commit |
 | Streaming crash recovery | [`chatPersistence.ts`](../src/store/chatPersistence.ts) | Publish bounded checkpoints/deltas through a head-last commit, not the full thread |
@@ -159,6 +166,67 @@ Concurrent lookups share one native tokenization promise. Rejected operations ar
 immediately. A result is retained only after a successful consumer release, so a canceled
 request cannot populate the cache for later work.
 
+### Conversation-model and destructive-operation boundaries
+
+The active thread's model is the source of truth for an existing conversation.
+`settings.activeModelId` remains the default for a new chat and the last model selected
+elsewhere, but it cannot silently rewrite an existing thread. Opening a saved chat either
+loads its exact downloaded model or leaves input disabled with an explicit load, retry, or
+Models action. Header selections use latest-operation-wins request identity; changing chats
+or unmounting invalidates an older completion callback.
+
+Every generation entry point carries the expected thread model into
+`LLMEngineService.chatCompletion`. The service checks that identity before prompt work and
+again at the native boundary. A mismatch fails with a typed error before completion starts,
+without changing the thread model or leaving a branch replacement active.
+
+Clearing all history first blocks new generation work and drains both pre-native prompt
+preparation and native completion. A branch replacement is restored or invalidated before
+the durable clear. The Storage Manager verifies the postcondition and reports
+`chat_history_busy` when conversations remain instead of showing false success. Late
+callbacks are generation-guarded and cannot recreate cleared messages.
+
+### Cross-turn prompt state cache
+
+Pocket AI integrates the prompt state cache exposed by `llama.rn` 0.12.7. This cache
+is separate from the ordinary KV cache:
+
+- the KV cache is the model's token-generation state for the active context;
+- the prompt state cache keeps bounded native checkpoints that may avoid reprocessing a
+  matching prompt prefix across turns.
+
+Pocket AI does not implement a second JavaScript or native checkpoint format and does not
+construct media cache keys. Each native context receives both
+`state_cache_budget_mb` and `state_cache_max_checkpoints` explicitly, so the upstream
+default can never enable optional memory silently. Ordinary turns and regeneration do not
+call `clearCache`; a native prefix can therefore be reused when it actually matches.
+Every completion still receives the full current request payload. Changing conversations
+cannot inject another chat's messages, changing models releases the old context, and
+changing or removing media changes the request payload and prompt identity.
+
+The runtime evaluates budgets in descending order: 160 MiB, 128 MiB, 64 MiB, then
+disabled at 0 MiB. Enabled profiles use at most 8 checkpoints. A non-zero tier is allowed
+only for known recurrent or hybrid GGUF architectures after an accurate, high-confidence
+memory fit. Pure-attention, pure sliding-window attention, unknown architectures,
+low-memory/critical-pressure states, restricted safe-load decisions, and unsafe or
+uncertain fits receive 0 MiB. Granite 4 hybrid and Mamba 2 remain disabled on
+Hexagon/HTP because that backend/architecture combination is not supported by this gate.
+
+The complete configured budget is recorded once as `promptStateCacheBytes` and added once
+to required memory. Calibration may adjust measured model or runtime components, but it
+cannot scale down this hard cap. Candidate selection repeats the final fit after adding
+the budget. Calibration keys, initialization-attempt identity, persisted OOM bounds, and
+last-good profile identity all include the budget, checkpoint count, and policy version.
+A successful disabled profile therefore does not authorize 160 MiB, an OOM at 160 MiB
+does not block 0 MiB, and legacy records without cache dimensions load as disabled until
+the current policy validates them.
+
+Expected benefit is concentrated in repeated long prefixes, regeneration, edits,
+recurrent/hybrid architectures, and some multimodal flows. It is not a speed guarantee
+for every model or request. Current llama.rn APIs do not expose authoritative hit count,
+restored-token count, checkpoint count, or actual allocated cache bytes, so Pocket AI does
+not synthesize those metrics.
+
 ### Streaming persistence and recovery
 
 Streaming patches never enter durable-thread persistence. A debounced V2 progress chain
@@ -244,6 +312,20 @@ outcome, probable-OOM state, and a bounded failure category. The
 `model.init.profileDuplicate` is the subset rejected as an exact attempt duplicate. Model
 paths and raw native errors are not trace metadata.
 
+## Notification lifecycle
+
+Notification service setup is a synchronous single-flight boundary around the asynchronous
+handler, Android channel, response-listener, and initial-response work. Concurrent callers
+await the same promise. Success publishes one listener; a failed attempt removes any
+partial listener and resets the promise for retry. Root unmount/dispose advances a
+generation guard so an older in-flight initialization cannot publish a subscription later.
+
+Inference notification taps validate the target against the current chat store before
+changing `activeThreadId`. A missing, deleted, malformed, or rejected target shows neutral
+localized copy and opens the conversation list. Deleting a thread also dismisses its
+deterministic inference notification. Notification payload content and user-generated
+conversation names are not logged.
+
 ## Catalog request ownership
 
 Each mounted catalog hook owns a `CatalogSearchSession`. A query change or unmount cancels
@@ -294,7 +376,11 @@ Important trace families include:
 | `chat.stream.nativeCallback`, `chat.stream.presentation`, `chat.stream.presentationCharacters`, `chat.stream.patch`, and `chat.stream.historyTraversal` | Native callbacks, parser applications, characters consumed by presentation parsing, streaming patches, and accidental history traversal |
 | `chat.persist.*` | Sanitization, serialization, storage writes, bytes, progress, and terminal writes |
 | `chat.turn.*` | Terminal mutation and persistence-transaction counts |
+| `chat.modelMismatchBlocked` and `chat.modelSelection.{applied,stale,failed,invalidated}` | Service-boundary model blocks and bounded latest-operation outcomes |
+| `chat.history.clear` | `generationWorkStopped`, success/failure outcome, and bounded `chat_history_busy` failure category |
 | `model.init.total`, `model.init.attempt`, `model.init.profileSkipped`, and `model.init.profileDuplicate` | Total load lifecycle, bounded attempt sequence, guarded skips, and duplicate rejection |
+| model diagnostics state-cache fields | Selected budget/checkpoints, enablement, eligibility, policy reason/version, reserved bytes, architecture, and backend |
+| `notification.initialization` and `notification.staleTarget` | Privacy-safe initialization outcome/failure category and boolean `staleNotificationTarget`; no payload content |
 | `catalog.search.*` | Per-session lifecycle and cancellation reason |
 | `catalog.resource.*` | Shared request count, deduplication, and consumer detach |
 | `catalog.deferredMetadata.batch` | Bounded deferred-metadata batch work |
@@ -313,6 +399,7 @@ characters instead of wall-clock thresholds.
 | Truncation display | The inference window could be built before the generating-state fast return | 100 patches in a 1,000-message thread add 0 `getThreadInferenceWindow` calls; terminal state adds 1 |
 | Attachment preparation | Token counting and final completion could resolve the same retained history repeatedly or use a newly missing file | Stable retained history is checked once; only the latest attachment receives one final TOCTOU recheck, and deletion before completion prevents the native call |
 | Prompt tokenization | Identical work in a later generation could call the native tokenizer again | Concurrent and settled identical keys produce 1 native count; every context/format/media identity change is a miss |
+| Prompt state lifecycle | Ordinary turns, regeneration, chat changes, model changes, or media changes could clear too much or reuse incompatible input | Two ordinary turns and regeneration call native completion without `clearCache`; chat B contains no chat A payload; a model switch releases and replaces the context; image A, image B, and text-only requests carry distinct media payloads |
 | Streaming state | Every patch replaced the thread/messages path | 100 patches retain the durable thread, messages array, presentation array, and all 1,000 historical objects |
 | Streaming persistence | A streaming flush could sanitize/serialize the full thread or repeatedly rewrite the full assistant prefix | 100 in-memory patches produce 0 durable sanitizations, stringifications, or thread writes. Initial flush performs 3 bounded writes (operation, checkpoint, head); normal flushes perform 2 (delta, head). The 1 KiB/64 KiB/512 KiB fixtures parse no previous snapshot, write operation metadata once, and serialize at most 3x the final assistant characters including compaction |
 | Branch replacement | Editing an earlier turn durably removed the old tail before the first replacement token | Over 1,000 messages, 100 replacement patches retain the durable thread, durable message array, presentation array, and surviving prefix objects; they perform 0 full-thread sanitizations/stringifications/writes, and one flush publishes one bounded operation/checkpoint/head set |
@@ -352,6 +439,10 @@ The final steps delete the fixture and clear all chat history, so the pack is on
 requires disposable prepared data. Its exact preconditions, 15 stable scenario IDs, and
 evidence locations are documented in the
 [Release Checklist](./release-checklist.md#destructive-branch-regeneration-pack).
+
+The broader model/backend/state-cache A/B procedure, including warm turns, memory
+pressure, model switching, notification concurrency, and multimodal invalidation, is in
+the [Runtime Hardening Device Validation Runbook](./runtime-hardening-device-validation.md).
 
 For this pack, the supporting accessibility and generation-control evidence is compiled
 into a verified QA release build. Shipping Android builds reject that configuration.

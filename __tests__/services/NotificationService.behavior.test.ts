@@ -2,6 +2,17 @@ import BackgroundService from 'react-native-background-actions';
 import { Alert, Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
+import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 jest.mock('../../src/i18n', () => ({
   t: (key: string, _options?: any) => key,
@@ -30,8 +41,11 @@ describe('NotificationService (behavior)', () => {
   const originalPlatformOS = Platform.OS;
 
   beforeEach(async () => {
+    notificationService.dispose();
     jest.clearAllMocks();
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatformOS });
     (notificationService as any).initialized = false;
+    (notificationService as any).initializationPromise = null;
     (notificationService as any).permissionState = 'unknown';
     (notificationService as any).hasHandledInitialResponse = false;
     (notificationService as any).responseSubscription = undefined;
@@ -51,11 +65,166 @@ describe('NotificationService (behavior)', () => {
     (Notifications.requestPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
     (Notifications.getNotificationChannelsAsync as jest.Mock).mockResolvedValue([]);
     (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValue(null);
+    (Notifications.setNotificationHandler as jest.Mock).mockImplementation(() => undefined);
+    (Notifications.setNotificationChannelAsync as jest.Mock).mockResolvedValue(null);
+    (Notifications.addNotificationResponseReceivedListener as jest.Mock).mockImplementation(
+      () => ({ remove: jest.fn() }),
+    );
+    performanceMonitor.clear();
+    performanceMonitor.setEnabled(false);
     await BackgroundService.stop();
   });
 
   afterAll(() => {
+    notificationService.dispose();
+    performanceMonitor.setEnabled(false);
     Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatformOS });
+  });
+
+  it('single-flights concurrent initialize and permission requests through one listener', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const firstChannel = createDeferred<null>();
+    const subscription = { remove: jest.fn() };
+    (Notifications.setNotificationChannelAsync as jest.Mock)
+      .mockImplementationOnce(() => firstChannel.promise)
+      .mockResolvedValue(null);
+    (Notifications.addNotificationResponseReceivedListener as jest.Mock).mockReturnValue(subscription);
+
+    const initializePromise = notificationService.initialize();
+    const permissionPromise = notificationService.requestPermissions();
+
+    expect((notificationService as any).initializationPromise).toBe(initializePromise);
+    await Promise.resolve();
+    expect(Notifications.setNotificationHandler).toHaveBeenCalledTimes(1);
+    expect(Notifications.setNotificationChannelAsync).toHaveBeenCalledTimes(1);
+    expect(Notifications.addNotificationResponseReceivedListener).not.toHaveBeenCalled();
+
+    firstChannel.resolve(null);
+    await expect(Promise.all([initializePromise, permissionPromise])).resolves.toEqual([
+      undefined,
+      true,
+    ]);
+
+    expect(Notifications.setNotificationHandler).toHaveBeenCalledTimes(1);
+    expect(Notifications.setNotificationChannelAsync).toHaveBeenCalledTimes(2);
+    expect(Notifications.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
+    expect(Notifications.getLastNotificationResponseAsync).toHaveBeenCalledTimes(1);
+    expect((notificationService as any).responseSubscription).toBe(subscription);
+    expect((notificationService as any).initializationPromise).toBeNull();
+  });
+
+  it('single-flights three public initialization paths', async () => {
+    const results = await Promise.all([
+      notificationService.initialize(),
+      notificationService.canStartForegroundServiceNotifications(),
+      notificationService.sendLocalNotification({ title: 'ready' }),
+    ]);
+
+    expect(results).toEqual([undefined, true, 'mock-notification-id']);
+    expect(Notifications.setNotificationHandler).toHaveBeenCalledTimes(1);
+    expect(Notifications.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not register another listener after successful initialization', async () => {
+    await notificationService.initialize();
+    await notificationService.initialize();
+    await notificationService.requestPermissions();
+
+    expect(Notifications.setNotificationHandler).toHaveBeenCalledTimes(1);
+    expect(Notifications.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
+    expect(Notifications.getLastNotificationResponseAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans state after a pre-listener failure and supports a clean retry', async () => {
+    const setupError = new Error('handler setup failed');
+    (Notifications.setNotificationHandler as jest.Mock).mockImplementationOnce(() => {
+      throw setupError;
+    });
+
+    await expect(notificationService.initialize()).rejects.toBe(setupError);
+
+    expect((notificationService as any).initialized).toBe(false);
+    expect((notificationService as any).initializationPromise).toBeNull();
+    expect((notificationService as any).responseSubscription).toBeUndefined();
+    expect(Notifications.addNotificationResponseReceivedListener).not.toHaveBeenCalled();
+
+    await expect(notificationService.initialize()).resolves.toBeUndefined();
+    expect(Notifications.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a partially registered listener before retrying initialization', async () => {
+    const firstSubscription = { remove: jest.fn() };
+    const retrySubscription = { remove: jest.fn() };
+    (Notifications.addNotificationResponseReceivedListener as jest.Mock)
+      .mockReturnValueOnce(firstSubscription)
+      .mockReturnValueOnce(retrySubscription);
+    (Notifications.getLastNotificationResponseAsync as jest.Mock)
+      .mockRejectedValueOnce(new Error('initial response unavailable'))
+      .mockResolvedValueOnce(null);
+
+    await expect(notificationService.initialize()).rejects.toThrow('initial response unavailable');
+
+    expect(firstSubscription.remove).toHaveBeenCalledTimes(1);
+    expect((notificationService as any).responseSubscription).toBeUndefined();
+    expect((notificationService as any).initialized).toBe(false);
+
+    await expect(notificationService.initialize()).resolves.toBeUndefined();
+    expect(Notifications.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(2);
+    expect((notificationService as any).responseSubscription).toBe(retrySubscription);
+    expect(retrySubscription.remove).not.toHaveBeenCalled();
+  });
+
+  it('does not leave an active subscription when disposed during initialization', async () => {
+    const initialResponse = createDeferred<null>();
+    const inFlightSubscription = { remove: jest.fn() };
+    const retrySubscription = { remove: jest.fn() };
+    (Notifications.getLastNotificationResponseAsync as jest.Mock)
+      .mockImplementationOnce(() => initialResponse.promise)
+      .mockResolvedValueOnce(null);
+    (Notifications.addNotificationResponseReceivedListener as jest.Mock)
+      .mockReturnValueOnce(inFlightSubscription)
+      .mockReturnValueOnce(retrySubscription);
+
+    const initialization = notificationService.initialize();
+    for (let index = 0; index < 4; index += 1) {
+      await Promise.resolve();
+    }
+    expect(Notifications.addNotificationResponseReceivedListener).toHaveBeenCalledTimes(1);
+
+    notificationService.dispose();
+    initialResponse.resolve(null);
+    await expect(initialization).rejects.toThrow('disposed');
+
+    expect(inFlightSubscription.remove).toHaveBeenCalledTimes(1);
+    expect((notificationService as any).initialized).toBe(false);
+    expect((notificationService as any).responseSubscription).toBeUndefined();
+
+    await expect(notificationService.initialize()).resolves.toBeUndefined();
+    expect((notificationService as any).responseSubscription).toBe(retrySubscription);
+    expect(retrySubscription.remove).not.toHaveBeenCalled();
+  });
+
+  it('emits privacy-safe initialization outcome and failure category telemetry', async () => {
+    const privateFailure = new Error('failed for private notification content');
+    (Notifications.setNotificationHandler as jest.Mock).mockImplementationOnce(() => {
+      throw privateFailure;
+    });
+    performanceMonitor.setEnabled(true);
+
+    await expect(notificationService.initialize()).rejects.toBe(privateFailure);
+
+    const initializationEvents = performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'notification.initialization',
+    );
+    expect(initializationEvents).toEqual([
+      expect.objectContaining({
+        meta: {
+          notificationInitializationOutcome: 'failure',
+          notificationInitializationFailureCategory: 'handler_setup_failed',
+        },
+      }),
+    ]);
+    expect(JSON.stringify(initializationEvents)).not.toContain('private notification content');
   });
 
   it('navigates to models on download notification tap', async () => {
@@ -296,15 +465,15 @@ describe('NotificationService (behavior)', () => {
     warnSpy.mockRestore();
   });
 
-  it('initialize swallows setup failures', async () => {
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  it('initialize propagates listener setup failures without retaining partial state', async () => {
+    const listenerError = new Error('listener failed');
     (Notifications.addNotificationResponseReceivedListener as jest.Mock).mockImplementationOnce(() => {
-      throw new Error('listener failed');
+      throw listenerError;
     });
 
-    await expect(notificationService.initialize()).resolves.toBeUndefined();
+    await expect(notificationService.initialize()).rejects.toBe(listenerError);
 
-    expect(warnSpy).toHaveBeenCalledWith('[NotificationService] Failed to initialize', expect.any(Error));
-    warnSpy.mockRestore();
+    expect((notificationService as any).initialized).toBe(false);
+    expect((notificationService as any).responseSubscription).toBeUndefined();
   });
 });

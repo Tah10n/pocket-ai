@@ -8,6 +8,7 @@ import i18n from '../i18n';
 import { useChatStore } from '../store/chatStore';
 import { semanticColorTokens } from '../utils/themeTokens';
 import { getPrivacySafeErrorLogDetails } from './AppError';
+import { performanceMonitor } from './PerformanceMonitor';
 
 export type NotificationTaskType = 'download' | 'inference';
 
@@ -36,6 +37,14 @@ const CHANNEL_IDS = {
 const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
 const FOREGROUND_SERVICE_NOTIFICATION_COLOR = semanticColorTokens.primary[500];
 const INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX = 'pocket-ai:inference:';
+
+type NotificationInitializationFailureCategory =
+    | 'handler_setup_failed'
+    | 'download_channel_failed'
+    | 'inference_channel_failed'
+    | 'listener_registration_failed'
+    | 'initial_response_failed'
+    | 'disposed';
 
 function getInferenceNotificationIdentifier(threadId: string): string {
     return `${INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX}${encodeURIComponent(threadId)}`;
@@ -122,59 +131,156 @@ function clampProgressPercent(value: number): number {
 
 class NotificationService {
     private initialized = false;
+    private initializationPromise: Promise<void> | null = null;
+    private lifecycleGeneration = 0;
     private permissionState: 'unknown' | 'granted' | 'denied' = 'unknown';
 
     private responseSubscription?: Notifications.EventSubscription;
     private hasHandledInitialResponse = false;
 
-    async initialize(): Promise<void> {
-        try {
-            await this.ensureInitialized();
-        } catch (error) {
-            console.warn('[NotificationService] Failed to initialize', error);
+    initialize(): Promise<void> {
+        return this.ensureInitialized();
+    }
+
+    private ensureInitialized(): Promise<void> {
+        if (this.initialized) {
+            return Promise.resolve();
+        }
+
+        if (this.initializationPromise) {
+            return this.initializationPromise;
+        }
+
+        const generation = this.lifecycleGeneration;
+        // Defer the async body by one microtask so the shared promise is assigned
+        // synchronously before any initialization work can yield or re-enter.
+        const initializationPromise = Promise.resolve().then(
+            () => this.performInitialization(generation),
+        );
+        this.initializationPromise = initializationPromise;
+        void initializationPromise.then(
+            () => {
+                if (this.initializationPromise === initializationPromise) {
+                    this.initializationPromise = null;
+                }
+            },
+            () => {
+                if (this.initializationPromise === initializationPromise) {
+                    this.initializationPromise = null;
+                }
+            },
+        );
+        return initializationPromise;
+    }
+
+    private assertInitializationGeneration(generation: number): void {
+        if (generation !== this.lifecycleGeneration) {
+            throw new Error('Notification initialization was disposed.');
         }
     }
 
-    private async ensureInitialized(): Promise<void> {
-        if (this.initialized) {
-            return;
-        }
+    private async performInitialization(generation: number): Promise<void> {
+        let failureCategory: NotificationInitializationFailureCategory = 'handler_setup_failed';
+        let localResponseSubscription: Notifications.EventSubscription | undefined;
+        let localResponseSubscriptionWasPublished = false;
 
-        Notifications.setNotificationHandler({
-            handleNotification: async () => ({
-                shouldShowBanner: true,
-                shouldShowList: true,
-                shouldPlaySound: false,
-                shouldSetBadge: false,
-            }),
-        });
-
-        if (Platform.OS === 'android') {
-            await Notifications.setNotificationChannelAsync(CHANNEL_IDS.downloads, {
-                name: 'Downloads',
-                importance: Notifications.AndroidImportance.HIGH,
+        try {
+            this.assertInitializationGeneration(generation);
+            Notifications.setNotificationHandler({
+                handleNotification: async () => ({
+                    shouldShowBanner: true,
+                    shouldShowList: true,
+                    shouldPlaySound: false,
+                    shouldSetBadge: false,
+                }),
             });
+            this.assertInitializationGeneration(generation);
 
-            await Notifications.setNotificationChannelAsync(CHANNEL_IDS.inference, {
-                name: 'Inference',
-                importance: Notifications.AndroidImportance.DEFAULT,
-            });
-        }
+            if (Platform.OS === 'android') {
+                failureCategory = 'download_channel_failed';
+                await Notifications.setNotificationChannelAsync(CHANNEL_IDS.downloads, {
+                    name: 'Downloads',
+                    importance: Notifications.AndroidImportance.HIGH,
+                });
+                this.assertInitializationGeneration(generation);
 
-        this.responseSubscription = Notifications.addNotificationResponseReceivedListener(this.handleNotificationResponse);
-        if (!this.hasHandledInitialResponse) {
-            this.hasHandledInitialResponse = true;
-            try {
+                failureCategory = 'inference_channel_failed';
+                await Notifications.setNotificationChannelAsync(CHANNEL_IDS.inference, {
+                    name: 'Inference',
+                    importance: Notifications.AndroidImportance.DEFAULT,
+                });
+                this.assertInitializationGeneration(generation);
+            }
+
+            failureCategory = 'listener_registration_failed';
+            localResponseSubscription = Notifications.addNotificationResponseReceivedListener(
+                this.handleNotificationResponse,
+            );
+            if (!localResponseSubscription || typeof localResponseSubscription.remove !== 'function') {
+                throw new Error('Notification response listener registration failed.');
+            }
+            this.assertInitializationGeneration(generation);
+            this.responseSubscription = localResponseSubscription;
+            localResponseSubscriptionWasPublished = true;
+
+            if (!this.hasHandledInitialResponse) {
+                failureCategory = 'initial_response_failed';
                 const lastResponse = await Notifications.getLastNotificationResponseAsync();
+                this.assertInitializationGeneration(generation);
+                this.hasHandledInitialResponse = true;
                 if (lastResponse) {
                     this.handleNotificationResponse(lastResponse);
                 }
-            } catch {
-                // ignore
             }
-        }
 
-        this.initialized = true;
+            this.assertInitializationGeneration(generation);
+            this.initialized = true;
+            performanceMonitor.mark('notification.initialization', {
+                notificationInitializationOutcome: 'success',
+            });
+        } catch (error) {
+            if (
+                localResponseSubscription
+                && (
+                    !localResponseSubscriptionWasPublished
+                    || this.responseSubscription === localResponseSubscription
+                )
+            ) {
+                try {
+                    localResponseSubscription.remove();
+                } catch {
+                    // Preserve the initialization error.
+                }
+            }
+            if (this.responseSubscription === localResponseSubscription) {
+                this.responseSubscription = undefined;
+            }
+            if (generation === this.lifecycleGeneration) {
+                this.initialized = false;
+            } else {
+                failureCategory = 'disposed';
+            }
+            performanceMonitor.mark('notification.initialization', {
+                notificationInitializationOutcome:
+                    failureCategory === 'disposed' ? 'disposed' : 'failure',
+                notificationInitializationFailureCategory: failureCategory,
+            });
+            throw error;
+        }
+    }
+
+    dispose(): void {
+        this.lifecycleGeneration += 1;
+        this.initialized = false;
+        this.initializationPromise = null;
+        this.permissionState = 'unknown';
+        const subscription = this.responseSubscription;
+        this.responseSubscription = undefined;
+        try {
+            subscription?.remove();
+        } catch {
+            // Best-effort lifecycle cleanup.
+        }
     }
 
     private handleNotificationResponse = (response: Notifications.NotificationResponse) => {

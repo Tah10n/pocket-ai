@@ -275,6 +275,60 @@ describe('NotificationService', () => {
     warnSpy.mockRestore();
   });
 
+  it('dismisses each unique valid thread notification in a cleanup batch', async () => {
+    const dismissSpy = jest
+      .spyOn(notificationService, 'dismissInferenceNotificationForThread')
+      .mockResolvedValue(undefined);
+
+    await expect(notificationService.dismissInferenceNotificationsForThreads([
+      'thread-1',
+      'thread-2',
+      'thread-1',
+      '',
+      '   ',
+    ])).resolves.toBeUndefined();
+
+    expect(dismissSpy).toHaveBeenCalledTimes(2);
+    expect(dismissSpy).toHaveBeenNthCalledWith(1, 'thread-1');
+    expect(dismissSpy).toHaveBeenNthCalledWith(2, 'thread-2');
+
+    dismissSpy.mockClear();
+    await expect(
+      notificationService.dismissInferenceNotificationsForThreads([]),
+    ).resolves.toBeUndefined();
+    expect(dismissSpy).not.toHaveBeenCalled();
+    dismissSpy.mockRestore();
+  });
+
+  it('keeps cleanup batches best-effort and logs unexpected dismissal failures safely', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const dismissSpy = jest
+      .spyOn(notificationService, 'dismissInferenceNotificationForThread')
+      .mockRejectedValueOnce(new Error('private conversation payload'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(notificationService.dismissInferenceNotificationsForThreads([
+      'private-thread-id',
+      'thread-2',
+    ])).resolves.toBeUndefined();
+
+    expect(dismissSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[NotificationService] Failed to dismiss inference notification',
+      expect.objectContaining({
+        scope: 'inference_notification_batch_dismiss',
+        errorName: 'Error',
+      }),
+    );
+    const serializedWarnings = JSON.stringify(warnSpy.mock.calls);
+    expect(serializedWarnings).not.toContain('private-thread-id');
+    expect(serializedWarnings).not.toContain('private conversation payload');
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+
+    dismissSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   it('refuses to start foreground-service notifications on Android when notifications are denied', async () => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'denied' });

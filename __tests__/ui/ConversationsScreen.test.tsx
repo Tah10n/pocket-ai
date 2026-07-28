@@ -1,9 +1,10 @@
 import React from 'react';
-import { fireEvent, render } from '@testing-library/react-native';
+import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { ConversationsScreen } from '../../src/ui/screens/ConversationsScreen';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { useConversationIndex } from '../../src/hooks/useConversationIndex';
+import { notificationService } from '../../src/services/NotificationService';
 import { getSettings, updateSettings } from '../../src/services/SettingsStore';
 import { useChatStore } from '../../src/store/chatStore';
 
@@ -11,6 +12,7 @@ const mockRouterPush = jest.fn();
 const mockRouterReplace = jest.fn();
 const mockRouterBack = jest.fn();
 let pruneExpiredThreadsSpy: jest.SpyInstance | null = null;
+let dismissInferenceNotificationSpy: jest.SpyInstance | null = null;
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
@@ -149,7 +151,11 @@ describe('ConversationsScreen', () => {
     pruneExpiredThreadsSpy?.mockRestore();
     pruneExpiredThreadsSpy = jest
       .spyOn(useChatStore.getState(), 'pruneExpiredThreads')
-      .mockReturnValue(0);
+      .mockReturnValue({ count: 0, threadIds: [] });
+    dismissInferenceNotificationSpy?.mockRestore();
+    dismissInferenceNotificationSpy = jest
+      .spyOn(notificationService, 'dismissInferenceNotificationForThread')
+      .mockResolvedValue(undefined);
     mockGetSettings.mockReturnValue({
       chatRetentionDays: 90,
     } as any);
@@ -220,7 +226,11 @@ describe('ConversationsScreen', () => {
     expect(renameThread).toHaveBeenCalledWith('thread-2', 'Renamed Retro');
   });
 
-  it('updates chat retention from the conversations screen', () => {
+  it('updates chat retention and dismisses every pruned thread notification', async () => {
+    pruneExpiredThreadsSpy?.mockReturnValue({
+      count: 2,
+      threadIds: ['thread-expired-1', 'thread-expired-2'],
+    });
     const { getByTestId } = render(
       <SafeAreaProvider
         initialMetrics={{
@@ -237,6 +247,31 @@ describe('ConversationsScreen', () => {
 
     expect(mockUpdateSettings).toHaveBeenCalledWith({ chatRetentionDays: null });
     expect(pruneExpiredThreadsSpy).toHaveBeenCalledWith(null);
+    await waitFor(() => {
+      expect(dismissInferenceNotificationSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(dismissInferenceNotificationSpy).toHaveBeenNthCalledWith(1, 'thread-expired-1');
+    expect(dismissInferenceNotificationSpy).toHaveBeenNthCalledWith(2, 'thread-expired-2');
+  });
+
+  it('does not dismiss any notification when retention removes no threads', async () => {
+    const { getByTestId } = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <ConversationsScreen />
+      </SafeAreaProvider>,
+    );
+
+    fireEvent.press(getByTestId('retention-toggle'));
+    fireEvent.press(getByTestId('retention-option-forever'));
+    await Promise.resolve();
+
+    expect(pruneExpiredThreadsSpy).toHaveBeenCalledWith(null);
+    expect(dismissInferenceNotificationSpy).not.toHaveBeenCalled();
   });
 
   it('keeps chat retention collapsed until the user expands it', () => {

@@ -680,6 +680,38 @@ class NotificationService {
         }
     }
 
+    async dismissInferenceNotificationsForThreads(threadIds: readonly string[]): Promise<void> {
+        try {
+            const uniqueThreadIds = Array.from(new Set(
+                threadIds.filter(
+                    (threadId) => typeof threadId === 'string' && threadId.trim().length > 0,
+                ),
+            ));
+
+            await Promise.all(uniqueThreadIds.map(async (threadId) => {
+                try {
+                    await this.dismissInferenceNotificationForThread(threadId);
+                } catch (error) {
+                    console.warn(
+                        '[NotificationService] Failed to dismiss inference notification',
+                        {
+                            scope: 'inference_notification_batch_dismiss',
+                            ...getPrivacySafeErrorLogDetails(error),
+                        },
+                    );
+                }
+            }));
+        } catch (error) {
+            console.warn(
+                '[NotificationService] Failed to dismiss inference notifications',
+                {
+                    scope: 'inference_notification_batch_dismiss',
+                    ...getPrivacySafeErrorLogDetails(error),
+                },
+            );
+        }
+    }
+
     async updateNotification(update: NotificationUpdate): Promise<void> {
         if (!BackgroundService.isRunning()) {
             return;

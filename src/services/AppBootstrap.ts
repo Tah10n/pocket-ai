@@ -31,6 +31,7 @@ import { EngineStatus } from '../types/models';
 import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState';
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import { canRecalculateMemoryFitWithoutOptionalMtpDraft } from '../utils/modelSpeculativeDecoding';
+import { notificationService } from './NotificationService';
 import {
   ChatMessage,
   ChatThread,
@@ -668,7 +669,12 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
     try {
       repairChatHistoryIndex();
       migrateLegacyChatHistory(settings);
-      useChatStore.getState().pruneExpiredThreads(settings.chatRetentionDays);
+      const cleanupResult = useChatStore.getState().pruneExpiredThreads(
+        settings.chatRetentionDays,
+      );
+      await notificationService.dismissInferenceNotificationsForThreads(
+        cleanupResult.threadIds,
+      );
     } catch (e) {
       recordError('chatHistory', e);
     }

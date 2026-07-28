@@ -171,6 +171,11 @@ export type ThreadModelSelectionCommitResult =
   | { status: 'missing' }
   | { status: 'persistence_failed'; error: unknown };
 
+export interface PruneExpiredThreadsResult {
+  count: number;
+  threadIds: string[];
+}
+
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
@@ -178,7 +183,10 @@ interface ChatStoreState {
   inferenceRevision: number;
   createThread: (input: CreateThreadInput) => string;
   mergeImportedThreads: (threads: ChatThread[]) => number;
-  pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
+  pruneExpiredThreads: (
+    retentionDays: number | null,
+    now?: number,
+  ) => PruneExpiredThreadsResult;
   clearAllThreads: () => number;
   setActiveThread: (threadId: string | null) => boolean;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
@@ -2790,36 +2798,57 @@ export const useChatStore = create<ChatStoreState>()(
         },
 
         pruneExpiredThreads: (retentionDays, now = Date.now()) => {
-        const state = get();
-        const expiredThreadIds = getExpiredThreadIds(
-          state.threads,
+        const initialState = get();
+        const initialExpiredThreadIds = getExpiredThreadIds(
+          initialState.threads,
           retentionDays,
           now,
-          state.activeThreadId,
-        ).filter((threadId) => !getActiveBranchReplacementRuntime(state.threads[threadId]));
-        if (expiredThreadIds.length === 0) {
-          return 0;
+          initialState.activeThreadId,
+        ).filter(
+          (threadId) => !getActiveBranchReplacementRuntime(initialState.threads[threadId]),
+        );
+        if (initialExpiredThreadIds.length === 0) {
+          return { count: 0, threadIds: [] };
         }
 
-        setWhenPrivateStorageWritable((state) => {
-          const nextThreads = { ...state.threads };
-          expiredThreadIds.forEach((threadId) => {
-            delete nextThreads[threadId];
+        let removedThreadIds: string[] = [];
+        withChatPersistenceContext({ reason: 'retention_cleanup' }, () => {
+          setWhenPrivateStorageWritable((state) => {
+            const expiredThreadIds = getExpiredThreadIds(
+              state.threads,
+              retentionDays,
+              now,
+              state.activeThreadId,
+            ).filter(
+              (threadId) => !getActiveBranchReplacementRuntime(state.threads[threadId]),
+            );
+            if (expiredThreadIds.length === 0) {
+              return state;
+            }
+
+            const nextThreads = { ...state.threads };
+            expiredThreadIds.forEach((threadId) => {
+              delete nextThreads[threadId];
+            });
+            removedThreadIds = expiredThreadIds;
+
+            const nextActiveThreadId =
+              state.activeThreadId && nextThreads[state.activeThreadId]
+                ? state.activeThreadId
+                : findMostRecentThreadId(nextThreads);
+
+            return {
+              threads: nextThreads,
+              activeThreadId: nextActiveThreadId,
+              inferenceRevision: state.inferenceRevision + 1,
+            };
           });
-
-          const nextActiveThreadId =
-            state.activeThreadId && nextThreads[state.activeThreadId]
-              ? state.activeThreadId
-              : findMostRecentThreadId(nextThreads);
-
-          return {
-            threads: nextThreads,
-            activeThreadId: nextActiveThreadId,
-            inferenceRevision: state.inferenceRevision + 1,
-          };
         });
 
-        return expiredThreadIds.length;
+        return {
+          count: removedThreadIds.length,
+          threadIds: removedThreadIds,
+        };
         },
 
         clearAllThreads: () => {

@@ -94,6 +94,16 @@ jest.mock('../../src/services/HuggingFaceTokenService', () => ({
   },
 }));
 
+const mockDismissInferenceNotificationsForThreads = jest.fn();
+
+jest.mock('../../src/services/NotificationService', () => ({
+  notificationService: {
+    dismissInferenceNotificationsForThreads: (
+      ...args: unknown[]
+    ) => mockDismissInferenceNotificationsForThreads(...args),
+  },
+}));
+
 const mockMergeImportedThreads = jest.fn();
 const mockPruneExpiredThreads = jest.fn();
 
@@ -171,7 +181,9 @@ describe('AppBootstrap', () => {
     mockMergeImportedThreads.mockReset();
     mockMergeImportedThreads.mockReturnValue(0);
     mockPruneExpiredThreads.mockReset();
-    mockPruneExpiredThreads.mockReturnValue(0);
+    mockPruneExpiredThreads.mockReturnValue({ count: 0, threadIds: [] });
+    mockDismissInferenceNotificationsForThreads.mockReset();
+    mockDismissInferenceNotificationsForThreads.mockResolvedValue(undefined);
 
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.IDLE,
@@ -766,6 +778,10 @@ describe('AppBootstrap', () => {
         updatedAt: 20,
       },
     ]);
+    mockPruneExpiredThreads.mockReturnValue({
+      count: 2,
+      threadIds: ['expired-thread-1', 'expired-thread-2'],
+    });
 
     await expect(bootstrapAppBackground()).resolves.toEqual({ outcome: 'success' });
 
@@ -782,6 +798,10 @@ describe('AppBootstrap', () => {
     ]);
     expect(clearLegacyChatHistory).toHaveBeenCalled();
     expect(mockPruneExpiredThreads).toHaveBeenCalledWith(90);
+    expect(mockDismissInferenceNotificationsForThreads).toHaveBeenCalledWith([
+      'expired-thread-1',
+      'expired-thread-2',
+    ]);
   });
 
   it('runs critical bootstrap before background bootstrap', async () => {

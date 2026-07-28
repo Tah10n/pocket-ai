@@ -5627,7 +5627,10 @@ describe('chatStore', () => {
     const capture = captureClearIndexWrites();
 
     try {
-      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+        count: 1,
+        threadIds: [staleThread.id],
+      });
 
       expect(capture.writes).toEqual([
         expect.objectContaining({
@@ -6903,24 +6906,66 @@ describe('chatStore', () => {
   it('prunes inactive threads that fall outside the retention window', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);
+    const oldestThread = buildThread('thread-oldest', now - 150 * 24 * 60 * 60 * 1000);
     const activeOldThread = buildThread('thread-active', now - 120 * 24 * 60 * 60 * 1000);
     const recentThread = buildThread('thread-recent', now - 10 * 24 * 60 * 60 * 1000);
 
     useChatStore.setState({
       threads: {
         [staleThread.id]: staleThread,
+        [oldestThread.id]: oldestThread,
         [activeOldThread.id]: activeOldThread,
         [recentThread.id]: recentThread,
       },
       activeThreadId: activeOldThread.id,
     });
 
-    const deletedCount = useChatStore.getState().pruneExpiredThreads(90, now);
+    const cleanupResult = useChatStore.getState().pruneExpiredThreads(90, now);
 
-    expect(deletedCount).toBe(1);
+    expect(cleanupResult).toEqual({
+      count: 2,
+      threadIds: [staleThread.id, oldestThread.id],
+    });
     expect(useChatStore.getState().getThread(staleThread.id)).toBeNull();
+    expect(useChatStore.getState().getThread(oldestThread.id)).toBeNull();
     expect(useChatStore.getState().getThread(activeOldThread.id)).toEqual(activeOldThread);
     expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
+  });
+
+  it('does not prune an expired thread while its branch replacement runtime is active', () => {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const now = 200 * dayMs;
+    const expiredAt = now - 95 * dayMs;
+    const branchThread = buildTrailingModelSwitchThread(
+      'thread-expired-branch-runtime',
+      { targetCreatedAt: expiredAt },
+    );
+    const recentThread = buildThread('thread-recent-during-branch-runtime', now - dayMs);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(expiredAt);
+
+    try {
+      seedPersistedChatThread(branchThread, expiredAt);
+      expect(useChatStore.getState().replaceBranchFromUserMessage(
+        branchThread.id,
+        `${branchThread.id}-user-1`,
+        'Edited prompt whose runtime must remain protected',
+      )).toBeTruthy();
+      useChatStore.setState((state) => ({
+        threads: {
+          ...state.threads,
+          [recentThread.id]: recentThread,
+        },
+        activeThreadId: recentThread.id,
+      }));
+
+      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+        count: 0,
+        threadIds: [],
+      });
+      expect(useChatStore.getState().getThread(branchThread.id)).not.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('removes expired v2 records during retention cleanup without touching retained threads', () => {
@@ -6944,7 +6989,10 @@ describe('chatStore', () => {
       activeThreadId: recentThread.id,
     });
 
-    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+      count: 1,
+      threadIds: [staleThread.id],
+    });
 
     const index = JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}');
     expect(storage.getString(getChatThreadStorageKey(staleThread.id))).toBeUndefined();
@@ -6952,6 +7000,58 @@ describe('chatStore', () => {
     expect(index.threadIds).toEqual([recentThread.id]);
     expect(index.revision).toEqual(expect.any(Number));
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('does not expose removed thread IDs when retention persistence rolls back', () => {
+    const now = 100 * 24 * 60 * 60 * 1000;
+    const staleThread = buildThread(
+      'thread-retention-persistence-failure',
+      now - 95 * 24 * 60 * 60 * 1000,
+    );
+    const recentThread = buildThread(
+      'thread-retention-persistence-retained',
+      now - 10 * 24 * 60 * 60 * 1000,
+    );
+    writeChatThreadRecord(storage, staleThread, now);
+    writeChatThreadRecord(storage, recentThread, now);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: recentThread.id,
+      threadIds: [staleThread.id, recentThread.id],
+      updatedAt: now,
+    });
+    useChatStore.setState({
+      threads: {
+        [staleThread.id]: staleThread,
+        [recentThread.id]: recentThread,
+      },
+      activeThreadId: recentThread.id,
+    });
+
+    const appStorage = getAppStorage() as unknown as { remove: typeof storage.remove };
+    const originalRemove = appStorage.remove;
+    const persistenceError = new Error('simulated retention persistence failure');
+    const staleThreadKey = getChatThreadStorageKey(staleThread.id);
+    appStorage.remove = jest.fn(function removeWithRetentionFailure(
+      this: unknown,
+      key: string,
+    ) {
+      if (key === staleThreadKey) {
+        throw persistenceError;
+      }
+      return originalRemove.call(this, key);
+    });
+
+    try {
+      expect(() => useChatStore.getState().pruneExpiredThreads(90, now))
+        .toThrow(persistenceError);
+    } finally {
+      appStorage.remove = originalRemove;
+    }
+
+    expect(useChatStore.getState().getThread(staleThread.id)).toEqual(staleThread);
+    expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
+    expect(storage.getString(staleThreadKey)).toContain(staleThread.title);
   });
 
   it('cleans attachment files removed by retention pruning', async () => {
@@ -6993,7 +7093,10 @@ describe('chatStore', () => {
       activeThreadId: recentThread.id,
     });
 
-    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+      count: 1,
+      threadIds: [staleThread.id],
+    });
     await flushAttachmentCleanup();
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith(staleAttachment.localUri, {
@@ -7015,9 +7118,12 @@ describe('chatStore', () => {
       activeThreadId: 'missing-thread',
     });
 
-    const deletedCount = useChatStore.getState().pruneExpiredThreads(90, now);
+    const cleanupResult = useChatStore.getState().pruneExpiredThreads(90, now);
 
-    expect(deletedCount).toBe(1);
+    expect(cleanupResult).toEqual({
+      count: 1,
+      threadIds: [staleThread.id],
+    });
     expect(useChatStore.getState().activeThreadId).toBe(recentThread.id);
   });
 
@@ -9779,7 +9885,10 @@ describe('chatStore', () => {
     useChatStore.getState().patchAssistantMessage(activeStreaming.id, 'assistant-active', { content: 'Active partial' });
     flushPendingChatPersistenceWrites('background');
 
-    expect(useChatStore.getState().pruneExpiredThreads(7, now)).toBe(1);
+    expect(useChatStore.getState().pruneExpiredThreads(7, now)).toEqual({
+      count: 1,
+      threadIds: [oldStreaming.id],
+    });
     expectNoStreamingProgressArtifacts(oldStreaming.id);
     expect(readChatStreamingProgressRecord(storage, activeStreaming.id)).toEqual({
       ok: true,

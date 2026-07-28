@@ -4766,41 +4766,50 @@ describe('LLMEngineService', () => {
       kvCacheType: 'f16',
     });
     const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
-    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
-      if (options?.speculative) {
-        throw new Error('GPU OOM while initializing MTP');
-      }
-      return baseInitImplementation?.(options);
-    });
+    const persistCalibrationFailureSpy = jest.spyOn(
+      llmEngineService as any,
+      'persistCalibrationFailure',
+    );
+    try {
+      (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+        if (options?.speculative) {
+          throw new Error('GPU OOM while initializing MTP');
+        }
+        return baseInitImplementation?.(options);
+      });
 
-    await llmEngineService.load('test/model', { forceReload: true });
-    expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toHaveProperty('speculative');
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[1][0]).not.toHaveProperty('speculative');
+      await llmEngineService.load('test/model', { forceReload: true });
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toHaveProperty('speculative');
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[1][0]).not.toHaveProperty('speculative');
 
-    await llmEngineService.unload();
-    (llamaRn.initLlama as jest.Mock).mockClear();
-    await llmEngineService.load('test/model', { forceReload: true });
+      await llmEngineService.unload();
+      (llamaRn.initLlama as jest.Mock).mockClear();
+      await llmEngineService.load('test/model', { forceReload: true });
 
-    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('speculative');
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
-      n_gpu_layers: 4,
-    }));
-    expect(llmEngineService.getState().diagnostics?.backendInitAttempts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        nGpuLayers: 4,
-        speculativeEnabled: true,
-        outcome: 'skipped',
-        failureCategory: 'known_oom_upper_bound',
-      }),
-      expect.objectContaining({
-        nGpuLayers: 4,
-        speculativeEnabled: false,
-        profileSource: 'speculative_fallback',
-        outcome: 'success',
-      }),
-    ]));
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('speculative');
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
+        n_gpu_layers: 4,
+      }));
+      expect(persistCalibrationFailureSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.getState().diagnostics?.backendInitAttempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          nGpuLayers: 4,
+          speculativeEnabled: true,
+          outcome: 'skipped',
+          failureCategory: 'known_oom_upper_bound',
+        }),
+        expect.objectContaining({
+          nGpuLayers: 4,
+          speculativeEnabled: false,
+          profileSource: 'speculative_fallback',
+          outcome: 'success',
+        }),
+      ]));
+    } finally {
+      persistCalibrationFailureSpy.mockRestore();
+    }
   });
 
   it('persists an exact CPU MTP OOM marker and skips only speculative init after reload', async () => {

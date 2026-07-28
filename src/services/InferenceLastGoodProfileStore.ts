@@ -453,8 +453,13 @@ export function readLastGoodInferenceProfile({
       }
     }
 
-    const devices = parsed.backendMode === 'npu' ? sanitizeDevices(parsed.devices) : undefined;
     const isCurrentSchema = parsed.schemaVersion === LAST_GOOD_PROFILE_SCHEMA_VERSION;
+    const isLegacySchema = parsed.schemaVersion === undefined || parsed.schemaVersion === 1;
+    if (!isCurrentSchema && !isLegacySchema) {
+      return clearAndReturnNull();
+    }
+
+    const devices = parsed.backendMode === 'npu' ? sanitizeDevices(parsed.devices) : undefined;
     const storedStateCacheBudgetMb = isCurrentSchema
       ? normalizeIdentityInteger(parsed.stateCacheBudgetMb)
       : 0;

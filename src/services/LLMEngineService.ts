@@ -6757,7 +6757,11 @@ class LLMEngineService {
                     nUbatch: profile.nUbatch,
                   })
                 : null;
-              if (calibrationKey) {
+              // A speculative context can fail because of draft/MTP memory while
+              // the same base profile still loads successfully. Keep that proof
+              // in the speculative failure-bound identity instead of poisoning
+              // the base model's calibration record.
+              if (calibrationKey && !speculativeEnabled) {
                 this.persistCalibrationFailure({
                   calibrationKey,
                   observedRawBudgetBytes,

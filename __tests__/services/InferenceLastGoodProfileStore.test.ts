@@ -223,6 +223,33 @@ describe('InferenceLastGoodProfileStore', () => {
     expect(mockStorage.contains(legacyKey)).toBe(true);
   });
 
+  it('rejects and removes an unknown future last-good profile schema', () => {
+    writeLastGoodInferenceProfile({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu',
+      nGpuLayers: 12,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    });
+    const key = mockStorage.getAllKeys().find((entry) => entry.startsWith('last-good:'))!;
+    const futurePayload = JSON.parse(mockStorage.getString(key)!) as Record<string, unknown>;
+    futurePayload.schemaVersion = 999;
+    mockStorage.set(key, JSON.stringify(futurePayload));
+
+    expect(readLastGoodInferenceProfile({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '1.2.3-test',
+    })).toBeNull();
+    expect(mockStorage.contains(key)).toBe(false);
+  });
+
   it('normalizes an old non-zero current-schema profile to the fail-closed dimensions', () => {
     writeLastGoodInferenceProfile({
       createdAtMs: Date.now(),

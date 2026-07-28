@@ -48,7 +48,11 @@ import { useModelParametersSheetController } from '@/hooks/useModelParametersShe
 import { useModelRegistryRevision } from '@/hooks/useModelRegistryRevision';
 import { useRouter } from 'expo-router';
 import { EngineStatus, LifecycleStatus, type ModelMetadata } from '../../types/models';
-import { ChatMessage, getThreadActiveModelId } from '../../types/chat';
+import {
+    ChatMessage,
+    getThreadActiveModelId,
+    type GenerationParamsSnapshot,
+} from '../../types/chat';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../types/attachments';
 import type {
     AttachmentDraft,
@@ -102,6 +106,26 @@ const VISION_READINESS_TRANSLATION_KEYS: Record<MultimodalReadinessStatus, strin
     failed: 'chat.visionReadiness.failed',
     unsupported: 'chat.visionReadiness.unsupported',
 };
+
+function areGenerationParamsSnapshotsEqual(
+    left: GenerationParamsSnapshot,
+    right: GenerationParamsSnapshot,
+): boolean {
+    return (
+        left.temperature === right.temperature
+        && left.topP === right.topP
+        && (left.topK ?? FALLBACK_TOP_K) === (right.topK ?? FALLBACK_TOP_K)
+        && (left.minP ?? FALLBACK_MIN_P) === (right.minP ?? FALLBACK_MIN_P)
+        && (
+            left.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY
+        ) === (
+            right.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY
+        )
+        && left.maxTokens === right.maxTokens
+        && (left.reasoningEffort ?? 'auto') === (right.reasoningEffort ?? 'auto')
+        && (left.seed ?? null) === (right.seed ?? null)
+    );
+}
 
 function getMissingAttachmentDraftIdsFromPreAppendFailure(error: unknown): Set<string> | null {
     const appError = toAppError(error);
@@ -1170,75 +1194,248 @@ export const ChatScreen = () => {
             }
             return { status: 'stale' as const };
         };
+        const failSelection = (error: unknown) => {
+            if (applySelection) {
+                performanceMonitor.incrementCounter('chat.modelSelection.failed');
+            }
+            return { status: 'failed' as const, error };
+        };
+        const recoverAuthoritativeThreadModel = async (): Promise<
+            | { status: 'recovered' }
+            | { status: 'stale' }
+            | { status: 'failed'; error: unknown }
+        > => {
+            if (!applySelection || !threadId || !isLatestRequest()) {
+                return { status: 'stale' };
+            }
+
+            const recoveryState = useChatStore.getState();
+            const authoritativeThread = recoveryState.getThread(threadId);
+            if (
+                recoveryState.activeThreadId !== threadId
+                || !authoritativeThread
+            ) {
+                return { status: 'stale' };
+            }
+            const authoritativeModelId = getThreadActiveModelId(authoritativeThread);
+            const currentEngineState = llmEngineService.getState();
+            if (
+                currentEngineState.status === EngineStatus.READY
+                && currentEngineState.activeModelId === authoritativeModelId
+            ) {
+                return { status: 'recovered' };
+            }
+
+            try {
+                await loadModel(authoritativeModelId, {
+                    preferLastWorkingProfile: true,
+                });
+            } catch {
+                if (!isLatestRequest()) {
+                    return { status: 'stale' };
+                }
+                autoModelLoadTargetKeyRef.current =
+                    `${threadId}:${authoritativeModelId}`;
+                return {
+                    status: 'failed',
+                    error: new Error(
+                        'The authoritative conversation model could not be restored.',
+                    ),
+                };
+            }
+
+            if (!isLatestRequest()) {
+                return { status: 'stale' };
+            }
+            const postRecoveryState = useChatStore.getState();
+            const postRecoveryThread = postRecoveryState.getThread(threadId);
+            const postRecoveryEngineState = llmEngineService.getState();
+            if (
+                postRecoveryState.activeThreadId !== threadId
+                || !postRecoveryThread
+                || getThreadActiveModelId(postRecoveryThread) !== authoritativeModelId
+            ) {
+                return { status: 'stale' };
+            }
+            if (
+                postRecoveryEngineState.status !== EngineStatus.READY
+                || postRecoveryEngineState.activeModelId !== authoritativeModelId
+            ) {
+                autoModelLoadTargetKeyRef.current =
+                    `${threadId}:${authoritativeModelId}`;
+                return {
+                    status: 'failed',
+                    error: new Error(
+                        'The authoritative conversation model did not become ready.',
+                    ),
+                };
+            }
+            return { status: 'recovered' };
+        };
+        let targetModelLoadCompleted = false;
 
         try {
             await loadModel(targetModelId, options);
+            targetModelLoadCompleted = true;
+
+            if (!isLatestRequest()) {
+                return invalidateAsStale();
+            }
+
+            const chatState = useChatStore.getState();
+            const freshThread = threadId ? chatState.getThread(threadId) : undefined;
+            const threadIntentIsCurrent = threadId === null
+                ? chatState.activeThreadId === null
+                : (
+                    chatState.activeThreadId === threadId
+                    && freshThread != null
+                    && getThreadActiveModelId(freshThread) === expectedThreadModelId
+                );
+            const freshEngineState = llmEngineService.getState();
+            const engineLoadedRequestedModel = freshEngineState.status === EngineStatus.READY
+                && freshEngineState.activeModelId === targetModelId;
+
+            if (!threadIntentIsCurrent) {
+                return invalidateAsStale();
+            }
+            if (!engineLoadedRequestedModel) {
+                return failSelection(
+                    new Error('The requested model did not become the active ready context.'),
+                );
+            }
+
+            let expectedParamsSnapshot: GenerationParamsSnapshot | null = null;
+            if (applySelection && freshThread && threadId && expectedThreadModelId) {
+                expectedParamsSnapshot = getGenerationParametersForModel(targetModelId);
+                const commitResult = useChatStore.getState().commitThreadModelSelection({
+                    threadId,
+                    expectedCurrentModelId: expectedThreadModelId,
+                    nextModelId: targetModelId,
+                    paramsSnapshot: expectedParamsSnapshot,
+                });
+
+                if (
+                    commitResult.status === 'missing'
+                    || (
+                        commitResult.status === 'stale'
+                        && useChatStore.getState().activeThreadId !== threadId
+                    )
+                ) {
+                    return invalidateAsStale();
+                }
+                if (
+                    commitResult.status === 'busy'
+                    || commitResult.status === 'persistence_failed'
+                    || commitResult.status === 'stale'
+                ) {
+                    if (!isLatestRequest()) {
+                        return invalidateAsStale();
+                    }
+                    const recoveryResult = await recoverAuthoritativeThreadModel();
+                    if (recoveryResult.status === 'stale') {
+                        return invalidateAsStale();
+                    }
+                    if (recoveryResult.status === 'failed') {
+                        return failSelection(recoveryResult.error);
+                    }
+                    if (commitResult.status === 'stale') {
+                        return invalidateAsStale();
+                    }
+                    return failSelection(
+                        commitResult.status === 'persistence_failed'
+                            ? new Error('The selected conversation model could not be saved.')
+                            : new Error('The conversation is busy and cannot change models.'),
+                    );
+                }
+            }
+
+            if (!isLatestRequest()) {
+                return invalidateAsStale();
+            }
+            const postCommitState = useChatStore.getState();
+            const postCommitThread = threadId
+                ? postCommitState.getThread(threadId)
+                : undefined;
+            const postCommitEngineState = llmEngineService.getState();
+            const threadPostconditionHolds = threadId === null
+                ? postCommitState.activeThreadId === null
+                : (
+                    postCommitState.activeThreadId === threadId
+                    && postCommitThread != null
+                    && getThreadActiveModelId(postCommitThread) === targetModelId
+                    && (
+                        !applySelection
+                        || (
+                            expectedParamsSnapshot != null
+                            && areGenerationParamsSnapshotsEqual(
+                                postCommitThread.paramsSnapshot,
+                                expectedParamsSnapshot,
+                            )
+                        )
+                    )
+                );
+            const enginePostconditionHolds =
+                postCommitEngineState.status === EngineStatus.READY
+                && postCommitEngineState.activeModelId === targetModelId;
+            if (!threadPostconditionHolds || !enginePostconditionHolds) {
+                const recoveryResult = await recoverAuthoritativeThreadModel();
+                if (recoveryResult.status === 'stale') {
+                    return invalidateAsStale();
+                }
+                if (recoveryResult.status === 'failed') {
+                    return failSelection(recoveryResult.error);
+                }
+                return failSelection(
+                    new Error('The model selection postcondition was not satisfied.'),
+                );
+            }
+
+            autoModelLoadTargetKeyRef.current = null;
+            if (applySelection) {
+                performanceMonitor.incrementCounter('chat.modelSelection.applied');
+            }
+            if (isScreenActiveRef.current) {
+                setModelSyncRevision((revision) => revision + 1);
+            }
+            return { status: 'applied' };
         } catch (error) {
             if (!isLatestRequest()) {
                 return invalidateAsStale();
             }
-            clearPendingSelection();
-            if (applySelection) {
-                performanceMonitor.incrementCounter('chat.modelSelection.failed');
+            if (applySelection && threadId) {
+                try {
+                    const recoveryResult = await recoverAuthoritativeThreadModel();
+                    if (recoveryResult.status === 'stale') {
+                        return invalidateAsStale();
+                    }
+                    if (recoveryResult.status === 'failed') {
+                        return failSelection(recoveryResult.error);
+                    }
+                } catch {
+                    const recoveryState = useChatStore.getState();
+                    const recoveryThread = recoveryState.getThread(threadId);
+                    if (
+                        recoveryState.activeThreadId === threadId
+                        && recoveryThread
+                    ) {
+                        autoModelLoadTargetKeyRef.current =
+                            `${threadId}:${getThreadActiveModelId(recoveryThread)}`;
+                    }
+                    return failSelection(
+                        new Error(
+                            'The authoritative conversation model recovery failed unexpectedly.',
+                        ),
+                    );
+                }
             }
-            return { status: 'failed', error };
-        }
-
-        const chatState = useChatStore.getState();
-        const freshThread = threadId ? chatState.getThread(threadId) : undefined;
-        const threadIntentIsCurrent = threadId === null
-            ? chatState.activeThreadId === null
-            : (
-                chatState.activeThreadId === threadId
-                && freshThread != null
-                && getThreadActiveModelId(freshThread) === expectedThreadModelId
+            return failSelection(
+                targetModelLoadCompleted && applySelection
+                    ? new Error('The model selection could not be completed safely.')
+                    : error,
             );
-        const freshEngineState = llmEngineService.getState();
-        const engineLoadedRequestedModel = freshEngineState.status === EngineStatus.READY
-            && freshEngineState.activeModelId === targetModelId;
-
-        if (!isLatestRequest() || !threadIntentIsCurrent) {
-            return invalidateAsStale();
-        }
-        if (!engineLoadedRequestedModel) {
+        } finally {
             clearPendingSelection();
-            if (applySelection) {
-                performanceMonitor.incrementCounter('chat.modelSelection.failed');
-            }
-            return {
-                status: 'failed',
-                error: new Error('The requested model did not become the active ready context.'),
-            };
         }
-
-        if (applySelection && freshThread) {
-            // Re-read both the thread and the actions after the await. Only the
-            // latest operation may make the durable model-switch commit.
-            const latestState = useChatStore.getState();
-            const latestThread = latestState.getThread(threadId!);
-            if (
-                latestState.activeThreadId !== threadId
-                || !latestThread
-                || getThreadActiveModelId(latestThread) !== expectedThreadModelId
-            ) {
-                return invalidateAsStale();
-            }
-            latestState.switchThreadModel(threadId!, targetModelId);
-            useChatStore.getState().updateThreadParamsSnapshot(
-                threadId!,
-                getGenerationParametersForModel(targetModelId),
-            );
-        }
-
-        clearPendingSelection();
-        autoModelLoadTargetKeyRef.current = null;
-        if (applySelection) {
-            performanceMonitor.incrementCounter('chat.modelSelection.applied');
-        }
-        if (isScreenActiveRef.current) {
-            setModelSyncRevision((revision) => revision + 1);
-        }
-        return { status: 'applied' };
     }, [loadModel]);
 
     const handleSelectModelFromHeader = useCallback(async (nextModelId: string) => {
@@ -1287,7 +1484,19 @@ export const ChatScreen = () => {
                 appError,
                 options,
                 onRetry: (nextOptions) => {
-                    void attemptLoadSelectedModel(nextOptions);
+                    void attemptLoadSelectedModel(nextOptions).catch((error) => {
+                        try {
+                            showAlertForError(
+                                'common.actionFailed',
+                                'ChatScreen.retryModelSelection',
+                                toAppError(error, 'model_load_failed'),
+                            );
+                        } catch {
+                            performanceMonitor.incrementCounter(
+                                'chat.modelSelection.errorHandlerFailed',
+                            );
+                        }
+                    });
                 },
             });
             if (!handledByMemoryPolicy) {
@@ -1305,38 +1514,52 @@ export const ChatScreen = () => {
     ]);
 
     const handleModelRecoveryAction = useCallback(async () => {
-        const chatState = useChatStore.getState();
-        const threadId = chatState.activeThreadId;
-        const thread = threadId ? chatState.getThread(threadId) : undefined;
-        const threadModelId = thread ? getThreadActiveModelId(thread) : '';
-        const model = threadModelId ? registry.getModel(threadModelId) : undefined;
-        const canLoadModel = Boolean(
-            thread
-            && model?.localPath
-            && (
-                model.lifecycleStatus === LifecycleStatus.DOWNLOADED
-                || model.lifecycleStatus === LifecycleStatus.ACTIVE
-            ),
-        );
-        if (!threadId || !thread || !threadModelId || !canLoadModel) {
-            router.navigate(modelRecoveryActionRoute);
-            return;
-        }
-
-        autoModelLoadTargetKeyRef.current = null;
-        const result = await executeThreadModelLoad({
-            targetModelId: threadModelId,
-            threadId,
-            expectedThreadModelId: threadModelId,
-            applySelection: false,
-            options: { preferLastWorkingProfile: true },
-        });
-        if (result.status === 'failed') {
-            showAlertForError(
-                'chat.threadModelLoadErrorTitle',
-                'ChatScreen.loadThreadModel',
-                toAppError(result.error, 'model_load_failed'),
+        try {
+            const chatState = useChatStore.getState();
+            const threadId = chatState.activeThreadId;
+            const thread = threadId ? chatState.getThread(threadId) : undefined;
+            const threadModelId = thread ? getThreadActiveModelId(thread) : '';
+            const model = threadModelId ? registry.getModel(threadModelId) : undefined;
+            const canLoadModel = Boolean(
+                thread
+                && model?.localPath
+                && (
+                    model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+                    || model.lifecycleStatus === LifecycleStatus.ACTIVE
+                ),
             );
+            if (!threadId || !thread || !threadModelId || !canLoadModel) {
+                router.navigate(modelRecoveryActionRoute);
+                return;
+            }
+
+            autoModelLoadTargetKeyRef.current = null;
+            const result = await executeThreadModelLoad({
+                targetModelId: threadModelId,
+                threadId,
+                expectedThreadModelId: threadModelId,
+                applySelection: false,
+                options: { preferLastWorkingProfile: true },
+            });
+            if (result.status === 'failed') {
+                showAlertForError(
+                    'chat.threadModelLoadErrorTitle',
+                    'ChatScreen.loadThreadModel',
+                    toAppError(result.error, 'model_load_failed'),
+                );
+            }
+        } catch {
+            try {
+                showAlertForError(
+                    'chat.threadModelLoadErrorTitle',
+                    'ChatScreen.loadThreadModel',
+                    new Error('The conversation model recovery action failed.'),
+                );
+            } catch {
+                performanceMonitor.incrementCounter(
+                    'chat.modelSelection.errorHandlerFailed',
+                );
+            }
         }
     }, [
         executeThreadModelLoad,
@@ -2184,6 +2407,18 @@ export const ChatScreen = () => {
             ) {
                 autoModelLoadTargetKeyRef.current = null;
             }
+        }).catch((error) => {
+            try {
+                showAlertForError(
+                    'chat.threadModelLoadErrorTitle',
+                    'ChatScreen.autoLoadThreadModel',
+                    toAppError(error, 'model_load_failed'),
+                );
+            } catch {
+                performanceMonitor.incrementCounter(
+                    'chat.modelSelection.errorHandlerFailed',
+                );
+            }
         });
     }, [
         activeThreadId,
@@ -2761,7 +2996,19 @@ export const ChatScreen = () => {
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 onClose={() => setModelSelectorOpen(false)}
                 onSelectModel={(modelId) => {
-                    void handleSelectModelFromHeader(modelId);
+                    void handleSelectModelFromHeader(modelId).catch((error) => {
+                        try {
+                            showAlertForError(
+                                'common.actionFailed',
+                                'ChatScreen.selectModel',
+                                toAppError(error, 'model_load_failed'),
+                            );
+                        } catch {
+                            performanceMonitor.incrementCounter(
+                                'chat.modelSelection.errorHandlerFailed',
+                            );
+                        }
+                    });
                 }}
             />
 

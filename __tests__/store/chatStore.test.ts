@@ -809,6 +809,212 @@ describe('chatStore', () => {
     expect(useChatStore.getState().getConversationIndex()[0]?.modelId).toBe('author/model-q8');
   });
 
+  it('atomically commits a thread model, full params snapshot, and switch message', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const inferenceRevisionBefore = useChatStore.getState().inferenceRevision;
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      const result = useChatStore.getState().commitThreadModelSelection({
+        threadId,
+        expectedCurrentModelId: 'author/model-q4',
+        nextModelId: 'author/model-q8',
+        paramsSnapshot: {
+          temperature: 0.25,
+          topP: 0.75,
+          topK: 24,
+          minP: 0.02,
+          repetitionPenalty: 1.1,
+          maxTokens: 2048,
+          reasoningEffort: 'high',
+          seed: 123,
+        },
+        at: 123,
+      });
+
+      expect(result).toEqual({
+        status: 'applied',
+        switchMessageId: expect.any(String),
+      });
+      expect(useChatStore.getState().inferenceRevision).toBe(inferenceRevisionBefore + 1);
+      expect(useChatStore.getState().getThread(threadId)).toEqual(expect.objectContaining({
+        activeModelId: 'author/model-q8',
+        paramsSnapshot: {
+          temperature: 0.25,
+          topP: 0.75,
+          topK: 24,
+          minP: 0.02,
+          repetitionPenalty: 1.1,
+          maxTokens: 2048,
+          reasoningEffort: 'high',
+          seed: 123,
+        },
+        messages: [
+          expect.objectContaining({
+            id: result.status === 'applied' ? result.switchMessageId : undefined,
+            kind: 'model_switch',
+            switchFromModelId: 'author/model-q4',
+            switchToModelId: 'author/model-q8',
+            createdAt: 123,
+          }),
+        ],
+      }));
+      expect(capture.setKeys.filter((key) => key === getChatThreadStorageKey(threadId)))
+        .toHaveLength(1);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('rolls back both model and params when atomic model selection persistence fails', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const threadBefore = useChatStore.getState().getThread(threadId);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated atomic model selection write failure');
+    let didFail = false;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (!didFail && key === getChatThreadStorageKey(threadId)) {
+        didFail = true;
+        throw writeError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(useChatStore.getState().commitThreadModelSelection({
+        threadId,
+        expectedCurrentModelId: 'author/model-q4',
+        nextModelId: 'author/model-q8',
+        paramsSnapshot: {
+          temperature: 0.1,
+          topP: 0.2,
+          topK: 8,
+          minP: 0.01,
+          repetitionPenalty: 1.2,
+          maxTokens: 2048,
+          reasoningEffort: 'high',
+          seed: 7,
+        },
+      })).toEqual({
+        status: 'persistence_failed',
+        error: writeError,
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(didFail).toBe(true);
+    expect(useChatStore.getState().getThread(threadId)).toBe(threadBefore);
+    expect(getThreadActiveModelId(useChatStore.getState().getThread(threadId)!)).toBe(
+      'author/model-q4',
+    );
+    expect(useChatStore.getState().getThread(threadId)?.paramsSnapshot)
+      .toEqual(threadBefore?.paramsSnapshot);
+    expect(
+      useChatStore.getState().getThread(threadId)?.messages.some(
+        (message) => message.kind === 'model_switch',
+      ),
+    ).toBe(false);
+    expect(readChatThreadRecord(storage, threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({
+          activeModelId: 'author/model-q4',
+          paramsSnapshot: threadBefore?.paramsSnapshot,
+        }),
+      }),
+    });
+  });
+
+  it('rejects stale, busy, unchanged, and missing atomic model selections without mutation', () => {
+    const thread = buildCompletedRegenerationThread('thread-atomic-model-guards');
+    seedPersistedChatThread(thread);
+    const originalThread = useChatStore.getState().threads[thread.id];
+
+    useChatStore.setState({ activeThreadId: null });
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'stale' });
+    expect(useChatStore.getState().threads[thread.id]).toBe(originalThread);
+
+    useChatStore.setState({ activeThreadId: thread.id });
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q6',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'stale' });
+    expect(useChatStore.getState().threads[thread.id]).toBe(originalThread);
+
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q4',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'unchanged' });
+    expect(useChatStore.getState().threads[thread.id]).toBe(originalThread);
+
+    const replacementId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt protected by branch replacement',
+    );
+    expect(replacementId).toBeTruthy();
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'busy' });
+    expect(getThreadActiveModelId(useChatStore.getState().threads[thread.id])).toBe(
+      'author/model-q4',
+    );
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      thread.id,
+      replacementId!,
+      { outcome: 'stopped' },
+    )).toEqual({ status: 'restored_without_write' });
+
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: 'missing-thread',
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'missing' });
+  });
+
   it('switchThreadModel updates activeModelId and appends a model_switch system message', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

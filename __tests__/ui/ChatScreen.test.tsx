@@ -647,6 +647,7 @@ const {
 } = require('../../src/ui/screens/ChatScreen');
 const { useChatStore } = require('../../src/store/chatStore');
 const {
+  getGenerationParametersForModel,
   getSettings,
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   updateSettings,
@@ -2898,10 +2899,188 @@ describe('ChatScreen', () => {
     expect(mockLoadModel).toHaveBeenCalled();
     expect(afterThread?.id).toBe(beforeThread?.id);
     expect(afterThread?.activeModelId).toBe('author/model-q8');
+    expect(afterThread?.paramsSnapshot).toEqual(
+      getGenerationParametersForModel('author/model-q8'),
+    );
     expect(afterThread?.messages.some((message: any) => message.kind === 'model_switch')).toBe(true);
 
     expect(queryByTestId('chat-model-selector-sheet')).toBeNull();
     expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
+  });
+
+  it('restores the authoritative thread model after a durable selection commit fails', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const threadBefore = useChatStore.getState().getActiveThread();
+    const commitError = new Error('simulated durable selection failure');
+    const commitSpy = jest.spyOn(
+      useChatStore.getState(),
+      'commitThreadModelSelection',
+    ).mockReturnValue({
+      status: 'persistence_failed',
+      error: commitError,
+    });
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      fireEvent.press(getByTestId('model-selector-button'));
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(2));
+      await waitFor(() => {
+        expect(lastChatInputBarProps.disabled).toBe(false);
+        expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
+      });
+
+      expect(mockLoadModel).toHaveBeenNthCalledWith(1, 'author/model-q8', undefined);
+      expect(mockLoadModel).toHaveBeenNthCalledWith(
+        2,
+        'author/model-q4',
+        expect.objectContaining({ preferLastWorkingProfile: true }),
+      );
+      expect(mockEngineState).toEqual(expect.objectContaining({
+        activeModelId: 'author/model-q4',
+        status: 'ready',
+      }));
+      expect(useChatStore.getState().getActiveThread()).toBe(threadBefore);
+      expect(
+        useChatStore.getState().getActiveThread()?.messages.some(
+          (message: { kind?: string }) => message.kind === 'model_switch',
+        ),
+      ).toBe(false);
+      expect(alertSpy).toHaveBeenCalledWith('common.actionFailed', expect.any(String));
+    } finally {
+      commitSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it('keeps input blocked and durable thread authoritative when commit recovery fails', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const threadBefore = useChatStore.getState().getActiveThread();
+    const commitSpy = jest.spyOn(
+      useChatStore.getState(),
+      'commitThreadModelSelection',
+    ).mockReturnValue({
+      status: 'persistence_failed',
+      error: new Error('private commit details'),
+    });
+    mockLoadModel
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('private recovery details'));
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      const { getByTestId, getByText } = render(React.createElement(ChatScreen));
+      fireEvent.press(getByTestId('model-selector-button'));
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(2));
+      await waitFor(() => {
+        expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
+        expect(lastChatInputBarProps.disabled).toBe(true);
+      });
+
+      expect(getByText('chat.loadThreadModel')).toBeTruthy();
+      expect(mockEngineState.activeModelId).toBe('author/model-q8');
+      expect(useChatStore.getState().getActiveThread()).toBe(threadBefore);
+      expect(
+        useChatStore.getState().getActiveThread()?.messages.some(
+          (message: { kind?: string }) => message.kind === 'model_switch',
+        ),
+      ).toBe(false);
+      expect(alertSpy).toHaveBeenCalledWith('common.actionFailed', expect.any(String));
+      expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain('private commit details');
+      expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain('private recovery details');
+    } finally {
+      commitSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it('catches an unexpected store commit exception and recovers without a floating rejection', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const commitSpy = jest.spyOn(
+      useChatStore.getState(),
+      'commitThreadModelSelection',
+    ).mockImplementation(() => {
+      throw new Error('unexpected commit exception');
+    });
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      fireEvent.press(getByTestId('model-selector-button'));
+      expect(
+        fireEvent.press(getByTestId('model-option-author/model-q8')),
+      ).toBeUndefined();
+
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(alertSpy).toHaveBeenCalled());
+
+      expect(mockEngineState.activeModelId).toBe('author/model-q4');
+      expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe(
+        'author/model-q4',
+      );
+      expect(lastChatInputBarProps.disabled).toBe(false);
+      expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain(
+        'unexpected commit exception',
+      );
+    } finally {
+      commitSpy.mockRestore();
+      consoleErrorSpy.mockRestore();
+    }
   });
 
   it('treats the current thread model as active in model controls after an in-chat switch', async () => {
@@ -3112,6 +3291,87 @@ describe('ChatScreen', () => {
     ) ?? [];
     expect(switchMessages).toHaveLength(1);
     expect(switchMessages[0]?.switchToModelId).toBe('author/model-q6');
+  });
+
+  it('rejects a selection when the thread model changes while loading and restores that model', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q6',
+        name: 'Model Q6',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q6.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const deferredLoad = createDeferred<void>();
+    mockLoadModel.mockImplementationOnce(() => deferredLoad.promise);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    fireEvent.press(getByTestId('model-selector-button'));
+    fireEvent.press(getByTestId('model-option-author/model-q8'));
+
+    await waitFor(() => {
+      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q8', undefined);
+    });
+
+    const externallySelectedParams = {
+      ...getGenerationParametersForModel('author/model-q6'),
+      maxTokens: 1536,
+    };
+    act(() => {
+      useChatStore.setState((state: any) => ({
+        threads: {
+          ...state.threads,
+          'thread-1': {
+            ...state.threads['thread-1'],
+            activeModelId: 'author/model-q6',
+            paramsSnapshot: externallySelectedParams,
+          },
+        },
+      }));
+    });
+
+    await act(async () => {
+      deferredLoad.resolve(undefined);
+      await deferredLoad.promise;
+    });
+
+    await waitFor(() => {
+      expect(mockLoadModel).toHaveBeenCalledWith(
+        'author/model-q6',
+        expect.objectContaining({ preferLastWorkingProfile: true }),
+      );
+      expect(mockEngineState.activeModelId).toBe('author/model-q6');
+      expect(lastChatHeaderProps.canOpenModelControls).toBe(true);
+    });
+
+    const thread = useChatStore.getState().threads['thread-1'];
+    expect(getThreadActiveModelId(thread)).toBe('author/model-q6');
+    expect(thread?.paramsSnapshot).toEqual(externallySelectedParams);
+    expect(
+      thread?.messages.some(
+        (message: { kind?: string; switchToModelId?: string }) =>
+          message.kind === 'model_switch' && message.switchToModelId === 'author/model-q8',
+      ),
+    ).toBe(false);
   });
 
   it('invalidates a pending model selection when the screen unmounts', async () => {
@@ -3477,6 +3737,9 @@ describe('ChatScreen', () => {
     });
     expect(queryByTestId('chat-model-selector-sheet')).toBeNull();
     expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
+    expect(lastChatHeaderProps.canOpenModelSelector).toBe(true);
+    expect(lastChatHeaderProps.canOpenModelControls).toBe(true);
+    expect(lastChatInputBarProps.disabled).toBe(false);
     } finally {
       consoleErrorSpy.mockRestore();
     }

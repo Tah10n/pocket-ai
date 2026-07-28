@@ -163,6 +163,14 @@ export type AssistantTurnCommitResult =
       };
     };
 
+export type ThreadModelSelectionCommitResult =
+  | { status: 'applied'; switchMessageId: string }
+  | { status: 'unchanged' }
+  | { status: 'stale' }
+  | { status: 'busy' }
+  | { status: 'missing' }
+  | { status: 'persistence_failed'; error: unknown };
+
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
@@ -175,6 +183,13 @@ interface ChatStoreState {
   setActiveThread: (threadId: string | null) => boolean;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
+  commitThreadModelSelection: (input: {
+    threadId: string;
+    expectedCurrentModelId: string;
+    nextModelId: string;
+    paramsSnapshot: GenerationParamsSnapshot;
+    at?: number;
+  }) => ThreadModelSelectionCommitResult;
   switchThreadModel: (threadId: string, nextModelId: string, at?: number) => string | null;
   appendMessage: (threadId: string, message: ChatMessage) => void;
   createAssistantPlaceholder: (threadId: string, modelId?: string) => string;
@@ -2913,6 +2928,93 @@ export const useChatStore = create<ChatStoreState>()(
             inferenceRevision: state.inferenceRevision + 1,
           };
           });
+        },
+
+        commitThreadModelSelection: ({
+          threadId,
+          expectedCurrentModelId,
+          nextModelId,
+          paramsSnapshot,
+          at,
+        }) => {
+          let commitResult: ThreadModelSelectionCommitResult = { status: 'missing' };
+
+          try {
+            setWhenPrivateStorageWritable((state) => {
+              const existingThread = state.threads[threadId];
+              if (!existingThread) {
+                commitResult = { status: 'missing' };
+                return state;
+              }
+              if (state.activeThreadId !== threadId) {
+                commitResult = { status: 'stale' };
+                return state;
+              }
+
+              const prevModelId = getThreadActiveModelId(existingThread);
+              if (prevModelId !== expectedCurrentModelId) {
+                commitResult = { status: 'stale' };
+                return state;
+              }
+              if (getActiveBranchReplacementRuntime(existingThread)) {
+                commitResult = { status: 'busy' };
+                return state;
+              }
+              if (nextModelId === prevModelId) {
+                commitResult = { status: 'unchanged' };
+                return state;
+              }
+
+              const requestedCreatedAt = at ?? Date.now();
+              const lastMessageCreatedAt =
+                existingThread.messages[existingThread.messages.length - 1]?.createdAt;
+              const createdAt = typeof lastMessageCreatedAt === 'number'
+                ? Math.max(requestedCreatedAt, lastMessageCreatedAt)
+                : requestedCreatedAt;
+              const updatedAt = Math.max(Date.now(), existingThread.updatedAt, createdAt);
+              const switchMessage = createModelSwitchMessage({
+                fromModelId: prevModelId,
+                toModelId: nextModelId,
+                createdAt,
+              });
+              const nextThread: ChatThread = {
+                ...existingThread,
+                activeModelId: nextModelId,
+                paramsSnapshot: {
+                  temperature: paramsSnapshot.temperature,
+                  topP: paramsSnapshot.topP,
+                  topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
+                  minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
+                  repetitionPenalty:
+                    paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+                  maxTokens: paramsSnapshot.maxTokens,
+                  reasoningEffort: normalizeReasoningEffort(
+                    paramsSnapshot.reasoningEffort,
+                    (paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled,
+                  ),
+                  seed: paramsSnapshot.seed ?? null,
+                },
+                messages: [...existingThread.messages, switchMessage],
+                updatedAt,
+              };
+              commitResult = {
+                status: 'applied',
+                switchMessageId: switchMessage.id,
+              };
+
+              return {
+                threads: {
+                  ...state.threads,
+                  [threadId]: nextThread,
+                },
+                inferenceRevision: state.inferenceRevision + 1,
+              };
+            });
+          } catch (error) {
+            return { status: 'persistence_failed', error };
+          }
+
+          return commitResult;
         },
 
         switchThreadModel: (threadId, nextModelId, at) => {

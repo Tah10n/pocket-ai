@@ -312,6 +312,11 @@ class NotificationService {
         this.initialized = false;
         this.initializationPromise = null;
         this.permissionState = 'unknown';
+        // A disposed lifecycle may still be waiting on a native promise that
+        // cannot be cancelled. Detach the next lifecycle from that queue so a
+        // stale read cannot block notification handling after reinitialization.
+        this.responseProcessingTail = Promise.resolve();
+        this.inFlightResponseOperations.clear();
         const subscription = this.responseSubscription;
         this.responseSubscription = undefined;
         try {
@@ -472,11 +477,6 @@ class NotificationService {
             return existing.promise;
         }
 
-        const processedUntil = this.recentlyProcessedResponses.get(fingerprint);
-        if (typeof processedUntil === 'number' && processedUntil > now) {
-            return Promise.resolve();
-        }
-
         const operation = this.responseProcessingTail.then(async () => {
             this.assertResponseGeneration(generation);
 
@@ -487,6 +487,11 @@ class NotificationService {
                 typeof queuedProcessedUntil === 'number'
                 && queuedProcessedUntil > processingStartedAt
             ) {
+                await this.clearNativeLastResponseIfMatching(
+                    fingerprint,
+                    source,
+                    generation,
+                );
                 return;
             }
 

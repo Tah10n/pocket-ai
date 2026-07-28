@@ -242,6 +242,57 @@ describe('NotificationService (behavior)', () => {
     expect(retrySubscription.remove).not.toHaveBeenCalled();
   });
 
+  it('does not let a stalled response from a disposed lifecycle block reinitialization', async () => {
+    const staleResponse = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 50,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const currentResponse = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 51,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const staleNativeRead = createDeferred<Notifications.NotificationResponse>();
+
+    await notificationService.initialize();
+    (Notifications.getLastNotificationResponseAsync as jest.Mock)
+      .mockImplementationOnce(() => staleNativeRead.promise)
+      .mockResolvedValueOnce(currentResponse)
+      .mockResolvedValueOnce(currentResponse);
+
+    const staleListener = (
+      Notifications.addNotificationResponseReceivedListener as jest.Mock
+    ).mock.calls[0][0];
+    staleListener(staleResponse);
+    for (let index = 0; index < 8; index += 1) {
+      await Promise.resolve();
+    }
+    expect(router.push).toHaveBeenCalledTimes(1);
+
+    notificationService.dispose();
+    let reinitializationSettled = false;
+    const reinitialization = notificationService.initialize().then(() => {
+      reinitializationSettled = true;
+    });
+    for (let index = 0; index < 12; index += 1) {
+      await Promise.resolve();
+    }
+
+    const routesBeforeStaleReadSettles = (router.push as jest.Mock).mock.calls.length;
+    const reinitializedBeforeStaleReadSettles = reinitializationSettled;
+    staleNativeRead.resolve(staleResponse);
+    await reinitialization;
+    for (let index = 0; index < 4; index += 1) {
+      await Promise.resolve();
+    }
+
+    expect(routesBeforeStaleReadSettles).toBe(2);
+    expect(reinitializedBeforeStaleReadSettles).toBe(true);
+    expect(router.push).toHaveBeenCalledTimes(2);
+    expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
+  });
+
   it('emits privacy-safe initialization outcome and failure category telemetry', async () => {
     const privateFailure = new Error('failed for private notification content');
     (Notifications.setNotificationHandler as jest.Mock).mockImplementationOnce(() => {
@@ -353,6 +404,46 @@ describe('NotificationService (behavior)', () => {
 
     expect(router.push).toHaveBeenCalledTimes(1);
     expect(Notifications.clearLastNotificationResponse).not.toHaveBeenCalled();
+  });
+
+  it('retries native clearing for a deduped response without routing twice', async () => {
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 250,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      (Notifications.clearLastNotificationResponse as jest.Mock)
+        .mockImplementationOnce(() => {
+          throw new Error('native clear unavailable');
+        })
+        .mockImplementation(() => undefined);
+      await notificationService.initialize();
+      (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValue(response);
+
+      const listener = (
+        Notifications.addNotificationResponseReceivedListener as jest.Mock
+      ).mock.calls[0][0];
+      listener(response);
+      await flushNotificationResponsePipeline();
+      listener(response);
+      await flushNotificationResponsePipeline();
+
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(2);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[NotificationService] Notification response processing failed',
+        expect.objectContaining({
+          scope: 'notification_response',
+          category: 'native_last_response_clear_failed',
+          source: 'listener',
+          errorName: 'Error',
+        }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('retries a routing failure without leaking notification data or rejecting the listener', async () => {

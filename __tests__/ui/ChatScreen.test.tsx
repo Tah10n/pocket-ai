@@ -2908,6 +2908,60 @@ describe('ChatScreen', () => {
     expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
   });
 
+  it('lets an explicit model selection recover a legacy thread without model evidence', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    useChatStore.setState((state: any) => ({
+      threads: {
+        ...state.threads,
+        'thread-1': {
+          ...state.threads['thread-1'],
+          modelId: '',
+          activeModelId: '',
+        },
+      },
+      activeThreadId: 'thread-1',
+    }));
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+    fireEvent.press(getByTestId('model-selector-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+    });
+
+    await waitFor(() => {
+      expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe(
+        'author/model-q8',
+      );
+      expect(lastChatInputBarProps.disabled).toBe(false);
+    });
+    expect(mockLoadModel).toHaveBeenCalledWith('author/model-q8', undefined);
+    expect(
+      useChatStore.getState().getActiveThread()?.messages.some(
+        (message: { kind?: string; switchToModelId?: string }) => (
+          message.kind === 'model_switch'
+          && message.switchToModelId === 'author/model-q8'
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it('restores the authoritative thread model after a durable selection commit fails', async () => {
     registry.saveModels([
       {

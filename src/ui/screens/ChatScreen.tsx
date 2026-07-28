@@ -1218,6 +1218,14 @@ export const ChatScreen = () => {
                 return { status: 'stale' };
             }
             const authoritativeModelId = getThreadActiveModelId(authoritativeThread);
+            if (!authoritativeModelId) {
+                return {
+                    status: 'failed',
+                    error: new Error(
+                        'The conversation does not have an authoritative model to restore.',
+                    ),
+                };
+            }
             const currentEngineState = llmEngineService.getState();
             if (
                 currentEngineState.status === EngineStatus.READY
@@ -1305,7 +1313,12 @@ export const ChatScreen = () => {
             }
 
             let expectedParamsSnapshot: GenerationParamsSnapshot | null = null;
-            if (applySelection && freshThread && threadId && expectedThreadModelId) {
+            if (
+                applySelection
+                && freshThread
+                && threadId
+                && expectedThreadModelId !== null
+            ) {
                 expectedParamsSnapshot = getGenerationParametersForModel(targetModelId);
                 const commitResult = useChatStore.getState().commitThreadModelSelection({
                     threadId,

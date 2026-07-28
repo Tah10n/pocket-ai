@@ -3278,6 +3278,47 @@ describe('ChatScreen', () => {
     expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
   });
 
+  it('retries exact thread-model synchronization when the chat screen regains focus', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    mockEngineState = {
+      activeModelId: 'author/model-q8',
+      status: 'ready',
+    };
+    const navigation = jest.requireMock('@react-navigation/native');
+    const useIsFocusedSpy = jest.spyOn(navigation, 'useIsFocused').mockReturnValue(false);
+
+    try {
+      const { rerender } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      expect(lastChatInputBarProps.disabled).toBe(true);
+
+      useIsFocusedSpy.mockReturnValue(true);
+      rerender(React.createElement(ChatScreen));
+
+      await waitFor(() => {
+        expect(mockLoadModel).toHaveBeenCalledWith(
+          'author/model-q4',
+          expect.objectContaining({ preferLastWorkingProfile: true }),
+        );
+        expect(lastChatInputBarProps.disabled).toBe(false);
+      });
+    } finally {
+      useIsFocusedSpy.mockRestore();
+    }
+  });
+
   it('applies only the latest of two rapid model selections', async () => {
     registry.saveModels([
       {

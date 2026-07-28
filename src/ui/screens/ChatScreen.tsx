@@ -14,7 +14,7 @@ import {
     View,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
@@ -716,6 +716,7 @@ export const ChatScreen = () => {
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
     const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const tabBarHeight = useBottomTabBarHeight();
+    const isScreenFocused = useIsFocused();
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
@@ -2363,7 +2364,7 @@ export const ChatScreen = () => {
 
     useEffect(() => {
         if (
-            !isScreenActiveRef.current
+            !isScreenFocused
             || !activeThreadId
             || !currentChatActiveModelId
             || isGenerating
@@ -2441,6 +2442,7 @@ export const ChatScreen = () => {
         executeThreadModelLoad,
         isGenerating,
         isPendingModelSelectionForCurrentThread,
+        isScreenFocused,
         modelRegistryRevision,
         showAlertForError,
     ]);

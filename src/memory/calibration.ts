@@ -88,6 +88,9 @@ export function createCalibrationKey({
   cacheTypeV,
   useMmap,
   hasMmproj,
+  stateCacheBudgetMb,
+  stateCacheMaxCheckpoints,
+  stateCachePolicyVersion,
   nBatch = 0,
   nUbatch = 0,
 }: {
@@ -101,6 +104,9 @@ export function createCalibrationKey({
   cacheTypeV: string;
   useMmap: boolean;
   hasMmproj: boolean;
+  stateCacheBudgetMb: number;
+  stateCacheMaxCheckpoints: number;
+  stateCachePolicyVersion: number;
   nBatch?: number;
   nUbatch?: number;
 }): CalibrationKey | null {
@@ -113,6 +119,9 @@ export function createCalibrationKey({
   const normalizedCacheTypeV = normalizeNonEmptyString(cacheTypeV);
   const normalizedBatch = normalizeFiniteNonNegativeNumber(nBatch);
   const normalizedUbatch = normalizeFiniteNonNegativeNumber(nUbatch);
+  const normalizedStateCacheBudgetMb = normalizeFiniteNonNegativeNumber(stateCacheBudgetMb);
+  const normalizedStateCacheMaxCheckpoints = normalizeFiniteNonNegativeNumber(stateCacheMaxCheckpoints);
+  const normalizedStateCachePolicyVersion = normalizeFiniteNonNegativeNumber(stateCachePolicyVersion);
 
   if (
     !normalizedDevice
@@ -124,6 +133,9 @@ export function createCalibrationKey({
     || normalizedCacheTypeV === null
     || normalizedBatch === null
     || normalizedUbatch === null
+    || normalizedStateCacheBudgetMb === null
+    || normalizedStateCacheMaxCheckpoints === null
+    || normalizedStateCachePolicyVersion === null
   ) {
     return null;
   }
@@ -145,6 +157,9 @@ export function createCalibrationKey({
     useMmap: useMmap === true,
     gpuLayers: Math.round(gpuLayerCount),
     hasMmproj: hasMmproj === true,
+    stateCacheBudgetMb: Math.round(normalizedStateCacheBudgetMb),
+    stateCacheMaxCheckpoints: Math.round(normalizedStateCacheMaxCheckpoints),
+    stateCachePolicyVersion: Math.round(normalizedStateCachePolicyVersion),
   };
 }
 

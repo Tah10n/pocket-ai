@@ -1,4 +1,8 @@
-import { buildInferenceCompletionTelemetry } from '../../src/services/LLMEngineService.diagnostics';
+import {
+  buildEngineDiagnosticsSnapshot,
+  buildInferenceCompletionTelemetry,
+} from '../../src/services/LLMEngineService.diagnostics';
+import type { PromptStateCachePolicy } from '../../src/services/PromptStateCachePolicy';
 
 describe('LLMEngineService MTP diagnostics', () => {
   it('preserves native throughput and computes draft acceptance', () => {
@@ -67,5 +71,113 @@ describe('LLMEngineService MTP diagnostics', () => {
         fallbackReason: 'completion_failed',
       },
     });
+  });
+});
+
+describe('LLMEngineService prompt state cache diagnostics', () => {
+  it('reports only policy and reserved-memory facts supplied by the runtime policy', () => {
+    const policy: PromptStateCachePolicy = {
+      budgetMb: 160,
+      maxCheckpoints: 8,
+      enabled: true,
+      eligibility: 'eligible',
+      reason: 'maximum_safe_budget',
+      policyVersion: 1,
+      architecture: 'mamba',
+      backendMode: 'gpu',
+      finalMemoryFit: {
+        decision: 'fits_high_confidence',
+        confidence: 'high',
+        requiredBytes: 2_000,
+        effectiveBudgetBytes: 4_000,
+        breakdown: {
+          weightsBytes: 1_000,
+          kvCacheBytes: 100,
+          promptStateCacheBytes: 160 * 1024 * 1024,
+          computeBytes: 100,
+          multimodalBytes: 0,
+          overheadBytes: 100,
+          safetyMarginBytes: 100,
+        },
+        budget: {
+          totalMemoryBytes: 8_000,
+          effectiveBudgetBytes: 4_000,
+        },
+        recommendations: [],
+      },
+      evaluatedBudgetsMb: [160],
+      source: 'runtime_accurate_memory_fit',
+    };
+    const snapshot = buildEngineDiagnosticsSnapshot({
+      activeBackendMode: 'gpu',
+      activeBackendDevices: ['private-device-name'],
+      activeBackendReasonNoGpu: null,
+      activeBackendSystemInfo: null,
+      activeBackendAndroidLib: null,
+      requestedGpuLayers: 12,
+      activeGpuLayers: 12,
+      actualGpuAccelerated: true,
+      requestedBackendPolicy: 'gpu',
+      effectiveBackendPolicy: 'gpu',
+      backendPolicyReasons: [],
+      backendInitAttemptsSnapshot: [{
+        candidate: 'gpu',
+        nGpuLayers: 12,
+        contextSize: 4096,
+        cacheTypeK: 'f16',
+        cacheTypeV: 'f16',
+        stateCacheBudgetMb: 160,
+        stateCacheMaxCheckpoints: 8,
+        stateCacheEnabled: true,
+        stateCacheEligibility: 'eligible',
+        stateCachePolicyReason: 'maximum_safe_budget',
+        stateCachePolicyVersion: 1,
+        promptStateCacheBytes: 160 * 1024 * 1024,
+        stateCacheArchitecture: 'mamba',
+        speculativeEnabled: false,
+        profileSource: 'requested',
+        probableOom: false,
+        durationMs: 10,
+        outcome: 'success',
+      }],
+      initGpuLayers: 12,
+      initDevices: ['private-device-name'],
+      initCacheTypeK: 'f16',
+      initCacheTypeV: 'f16',
+      initFlashAttnType: 'on',
+      initUseMmap: true,
+      initUseMlock: false,
+      initNParallel: 1,
+      initNThreads: 4,
+      initCpuMask: null,
+      initCpuStrict: null,
+      initNBatch: 512,
+      initNUbatch: 256,
+      initKvUnified: false,
+      lastLifecycleEvent: null,
+      lastLifecycleError: null,
+      multimodalDiagnostics: null,
+      speculativeDecodingDiagnostics: null,
+      activePromptStateCachePolicy: policy,
+    });
+
+    expect(snapshot).toEqual(expect.objectContaining({
+      backendMode: 'gpu',
+      stateCacheBudgetMb: 160,
+      stateCacheMaxCheckpoints: 8,
+      stateCacheEnabled: true,
+      stateCacheEligibility: 'eligible',
+      stateCachePolicyReason: 'maximum_safe_budget',
+      stateCachePolicyVersion: 1,
+      promptStateCacheBytes: 160 * 1024 * 1024,
+      stateCacheArchitecture: 'mamba',
+    }));
+    expect(snapshot.backendDevices).toEqual(['gpu']);
+    expect(snapshot.backendInitAttempts?.[0]).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 160,
+      stateCacheArchitecture: 'mamba',
+    }));
+    expect(snapshot).not.toHaveProperty('stateCacheHits');
+    expect(snapshot).not.toHaveProperty('stateCacheTokens');
   });
 });

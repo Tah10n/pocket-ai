@@ -152,6 +152,9 @@ import {
   type LlamaMultimodalSupport,
 } from './LlamaRuntimeAdapter';
 import {
+  DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+  PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+  PROMPT_STATE_CACHE_POLICY_VERSION,
   resolvePromptStateCachePolicy,
   type PromptStateCachePolicy,
 } from './PromptStateCachePolicy';
@@ -600,6 +603,24 @@ const SAFE_INIT_PROFILE_SOURCES = new Set<EngineModelInitProfileSource>([
   'speculative_fallback',
   'backend_discovery',
 ]);
+const SAFE_PROMPT_STATE_CACHE_ELIGIBILITY = new Set(['eligible', 'ineligible', 'unknown']);
+const SAFE_PROMPT_STATE_CACHE_POLICY_REASONS = new Set([
+  'maximum_safe_budget',
+  'reduced_to_memory_fit',
+  'no_safe_budget',
+  'architecture_ineligible',
+  'pure_swa_ineligible',
+  'architecture_unknown',
+  'unsupported_backend_architecture',
+  'low_memory',
+  'critical_memory_pressure',
+  'base_fit_borderline',
+  'base_fit_likely_oom',
+  'base_fit_unknown',
+  'insufficient_confidence',
+  'safe_load_restricted',
+  'memory_estimate_failed',
+]);
 
 function getOwnDataProperty(record: Record<string, unknown>, key: string): unknown {
   try {
@@ -751,12 +772,43 @@ function sanitizeBackendInitAttempt(value: unknown): EngineBackendInitAttempt | 
     contextSize,
     cacheTypeK: 'redacted',
     cacheTypeV: 'redacted',
+    stateCacheBudgetMb: readFiniteNumber(source, 'stateCacheBudgetMb') ?? 0,
+    stateCacheMaxCheckpoints:
+      readFiniteNumber(source, 'stateCacheMaxCheckpoints')
+      ?? PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+    stateCacheEnabled: readBoolean(source, 'stateCacheEnabled') ?? false,
+    stateCacheEligibility: 'unknown',
+    stateCachePolicyReason: 'architecture_unknown',
+    stateCachePolicyVersion: readFiniteNumber(source, 'stateCachePolicyVersion') ?? 0,
+    promptStateCacheBytes: readFiniteNumber(source, 'promptStateCacheBytes') ?? 0,
     speculativeEnabled,
     profileSource: profileSource as EngineModelInitProfileSource,
     probableOom,
     durationMs,
     outcome,
   };
+  const stateCacheEligibility = getOwnDataProperty(source, 'stateCacheEligibility');
+  if (
+    typeof stateCacheEligibility === 'string'
+    && SAFE_PROMPT_STATE_CACHE_ELIGIBILITY.has(stateCacheEligibility)
+  ) {
+    sanitized.stateCacheEligibility =
+      stateCacheEligibility as EngineBackendInitAttempt['stateCacheEligibility'];
+  }
+  const stateCachePolicyReason = getOwnDataProperty(source, 'stateCachePolicyReason');
+  if (
+    typeof stateCachePolicyReason === 'string'
+    && SAFE_PROMPT_STATE_CACHE_POLICY_REASONS.has(stateCachePolicyReason)
+  ) {
+    sanitized.stateCachePolicyReason = stateCachePolicyReason;
+  }
+  const stateCacheArchitecture = getOwnDataProperty(source, 'stateCacheArchitecture');
+  if (
+    typeof stateCacheArchitecture === 'string'
+    && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(stateCacheArchitecture)
+  ) {
+    sanitized.stateCacheArchitecture = stateCacheArchitecture;
+  }
   for (const key of ['nBatch', 'nUbatch', 'deviceCount'] as const) {
     const numericValue = readFiniteNumber(source, key);
     if (numericValue !== undefined) {
@@ -1297,6 +1349,7 @@ class LLMEngineService {
   private speculativeDraftSizeBytes: number | null = null;
   private speculativeMemorySession: SpeculativeMemorySession | null = null;
   private lastCompletionTelemetry: InferenceCompletionTelemetry | null = null;
+  private activePromptStateCachePolicy: PromptStateCachePolicy | null = null;
   private loadedContextDisablesContextShiftForMultimodal = false;
   private pendingMultimodalReadinessRefresh: MultimodalReadinessRefreshRequest | null = null;
   private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
@@ -2598,6 +2651,9 @@ class LLMEngineService {
     cacheTypeV,
     useMmap,
     hasMmproj,
+    stateCacheBudgetMb = DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+    stateCacheMaxCheckpoints = PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+    stateCachePolicyVersion = PROMPT_STATE_CACHE_POLICY_VERSION,
     nBatch,
     nUbatch,
   }: {
@@ -2609,6 +2665,9 @@ class LLMEngineService {
     cacheTypeV: string;
     useMmap: boolean;
     hasMmproj: boolean;
+    stateCacheBudgetMb?: number;
+    stateCacheMaxCheckpoints?: number;
+    stateCachePolicyVersion?: number;
     nBatch?: number;
     nUbatch?: number;
   }): string | null {
@@ -2623,6 +2682,9 @@ class LLMEngineService {
       cacheTypeV,
       useMmap,
       hasMmproj,
+      stateCacheBudgetMb,
+      stateCacheMaxCheckpoints,
+      stateCachePolicyVersion,
       nBatch,
       nUbatch,
     });
@@ -4169,6 +4231,7 @@ class LLMEngineService {
       lastLifecycleError: this.lastLifecycleError,
       multimodalDiagnostics: this.recentMultimodalDiagnostics,
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
+      activePromptStateCachePolicy: this.activePromptStateCachePolicy,
     });
   }
 
@@ -5130,6 +5193,7 @@ class LLMEngineService {
     this.speculativeDraftSizeBytes = null;
     this.speculativeMemorySession = null;
     this.lastCompletionTelemetry = null;
+    this.activePromptStateCachePolicy = null;
   }
 
   private resolveReportedLoadedGpuLayers(resolvedGpuLayers: number | null): number {
@@ -6036,6 +6100,7 @@ class LLMEngineService {
         profile: InitInferenceProfile,
         layers: number,
         speculativeEnabled: boolean,
+        promptStateCachePolicy: PromptStateCachePolicy,
       ): ModelInitAttemptIdentity => ({
         backendMode: profile.backendMode,
         devices: profile.devices,
@@ -6055,12 +6120,16 @@ class LLMEngineService {
         cacheTypeK,
         cacheTypeV,
         speculativeEnabled,
+        stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
+        stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
+        stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
       });
 
       const buildPersistentFailureBoundIdentity = (
         profile: InitInferenceProfile,
         layers: number,
         speculativeConfig: ModelSpeculativeDecodingConfig | null,
+        promptStateCachePolicy: PromptStateCachePolicy,
       ): ModelInitFailureBoundIdentity => ({
         modelId,
         modelFileSizeBytes: verifiedFileSizeBytes,
@@ -6095,6 +6164,9 @@ class LLMEngineService {
         noExtraBufts: profileUsesNoExtraBufts(profile),
         kvUnified: profile.kvUnified,
         nParallel: profile.nParallel,
+        stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
+        stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
+        stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
         projector: loadTimeProjectorMemory
           ? {
               id: loadTimeProjectorMemory.projectorId,
@@ -6163,6 +6235,7 @@ class LLMEngineService {
         layers: number,
         speculativeEnabled: boolean,
         profileSource: EngineModelInitProfileSource,
+        promptStateCachePolicy: PromptStateCachePolicy,
       ) => ({
         modelId,
         backendMode: profile.backendMode,
@@ -6177,6 +6250,15 @@ class LLMEngineService {
         kvCacheTypeV: cacheTypeV,
         speculativeEnabled,
         profileSource,
+        stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
+        stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
+        stateCacheEnabled: promptStateCachePolicy.enabled,
+        stateCacheEligibility: promptStateCachePolicy.eligibility,
+        stateCachePolicyReason: promptStateCachePolicy.reason,
+        stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
+        promptStateCacheBytes:
+          promptStateCachePolicy.finalMemoryFit?.breakdown.promptStateCacheBytes ?? 0,
+        stateCacheArchitecture: promptStateCachePolicy.architecture,
       });
 
       const createInitAttemptRecord = ({
@@ -6188,6 +6270,7 @@ class LLMEngineService {
         probableOom,
         durationMs,
         failureCategory,
+        promptStateCachePolicy,
       }: {
         profile: InitInferenceProfile;
         layers: number;
@@ -6197,6 +6280,7 @@ class LLMEngineService {
         probableOom: boolean;
         durationMs: number;
         failureCategory?: EngineBackendInitAttempt['failureCategory'];
+        promptStateCachePolicy: PromptStateCachePolicy;
       }): EngineBackendInitAttempt => ({
         candidate: profile.backendMode,
         nGpuLayers: Math.max(0, Math.round(layers)),
@@ -6208,6 +6292,17 @@ class LLMEngineService {
         ...(typeof profile.nUbatch === 'number' ? { nUbatch: Math.round(profile.nUbatch) } : null),
         cacheTypeK,
         cacheTypeV,
+        stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
+        stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
+        stateCacheEnabled: promptStateCachePolicy.enabled,
+        stateCacheEligibility: promptStateCachePolicy.eligibility,
+        stateCachePolicyReason: promptStateCachePolicy.reason,
+        stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
+        promptStateCacheBytes:
+          promptStateCachePolicy.finalMemoryFit?.breakdown.promptStateCacheBytes ?? 0,
+        ...(promptStateCachePolicy.architecture
+          ? { stateCacheArchitecture: promptStateCachePolicy.architecture }
+          : null),
         speculativeEnabled,
         profileSource,
         probableOom,
@@ -6220,9 +6315,12 @@ class LLMEngineService {
         profile: InitInferenceProfile,
         failureCategory: 'backend_unavailable' | 'known_oom_upper_bound' | 'attempt_limit',
         probableOom = false,
+        explicitPromptStateCachePolicy?: PromptStateCachePolicy,
       ) => {
         performanceMonitor.incrementCounter('model.init.profileSkipped');
         const speculativeEnabled = speculativeDecodingForLoad !== null;
+        const promptStateCachePolicy = explicitPromptStateCachePolicy
+          ?? resolvePromptStateCachePolicyForInitProfile(profile, profile.nGpuLayers);
         const attempt = createInitAttemptRecord({
           profile,
           layers: profile.nGpuLayers,
@@ -6232,6 +6330,7 @@ class LLMEngineService {
           probableOom,
           durationMs: 0,
           failureCategory,
+          promptStateCachePolicy,
         });
         backendInitAttempts.push(attempt);
         performanceMonitor.mark('model.init.attempt', {
@@ -6240,6 +6339,7 @@ class LLMEngineService {
             profile.nGpuLayers,
             speculativeEnabled,
             profile.profileSource,
+            promptStateCachePolicy,
           ),
           durationMs: 0,
           outcome: 'skipped',
@@ -6276,6 +6376,9 @@ class LLMEngineService {
               cacheTypeV,
               useMmap: profile.useMmap,
               hasMmproj: hasLoadTimeMmproj,
+              stateCacheBudgetMb,
+              stateCacheMaxCheckpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+              stateCachePolicyVersion: PROMPT_STATE_CACHE_POLICY_VERSION,
               nBatch: profile.nBatch,
               nUbatch: profile.nUbatch,
             })
@@ -6356,6 +6459,9 @@ class LLMEngineService {
               cacheTypeV,
               useMmap: requestedUseMmap,
               hasMmproj: hasLoadTimeMmproj,
+              stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
+              stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
+              stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
               nBatch: effectiveBatchParams?.nBatch,
               nUbatch: effectiveBatchParams?.nUbatch,
             })
@@ -6541,13 +6647,22 @@ class LLMEngineService {
             profile,
             normalizedAttemptLayers,
           );
-          const identity = buildInitAttemptIdentity(profile, normalizedAttemptLayers, speculativeEnabled);
+          const identity = buildInitAttemptIdentity(
+            profile,
+            normalizedAttemptLayers,
+            speculativeEnabled,
+            promptStateCachePolicy,
+          );
           const persistentIdentity = buildPersistentFailureBoundIdentity(
             profile,
             normalizedAttemptLayers,
             speculativeConfig,
+            promptStateCachePolicy,
           );
-          if (normalizedAttemptLayers > 0 || speculativeEnabled) {
+          const shouldUsePersistentFailureBound = normalizedAttemptLayers > 0
+            || speculativeEnabled
+            || promptStateCachePolicy.enabled;
+          if (shouldUsePersistentFailureBound) {
             const persistedUpperBound = readPersistentFailureBound(persistentIdentity);
             if (persistedUpperBound !== null) {
               initAttemptGuard.recordKnownOomUpperBound(identity, persistedUpperBound);
@@ -6566,6 +6681,7 @@ class LLMEngineService {
                 { ...profile, nGpuLayers: normalizedAttemptLayers, profileSource },
                 decision,
                 decision === 'known_oom_upper_bound',
+                promptStateCachePolicy,
               );
             }
             if (decision === 'known_oom_upper_bound') {
@@ -6582,6 +6698,7 @@ class LLMEngineService {
               normalizedAttemptLayers,
               speculativeEnabled,
               profileSource,
+              promptStateCachePolicy,
             ),
           );
           try {
@@ -6602,6 +6719,7 @@ class LLMEngineService {
               outcome: 'success',
               probableOom: false,
               durationMs,
+              promptStateCachePolicy,
             });
             backendInitAttempts.push(attempt);
             attemptSpan.end({
@@ -6621,7 +6739,30 @@ class LLMEngineService {
             const probableOom = isProbableMemoryFailure(error);
             if (probableOom) {
               initAttemptGuard.recordProbableOom(identity);
-              if (normalizedAttemptLayers > 0 || speculativeEnabled) {
+              const calibrationKey = verifiedFileSizeBytes !== null
+                ? this.buildCalibrationKeyString({
+                    ggufMetadata,
+                    verifiedFileSizeBytes,
+                    contextTokens: finalContextSize,
+                    gpuLayers: normalizedAttemptLayers,
+                    cacheTypeK,
+                    cacheTypeV,
+                    useMmap: profile.useMmap,
+                    hasMmproj: hasLoadTimeMmproj,
+                    stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
+                    stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
+                    stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
+                    nBatch: profile.nBatch,
+                    nUbatch: profile.nUbatch,
+                  })
+                : null;
+              if (calibrationKey) {
+                this.persistCalibrationFailure({
+                  calibrationKey,
+                  observedRawBudgetBytes,
+                });
+              }
+              if (shouldUsePersistentFailureBound) {
                 persistFailureBound(persistentIdentity, normalizedAttemptLayers);
               }
             }
@@ -6635,6 +6776,7 @@ class LLMEngineService {
               probableOom,
               durationMs,
               failureCategory,
+              promptStateCachePolicy,
             });
             backendInitAttempts.push(attempt);
             attemptSpan.end({
@@ -6745,12 +6887,22 @@ class LLMEngineService {
               return null;
             }
 
+            const retryPromptStateCachePolicy = resolvePromptStateCachePolicyForInitProfile(
+              profile,
+              normalizedLayers,
+            );
             const activeSpeculativeIdentity = buildInitAttemptIdentity(
               profile,
               normalizedLayers,
               speculativeDecodingForLoad !== null,
+              retryPromptStateCachePolicy,
             );
-            const baseOnlyIdentity = buildInitAttemptIdentity(profile, normalizedLayers, false);
+            const baseOnlyIdentity = buildInitAttemptIdentity(
+              profile,
+              normalizedLayers,
+              false,
+              retryPromptStateCachePolicy,
+            );
             retryUpperBound = Math.min(
               normalizedLayers,
               initAttemptGuard.getKnownOomUpperBound(activeSpeculativeIdentity)
@@ -6772,26 +6924,6 @@ class LLMEngineService {
           }
         } catch (error) {
           const isOomLikely = isProbableMemoryFailure(error);
-          const initialCalibrationKey = verifiedFileSizeBytes !== null
-            ? this.buildCalibrationKeyString({
-                ggufMetadata,
-                verifiedFileSizeBytes,
-                contextTokens: finalContextSize,
-                gpuLayers: normalizedLayers,
-                cacheTypeK,
-                cacheTypeV,
-                useMmap: requestedUseMmap,
-                hasMmproj: hasLoadTimeMmproj,
-                nBatch: effectiveBatchParams?.nBatch,
-                nUbatch: effectiveBatchParams?.nUbatch,
-              })
-            : null;
-          if (initialCalibrationKey && isOomLikely) {
-            this.persistCalibrationFailure({
-              calibrationKey: initialCalibrationKey,
-              observedRawBudgetBytes,
-            });
-          }
 
           if (!isOomLikely) {
             if (process.env.NODE_ENV !== 'test') {
@@ -6824,21 +6956,6 @@ class LLMEngineService {
         }
 
         for (const candidateLayers of retryCandidates) {
-          const candidateCalibrationKey = verifiedFileSizeBytes !== null
-            ? this.buildCalibrationKeyString({
-                ggufMetadata,
-                verifiedFileSizeBytes,
-                contextTokens: finalContextSize,
-                gpuLayers: candidateLayers,
-                cacheTypeK,
-                cacheTypeV,
-                useMmap: requestedUseMmap,
-                hasMmproj: hasLoadTimeMmproj,
-                nBatch: effectiveBatchParams?.nBatch,
-                nUbatch: effectiveBatchParams?.nUbatch,
-              })
-            : null;
-
           try {
             const result = await initOnce(candidateLayers, 'oom_retry');
             if (result.status === 'skipped') {
@@ -6857,12 +6974,6 @@ class LLMEngineService {
             };
           } catch (retryError) {
             lastError = retryError;
-            if (candidateCalibrationKey && isProbableMemoryFailure(retryError)) {
-              this.persistCalibrationFailure({
-                calibrationKey: candidateCalibrationKey,
-                observedRawBudgetBytes,
-              });
-            }
           }
         }
 
@@ -7210,7 +7321,11 @@ class LLMEngineService {
             continue;
           }
 
-          if (actualGpu) {
+          if (
+            actualGpu
+            || successfulAttempt.speculativeEnabled
+            || promptStateCachePolicy.enabled
+          ) {
             reconcileSuccessfulFailureBound(
               successfulFailureBoundIdentity,
               candidateGpuLayers,
@@ -7221,6 +7336,10 @@ class LLMEngineService {
           resolvedInitGpuLayers = candidateGpuLayers;
           resolvedInitActualGpu = actualGpu;
           resolvedPromptStateCachePolicy = promptStateCachePolicy;
+          this.activePromptStateCachePolicy = {
+            ...promptStateCachePolicy,
+            evaluatedBudgetsMb: [...promptStateCachePolicy.evaluatedBudgetsMb],
+          };
           resolvedRuntimeDevices = Array.isArray(context.devices)
             ? context.devices
                 .filter((device): device is string => typeof device === 'string')
@@ -7390,6 +7509,13 @@ class LLMEngineService {
             nGpuLayers: resolvedInitProfile.backendMode === 'cpu'
               ? 0
               : (resolvedInitGpuLayers ?? resolvedInitProfile.nGpuLayers),
+            stateCacheBudgetMb:
+              resolvedPromptStateCachePolicy?.budgetMb
+              ?? DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+            stateCacheMaxCheckpoints:
+              resolvedPromptStateCachePolicy?.maxCheckpoints
+              ?? PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+            stateCachePolicyVersion: resolvedPromptStateCachePolicy?.policyVersion ?? 0,
             ...(resolvedInitProfile.backendMode === 'npu' ? { devices: resolvedInitProfile.devices } : null),
           });
         }

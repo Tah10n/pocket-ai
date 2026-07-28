@@ -59,6 +59,9 @@ export interface CalibrationKey {
   useMmap: boolean;
   gpuLayers: number;
   hasMmproj: boolean;
+  stateCacheBudgetMb: number;
+  stateCacheMaxCheckpoints: number;
+  stateCachePolicyVersion: number;
 }
 
 export interface CalibrationRecord {

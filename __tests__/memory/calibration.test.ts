@@ -23,6 +23,9 @@ describe('memory calibration', () => {
       cacheTypeV: 'F32',
       useMmap: true,
       hasMmproj: false,
+      stateCacheBudgetMb: 160,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 1,
       nBatch: 0,
       nUbatch: 0,
     });
@@ -41,6 +44,9 @@ describe('memory calibration', () => {
       useMmap: true,
       gpuLayers: 12,
       hasMmproj: false,
+      stateCacheBudgetMb: 160,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 1,
     });
 
     expect(serializeCalibrationKey(key!)).toContain('"deviceModel":"Pixel 7"');
@@ -58,8 +64,35 @@ describe('memory calibration', () => {
         cacheTypeV: 'f16',
         useMmap: true,
         hasMmproj: false,
+        stateCacheBudgetMb: 0,
+        stateCacheMaxCheckpoints: 8,
+        stateCachePolicyVersion: 1,
       }),
     ).toBeNull();
+  });
+
+  it('isolates disabled and enabled prompt state cache profiles and roundtrips every dimension', () => {
+    const createKey = (stateCacheBudgetMb: number) => createCalibrationKey({
+      deviceModel: 'Pixel 7',
+      osMajor: 'android:14',
+      ggufMetadata: { 'general.architecture': 'mamba' },
+      verifiedFileSizeBytes: 1234,
+      contextTokens: 4096,
+      gpuLayers: 12,
+      cacheTypeK: 'f16',
+      cacheTypeV: 'f16',
+      useMmap: true,
+      hasMmproj: false,
+      stateCacheBudgetMb,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 1,
+    });
+
+    const disabled = createKey(0)!;
+    const enabled = createKey(160)!;
+
+    expect(serializeCalibrationKey(disabled)).not.toBe(serializeCalibrationKey(enabled));
+    expect(JSON.parse(serializeCalibrationKey(enabled))).toEqual(enabled);
   });
 
   it('updates bounded factors on success and failure observations', () => {

@@ -37,6 +37,15 @@ const CHANNEL_IDS = {
 const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
 const FOREGROUND_SERVICE_NOTIFICATION_COLOR = semanticColorTokens.primary[500];
 const INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX = 'pocket-ai:inference:';
+const NOTIFICATION_RESPONSE_DEDUPE_TTL_MS = 5 * 60 * 1000;
+const NOTIFICATION_RESPONSE_DEDUPE_MAX_ENTRIES = 48;
+
+type NotificationResponseSource = 'initial' | 'listener';
+
+type NotificationResponseFailureCategory =
+    | 'routing_failed'
+    | 'native_last_response_read_failed'
+    | 'native_last_response_clear_failed';
 
 type NotificationInitializationFailureCategory =
     | 'handler_setup_failed'
@@ -48,6 +57,23 @@ type NotificationInitializationFailureCategory =
 
 function getInferenceNotificationIdentifier(threadId: string): string {
     return `${INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX}${encodeURIComponent(threadId)}`;
+}
+
+function getNotificationResponseFingerprint(
+    response: Notifications.NotificationResponse,
+): string {
+    const identifier = typeof response?.notification?.request?.identifier === 'string'
+        ? response.notification.request.identifier
+        : '';
+    const actionIdentifier = typeof response?.actionIdentifier === 'string'
+        ? response.actionIdentifier
+        : '';
+    const notificationDate = typeof response?.notification?.date === 'number'
+        && Number.isFinite(response.notification.date)
+        ? response.notification.date
+        : '';
+
+    return JSON.stringify([identifier, actionIdentifier, notificationDate]);
 }
 
 function sleep(ms: number) {
@@ -136,7 +162,12 @@ class NotificationService {
     private permissionState: 'unknown' | 'granted' | 'denied' = 'unknown';
 
     private responseSubscription?: Notifications.EventSubscription;
-    private hasHandledInitialResponse = false;
+    private responseProcessingTail: Promise<void> = Promise.resolve();
+    private inFlightResponseOperations = new Map<
+        string,
+        { generation: number; promise: Promise<void> }
+    >();
+    private recentlyProcessedResponses = new Map<string, number>();
 
     initialize(): Promise<void> {
         return this.ensureInitialized();
@@ -214,7 +245,13 @@ class NotificationService {
 
             failureCategory = 'listener_registration_failed';
             localResponseSubscription = Notifications.addNotificationResponseReceivedListener(
-                this.handleNotificationResponse,
+                (response) => {
+                    void this.processNotificationResponseOnce(
+                        response,
+                        'listener',
+                        generation,
+                    ).catch(() => undefined);
+                },
             );
             if (!localResponseSubscription || typeof localResponseSubscription.remove !== 'function') {
                 throw new Error('Notification response listener registration failed.');
@@ -223,14 +260,15 @@ class NotificationService {
             this.responseSubscription = localResponseSubscription;
             localResponseSubscriptionWasPublished = true;
 
-            if (!this.hasHandledInitialResponse) {
-                failureCategory = 'initial_response_failed';
-                const lastResponse = await Notifications.getLastNotificationResponseAsync();
-                this.assertInitializationGeneration(generation);
-                this.hasHandledInitialResponse = true;
-                if (lastResponse) {
-                    this.handleNotificationResponse(lastResponse);
-                }
+            failureCategory = 'initial_response_failed';
+            const lastResponse = await Notifications.getLastNotificationResponseAsync();
+            this.assertInitializationGeneration(generation);
+            if (lastResponse) {
+                await this.processNotificationResponseOnce(
+                    lastResponse,
+                    'initial',
+                    generation,
+                );
             }
 
             this.assertInitializationGeneration(generation);
@@ -283,11 +321,110 @@ class NotificationService {
         }
     }
 
-    private handleNotificationResponse = (response: Notifications.NotificationResponse) => {
+    private assertResponseGeneration(generation: number): void {
+        if (generation !== this.lifecycleGeneration) {
+            throw new Error('Notification response lifecycle was disposed.');
+        }
+    }
+
+    private pruneRecentlyProcessedResponses(now: number): void {
+        for (const [fingerprint, expiresAt] of this.recentlyProcessedResponses) {
+            if (expiresAt > now) {
+                continue;
+            }
+            this.recentlyProcessedResponses.delete(fingerprint);
+        }
+
+        while (
+            this.recentlyProcessedResponses.size
+            > NOTIFICATION_RESPONSE_DEDUPE_MAX_ENTRIES
+        ) {
+            const oldestFingerprint = this.recentlyProcessedResponses.keys().next().value;
+            if (typeof oldestFingerprint !== 'string') {
+                break;
+            }
+            this.recentlyProcessedResponses.delete(oldestFingerprint);
+        }
+    }
+
+    private rememberProcessedResponse(fingerprint: string, now: number): void {
+        this.recentlyProcessedResponses.delete(fingerprint);
+        this.recentlyProcessedResponses.set(
+            fingerprint,
+            now + NOTIFICATION_RESPONSE_DEDUPE_TTL_MS,
+        );
+        this.pruneRecentlyProcessedResponses(now);
+    }
+
+    private logNotificationResponseFailure(
+        source: NotificationResponseSource,
+        category: NotificationResponseFailureCategory,
+        error: unknown,
+    ): void {
+        performanceMonitor.mark('notification.response', {
+            notificationResponseOutcome: 'failure',
+            notificationResponseFailureCategory: category,
+            notificationResponseSource: source,
+        });
+        console.warn(
+            '[NotificationService] Notification response processing failed',
+            {
+                scope: 'notification_response',
+                category,
+                source,
+                ...getPrivacySafeErrorLogDetails(error),
+            },
+        );
+    }
+
+    private async clearNativeLastResponseIfMatching(
+        fingerprint: string,
+        source: NotificationResponseSource,
+        generation: number,
+    ): Promise<void> {
+        let lastResponse: Notifications.NotificationResponse | null | undefined;
+        try {
+            lastResponse = await Notifications.getLastNotificationResponseAsync();
+        } catch (error) {
+            this.logNotificationResponseFailure(
+                source,
+                'native_last_response_read_failed',
+                error,
+            );
+            return;
+        }
+
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
+        if (
+            !lastResponse
+            || getNotificationResponseFingerprint(lastResponse) !== fingerprint
+        ) {
+            return;
+        }
+
+        try {
+            Notifications.clearLastNotificationResponse();
+        } catch (error) {
+            this.logNotificationResponseFailure(
+                source,
+                'native_last_response_clear_failed',
+                error,
+            );
+        }
+    }
+
+    private routeNotificationResponse(
+        response: Notifications.NotificationResponse,
+        generation: number,
+    ): void {
+        this.assertResponseGeneration(generation);
         const data = response.notification.request.content.data ?? {};
         const taskType = typeof data.taskType === 'string' ? data.taskType : null;
 
         if (taskType === 'download') {
+            this.assertResponseGeneration(generation);
             router.push('/(tabs)/models');
             return;
         }
@@ -302,20 +439,86 @@ class NotificationService {
                 || chatState.threads[threadId] == null
                 || !chatState.setActiveThread(threadId)
             ) {
+                this.assertResponseGeneration(generation);
                 performanceMonitor.incrementCounter('notification.staleTarget', 1, {
                     staleNotificationTarget: true,
                 });
+                this.assertResponseGeneration(generation);
                 Alert.alert(
                     i18n.t('notifications.conversationUnavailable.title'),
                     i18n.t('notifications.conversationUnavailable.body'),
                 );
+                this.assertResponseGeneration(generation);
                 router.push('/conversations');
                 return;
             }
 
+            this.assertResponseGeneration(generation);
             router.push('/(tabs)/chat');
         }
-    };
+    }
+
+    private processNotificationResponseOnce(
+        response: Notifications.NotificationResponse,
+        source: NotificationResponseSource,
+        generation: number,
+    ): Promise<void> {
+        const fingerprint = getNotificationResponseFingerprint(response);
+        const now = Date.now();
+        this.pruneRecentlyProcessedResponses(now);
+
+        const existing = this.inFlightResponseOperations.get(fingerprint);
+        if (existing?.generation === generation) {
+            return existing.promise;
+        }
+
+        const processedUntil = this.recentlyProcessedResponses.get(fingerprint);
+        if (typeof processedUntil === 'number' && processedUntil > now) {
+            return Promise.resolve();
+        }
+
+        const operation = this.responseProcessingTail.then(async () => {
+            this.assertResponseGeneration(generation);
+
+            const processingStartedAt = Date.now();
+            this.pruneRecentlyProcessedResponses(processingStartedAt);
+            const queuedProcessedUntil = this.recentlyProcessedResponses.get(fingerprint);
+            if (
+                typeof queuedProcessedUntil === 'number'
+                && queuedProcessedUntil > processingStartedAt
+            ) {
+                return;
+            }
+
+            try {
+                this.routeNotificationResponse(response, generation);
+            } catch (error) {
+                this.logNotificationResponseFailure(source, 'routing_failed', error);
+                throw error;
+            }
+
+            this.assertResponseGeneration(generation);
+            this.rememberProcessedResponse(fingerprint, Date.now());
+            await this.clearNativeLastResponseIfMatching(
+                fingerprint,
+                source,
+                generation,
+            );
+        });
+
+        this.responseProcessingTail = operation.catch(() => undefined);
+        this.inFlightResponseOperations.set(fingerprint, {
+            generation,
+            promise: operation,
+        });
+        const clearInFlightOperation = () => {
+            if (this.inFlightResponseOperations.get(fingerprint)?.promise === operation) {
+                this.inFlightResponseOperations.delete(fingerprint);
+            }
+        };
+        void operation.then(clearInFlightOperation, clearInFlightOperation);
+        return operation;
+    }
 
     async requestPermissions(): Promise<boolean> {
         await this.ensureInitialized();

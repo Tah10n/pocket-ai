@@ -1,5 +1,10 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { ChatMessage, ChatThread } from '../../src/types/chat';
+import {
+  ChatMessage,
+  ChatThread,
+  getThreadActiveModelId,
+  sanitizeHydratedThread,
+} from '../../src/types/chat';
 import {
   __getUnreferencedAttachmentCleanupStateForTests,
   __resetUnreferencedAttachmentCleanupForTests,
@@ -428,6 +433,50 @@ describe('chatStore', () => {
     flushPendingChatPersistenceWrites('background');
     useChatStore.setState({ threads: {}, activeThreadId: null });
     storage.getAllKeys().forEach((key) => storage.remove(key));
+  });
+
+  it('migrates a legacy thread without modelId only from persisted model evidence', () => {
+    const legacyThread = {
+      ...buildThread('legacy', 10),
+      modelId: undefined,
+      activeModelId: 'author/legacy-q8',
+      messages: [
+        {
+          id: 'legacy-user',
+          role: 'user',
+          content: 'Persisted prompt',
+          createdAt: 10,
+          state: 'complete',
+        },
+      ],
+    } as unknown as ChatThread;
+
+    const migrated = sanitizeHydratedThread(legacyThread);
+
+    expect(migrated.modelId).toBe('author/legacy-q8');
+    expect(getThreadActiveModelId(migrated)).toBe('author/legacy-q8');
+    expect(migrated.messages[0]?.modelId).toBe('author/legacy-q8');
+  });
+
+  it('leaves a legacy thread unavailable when it has no persisted model evidence', () => {
+    const legacyThread = {
+      ...buildThread('legacy-empty', 10),
+      modelId: undefined,
+      activeModelId: undefined,
+      messages: [{
+        id: 'legacy-empty-user',
+        role: 'user',
+        content: 'Prompt without model metadata',
+        createdAt: 10,
+        state: 'complete',
+      }],
+    } as unknown as ChatThread;
+
+    const migrated = sanitizeHydratedThread(legacyThread);
+
+    expect(migrated.modelId).toBe('');
+    expect(getThreadActiveModelId(migrated)).toBe('');
+    expect(migrated.messages[0]?.modelId).toBeUndefined();
   });
 
   it('findMostRecentThreadId returns the newest thread id without sorting', () => {

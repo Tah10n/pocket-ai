@@ -57,6 +57,8 @@ import type {
     MultimodalSupportModality,
 } from '../../types/multimodal';
 import { getChatHardwareBannerInputs, hardwareListenerService } from '../../services/HardwareListenerService';
+import { llmEngineService } from '../../services/LLMEngineService';
+import { performanceMonitor } from '../../services/PerformanceMonitor';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
@@ -704,6 +706,7 @@ export const ChatScreen = () => {
         threadId: string | null;
         modelId: string;
     } | null>(null);
+    const [, setModelSyncRevision] = useState(0);
     const [settings, setSettings] = useState(() => getSettings());
     const [pendingRegenerateMessage, setPendingRegenerateMessage] = useState<{
         messageId: string;
@@ -712,7 +715,6 @@ export const ChatScreen = () => {
     } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
-    const switchThreadModel = useChatStore((state) => state.switchThreadModel);
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
     const autoScrollFrameRef = useRef<number | null>(null);
     const keyboardMeasureFrameRef = useRef<number | null>(null);
@@ -735,6 +737,10 @@ export const ChatScreen = () => {
     const momentumStartOffsetYRef = useRef<number | null>(null);
     const shouldStickToBottomRef = useRef(true);
     const sendMessageInFlightRef = useRef(false);
+    const modelSelectionRequestIdRef = useRef(0);
+    const isScreenActiveRef = useRef(true);
+    const previousActiveThreadIdRef = useRef(activeThread?.id ?? null);
+    const autoModelLoadTargetKeyRef = useRef<string | null>(null);
     const hasActiveModel = Boolean(engineState.activeModelId);
     const isEngineReady = engineState.status === EngineStatus.READY;
     const isModelInitializing = engineState.status === EngineStatus.INITIALIZING;
@@ -742,7 +748,17 @@ export const ChatScreen = () => {
         () => resolveModelWarmupProgressPercent(engineState.loadProgress),
         [engineState.loadProgress],
     );
-    const isInputDisabled = !hasActiveModel || !isEngineReady;
+    const activeThreadId = activeThread?.id ?? null;
+    const currentChatActiveModelId = activeThread
+        ? getThreadActiveModelId(activeThread)
+        : settings.activeModelId ?? engineState.activeModelId ?? null;
+    const isModelSelectionPending = pendingModelSelection != null;
+    const isPendingModelSelectionForCurrentThread = pendingModelSelection != null
+        && pendingModelSelection.threadId === activeThreadId;
+    const isCurrentChatModelReady = Boolean(currentChatActiveModelId)
+        && isEngineReady
+        && engineState.activeModelId === currentChatActiveModelId;
+    const isInputDisabled = !isCurrentChatModelReady || isPendingModelSelectionForCurrentThread;
     const statusLabel = activeThread?.status === 'stopped'
         ? t('chat.statusStopped')
         : activeThread?.status === 'error'
@@ -792,13 +808,6 @@ export const ChatScreen = () => {
             .sort((left, right) => (left.name ?? left.id).localeCompare(right.name ?? right.id));
     }, [modelRegistryRevision]);
 
-    const activeThreadId = activeThread?.id ?? null;
-    const currentChatActiveModelId = activeThread
-        ? getThreadActiveModelId(activeThread)
-        : settings.activeModelId ?? engineState.activeModelId ?? null;
-    const isModelSelectionPending = pendingModelSelection != null;
-    const isPendingModelSelectionForCurrentThread = pendingModelSelection != null
-        && pendingModelSelection.threadId === activeThreadId;
     const displayedChatActiveModelId = isPendingModelSelectionForCurrentThread
         ? pendingModelSelection.modelId
         : currentChatActiveModelId;
@@ -807,6 +816,19 @@ export const ChatScreen = () => {
 
         return displayedChatActiveModelId ? registry.getModel(displayedChatActiveModelId) : undefined;
     }, [displayedChatActiveModelId, modelRegistryRevision]);
+    const currentThreadModelArtifact = useMemo(() => {
+        void modelRegistryRevision;
+        return currentChatActiveModelId ? registry.getModel(currentChatActiveModelId) : undefined;
+    }, [currentChatActiveModelId, modelRegistryRevision]);
+    const canLoadCurrentThreadModel = Boolean(
+        activeThread
+        && currentChatActiveModelId
+        && currentThreadModelArtifact?.localPath
+        && (
+            currentThreadModelArtifact.lifecycleStatus === LifecycleStatus.DOWNLOADED
+            || currentThreadModelArtifact.lifecycleStatus === LifecycleStatus.ACTIVE
+        ),
+    );
     const multimodalReadiness = useMemo(
         () => resolveFallbackMultimodalReadiness(activeChatModel, displayedChatActiveModelId),
         [activeChatModel, displayedChatActiveModelId],
@@ -964,8 +986,22 @@ export const ChatScreen = () => {
     const thermalWarningMessage = hardwareBannerInputs.thermalState === 'critical'
         ? t('chat.thermalDescriptionCritical')
         : t('chat.thermalDescriptionElevated');
-    const recoveryTitle = hasActiveModel ? t('chat.warmingUp') : t('chat.loadModelWarning');
-    const recoveryDescription = hasActiveModel ? t('chat.warmingUpDescription') : t('chat.loadModelDescription');
+    const activeThreadNeedsItsModel = Boolean(activeThread) && !isCurrentChatModelReady;
+    const activeThreadModelUnavailable = activeThreadNeedsItsModel && !canLoadCurrentThreadModel;
+    const recoveryTitle = activeThreadModelUnavailable
+        ? t('chat.threadModelUnavailableTitle')
+        : activeThreadNeedsItsModel
+            ? (isModelInitializing ? t('chat.threadModelLoadingTitle') : t('chat.threadModelRequiredTitle'))
+            : hasActiveModel
+                ? t('chat.warmingUp')
+                : t('chat.loadModelWarning');
+    const recoveryDescription = activeThreadModelUnavailable
+        ? t('chat.threadModelUnavailableDescription')
+        : activeThreadNeedsItsModel
+            ? t('chat.threadModelRequiredDescription', { model: modelLabel })
+            : hasActiveModel
+                ? t('chat.warmingUpDescription')
+                : t('chat.loadModelDescription');
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
     const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
     const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
@@ -990,14 +1026,21 @@ export const ChatScreen = () => {
         isKeyboardVisible: isAndroidKeyboardOpen,
     });
     const hasDownloadedModels = downloadedModels.length > 0;
-    const modelRecoveryActionRoute = hasDownloadedModels
-        ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
-        : '/(tabs)/models';
-    const resolvedModelRecoveryActionLabel = hasActiveModel
-        ? t('chat.openModels')
-        : hasDownloadedModels
-            ? t('chat.loadModel')
-            : t('chat.downloadModel');
+    const modelRecoveryActionRoute = useMemo(
+        () => (
+            hasDownloadedModels
+                ? ({ pathname: '/(tabs)/models', params: { initialTab: 'downloaded' } } as const)
+                : '/(tabs)/models'
+        ),
+        [hasDownloadedModels],
+    );
+    const resolvedModelRecoveryActionLabel = canLoadCurrentThreadModel
+        ? t('chat.loadThreadModel')
+        : hasActiveModel
+            ? t('chat.openModels')
+            : hasDownloadedModels
+                ? t('chat.loadModel')
+                : t('chat.downloadModel');
     const headerModelLabel = shouldShowRecoveryCard && !hasActiveModel
         ? undefined
         : modelLabel;
@@ -1079,76 +1122,227 @@ export const ChatScreen = () => {
         t,
     ]);
 
+    const executeThreadModelLoad = useCallback(async ({
+        targetModelId,
+        threadId,
+        expectedThreadModelId,
+        applySelection,
+        options,
+    }: {
+        targetModelId: string;
+        threadId: string | null;
+        expectedThreadModelId: string | null;
+        applySelection: boolean;
+        options?: LoadModelOptions;
+    }): Promise<
+        | { status: 'applied' }
+        | { status: 'stale' }
+        | { status: 'failed'; error: unknown }
+    > => {
+        const requestId = modelSelectionRequestIdRef.current + 1;
+        modelSelectionRequestIdRef.current = requestId;
+        if (applySelection && isScreenActiveRef.current) {
+            setPendingModelSelection({ threadId, modelId: targetModelId });
+        }
+
+        const isLatestRequest = () => (
+            isScreenActiveRef.current
+            && modelSelectionRequestIdRef.current === requestId
+        );
+        const clearPendingSelection = () => {
+            if (!isScreenActiveRef.current) {
+                return;
+            }
+            setPendingModelSelection((currentValue) => (
+                modelSelectionRequestIdRef.current === requestId
+                && currentValue?.threadId === threadId
+                && currentValue.modelId === targetModelId
+                    ? null
+                    : currentValue
+            ));
+        };
+        const invalidateAsStale = () => {
+            if (applySelection) {
+                performanceMonitor.incrementCounter('chat.modelSelection.stale');
+            }
+            if (isScreenActiveRef.current) {
+                setModelSyncRevision((revision) => revision + 1);
+            }
+            return { status: 'stale' as const };
+        };
+
+        try {
+            await loadModel(targetModelId, options);
+        } catch (error) {
+            if (!isLatestRequest()) {
+                return invalidateAsStale();
+            }
+            clearPendingSelection();
+            if (applySelection) {
+                performanceMonitor.incrementCounter('chat.modelSelection.failed');
+            }
+            return { status: 'failed', error };
+        }
+
+        const chatState = useChatStore.getState();
+        const freshThread = threadId ? chatState.getThread(threadId) : undefined;
+        const threadIntentIsCurrent = threadId === null
+            ? chatState.activeThreadId === null
+            : (
+                chatState.activeThreadId === threadId
+                && freshThread != null
+                && getThreadActiveModelId(freshThread) === expectedThreadModelId
+            );
+        const freshEngineState = llmEngineService.getState();
+        const engineLoadedRequestedModel = freshEngineState.status === EngineStatus.READY
+            && freshEngineState.activeModelId === targetModelId;
+
+        if (!isLatestRequest() || !threadIntentIsCurrent) {
+            return invalidateAsStale();
+        }
+        if (!engineLoadedRequestedModel) {
+            clearPendingSelection();
+            if (applySelection) {
+                performanceMonitor.incrementCounter('chat.modelSelection.failed');
+            }
+            return {
+                status: 'failed',
+                error: new Error('The requested model did not become the active ready context.'),
+            };
+        }
+
+        if (applySelection && freshThread) {
+            // Re-read both the thread and the actions after the await. Only the
+            // latest operation may make the durable model-switch commit.
+            const latestState = useChatStore.getState();
+            const latestThread = latestState.getThread(threadId!);
+            if (
+                latestState.activeThreadId !== threadId
+                || !latestThread
+                || getThreadActiveModelId(latestThread) !== expectedThreadModelId
+            ) {
+                return invalidateAsStale();
+            }
+            latestState.switchThreadModel(threadId!, targetModelId);
+            useChatStore.getState().updateThreadParamsSnapshot(
+                threadId!,
+                getGenerationParametersForModel(targetModelId),
+            );
+        }
+
+        clearPendingSelection();
+        autoModelLoadTargetKeyRef.current = null;
+        if (applySelection) {
+            performanceMonitor.incrementCounter('chat.modelSelection.applied');
+        }
+        if (isScreenActiveRef.current) {
+            setModelSyncRevision((revision) => revision + 1);
+        }
+        return { status: 'applied' };
+    }, [loadModel]);
+
     const handleSelectModelFromHeader = useCallback(async (nextModelId: string) => {
         if (isGenerating) {
             return;
         }
 
-        const selectionThreadId = activeThread?.id ?? null;
+        const chatState = useChatStore.getState();
+        const selectionThreadId = chatState.activeThreadId;
+        const selectionThread = selectionThreadId
+            ? chatState.getThread(selectionThreadId)
+            : undefined;
+        const expectedThreadModelId = selectionThread
+            ? getThreadActiveModelId(selectionThread)
+            : null;
 
-        if (nextModelId === currentChatActiveModelId) {
-            setPendingModelSelection((currentValue) => (
-                currentValue?.threadId === selectionThreadId ? null : currentValue
-            ));
+        if (nextModelId === expectedThreadModelId || (
+            selectionThreadId === null && nextModelId === currentChatActiveModelId
+        )) {
+            modelSelectionRequestIdRef.current += 1;
+            autoModelLoadTargetKeyRef.current = null;
+            performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
+            setPendingModelSelection(null);
+            setModelSyncRevision((revision) => revision + 1);
             setModelSelectorOpen(false);
             return;
         }
 
         setModelSelectorOpen(false);
 
-        const clearPendingModelSelection = () => {
-            setPendingModelSelection((currentValue) => (
-                currentValue?.threadId === selectionThreadId && currentValue.modelId === nextModelId
-                    ? null
-                    : currentValue
-            ));
-        };
-
         const attemptLoadSelectedModel = async (options?: LoadModelOptions): Promise<void> => {
-            setPendingModelSelection({ threadId: selectionThreadId, modelId: nextModelId });
-
-            try {
-                await loadModel(nextModelId, options);
-            } catch (error) {
-                clearPendingModelSelection();
-
-                const appError = toAppError(error, 'model_load_failed');
-                const handledByMemoryPolicy = handleModelLoadMemoryPolicyError({
-                    t,
-                    appError,
-                    options,
-                    onRetry: (nextOptions) => {
-                        void attemptLoadSelectedModel(nextOptions);
-                    },
-                });
-
-                if (!handledByMemoryPolicy) {
-                    showAlertForError('common.actionFailed', 'ChatScreen.loadModel', appError);
-                }
-
+            const result = await executeThreadModelLoad({
+                targetModelId: nextModelId,
+                threadId: selectionThreadId,
+                expectedThreadModelId,
+                applySelection: true,
+                options,
+            });
+            if (result.status !== 'failed') {
                 return;
             }
 
-            clearPendingModelSelection();
-
-            if (!activeThread) {
-                return;
+            const appError = toAppError(result.error, 'model_load_failed');
+            const handledByMemoryPolicy = handleModelLoadMemoryPolicyError({
+                t,
+                appError,
+                options,
+                onRetry: (nextOptions) => {
+                    void attemptLoadSelectedModel(nextOptions);
+                },
+            });
+            if (!handledByMemoryPolicy) {
+                showAlertForError('common.actionFailed', 'ChatScreen.loadModel', appError);
             }
-
-            switchThreadModel(activeThread.id, nextModelId);
-            updateThreadParamsSnapshot(activeThread.id, getGenerationParametersForModel(nextModelId));
         };
 
         await attemptLoadSelectedModel();
     }, [
-        activeThread,
         currentChatActiveModelId,
+        executeThreadModelLoad,
         isGenerating,
-        loadModel,
         showAlertForError,
-        switchThreadModel,
         t,
-        updateThreadParamsSnapshot,
+    ]);
+
+    const handleModelRecoveryAction = useCallback(async () => {
+        const chatState = useChatStore.getState();
+        const threadId = chatState.activeThreadId;
+        const thread = threadId ? chatState.getThread(threadId) : undefined;
+        const threadModelId = thread ? getThreadActiveModelId(thread) : '';
+        const model = threadModelId ? registry.getModel(threadModelId) : undefined;
+        const canLoadModel = Boolean(
+            thread
+            && model?.localPath
+            && (
+                model.lifecycleStatus === LifecycleStatus.DOWNLOADED
+                || model.lifecycleStatus === LifecycleStatus.ACTIVE
+            ),
+        );
+        if (!threadId || !thread || !threadModelId || !canLoadModel) {
+            router.navigate(modelRecoveryActionRoute);
+            return;
+        }
+
+        autoModelLoadTargetKeyRef.current = null;
+        const result = await executeThreadModelLoad({
+            targetModelId: threadModelId,
+            threadId,
+            expectedThreadModelId: threadModelId,
+            applySelection: false,
+            options: { preferLastWorkingProfile: true },
+        });
+        if (result.status === 'failed') {
+            showAlertForError(
+                'chat.threadModelLoadErrorTitle',
+                'ChatScreen.loadThreadModel',
+                toAppError(result.error, 'model_load_failed'),
+            );
+        }
+    }, [
+        executeThreadModelLoad,
+        modelRecoveryActionRoute,
+        router,
+        showAlertForError,
     ]);
 
     const getConfigurableModelById = useCallback((modelId: string | null) => {
@@ -1907,6 +2101,102 @@ export const ChatScreen = () => {
         });
     }, []);
 
+    useFocusEffect(
+        useCallback(() => {
+            isScreenActiveRef.current = true;
+            return () => {
+                isScreenActiveRef.current = false;
+                modelSelectionRequestIdRef.current += 1;
+                autoModelLoadTargetKeyRef.current = null;
+                performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
+            };
+        }, []),
+    );
+
+    useEffect(() => {
+        if (previousActiveThreadIdRef.current === activeThreadId) {
+            return;
+        }
+
+        previousActiveThreadIdRef.current = activeThreadId;
+        modelSelectionRequestIdRef.current += 1;
+        autoModelLoadTargetKeyRef.current = null;
+        performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
+        setPendingModelSelection(null);
+    }, [activeThreadId]);
+
+    useEffect(() => {
+        if (
+            !isScreenActiveRef.current
+            || !activeThreadId
+            || !currentChatActiveModelId
+            || isGenerating
+            || isPendingModelSelectionForCurrentThread
+        ) {
+            return;
+        }
+
+        if (
+            engineState.status === EngineStatus.READY
+            && engineState.activeModelId === currentChatActiveModelId
+        ) {
+            autoModelLoadTargetKeyRef.current = null;
+            return;
+        }
+
+        void modelRegistryRevision;
+        const threadModel = registry.getModel(currentChatActiveModelId);
+        const canAutoLoadThreadModel = threadModel?.localPath
+            && (
+                threadModel.lifecycleStatus === LifecycleStatus.DOWNLOADED
+                || threadModel.lifecycleStatus === LifecycleStatus.ACTIVE
+            );
+        if (!canAutoLoadThreadModel) {
+            return;
+        }
+
+        const targetKey = `${activeThreadId}:${currentChatActiveModelId}`;
+        if (autoModelLoadTargetKeyRef.current === targetKey) {
+            return;
+        }
+        autoModelLoadTargetKeyRef.current = targetKey;
+
+        void executeThreadModelLoad({
+            targetModelId: currentChatActiveModelId,
+            threadId: activeThreadId,
+            expectedThreadModelId: currentChatActiveModelId,
+            applySelection: false,
+            options: { preferLastWorkingProfile: true },
+        }).then((result) => {
+            if (
+                result.status === 'failed'
+                && autoModelLoadTargetKeyRef.current === targetKey
+            ) {
+                showAlertForError(
+                    'chat.threadModelLoadErrorTitle',
+                    'ChatScreen.autoLoadThreadModel',
+                    toAppError(result.error, 'model_load_failed'),
+                );
+            }
+            if (
+                result.status === 'stale'
+                && autoModelLoadTargetKeyRef.current === targetKey
+            ) {
+                autoModelLoadTargetKeyRef.current = null;
+            }
+        });
+    }, [
+        activeThreadId,
+        currentChatActiveModelId,
+        engineState.activeModelId,
+        engineState.status,
+        executeThreadModelLoad,
+        isGenerating,
+        isPendingModelSelectionForCurrentThread,
+        modelRegistryRevision,
+        showAlertForError,
+    ]);
+
     useEffect(() => {
         if (!pendingModelSelection) {
             return;
@@ -2132,7 +2422,7 @@ export const ChatScreen = () => {
                             setModelSelectorOpen(true);
                         }
                         : undefined}
-                    canOpenModelSelector={hasDownloadedModels && !isGenerating && !isModelSelectionPending}
+                    canOpenModelSelector={hasDownloadedModels && !isGenerating}
                     canOpenModelControls={Boolean(configurableModelId) && !isGenerating && !isModelSelectionPending}
                     onBack={router.canGoBack() ? () => router.back() : undefined}
                 />
@@ -2146,7 +2436,7 @@ export const ChatScreen = () => {
                                 description={recoveryDescription}
                                 actionLabel={resolvedModelRecoveryActionLabel}
                                 onAction={() => {
-                                    router.navigate(modelRecoveryActionRoute);
+                                    void handleModelRecoveryAction();
                                 }}
                                 tone="warning"
                                 iconName={hasActiveModel ? 'hourglass-empty' : 'download'}
@@ -2316,7 +2606,7 @@ export const ChatScreen = () => {
                                         size="md"
                                         className="mt-6 self-stretch"
                                         onPress={() => {
-                                            router.navigate(modelRecoveryActionRoute);
+                                            void handleModelRecoveryAction();
                                         }}
                                     >
                                         <MaterialSymbols
@@ -2467,7 +2757,7 @@ export const ChatScreen = () => {
                 visible={isModelSelectorOpen}
                 models={downloadedModels}
                 currentModelId={displayedChatActiveModelId}
-                canSelect={!isGenerating && !isModelSelectionPending}
+                canSelect={!isGenerating}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 onClose={() => setModelSelectorOpen(false)}
                 onSelectModel={(modelId) => {

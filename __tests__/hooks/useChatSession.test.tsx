@@ -828,6 +828,7 @@ describe('useChatSession', () => {
     }));
     expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        expectedModelId: 'author/model-q4',
         multimodalReadiness: expect.objectContaining({
           status: 'ready',
           support: ['vision'],
@@ -921,6 +922,7 @@ describe('useChatSession', () => {
     }));
     expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        expectedModelId: 'author/model-q4',
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
@@ -3081,6 +3083,7 @@ describe('useChatSession', () => {
 
     expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        expectedModelId: 'author/model-q4',
         params: expect.objectContaining({
           enable_thinking: false,
           reasoning_format: 'none',
@@ -5849,7 +5852,7 @@ describe('useChatSession', () => {
     );
   });
 
-  it('auto-switches the active thread model when the global active model changes', async () => {
+  it('keeps the thread model authoritative when the global and engine model change', async () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
@@ -5874,7 +5877,11 @@ describe('useChatSession', () => {
     });
 
     await act(async () => {
-      await getSession()?.appendUserMessage('Use a different model now');
+      await expect(
+        getSession()?.appendUserMessage('Use a different model now'),
+      ).rejects.toMatchObject({
+        code: 'chat_model_mismatch',
+      });
     });
 
     const state = useChatStore.getState();
@@ -5882,37 +5889,12 @@ describe('useChatSession', () => {
 
     expect(activeThread?.id).toBe(originalThread?.id);
     expect(activeThread?.modelId).toBe('author/model-q4');
-    expect(activeThread?.activeModelId).toBe('author/model-q8');
+    expect(activeThread?.activeModelId).toBe('author/model-q4');
 
     const roles = activeThread?.messages.map((message) => message.role);
-    expect(roles).toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
-
-    const switchMessage = activeThread?.messages.find((message) => message.kind === 'model_switch');
-    expect(switchMessage).toEqual(
-      expect.objectContaining({
-        role: 'system',
-        kind: 'model_switch',
-        modelId: 'author/model-q8',
-        switchFromModelId: 'author/model-q4',
-        switchToModelId: 'author/model-q8',
-      }),
-    );
-
-    const lastUserMessage = [...(activeThread?.messages ?? [])].reverse().find((message) => message.role === 'user');
-    const lastAssistantMessage = activeThread?.messages.at(-1);
-    expect(lastUserMessage).toEqual(
-      expect.objectContaining({
-        kind: 'message',
-        modelId: 'author/model-q8',
-      }),
-    );
-    expect(lastAssistantMessage).toEqual(
-      expect.objectContaining({
-        role: 'assistant',
-        kind: 'message',
-        modelId: 'author/model-q8',
-      }),
-    );
+    expect(roles).toEqual(['user', 'assistant']);
+    expect(activeThread?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
 
     expect(originalThread?.modelId).toBe('author/model-q4');
     expect(state.getConversationIndex()).toHaveLength(1);

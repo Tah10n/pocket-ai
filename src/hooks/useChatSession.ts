@@ -160,12 +160,99 @@ type PromptPreparationEngineSnapshot = {
   readonly contextIdentity: string;
 };
 
+function assertThreadModelExecutionInvariant(
+  threadId: string,
+  expectedModelId?: string,
+): ChatThread {
+  const chatState = useChatStore.getState();
+  const thread = chatState.getThread(threadId);
+  if (!thread || chatState.activeThreadId !== threadId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_mismatch',
+      'The active conversation changed before generation started.',
+      {
+        details: {
+          expectedThreadModelId: expectedModelId ?? null,
+          engineModelId: llmEngineService.getState().activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  const threadModelId = getThreadActiveModelId(thread);
+  if (threadModelId.length === 0) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_not_loaded',
+      'This conversation does not have a valid model.',
+      {
+        details: {
+          expectedThreadModelId: null,
+          engineModelId: llmEngineService.getState().activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  if (expectedModelId !== undefined && threadModelId !== expectedModelId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_mismatch',
+      'The conversation model changed before generation started.',
+      {
+        details: {
+          expectedThreadModelId: expectedModelId,
+          engineModelId: llmEngineService.getState().activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  const engineState = llmEngineService.getState();
+  if (engineState.status !== EngineStatus.READY || !engineState.activeModelId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_not_loaded',
+      'The conversation model is not loaded.',
+      {
+        details: {
+          expectedThreadModelId: threadModelId,
+          engineModelId: engineState.activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  if (engineState.activeModelId !== threadModelId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_mismatch',
+      'The loaded model does not match the conversation model.',
+      {
+        details: {
+          expectedThreadModelId: threadModelId,
+          engineModelId: engineState.activeModelId,
+        },
+      },
+    );
+  }
+
+  return thread;
+}
+
 function capturePromptPreparationEngineSnapshot(expectedModelId: string): PromptPreparationEngineSnapshot {
   const engineState = llmEngineService.getState();
   if (engineState.status !== EngineStatus.READY || engineState.activeModelId !== expectedModelId) {
     throw new AppError(
-      'engine_not_ready',
+      engineState.activeModelId ? 'chat_model_mismatch' : 'chat_model_not_loaded',
       'The model context changed before prompt preparation started. Try again.',
+      {
+        details: {
+          expectedThreadModelId: expectedModelId,
+          engineModelId: engineState.activeModelId ?? null,
+        },
+      },
     );
   }
 
@@ -1582,7 +1669,6 @@ export const useChatSession = () => {
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
-  const switchThreadModel = useChatStore((state) => state.switchThreadModel);
   const deleteMessageBranch = useChatStore((state) => state.deleteMessageBranch);
   const deleteThreadState = useChatStore((state) => state.deleteThread);
   const finalizeAssistantTurn = useChatStore((state) => state.finalizeAssistantTurn);
@@ -1720,11 +1806,15 @@ export const useChatSession = () => {
     threadId: string,
     assistantMessageId: string,
     completionOptions: {
+      expectedModelId?: string;
       multimodalReadiness?: MultimodalReadinessState;
       attachmentResolution?: PreparedAttachmentResolution;
     } = {},
   ) => {
-    const storedThread = useChatStore.getState().getThread(threadId);
+    const storedThread = assertThreadModelExecutionInvariant(
+      threadId,
+      completionOptions.expectedModelId,
+    );
     if (!storedThread) {
       throw new Error('Thread not found');
     }
@@ -1733,7 +1823,7 @@ export const useChatSession = () => {
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
 
-    const modelId = getThreadActiveModelId(storedThread);
+    const modelId = completionOptions.expectedModelId ?? getThreadActiveModelId(storedThread);
 
     performanceMonitor.mark('chat.send.start', { modelId });
     const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
@@ -1754,6 +1844,7 @@ export const useChatSession = () => {
       if (generationState.stopRequested) {
         throw new Error('Generation was stopped before native completion started.');
       }
+      assertThreadModelExecutionInvariant(threadId, modelId);
       if (useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart) {
         throw new AppError(
           'action_failed',
@@ -1842,10 +1933,17 @@ export const useChatSession = () => {
         ? llmEngineService.getContextSize()
         : DEFAULT_CONTEXT_SIZE;
 
-    const canMutateAssistantMessage = (options?: { allowStopped?: boolean }) => (
-      isMatchingGeneration(threadId, assistantMessageId)
-      && (options?.allowStopped === true || !generationState.stopRequested)
-    );
+    const canMutateAssistantMessage = (options?: { allowStopped?: boolean }) => {
+      const chatState = useChatStore.getState();
+      const currentThread = chatState.getThread(threadId);
+      return (
+        isMatchingGeneration(threadId, assistantMessageId)
+        && chatState.activeThreadId === threadId
+        && currentThread != null
+        && getThreadActiveModelId(currentThread) === modelId
+        && (options?.allowStopped === true || !generationState.stopRequested)
+      );
+    };
 
     const hasBufferedAssistantContent = () => {
       const presentation = presentationParser.getPresentation();
@@ -2477,6 +2575,7 @@ export const useChatSession = () => {
         throw new Error('Wait for the current response to finish stopping before starting another response.');
       }
 
+      assertThreadModelExecutionInvariant(threadId, modelId);
       if (isAndroidQaEvidenceEnabled) {
         recordAndroidQaPreparedGenerationEvidence(buildAndroidQaPreparedGenerationEvidence({
           userMessageId: latestUserMessageId,
@@ -2487,6 +2586,7 @@ export const useChatSession = () => {
       generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
+        expectedModelId: modelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         params: {
           temperature: thread.paramsSnapshot.temperature,
@@ -2675,10 +2775,15 @@ export const useChatSession = () => {
 
       const message = resolvePersistedAssistantErrorMessage(error);
       const userFacingError = resolveUserFacingGenerationError(error, message);
+      const appError = toAppError(error);
+      const assistantErrorCode = appError.code === 'chat_model_mismatch'
+        || appError.code === 'chat_model_not_loaded'
+        ? appError.code
+        : 'generation_failed';
 
       const errorResult = finalizeBufferedAssistantTurn({
           outcome: 'error',
-          errorCode: 'generation_failed',
+          errorCode: assistantErrorCode,
           errorMessage: message,
       });
       const errorCommitError = resolveTerminalCommitError(errorResult);
@@ -2729,15 +2834,8 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    const engineState = llmEngineService.getState();
-    if (engineState.status !== EngineStatus.READY) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
     const threadModelId = getThreadActiveModelId(thread);
-    if (engineState.activeModelId !== threadModelId) {
-      throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
-    }
+    assertThreadModelExecutionInvariant(thread.id, threadModelId);
 
     if (
       llmEngineService.hasActiveCompletion()
@@ -2748,50 +2846,54 @@ export const useChatSession = () => {
     }
   }, []);
 
-  const ensureThreadUsesModelForSend = useCallback((thread: ChatThread, nextModelId: string) => {
-    const currentModelId = getThreadActiveModelId(thread);
-    if (nextModelId === currentModelId) {
-      return;
-    }
-
-    switchThreadModel(thread.id, nextModelId);
-    updateThreadParamsSnapshot(thread.id, getGenerationParametersForModel(nextModelId));
-  }, [switchThreadModel, updateThreadParamsSnapshot]);
-
   const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
     markInteractiveWorkStarted();
     assertPrivateStorageWritableForChatMutation();
     const settings = getSettings();
-    const activeModelId = settings.activeModelId;
-    const activeModelParams = getGenerationParametersForModel(activeModelId);
+    const interactiveStateAtStart = useChatStore.getState();
+    const interactiveRevisionAtStart = interactiveStateAtStart.inferenceRevision;
+    const activeThreadIdAtStart = interactiveStateAtStart.activeThreadId;
+    const existingThreadAtStart = activeThreadIdAtStart
+      ? interactiveStateAtStart.getThread(activeThreadIdAtStart)
+      : undefined;
+    const targetModelId = existingThreadAtStart
+      ? getThreadActiveModelId(existingThreadAtStart)
+      : settings.activeModelId?.trim() ?? '';
+    const newThreadModelParams = getGenerationParametersForModel(targetModelId);
+
+    if (existingThreadAtStart) {
+      ensureThreadCanGenerate(existingThreadAtStart, 'sending another message');
+    } else {
+      const engineState = llmEngineService.getState();
+      if (!targetModelId || engineState.status !== EngineStatus.READY || !engineState.activeModelId) {
+        throw new AppError('chat_model_not_loaded', 'Load a model before starting a conversation.');
+      }
+      if (engineState.activeModelId !== targetModelId) {
+        performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+        throw new AppError(
+          'chat_model_mismatch',
+          'The loaded model does not match the model selected for this conversation.',
+          {
+            details: {
+              expectedThreadModelId: targetModelId,
+              engineModelId: engineState.activeModelId,
+            },
+          },
+        );
+      }
+    }
+
     const attachmentDrafts = resolveReadyAttachmentDrafts({
       drafts: options.attachmentDrafts ?? [],
       readiness: options.multimodalReadiness,
-      expectedModelId: activeModelId,
+      expectedModelId: targetModelId,
     });
     const documentAttachmentDrafts = resolveReadyDocumentAttachmentDrafts(options.documentAttachmentDrafts ?? []);
     const mediaAttachmentDrafts = resolveReadyMediaAttachmentDrafts({
       drafts: options.mediaAttachmentDrafts ?? [],
       readiness: options.multimodalReadiness,
-      expectedModelId: activeModelId,
+      expectedModelId: targetModelId,
     });
-
-    if (!activeModelId) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
-    const engineState = llmEngineService.getState();
-    if (engineState.status !== EngineStatus.READY) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
-    if (engineState.activeModelId !== activeModelId) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
-    if (activeThread?.status === 'generating') {
-      throw new Error('A response is already being generated for this thread.');
-    }
 
     if (
       llmEngineService.hasActiveCompletion()
@@ -2803,18 +2905,9 @@ export const useChatSession = () => {
 
     const attachmentResolution = createPreparedAttachmentResolution(
       options.multimodalReadiness,
-      activeModelId,
+      targetModelId,
     );
-    const interactiveStateAtStart = useChatStore.getState();
-    const interactiveRevisionAtStart = interactiveStateAtStart.inferenceRevision;
-    const activeThreadIdAtStart = interactiveStateAtStart.activeThreadId;
-    if ((activeThread?.id ?? null) !== activeThreadIdAtStart) {
-      throw new AppError(
-        'action_failed',
-        'The conversation changed before prompt preparation started. Try again.',
-      );
-    }
-    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(targetModelId);
     const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
     try {
       await assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile);
@@ -2824,6 +2917,13 @@ export const useChatSession = () => {
       if (
         currentState.inferenceRevision !== interactiveRevisionAtStart
         || currentState.activeThreadId !== activeThreadIdAtStart
+        || (
+          existingThreadAtStart != null
+          && (
+            currentState.getThread(existingThreadAtStart.id) !== existingThreadAtStart
+            || getThreadActiveModelId(existingThreadAtStart) !== targetModelId
+          )
+        )
       ) {
         throw new AppError(
           'action_failed',
@@ -2838,35 +2938,24 @@ export const useChatSession = () => {
         ? assertActiveMultimodalReadyForAttachmentMediaPaths({
             mediaPaths: imageAttachmentMediaPaths,
             multimodalReadiness: options.multimodalReadiness,
-            expectedModelId: activeModelId,
+            expectedModelId: targetModelId,
             mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
           })
         : options.multimodalReadiness;
-      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, targetModelId);
 
-      const threadId = activeThread?.id
+      const threadId = existingThreadAtStart?.id
         ?? createThread({
-          modelId: activeModelId,
+          modelId: targetModelId,
           presetId: settings.activePresetId,
           presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
-          paramsSnapshot: activeModelParams,
+          paramsSnapshot: newThreadModelParams,
         });
 
       setActiveThread(threadId);
 
-      const existingThread = activeThread;
-      if (existingThread) {
-        ensureThreadUsesModelForSend(existingThread, activeModelId);
-        const nextThread = useChatStore.getState().getThread(threadId);
-        if (nextThread) {
-          syncThreadParametersCallback(nextThread, activeModelParams);
-        }
-      }
-
-      const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
-      const threadModelId = threadAfterPossibleSwitch
-        ? getThreadActiveModelId(threadAfterPossibleSwitch)
-        : activeModelId;
+      const threadForSend = assertThreadModelExecutionInvariant(threadId, targetModelId);
+      const threadModelId = getThreadActiveModelId(threadForSend);
 
       const userMessageId = createChatId('message');
       const normalizedText = text.trim();
@@ -2910,13 +2999,21 @@ export const useChatSession = () => {
       const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
 
       await runAssistantCompletion(threadId, assistantMessageId, {
+        expectedModelId: threadModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
       });
     } finally {
       releaseInteractivePromptPreparation();
     }
-  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
+  }, [
+    appendMessage,
+    createAssistantPlaceholder,
+    createThread,
+    ensureThreadCanGenerate,
+    runAssistantCompletion,
+    setActiveThread,
+  ]);
 
   const stopGeneration = useCallback(async () => {
     markInteractiveWorkStarted();
@@ -3051,6 +3148,7 @@ export const useChatSession = () => {
       }
 
       await runAssistantCompletion(activeThread.id, assistantMessageId, {
+        expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
       });
@@ -3149,6 +3247,7 @@ export const useChatSession = () => {
         }
 
         await runAssistantCompletion(activeThread.id, assistantMessageId, {
+          expectedModelId: activeModelId,
           multimodalReadiness: effectiveMultimodalReadiness,
           attachmentResolution,
         });
@@ -3167,6 +3266,7 @@ export const useChatSession = () => {
       }
 
       await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+        expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
       });

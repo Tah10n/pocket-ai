@@ -1836,6 +1836,49 @@ class LLMEngineService {
     return { context, generation: this.contextGeneration };
   }
 
+  private assertExpectedCompletionModel(expectedModelId: string | undefined): void {
+    if (expectedModelId === undefined) {
+      return;
+    }
+
+    const normalizedExpectedModelId = expectedModelId.trim();
+    const engineModelId = typeof this.state.activeModelId === 'string'
+      ? this.state.activeModelId.trim()
+      : '';
+    if (
+      normalizedExpectedModelId.length === 0
+      || engineModelId.length === 0
+      || this.state.status !== EngineStatus.READY
+      || !this.context
+    ) {
+      performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+      throw new AppError(
+        'chat_model_not_loaded',
+        'The conversation model is not loaded.',
+        {
+          details: {
+            expectedThreadModelId: normalizedExpectedModelId || null,
+            engineModelId: engineModelId || null,
+          },
+        },
+      );
+    }
+
+    if (engineModelId !== normalizedExpectedModelId) {
+      performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+      throw new AppError(
+        'chat_model_mismatch',
+        'The loaded model does not match the conversation model.',
+        {
+          details: {
+            expectedThreadModelId: normalizedExpectedModelId,
+            engineModelId,
+          },
+        },
+      );
+    }
+  }
+
   private assertContextStillCurrent(context: LlamaContext, generation: number): void {
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
@@ -3113,6 +3156,7 @@ class LLMEngineService {
 
   public async chatCompletion({
     messages,
+    expectedModelId,
     mediaPaths,
     multimodalReadiness,
     onToken,
@@ -3121,6 +3165,8 @@ class LLMEngineService {
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
+
+    this.assertExpectedCompletionModel(expectedModelId);
 
     if (this.completionRunner.hasActive()) {
       throw new AppError('engine_busy', 'A response is already being generated.');
@@ -3185,6 +3231,7 @@ class LLMEngineService {
           await this.initPromise;
         }
 
+        this.assertExpectedCompletionModel(expectedModelId);
         const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
         const activeSpeculativeConfig = this.activeSpeculativeDecoding
           ? { ...this.activeSpeculativeDecoding }
@@ -3302,6 +3349,7 @@ class LLMEngineService {
           }
 
           this.assertContextStillCurrent(context, contextGeneration);
+          this.assertExpectedCompletionModel(expectedModelId);
           this.assertCompletionNotInterrupted(interruptGeneration);
 
           return await runCompletionOnContext({

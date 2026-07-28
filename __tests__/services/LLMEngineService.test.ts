@@ -474,6 +474,25 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('blocks completion at the service boundary when the expected thread model differs', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      expectedModelId: 'other/model',
+      messages: [{ role: 'user', content: 'Do not run this prompt' }],
+    })).rejects.toMatchObject({
+      code: 'chat_model_mismatch',
+      details: {
+        expectedThreadModelId: 'other/model',
+        engineModelId: 'test/model',
+      },
+    });
+
+    expect(
+      (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+    ).not.toHaveBeenCalled();
+  });
+
   it('marks llama.rn reasoning callbacks as accumulated snapshots', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     completionMock.mockImplementationOnce(async (_params, onToken) => {

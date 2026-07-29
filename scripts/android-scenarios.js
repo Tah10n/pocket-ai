@@ -481,9 +481,9 @@ const LOGCAT_COLLECTOR_STOP_TIMEOUT_MS = 10_000;
 const LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS = 5_000;
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
-// Some physical ADB transports truncate larger binary reads without returning a failing status.
-// Keep each independently validated screenshot transfer below that observed boundary.
-const PHYSICAL_SCREENSHOT_CHUNK_SIZE_BYTES = 16 * 1024;
+// Keep physical screenshot transfers bounded so an interrupted ADB transport can resume from
+// one independently validated chunk instead of repeating the whole PNG.
+const PHYSICAL_SCREENSHOT_CHUNK_SIZE_BYTES = 32 * 1024;
 // Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
 // Give successful routes a short visual-settle window so QA evidence does not capture a
 // transient black surface immediately after navigation.
@@ -7719,13 +7719,16 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
         }
 
         sawChunkDeviceUnavailable = isAdbDeviceUnavailableResult(chunkResult);
+        const sawShortChunk = !chunkResult.error
+          && chunkResult.status === 0
+          && chunkResult.stdout?.length !== expectedChunkBytes;
         lastChunkFailure = chunkResult.error
           ? describeSpawnError(`read screenshot chunk ${chunkIndex + 1}/${chunkCount}`, chunkResult.error)
           : chunkResult.status === 0
             ? `read screenshot chunk ${chunkIndex + 1}/${chunkCount} returned ${chunkResult.stdout?.length ?? 0}/${expectedChunkBytes} bytes`
             : describeSpawnResult(`read screenshot chunk ${chunkIndex + 1}/${chunkCount}`, chunkResult);
 
-        if (sawChunkDeviceUnavailable) {
+        if (sawChunkDeviceUnavailable || sawShortChunk) {
           waitForAdbDevice(adbPath, serial, runSpawnSync);
         }
         if (chunkAttempt < 3) {

@@ -720,12 +720,56 @@ describe('android-scenarios screenshot capture', () => {
       expect(spawn.mock.calls.some(([, args]) => args.includes('exec-out') && args.includes('screencap'))).toBe(false);
       expect(spawn).toHaveBeenCalledWith(
         'adb',
-        expect.arrayContaining(['exec-out', 'dd', 'bs=16384', 'skip=0', 'count=1', 'status=none']),
-        expect.objectContaining({ maxBuffer: 32768, timeout: 15000 })
+        expect.arrayContaining(['exec-out', 'dd', 'bs=32768', 'skip=0', 'count=1', 'status=none']),
+        expect.objectContaining({ maxBuffer: 65536, timeout: 15000 })
       );
       for (const [, , spawnOptions] of spawn.mock.calls) {
         expect(spawnOptions).toEqual(expect.objectContaining({ timeout: 15000 }));
       }
+      expect(fs.readFileSync(screenshotPath)).toEqual(pngBuffer);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('waits for the target serial and resumes only a truncated screenshot chunk', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-screenshot-'));
+    const screenshotPath = path.join(tempDir, 'capture.png');
+    const sleepSync = jest.fn();
+    let chunkAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('stat')) {
+        return { status: 0, stdout: `${pngBuffer.length}\n`, stderr: '' };
+      }
+
+      if (args.includes('dd')) {
+        chunkAttempts += 1;
+        return {
+          status: 0,
+          stdout: chunkAttempts === 1 ? pngBuffer.subarray(0, 8) : pngBuffer,
+          stderr: '',
+        };
+      }
+
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    try {
+      expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        maxAttempts: 1,
+        remoteChunkSizeBytes: pngBuffer.length,
+        retryDelayMs: 1,
+        sleepSync,
+        spawnSync: spawn,
+      })).toBe(screenshotPath);
+
+      expect(chunkAttempts).toBe(2);
+      expect(spawn).toHaveBeenCalledWith(
+        'adb',
+        ['-s', 'device-1', 'wait-for-device'],
+        expect.objectContaining({ timeout: 15000 })
+      );
+      expect(sleepSync).toHaveBeenCalledWith(1);
       expect(fs.readFileSync(screenshotPath)).toEqual(pngBuffer);
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });

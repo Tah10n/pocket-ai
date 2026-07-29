@@ -1126,32 +1126,34 @@ function createScenarioContext(adbPath, serial) {
       runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
       await delay(700);
     },
-    swipeUp: async () => {
+    swipeUp: async (options = {}) => {
+      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "up");
       runChecked(adbPath, [
         "-s",
         serial,
         "shell",
         "input",
         "swipe",
-        "540",
-        "1700",
-        "540",
-        "700",
+        `${gesture.startX}`,
+        `${gesture.startY}`,
+        `${gesture.endX}`,
+        `${gesture.endY}`,
         "250",
       ]);
       await delay(900);
     },
-    swipeDown: async () => {
+    swipeDown: async (options = {}) => {
+      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "down");
       runChecked(adbPath, [
         "-s",
         serial,
         "shell",
         "input",
         "swipe",
-        "540",
-        "700",
-        "540",
-        "1700",
+        `${gesture.startX}`,
+        `${gesture.startY}`,
+        `${gesture.endX}`,
+        `${gesture.endY}`,
         "250",
       ]);
       await delay(900);
@@ -1160,6 +1162,60 @@ function createScenarioContext(adbPath, serial) {
       const screenshotPath = path.join(artifactsRoot, fileName);
       return captureAndroidScreenshot(adbPath, serial, screenshotPath);
     },
+  };
+}
+
+function resolveScenarioVerticalSwipeGesture(snapshot, direction) {
+  if (direction !== "up" && direction !== "down") {
+    throw new Error(`Unsupported scenario swipe direction "${direction}".`);
+  }
+
+  const fallback = {
+    startX: 540,
+    startY: direction === "up" ? 1700 : 700,
+    endX: 540,
+    endY: direction === "up" ? 700 : 1700,
+  };
+  if (!snapshot) {
+    return fallback;
+  }
+
+  const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  if (!viewport) {
+    return fallback;
+  }
+  if (!viewport.bounds) {
+    throw new Error("The visible chat list viewport has no bounds for a safe swipe.");
+  }
+
+  const composer = findResourceIdInSnapshot(snapshot, "chat-input-bar-container", {
+    visibleOnly: true,
+  });
+  const visibleBottom = composer?.bounds?.top > viewport.bounds.top
+    ? Math.min(viewport.bounds.bottom, composer.bounds.top)
+    : viewport.bounds.bottom;
+  const visibleHeight = visibleBottom - viewport.bounds.top;
+  if (visibleHeight < 320) {
+    throw new Error(
+      `The visible chat list viewport is too short for a safe swipe (${visibleHeight}px).`
+    );
+  }
+
+  const verticalInset = Math.min(160, Math.max(80, Math.floor(visibleHeight * 0.2)));
+  const upperY = viewport.bounds.top + verticalInset;
+  const lowerY = visibleBottom - verticalInset;
+  if (lowerY - upperY < 160) {
+    throw new Error("The visible chat list viewport cannot provide a safe swipe distance.");
+  }
+
+  const centerX = Math.round((viewport.bounds.left + viewport.bounds.right) / 2);
+  return {
+    startX: centerX,
+    startY: direction === "up" ? lowerY : upperY,
+    endX: centerX,
+    endY: direction === "up" ? upperY : lowerY,
   };
 }
 
@@ -3088,14 +3144,15 @@ async function scanConversationTopology(ctx, options = {}) {
       break;
     }
     if (attempt < scanLimit - 1) {
-      await ctx.swipeDown();
+      await ctx.swipeDown({ snapshot });
       swipeCount += 1;
     }
   }
 
   if (options.restoreBottom !== false) {
+    const viewportSnapshot = snapshots.at(-1);
     for (let index = 0; index < swipeCount + 1; index += 1) {
-      await ctx.swipeUp();
+      await ctx.swipeUp({ snapshot: viewportSnapshot });
     }
   }
   if (!reachedHistoryStart) {
@@ -7994,6 +8051,7 @@ module.exports = {
   resolveAndroidPackageUid,
   resolveBranchRegenerationReplacement,
   resolveAndroidQaGenerationGateObservation,
+  resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
   restoreLanguageAfterScenario,
   runCapture,

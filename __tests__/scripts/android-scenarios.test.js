@@ -75,6 +75,7 @@ const {
   resolveBranchRegenerationReplacement,
   resolveAndroidPackageUid,
   resolveAndroidQaGenerationGateObservation,
+  resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
   selectScenarios,
   ScenarioSkipError,
@@ -1790,6 +1791,56 @@ describe('android-scenarios variant picker helpers', () => {
     expect(setFilterPanelOpen).toHaveBeenCalledTimes(1);
     expect(ctx.tapAnyText).toHaveBeenCalledTimes(1);
     expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']), { timeoutMs: 8_000 });
+  });
+});
+
+describe('android-scenarios bounded chat swipes', () => {
+  it('starts topology swipes inside the visible list below recovery banners and above the composer', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-qa-arm-before-first-output"
+          bounds="[44,676][290,760]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,766][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+      </hierarchy>
+    `);
+
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'down')).toEqual({
+      startX: 541,
+      startY: 926,
+      endX: 541,
+      endY: 1778,
+    });
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'up')).toEqual({
+      startX: 541,
+      startY: 1778,
+      endX: 541,
+      endY: 926,
+    });
+  });
+
+  it('retains bounded fallback gestures outside the chat viewport', () => {
+    const snapshot = parseUiSnapshot('<hierarchy><node bounds="[0,0][1080,2412]" /></hierarchy>');
+
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'down')).toEqual({
+      startX: 540,
+      startY: 700,
+      endX: 540,
+      endY: 1700,
+    });
+    expect(() => resolveScenarioVerticalSwipeGesture(snapshot, 'sideways'))
+      .toThrow(/Unsupported scenario swipe direction/);
   });
 });
 

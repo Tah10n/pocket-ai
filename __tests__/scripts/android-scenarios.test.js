@@ -3523,6 +3523,34 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       .toBe('chat-primary-action-send');
   });
 
+  it('merges sparse viewport overlap without duplicating messages', () => {
+    const older = [
+      conversationToken('user', '1'),
+      conversationToken('assistant', '1a'),
+      conversationToken('user', '2'),
+      conversationToken('user', '3'),
+    ];
+    const newer = [
+      conversationToken('user', '2'),
+      conversationToken('assistant', '2a'),
+      conversationToken('user', '3'),
+      conversationToken('assistant', '3a', 'stopped'),
+    ];
+
+    const merged = mergeOlderConversationOrder(older, newer);
+
+    expect(merged.map((token) => token.key)).toEqual([
+      'user:1',
+      'assistant:1a',
+      'user:2',
+      'assistant:2a',
+      'user:3',
+      'assistant:3a',
+    ]);
+    expect(new Set(merged.map((token) => token.key)).size).toBe(merged.length);
+    expect(merged.at(-1)).toEqual(expect.objectContaining({ state: 'stopped' }));
+  });
+
   it('recognizes only the stable visible history-start anchor as a complete topology scan', () => {
     const anchored = parseUiSnapshot(`
       <hierarchy>

@@ -3039,15 +3039,67 @@ function mergeOlderConversationOrder(olderTokens, currentOrder) {
   if (currentOrder.length === 0) {
     return [...olderTokens];
   }
-  const maxOverlap = Math.min(olderTokens.length, currentOrder.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    const olderSuffix = olderTokens.slice(olderTokens.length - overlap);
-    const currentPrefix = currentOrder.slice(0, overlap);
-    if (olderSuffix.every((token, index) => token.key === currentPrefix[index].key)) {
-      return [...olderTokens.slice(0, olderTokens.length - overlap), ...currentOrder];
+  if (olderTokens.length === 0) {
+    return [...currentOrder];
+  }
+
+  const currentIndexByKey = new Map(
+    currentOrder.map((token, index) => [token.key, index])
+  );
+  let previousCurrentIndex = -1;
+  for (const token of olderTokens) {
+    const currentIndex = currentIndexByKey.get(token.key);
+    if (currentIndex === undefined) {
+      continue;
+    }
+    if (currentIndex < previousCurrentIndex) {
+      const currentKeys = new Set(currentIndexByKey.keys());
+      return [
+        ...olderTokens.filter((candidate) => !currentKeys.has(candidate.key)),
+        ...currentOrder,
+      ];
+    }
+    previousCurrentIndex = currentIndex;
+  }
+
+  const lcsLengths = Array.from(
+    { length: olderTokens.length + 1 },
+    () => new Array(currentOrder.length + 1).fill(0)
+  );
+  for (let olderIndex = olderTokens.length - 1; olderIndex >= 0; olderIndex -= 1) {
+    for (let currentIndex = currentOrder.length - 1; currentIndex >= 0; currentIndex -= 1) {
+      lcsLengths[olderIndex][currentIndex] = (
+        olderTokens[olderIndex].key === currentOrder[currentIndex].key
+          ? 1 + lcsLengths[olderIndex + 1][currentIndex + 1]
+          : Math.max(
+            lcsLengths[olderIndex + 1][currentIndex],
+            lcsLengths[olderIndex][currentIndex + 1]
+          )
+      );
     }
   }
-  return [...olderTokens, ...currentOrder];
+
+  const merged = [];
+  let olderIndex = 0;
+  let currentIndex = 0;
+  while (olderIndex < olderTokens.length && currentIndex < currentOrder.length) {
+    if (olderTokens[olderIndex].key === currentOrder[currentIndex].key) {
+      merged.push(currentOrder[currentIndex]);
+      olderIndex += 1;
+      currentIndex += 1;
+    } else if (
+      lcsLengths[olderIndex + 1][currentIndex]
+      >= lcsLengths[olderIndex][currentIndex + 1]
+    ) {
+      merged.push(olderTokens[olderIndex]);
+      olderIndex += 1;
+    } else {
+      merged.push(currentOrder[currentIndex]);
+      currentIndex += 1;
+    }
+  }
+  merged.push(...olderTokens.slice(olderIndex), ...currentOrder.slice(currentIndex));
+  return merged;
 }
 
 function buildConversationTopology(order, snapshots) {

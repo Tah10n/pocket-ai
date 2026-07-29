@@ -4287,6 +4287,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         privateRoot: tempDir,
         runCapture,
         spawn,
+        captureOwnership: () => null,
       });
       fs.appendFileSync(
         collector.rawLogPath,
@@ -4409,6 +4410,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         privateRoot: tempDir,
         runCapture,
         spawn,
+        captureOwnership: () => null,
       });
       fs.appendFileSync(collector.rawLogPath, 'complete raced interval\n');
 
@@ -4451,7 +4453,12 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         serial: 'device-1',
         packageName: 'com.github.tah10n.pocketai',
         stem: 'unexpected-exit',
-      }, { privateRoot: tempDir, runCapture, spawn });
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn,
+        captureOwnership: () => null,
+      });
       children[0].emit('close', 1, null);
 
       expect(() => readAndroidLogcatCollector(collector, { requireStopped: false }))
@@ -4497,6 +4504,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         privateRoot: tempDir,
         runCapture,
         spawn: failingSpawn,
+        captureOwnership: () => null,
         onCollectorCreated,
       })).rejects.toThrow(/spawn denied/);
       expect(onCollectorCreated).toHaveBeenLastCalledWith(null);

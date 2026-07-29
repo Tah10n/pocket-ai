@@ -720,8 +720,8 @@ describe('android-scenarios screenshot capture', () => {
       expect(spawn.mock.calls.some(([, args]) => args.includes('exec-out') && args.includes('screencap'))).toBe(false);
       expect(spawn).toHaveBeenCalledWith(
         'adb',
-        expect.arrayContaining(['exec-out', 'dd', 'bs=32768', 'skip=0', 'count=1', 'status=none']),
-        expect.objectContaining({ maxBuffer: 65536, timeout: 15000 })
+        expect.arrayContaining(['exec-out', 'dd', 'bs=16384', 'skip=0', 'count=1', 'status=none']),
+        expect.objectContaining({ maxBuffer: 32768, timeout: 15000 })
       );
       for (const [, , spawnOptions] of spawn.mock.calls) {
         expect(spawnOptions).toEqual(expect.objectContaining({ timeout: 15000 }));

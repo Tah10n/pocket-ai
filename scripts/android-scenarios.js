@@ -481,6 +481,9 @@ const LOGCAT_COLLECTOR_STOP_TIMEOUT_MS = 10_000;
 const LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS = 5_000;
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
+// Some physical ADB transports truncate larger binary reads without returning a failing status.
+// Keep each independently validated screenshot transfer below that observed boundary.
+const PHYSICAL_SCREENSHOT_CHUNK_SIZE_BYTES = 16 * 1024;
 // Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
 // Give successful routes a short visual-settle window so QA evidence does not capture a
 // transient black surface immediately after navigation.
@@ -7654,7 +7657,8 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
   const runSleepSync = options.sleepSync ?? sleepSync;
   const preferRemoteFile = options.preferRemoteFile ?? !isEmulatorSerial(serial);
   const copyRemoteFileInChunks = options.copyRemoteFileInChunks ?? preferRemoteFile;
-  const remoteChunkSizeBytes = options.remoteChunkSizeBytes ?? 32 * 1024;
+  const remoteChunkSizeBytes = options.remoteChunkSizeBytes
+    ?? PHYSICAL_SCREENSHOT_CHUNK_SIZE_BYTES;
   const commandTimeoutMs = options.commandTimeoutMs ?? ADB_COMMAND_TIMEOUT_MS;
 
   const copyRemoteScreenshotInChunks = (remotePath) => {

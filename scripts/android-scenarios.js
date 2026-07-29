@@ -3410,30 +3410,34 @@ async function detectAudioAttachmentSupport(ctx) {
 }
 
 async function findChatResourceWithScroll(ctx, resourceId, options = {}) {
-  const adbPath = resolveAdbPath();
-  const findNow = () => findResourceIdInSnapshot(
-    createUiSnapshot(adbPath, ctx.serial),
-    resourceId,
-    { visibleOnly: true }
-  );
-  let node = findNow();
-  if (node) {
-    return node;
+  const adbPath = options.adbPath || resolveAdbPath();
+  const readSnapshot = options.readSnapshot
+    || (() => createUiSnapshot(adbPath, ctx.serial));
+  const observeNow = () => {
+    const snapshot = readSnapshot();
+    return {
+      node: findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true }),
+      snapshot,
+    };
+  };
+  let observation = observeNow();
+  if (observation.node) {
+    return observation.node;
   }
 
   const maxSwipes = options.maxSwipes ?? BRANCH_FIXTURE_SCAN_LIMIT;
   for (let attempt = 0; attempt < maxSwipes; attempt += 1) {
-    await ctx.swipeDown();
-    node = findNow();
-    if (node) {
-      return node;
+    await ctx.swipeDown({ snapshot: observation.snapshot });
+    observation = observeNow();
+    if (observation.node) {
+      return observation.node;
     }
   }
   for (let attempt = 0; attempt < maxSwipes; attempt += 1) {
-    await ctx.swipeUp();
-    node = findNow();
-    if (node) {
-      return node;
+    await ctx.swipeUp({ snapshot: observation.snapshot });
+    observation = observeNow();
+    if (observation.node) {
+      return observation.node;
     }
   }
   throw new Error(
@@ -8117,6 +8121,7 @@ module.exports = {
   dumpUiHierarchy,
   dismissTransientSurfaceWithBack,
   findCatalogRiskModelCard,
+  findChatResourceWithScroll,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   openFirstVisibleVariantPicker,
   prepareCatalogForVariantPickerSmokeScenario,

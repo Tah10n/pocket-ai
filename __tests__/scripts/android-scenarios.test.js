@@ -45,6 +45,7 @@ const {
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
+  findChatResourceWithScroll,
   escapeAdbInputText,
   extractVisibleConversationTokens,
   findAttachImageActionInSnapshot,
@@ -1840,6 +1841,62 @@ describe('android-scenarios variant picker helpers', () => {
 });
 
 describe('android-scenarios bounded chat swipes', () => {
+  it('uses each current chat snapshot to keep resource scans inside a shifted viewport', async () => {
+    const initialSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-qa-arm-before-first-output"
+          bounds="[44,676][290,760]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,766][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+      </hierarchy>
+    `);
+    const targetSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,766][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="regenerate-message-message-reasoning"
+          bounds="[897,1358][960,1421]"
+          displayed="true"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const readSnapshot = jest.fn()
+      .mockReturnValueOnce(initialSnapshot)
+      .mockReturnValueOnce(targetSnapshot);
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeDown: jest.fn(),
+      swipeUp: jest.fn(),
+    };
+
+    const target = await findChatResourceWithScroll(
+      ctx,
+      'regenerate-message-message-reasoning',
+      { adbPath: 'adb', maxSwipes: 1, readSnapshot }
+    );
+
+    expect(target.resourceId).toBe('regenerate-message-message-reasoning');
+    expect(ctx.swipeDown).toHaveBeenCalledWith({ snapshot: initialSnapshot });
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('starts topology swipes inside the visible list below recovery banners and above the composer', () => {
     const snapshot = parseUiSnapshot(`
       <hierarchy>

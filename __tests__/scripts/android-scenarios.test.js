@@ -73,6 +73,7 @@ const {
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
   resolveBranchRegenerationReplacement,
+  resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidPackageUid,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
@@ -3718,6 +3719,78 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       </hierarchy>
     `);
     expect(snapshot.nodes[0].selected).toBe(true);
+  });
+
+  it('treats an explicitly disabled reasoning control as authoritative unsupported reasoning', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-off"
+          enabled="false"
+          selected="false"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+
+    expect(resolveReasoningAuthoritativeClearConfiguration(snapshot)).toEqual({
+      reasoningEffort: 'unsupported',
+      requiresSelection: false,
+      verifiedSelected: false,
+      verifiedUnsupported: true,
+    });
+  });
+
+  it('distinguishes a selected Off control from one that still needs a tap', () => {
+    const selected = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-off"
+          enabled="true"
+          selected="true"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+    const pending = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-off"
+          enabled="true"
+          selected="false"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+
+    expect(resolveReasoningAuthoritativeClearConfiguration(selected))
+      .toEqual(expect.objectContaining({
+        reasoningEffort: 'off',
+        requiresSelection: false,
+        verifiedSelected: true,
+      }));
+    expect(resolveReasoningAuthoritativeClearConfiguration(pending))
+      .toEqual(expect.objectContaining({
+        reasoningEffort: 'off',
+        requiresSelection: true,
+        verifiedSelected: false,
+      }));
+  });
+
+  it('still fails reasoning-clear setup when Off is absent for a reasoning-required model', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-auto"
+          enabled="true"
+          selected="true"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+
+    expect(() => resolveReasoningAuthoritativeClearConfiguration(snapshot))
+      .toThrow(/reasoning-effort-off is not visible/);
   });
 
   it('requires a new completed assistant directly adjacent to the target user', () => {

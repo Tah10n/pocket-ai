@@ -3636,6 +3636,36 @@ async function interruptObservedBranchGeneration(ctx, options) {
   };
 }
 
+function resolveReasoningAuthoritativeClearConfiguration(snapshot) {
+  const reasoningOff = findResourceIdInSnapshot(
+    snapshot,
+    "reasoning-effort-off",
+    { visibleOnly: true }
+  );
+  if (!reasoningOff) {
+    throw new Error("reasoning-effort-off is not visible");
+  }
+  if (!reasoningOff.bounds) {
+    throw new Error("reasoning-effort-off has no tap bounds");
+  }
+
+  if (!reasoningOff.enabled) {
+    return {
+      reasoningEffort: "unsupported",
+      requiresSelection: false,
+      verifiedSelected: false,
+      verifiedUnsupported: true,
+    };
+  }
+
+  return {
+    reasoningEffort: "off",
+    requiresSelection: !reasoningOff.selected,
+    verifiedSelected: reasoningOff.selected,
+    verifiedUnsupported: false,
+  };
+}
+
 async function disableReasoningForAuthoritativeClear(ctx) {
   const adbPath = resolveAdbPath();
   try {
@@ -3646,14 +3676,18 @@ async function disableReasoningForAuthoritativeClear(ctx) {
       timeoutMs: 10_000,
       visibleOnly: true,
     });
-    const reasoningOff = await waitForResourceId(adbPath, ctx.serial, "reasoning-effort-off", {
+    await waitForResourceId(adbPath, ctx.serial, "reasoning-effort-off", {
       timeoutMs: 10_000,
       visibleOnly: true,
     });
-    if (!reasoningOff.enabled || !reasoningOff.bounds) {
-      throw new Error("reasoning-effort-off is disabled or not tappable");
-    }
-    if (!reasoningOff.selected) {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    const configuration = resolveReasoningAuthoritativeClearConfiguration(snapshot);
+    if (configuration.requiresSelection) {
+      const reasoningOff = findResourceIdInSnapshot(
+        snapshot,
+        "reasoning-effort-off",
+        { visibleOnly: true }
+      );
       tapBounds(adbPath, ctx.serial, reasoningOff.bounds);
       const { match, snapshot } = await waitForSnapshotMatch(
         adbPath,
@@ -3678,7 +3712,17 @@ async function disableReasoningForAuthoritativeClear(ctx) {
     await waitForNoResourceId(adbPath, ctx.serial, "model-parameters-sheet", {
       timeoutMs: 10_000,
     });
-    return { reasoningEffort: "off", verifiedSelected: true };
+    return configuration.reasoningEffort === "off"
+      ? {
+          reasoningEffort: "off",
+          verifiedSelected: true,
+          verifiedUnsupported: false,
+        }
+      : {
+          reasoningEffort: "unsupported",
+          verifiedSelected: false,
+          verifiedUnsupported: true,
+        };
   } catch (error) {
     throw new ScenarioPreconditionFailureError(
       `Reasoning authoritative-clear requires an optional reasoning-off control: ${error.message}`
@@ -8109,6 +8153,7 @@ module.exports = {
   readTransferredMetroOwnership,
   resolveAndroidPackageUid,
   resolveBranchRegenerationReplacement,
+  resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,

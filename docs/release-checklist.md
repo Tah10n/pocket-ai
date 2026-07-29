@@ -209,6 +209,11 @@ Audio is the only conditional target. If the installed runtime does not expose t
 attachment action, step 13 records `not_applicable` with explicit evidence. If audio is
 exposed, the audio fixture is mandatory and any missing precondition fails the pack.
 
+For step 10, the runner selects `Off` when the active model exposes an optional reasoning
+control. A model that explicitly marks reasoning as unsupported is already authoritatively
+disabled and is recorded as such. A reasoning-required model without an `Off` control still
+fails the pack precondition.
+
 ### PR runner contract
 
 The `android-pack-branch-regeneration` label targets a serialized, ephemeral self-hosted

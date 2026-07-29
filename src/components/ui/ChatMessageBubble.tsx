@@ -17,6 +17,7 @@ import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
 import { getAssistantPresentation } from '../../utils/chatPresentation';
 import { getThemeActionContentClassName } from '../../utils/themeTokens';
+import { shouldReduceAndroidQaStreamingMotion } from '../../services/AndroidQaGenerationEvidence';
 
 export interface ChatMessageBubbleProps {
   id: string;
@@ -208,6 +209,7 @@ const ChatMessageBubbleComponent = ({
           isStreaming: Boolean(isStreaming),
         });
   const isAssistantStreaming = !isUser && Boolean(isStreaming);
+  const reduceAndroidQaStreamingMotion = shouldReduceAndroidQaStreamingMotion();
   const assistantMessageState = messageState
     ?? (isStreaming ? 'streaming' : errorMessage ? 'error' : 'complete');
   const thoughtContent = hasExplicitThoughtContent
@@ -411,7 +413,7 @@ const ChatMessageBubbleComponent = ({
                 <Box className="flex-row items-center gap-2.5">
                   <ScreenIconTile iconName="psychology-alt" tone="accent" size="sm" iconSize="sm" className="h-7 w-7 rounded-full">
                     {shouldAnimateThought ? (
-                      <ThinkingPulse />
+                      <ThinkingPulse reduceMotion={reduceAndroidQaStreamingMotion} />
                     ) : (
                       <MaterialSymbols name="psychology-alt" size="sm" className="text-primary-500" />
                     )}
@@ -443,7 +445,7 @@ const ChatMessageBubbleComponent = ({
                     isAssistantStreaming && (hasExplicitThoughtContent || assistantPresentation?.isThoughtStreaming) ? (
                       <Text className="text-sm leading-6 text-typography-700 dark:text-typography-200">
                         {thoughtContent}
-                        <StreamingCursor />
+                        <StreamingCursor reduceMotion={reduceAndroidQaStreamingMotion} />
                       </Text>
                     ) : (
                       <MarkdownRenderer content={thoughtContent} selectable />
@@ -539,14 +541,14 @@ const ChatMessageBubbleComponent = ({
               ) : null}
             </>
           ) : shouldShowStreamingPlaceholder ? (
-            <StreamingCursor compact />
+            <StreamingCursor compact reduceMotion={reduceAndroidQaStreamingMotion} />
           ) : isStreaming && assistantBodyContent ? (
             <Text
               testID={`assistant-message-content-${id}`}
               className="text-base leading-relaxed text-typography-900 dark:text-typography-100"
             >
               {assistantBodyContent}
-              <StreamingCursor />
+              <StreamingCursor reduceMotion={reduceAndroidQaStreamingMotion} />
             </Text>
           ) : assistantBodyContent ? (
             <Box testID={`assistant-message-content-${id}`}>

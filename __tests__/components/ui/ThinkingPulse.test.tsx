@@ -78,4 +78,14 @@ describe('ThinkingPulse', () => {
 
     expect(mockWithRepeat).toHaveBeenCalledWith(mockWithTiming.mock.results[0]?.value, -1, false);
   });
+
+  it('keeps the pulse static when deterministic QA motion is required', () => {
+    mockUseMotionPreferences.mockReturnValue({ motionPreset: 'full' });
+
+    const screen = render(<ThinkingPulse reduceMotion />);
+
+    expect(screen.toJSON()).toBeTruthy();
+    expect(mockWithTiming).not.toHaveBeenCalled();
+    expect(mockWithRepeat).not.toHaveBeenCalled();
+  });
 });

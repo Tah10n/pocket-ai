@@ -38,7 +38,11 @@ jest.mock('../../src/components/ui/StreamingCursor', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    StreamingCursor: () => mockReact.createElement(Text, { testID: 'streaming-cursor' }, '|'),
+    StreamingCursor: ({ reduceMotion }: { reduceMotion?: boolean }) => mockReact.createElement(
+      Text,
+      { testID: 'streaming-cursor', reduceMotion },
+      '|',
+    ),
   };
 });
 
@@ -46,7 +50,11 @@ jest.mock('../../src/components/ui/ThinkingPulse', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    ThinkingPulse: () => mockReact.createElement(Text, { testID: 'thinking-pulse' }, 'pulse'),
+    ThinkingPulse: ({ reduceMotion }: { reduceMotion?: boolean }) => mockReact.createElement(
+      Text,
+      { testID: 'thinking-pulse', reduceMotion },
+      'pulse',
+    ),
   };
 });
 
@@ -177,6 +185,31 @@ describe('ChatMessageBubble', () => {
     );
 
     expect(getByTestId('user-message-state-complete-user-state')).toBeTruthy();
+  });
+
+  it('disables streaming animations in explicit Android QA evidence builds', () => {
+    const originalAndroidQa = process.env.EXPO_PUBLIC_ANDROID_QA;
+    process.env.EXPO_PUBLIC_ANDROID_QA = '1';
+    try {
+      const { getByTestId } = render(
+        <ChatMessageBubble
+          id="assistant-qa-motion"
+          isUser={false}
+          content="<think>QA reasoning"
+          isStreaming
+        />,
+      );
+
+      expect(getByTestId('thinking-pulse').props.reduceMotion).toBe(true);
+      fireEvent.press(getByTestId('thought-toggle-assistant-qa-motion'));
+      expect(getByTestId('streaming-cursor').props.reduceMotion).toBe(true);
+    } finally {
+      if (originalAndroidQa === undefined) {
+        delete process.env.EXPO_PUBLIC_ANDROID_QA;
+      } else {
+        process.env.EXPO_PUBLIC_ANDROID_QA = originalAndroidQa;
+      }
+    }
   });
 
   it('renders a persisted thought disclosure and copies only the final markdown', async () => {

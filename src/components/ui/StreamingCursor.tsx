@@ -16,18 +16,25 @@ const AnimatedText = Animated.createAnimatedComponent(Text);
 
 export const StreamingCursor = ({
   compact = false,
+  reduceMotion = false,
 }: {
   compact?: boolean;
+  reduceMotion?: boolean;
 }) => {
   const opacity = useSharedValue(1);
 
   useEffect(() => {
+    if (reduceMotion) {
+      opacity.value = 1;
+      return;
+    }
+
     opacity.value = withRepeat(
       withTiming(0, { duration: 500, easing: Easing.inOut(Easing.ease) }),
       -1, // infinite repeat
       true  // reverse each cycle
     );
-  }, [opacity]);
+  }, [opacity, reduceMotion]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
@@ -35,6 +42,8 @@ export const StreamingCursor = ({
 
   return (
     <AnimatedText
+      accessible={false}
+      importantForAccessibility="no"
       className={compact
         ? 'text-xs leading-4 text-typography-400 opacity-60 dark:text-typography-500'
         : 'text-sm leading-6 text-typography-500 opacity-70 dark:text-typography-400'}

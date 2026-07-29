@@ -4326,6 +4326,54 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     }
   });
 
+  it('accepts a concurrent owned collector close when signal delivery reports false', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-close-race-'));
+    const children = [4151, 4152].map((pid) => {
+      const child = new EventEmitter();
+      child.pid = pid;
+      child.kill = jest.fn(() => {
+        setImmediate(() => child.emit('close', 0, null));
+        return false;
+      });
+      return child;
+    });
+    const spawn = jest.fn(() => {
+      const child = children[spawn.mock.calls.length - 1];
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    });
+    const runCapture = jest.fn((command, args) => (
+      args.includes('dumpsys')
+        ? 'Package [com.github.tah10n.pocketai]\n  userId=10234\n'
+        : '1784700000.123\n'
+    ));
+
+    try {
+      const collector = await startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'close-race',
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn,
+      });
+      fs.appendFileSync(collector.rawLogPath, 'complete raced interval\n');
+
+      await expect(stopAndroidLogcatCollector(collector)).resolves.toBeUndefined();
+      expect(collector).toEqual(expect.objectContaining({
+        closed: true,
+        stopped: true,
+      }));
+      expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+      expect(readAndroidLogcatCollector(collector)).toContain('complete raced interval');
+      cleanupAndroidLogcatCollector(collector);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
   it('fails closed when the owned collector exits before the scenario completes', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-exit-'));
     const children = [4201, 4202].map((pid) => {

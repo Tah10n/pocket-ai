@@ -6631,12 +6631,12 @@ async function stopAndroidLogcatStream(collector, stream, options = {}) {
   stream.stopRequested = true;
   let stopFailure = stream.error;
   if (!stream.closed) {
-    const killAccepted = stream.child.kill();
-    if (!killAccepted) {
-      stopFailure = stopFailure || new Error(
-        `The Android ${stream.kind} logcat process rejected its owned stop request.`
-      );
-    }
+    // ChildProcess.kill() can return false when the process exits between the
+    // closed-state check above and signal delivery. The close event, bounded
+    // wait, and authenticated ownership fallback are the authoritative stop
+    // proof; the advisory return value must not poison an otherwise complete
+    // evidence interval.
+    stream.child.kill();
     try {
       await awaitWithTimeout(
         stream.closedPromise,

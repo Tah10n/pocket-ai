@@ -3452,13 +3452,13 @@ async function findChatResourceWithScroll(ctx, resourceId, options = {}) {
 }
 
 function isChatResourceTapSafe(snapshot, node) {
-  if (!node?.bounds) {
+  if (!hasPositiveBounds(node?.bounds)) {
     return false;
   }
   const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
     visibleOnly: true,
   });
-  if (!viewport?.bounds) {
+  if (!hasPositiveBounds(viewport?.bounds)) {
     return false;
   }
   const composer = findResourceIdInSnapshot(snapshot, "chat-input-bar-container", {
@@ -6106,7 +6106,7 @@ function resolveViewportBounds(nodes) {
 }
 
 function isBoundsInViewport(bounds, viewportBounds) {
-  if (!bounds || !viewportBounds) {
+  if (!hasPositiveBounds(bounds) || !hasPositiveBounds(viewportBounds)) {
     return false;
   }
 
@@ -6116,6 +6116,14 @@ function isBoundsInViewport(bounds, viewportBounds) {
     && bounds.centerY >= viewportBounds.top
     && bounds.centerY <= viewportBounds.bottom
   );
+}
+
+function hasPositiveBounds(bounds) {
+  return Boolean(bounds)
+    && Number.isFinite(bounds.width)
+    && Number.isFinite(bounds.height)
+    && bounds.width > 0
+    && bounds.height > 0;
 }
 
 function findAnyNodeClearOfBottomOverlay(snapshot, labels, options = {}) {

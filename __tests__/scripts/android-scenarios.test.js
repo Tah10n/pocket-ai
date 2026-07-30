@@ -1964,6 +1964,55 @@ describe('android-scenarios bounded chat swipes', () => {
     expect(readSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it('scrolls past a clipped regenerate action with inverted bounds before returning it', async () => {
+    const clippedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="chat-list-viewport" bounds="[32,775][1049,2412]" />
+        <node resource-id="chat-input-bar-container" bounds="[0,1938][1080,2106]" />
+        <node
+          resource-id="regenerate-message-message-reasoning"
+          bounds="[897,775][960,404]"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const tappableSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="chat-list-viewport" bounds="[32,775][1049,2412]" />
+        <node resource-id="chat-input-bar-container" bounds="[0,1938][1080,2106]" />
+        <node
+          resource-id="regenerate-message-message-reasoning"
+          bounds="[897,1358][960,1421]"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const readSnapshot = jest.fn()
+      .mockReturnValueOnce(clippedSnapshot)
+      .mockReturnValueOnce(tappableSnapshot);
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeDown: jest.fn(),
+      swipeUp: jest.fn(),
+    };
+
+    const target = await findChatResourceWithScroll(
+      ctx,
+      'regenerate-message-message-reasoning',
+      {
+        adbPath: 'adb',
+        maxSwipes: 1,
+        readSnapshot,
+        requireTapSafe: true,
+      }
+    );
+
+    expect(target.bounds.centerY).toBe(1390);
+    expect(ctx.swipeDown).toHaveBeenCalledWith({ snapshot: clippedSnapshot });
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('starts topology swipes inside the visible list below recovery banners and above the composer', () => {
     const snapshot = parseUiSnapshot(`
       <hierarchy>

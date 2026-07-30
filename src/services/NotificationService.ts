@@ -650,19 +650,30 @@ class NotificationService {
         content: Notifications.NotificationContentInput,
         options: { channelId?: string; identifier?: string } = {},
     ): Promise<string | null> {
-        await this.ensureInitialized();
+        try {
+            await this.ensureInitialized();
 
-        const hasPermission = await this.canSendLocalNotifications();
-        if (!hasPermission) {
+            const hasPermission = await this.canSendLocalNotifications();
+            if (!hasPermission) {
+                return null;
+            }
+
+            const trigger = options.channelId ? { channelId: options.channelId } : null;
+            return await Notifications.scheduleNotificationAsync({
+                ...(options.identifier ? { identifier: options.identifier } : null),
+                content,
+                trigger,
+            });
+        } catch (error) {
+            console.warn(
+                '[NotificationService] Failed to send local notification',
+                {
+                    scope: 'local_notification_send',
+                    ...getPrivacySafeErrorLogDetails(error),
+                },
+            );
             return null;
         }
-
-        const trigger = options.channelId ? { channelId: options.channelId } : null;
-        return await Notifications.scheduleNotificationAsync({
-            ...(options.identifier ? { identifier: options.identifier } : null),
-            content,
-            trigger,
-        });
     }
 
     async dismissInferenceNotificationForThread(threadId: string): Promise<void> {

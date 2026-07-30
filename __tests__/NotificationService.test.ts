@@ -101,6 +101,38 @@ describe('NotificationService', () => {
     });
   });
 
+  it('keeps native notification failures best-effort and privacy-safe', async () => {
+    (notificationService as any).permissionState = 'granted';
+    (Notifications.scheduleNotificationAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('private-thread-id private-payload'),
+    );
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await expect(notificationService.sendLocalNotification({
+        title: 'private-title',
+        data: {
+          threadId: 'private-thread-id',
+          payload: 'private-payload',
+        },
+      })).resolves.toBeNull();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[NotificationService] Failed to send local notification',
+        {
+          scope: 'local_notification_send',
+          errorName: 'Error',
+        },
+      );
+      const loggedSurface = JSON.stringify(warnSpy.mock.calls);
+      expect(loggedSurface).not.toContain('private-title');
+      expect(loggedSurface).not.toContain('private-thread-id');
+      expect(loggedSurface).not.toContain('private-payload');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it.each([
     [0, false, 'unknown'],
     [1, false, 'denied'],

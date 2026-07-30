@@ -5911,11 +5911,11 @@ function parseUiNodes(xml) {
   while (match) {
     const rawAttributes = match[1];
     const attributes = {};
-    const attrRegex = /([\w:-]+)="([^"]*)"/g;
+    const attrRegex = /([\w:-]+)=(?:"([^"]*)"|'([^']*)')/g;
     let attrMatch = attrRegex.exec(rawAttributes);
 
     while (attrMatch) {
-      attributes[attrMatch[1]] = decodeXmlEntities(attrMatch[2]);
+      attributes[attrMatch[1]] = decodeXmlEntities(attrMatch[2] ?? attrMatch[3]);
       attrMatch = attrRegex.exec(rawAttributes);
     }
 

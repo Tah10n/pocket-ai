@@ -3774,6 +3774,32 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     })).toBeNull();
   });
 
+  it('recognizes durable output when uiautomator single-quotes text containing a double quote', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-qa-generation-gate-after-first-durable-output-assistant-new" bounds="[44,442][47,445]" />
+        <node resource-id="assistant-message-state-streaming-assistant-new" bounds="[32,1693][1049,1860]" />
+        <node text=' "▏' resource-id="assistant-message-content-assistant-new" bounds="[63,1708][108,1770]" />
+        <node resource-id="chat-primary-action-stop" clickable="true" enabled="true" bounds="[918,1970][1023,2075]" />
+      </hierarchy>
+    `);
+
+    expect(resolveAndroidQaGenerationGateObservation(snapshot, {
+      phase: 'after-first-durable-output',
+      baselineAssistantIds: new Set(),
+    })).toEqual(expect.objectContaining({
+      assistantId: 'assistant-new',
+      surface: 'content',
+    }));
+    expect(findResourceIdInSnapshot(
+      snapshot,
+      'assistant-message-content-assistant-new'
+    )).toEqual(expect.objectContaining({
+      text: ' "▏',
+    }));
+  });
+
   it('requires every stable attachment identity in the exact prepared generation request', () => {
     const target = {
       userId: 'user-document',

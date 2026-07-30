@@ -1897,6 +1897,73 @@ describe('android-scenarios bounded chat swipes', () => {
     expect(readSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it('scrolls past a regenerate action hidden under the composer before returning it', async () => {
+    const obscuredSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,451][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+        <node
+          resource-id="regenerate-message-message-image"
+          bounds="[897,2274][960,2337]"
+          displayed="true"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const tappableSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,451][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+        <node
+          resource-id="regenerate-message-message-image"
+          bounds="[897,1600][960,1663]"
+          displayed="true"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const readSnapshot = jest.fn()
+      .mockReturnValueOnce(obscuredSnapshot)
+      .mockReturnValueOnce(tappableSnapshot);
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeDown: jest.fn(),
+      swipeUp: jest.fn(),
+    };
+
+    const target = await findChatResourceWithScroll(
+      ctx,
+      'regenerate-message-message-image',
+      {
+        adbPath: 'adb',
+        maxSwipes: 1,
+        readSnapshot,
+        requireTapSafe: true,
+      }
+    );
+
+    expect(target.bounds.centerY).toBe(1632);
+    expect(ctx.swipeDown).toHaveBeenCalledWith({ snapshot: obscuredSnapshot });
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('starts topology swipes inside the visible list below recovery banners and above the composer', () => {
     const snapshot = parseUiSnapshot(`
       <hierarchy>

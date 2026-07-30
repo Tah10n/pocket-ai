@@ -3415,8 +3415,14 @@ async function findChatResourceWithScroll(ctx, resourceId, options = {}) {
     || (() => createUiSnapshot(adbPath, ctx.serial));
   const observeNow = () => {
     const snapshot = readSnapshot();
+    const candidate = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
     return {
-      node: findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true }),
+      node: candidate && (
+        options.requireTapSafe !== true
+        || isChatResourceTapSafe(snapshot, candidate)
+      )
+        ? candidate
+        : null,
       snapshot,
     };
   };
@@ -3442,6 +3448,30 @@ async function findChatResourceWithScroll(ctx, resourceId, options = {}) {
   }
   throw new Error(
     withUiSummary(adbPath, ctx.serial, `Could not find chat resource id "${resourceId}" while scanning the conversation.`)
+  );
+}
+
+function isChatResourceTapSafe(snapshot, node) {
+  if (!node?.bounds) {
+    return false;
+  }
+  const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  if (!viewport?.bounds) {
+    return false;
+  }
+  const composer = findResourceIdInSnapshot(snapshot, "chat-input-bar-container", {
+    visibleOnly: true,
+  });
+  const safeBottom = composer?.bounds?.top > viewport.bounds.top
+    ? Math.min(viewport.bounds.bottom, composer.bounds.top)
+    : viewport.bounds.bottom;
+  return (
+    node.bounds.left >= viewport.bounds.left
+    && node.bounds.right <= viewport.bounds.right
+    && node.bounds.top >= viewport.bounds.top
+    && node.bounds.bottom <= safeBottom
   );
 }
 
@@ -3475,7 +3505,9 @@ async function tapVisibleResource(ctx, resourceId, options = {}) {
 
 async function startBranchRegeneration(ctx, target) {
   const regenerateResourceId = `regenerate-message-${target.userId}`;
-  const regenerateButton = await findChatResourceWithScroll(ctx, regenerateResourceId);
+  const regenerateButton = await findChatResourceWithScroll(ctx, regenerateResourceId, {
+    requireTapSafe: true,
+  });
   if (!regenerateButton.bounds || !regenerateButton.enabled) {
     throw new Error(`Regeneration action for user message ${target.userId} is not enabled.`);
   }

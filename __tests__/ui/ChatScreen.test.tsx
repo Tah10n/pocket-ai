@@ -3510,6 +3510,68 @@ describe('ChatScreen', () => {
     expect(mockRouterNavigate).not.toHaveBeenCalled();
   });
 
+  it('clears a pending model selection when the chat screen loses focus', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const deferredLoad = createDeferred<void>();
+    mockLoadModel.mockImplementationOnce(() => deferredLoad.promise);
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+
+    try {
+      const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+
+      fireEvent.press(getByTestId('model-selector-button'));
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+
+      await waitFor(() => {
+        expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
+        expect(lastChatInputBarProps.disabled).toBe(true);
+      });
+
+      act(() => {
+        navigation.__setIsFocused(false);
+      });
+      rerender(React.createElement(ChatScreen));
+
+      await waitFor(() => {
+        expect(lastChatHeaderProps.modelLabel).toBe('model-q4');
+        expect(lastChatInputBarProps.disabled).toBe(false);
+      });
+      expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe(
+        'author/model-q4',
+      );
+
+      await act(async () => {
+        deferredLoad.resolve(undefined);
+        await deferredLoad.promise;
+      });
+      expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe(
+        'author/model-q4',
+      );
+    } finally {
+      navigation.__setIsFocused(true);
+    }
+  });
+
   it('keeps the thread model blocked and exposes retry UI when automatic loading fails', async () => {
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     try {

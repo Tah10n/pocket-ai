@@ -2346,6 +2346,7 @@ export const ChatScreen = () => {
                 modelSelectionRequestIdRef.current += 1;
                 autoModelLoadTargetKeyRef.current = null;
                 performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
+                setPendingModelSelection(null);
             };
         }, []),
     );

@@ -516,6 +516,7 @@ const PRIVATE_LOGCAT_DIRECTORY = path.join(
 const BRANCH_GENERATION_TIMEOUT_MS = 240_000;
 const BRANCH_PARTIAL_TIMEOUT_MS = 120_000;
 const BRANCH_FIXTURE_SCAN_LIMIT = 24;
+const BRANCH_TOPOLOGY_SWIPE_MAX_DISTANCE_PX = 480;
 const FATAL_LOG_PATTERNS = [
   /FATAL EXCEPTION/i,
   /Fatal signal\s+\d+|SIGABRT|SIGBUS|SIGFPE|SIGILL|SIGSEGV/i,
@@ -1130,7 +1131,7 @@ function createScenarioContext(adbPath, serial) {
       await delay(700);
     },
     swipeUp: async (options = {}) => {
-      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "up");
+      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "up", options);
       runChecked(adbPath, [
         "-s",
         serial,
@@ -1146,7 +1147,7 @@ function createScenarioContext(adbPath, serial) {
       await delay(900);
     },
     swipeDown: async (options = {}) => {
-      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "down");
+      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "down", options);
       runChecked(adbPath, [
         "-s",
         serial,
@@ -1168,7 +1169,7 @@ function createScenarioContext(adbPath, serial) {
   };
 }
 
-function resolveScenarioVerticalSwipeGesture(snapshot, direction) {
+function resolveScenarioVerticalSwipeGesture(snapshot, direction, options = {}) {
   if (direction !== "up" && direction !== "down") {
     throw new Error(`Unsupported scenario swipe direction "${direction}".`);
   }
@@ -1209,16 +1210,23 @@ function resolveScenarioVerticalSwipeGesture(snapshot, direction) {
   const verticalInset = Math.min(160, Math.max(80, Math.floor(visibleHeight * 0.2)));
   const upperY = viewport.bounds.top + verticalInset;
   const lowerY = visibleBottom - verticalInset;
-  if (lowerY - upperY < 160) {
+  const availableDistance = lowerY - upperY;
+  if (availableDistance < 160) {
     throw new Error("The visible chat list viewport cannot provide a safe swipe distance.");
   }
+  const requestedMaxDistance = Number(options.maxDistancePx);
+  const swipeDistance = Number.isFinite(requestedMaxDistance) && requestedMaxDistance >= 160
+    ? Math.min(availableDistance, Math.floor(requestedMaxDistance))
+    : availableDistance;
 
   const centerX = Math.round((viewport.bounds.left + viewport.bounds.right) / 2);
   return {
     startX: centerX,
     startY: direction === "up" ? lowerY : upperY,
     endX: centerX,
-    endY: direction === "up" ? upperY : lowerY,
+    endY: direction === "up"
+      ? lowerY - swipeDistance
+      : upperY + swipeDistance,
   };
 }
 
@@ -3199,7 +3207,10 @@ async function scanConversationTopology(ctx, options = {}) {
       break;
     }
     if (attempt < scanLimit - 1) {
-      await ctx.swipeDown({ snapshot });
+      await ctx.swipeDown({
+        snapshot,
+        maxDistancePx: BRANCH_TOPOLOGY_SWIPE_MAX_DISTANCE_PX,
+      });
       swipeCount += 1;
     }
   }
@@ -3207,7 +3218,10 @@ async function scanConversationTopology(ctx, options = {}) {
   if (options.restoreBottom !== false) {
     const viewportSnapshot = snapshots.at(-1);
     for (let index = 0; index < swipeCount + 1; index += 1) {
-      await ctx.swipeUp({ snapshot: viewportSnapshot });
+      await ctx.swipeUp({
+        snapshot: viewportSnapshot,
+        maxDistancePx: BRANCH_TOPOLOGY_SWIPE_MAX_DISTANCE_PX,
+      });
     }
   }
   if (!reachedHistoryStart) {

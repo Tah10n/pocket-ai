@@ -2046,6 +2046,22 @@ describe('android-scenarios bounded chat swipes', () => {
       endX: 541,
       endY: 926,
     });
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'down', {
+      maxDistancePx: 480,
+    })).toEqual({
+      startX: 541,
+      startY: 926,
+      endX: 541,
+      endY: 1406,
+    });
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'up', {
+      maxDistancePx: 480,
+    })).toEqual({
+      startX: 541,
+      startY: 1778,
+      endX: 541,
+      endY: 1298,
+    });
   });
 
   it('retains bounded fallback gestures outside the chat viewport', () => {

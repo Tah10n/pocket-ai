@@ -164,8 +164,9 @@ npm run android:scenarios:branch-regeneration -- --fail-on-skip
 ```
 
 The branch pack requires a prepared disposable conversation fixture and clears chat history
-at the end. Use synthetic, non-sensitive fixture content because screenshots and UI
-hierarchy evidence preserve visible text. See the
+at the end. It is intentionally local-only and is not dispatched by GitHub Actions. Use
+synthetic, non-sensitive fixture content because screenshots and UI hierarchy evidence
+preserve visible text. See the
 [Android Build Guide](docs/android-build.md#current-head-release-apk-qa) and
 [Release Checklist](docs/release-checklist.md#destructive-branch-regeneration-pack) before
 running it.

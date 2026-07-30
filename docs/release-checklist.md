@@ -105,13 +105,12 @@ Record every unavailable physical device, model, projector, accelerator backend,
 memory-pressure scenario as unverified; an emulator build does not substitute for those
 combinations.
 
-For PR CI, `android-pack-catalog` selects the hosted catalog pack.
-`android-pack-branch-regeneration` instead dispatches the destructive 15-step release pack
-with `--fail-on-skip` to the dedicated prepared self-hosted runner. The label fails when
-the runner, local model, fixture, or sentinel precondition is missing. If multiple Android
-pack labels are applied, CI uses this priority order: `android-pack-all`,
-`android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`,
-`android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+For PR CI, `android-pack-catalog` selects the hosted catalog pack. The destructive
+branch-regeneration pack is intentionally local-only and must be recorded as physical-device
+evidence; GitHub Actions does not dispatch it. If multiple hosted Android pack labels are
+applied, CI uses this priority order: `android-pack-all`, `android-pack-native`,
+`android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then
+`android-pack-extended`.
 
 ## Build commands
 
@@ -214,22 +213,20 @@ control. A model that explicitly marks reasoning as unsupported is already autho
 disabled and is recorded as such. A reasoning-required model without an `Off` control still
 fails the pack precondition.
 
-### PR runner contract
+### Local maintainer contract
 
-The `android-pack-branch-regeneration` label targets a serialized, ephemeral self-hosted
-Linux runner with the labels `android` and `pocket-ai-branch-regeneration`. Each runner
-instance must accept one job, retain no credentials or personal state, and be discarded
-or reimaged after the job. Before applying the label:
+This pack is intentionally local-only and never runs in GitHub Actions. Run it from a
+trusted maintainer workstation connected directly to disposable QA app data. Before
+starting:
 
-- expose the selected disposable device serial as the repository variable
-  `POCKET_AI_BRANCH_QA_SERIAL` or as the same runner environment variable;
-- keep `adb` on `PATH` and the selected device connected in the `device` state;
-- install the QA app with the same signing identity used by the runner build, then prepare
-  the model and conversations listed above;
-- remove secrets and personal data from both the runner and device.
+- keep `adb` available and pass the selected device explicitly with `--serial <serial>`;
+- install the QA app with the same signing identity used by the local release build, then
+  prepare the model and conversations listed above;
+- remove secrets and personal data from the workstation, fixture, and device;
+- record the exact Git `HEAD`, device serial, APK/build/install provenance, report path,
+  and per-step result in the PR or release evidence.
 
-The workflow verifies the serial, device state, and existing package before building and
-installing the current merge candidate. The pack then validates the loaded model, exact
+The local command verifies the serial, device state, existing package, loaded model, exact
 fixture topology, release APK provenance, and all 15 ordered steps. Reprepare the device
 after every successful run because steps 14 and 15 delete the fixture and remaining history.
 

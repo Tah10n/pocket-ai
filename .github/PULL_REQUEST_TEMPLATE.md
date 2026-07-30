@@ -23,9 +23,9 @@ Link the issue this pull request addresses, if one exists.
 - [ ] Run Android checks
 - [ ] Run Android scenarios
 
-Optional Android QA pack labels (CI priority when multiple labels are present): `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+Optional Android QA pack labels (CI priority when multiple labels are present): `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
-`android-pack-branch-regeneration` runs the destructive 15-step release pack fail-closed on the dedicated ephemeral prepared runner. It requires a disposable same-signature device, a loaded local model, and the fixture plus sentinel conversations; missing preconditions fail CI and a successful run consumes the fixture.
+The destructive branch-regeneration pack is intentionally local-only. When it is relevant, record the exact `npm run android:scenarios:branch-regeneration -- --fail-on-skip` command, device, provenance, and per-step result in this PR; do not represent a hosted Android job as equivalent coverage.
 
 ## UI evidence
 

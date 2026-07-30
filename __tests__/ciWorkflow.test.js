@@ -7,7 +7,6 @@ const readAppFile = (...segments) => fs.readFileSync(path.join(appRoot, ...segme
 
 const packLabelPriority = [
   'android-pack-all',
-  'android-pack-branch-regeneration',
   'android-pack-native',
   'android-pack-runtime',
   'android-pack-dependency-ui',
@@ -63,6 +62,7 @@ describe('Android catalog QA CI configuration', () => {
   const prTemplate = readAppFile('.github', 'PULL_REQUEST_TEMPLATE.md');
   const contributing = readAppFile('CONTRIBUTING.md');
   const releaseChecklist = readAppFile('docs', 'release-checklist.md');
+  const packageJson = JSON.parse(readAppFile('package.json'));
 
   it('lets the catalog pack label trigger Android QA and select the catalog pack', () => {
     const selection = extractAndroidQaPackSelection(workflow);
@@ -73,34 +73,17 @@ describe('Android catalog QA CI configuration', () => {
     expect(workflow).toContain('--pack "$ANDROID_QA_PACK"');
   });
 
-  it('routes destructive branch regeneration only to a serialized prepared runner', () => {
-    const hostedJob = extractWorkflowJob(workflow, 'android-qa');
-    const branchJob = extractWorkflowJob(workflow, 'android-branch-regeneration');
-    const hostedSelection = extractAndroidQaPackSelection(workflow);
-
-    expect(branchJob).toContain(
-      "contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration')"
+  it('keeps destructive branch regeneration local-only', () => {
+    expect(workflow).not.toContain('android-pack-branch-regeneration');
+    expect(workflow).not.toContain('android-branch-regeneration');
+    expect(workflow).not.toContain('pocket-ai-branch-regeneration');
+    expect(workflow).not.toContain('POCKET_AI_BRANCH_QA_SERIAL');
+    expect(workflow).not.toContain('self-hosted');
+    expect(packageJson.scripts['android:scenarios:branch-regeneration']).toBe(
+      'node ./scripts/android-scenarios.js --pack branch-regeneration --apk-variant release --fail-on-skip'
     );
-    expect(branchJob).toContain(
-      "!contains(github.event.pull_request.labels.*.name, 'android-pack-all')"
-    );
-    expect(branchJob).toContain('- self-hosted');
-    expect(branchJob).toContain('- pocket-ai-branch-regeneration');
-    expect(branchJob).toContain('persist-credentials: false');
-    expect(branchJob).toContain('group: pocket-ai-branch-regeneration');
-    expect(branchJob).toContain('cancel-in-progress: false');
-    expect(branchJob).toContain('POCKET_AI_BRANCH_QA_SERIAL');
-    expect(branchJob).toContain('shell pm path com.github.tah10n.pocketai');
-    expect(branchJob).toContain('npm run android:scenarios:branch-regeneration');
-    expect(branchJob).toContain('--fail-on-skip');
-    expect(branchJob).not.toContain('--skip-build');
-    expect(branchJob).not.toContain('--preserve-running-app');
-    expect(branchJob).not.toContain('android-emulator-runner');
-    expect(branchJob).toContain('ANDROID_SMOKE_APK_VARIANT: release');
-    expect(hostedJob).toContain(
-      "!contains(github.event.pull_request.labels.*.name, 'android-pack-branch-regeneration')"
-    );
-    expect(hostedSelection).not.toContain('android-pack-branch-regeneration');
+    expect(contributing).toContain('branch-regeneration` pack is local-only');
+    expect(releaseChecklist).toContain('intentionally local-only');
   });
 
   it('defaults Android QA to runtime and delegates build reuse to the provenance-aware launcher', () => {
@@ -116,47 +99,30 @@ describe('Android catalog QA CI configuration', () => {
     expect(workflow).toContain('POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"');
   });
 
-  it('keeps diagnostics short-lived and uploads APKs only for explicit provenance runs', () => {
+  it('keeps hosted diagnostics short-lived and uploads APKs only for an explicit all-pack run', () => {
     const hostedJob = extractWorkflowJob(workflow, 'android-qa');
-    const branchJob = extractWorkflowJob(workflow, 'android-branch-regeneration');
     const hostedDiagnostics = extractWorkflowStep(hostedJob, 'Upload Android QA diagnostics');
     const hostedApk = extractWorkflowStep(hostedJob, 'Upload Android QA APK');
-    const branchDiagnostics = extractWorkflowStep(
-      branchJob,
-      'Upload branch-regeneration QA diagnostics'
-    );
-    const branchApk = extractWorkflowStep(branchJob, 'Upload branch-regeneration QA APK');
 
-    for (const diagnostics of [hostedDiagnostics, branchDiagnostics]) {
-      expect(diagnostics).toContain('if: always()');
-      expect(diagnostics).toContain('retention-days: 3');
-      expect(diagnostics).toContain('artifacts/android-scenarios/**');
-      expect(diagnostics).toContain('artifacts/bootstrap-logcat.txt');
-      expect(diagnostics).not.toContain('app-release.apk');
-    }
+    expect(hostedDiagnostics).toContain('if: always()');
+    expect(hostedDiagnostics).toContain('retention-days: 3');
+    expect(hostedDiagnostics).toContain('artifacts/android-scenarios/**');
+    expect(hostedDiagnostics).toContain('artifacts/bootstrap-logcat.txt');
+    expect(hostedDiagnostics).not.toContain('app-release.apk');
 
     expect(hostedApk).toContain('success()');
     expect(hostedApk).toContain(
       "contains(github.event.pull_request.labels.*.name, 'android-pack-all')"
     );
     expect(hostedApk).toContain('name: android-qa-apk');
-    expect(branchApk).toContain('if: success()');
-    expect(branchApk).toContain('name: android-branch-regeneration-apk');
-
-    for (const apk of [hostedApk, branchApk]) {
-      expect(apk).toContain('if-no-files-found: error');
-      expect(apk).toContain('retention-days: 3');
-      expect(apk).toContain('android/app/build/outputs/apk/release/app-release.apk');
-    }
+    expect(hostedApk).toContain('if-no-files-found: error');
+    expect(hostedApk).toContain('retention-days: 3');
+    expect(hostedApk).toContain('android/app/build/outputs/apk/release/app-release.apk');
   });
 
   it('keeps CI pack label priority documented in the same order', () => {
     const selection = extractAndroidQaPackSelection(workflow);
     const documentedPriority = packLabelPriority.join('`, `').replace('`, `android-pack-extended', '`, then `android-pack-extended');
-    const hostedPackLabelPriority = packLabelPriority.filter(
-      (label) => label !== 'android-pack-branch-regeneration'
-    );
-
     for (const label of packLabelPriority) {
       expect(prTemplate).toContain(label);
       expect(contributing).toContain(label);
@@ -167,7 +133,7 @@ describe('Android catalog QA CI configuration', () => {
     expect(normalizeWhitespace(releaseChecklist)).toContain(documentedPriority);
     expect(normalizeWhitespace(prTemplate)).toContain(documentedPriority);
 
-    const workflowIndexes = hostedPackLabelPriority.map((label) => selection.indexOf(`'${label}'`));
+    const workflowIndexes = packLabelPriority.map((label) => selection.indexOf(`'${label}'`));
     expect(workflowIndexes.every((index) => index >= 0)).toBe(true);
     expect(workflowIndexes).toEqual([...workflowIndexes].sort((a, b) => a - b));
   });

@@ -69,19 +69,18 @@ For iOS dependency integration, run the CocoaPods/install or archive check avail
 macOS host and record the exact command. A Windows or Linux TypeScript/Jest run is not an
 iOS build.
 
-## GitHub Android jobs
+## GitHub and local Android coverage
 
 The normal `verify` job always runs for a pull request. Android jobs are opt-in:
 
 - `android (qa)` runs when the PR body checks an Android box or the PR has an appropriate
   `run-android-*` / `android-pack-*` label. Use `android-pack-native` for broad native
   integration or `android-pack-runtime` for the runtime pack.
-- `android (branch regeneration)` runs only with
-  `android-pack-branch-regeneration`. It needs the dedicated prepared self-hosted runner
-  and does not run alongside `android-pack-all`.
 
-Do not weaken workflow conditions to make a job appear green. If a label, prepared runner,
-device, model, projector, or fixture is missing, record that exact reason and keep the
+Branch regeneration is intentionally not a GitHub job. Run the destructive command locally
+on the prepared disposable device and attach its provenance and per-step result to the PR.
+Do not weaken local preconditions or treat a hosted emulator job as equivalent coverage. If
+a device, model, projector, or fixture is missing, record that exact reason and keep the
 combination in the unverified list.
 
 ## Minimum device matrix

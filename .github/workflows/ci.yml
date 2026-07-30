@@ -126,16 +126,27 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           script: npm run android:scenarios -- --emulator --pack "$ANDROID_QA_PACK" --fail-on-skip --bootstrap-screenshot
 
-      - name: Upload Android QA artifacts
+      - name: Upload Android QA diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: android-qa
           if-no-files-found: warn
+          retention-days: 3
           path: |
             artifacts/android-scenarios/**
             artifacts/bootstrap-logcat.txt
-            android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload Android QA APK
+        if: >-
+          success() &&
+          contains(github.event.pull_request.labels.*.name, 'android-pack-all')
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-qa-apk
+          if-no-files-found: error
+          retention-days: 3
+          path: android/app/build/outputs/apk/release/app-release.apk
 
   android-branch-regeneration:
     name: android (branch regeneration)
@@ -210,14 +221,23 @@ jobs:
           --serial "$POCKET_AI_BRANCH_QA_SERIAL"
           --fail-on-skip
 
-      - name: Upload branch-regeneration QA artifacts
+      - name: Upload branch-regeneration QA diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: android-branch-regeneration-qa
           if-no-files-found: warn
+          retention-days: 3
           path: |
             artifacts/android-scenarios/**
             artifacts/bootstrap-logcat.txt
-            android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload branch-regeneration QA APK
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-branch-regeneration-apk
+          if-no-files-found: error
+          retention-days: 3
+          path: android/app/build/outputs/apk/release/app-release.apk
 

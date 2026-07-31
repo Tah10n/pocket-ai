@@ -77,6 +77,26 @@ describe('huggingFaceUrls', () => {
     });
   });
 
+  it('isolates callers from the cached resolve identity value', () => {
+    const url = 'https://huggingface.co/org/model/resolve/main/projectors/mmproj.gguf';
+    const first = resolveHuggingFaceResolveIdentity(url);
+    const second = resolveHuggingFaceResolveIdentity(url);
+
+    expect(first).toEqual(second);
+    expect(first).not.toBe(second);
+    expect(first).not.toBeNull();
+
+    if (first) {
+      first.filePath = 'caller-mutated.gguf';
+    }
+
+    expect(resolveHuggingFaceResolveIdentity(url)).toEqual({
+      repoId: 'org/model',
+      revision: 'main',
+      filePath: 'projectors/mmproj.gguf',
+    });
+  });
+
   it.each([
     'http://huggingface.co/org/model/resolve/main/mmproj.gguf',
     'https://huggingface.co.evil.example/org/model/resolve/main/mmproj.gguf',

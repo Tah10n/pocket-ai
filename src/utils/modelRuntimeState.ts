@@ -19,6 +19,42 @@ interface MergeModelWithRuntimeStateOptions {
   queuedItem?: ModelMetadata;
 }
 
+type RuntimeMergeCacheEntry = MergeModelWithRuntimeStateOptions & {
+  result: ModelMetadata;
+};
+
+// Registry and Zustand ownership paths replace model objects rather than
+// mutating them. A WeakMap therefore gives the catalog a bounded identity
+// cache while still invalidating immediately when any runtime source changes.
+const runtimeMergeCache = new WeakMap<ModelMetadata, RuntimeMergeCacheEntry>();
+
+function getCachedRuntimeMerge(
+  model: ModelMetadata,
+  options: MergeModelWithRuntimeStateOptions,
+): ModelMetadata | undefined {
+  const cached = runtimeMergeCache.get(model);
+  return cached
+    && cached.activeModelId === options.activeModelId
+    && cached.localModel === options.localModel
+    && cached.queuedItem === options.queuedItem
+    ? cached.result
+    : undefined;
+}
+
+function cacheRuntimeMerge(
+  model: ModelMetadata,
+  options: MergeModelWithRuntimeStateOptions,
+  result: ModelMetadata,
+): ModelMetadata {
+  const entry = { ...options, result };
+  runtimeMergeCache.set(model, entry);
+  // The list resolves a model before passing it to a card. Marking the output
+  // as resolved prevents the card from repeating the same projector/runtime
+  // merge during its own granular queue subscription render.
+  runtimeMergeCache.set(result, entry);
+  return result;
+}
+
 function mergeSpeculativeDraftRuntimeArtifacts(
   model: Pick<ModelMetadata, 'artifacts'>,
   runtimeModel: Pick<ModelMetadata, 'artifacts'>,
@@ -300,7 +336,7 @@ function mergeProjectorRuntimeFields(
   });
 }
 
-export function mergeModelWithRuntimeState(
+function mergeModelWithRuntimeStateUncached(
   model: ModelMetadata,
   {
     activeModelId,
@@ -474,4 +510,33 @@ export function mergeModelWithRuntimeState(
   }
 
   return mergedModel;
+}
+
+export function mergeModelWithRuntimeState(
+  model: ModelMetadata,
+  options: MergeModelWithRuntimeStateOptions,
+): ModelMetadata {
+  const cached = getCachedRuntimeMerge(model, options);
+  if (cached) {
+    return cached;
+  }
+
+  if (!options.localModel && !options.queuedItem) {
+    const shouldBeActive = options.activeModelId === model.id;
+    const lifecycleStatus = shouldBeActive
+      ? LifecycleStatus.ACTIVE
+      : model.lifecycleStatus === LifecycleStatus.ACTIVE
+        ? LifecycleStatus.DOWNLOADED
+        : model.lifecycleStatus;
+    const result = lifecycleStatus === model.lifecycleStatus
+      ? model
+      : { ...model, lifecycleStatus };
+    return cacheRuntimeMerge(model, options, result);
+  }
+
+  return cacheRuntimeMerge(
+    model,
+    options,
+    mergeModelWithRuntimeStateUncached(model, options),
+  );
 }

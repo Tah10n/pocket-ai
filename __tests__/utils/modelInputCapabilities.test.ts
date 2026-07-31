@@ -17,6 +17,7 @@ describe('modelInputCapabilities', () => {
     ['Phi-4 multimodal architecture', { source: 'architecture', value: 'Phi4MMForCausalLM' }, ['image', 'audio']],
     ['Qwen 2.5 Omni config', { source: 'config', value: 'qwen2_5_omni' }, ['image', 'audio']],
     ['Voxtral architecture', { source: 'architecture', value: 'VoxtralForConditionalGeneration' }, ['audio']],
+    ['Voxtral split compact-suffix lookalike', { source: 'architecture', value: 'Voxtrala-udi-o' }, []],
     ['Qwen 3 VL architecture', { source: 'architecture', value: 'Qwen3VLForConditionalGeneration' }, ['image']],
     ['Qwen 2.5 OCR lookalike', { source: 'config', value: 'qwen2_5_ocr' }, []],
     ['Qwen 2.5 Open lookalike', { source: 'config', value: 'qwen2_5_open' }, []],

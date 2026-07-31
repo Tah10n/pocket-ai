@@ -73,6 +73,23 @@ function getProjectorMemoryFitSignature(projector: ProjectorArtifact): string {
   ].join('\u0001');
 }
 
+type ProjectorMemoryFitSignatureCacheEntry = {
+  modelId: ProjectorIdentityModel['id'];
+  activeVariantId: ProjectorIdentityModel['activeVariantId'];
+  resolvedFileName: ProjectorIdentityModel['resolvedFileName'];
+  variants: ProjectorIdentityModel['variants'];
+  projectorCandidates: ProjectorIdentityModel['projectorCandidates'];
+  artifacts: ProjectorIdentityModel['artifacts'];
+  chatModalities: ProjectorIdentityModel['chatModalities'];
+  selectedProjectorId: ProjectorIdentityModel['selectedProjectorId'];
+  signature: string | null;
+};
+
+const projectorMemoryFitSignatureCache = new WeakMap<
+  ProjectorIdentityModel,
+  ProjectorMemoryFitSignatureCacheEntry
+>();
+
 export function clearProjectorScopedMemoryFit(model: ModelMetadata): ModelMetadata {
   const variants = model.variants?.map(clearVariantRamFit);
 
@@ -86,15 +103,40 @@ export function clearProjectorScopedMemoryFit(model: ModelMetadata): ModelMetada
 }
 
 export function getSelectedProjectorMemoryFitSignature(model: ProjectorIdentityModel): string | null {
-  const projectors = getEffectiveMemoryFitProjectors(model);
-  if (projectors.length === 0) {
-    return null;
+  const cached = projectorMemoryFitSignatureCache.get(model);
+  if (
+    cached
+    && cached.modelId === model.id
+    && cached.activeVariantId === model.activeVariantId
+    && cached.resolvedFileName === model.resolvedFileName
+    && cached.variants === model.variants
+    && cached.projectorCandidates === model.projectorCandidates
+    && cached.artifacts === model.artifacts
+    && cached.chatModalities === model.chatModalities
+    && cached.selectedProjectorId === model.selectedProjectorId
+  ) {
+    return cached.signature;
   }
 
-  return projectors
-    .map(getProjectorMemoryFitSignature)
-    .sort()
-    .join('\u0002');
+  const projectors = getEffectiveMemoryFitProjectors(model);
+  const signature = projectors.length === 0
+    ? null
+    : projectors
+      .map(getProjectorMemoryFitSignature)
+      .sort()
+      .join('\u0002');
+  projectorMemoryFitSignatureCache.set(model, {
+    modelId: model.id,
+    activeVariantId: model.activeVariantId,
+    resolvedFileName: model.resolvedFileName,
+    variants: model.variants,
+    projectorCandidates: model.projectorCandidates,
+    artifacts: model.artifacts,
+    chatModalities: model.chatModalities,
+    selectedProjectorId: model.selectedProjectorId,
+    signature,
+  });
+  return signature;
 }
 
 export function shouldClearProjectorScopedMemoryFit(

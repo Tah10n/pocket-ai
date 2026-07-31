@@ -367,6 +367,32 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
   const isDifferentFile = model.resolvedFileName !== variant.fileName;
   const nextSize = selectedSize ?? (!isDifferentFile ? model.size : null);
   const isDifferentFitIdentity = isDifferentFile || model.size !== nextSize;
+  const nextDownloadUrl = buildHuggingFaceResolveUrl(model.id, variant.fileName, model.hfRevision);
+  const nextSha256 = variant.sha256 ?? (!isDifferentFile ? model.sha256 : undefined);
+  const nextMetadataTrust = !isDifferentFile && model.metadataTrust
+    ? model.metadataTrust
+    : selectedSize !== null ? 'trusted_remote' : undefined;
+  const alreadySelected = !isDifferentFile
+    && model.activeVariantId === variant.variantId
+    && model.size === nextSize
+    && model.downloadUrl === nextDownloadUrl
+    && model.sha256 === nextSha256
+    && model.speculativeDecoding === variant.speculativeDecoding
+    && model.metadataTrust === nextMetadataTrust
+    && model.gguf?.sizeLabel === variant.quantizationLabel
+    && (
+      nextSize === null
+        ? model.gguf?.totalBytes === undefined
+        : model.gguf?.totalBytes === nextSize
+    );
+  if (alreadySelected) {
+    // Catalog, registry, and queue models are normalized at their ownership
+    // boundaries. Re-selecting their active variant must therefore preserve
+    // identity instead of re-running the full persisted-metadata migration in
+    // a React render.
+    return model;
+  }
+
   const { totalBytes: _staleTotalBytes, ...existingGguf } = model.gguf ?? {};
   const nextGguf = isDifferentFile
     ? {
@@ -388,14 +414,12 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
   return normalizePersistedModelMetadata({
     ...model,
     size: nextSize,
-    downloadUrl: buildHuggingFaceResolveUrl(model.id, variant.fileName, model.hfRevision),
+    downloadUrl: nextDownloadUrl,
     resolvedFileName: variant.fileName,
-    sha256: variant.sha256 ?? (!isDifferentFile ? model.sha256 : undefined),
+    sha256: nextSha256,
     activeVariantId: variant.variantId,
     speculativeDecoding: variant.speculativeDecoding,
-    metadataTrust: !isDifferentFile && model.metadataTrust
-      ? model.metadataTrust
-      : selectedSize !== null ? 'trusted_remote' : undefined,
+    metadataTrust: nextMetadataTrust,
     ...memoryFitPatch,
     gguf: nextGguf,
     ...(isDifferentFile ? {

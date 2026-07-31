@@ -25,6 +25,7 @@ import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from './projectorRun
 import {
   canonicalizeProjectorCandidateAliases,
   getProjectorExactScopeKey,
+  type CanonicalProjectorCandidatesResult,
 } from './projectorIdentity';
 import { getValidatedMultimodalReadinessForResolvedScope } from './multimodalReadinessCore';
 import { normalizeSha256Digest } from './sha256';
@@ -711,6 +712,7 @@ export function hasAmbiguousCurrentProjectorId(
 function getCandidateProjectorArtifactMatch(
   model: ModelNativeCapabilityInput,
   candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
+  canonicalCandidates?: CanonicalProjectorCandidatesResult,
 ): {
   artifacts: NonNullable<ModelMetadata['artifacts']>;
   hasIdentityConflict: boolean;
@@ -728,7 +730,8 @@ function getCandidateProjectorArtifactMatch(
   ].filter((entry) => (
     modelId === null || normalizeOptionalString(entry.ownerModelId) === modelId
   ));
-  const canonical = canonicalizeProjectorCandidateAliases(sourceCandidates, model.artifacts);
+  const canonical = canonicalCandidates
+    ?? canonicalizeProjectorCandidateAliases(sourceCandidates, model.artifacts);
   const canonicalCandidate = canonical.candidates.find((entry) => (
     getProjectorExactScopeKey(entry) === scopeKey
   ));
@@ -746,18 +749,18 @@ function candidateHasTrustedActiveVariantModality(
   model: ModelNativeCapabilityInput,
   candidate: NonNullable<ModelMetadata['projectorCandidates']>[number],
   modality: 'vision' | 'audio',
+  canonicalCandidates?: CanonicalProjectorCandidatesResult,
 ): boolean {
-  if (!hasConsistentRemoteProjectorIdentity({
-    repoId: candidate.repoId,
-    revision: candidate.hfRevision,
-    filePath: candidate.fileName,
-    downloadUrl: candidate.downloadUrl,
-  })) {
+  if (getProjectorExactScopeKey(candidate) === null) {
     return false;
   }
 
   const activeVariant = resolveActiveModelVariant(model);
-  const { artifacts, hasIdentityConflict } = getCandidateProjectorArtifactMatch(model, candidate);
+  const { artifacts, hasIdentityConflict } = getCandidateProjectorArtifactMatch(
+    model,
+    candidate,
+    canonicalCandidates,
+  );
   if (hasIdentityConflict) {
     return false;
   }
@@ -795,6 +798,14 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
     model.artifacts,
     { activeVariantKeys },
   );
+  const effectiveModalities = activeVariant?.chatModalities ?? model.chatModalities;
+  // Artifact matching uses exact owner-variant scopes. Compute that view once
+  // for the whole candidate set instead of rebuilding it for every modality
+  // check inside the filter.
+  const exactCanonical = Array.isArray(effectiveModalities)
+    && (effectiveModalities.includes('vision') || effectiveModalities.includes('audio'))
+    ? canonicalizeProjectorCandidateAliases(sourceCandidates, model.artifacts)
+    : undefined;
   const eligibleCandidates = candidates.filter((candidate) => {
     if (modelId !== null && candidate.ownerModelId !== modelId) {
       return false;
@@ -817,14 +828,13 @@ export function filterProjectorCandidatesForEffectiveActiveVariant(
       return false;
     }
 
-    const effectiveModalities = activeVariant?.chatModalities ?? model.chatModalities;
     if (Array.isArray(effectiveModalities)) {
       const hasCompatibleModality = (
         effectiveModalities.includes('vision')
-        && candidateHasTrustedActiveVariantModality(model, candidate, 'vision')
+        && candidateHasTrustedActiveVariantModality(model, candidate, 'vision', exactCanonical)
       ) || (
         effectiveModalities.includes('audio')
-        && candidateHasTrustedActiveVariantModality(model, candidate, 'audio')
+        && candidateHasTrustedActiveVariantModality(model, candidate, 'audio', exactCanonical)
       );
       if (!hasCompatibleModality) {
         return false;
@@ -859,27 +869,87 @@ export function hasExplicitEffectiveActiveVariantProjectorCandidates(
     || Array.isArray(model.projectorCandidates);
 }
 
-function resolveEffectiveActiveVariantProjectorCandidates(
-  model: ModelNativeCapabilityInput,
-): {
+type EffectiveActiveVariantProjectorResolution = {
   candidates: NonNullable<ModelMetadata['projectorCandidates']>;
   runtimeToEffectiveProjectorIds: ReadonlyMap<string, string>;
-} {
+};
+
+type EffectiveActiveVariantProjectorCacheEntry = {
+  modelId: ModelNativeCapabilityInput['id'];
+  activeVariantId: ModelNativeCapabilityInput['activeVariantId'];
+  resolvedFileName: ModelNativeCapabilityInput['resolvedFileName'];
+  variants: ModelNativeCapabilityInput['variants'];
+  projectorCandidates: ModelNativeCapabilityInput['projectorCandidates'];
+  artifacts: ModelNativeCapabilityInput['artifacts'];
+  chatModalities: ModelNativeCapabilityInput['chatModalities'];
+  resolution: EffectiveActiveVariantProjectorResolution;
+};
+
+// Catalog, registry, and queue updates replace model/array references. Cache
+// the exact effective projector resolution for a stable immutable snapshot so
+// callers such as selected-projector and memory-fit resolution do not repeat
+// canonicalization several times in one render.
+const effectiveActiveVariantProjectorCache = new WeakMap<
+  ModelNativeCapabilityInput,
+  EffectiveActiveVariantProjectorCacheEntry
+>();
+
+function getCachedEffectiveActiveVariantProjectorResolution(
+  model: ModelNativeCapabilityInput,
+): EffectiveActiveVariantProjectorResolution | undefined {
+  const cached = effectiveActiveVariantProjectorCache.get(model);
+  return cached
+    && cached.modelId === model.id
+    && cached.activeVariantId === model.activeVariantId
+    && cached.resolvedFileName === model.resolvedFileName
+    && cached.variants === model.variants
+    && cached.projectorCandidates === model.projectorCandidates
+    && cached.artifacts === model.artifacts
+    && cached.chatModalities === model.chatModalities
+    ? cached.resolution
+    : undefined;
+}
+
+function cacheEffectiveActiveVariantProjectorResolution(
+  model: ModelNativeCapabilityInput,
+  resolution: EffectiveActiveVariantProjectorResolution,
+): EffectiveActiveVariantProjectorResolution {
+  effectiveActiveVariantProjectorCache.set(model, {
+    modelId: model.id,
+    activeVariantId: model.activeVariantId,
+    resolvedFileName: model.resolvedFileName,
+    variants: model.variants,
+    projectorCandidates: model.projectorCandidates,
+    artifacts: model.artifacts,
+    chatModalities: model.chatModalities,
+    resolution,
+  });
+  return resolution;
+}
+
+function resolveEffectiveActiveVariantProjectorCandidates(
+  model: ModelNativeCapabilityInput,
+): EffectiveActiveVariantProjectorResolution {
+  const cached = getCachedEffectiveActiveVariantProjectorResolution(model);
+  if (cached) {
+    return cached;
+  }
+
   const activeVariant = resolveActiveModelVariant(model);
   const activeVariantCandidates = activeVariant?.projectorCandidates;
   const modelCandidates = model.projectorCandidates;
   if (Array.isArray(activeVariantCandidates) && activeVariantCandidates.length === 0) {
-    return {
+    return cacheEffectiveActiveVariantProjectorResolution(model, {
       candidates: [],
       runtimeToEffectiveProjectorIds: new Map(),
-    };
+    });
   }
 
   if (!activeVariantCandidates) {
-    return {
+    return cacheEffectiveActiveVariantProjectorResolution(model, {
       candidates: filterProjectorCandidatesForEffectiveActiveVariant(model, modelCandidates ?? []),
       runtimeToEffectiveProjectorIds: new Map(),
-    };
+    });
   }
 
   const activeVariantKeys = getEffectiveActiveVariantKeys(model);
@@ -905,10 +975,10 @@ function resolveEffectiveActiveVariantProjectorCandidates(
     ...compatibleModelWideCandidates,
   ].filter((candidate) => !blockedEffectiveProjectorIds.has(candidate.id));
 
-  return {
+  return cacheEffectiveActiveVariantProjectorResolution(model, {
     candidates: filterProjectorCandidatesForEffectiveActiveVariant(model, mergedCandidates),
     runtimeToEffectiveProjectorIds: runtimeMerge.runtimeToNextProjectorIds,
-  };
+  });
 }
 
 export function getEffectiveActiveVariantSelectedProjectorId(
@@ -939,6 +1009,9 @@ export function remapProjectorIdToEffectiveCandidate(
   const normalizedProjectorId = normalizeOptionalString(projectorId);
   if (normalizedProjectorId === null) {
     return undefined;
+  }
+  if (effectiveCandidates.some((candidate) => candidate.id === normalizedProjectorId)) {
+    return normalizedProjectorId;
   }
 
   const activeVariant = resolveActiveModelVariant(model);

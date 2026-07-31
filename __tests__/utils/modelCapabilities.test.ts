@@ -2114,4 +2114,49 @@ describe('modelCapabilities', () => {
       })),
     })).toEqual(expected);
   });
+
+  it('reuses effective projector resolution for one immutable model snapshot', () => {
+    const candidate = {
+      id: 'audio-projector',
+      ownerModelId: 'author/model',
+      ownerVariantId: 'active',
+      repoId: 'author/model',
+      fileName: 'mmproj-audio.gguf',
+      downloadUrl: 'https://example.com/mmproj-audio.gguf',
+      size: 1,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model = {
+      id: 'author/model',
+      activeVariantId: 'active',
+      resolvedFileName: 'active.gguf',
+      variants: [{
+        variantId: 'active',
+        fileName: 'active.gguf',
+        quantizationLabel: 'Q4_K_M',
+        size: 1,
+        chatModalities: ['text', 'audio'] as Array<'text' | 'audio'>,
+        projectorCandidates: [candidate],
+        selectedProjectorId: candidate.id,
+      }],
+      projectorCandidates: [candidate],
+      selectedProjectorId: candidate.id,
+      artifacts: [{
+        id: candidate.id,
+        kind: 'multimodal_projector' as const,
+        requiredFor: ['audio' as const],
+        remoteFileName: candidate.fileName,
+        downloadUrl: candidate.downloadUrl,
+        sizeBytes: candidate.size,
+        installState: 'remote' as const,
+      }],
+    };
+
+    const first = getEffectiveActiveVariantProjectorCandidates(model);
+    const second = getEffectiveActiveVariantProjectorCandidates(model);
+
+    expect(second).toBe(first);
+    expect(getEffectiveActiveVariantSelectedProjectorId(model, first)).toBe(first[0]?.id);
+  });
 });

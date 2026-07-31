@@ -83,6 +83,11 @@ type KnownInputProfile = {
   modalities: readonly NativeInputModality[];
 };
 
+type SignalMatch = {
+  modality: NativeInputModality;
+  confidence: CapabilityConfidence;
+};
+
 // These aliases mirror model families with explicit multimodal projector
 // support in the bundled runtime. Runtime probing remains authoritative; this
 // table only repairs incomplete catalog/config metadata before a model is run.
@@ -174,6 +179,21 @@ const KNOWN_INPUT_PROFILES: readonly KnownInputProfile[] = [
   },
 ];
 
+const SIGNAL_MATCH_CACHE_LIMIT = 512;
+const signalMatchCache = new Map<string, readonly SignalMatch[]>();
+
+function cacheSignalMatches(key: string, matches: readonly SignalMatch[]): readonly SignalMatch[] {
+  signalMatchCache.delete(key);
+  signalMatchCache.set(key, matches);
+  if (signalMatchCache.size > SIGNAL_MATCH_CACHE_LIMIT) {
+    const oldestKey = signalMatchCache.keys().next().value as string | undefined;
+    if (oldestKey !== undefined) {
+      signalMatchCache.delete(oldestKey);
+    }
+  }
+  return matches;
+}
+
 const CONFIG_SIGNAL_MAX_DEPTH = 8;
 const CONFIG_SIGNAL_MAX_OBJECTS = 256;
 const CONFIG_BLOCK_KIND_TOKENS = new Set([
@@ -227,8 +247,45 @@ const KNOWN_PROFILE_COMPACT_SUFFIXES = [
   'vision',
 ] as const;
 
-function signalMatchesKnownProfileAlias(value: string, alias: string): boolean {
-  const tokens = value
+type KnownProfileSuffixTrieNode = {
+  children: Map<string, KnownProfileSuffixTrieNode>;
+  matches: {
+    profile: KnownInputProfile;
+    aliasLength: number;
+  }[];
+};
+
+const knownProfileExactAliases = new Map<string, Set<KnownInputProfile>>();
+const knownProfileSuffixTrie: KnownProfileSuffixTrieNode = {
+  children: new Map(),
+  matches: [],
+};
+let knownProfileMaxAliasLength = 0;
+
+for (const profile of KNOWN_INPUT_PROFILES) {
+  for (const alias of profile.aliases) {
+    knownProfileMaxAliasLength = Math.max(knownProfileMaxAliasLength, alias.length);
+    const exactProfiles = knownProfileExactAliases.get(alias) ?? new Set<KnownInputProfile>();
+    exactProfiles.add(profile);
+    knownProfileExactAliases.set(alias, exactProfiles);
+
+    for (const suffix of KNOWN_PROFILE_COMPACT_SUFFIXES) {
+      let node = knownProfileSuffixTrie;
+      for (const character of `${alias}${suffix}`) {
+        const child = node.children.get(character) ?? {
+          children: new Map<string, KnownProfileSuffixTrieNode>(),
+          matches: [],
+        };
+        node.children.set(character, child);
+        node = child;
+      }
+      node.matches.push({ profile, aliasLength: alias.length });
+    }
+  }
+}
+
+function tokenizeKnownProfileSignal(value: string): string[] {
+  return value
     .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/gu, '$1 $2')
     .replace(/([A-Za-z])([0-9])/gu, '$1 $2')
@@ -236,33 +293,46 @@ function signalMatchesKnownProfileAlias(value: string, alias: string): boolean {
     .toLowerCase()
     .split(/[^a-z0-9]+/gu)
     .filter(Boolean);
+}
 
+function getKnownInputProfiles(value: string): KnownInputProfile[] {
+  const tokens = tokenizeKnownProfileSignal(value);
+  const matches = new Set<KnownInputProfile>();
   for (let start = 0; start < tokens.length; start += 1) {
     let joined = '';
+    let suffixNode: KnownProfileSuffixTrieNode | undefined = knownProfileSuffixTrie;
     for (let end = start; end < tokens.length; end += 1) {
-      joined += tokens[end];
-      const compactSuffix = joined.startsWith(alias)
-        ? joined.slice(alias.length)
-        : '';
-      if (
-        joined === alias
-        || KNOWN_PROFILE_COMPACT_SUFFIXES.some((suffix) => compactSuffix.startsWith(suffix))
-      ) {
-        return true;
+      const token = tokens[end] as string;
+      const previousJoinedLength = joined.length;
+      joined += token;
+      knownProfileExactAliases.get(joined)?.forEach((profile) => matches.add(profile));
+      if (suffixNode) {
+        for (const character of token) {
+          suffixNode = suffixNode.children.get(character);
+          if (!suffixNode) {
+            break;
+          }
+          for (const match of suffixNode.matches) {
+            // The legacy alias-first matcher inspected the first token
+            // boundary past aliasLength + 3, then stopped that alias. Keep
+            // that exact lookalike boundary while sharing one trie traversal.
+            if (previousJoinedLength <= match.aliasLength + 3) {
+              matches.add(match.profile);
+            }
+          }
+        }
       }
-      if (joined.length > alias.length + 3) {
+      // The old alias-first matcher stopped after alias.length + 3, but always
+      // evaluated the boundary that crossed that limit. Applying the maximum
+      // alias length globally preserves those exact and compact-suffix matches
+      // while visiting each token window only once.
+      if (joined.length > knownProfileMaxAliasLength + 3) {
         break;
       }
     }
   }
 
-  return false;
-}
-
-function getKnownInputProfiles(value: string): KnownInputProfile[] {
-  return KNOWN_INPUT_PROFILES.filter((profile) => (
-    profile.aliases.some((alias) => signalMatchesKnownProfileAlias(value, alias))
-  ));
+  return KNOWN_INPUT_PROFILES.filter((profile) => matches.has(profile));
 }
 
 function getConfigBlockModalities(key: string): NativeInputModality[] {
@@ -299,7 +369,13 @@ function isTraversableConfigValue(value: unknown): boolean {
 function resolveSignalMatches(
   source: CapabilityEvidence['source'],
   value: string,
-): { modality: NativeInputModality; confidence: CapabilityConfidence }[] {
+): readonly SignalMatch[] {
+  const cacheKey = `${source}\u0000${value}`;
+  const cached = signalMatchCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const matches = new Map<NativeInputModality, CapabilityConfidence>();
   const confidenceRank: Record<CapabilityConfidence, number> = {
     low: 0,
@@ -335,7 +411,10 @@ function resolveSignalMatches(
     }
   }
 
-  return Array.from(matches, ([modality, confidence]) => ({ modality, confidence }));
+  return cacheSignalMatches(
+    cacheKey,
+    Array.from(matches, ([modality, confidence]) => ({ modality, confidence })),
+  );
 }
 
 /**
@@ -646,10 +725,12 @@ function addKnownRepositoryProfileEvidence(
   const modelFileNames = fileNames.filter((fileName) => (
     !isProjectorFileName(fileName) && /\.gguf$/iu.test(fileName)
   ));
+  // Resolve each repository/file signal once. The previous profile-first loop
+  // recomputed the complete alias matrix for the same strings on every pass.
+  const repositoryProfiles = new Set(repositoryNames.flatMap(getKnownInputProfiles));
+  const modelFileProfiles = new Set(modelFileNames.flatMap(getKnownInputProfiles));
   for (const profile of KNOWN_INPUT_PROFILES) {
-    const repositoryMatches = repositoryNames.some((name) => getKnownInputProfiles(name).includes(profile));
-    const modelFileMatches = modelFileNames.some((fileName) => getKnownInputProfiles(fileName).includes(profile));
-    if (!repositoryMatches || !modelFileMatches) {
+    if (!repositoryProfiles.has(profile) || !modelFileProfiles.has(profile)) {
       continue;
     }
 

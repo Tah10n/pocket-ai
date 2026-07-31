@@ -4747,8 +4747,11 @@ export class ModelCatalogService {
         return sanitized ? [sanitized] : [];
       })
       : models;
-    const normalizedModels = scopedModels.map((model) => (
-      this.limitSnapshotModelVariants(normalizePersistedModelMetadata(model))
+    const normalizedModels = scopedModels.map((model) => this.limitSnapshotModelVariants(
+      // Anonymous sanitization already returns normalized metadata. Re-running
+      // the full normalizer here duplicated capability inference on the JS
+      // thread whenever catalog snapshots were refreshed.
+      authScope === 'anon' ? model : normalizePersistedModelMetadata(model),
     ));
     normalizedModels.forEach((model) => {
       this.setModelSnapshotInMemory(this.buildModelSnapshotCacheKey(model.id, authScope), model);
@@ -4780,8 +4783,10 @@ export class ModelCatalogService {
       this.persistentCache.deleteModelSnapshots(modelIdsToDelete, authScope);
     }
 
-    const normalizedModels = sanitizedModels.map((model) => (
-      this.limitSnapshotModelVariants(normalizePersistedModelMetadata(model))
+    const normalizedModels = sanitizedModels.map((model) => this.limitSnapshotModelVariants(
+      // sanitizeAnonymousSnapshotModel normalizes both public and redacted
+      // anonymous records, so only authenticated snapshots need this pass.
+      authScope === 'anon' ? model : normalizePersistedModelMetadata(model),
     ));
     if (normalizedModels.length === 0) {
       return;

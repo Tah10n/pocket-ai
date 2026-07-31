@@ -8,7 +8,6 @@ import i18n from '../i18n';
 import { useChatStore } from '../store/chatStore';
 import { semanticColorTokens } from '../utils/themeTokens';
 import { AppError, getPrivacySafeErrorLogDetails } from './AppError';
-import { activateThreadForNavigation } from './ChatThreadActivationService';
 import { performanceMonitor } from './PerformanceMonitor';
 
 export type NotificationTaskType = 'download' | 'inference';
@@ -439,6 +438,14 @@ class NotificationService {
             const threadId = typeof data.threadId === 'string' && data.threadId.trim().length > 0
                 ? data.threadId
                 : '';
+            // Load chat activation only when an inference notification is
+            // opened. A static import closes a startup cycle through
+            // ChatGenerationService -> BackgroundTaskService -> this module
+            // and makes Metro show a warning banner over the bottom tabs.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { activateThreadForNavigation } = require(
+                './ChatThreadActivationService'
+            ) as typeof import('./ChatThreadActivationService');
             const activationResult = activateThreadForNavigation(threadId);
 
             switch (activationResult.status) {

@@ -329,6 +329,44 @@ describe('modelSize', () => {
     expect(getModelDisplayArtifactSizeBytes(model)).toBe(1_200);
   });
 
+  it('reuses an immutable display-projector resolution and invalidates it for a new candidate snapshot', () => {
+    const projector = {
+      id: 'projector-vision',
+      ownerModelId: 'org/model',
+      repoId: 'org/model',
+      fileName: 'mmproj-model-f16.gguf',
+      downloadUrl: 'https://example.com/mmproj-model-f16.gguf',
+      size: 250,
+      lifecycleStatus: 'available' as const,
+      matchStatus: 'matched' as const,
+    };
+    const model: Parameters<typeof getModelDisplayArtifactSizeBytes>[0] = {
+      id: 'org/model',
+      size: 1_000,
+      chatModalities: ['text', 'vision'],
+      projectorCandidates: [projector],
+      artifacts: [{
+        id: projector.id,
+        kind: 'multimodal_projector',
+        requiredFor: ['image'],
+        remoteFileName: projector.fileName,
+        downloadUrl: projector.downloadUrl,
+        sizeBytes: projector.size,
+        installState: 'remote',
+      }],
+    };
+
+    const firstResolution = getModelDisplayProjectorCandidates(model);
+    expect(firstResolution).toBeDefined();
+    expect(getModelDisplayProjectorCandidates(model)).toBe(firstResolution);
+
+    model.projectorCandidates = [...(model.projectorCandidates ?? [])];
+    const refreshedResolution = getModelDisplayProjectorCandidates(model);
+
+    expect(refreshedResolution).not.toBe(firstResolution);
+    expect(refreshedResolution).toEqual(firstResolution);
+  });
+
   it('resolves activeVariantId when it contains the active variant filename alias', () => {
     const projector = {
       id: 'projector-audio',

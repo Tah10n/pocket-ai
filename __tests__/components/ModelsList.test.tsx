@@ -7,6 +7,7 @@ import { useModelsStore } from '../../src/store/modelsStore';
 import type { ModelFilterCriteria, ModelSortPreference } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
+import { registry } from '../../src/services/LocalStorageRegistry';
 
 let mockLastFlashListProps: any = null;
 let mockModelCardPropsLog: any[] = [];
@@ -379,6 +380,8 @@ describe('ModelsList', () => {
     mockUseModelActionsInput = null;
     mockHandleDownload = jest.fn();
     mockRegistryModel = undefined;
+    (registry.getModel as jest.Mock).mockImplementation(() => mockRegistryModel);
+    (registry.getModels as jest.Mock).mockReturnValue([]);
     mockRegistryUpdateModel = jest.fn((model: ModelMetadata) => {
       mockRegistryModel = model;
     });
@@ -444,6 +447,39 @@ describe('ModelsList', () => {
     });
 
     expect(mockLastVariantPickerProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
+  });
+
+  it('reuses the list registry snapshot when the point lookup would return a different clone', () => {
+    const handleLoadMore = jest.fn();
+    const catalogModel = createModel();
+    const listLocalModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'models/from-list-snapshot.gguf',
+    });
+    const pointLookupClone = createModel({
+      lifecycleStatus: LifecycleStatus.FAILED,
+      downloadProgress: 0.25,
+      localPath: 'models/from-point-lookup.gguf',
+    });
+    (registry.getModels as jest.Mock).mockReturnValue([listLocalModel]);
+    (registry.getModel as jest.Mock).mockReturnValue(pointLookupClone);
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [catalogModel],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    const listProjection = mockLastFlashListProps.data[0];
+    expect(registry.getModels).toHaveBeenCalledTimes(1);
+    expect(registry.getModel).not.toHaveBeenCalled();
+    expect(mockModelCardPropsLog.at(-1)?.model).toBe(listProjection);
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'models/from-list-snapshot.gguf',
+    }));
   });
 
   it('opens projector choice from the list download flow and resumes download after selection', async () => {

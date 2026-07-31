@@ -1431,7 +1431,7 @@ describe('modelRuntimeState', () => {
     expect(merged.multimodalReadiness).toBeUndefined();
   });
 
-  it('reuses one runtime projection across the list and card render boundary', () => {
+  it('reuses one runtime projection across the list and card boundary and invalidates changed sources', () => {
     const catalogModel = makeModel({
       lifecycleStatus: LifecycleStatus.AVAILABLE,
       downloadProgress: 0,
@@ -1461,6 +1461,26 @@ describe('modelRuntimeState', () => {
     expect(updatedProjection).toEqual(expect.objectContaining({
       lifecycleStatus: LifecycleStatus.PAUSED,
       downloadProgress: 0.75,
+    }));
+
+    const queuedItem = makeModel({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.25,
+    });
+    const queuedProjection = mergeModelWithRuntimeState(catalogModel, { queuedItem });
+    expect(mergeModelWithRuntimeState(queuedProjection, { queuedItem })).toBe(queuedProjection);
+
+    const updatedQueuedItem = {
+      ...queuedItem,
+      downloadProgress: 0.9,
+    };
+    const updatedQueuedProjection = mergeModelWithRuntimeState(queuedProjection, {
+      queuedItem: updatedQueuedItem,
+    });
+    expect(updatedQueuedProjection).not.toBe(queuedProjection);
+    expect(updatedQueuedProjection).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.9,
     }));
   });
 });

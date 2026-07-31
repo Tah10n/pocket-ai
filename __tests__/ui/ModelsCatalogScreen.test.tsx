@@ -52,7 +52,11 @@ jest.mock('../../src/components/ui/ScreenShell', () => {
   return {
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
     ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-    ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(
+      View,
+      { ...props, testID: props.testID ?? 'models-screen-root' },
+      children,
+    ),
     ScreenContent: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
   };
 });
@@ -122,10 +126,26 @@ jest.mock('../../src/components/models/ModelsList', () => {
         ),
       );
 
-      return renderContentContainer ? renderContentContainer(content) : content;
+      return mockReact.createElement(
+        mockReact.Fragment,
+        null,
+        renderContentContainer ? renderContentContainer(content) : content,
+        mockReact.createElement(View, { testID: 'models-list-overlay' }),
+      );
     },
   };
 });
+
+function hasAncestorWithTestId(node: any, testID: string): boolean {
+  let ancestor = node.parent;
+  while (ancestor) {
+    if (ancestor.props?.testID === testID) {
+      return true;
+    }
+    ancestor = ancestor.parent;
+  }
+  return false;
+}
 
 describe('ModelsCatalogScreen', () => {
   afterEach(() => {
@@ -185,11 +205,23 @@ describe('ModelsCatalogScreen', () => {
     expect(mockPush).toHaveBeenCalledWith('/storage');
   });
 
+  it('keeps Android catalog overlays at screen level instead of inside their blur target', () => {
+    const { getByTestId } = render(<ModelsCatalogScreen />);
+
+    expect(hasAncestorWithTestId(getByTestId('models-list-props'), 'models-catalog-content-blur-target'))
+      .toBe(true);
+    expect(hasAncestorWithTestId(getByTestId('models-list-overlay'), 'models-catalog-content-blur-target'))
+      .toBe(false);
+    expect(hasAncestorWithTestId(getByTestId('models-list-overlay'), 'models-screen-root'))
+      .toBe(true);
+  });
+
   it('keeps a delayed All snapshot coherent and inert while switching to Downloaded', () => {
     mockInitialTab = 'all';
     const { getByTestId, rerender } = render(<ModelsCatalogScreen />);
 
     expect(getByTestId('models-list-state').props.children).toBe('all::0');
+    expect(mockModelsListStates).toEqual(['all::0']);
     mockHoldDeferredCatalogSnapshot = true;
 
     fireEvent.press(getByTestId('switch-to-downloaded'));
@@ -209,12 +241,13 @@ describe('ModelsCatalogScreen', () => {
 
     fireEvent.press(getByTestId('search-mistral'));
     expect(getByTestId('models-list-state', { includeHiddenElements: true }).props.children).toBe('all::0');
-    expect(mockModelsListStates).not.toContain('all:mistral:1');
+    expect(mockModelsListStates).toEqual(['all::0']);
 
     mockHoldDeferredCatalogSnapshot = false;
     rerender(<ModelsCatalogScreen />);
 
     expect(getByTestId('models-list-state').props.children).toBe('downloaded:mistral:1');
+    expect(mockModelsListStates).toEqual(['all::0', 'downloaded:mistral:1']);
     expect(getByTestId('models-deferred-catalog-content').props).toEqual(expect.objectContaining({
       accessibilityElementsHidden: false,
       importantForAccessibility: 'auto',

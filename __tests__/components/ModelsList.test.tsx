@@ -42,6 +42,17 @@ function getCanonicalProjectorId(projector: {
   return buildProjectorArtifactId(projector);
 }
 
+function hasAncestorWithTestId(node: any, testID: string): boolean {
+  let ancestor = node.parent;
+  while (ancestor) {
+    if (ancestor.props?.testID === testID) {
+      return true;
+    }
+    ancestor = ancestor.parent;
+  }
+  return false;
+}
+
 jest.mock('@shopify/flash-list', () => ({
   FlashList: (props: any) => {
     mockLastFlashListProps = props;
@@ -90,7 +101,11 @@ jest.mock('@/components/ui/button', () => ({
 }));
 
 jest.mock('@/components/ui/ErrorReportSheet', () => ({
-  ErrorReportSheet: () => null,
+  ErrorReportSheet: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-error-report-sheet' });
+  },
 }));
 
 jest.mock('@/components/ui/ModelCard', () => ({
@@ -102,24 +117,36 @@ jest.mock('@/components/ui/ModelCard', () => ({
 
 jest.mock('@/components/ui/ModelWarmupBanner', () => ({
   MODEL_WARMUP_BANNER_RESERVED_HEIGHT: 0,
-  ModelWarmupBanner: () => null,
+  ModelWarmupBanner: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-warmup-banner' });
+  },
 }));
 
 jest.mock('@/components/ui/ModelParametersSheet', () => ({
-  ModelParametersSheet: () => null,
+  ModelParametersSheet: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-parameters-sheet' });
+  },
 }));
 
 jest.mock('@/components/ui/ModelVariantPickerSheet', () => ({
   ModelVariantPickerSheet: (props: any) => {
     mockLastVariantPickerProps = props;
-    return null;
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-variant-picker-sheet' });
   },
 }));
 
 jest.mock('@/components/ui/ProjectorChoiceSheet', () => ({
   ProjectorChoiceSheet: (props: any) => {
     mockLastProjectorChoiceSheetProps = props;
-    return null;
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-projector-choice-sheet' });
   },
 }));
 
@@ -418,7 +445,7 @@ describe('ModelsList', () => {
     expect(handleLoadMore).toHaveBeenCalledWith('manual');
   });
 
-  it('routes picker chrome through a provided full-screen blur target', async () => {
+  it('keeps Android glass overlays outside the provided full-screen blur target', async () => {
     const handleLoadMore = jest.fn();
     const androidBlurTargetRef = React.createRef<any>();
     const renderContentContainer = jest.fn((content) => (
@@ -441,6 +468,15 @@ describe('ModelsList', () => {
     expect(renderContentContainer).toHaveBeenCalledTimes(1);
     expect(getByTestId('external-catalog-content-container')).toBeTruthy();
     expect(queryByTestId('models-warmup-content-blur-target')).toBeNull();
+    [
+      'models-warmup-banner',
+      'models-parameters-sheet',
+      'models-variant-picker-sheet',
+      'models-projector-choice-sheet',
+      'models-error-report-sheet',
+    ].forEach((testID) => {
+      expect(hasAncestorWithTestId(getByTestId(testID), 'external-catalog-content-container')).toBe(false);
+    });
 
     act(() => {
       mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');

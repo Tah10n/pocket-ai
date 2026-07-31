@@ -1,5 +1,5 @@
-import React, { useCallback, useDeferredValue, useEffect, useRef, useState } from 'react';
-import { StyleSheet, type View } from 'react-native';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 import { SearchHeader } from '@/components/ui/SearchHeader';
 import { ScreenAndroidContentBlurTarget, ScreenContent, ScreenRoot } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
@@ -9,14 +9,29 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 const DeferredModelsList = React.memo(ModelsList);
 DeferredModelsList.displayName = 'DeferredModelsList';
 
+interface CatalogRenderSnapshot {
+  activeTab: ModelsCatalogTab;
+  searchQuery: string;
+  searchSessionKey: number;
+}
+
 export const ModelsCatalogScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams<{ initialTab?: string }>();
   const requestedTab = resolveModelsCatalogTab(params.initialTab);
   const [activeTab, setActiveTab] = useState<ModelsCatalogTab>(requestedTab);
-  const deferredActiveTab = useDeferredValue(activeTab);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchSessionKey, setSearchSessionKey] = useState(0);
+  const [searchState, setSearchState] = useState({ query: '', sessionKey: 0 });
+  const { query: searchQuery, sessionKey: searchSessionKey } = searchState;
+  const catalogRenderSnapshot = useMemo<CatalogRenderSnapshot>(() => ({
+    activeTab,
+    searchQuery,
+    searchSessionKey,
+  }), [activeTab, searchQuery, searchSessionKey]);
+  const deferredCatalogRenderSnapshot = useDeferredValue(catalogRenderSnapshot);
+  const isDeferredCatalogContentStale =
+    activeTab !== deferredCatalogRenderSnapshot.activeTab
+    || searchQuery !== deferredCatalogRenderSnapshot.searchQuery
+    || searchSessionKey !== deferredCatalogRenderSnapshot.searchSessionKey;
   const catalogContentBlurTargetRef = useRef<View | null>(null);
 
   useEffect(() => {
@@ -24,13 +39,15 @@ export const ModelsCatalogScreen = () => {
   }, [requestedTab]);
 
   const handleSearchChange = useCallback((query: string) => {
-    setSearchQuery((current) => {
-      if (current === query) {
+    setSearchState((current) => {
+      if (current.query === query) {
         return current;
       }
 
-      setSearchSessionKey((sessionKey) => sessionKey + 1);
-      return query;
+      return {
+        query,
+        sessionKey: current.sessionKey + 1,
+      };
     });
   }, []);
 
@@ -59,12 +76,20 @@ export const ModelsCatalogScreen = () => {
           respectFloatingHeader={false}
           style={{ paddingBottom: 0 }}
         >
-          <DeferredModelsList
-            activeTab={deferredActiveTab}
-            searchQuery={searchQuery}
-            searchSessionKey={searchSessionKey}
-            androidContentBlurTargetRef={catalogContentBlurTargetRef}
-          />
+          <View
+            accessibilityElementsHidden={isDeferredCatalogContentStale}
+            importantForAccessibility={isDeferredCatalogContentStale ? 'no-hide-descendants' : 'auto'}
+            pointerEvents={isDeferredCatalogContentStale ? 'none' : 'auto'}
+            style={styles.deferredCatalogContent}
+            testID="models-deferred-catalog-content"
+          >
+            <DeferredModelsList
+              activeTab={deferredCatalogRenderSnapshot.activeTab}
+              searchQuery={deferredCatalogRenderSnapshot.searchQuery}
+              searchSessionKey={deferredCatalogRenderSnapshot.searchSessionKey}
+              androidContentBlurTargetRef={catalogContentBlurTargetRef}
+            />
+          </View>
         </ScreenContent>
       </ScreenAndroidContentBlurTarget>
     </ScreenRoot>
@@ -73,6 +98,9 @@ export const ModelsCatalogScreen = () => {
 
 const styles = StyleSheet.create({
   catalogContentBlurTarget: {
+    flex: 1,
+  },
+  deferredCatalogContent: {
     flex: 1,
   },
 });

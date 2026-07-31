@@ -7,7 +7,8 @@ import { router } from 'expo-router';
 import i18n from '../i18n';
 import { useChatStore } from '../store/chatStore';
 import { semanticColorTokens } from '../utils/themeTokens';
-import { getPrivacySafeErrorLogDetails } from './AppError';
+import { AppError, getPrivacySafeErrorLogDetails } from './AppError';
+import { activateThreadForNavigation } from './ChatThreadActivationService';
 import { performanceMonitor } from './PerformanceMonitor';
 
 export type NotificationTaskType = 'download' | 'inference';
@@ -437,29 +438,54 @@ class NotificationService {
         if (taskType === 'inference') {
             const threadId = typeof data.threadId === 'string' && data.threadId.trim().length > 0
                 ? data.threadId
-                : null;
-            const chatState = useChatStore.getState();
-            if (
-                !threadId
-                || chatState.threads[threadId] == null
-                || !chatState.setActiveThread(threadId)
-            ) {
-                this.assertResponseGeneration(generation);
-                performanceMonitor.incrementCounter('notification.staleTarget', 1, {
-                    staleNotificationTarget: true,
-                });
-                this.assertResponseGeneration(generation);
-                Alert.alert(
-                    i18n.t('notifications.conversationUnavailable.title'),
-                    i18n.t('notifications.conversationUnavailable.body'),
-                );
-                this.assertResponseGeneration(generation);
-                router.push('/conversations');
-                return;
-            }
+                : '';
+            const activationResult = activateThreadForNavigation(threadId);
 
-            this.assertResponseGeneration(generation);
-            router.push('/(tabs)/chat');
+            switch (activationResult.status) {
+                case 'opened':
+                case 'already_active':
+                    this.assertResponseGeneration(generation);
+                    router.push('/(tabs)/chat');
+                    return;
+                case 'missing':
+                    this.assertResponseGeneration(generation);
+                    performanceMonitor.incrementCounter('notification.staleTarget', 1, {
+                        staleNotificationTarget: true,
+                    });
+                    this.assertResponseGeneration(generation);
+                    Alert.alert(
+                        i18n.t('notifications.conversationUnavailable.title'),
+                        i18n.t('notifications.conversationUnavailable.body'),
+                    );
+                    this.assertResponseGeneration(generation);
+                    router.push('/conversations');
+                    return;
+                case 'generation_busy':
+                    this.assertResponseGeneration(generation);
+                    performanceMonitor.incrementCounter(
+                        'notification.navigationBlockedByGeneration',
+                        1,
+                        { notificationNavigationBlockedByGeneration: true },
+                    );
+                    this.assertResponseGeneration(generation);
+                    Alert.alert(
+                        i18n.t('notifications.conversationBusy.title'),
+                        i18n.t('notifications.conversationBusy.body'),
+                    );
+                    return;
+                case 'stale': {
+                    const latestChatState = useChatStore.getState();
+                    const hasValidActiveThread = latestChatState.activeThreadId === null
+                        || latestChatState.threads[latestChatState.activeThreadId] != null;
+                    throw new AppError(
+                        'action_failed',
+                        'Conversation navigation changed before it could complete. Try again.',
+                        { details: { hasValidActiveThread } },
+                    );
+                }
+                case 'persistence_failed':
+                    throw activationResult.error;
+            }
         }
     }
 

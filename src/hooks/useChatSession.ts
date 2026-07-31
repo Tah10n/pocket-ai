@@ -24,6 +24,7 @@ import {
   stopAllGenerationWork,
   type ChatGenerationWorkHandle,
 } from '../services/ChatGenerationService';
+import { activateThreadForNavigation } from '../services/ChatThreadActivationService';
 import {
   ChatMessage,
   ChatThread,
@@ -3413,22 +3414,30 @@ export const useChatSession = () => {
   }, [activeThread, setActiveThread]);
 
   const openThread = useCallback((threadId: string) => {
-    if (activeThread?.status === 'generating' && activeThread.id !== threadId) {
-      throw new Error('Stop the current response before switching conversations.');
+    const result = activateThreadForNavigation(threadId);
+    switch (result.status) {
+      case 'opened':
+      case 'already_active':
+        return;
+      case 'missing':
+        throw new AppError(
+          'action_failed',
+          'The selected conversation is no longer available.',
+        );
+      case 'generation_busy':
+        throw new AppError(
+          'engine_busy',
+          'Stop the current response before switching conversations.',
+        );
+      case 'stale':
+        throw new AppError(
+          'action_failed',
+          'The conversation changed before it could be opened. Try again.',
+        );
+      case 'persistence_failed':
+        throw toAppError(result.error);
     }
-
-    const thread = useChatStore.getState().getThread(threadId);
-    if (!thread) {
-      throw new Error('The selected conversation is no longer available.');
-    }
-
-    assertPrivateStorageWritableForChatMutation();
-
-    syncThreadParametersCallback(thread);
-    if (!setActiveThread(threadId)) {
-      throw new Error('The selected conversation is no longer available.');
-    }
-  }, [activeThread, setActiveThread, syncThreadParametersCallback]);
+  }, []);
 
   const deleteThread = useCallback((threadId: string) => {
     const thread = useChatStore.getState().getThread(threadId);

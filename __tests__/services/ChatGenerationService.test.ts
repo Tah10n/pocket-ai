@@ -17,7 +17,9 @@ jest.mock('../../src/services/BackgroundTaskService', () => ({
 import {
   __resetChatGenerationServiceForTests,
   beginChatGenerationWork,
+  hasActiveChatGenerationWork,
   registerActiveChatGenerationStop,
+  registerChatGenerationFallbackStop,
   stopAllGenerationWork,
 } from '../../src/services/ChatGenerationService';
 import { backgroundTaskService } from '../../src/services/BackgroundTaskService';
@@ -47,6 +49,33 @@ describe('ChatGenerationService', () => {
     __resetChatGenerationServiceForTests();
   });
 
+  it('reports active work without exposing mutable generation state', () => {
+    expect(hasActiveChatGenerationWork()).toBe(false);
+
+    const work = beginChatGenerationWork('test_pre_native_visibility');
+    expect(hasActiveChatGenerationWork()).toBe(true);
+    work.finish();
+    expect(hasActiveChatGenerationWork()).toBe(false);
+
+    const unregisterStop = registerActiveChatGenerationStop({
+      hasNativeCompletion: () => true,
+      stop: jest.fn().mockResolvedValue(undefined),
+    });
+    expect(hasActiveChatGenerationWork()).toBe(true);
+    unregisterStop();
+    expect(hasActiveChatGenerationWork()).toBe(false);
+
+    let fallbackActive = true;
+    registerChatGenerationFallbackStop({
+      isActive: () => fallbackActive,
+      hasNativeCompletion: () => false,
+      stop: jest.fn().mockResolvedValue(undefined),
+    });
+    expect(hasActiveChatGenerationWork()).toBe(true);
+    fallbackActive = false;
+    expect(hasActiveChatGenerationWork()).toBe(false);
+  });
+
   it('invalidates pre-native work immediately and shares one concurrent stop', async () => {
     const stopDeferred = createDeferred<void>();
     const stopHandler = jest.fn(() => stopDeferred.promise);
@@ -61,6 +90,7 @@ describe('ChatGenerationService', () => {
     const secondStop = stopAllGenerationWork();
 
     expect(firstStop).toBe(secondStop);
+    expect(hasActiveChatGenerationWork()).toBe(true);
     await expect(blockedPreparation).rejects.toMatchObject({
       name: 'ChatGenerationCancelledError',
     });

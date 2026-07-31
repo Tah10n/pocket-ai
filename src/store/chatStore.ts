@@ -171,6 +171,12 @@ export type ThreadModelSelectionCommitResult =
   | { status: 'missing' }
   | { status: 'persistence_failed'; error: unknown };
 
+export type ThreadActivationCommitResult =
+  | { status: 'applied' }
+  | { status: 'stale' }
+  | { status: 'missing' }
+  | { status: 'persistence_failed'; error: unknown };
+
 export interface PruneExpiredThreadsResult {
   count: number;
   threadIds: string[];
@@ -189,6 +195,11 @@ interface ChatStoreState {
   ) => PruneExpiredThreadsResult;
   clearAllThreads: () => number;
   setActiveThread: (threadId: string | null) => boolean;
+  commitThreadActivation: (input: {
+    threadId: string;
+    expectedActiveThreadId: string | null;
+    paramsSnapshot: GenerationParamsSnapshot;
+  }) => ThreadActivationCommitResult;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
   commitThreadModelSelection: (input: {
@@ -247,6 +258,51 @@ function updateThreadMetadata(thread: ChatThread, updatedAt = Date.now()): ChatT
     title,
     updatedAt,
   };
+}
+
+function normalizeThreadParamsSnapshot(
+  paramsSnapshot: GenerationParamsSnapshot,
+): GenerationParamsSnapshot {
+  return {
+    temperature: paramsSnapshot.temperature,
+    topP: paramsSnapshot.topP,
+    topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
+    minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
+    repetitionPenalty:
+      paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+    maxTokens: paramsSnapshot.maxTokens,
+    reasoningEffort: normalizeReasoningEffort(
+      paramsSnapshot.reasoningEffort,
+      (paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled,
+    ),
+    seed: paramsSnapshot.seed ?? null,
+  };
+}
+
+function areThreadParamsSnapshotsEqual(
+  left: GenerationParamsSnapshot,
+  right: GenerationParamsSnapshot,
+): boolean {
+  return (
+    left.temperature === right.temperature
+    && left.topP === right.topP
+    && (left.topK ?? FALLBACK_TOP_K) === (right.topK ?? FALLBACK_TOP_K)
+    && (left.minP ?? FALLBACK_MIN_P) === (right.minP ?? FALLBACK_MIN_P)
+    && (
+      left.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY
+    ) === (
+      right.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY
+    )
+    && left.maxTokens === right.maxTokens
+    && normalizeReasoningEffort(
+      left.reasoningEffort,
+      (left as { reasoningEnabled?: unknown }).reasoningEnabled,
+    ) === normalizeReasoningEffort(
+      right.reasoningEffort,
+      (right as { reasoningEnabled?: unknown }).reasoningEnabled,
+    )
+    && (left.seed ?? null) === (right.seed ?? null)
+  );
 }
 
 function createModelSwitchMessage({
@@ -2894,6 +2950,61 @@ export const useChatStore = create<ChatStoreState>()(
             return { activeThreadId: threadId };
           });
           return didSetActiveThread;
+        },
+
+        commitThreadActivation: ({
+          threadId,
+          expectedActiveThreadId,
+          paramsSnapshot,
+        }) => {
+          let commitResult: ThreadActivationCommitResult = { status: 'missing' };
+          const inferenceRevisionBeforeCommit = get().inferenceRevision;
+
+          try {
+            setWhenPrivateStorageWritable((state) => {
+              const existingThread = state.threads[threadId];
+              if (!existingThread) {
+                commitResult = { status: 'missing' };
+                return state;
+              }
+              if (state.activeThreadId !== expectedActiveThreadId) {
+                commitResult = { status: 'stale' };
+                return state;
+              }
+
+              const nextParamsSnapshot = normalizeThreadParamsSnapshot(paramsSnapshot);
+              const paramsChanged = !areThreadParamsSnapshotsEqual(
+                existingThread.paramsSnapshot,
+                nextParamsSnapshot,
+              );
+              commitResult = { status: 'applied' };
+
+              return {
+                activeThreadId: threadId,
+                ...(paramsChanged
+                  ? {
+                      threads: {
+                        ...state.threads,
+                        [threadId]: updateThreadMetadata({
+                          ...existingThread,
+                          paramsSnapshot: nextParamsSnapshot,
+                        }),
+                      },
+                      inferenceRevision: state.inferenceRevision + 1,
+                    }
+                  : null),
+              };
+            });
+          } catch (error) {
+            if (get().inferenceRevision !== inferenceRevisionBeforeCommit) {
+              (set as any)({
+                inferenceRevision: inferenceRevisionBeforeCommit,
+              }, false);
+            }
+            return { status: 'persistence_failed', error };
+          }
+
+          return commitResult;
         },
 
         updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) => {

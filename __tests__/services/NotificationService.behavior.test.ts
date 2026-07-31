@@ -50,6 +50,7 @@ jest.mock('../../src/i18n', () => ({
 }));
 
 const mockSetActiveThread = jest.fn();
+const mockActivateThreadForNavigation = jest.fn();
 let mockActiveThreadId: string | null;
 let mockThreads: Record<string, { id: string }>;
 jest.mock('../../src/store/chatStore', () => ({
@@ -60,6 +61,12 @@ jest.mock('../../src/store/chatStore', () => ({
       setActiveThread: mockSetActiveThread,
     }),
   },
+}));
+
+jest.mock('../../src/services/ChatThreadActivationService', () => ({
+  activateThreadForNavigation: (threadId: string) => (
+    mockActivateThreadForNavigation(threadId)
+  ),
 }));
 
 // Import after mocks so NotificationService picks them up.
@@ -98,6 +105,16 @@ describe('NotificationService (behavior)', () => {
       }
       mockActiveThreadId = threadId;
       return true;
+    });
+    mockActivateThreadForNavigation.mockImplementation((threadId: string) => {
+      if (!threadId || !mockThreads[threadId]) {
+        return { status: 'missing' };
+      }
+      if (mockActiveThreadId === threadId) {
+        return { status: 'already_active', threadId };
+      }
+      mockActiveThreadId = threadId;
+      return { status: 'opened', threadId };
     });
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
     (Notifications.requestPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
@@ -340,8 +357,9 @@ describe('NotificationService (behavior)', () => {
     await initialization;
     await flushNotificationResponsePipeline();
 
-    expect(mockSetActiveThread).toHaveBeenCalledTimes(1);
-    expect(mockSetActiveThread).toHaveBeenCalledWith('thread-1');
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledTimes(1);
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledWith('thread-1');
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
     expect(router.push).toHaveBeenCalledTimes(1);
     expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
     expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
@@ -378,6 +396,310 @@ describe('NotificationService (behavior)', () => {
     expect(router.push).toHaveBeenCalledWith('/conversations');
     expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
     alertSpy.mockRestore();
+  });
+
+  it('handles a cross-thread generation block once without activating the target', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 150,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    mockActivateThreadForNavigation.mockReturnValueOnce({
+      status: 'generation_busy',
+    });
+    performanceMonitor.setEnabled(true);
+    await notificationService.initialize();
+    (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValueOnce(
+      response,
+    );
+
+    const listener = (
+      Notifications.addNotificationResponseReceivedListener as jest.Mock
+    ).mock.calls[0][0];
+    listener(response);
+    await flushNotificationResponsePipeline();
+
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledWith('thread-1');
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(router.push).not.toHaveBeenCalled();
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'notifications.conversationBusy.title',
+      'notifications.conversationBusy.body',
+    );
+    expect(alertSpy).not.toHaveBeenCalledWith(
+      'notifications.conversationUnavailable.title',
+      'notifications.conversationUnavailable.body',
+    );
+    expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
+    expect(performanceMonitor.snapshot().counters).toEqual(expect.objectContaining({
+      'notification.navigationBlockedByGeneration': 1,
+    }));
+    expect(performanceMonitor.snapshot().counters).not.toHaveProperty(
+      'notification.staleTarget',
+    );
+    const blockedEvents = performanceMonitor.snapshot().events.filter(
+      (event) => event.name === 'notification.navigationBlockedByGeneration',
+    );
+    expect(blockedEvents).toEqual([
+      expect.objectContaining({
+        meta: {
+          notificationNavigationBlockedByGeneration: true,
+        },
+      }),
+    ]);
+    expect(JSON.stringify(blockedEvents)).not.toContain('thread-1');
+    alertSpy.mockRestore();
+  });
+
+  it('single-flights a busy response arriving through initial and live sources', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 151,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const initialResponse = createDeferred<Notifications.NotificationResponse>();
+    mockActivateThreadForNavigation.mockReturnValue({
+      status: 'generation_busy',
+    });
+    (Notifications.getLastNotificationResponseAsync as jest.Mock)
+      .mockImplementationOnce(() => initialResponse.promise)
+      .mockResolvedValueOnce(response);
+
+    const initialization = notificationService.initialize();
+    for (let index = 0; index < 4; index += 1) {
+      await Promise.resolve();
+    }
+    const listener = (
+      Notifications.addNotificationResponseReceivedListener as jest.Mock
+    ).mock.calls[0][0];
+
+    listener(response);
+    initialResponse.resolve(response);
+    await initialization;
+    await flushNotificationResponsePipeline();
+
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledTimes(1);
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(router.push).not.toHaveBeenCalled();
+    expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
+    alertSpy.mockRestore();
+  });
+
+  it('allows a notification for the already-active generating conversation', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-current',
+      date: 152,
+      data: { taskType: 'inference', threadId: 'thread-current' },
+    });
+    await notificationService.initialize();
+    (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValueOnce(
+      response,
+    );
+
+    const listener = (
+      Notifications.addNotificationResponseReceivedListener as jest.Mock
+    ).mock.calls[0][0];
+    listener(response);
+    await flushNotificationResponsePipeline();
+
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledWith('thread-current');
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
+    alertSpy.mockRestore();
+  });
+
+  it('opens a later notification after generation is no longer busy', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const firstResponse = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 153,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const secondResponse = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 154,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    mockActivateThreadForNavigation
+      .mockReturnValueOnce({ status: 'generation_busy' })
+      .mockImplementationOnce((threadId: string) => {
+        mockActiveThreadId = threadId;
+        return { status: 'opened', threadId };
+      });
+    await notificationService.initialize();
+    (Notifications.getLastNotificationResponseAsync as jest.Mock)
+      .mockResolvedValueOnce(firstResponse)
+      .mockResolvedValueOnce(secondResponse);
+
+    const listener = (
+      Notifications.addNotificationResponseReceivedListener as jest.Mock
+    ).mock.calls[0][0];
+    listener(firstResponse);
+    await flushNotificationResponsePipeline();
+    listener(secondResponse);
+    await flushNotificationResponsePipeline();
+
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledTimes(2);
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-1');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'notifications.conversationBusy.title',
+      'notifications.conversationBusy.body',
+    );
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
+    expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(2);
+    alertSpy.mockRestore();
+  });
+
+  it('keeps missing-target handling distinct while another conversation is active', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:deleted-thread',
+      date: 155,
+      data: { taskType: 'inference', threadId: 'deleted-thread' },
+    });
+    await notificationService.initialize();
+    (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValueOnce(
+      response,
+    );
+
+    const listener = (
+      Notifications.addNotificationResponseReceivedListener as jest.Mock
+    ).mock.calls[0][0];
+    listener(response);
+    await flushNotificationResponsePipeline();
+
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledWith('deleted-thread');
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
+    expect(mockActiveThreadId).toBe('thread-current');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'notifications.conversationUnavailable.title',
+      'notifications.conversationUnavailable.body',
+    );
+    expect(alertSpy).not.toHaveBeenCalledWith(
+      'notifications.conversationBusy.title',
+      'notifications.conversationBusy.body',
+    );
+    expect(router.push).toHaveBeenCalledWith('/conversations');
+    expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
+    alertSpy.mockRestore();
+  });
+
+  it('keeps an activation persistence failure retryable and rejection-safe', async () => {
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 156,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const writeError = new Error('private activation persistence failure');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockActivateThreadForNavigation
+      .mockReturnValueOnce({
+        status: 'persistence_failed',
+        error: writeError,
+      })
+      .mockImplementationOnce((threadId: string) => {
+        mockActiveThreadId = threadId;
+        return { status: 'opened', threadId };
+      });
+    performanceMonitor.setEnabled(true);
+
+    try {
+      await notificationService.initialize();
+      const listener = (
+        Notifications.addNotificationResponseReceivedListener as jest.Mock
+      ).mock.calls[0][0];
+
+      expect(listener(response)).toBeUndefined();
+      await flushNotificationResponsePipeline();
+
+      expect(mockActivateThreadForNavigation).toHaveBeenCalledTimes(1);
+      expect(mockActiveThreadId).toBe('thread-current');
+      expect(router.push).not.toHaveBeenCalled();
+      expect(Notifications.clearLastNotificationResponse).not.toHaveBeenCalled();
+
+      (Notifications.getLastNotificationResponseAsync as jest.Mock).mockResolvedValueOnce(
+        response,
+      );
+      expect(listener(response)).toBeUndefined();
+      await flushNotificationResponsePipeline();
+
+      expect(mockActivateThreadForNavigation).toHaveBeenCalledTimes(2);
+      expect(mockSetActiveThread).not.toHaveBeenCalled();
+      expect(mockActiveThreadId).toBe('thread-1');
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
+      expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[NotificationService] Notification response processing failed',
+        expect.objectContaining({
+          scope: 'notification_response',
+          category: 'routing_failed',
+          errorName: 'Error',
+        }),
+      );
+      expect(JSON.stringify({
+        logs: warnSpy.mock.calls,
+        telemetry: performanceMonitor.snapshot(),
+      })).not.toContain('private activation persistence failure');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps a stale activation retryable without switching or clearing it', async () => {
+    const response = createNotificationResponse({
+      identifier: 'pocket-ai:inference:thread-1',
+      date: 157,
+      data: { taskType: 'inference', threadId: 'thread-1' },
+    });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockActivateThreadForNavigation.mockReturnValueOnce({ status: 'stale' });
+    performanceMonitor.setEnabled(true);
+
+    try {
+      await notificationService.initialize();
+      const listener = (
+        Notifications.addNotificationResponseReceivedListener as jest.Mock
+      ).mock.calls[0][0];
+
+      expect(listener(response)).toBeUndefined();
+      await flushNotificationResponsePipeline();
+
+      expect(mockActivateThreadForNavigation).toHaveBeenCalledWith('thread-1');
+      expect(mockSetActiveThread).not.toHaveBeenCalled();
+      expect(mockActiveThreadId).toBe('thread-current');
+      expect(router.push).not.toHaveBeenCalled();
+      expect(Notifications.clearLastNotificationResponse).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[NotificationService] Notification response processing failed',
+        expect.objectContaining({
+          scope: 'notification_response',
+          category: 'routing_failed',
+          errorCode: 'action_failed',
+        }),
+      );
+      expect(JSON.stringify({
+        logs: warnSpy.mock.calls,
+        telemetry: performanceMonitor.snapshot(),
+      })).not.toContain('thread-1');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('does not clear a newer native response after routing an older response', async () => {
@@ -525,7 +847,8 @@ describe('NotificationService (behavior)', () => {
     listener(secondResponse);
     await flushNotificationResponsePipeline();
 
-    expect(mockSetActiveThread).toHaveBeenCalledTimes(2);
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledTimes(2);
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
     expect(router.push).toHaveBeenCalledTimes(2);
     expect(Notifications.clearLastNotificationResponse).toHaveBeenCalledTimes(2);
   });
@@ -568,7 +891,8 @@ describe('NotificationService (behavior)', () => {
     }));
     await flushNotificationResponsePipeline();
 
-    expect(mockSetActiveThread).toHaveBeenCalledWith('thread-1');
+    expect(mockActivateThreadForNavigation).toHaveBeenCalledWith('thread-1');
+    expect(mockSetActiveThread).not.toHaveBeenCalled();
     expect(mockActiveThreadId).toBe('thread-1');
     expect(router.push).toHaveBeenCalledWith('/(tabs)/chat');
     expect(router.push).toHaveBeenCalledTimes(1);

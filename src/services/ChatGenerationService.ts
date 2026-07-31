@@ -44,6 +44,16 @@ export function isChatGenerationCancelledError(error: unknown): error is ChatGen
   return error instanceof ChatGenerationCancelledError;
 }
 
+export function hasActiveChatGenerationWork(): boolean {
+  return (
+    activeWork.size > 0
+    || activeStopRegistration !== null
+    || fallbackStopRegistration?.isActive() === true
+    || stopAllPromise !== null
+    || admissionBlocked
+  );
+}
+
 function invalidateGenerationWork(): void {
   cancellationGeneration += 1;
   const listeners = Array.from(cancellationListeners);

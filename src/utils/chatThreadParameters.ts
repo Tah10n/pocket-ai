@@ -1,21 +1,36 @@
 import { GenerationParameters, getGenerationParametersForModel } from '../services/SettingsStore';
 import { getThreadActiveModelId, type ChatThread } from '../types/chat';
 
+export function resolveThreadGenerationParameters(thread: ChatThread): GenerationParameters {
+  return getGenerationParametersForModel(getThreadActiveModelId(thread));
+}
+
+export function areThreadGenerationParametersEqual(
+  paramsSnapshot: ChatThread['paramsSnapshot'],
+  resolvedParams: GenerationParameters,
+): boolean {
+  return (
+    paramsSnapshot.temperature === resolvedParams.temperature
+    && paramsSnapshot.topP === resolvedParams.topP
+    && paramsSnapshot.topK === resolvedParams.topK
+    && paramsSnapshot.minP === resolvedParams.minP
+    && paramsSnapshot.repetitionPenalty === resolvedParams.repetitionPenalty
+    && paramsSnapshot.maxTokens === resolvedParams.maxTokens
+    && (paramsSnapshot.seed ?? null) === (resolvedParams.seed ?? null)
+    && (paramsSnapshot.reasoningEffort ?? 'auto') === (resolvedParams.reasoningEffort ?? 'auto')
+  );
+}
+
 export function syncThreadParameters(
   thread: ChatThread,
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParameters) => void,
   nextParams?: GenerationParameters,
 ): ChatThread {
-  const resolvedParams = nextParams ?? getGenerationParametersForModel(getThreadActiveModelId(thread));
-  const paramsChanged =
-    thread.paramsSnapshot.temperature !== resolvedParams.temperature
-    || thread.paramsSnapshot.topP !== resolvedParams.topP
-    || thread.paramsSnapshot.topK !== resolvedParams.topK
-    || thread.paramsSnapshot.minP !== resolvedParams.minP
-    || thread.paramsSnapshot.repetitionPenalty !== resolvedParams.repetitionPenalty
-    || thread.paramsSnapshot.maxTokens !== resolvedParams.maxTokens
-    || (thread.paramsSnapshot.seed ?? null) !== (resolvedParams.seed ?? null)
-    || (thread.paramsSnapshot.reasoningEffort ?? 'auto') !== (resolvedParams.reasoningEffort ?? 'auto');
+  const resolvedParams = nextParams ?? resolveThreadGenerationParameters(thread);
+  const paramsChanged = !areThreadGenerationParametersEqual(
+    thread.paramsSnapshot,
+    resolvedParams,
+  );
 
   if (paramsChanged) {
     updateThreadParamsSnapshot(thread.id, resolvedParams);

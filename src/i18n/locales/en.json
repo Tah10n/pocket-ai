@@ -97,6 +97,10 @@
       "title": "Conversation unavailable",
       "body": "This conversation is no longer available."
     },
+    "conversationBusy": {
+      "title": "Stop the current response first",
+      "body": "You can open another conversation after the current generation finishes or is stopped."
+    },
     "download": {
       "progress": {
         "title": "Downloading {{modelName}}",

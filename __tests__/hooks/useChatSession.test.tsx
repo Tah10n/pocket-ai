@@ -6,7 +6,8 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
 import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
-import { AppState } from 'react-native';
+import { Alert, AppState } from 'react-native';
+import { router } from 'expo-router';
 import { getAppStorage, storage } from '../../src/store/storage';
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
@@ -49,6 +50,8 @@ import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inf
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { clearChatHistory } from '../../src/services/ChatHistoryService';
+import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationService';
+import i18n from '../../src/i18n';
 import {
   armAndroidQaGenerationGate,
   getAndroidQaGenerationEvidenceSnapshot,
@@ -173,6 +176,53 @@ describe('useChatSession', () => {
       reject = rejectPromise;
     });
     return { promise, reject, resolve };
+  }
+
+  function createSavedThreadForNavigation(): string {
+    return useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 1024,
+        reasoningEffort: 'auto',
+        seed: null,
+      },
+    });
+  }
+
+  function routeInferenceNotificationForTest(threadId: string, date: number): void {
+    const service = notificationService as unknown as {
+      lifecycleGeneration: number;
+      routeNotificationResponse: (response: unknown, generation: number) => void;
+    };
+    service.routeNotificationResponse(
+      {
+        actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+        notification: {
+          date,
+          request: {
+            identifier: `pocket-ai:inference:${threadId}`,
+            content: {
+              data: {
+                taskType: 'inference',
+                threadId,
+              },
+            },
+          },
+        },
+      },
+      service.lifecycleGeneration,
+    );
   }
 
   function renderHookHarness() {
@@ -7062,6 +7112,143 @@ describe('useChatSession', () => {
     });
 
     expect(useChatStore.getState().activeThreadId).toBe(threadTwoId);
+  });
+
+  it('keeps notification navigation on the active thread during pre-native attachment preparation', async () => {
+    const threadA = createSavedThreadForNavigation();
+    const threadB = createSavedThreadForNavigation();
+    useChatStore.getState().setActiveThread(threadA);
+    const targetBefore = useChatStore.getState().threads[threadB];
+    const attachmentLookup = createDeferred<{ exists: boolean; size: number }>();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementationOnce(
+      () => attachmentLookup.promise,
+    );
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    try {
+      act(() => {
+        sendPromise = getSession()?.appendUserMessage(
+          'Keep this preparation on conversation A',
+          {
+            attachmentDrafts: [copiedDraftImageAttachment],
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'ready',
+              support: ['vision'],
+              checkedAt: 1,
+            },
+          },
+        );
+      });
+      await waitFor(() => {
+        expect(FileSystem.getInfoAsync).toHaveBeenCalled();
+      });
+
+      expect(useChatStore.getState().threads[threadA].status).toBe('idle');
+      expect(hasActiveChatGenerationWork()).toBe(true);
+
+      act(() => {
+        routeInferenceNotificationForTest(threadB, 7_001);
+      });
+
+      expect(useChatStore.getState().activeThreadId).toBe(threadA);
+      expect(useChatStore.getState().threads[threadB]).toBe(targetBefore);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(alertSpy).toHaveBeenCalledWith(
+        i18n.t('notifications.conversationBusy.title'),
+        i18n.t('notifications.conversationBusy.body'),
+      );
+
+      await act(async () => {
+        attachmentLookup.resolve({ exists: true, size: 123_456 });
+        await sendPromise;
+      });
+
+      const settledState = useChatStore.getState();
+      const settledThreadA = settledState.threads[threadA];
+      expect(settledState.activeThreadId).toBe(threadA);
+      expect(settledThreadA.status).toBe('idle');
+      expect(settledThreadA.messages.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Hello back',
+        state: 'complete',
+      }));
+      expect(
+        settledThreadA.messages.some((message) => message.state === 'streaming'),
+      ).toBe(false);
+      expect(settledState.threads[threadB]).toBe(targetBefore);
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('preserves terminal callbacks after notification navigation is blocked during native completion', async () => {
+    const threadA = createSavedThreadForNavigation();
+    const threadB = createSavedThreadForNavigation();
+    useChatStore.getState().setActiveThread(threadA);
+    const targetBefore = useChatStore.getState().threads[threadB];
+    const nativeCompletion = createDeferred<{ text: string }>();
+    let onToken: ((token: string) => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) => {
+        onToken = tokenHandler;
+        return nativeCompletion.promise;
+      },
+    );
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    try {
+      act(() => {
+        sendPromise = getSession()?.appendUserMessage(
+          'Keep native completion on conversation A',
+        );
+      });
+      await waitFor(() => {
+        expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+        expect(useChatStore.getState().threads[threadA].status).toBe('generating');
+      });
+      expect(hasActiveChatGenerationWork()).toBe(true);
+
+      act(() => {
+        routeInferenceNotificationForTest(threadB, 7_002);
+      });
+
+      expect(useChatStore.getState().activeThreadId).toBe(threadA);
+      expect(useChatStore.getState().threads[threadB]).toBe(targetBefore);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(alertSpy).toHaveBeenCalledWith(
+        i18n.t('notifications.conversationBusy.title'),
+        i18n.t('notifications.conversationBusy.body'),
+      );
+
+      await act(async () => {
+        onToken?.('Native completion survived');
+        nativeCompletion.resolve({ text: 'Native completion survived' });
+        await sendPromise;
+      });
+
+      const settledState = useChatStore.getState();
+      const settledThreadA = settledState.threads[threadA];
+      expect(settledState.activeThreadId).toBe(threadA);
+      expect(settledThreadA.status).toBe('idle');
+      expect(settledThreadA.messages.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Native completion survived',
+        state: 'complete',
+      }));
+      expect(
+        settledThreadA.messages.some((message) => message.state === 'streaming'),
+      ).toBe(false);
+      expect(settledState.threads[threadB]).toBe(targetBefore);
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    } finally {
+      alertSpy.mockRestore();
+    }
   });
 
   it('dismisses the thread inference notification after deleting the conversation', async () => {

@@ -8,28 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
-## [Unreleased]
+## [1.6.2](https://github.com/Tah10n/pocket-ai/compare/v1.6.1...v1.6.2) (2026-08-01)
 
-### Added
 
-- Add architecture-aware prompt state-cache policy infrastructure, isolated persistence
-  identities, and privacy-safe diagnostics while keeping production fail-closed at 0 MiB.
-- Add a physical-device runtime hardening and A/B validation runbook.
+### Bug Fixes
 
-### Changed
-
-- Upgrade `llama.rn` from 0.12.6 to exactly 0.12.7 and pass an explicit 0 MiB budget with
-  an 8-checkpoint limit on every native context initialization path. Non-zero caching
-  remains disabled until the native runtime provides a verifiable strict memory bound.
-
-### Fixed
-
-- Keep each saved conversation's model authoritative, block generation until the exact
-  model is loaded, and invalidate stale or superseded model selections.
-- Drain pre-native and native generation work before clearing history so a late branch
-  callback cannot restore deleted messages or produce false success.
-- Reject stale notification targets, dismiss deleted-thread inference notifications, and
-  serialize notification initialization through one retryable listener lifecycle.
+* **chat:** keep conversations bound to their selected model ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+* **chat:** prevent late generation from restoring cleared messages ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+* **notifications:** reject stale targets and serialize initialization ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+* **runtime:** upgrade llama.rn to 0.12.7 with prompt-state caching disabled ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
 
 ## [1.6.1](https://github.com/Tah10n/pocket-ai/compare/v1.6.0...v1.6.1) (2026-07-24)
 

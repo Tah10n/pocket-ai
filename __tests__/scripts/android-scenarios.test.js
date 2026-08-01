@@ -45,6 +45,7 @@ const {
   findCatalogRiskModelCard,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   findBlockingSystemDialogAction,
+  findChatResourceWithScroll,
   escapeAdbInputText,
   extractVisibleConversationTokens,
   findAttachImageActionInSnapshot,
@@ -73,8 +74,10 @@ const {
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
   resolveBranchRegenerationReplacement,
+  resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidPackageUid,
   resolveAndroidQaGenerationGateObservation,
+  resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
   selectScenarios,
   ScenarioSkipError,
@@ -725,6 +728,50 @@ describe('android-scenarios screenshot capture', () => {
       for (const [, , spawnOptions] of spawn.mock.calls) {
         expect(spawnOptions).toEqual(expect.objectContaining({ timeout: 15000 }));
       }
+      expect(fs.readFileSync(screenshotPath)).toEqual(pngBuffer);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('waits for the target serial and resumes only a truncated screenshot chunk', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-screenshot-'));
+    const screenshotPath = path.join(tempDir, 'capture.png');
+    const sleepSync = jest.fn();
+    let chunkAttempts = 0;
+    const spawn = jest.fn((_command, args) => {
+      if (args.includes('stat')) {
+        return { status: 0, stdout: `${pngBuffer.length}\n`, stderr: '' };
+      }
+
+      if (args.includes('dd')) {
+        chunkAttempts += 1;
+        return {
+          status: 0,
+          stdout: chunkAttempts === 1 ? pngBuffer.subarray(0, 8) : pngBuffer,
+          stderr: '',
+        };
+      }
+
+      return { status: 0, stdout: '', stderr: '' };
+    });
+
+    try {
+      expect(captureAndroidScreenshot('adb', 'device-1', screenshotPath, {
+        maxAttempts: 1,
+        remoteChunkSizeBytes: pngBuffer.length,
+        retryDelayMs: 1,
+        sleepSync,
+        spawnSync: spawn,
+      })).toBe(screenshotPath);
+
+      expect(chunkAttempts).toBe(2);
+      expect(spawn).toHaveBeenCalledWith(
+        'adb',
+        ['-s', 'device-1', 'wait-for-device'],
+        expect.objectContaining({ timeout: 15000 })
+      );
+      expect(sleepSync).toHaveBeenCalledWith(1);
       expect(fs.readFileSync(screenshotPath)).toEqual(pngBuffer);
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });
@@ -1790,6 +1837,244 @@ describe('android-scenarios variant picker helpers', () => {
     expect(setFilterPanelOpen).toHaveBeenCalledTimes(1);
     expect(ctx.tapAnyText).toHaveBeenCalledTimes(1);
     expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']), { timeoutMs: 8_000 });
+  });
+});
+
+describe('android-scenarios bounded chat swipes', () => {
+  it('uses each current chat snapshot to keep resource scans inside a shifted viewport', async () => {
+    const initialSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-qa-arm-before-first-output"
+          bounds="[44,676][290,760]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,766][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+      </hierarchy>
+    `);
+    const targetSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,766][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="regenerate-message-message-reasoning"
+          bounds="[897,1358][960,1421]"
+          displayed="true"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const readSnapshot = jest.fn()
+      .mockReturnValueOnce(initialSnapshot)
+      .mockReturnValueOnce(targetSnapshot);
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeDown: jest.fn(),
+      swipeUp: jest.fn(),
+    };
+
+    const target = await findChatResourceWithScroll(
+      ctx,
+      'regenerate-message-message-reasoning',
+      { adbPath: 'adb', maxSwipes: 1, readSnapshot }
+    );
+
+    expect(target.resourceId).toBe('regenerate-message-message-reasoning');
+    expect(ctx.swipeDown).toHaveBeenCalledWith({ snapshot: initialSnapshot });
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('scrolls past a regenerate action hidden under the composer before returning it', async () => {
+    const obscuredSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,451][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+        <node
+          resource-id="regenerate-message-message-image"
+          bounds="[897,2274][960,2337]"
+          displayed="true"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const tappableSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,451][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+        <node
+          resource-id="regenerate-message-message-image"
+          bounds="[897,1600][960,1663]"
+          displayed="true"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const readSnapshot = jest.fn()
+      .mockReturnValueOnce(obscuredSnapshot)
+      .mockReturnValueOnce(tappableSnapshot);
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeDown: jest.fn(),
+      swipeUp: jest.fn(),
+    };
+
+    const target = await findChatResourceWithScroll(
+      ctx,
+      'regenerate-message-message-image',
+      {
+        adbPath: 'adb',
+        maxSwipes: 1,
+        readSnapshot,
+        requireTapSafe: true,
+      }
+    );
+
+    expect(target.bounds.centerY).toBe(1632);
+    expect(ctx.swipeDown).toHaveBeenCalledWith({ snapshot: obscuredSnapshot });
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('scrolls past a clipped regenerate action with inverted bounds before returning it', async () => {
+    const clippedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="chat-list-viewport" bounds="[32,775][1049,2412]" />
+        <node resource-id="chat-input-bar-container" bounds="[0,1938][1080,2106]" />
+        <node
+          resource-id="regenerate-message-message-reasoning"
+          bounds="[897,775][960,404]"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const tappableSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="chat-list-viewport" bounds="[32,775][1049,2412]" />
+        <node resource-id="chat-input-bar-container" bounds="[0,1938][1080,2106]" />
+        <node
+          resource-id="regenerate-message-message-reasoning"
+          bounds="[897,1358][960,1421]"
+          enabled="true"
+        />
+      </hierarchy>
+    `);
+    const readSnapshot = jest.fn()
+      .mockReturnValueOnce(clippedSnapshot)
+      .mockReturnValueOnce(tappableSnapshot);
+    const ctx = {
+      serial: 'emulator-5554',
+      swipeDown: jest.fn(),
+      swipeUp: jest.fn(),
+    };
+
+    const target = await findChatResourceWithScroll(
+      ctx,
+      'regenerate-message-message-reasoning',
+      {
+        adbPath: 'adb',
+        maxSwipes: 1,
+        readSnapshot,
+        requireTapSafe: true,
+      }
+    );
+
+    expect(target.bounds.centerY).toBe(1390);
+    expect(ctx.swipeDown).toHaveBeenCalledWith({ snapshot: clippedSnapshot });
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(readSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts topology swipes inside the visible list below recovery banners and above the composer', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node
+          resource-id="chat-qa-arm-before-first-output"
+          bounds="[44,676][290,760]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-list-viewport"
+          bounds="[32,766][1049,2412]"
+          displayed="true"
+        />
+        <node
+          resource-id="chat-input-bar-container"
+          bounds="[0,1938][1080,2106]"
+          displayed="true"
+        />
+      </hierarchy>
+    `);
+
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'down')).toEqual({
+      startX: 541,
+      startY: 926,
+      endX: 541,
+      endY: 1778,
+    });
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'up')).toEqual({
+      startX: 541,
+      startY: 1778,
+      endX: 541,
+      endY: 926,
+    });
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'down', {
+      maxDistancePx: 480,
+    })).toEqual({
+      startX: 541,
+      startY: 926,
+      endX: 541,
+      endY: 1406,
+    });
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'up', {
+      maxDistancePx: 480,
+    })).toEqual({
+      startX: 541,
+      startY: 1778,
+      endX: 541,
+      endY: 1298,
+    });
+  });
+
+  it('retains bounded fallback gestures outside the chat viewport', () => {
+    const snapshot = parseUiSnapshot('<hierarchy><node bounds="[0,0][1080,2412]" /></hierarchy>');
+
+    expect(resolveScenarioVerticalSwipeGesture(snapshot, 'down')).toEqual({
+      startX: 540,
+      startY: 700,
+      endX: 540,
+      endY: 1700,
+    });
+    expect(() => resolveScenarioVerticalSwipeGesture(snapshot, 'sideways'))
+      .toThrow(/Unsupported scenario swipe direction/);
   });
 });
 
@@ -3428,6 +3713,34 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       .toBe('chat-primary-action-send');
   });
 
+  it('merges sparse viewport overlap without duplicating messages', () => {
+    const older = [
+      conversationToken('user', '1'),
+      conversationToken('assistant', '1a'),
+      conversationToken('user', '2'),
+      conversationToken('user', '3'),
+    ];
+    const newer = [
+      conversationToken('user', '2'),
+      conversationToken('assistant', '2a'),
+      conversationToken('user', '3'),
+      conversationToken('assistant', '3a', 'stopped'),
+    ];
+
+    const merged = mergeOlderConversationOrder(older, newer);
+
+    expect(merged.map((token) => token.key)).toEqual([
+      'user:1',
+      'assistant:1a',
+      'user:2',
+      'assistant:2a',
+      'user:3',
+      'assistant:3a',
+    ]);
+    expect(new Set(merged.map((token) => token.key)).size).toBe(merged.length);
+    expect(merged.at(-1)).toEqual(expect.objectContaining({ state: 'stopped' }));
+  });
+
   it('recognizes only the stable visible history-start anchor as a complete topology scan', () => {
     const anchored = parseUiSnapshot(`
       <hierarchy>
@@ -3526,6 +3839,32 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     })).toBeNull();
   });
 
+  it('recognizes durable output when uiautomator single-quotes text containing a double quote', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-qa-generation-gate-after-first-durable-output-assistant-new" bounds="[44,442][47,445]" />
+        <node resource-id="assistant-message-state-streaming-assistant-new" bounds="[32,1693][1049,1860]" />
+        <node text=' "▏' resource-id="assistant-message-content-assistant-new" bounds="[63,1708][108,1770]" />
+        <node resource-id="chat-primary-action-stop" clickable="true" enabled="true" bounds="[918,1970][1023,2075]" />
+      </hierarchy>
+    `);
+
+    expect(resolveAndroidQaGenerationGateObservation(snapshot, {
+      phase: 'after-first-durable-output',
+      baselineAssistantIds: new Set(),
+    })).toEqual(expect.objectContaining({
+      assistantId: 'assistant-new',
+      surface: 'content',
+    }));
+    expect(findResourceIdInSnapshot(
+      snapshot,
+      'assistant-message-content-assistant-new'
+    )).toEqual(expect.objectContaining({
+      text: ' "▏',
+    }));
+  });
+
   it('requires every stable attachment identity in the exact prepared generation request', () => {
     const target = {
       userId: 'user-document',
@@ -3595,6 +3934,78 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       </hierarchy>
     `);
     expect(snapshot.nodes[0].selected).toBe(true);
+  });
+
+  it('treats an explicitly disabled reasoning control as authoritative unsupported reasoning', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-off"
+          enabled="false"
+          selected="false"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+
+    expect(resolveReasoningAuthoritativeClearConfiguration(snapshot)).toEqual({
+      reasoningEffort: 'unsupported',
+      requiresSelection: false,
+      verifiedSelected: false,
+      verifiedUnsupported: true,
+    });
+  });
+
+  it('distinguishes a selected Off control from one that still needs a tap', () => {
+    const selected = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-off"
+          enabled="true"
+          selected="true"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+    const pending = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-off"
+          enabled="true"
+          selected="false"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+
+    expect(resolveReasoningAuthoritativeClearConfiguration(selected))
+      .toEqual(expect.objectContaining({
+        reasoningEffort: 'off',
+        requiresSelection: false,
+        verifiedSelected: true,
+      }));
+    expect(resolveReasoningAuthoritativeClearConfiguration(pending))
+      .toEqual(expect.objectContaining({
+        reasoningEffort: 'off',
+        requiresSelection: true,
+        verifiedSelected: false,
+      }));
+  });
+
+  it('still fails reasoning-clear setup when Off is absent for a reasoning-required model', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node
+          resource-id="reasoning-effort-auto"
+          enabled="true"
+          selected="true"
+          bounds="[100,100][200,200]"
+        />
+      </hierarchy>
+    `);
+
+    expect(() => resolveReasoningAuthoritativeClearConfiguration(snapshot))
+      .toThrow(/reasoning-effort-off is not visible/);
   });
 
   it('requires a new completed assistant directly adjacent to the target user', () => {
@@ -4236,6 +4647,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         privateRoot: tempDir,
         runCapture,
         spawn,
+        captureOwnership: () => null,
       });
       fs.appendFileSync(
         collector.rawLogPath,
@@ -4326,6 +4738,55 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     }
   });
 
+  it('accepts a concurrent owned collector close when signal delivery reports false', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-close-race-'));
+    const children = [4151, 4152].map((pid) => {
+      const child = new EventEmitter();
+      child.pid = pid;
+      child.kill = jest.fn(() => {
+        setImmediate(() => child.emit('close', 0, null));
+        return false;
+      });
+      return child;
+    });
+    const spawn = jest.fn(() => {
+      const child = children[spawn.mock.calls.length - 1];
+      setImmediate(() => child.emit('spawn'));
+      return child;
+    });
+    const runCapture = jest.fn((command, args) => (
+      args.includes('dumpsys')
+        ? 'Package [com.github.tah10n.pocketai]\n  userId=10234\n'
+        : '1784700000.123\n'
+    ));
+
+    try {
+      const collector = await startAndroidLogcatCollector({
+        adbPath: 'adb',
+        serial: 'device-1',
+        packageName: 'com.github.tah10n.pocketai',
+        stem: 'close-race',
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn,
+        captureOwnership: () => null,
+      });
+      fs.appendFileSync(collector.rawLogPath, 'complete raced interval\n');
+
+      await expect(stopAndroidLogcatCollector(collector)).resolves.toBeUndefined();
+      expect(collector).toEqual(expect.objectContaining({
+        closed: true,
+        stopped: true,
+      }));
+      expect(children.every((child) => child.kill.mock.calls.length === 1)).toBe(true);
+      expect(readAndroidLogcatCollector(collector)).toContain('complete raced interval');
+      cleanupAndroidLogcatCollector(collector);
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
   it('fails closed when the owned collector exits before the scenario completes', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-logcat-exit-'));
     const children = [4201, 4202].map((pid) => {
@@ -4352,7 +4813,12 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         serial: 'device-1',
         packageName: 'com.github.tah10n.pocketai',
         stem: 'unexpected-exit',
-      }, { privateRoot: tempDir, runCapture, spawn });
+      }, {
+        privateRoot: tempDir,
+        runCapture,
+        spawn,
+        captureOwnership: () => null,
+      });
       children[0].emit('close', 1, null);
 
       expect(() => readAndroidLogcatCollector(collector, { requireStopped: false }))
@@ -4398,6 +4864,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         privateRoot: tempDir,
         runCapture,
         spawn: failingSpawn,
+        captureOwnership: () => null,
         onCollectorCreated,
       })).rejects.toThrow(/spawn denied/);
       expect(onCollectorCreated).toHaveBeenLastCalledWith(null);

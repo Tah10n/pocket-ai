@@ -1,5 +1,10 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { ChatMessage, ChatThread } from '../../src/types/chat';
+import {
+  ChatMessage,
+  ChatThread,
+  getThreadActiveModelId,
+  sanitizeHydratedThread,
+} from '../../src/types/chat';
 import {
   __getUnreferencedAttachmentCleanupStateForTests,
   __resetUnreferencedAttachmentCleanupForTests,
@@ -430,6 +435,50 @@ describe('chatStore', () => {
     storage.getAllKeys().forEach((key) => storage.remove(key));
   });
 
+  it('migrates a legacy thread without modelId only from persisted model evidence', () => {
+    const legacyThread = {
+      ...buildThread('legacy', 10),
+      modelId: undefined,
+      activeModelId: 'author/legacy-q8',
+      messages: [
+        {
+          id: 'legacy-user',
+          role: 'user',
+          content: 'Persisted prompt',
+          createdAt: 10,
+          state: 'complete',
+        },
+      ],
+    } as unknown as ChatThread;
+
+    const migrated = sanitizeHydratedThread(legacyThread);
+
+    expect(migrated.modelId).toBe('author/legacy-q8');
+    expect(getThreadActiveModelId(migrated)).toBe('author/legacy-q8');
+    expect(migrated.messages[0]?.modelId).toBe('author/legacy-q8');
+  });
+
+  it('leaves a legacy thread unavailable when it has no persisted model evidence', () => {
+    const legacyThread = {
+      ...buildThread('legacy-empty', 10),
+      modelId: undefined,
+      activeModelId: undefined,
+      messages: [{
+        id: 'legacy-empty-user',
+        role: 'user',
+        content: 'Prompt without model metadata',
+        createdAt: 10,
+        state: 'complete',
+      }],
+    } as unknown as ChatThread;
+
+    const migrated = sanitizeHydratedThread(legacyThread);
+
+    expect(migrated.modelId).toBe('');
+    expect(getThreadActiveModelId(migrated)).toBe('');
+    expect(migrated.messages[0]?.modelId).toBeUndefined();
+  });
+
   it('findMostRecentThreadId returns the newest thread id without sorting', () => {
     const threads = {
       a: buildThread('a', 10),
@@ -758,6 +807,212 @@ describe('chatStore', () => {
     });
 
     expect(useChatStore.getState().getConversationIndex()[0]?.modelId).toBe('author/model-q8');
+  });
+
+  it('atomically commits a thread model, full params snapshot, and switch message', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const inferenceRevisionBefore = useChatStore.getState().inferenceRevision;
+    const capture = captureChatPersistenceWrites();
+
+    try {
+      const result = useChatStore.getState().commitThreadModelSelection({
+        threadId,
+        expectedCurrentModelId: 'author/model-q4',
+        nextModelId: 'author/model-q8',
+        paramsSnapshot: {
+          temperature: 0.25,
+          topP: 0.75,
+          topK: 24,
+          minP: 0.02,
+          repetitionPenalty: 1.1,
+          maxTokens: 2048,
+          reasoningEffort: 'high',
+          seed: 123,
+        },
+        at: 123,
+      });
+
+      expect(result).toEqual({
+        status: 'applied',
+        switchMessageId: expect.any(String),
+      });
+      expect(useChatStore.getState().inferenceRevision).toBe(inferenceRevisionBefore + 1);
+      expect(useChatStore.getState().getThread(threadId)).toEqual(expect.objectContaining({
+        activeModelId: 'author/model-q8',
+        paramsSnapshot: {
+          temperature: 0.25,
+          topP: 0.75,
+          topK: 24,
+          minP: 0.02,
+          repetitionPenalty: 1.1,
+          maxTokens: 2048,
+          reasoningEffort: 'high',
+          seed: 123,
+        },
+        messages: [
+          expect.objectContaining({
+            id: result.status === 'applied' ? result.switchMessageId : undefined,
+            kind: 'model_switch',
+            switchFromModelId: 'author/model-q4',
+            switchToModelId: 'author/model-q8',
+            createdAt: 123,
+          }),
+        ],
+      }));
+      expect(capture.setKeys.filter((key) => key === getChatThreadStorageKey(threadId)))
+        .toHaveLength(1);
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it('rolls back both model and params when atomic model selection persistence fails', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    const threadBefore = useChatStore.getState().getThread(threadId);
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    const writeError = new Error('simulated atomic model selection write failure');
+    let didFail = false;
+    appStorage.set = jest.fn(function setWithFailure(this: unknown, key: string, value: unknown) {
+      if (!didFail && key === getChatThreadStorageKey(threadId)) {
+        didFail = true;
+        throw writeError;
+      }
+      return originalSet.call(this, key, value);
+    });
+
+    try {
+      expect(useChatStore.getState().commitThreadModelSelection({
+        threadId,
+        expectedCurrentModelId: 'author/model-q4',
+        nextModelId: 'author/model-q8',
+        paramsSnapshot: {
+          temperature: 0.1,
+          topP: 0.2,
+          topK: 8,
+          minP: 0.01,
+          repetitionPenalty: 1.2,
+          maxTokens: 2048,
+          reasoningEffort: 'high',
+          seed: 7,
+        },
+      })).toEqual({
+        status: 'persistence_failed',
+        error: writeError,
+      });
+    } finally {
+      appStorage.set = originalSet;
+    }
+
+    expect(didFail).toBe(true);
+    expect(useChatStore.getState().getThread(threadId)).toBe(threadBefore);
+    expect(getThreadActiveModelId(useChatStore.getState().getThread(threadId)!)).toBe(
+      'author/model-q4',
+    );
+    expect(useChatStore.getState().getThread(threadId)?.paramsSnapshot)
+      .toEqual(threadBefore?.paramsSnapshot);
+    expect(
+      useChatStore.getState().getThread(threadId)?.messages.some(
+        (message) => message.kind === 'model_switch',
+      ),
+    ).toBe(false);
+    expect(readChatThreadRecord(storage, threadId)).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        thread: expect.objectContaining({
+          activeModelId: 'author/model-q4',
+          paramsSnapshot: threadBefore?.paramsSnapshot,
+        }),
+      }),
+    });
+  });
+
+  it('rejects stale, busy, unchanged, and missing atomic model selections without mutation', () => {
+    const thread = buildCompletedRegenerationThread('thread-atomic-model-guards');
+    seedPersistedChatThread(thread);
+    const originalThread = useChatStore.getState().threads[thread.id];
+
+    useChatStore.setState({ activeThreadId: null });
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'stale' });
+    expect(useChatStore.getState().threads[thread.id]).toBe(originalThread);
+
+    useChatStore.setState({ activeThreadId: thread.id });
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q6',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'stale' });
+    expect(useChatStore.getState().threads[thread.id]).toBe(originalThread);
+
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q4',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'unchanged' });
+    expect(useChatStore.getState().threads[thread.id]).toBe(originalThread);
+
+    const replacementId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      `${thread.id}-user-1`,
+      'Edited prompt protected by branch replacement',
+    );
+    expect(replacementId).toBeTruthy();
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: thread.id,
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'busy' });
+    expect(getThreadActiveModelId(useChatStore.getState().threads[thread.id])).toBe(
+      'author/model-q4',
+    );
+    expect(useChatStore.getState().finalizeAssistantTurn(
+      thread.id,
+      replacementId!,
+      { outcome: 'stopped' },
+    )).toEqual({ status: 'restored_without_write' });
+
+    expect(useChatStore.getState().commitThreadModelSelection({
+      threadId: 'missing-thread',
+      expectedCurrentModelId: 'author/model-q4',
+      nextModelId: 'author/model-q8',
+      paramsSnapshot: thread.paramsSnapshot,
+    })).toEqual({ status: 'missing' });
   });
 
   it('switchThreadModel updates activeModelId and appends a model_switch system message', () => {
@@ -4704,6 +4959,30 @@ describe('chatStore', () => {
     expect(readPersistedChatIndex().activeThreadId).toBeNull();
   });
 
+  it('rejects a missing active thread without damaging the valid selection', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+
+    expect(useChatStore.getState().setActiveThread(threadId)).toBe(true);
+    expect(useChatStore.getState().setActiveThread('missing-notification-thread')).toBe(false);
+
+    expect(useChatStore.getState().activeThreadId).toBe(threadId);
+    expect(readPersistedChatIndex().activeThreadId).toBe(threadId);
+  });
+
   it('recovers a pending thread commit when the record was written before the index update', async () => {
     const thread = buildThread('thread-pending-record-first', 20);
 
@@ -5348,7 +5627,10 @@ describe('chatStore', () => {
     const capture = captureClearIndexWrites();
 
     try {
-      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+        count: 1,
+        threadIds: [staleThread.id],
+      });
 
       expect(capture.writes).toEqual([
         expect.objectContaining({
@@ -6624,24 +6906,66 @@ describe('chatStore', () => {
   it('prunes inactive threads that fall outside the retention window', () => {
     const now = 100 * 24 * 60 * 60 * 1000;
     const staleThread = buildThread('thread-stale', now - 95 * 24 * 60 * 60 * 1000);
+    const oldestThread = buildThread('thread-oldest', now - 150 * 24 * 60 * 60 * 1000);
     const activeOldThread = buildThread('thread-active', now - 120 * 24 * 60 * 60 * 1000);
     const recentThread = buildThread('thread-recent', now - 10 * 24 * 60 * 60 * 1000);
 
     useChatStore.setState({
       threads: {
         [staleThread.id]: staleThread,
+        [oldestThread.id]: oldestThread,
         [activeOldThread.id]: activeOldThread,
         [recentThread.id]: recentThread,
       },
       activeThreadId: activeOldThread.id,
     });
 
-    const deletedCount = useChatStore.getState().pruneExpiredThreads(90, now);
+    const cleanupResult = useChatStore.getState().pruneExpiredThreads(90, now);
 
-    expect(deletedCount).toBe(1);
+    expect(cleanupResult).toEqual({
+      count: 2,
+      threadIds: [staleThread.id, oldestThread.id],
+    });
     expect(useChatStore.getState().getThread(staleThread.id)).toBeNull();
+    expect(useChatStore.getState().getThread(oldestThread.id)).toBeNull();
     expect(useChatStore.getState().getThread(activeOldThread.id)).toEqual(activeOldThread);
     expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
+  });
+
+  it('does not prune an expired thread while its branch replacement runtime is active', () => {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const now = 200 * dayMs;
+    const expiredAt = now - 95 * dayMs;
+    const branchThread = buildTrailingModelSwitchThread(
+      'thread-expired-branch-runtime',
+      { targetCreatedAt: expiredAt },
+    );
+    const recentThread = buildThread('thread-recent-during-branch-runtime', now - dayMs);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(expiredAt);
+
+    try {
+      seedPersistedChatThread(branchThread, expiredAt);
+      expect(useChatStore.getState().replaceBranchFromUserMessage(
+        branchThread.id,
+        `${branchThread.id}-user-1`,
+        'Edited prompt whose runtime must remain protected',
+      )).toBeTruthy();
+      useChatStore.setState((state) => ({
+        threads: {
+          ...state.threads,
+          [recentThread.id]: recentThread,
+        },
+        activeThreadId: recentThread.id,
+      }));
+
+      expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+        count: 0,
+        threadIds: [],
+      });
+      expect(useChatStore.getState().getThread(branchThread.id)).not.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('removes expired v2 records during retention cleanup without touching retained threads', () => {
@@ -6665,7 +6989,10 @@ describe('chatStore', () => {
       activeThreadId: recentThread.id,
     });
 
-    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+      count: 1,
+      threadIds: [staleThread.id],
+    });
 
     const index = JSON.parse(storage.getString(CHAT_PERSISTENCE_INDEX_KEY) ?? '{}');
     expect(storage.getString(getChatThreadStorageKey(staleThread.id))).toBeUndefined();
@@ -6673,6 +7000,58 @@ describe('chatStore', () => {
     expect(index.threadIds).toEqual([recentThread.id]);
     expect(index.revision).toEqual(expect.any(Number));
     expect(storage.getString(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY)).toBeUndefined();
+  });
+
+  it('does not expose removed thread IDs when retention persistence rolls back', () => {
+    const now = 100 * 24 * 60 * 60 * 1000;
+    const staleThread = buildThread(
+      'thread-retention-persistence-failure',
+      now - 95 * 24 * 60 * 60 * 1000,
+    );
+    const recentThread = buildThread(
+      'thread-retention-persistence-retained',
+      now - 10 * 24 * 60 * 60 * 1000,
+    );
+    writeChatThreadRecord(storage, staleThread, now);
+    writeChatThreadRecord(storage, recentThread, now);
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: recentThread.id,
+      threadIds: [staleThread.id, recentThread.id],
+      updatedAt: now,
+    });
+    useChatStore.setState({
+      threads: {
+        [staleThread.id]: staleThread,
+        [recentThread.id]: recentThread,
+      },
+      activeThreadId: recentThread.id,
+    });
+
+    const appStorage = getAppStorage() as unknown as { remove: typeof storage.remove };
+    const originalRemove = appStorage.remove;
+    const persistenceError = new Error('simulated retention persistence failure');
+    const staleThreadKey = getChatThreadStorageKey(staleThread.id);
+    appStorage.remove = jest.fn(function removeWithRetentionFailure(
+      this: unknown,
+      key: string,
+    ) {
+      if (key === staleThreadKey) {
+        throw persistenceError;
+      }
+      return originalRemove.call(this, key);
+    });
+
+    try {
+      expect(() => useChatStore.getState().pruneExpiredThreads(90, now))
+        .toThrow(persistenceError);
+    } finally {
+      appStorage.remove = originalRemove;
+    }
+
+    expect(useChatStore.getState().getThread(staleThread.id)).toEqual(staleThread);
+    expect(useChatStore.getState().getThread(recentThread.id)).toEqual(recentThread);
+    expect(storage.getString(staleThreadKey)).toContain(staleThread.title);
   });
 
   it('cleans attachment files removed by retention pruning', async () => {
@@ -6714,7 +7093,10 @@ describe('chatStore', () => {
       activeThreadId: recentThread.id,
     });
 
-    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toBe(1);
+    expect(useChatStore.getState().pruneExpiredThreads(90, now)).toEqual({
+      count: 1,
+      threadIds: [staleThread.id],
+    });
     await flushAttachmentCleanup();
 
     expect(FileSystem.deleteAsync).toHaveBeenCalledWith(staleAttachment.localUri, {
@@ -6736,9 +7118,12 @@ describe('chatStore', () => {
       activeThreadId: 'missing-thread',
     });
 
-    const deletedCount = useChatStore.getState().pruneExpiredThreads(90, now);
+    const cleanupResult = useChatStore.getState().pruneExpiredThreads(90, now);
 
-    expect(deletedCount).toBe(1);
+    expect(cleanupResult).toEqual({
+      count: 1,
+      threadIds: [staleThread.id],
+    });
     expect(useChatStore.getState().activeThreadId).toBe(recentThread.id);
   });
 
@@ -8233,6 +8618,7 @@ describe('chatStore', () => {
       predictedPerSecond: 7.5,
       timeToFirstTokenMs: 640,
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,
@@ -8395,6 +8781,7 @@ describe('chatStore', () => {
       predictedPerSecond: 7.5,
       timeToFirstTokenMs: 640,
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,
@@ -9500,7 +9887,10 @@ describe('chatStore', () => {
     useChatStore.getState().patchAssistantMessage(activeStreaming.id, 'assistant-active', { content: 'Active partial' });
     flushPendingChatPersistenceWrites('background');
 
-    expect(useChatStore.getState().pruneExpiredThreads(7, now)).toBe(1);
+    expect(useChatStore.getState().pruneExpiredThreads(7, now)).toEqual({
+      count: 1,
+      threadIds: [oldStreaming.id],
+    });
     expectNoStreamingProgressArtifacts(oldStreaming.id);
     expect(readChatStreamingProgressRecord(storage, activeStreaming.id)).toEqual({
       ok: true,

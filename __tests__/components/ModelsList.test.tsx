@@ -7,6 +7,7 @@ import { useModelsStore } from '../../src/store/modelsStore';
 import type { ModelFilterCriteria, ModelSortPreference } from '../../src/store/modelsStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
+import { registry } from '../../src/services/LocalStorageRegistry';
 
 let mockLastFlashListProps: any = null;
 let mockModelCardPropsLog: any[] = [];
@@ -39,6 +40,17 @@ function getCanonicalProjectorId(projector: {
   fileName: string;
 }): string {
   return buildProjectorArtifactId(projector);
+}
+
+function hasAncestorWithTestId(node: any, testID: string): boolean {
+  let ancestor = node.parent;
+  while (ancestor) {
+    if (ancestor.props?.testID === testID) {
+      return true;
+    }
+    ancestor = ancestor.parent;
+  }
+  return false;
 }
 
 jest.mock('@shopify/flash-list', () => ({
@@ -89,7 +101,11 @@ jest.mock('@/components/ui/button', () => ({
 }));
 
 jest.mock('@/components/ui/ErrorReportSheet', () => ({
-  ErrorReportSheet: () => null,
+  ErrorReportSheet: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-error-report-sheet' });
+  },
 }));
 
 jest.mock('@/components/ui/ModelCard', () => ({
@@ -101,24 +117,36 @@ jest.mock('@/components/ui/ModelCard', () => ({
 
 jest.mock('@/components/ui/ModelWarmupBanner', () => ({
   MODEL_WARMUP_BANNER_RESERVED_HEIGHT: 0,
-  ModelWarmupBanner: () => null,
+  ModelWarmupBanner: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-warmup-banner' });
+  },
 }));
 
 jest.mock('@/components/ui/ModelParametersSheet', () => ({
-  ModelParametersSheet: () => null,
+  ModelParametersSheet: () => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-parameters-sheet' });
+  },
 }));
 
 jest.mock('@/components/ui/ModelVariantPickerSheet', () => ({
   ModelVariantPickerSheet: (props: any) => {
     mockLastVariantPickerProps = props;
-    return null;
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-variant-picker-sheet' });
   },
 }));
 
 jest.mock('@/components/ui/ProjectorChoiceSheet', () => ({
   ProjectorChoiceSheet: (props: any) => {
     mockLastProjectorChoiceSheetProps = props;
-    return null;
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, { testID: 'models-projector-choice-sheet' });
   },
 }));
 
@@ -379,6 +407,8 @@ describe('ModelsList', () => {
     mockUseModelActionsInput = null;
     mockHandleDownload = jest.fn();
     mockRegistryModel = undefined;
+    (registry.getModel as jest.Mock).mockImplementation(() => mockRegistryModel);
+    (registry.getModels as jest.Mock).mockReturnValue([]);
     mockRegistryUpdateModel = jest.fn((model: ModelMetadata) => {
       mockRegistryModel = model;
     });
@@ -415,7 +445,7 @@ describe('ModelsList', () => {
     expect(handleLoadMore).toHaveBeenCalledWith('manual');
   });
 
-  it('routes picker chrome through a provided full-screen blur target', async () => {
+  it('keeps Android glass overlays outside the provided full-screen blur target', async () => {
     const handleLoadMore = jest.fn();
     const androidBlurTargetRef = React.createRef<any>();
     const renderContentContainer = jest.fn((content) => (
@@ -438,12 +468,54 @@ describe('ModelsList', () => {
     expect(renderContentContainer).toHaveBeenCalledTimes(1);
     expect(getByTestId('external-catalog-content-container')).toBeTruthy();
     expect(queryByTestId('models-warmup-content-blur-target')).toBeNull();
+    [
+      'models-warmup-banner',
+      'models-parameters-sheet',
+      'models-variant-picker-sheet',
+      'models-projector-choice-sheet',
+      'models-error-report-sheet',
+    ].forEach((testID) => {
+      expect(hasAncestorWithTestId(getByTestId(testID), 'external-catalog-content-container')).toBe(false);
+    });
 
     act(() => {
       mockModelCardPropsLog.at(-1)?.onOpenVariantSelector('org/model');
     });
 
     expect(mockLastVariantPickerProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
+  });
+
+  it('reuses the list registry snapshot when the point lookup would return a different clone', () => {
+    const handleLoadMore = jest.fn();
+    const catalogModel = createModel();
+    const listLocalModel = createModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'models/from-list-snapshot.gguf',
+    });
+    const pointLookupClone = createModel({
+      lifecycleStatus: LifecycleStatus.FAILED,
+      downloadProgress: 0.25,
+      localPath: 'models/from-point-lookup.gguf',
+    });
+    (registry.getModels as jest.Mock).mockReturnValue([listLocalModel]);
+    (registry.getModel as jest.Mock).mockReturnValue(pointLookupClone);
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      models: [catalogModel],
+    } as any);
+
+    render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    const listProjection = mockLastFlashListProps.data[0];
+    expect(registry.getModels).toHaveBeenCalledTimes(1);
+    expect(registry.getModel).not.toHaveBeenCalled();
+    expect(mockModelCardPropsLog.at(-1)?.model).toBe(listProjection);
+    expect(mockModelCardPropsLog.at(-1)?.model).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'models/from-list-snapshot.gguf',
+    }));
   });
 
   it('opens projector choice from the list download flow and resumes download after selection', async () => {

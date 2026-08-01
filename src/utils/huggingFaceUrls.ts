@@ -12,25 +12,45 @@ export type RemoteProjectorIdentity = {
 const HUGGING_FACE_RESOLVE_HOSTNAMES = new Set([HF_HOSTNAME, HF_SHORT_HOSTNAME]);
 const INVALID_REMOTE_PATH_SEGMENTS = new Set(['', '.', '..']);
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+const REMOTE_URL_PARSE_CACHE_LIMIT = 256;
+const huggingFaceHostnameCache = new Map<string, boolean>();
+const huggingFaceResolveIdentityCache = new Map<string, RemoteProjectorIdentity | null>();
+
+function cacheRemoteUrlResult<T>(cache: Map<string, T>, key: string, value: T): T {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > REMOTE_URL_PARSE_CACHE_LIMIT) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey !== undefined) {
+      cache.delete(oldestKey);
+    }
+  }
+  return value;
+}
 
 export function hasHuggingFaceHostname(url: unknown): boolean {
   if (typeof url !== 'string') {
     return false;
   }
 
+  const cacheKey = url.trim();
+  if (huggingFaceHostnameCache.has(cacheKey)) {
+    return huggingFaceHostnameCache.get(cacheKey) === true;
+  }
+
   try {
-    const parsedHostname = new URL(url).hostname.toLowerCase();
+    const parsedHostname = new URL(cacheKey).hostname.toLowerCase();
     const hostname = parsedHostname.endsWith('.')
       ? parsedHostname.slice(0, -1)
       : parsedHostname;
-    return (
+    return cacheRemoteUrlResult(huggingFaceHostnameCache, cacheKey, (
       hostname === HF_HOSTNAME
       || hostname.endsWith(`.${HF_HOSTNAME}`)
       || hostname === HF_SHORT_HOSTNAME
       || hostname.endsWith(`.${HF_SHORT_HOSTNAME}`)
-    );
+    ));
   } catch {
-    return false;
+    return cacheRemoteUrlResult(huggingFaceHostnameCache, cacheKey, false);
   }
 }
 
@@ -199,13 +219,8 @@ export function resolveHuggingFaceRevision(revision: string | null | undefined):
   return normalizeHuggingFaceRevision(revision) ?? DEFAULT_HF_REVISION;
 }
 
-export function resolveHuggingFaceResolveIdentity(url: unknown): RemoteProjectorIdentity | null {
-  if (typeof url !== 'string') {
-    return null;
-  }
-
+function resolveHuggingFaceResolveIdentityUncached(trimmedUrl: string): RemoteProjectorIdentity | null {
   try {
-    const trimmedUrl = url.trim();
     const parsed = new URL(trimmedUrl);
     const hostname = parsed.hostname.toLowerCase();
     if (
@@ -251,6 +266,22 @@ export function resolveHuggingFaceResolveIdentity(url: unknown): RemoteProjector
   } catch {
     return null;
   }
+}
+
+export function resolveHuggingFaceResolveIdentity(url: unknown): RemoteProjectorIdentity | null {
+  if (typeof url !== 'string') {
+    return null;
+  }
+
+  const cacheKey = url.trim();
+  if (huggingFaceResolveIdentityCache.has(cacheKey)) {
+    const cached = huggingFaceResolveIdentityCache.get(cacheKey);
+    return cached ? { ...cached } : null;
+  }
+
+  const resolved = resolveHuggingFaceResolveIdentityUncached(cacheKey);
+  cacheRemoteUrlResult(huggingFaceResolveIdentityCache, cacheKey, resolved);
+  return resolved ? { ...resolved } : null;
 }
 
 function resolveOrdinaryHttpRemoteFilePath(url: unknown): string | null {

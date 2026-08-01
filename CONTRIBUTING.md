@@ -161,13 +161,13 @@ npm run android:scenarios -- --pack catalog
 npm run android:scenarios -- --pack dependency-ui
 npm run android:scenarios -- --pack runtime
 npm run android:scenarios:storage -- --skip-build
-npm run android:scenarios:branch-regeneration
+npm run android:scenarios:branch-regeneration -- --fail-on-skip
 npm run android:scenarios -- --pack native
 ```
 
-In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a specific pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a hosted pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
-`android-pack-branch-regeneration` does not run on the empty hosted emulator. It dispatches the existing 15-step release pack, with `--fail-on-skip`, to the serialized, ephemeral self-hosted runner labeled `pocket-ai-branch-regeneration`. That isolated runner must accept only one job, retain no credentials or personal data, expose `adb`, provide a disposable connected device through `POCKET_AI_BRANCH_QA_SERIAL`, and find an installed same-signature QA app containing a loaded local model plus the prepared fixture and sentinel conversations. Missing runner state or pack preconditions fail CI. Discard the runner instance after the job. A successful run destroys the prepared conversations, so reprepare the device before applying the label again. Use `android-pack-catalog` for live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
+The destructive `branch-regeneration` pack is local-only and is never dispatched by GitHub Actions. Run it with `--fail-on-skip` from a trusted maintainer workstation connected to a disposable device that contains a loaded local model plus the prepared fixture and sentinel conversations. Missing device, model, fixture, or provenance preconditions must fail the local run. A successful run destroys the prepared conversations, so reprepare the device before running it again. Use `android-pack-catalog` for hosted live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
 
 ## Localization
 

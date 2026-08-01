@@ -219,6 +219,93 @@ describe('memoryFit', () => {
     }));
   });
 
+  it.each([
+    ['stateCacheBudgetMb', 64],
+    ['state_cache_budget_mb', 128],
+    ['stateCacheBudgetMb', 160],
+  ] as const)('accounts for the full %s hard cap exactly once at %i MiB', (alias, budgetMb) => {
+    const createFit = (runtimeParams: Record<string, unknown>) => estimateAccurateMemoryFit({
+      input: {
+        modelSizeBytes: 1_000_000_000,
+        verifiedFileSizeBytes: 1_000_000_000,
+        metadataTrust: 'verified_local',
+        ggufMetadata: {
+          'general.architecture': 'mamba',
+          'mamba.block_count': 2,
+          'mamba.attention.head_count_kv': 4,
+          'mamba.embedding_length': 64,
+        },
+        runtimeParams: {
+          contextTokens: 128,
+          cacheTypeK: 'f16',
+          cacheTypeV: 'f16',
+          gpuLayers: 0,
+          useMmap: false,
+          ...runtimeParams,
+        },
+        snapshot: {
+          timestampMs: 1,
+          platform: 'android',
+          totalBytes: 8 * 1024 * 1024 * 1024,
+          availableBytes: 6 * 1024 * 1024 * 1024,
+          usedBytes: 2 * 1024 * 1024 * 1024,
+          appUsedBytes: 256 * 1024 * 1024,
+          lowMemory: false,
+          pressureLevel: 'normal',
+          thresholdBytes: 128 * 1024 * 1024,
+        },
+      },
+      totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+    });
+    const baseFit = createFit({ stateCacheBudgetMb: 0 });
+    const cacheFit = createFit({ [alias]: budgetMb });
+    const expectedBytes = budgetMb * 1024 * 1024;
+
+    expect(cacheFit.breakdown.promptStateCacheBytes).toBe(expectedBytes);
+    expect(cacheFit.requiredBytes - baseFit.requiredBytes).toBe(expectedBytes);
+  });
+
+  it('does not scale the prompt state cache hard cap with calibration factors', () => {
+    const fit = estimateAccurateMemoryFit({
+      input: {
+        modelSizeBytes: 1_000_000_000,
+        verifiedFileSizeBytes: 1_000_000_000,
+        metadataTrust: 'verified_local',
+        ggufMetadata: {
+          'general.architecture': 'mamba',
+        },
+        runtimeParams: {
+          stateCacheBudgetMb: 160,
+        },
+        calibrationRecord: {
+          key: 'calibrated-profile',
+          sampleCount: 4,
+          successCount: 4,
+          failureCount: 0,
+          weightsCorrectionFactor: 0.9,
+          computeCorrectionFactor: 0.8,
+          overheadCorrectionFactor: 0.8,
+          failurePenaltyFactor: 1,
+          lastObservedAtMs: Date.now(),
+        },
+      },
+      totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+    });
+
+    expect(fit.breakdown.promptStateCacheBytes).toBe(160 * 1024 * 1024);
+  });
+
+  it('keeps fast catalog estimates cache-free until runtime policy is known', () => {
+    const fit = estimateFastMemoryFit({
+      modelSizeBytes: 1_000_000_000,
+      totalMemoryBytes: 8 * 1024 * 1024 * 1024,
+      metadataTrust: 'trusted_remote',
+      ggufMetadata: { 'general.architecture': 'mamba' },
+    });
+
+    expect(fit.breakdown.promptStateCacheBytes).toBe(0);
+  });
+
   it('returns unknown for accurate estimates when total memory is missing', () => {
     const result = estimateAccurateMemoryFit({
       input: {

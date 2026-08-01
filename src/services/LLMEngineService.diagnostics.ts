@@ -17,6 +17,7 @@ import type {
   VisionCapabilityDiagnostic,
 } from '../types/multimodal';
 import { sanitizeMultimodalFailureCategory } from '../utils/multimodalFailureReason';
+import type { PromptStateCachePolicy } from './PromptStateCachePolicy';
 
 function toNonNegativeInteger(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
@@ -77,6 +78,7 @@ export function buildInferenceCompletionTelemetry(source: {
       prompt_per_second?: unknown;
     } | null;
   };
+  mtpSupported: boolean;
   mtpRequested: boolean;
   mtpAttempted: boolean;
   mtpFallbackUsed: boolean;
@@ -96,6 +98,7 @@ export function buildInferenceCompletionTelemetry(source: {
     promptPerSecond: toOptionalPositiveNumber(source.result.timings?.prompt_per_second),
     timeToFirstTokenMs: toOptionalNonNegativeNumber(source.timeToFirstTokenMs),
     mtp: {
+      supported: source.mtpSupported,
       requested: source.mtpRequested,
       attempted: source.mtpAttempted,
       fallbackUsed: source.mtpFallbackUsed,
@@ -270,6 +273,7 @@ export function buildEngineDiagnosticsSnapshot(source: {
   lastLifecycleError: string | null;
   multimodalDiagnostics: MultimodalDiagnosticsSummary | null;
   speculativeDecodingDiagnostics?: EngineSpeculativeDecodingDiagnostics | null;
+  activePromptStateCachePolicy: PromptStateCachePolicy | null;
 }): NonNullable<EngineState['diagnostics']> {
   const backendDevices = buildSafeDeviceCategories(source.activeBackendDevices, source.activeBackendMode) ?? [];
   const initDevices = buildSafeDeviceCategories(source.initDevices, source.activeBackendMode);
@@ -317,6 +321,24 @@ export function buildEngineDiagnosticsSnapshot(source: {
     initNBatch: source.initNBatch ?? undefined,
     initNUbatch: source.initNUbatch ?? undefined,
     initKvUnified: source.initKvUnified ?? undefined,
+    stateCacheBudgetMb: source.activePromptStateCachePolicy
+      ? toOptionalNonNegativeNumber(source.activePromptStateCachePolicy.budgetMb)
+      : undefined,
+    stateCacheMaxCheckpoints: source.activePromptStateCachePolicy
+      ? toOptionalNonNegativeNumber(source.activePromptStateCachePolicy.maxCheckpoints)
+      : undefined,
+    stateCacheEnabled: source.activePromptStateCachePolicy?.enabled,
+    stateCacheEligibility: source.activePromptStateCachePolicy?.eligibility,
+    stateCachePolicyReason: source.activePromptStateCachePolicy?.reason,
+    stateCachePolicyVersion: source.activePromptStateCachePolicy
+      ? toOptionalNonNegativeNumber(source.activePromptStateCachePolicy.policyVersion)
+      : undefined,
+    promptStateCacheBytes: source.activePromptStateCachePolicy
+      ? toOptionalNonNegativeNumber(
+          source.activePromptStateCachePolicy.finalMemoryFit?.breakdown.promptStateCacheBytes ?? 0,
+        )
+      : undefined,
+    stateCacheArchitecture: source.activePromptStateCachePolicy?.architecture ?? undefined,
     lastLifecycleEvent: source.lastLifecycleEvent ?? undefined,
     lastLifecycleError: source.lastLifecycleError ?? undefined,
     multimodal: source.multimodalDiagnostics ? { ...source.multimodalDiagnostics } : undefined,

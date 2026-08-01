@@ -8,6 +8,7 @@ import {
   recordAndroidQaPreparedGenerationEvidence,
   releaseAndroidQaGenerationGate,
   resetAndroidQaGenerationEvidenceForTests,
+  shouldReduceAndroidQaStreamingMotion,
   shouldHoldAndroidQaGenerationBeforeFirstOutput,
   waitForAndroidQaGenerationGateRelease,
 } from '../../src/services/AndroidQaGenerationEvidence';
@@ -139,5 +140,25 @@ describe('AndroidQaGenerationEvidence', () => {
 
     beginAndroidQaGeneration('assistant-2');
     expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toBeNull();
+  });
+
+  it('reduces streaming motion only for an explicit Android QA evidence bundle', () => {
+    const originalAndroidQa = process.env.EXPO_PUBLIC_ANDROID_QA;
+    try {
+      delete process.env.EXPO_PUBLIC_ANDROID_QA;
+      expect(shouldReduceAndroidQaStreamingMotion()).toBe(false);
+
+      process.env.EXPO_PUBLIC_ANDROID_QA = '1';
+      expect(shouldReduceAndroidQaStreamingMotion()).toBe(true);
+
+      process.env.EXPO_PUBLIC_ANDROID_QA = '0';
+      expect(shouldReduceAndroidQaStreamingMotion()).toBe(false);
+    } finally {
+      if (originalAndroidQa === undefined) {
+        delete process.env.EXPO_PUBLIC_ANDROID_QA;
+      } else {
+        process.env.EXPO_PUBLIC_ANDROID_QA = originalAndroidQa;
+      }
+    }
   });
 });

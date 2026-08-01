@@ -101,6 +101,38 @@ describe('NotificationService', () => {
     });
   });
 
+  it('keeps native notification failures best-effort and privacy-safe', async () => {
+    (notificationService as any).permissionState = 'granted';
+    (Notifications.scheduleNotificationAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('private-thread-id private-payload'),
+    );
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await expect(notificationService.sendLocalNotification({
+        title: 'private-title',
+        data: {
+          threadId: 'private-thread-id',
+          payload: 'private-payload',
+        },
+      })).resolves.toBeNull();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[NotificationService] Failed to send local notification',
+        {
+          scope: 'local_notification_send',
+          errorName: 'Error',
+        },
+      );
+      const loggedSurface = JSON.stringify(warnSpy.mock.calls);
+      expect(loggedSurface).not.toContain('private-title');
+      expect(loggedSurface).not.toContain('private-thread-id');
+      expect(loggedSurface).not.toContain('private-payload');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it.each([
     [0, false, 'unknown'],
     [1, false, 'denied'],
@@ -218,6 +250,7 @@ describe('NotificationService', () => {
     await notificationService.sendInferenceErrorNotification({ threadId: 'thread-3' });
 
     expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(1, {
+      identifier: 'pocket-ai:inference:thread-1',
       content: expect.objectContaining({
         title: 'notifications.inference.complete.title',
         data: { taskType: 'inference', threadId: 'thread-1' },
@@ -225,6 +258,7 @@ describe('NotificationService', () => {
       trigger: { channelId: 'inference' },
     });
     expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(2, {
+      identifier: 'pocket-ai:inference:thread-2',
       content: expect.objectContaining({
         title: 'notifications.inference.interrupted.title',
         data: { taskType: 'inference', threadId: 'thread-2' },
@@ -232,12 +266,99 @@ describe('NotificationService', () => {
       trigger: { channelId: 'inference' },
     });
     expect(Notifications.scheduleNotificationAsync).toHaveBeenNthCalledWith(3, {
+      identifier: 'pocket-ai:inference:thread-3',
       content: expect.objectContaining({
         title: 'notifications.inference.error.title',
         data: { taskType: 'inference', threadId: 'thread-3' },
       }),
       trigger: { channelId: 'inference' },
     });
+  });
+
+  it('dismisses only the deterministic inference notification for a deleted thread', async () => {
+    await expect(
+      notificationService.dismissInferenceNotificationForThread('thread/with space'),
+    ).resolves.toBeUndefined();
+
+    expect(Notifications.dismissNotificationAsync).toHaveBeenCalledTimes(1);
+    expect(Notifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'pocket-ai:inference:thread%2Fwith%20space',
+    );
+  });
+
+  it('does not let inference notification dismissal failures block deletion flows', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    (Notifications.dismissNotificationAsync as jest.Mock).mockRejectedValueOnce(
+      new Error('native dismiss failed'),
+    );
+
+    await expect(
+      notificationService.dismissInferenceNotificationForThread('thread-1'),
+    ).resolves.toBeUndefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[NotificationService] Failed to dismiss inference notification',
+      expect.objectContaining({
+        scope: 'inference_notification_dismiss',
+        errorName: 'Error',
+      }),
+    );
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it('dismisses each unique valid thread notification in a cleanup batch', async () => {
+    const dismissSpy = jest
+      .spyOn(notificationService, 'dismissInferenceNotificationForThread')
+      .mockResolvedValue(undefined);
+
+    await expect(notificationService.dismissInferenceNotificationsForThreads([
+      'thread-1',
+      'thread-2',
+      'thread-1',
+      '',
+      '   ',
+    ])).resolves.toBeUndefined();
+
+    expect(dismissSpy).toHaveBeenCalledTimes(2);
+    expect(dismissSpy).toHaveBeenNthCalledWith(1, 'thread-1');
+    expect(dismissSpy).toHaveBeenNthCalledWith(2, 'thread-2');
+
+    dismissSpy.mockClear();
+    await expect(
+      notificationService.dismissInferenceNotificationsForThreads([]),
+    ).resolves.toBeUndefined();
+    expect(dismissSpy).not.toHaveBeenCalled();
+    dismissSpy.mockRestore();
+  });
+
+  it('keeps cleanup batches best-effort and logs unexpected dismissal failures safely', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const dismissSpy = jest
+      .spyOn(notificationService, 'dismissInferenceNotificationForThread')
+      .mockRejectedValueOnce(new Error('private conversation payload'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(notificationService.dismissInferenceNotificationsForThreads([
+      'private-thread-id',
+      'thread-2',
+    ])).resolves.toBeUndefined();
+
+    expect(dismissSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[NotificationService] Failed to dismiss inference notification',
+      expect.objectContaining({
+        scope: 'inference_notification_batch_dismiss',
+        errorName: 'Error',
+      }),
+    );
+    const serializedWarnings = JSON.stringify(warnSpy.mock.calls);
+    expect(serializedWarnings).not.toContain('private-thread-id');
+    expect(serializedWarnings).not.toContain('private conversation payload');
+    expect(warnSpy.mock.calls.flat().some((argument) => argument instanceof Error)).toBe(false);
+
+    dismissSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   it('refuses to start foreground-service notifications on Android when notifications are denied', async () => {

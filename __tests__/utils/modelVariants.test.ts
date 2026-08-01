@@ -307,6 +307,14 @@ describe('modelVariants', () => {
     }));
   });
 
+  it('preserves object identity when an already-normalized active variant is reselected', () => {
+    const model = createModel({ sha256: 'a'.repeat(64) });
+
+    expect(applyModelVariantSelection(model, 'model.Q4_K_M.gguf')).toBe(model);
+    expect(applyDefaultCatalogModelVariantSelection(model)).toBe(model);
+    expect(applyModelVariantSelectionIfAvailable(model, model)).toBe(model);
+  });
+
   it('preserves same-file trusted metadata when the variant entry is incomplete', () => {
     const selected = applyModelVariantSelection(
       createModel({

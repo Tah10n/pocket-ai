@@ -13,12 +13,34 @@ type ProjectorArtifactSizeIdentity = Pick<ProjectorArtifact, 'size'> & Partial<P
 type ProjectorArtifactDisplayIdentity = ProjectorArtifactSizeIdentity & Partial<Pick<ProjectorArtifact, 'ownerVariantId'>>;
 type ModelDisplayArtifactSizeInput = Pick<ModelMetadata, 'size' | 'projectorCandidates' | 'selectedProjectorId'> & Partial<Pick<
   ModelMetadata,
-  'activeVariantId' | 'artifacts' | 'id' | 'resolvedFileName' | 'speculativeDecoding' | 'variants'
+  | 'activeVariantId'
+  | 'artifacts'
+  | 'chatModalities'
+  | 'id'
+  | 'resolvedFileName'
+  | 'speculativeDecoding'
+  | 'variants'
 >>;
 type ModelDisplayProjectorCandidatesResult = {
   candidates: ModelMetadata['projectorCandidates'];
   runtimeToDisplayProjectorIds: Map<string, string>;
 };
+type ModelDisplayProjectorCacheEntry = {
+  modelId: ModelDisplayArtifactSizeInput['id'];
+  activeVariantId: ModelDisplayArtifactSizeInput['activeVariantId'];
+  resolvedFileName: ModelDisplayArtifactSizeInput['resolvedFileName'];
+  variants: ModelDisplayArtifactSizeInput['variants'];
+  projectorCandidates: ModelDisplayArtifactSizeInput['projectorCandidates'];
+  artifacts: ModelDisplayArtifactSizeInput['artifacts'];
+  chatModalities: ModelDisplayArtifactSizeInput['chatModalities'];
+  defaultResolution?: ModelDisplayProjectorCandidatesResult;
+  explicitResolutions: WeakMap<
+    NonNullable<ModelMetadata['projectorCandidates']>,
+    ModelDisplayProjectorCandidatesResult
+  >;
+};
+
+const modelDisplayProjectorCache = new WeakMap<object, ModelDisplayProjectorCacheEntry>();
 
 export const DECIMAL_GIGABYTE = 1000 * 1000 * 1000;
 export const UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES = DECIMAL_GIGABYTE;
@@ -141,7 +163,7 @@ function filterDisplayProjectorsForEffectiveModality(
   return filtered.length > 0 ? filtered : undefined;
 }
 
-function resolveModelDisplayProjectorCandidates(
+function resolveModelDisplayProjectorCandidatesUncached(
   model: ModelDisplayArtifactSizeInput,
   projectorCandidates?: ModelMetadata['projectorCandidates'],
 ): ModelDisplayProjectorCandidatesResult {
@@ -191,6 +213,63 @@ function resolveModelDisplayProjectorCandidates(
     ),
     runtimeToDisplayProjectorIds: emptyIdMap,
   };
+}
+
+function getModelDisplayProjectorCacheEntry(
+  model: ModelDisplayArtifactSizeInput,
+): ModelDisplayProjectorCacheEntry {
+  const cached = modelDisplayProjectorCache.get(model);
+  if (
+    cached
+    && cached.modelId === model.id
+    && cached.activeVariantId === model.activeVariantId
+    && cached.resolvedFileName === model.resolvedFileName
+    && cached.variants === model.variants
+    && cached.projectorCandidates === model.projectorCandidates
+    && cached.artifacts === model.artifacts
+    && cached.chatModalities === model.chatModalities
+  ) {
+    return cached;
+  }
+
+  const entry: ModelDisplayProjectorCacheEntry = {
+    modelId: model.id,
+    activeVariantId: model.activeVariantId,
+    resolvedFileName: model.resolvedFileName,
+    variants: model.variants,
+    projectorCandidates: model.projectorCandidates,
+    artifacts: model.artifacts,
+    chatModalities: model.chatModalities,
+    explicitResolutions: new WeakMap(),
+  };
+  modelDisplayProjectorCache.set(model, entry);
+  return entry;
+}
+
+function resolveModelDisplayProjectorCandidates(
+  model: ModelDisplayArtifactSizeInput,
+  projectorCandidates?: ModelMetadata['projectorCandidates'],
+): ModelDisplayProjectorCandidatesResult {
+  const cache = getModelDisplayProjectorCacheEntry(model);
+  if (projectorCandidates) {
+    if (cache.defaultResolution?.candidates === projectorCandidates) {
+      return cache.defaultResolution;
+    }
+    const cached = cache.explicitResolutions.get(projectorCandidates);
+    if (cached) {
+      return cached;
+    }
+  } else if (cache.defaultResolution) {
+    return cache.defaultResolution;
+  }
+
+  const resolution = resolveModelDisplayProjectorCandidatesUncached(model, projectorCandidates);
+  if (projectorCandidates) {
+    cache.explicitResolutions.set(projectorCandidates, resolution);
+  } else {
+    cache.defaultResolution = resolution;
+  }
+  return resolution;
 }
 
 export function getModelDisplayProjectorCandidates(

@@ -29,6 +29,9 @@ export type ModelInitAttemptIdentity = ModelInitCandidateIdentity & {
   cacheTypeK: string;
   cacheTypeV: string;
   speculativeEnabled: boolean;
+  stateCacheBudgetMb: number;
+  stateCacheMaxCheckpoints: number;
+  stateCachePolicyVersion: number;
 };
 
 export type ModelInitAttemptDecision =
@@ -91,6 +94,9 @@ export function buildModelInitAttemptKey(identity: ModelInitAttemptIdentity): st
     cacheTypeK: identity.cacheTypeK.trim().toLowerCase(),
     cacheTypeV: identity.cacheTypeV.trim().toLowerCase(),
     speculativeEnabled: identity.speculativeEnabled === true,
+    stateCacheBudgetMb: normalizeInteger(identity.stateCacheBudgetMb),
+    stateCacheMaxCheckpoints: normalizeInteger(identity.stateCacheMaxCheckpoints),
+    stateCachePolicyVersion: normalizeInteger(identity.stateCachePolicyVersion),
   });
 }
 
@@ -103,6 +109,9 @@ function buildModelInitMemoryProfileKey(identity: ModelInitAttemptIdentity): str
     cacheTypeK: identity.cacheTypeK.trim().toLowerCase(),
     cacheTypeV: identity.cacheTypeV.trim().toLowerCase(),
     speculativeEnabled: identity.speculativeEnabled === true,
+    stateCacheBudgetMb: normalizeInteger(identity.stateCacheBudgetMb),
+    stateCacheMaxCheckpoints: normalizeInteger(identity.stateCacheMaxCheckpoints),
+    stateCachePolicyVersion: normalizeInteger(identity.stateCachePolicyVersion),
   });
 }
 

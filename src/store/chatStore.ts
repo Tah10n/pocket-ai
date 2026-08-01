@@ -163,6 +163,25 @@ export type AssistantTurnCommitResult =
       };
     };
 
+export type ThreadModelSelectionCommitResult =
+  | { status: 'applied'; switchMessageId: string }
+  | { status: 'unchanged' }
+  | { status: 'stale' }
+  | { status: 'busy' }
+  | { status: 'missing' }
+  | { status: 'persistence_failed'; error: unknown };
+
+export type ThreadActivationCommitResult =
+  | { status: 'applied' }
+  | { status: 'stale' }
+  | { status: 'missing' }
+  | { status: 'persistence_failed'; error: unknown };
+
+export interface PruneExpiredThreadsResult {
+  count: number;
+  threadIds: string[];
+}
+
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
@@ -170,11 +189,26 @@ interface ChatStoreState {
   inferenceRevision: number;
   createThread: (input: CreateThreadInput) => string;
   mergeImportedThreads: (threads: ChatThread[]) => number;
-  pruneExpiredThreads: (retentionDays: number | null, now?: number) => number;
+  pruneExpiredThreads: (
+    retentionDays: number | null,
+    now?: number,
+  ) => PruneExpiredThreadsResult;
   clearAllThreads: () => number;
-  setActiveThread: (threadId: string | null) => void;
+  setActiveThread: (threadId: string | null) => boolean;
+  commitThreadActivation: (input: {
+    threadId: string;
+    expectedActiveThreadId: string | null;
+    paramsSnapshot: GenerationParamsSnapshot;
+  }) => ThreadActivationCommitResult;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
+  commitThreadModelSelection: (input: {
+    threadId: string;
+    expectedCurrentModelId: string;
+    nextModelId: string;
+    paramsSnapshot: GenerationParamsSnapshot;
+    at?: number;
+  }) => ThreadModelSelectionCommitResult;
   switchThreadModel: (threadId: string, nextModelId: string, at?: number) => string | null;
   appendMessage: (threadId: string, message: ChatMessage) => void;
   createAssistantPlaceholder: (threadId: string, modelId?: string) => string;
@@ -224,6 +258,51 @@ function updateThreadMetadata(thread: ChatThread, updatedAt = Date.now()): ChatT
     title,
     updatedAt,
   };
+}
+
+function normalizeThreadParamsSnapshot(
+  paramsSnapshot: GenerationParamsSnapshot,
+): GenerationParamsSnapshot {
+  return {
+    temperature: paramsSnapshot.temperature,
+    topP: paramsSnapshot.topP,
+    topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
+    minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
+    repetitionPenalty:
+      paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+    maxTokens: paramsSnapshot.maxTokens,
+    reasoningEffort: normalizeReasoningEffort(
+      paramsSnapshot.reasoningEffort,
+      (paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled,
+    ),
+    seed: paramsSnapshot.seed ?? null,
+  };
+}
+
+function areThreadParamsSnapshotsEqual(
+  left: GenerationParamsSnapshot,
+  right: GenerationParamsSnapshot,
+): boolean {
+  return (
+    left.temperature === right.temperature
+    && left.topP === right.topP
+    && (left.topK ?? FALLBACK_TOP_K) === (right.topK ?? FALLBACK_TOP_K)
+    && (left.minP ?? FALLBACK_MIN_P) === (right.minP ?? FALLBACK_MIN_P)
+    && (
+      left.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY
+    ) === (
+      right.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY
+    )
+    && left.maxTokens === right.maxTokens
+    && normalizeReasoningEffort(
+      left.reasoningEffort,
+      (left as { reasoningEnabled?: unknown }).reasoningEnabled,
+    ) === normalizeReasoningEffort(
+      right.reasoningEffort,
+      (right as { reasoningEnabled?: unknown }).reasoningEnabled,
+    )
+    && (left.seed ?? null) === (right.seed ?? null)
+  );
 }
 
 function createModelSwitchMessage({
@@ -2775,36 +2854,57 @@ export const useChatStore = create<ChatStoreState>()(
         },
 
         pruneExpiredThreads: (retentionDays, now = Date.now()) => {
-        const state = get();
-        const expiredThreadIds = getExpiredThreadIds(
-          state.threads,
+        const initialState = get();
+        const initialExpiredThreadIds = getExpiredThreadIds(
+          initialState.threads,
           retentionDays,
           now,
-          state.activeThreadId,
-        ).filter((threadId) => !getActiveBranchReplacementRuntime(state.threads[threadId]));
-        if (expiredThreadIds.length === 0) {
-          return 0;
+          initialState.activeThreadId,
+        ).filter(
+          (threadId) => !getActiveBranchReplacementRuntime(initialState.threads[threadId]),
+        );
+        if (initialExpiredThreadIds.length === 0) {
+          return { count: 0, threadIds: [] };
         }
 
-        setWhenPrivateStorageWritable((state) => {
-          const nextThreads = { ...state.threads };
-          expiredThreadIds.forEach((threadId) => {
-            delete nextThreads[threadId];
+        let removedThreadIds: string[] = [];
+        withChatPersistenceContext({ reason: 'retention_cleanup' }, () => {
+          setWhenPrivateStorageWritable((state) => {
+            const expiredThreadIds = getExpiredThreadIds(
+              state.threads,
+              retentionDays,
+              now,
+              state.activeThreadId,
+            ).filter(
+              (threadId) => !getActiveBranchReplacementRuntime(state.threads[threadId]),
+            );
+            if (expiredThreadIds.length === 0) {
+              return state;
+            }
+
+            const nextThreads = { ...state.threads };
+            expiredThreadIds.forEach((threadId) => {
+              delete nextThreads[threadId];
+            });
+            removedThreadIds = expiredThreadIds;
+
+            const nextActiveThreadId =
+              state.activeThreadId && nextThreads[state.activeThreadId]
+                ? state.activeThreadId
+                : findMostRecentThreadId(nextThreads);
+
+            return {
+              threads: nextThreads,
+              activeThreadId: nextActiveThreadId,
+              inferenceRevision: state.inferenceRevision + 1,
+            };
           });
-
-          const nextActiveThreadId =
-            state.activeThreadId && nextThreads[state.activeThreadId]
-              ? state.activeThreadId
-              : findMostRecentThreadId(nextThreads);
-
-          return {
-            threads: nextThreads,
-            activeThreadId: nextActiveThreadId,
-            inferenceRevision: state.inferenceRevision + 1,
-          };
         });
 
-        return expiredThreadIds.length;
+        return {
+          count: removedThreadIds.length,
+          threadIds: removedThreadIds,
+        };
         },
 
         clearAllThreads: () => {
@@ -2835,7 +2935,77 @@ export const useChatStore = create<ChatStoreState>()(
         return threadCount;
         },
 
-        setActiveThread: (threadId) => setWhenPrivateStorageWritable({ activeThreadId: threadId }),
+        setActiveThread: (threadId) => {
+          let didSetActiveThread = false;
+          setWhenPrivateStorageWritable((state) => {
+            if (threadId !== null && !state.threads[threadId]) {
+              return state;
+            }
+
+            didSetActiveThread = true;
+            if (state.activeThreadId === threadId) {
+              return state;
+            }
+
+            return { activeThreadId: threadId };
+          });
+          return didSetActiveThread;
+        },
+
+        commitThreadActivation: ({
+          threadId,
+          expectedActiveThreadId,
+          paramsSnapshot,
+        }) => {
+          let commitResult: ThreadActivationCommitResult = { status: 'missing' };
+          const inferenceRevisionBeforeCommit = get().inferenceRevision;
+
+          try {
+            setWhenPrivateStorageWritable((state) => {
+              const existingThread = state.threads[threadId];
+              if (!existingThread) {
+                commitResult = { status: 'missing' };
+                return state;
+              }
+              if (state.activeThreadId !== expectedActiveThreadId) {
+                commitResult = { status: 'stale' };
+                return state;
+              }
+
+              const nextParamsSnapshot = normalizeThreadParamsSnapshot(paramsSnapshot);
+              const paramsChanged = !areThreadParamsSnapshotsEqual(
+                existingThread.paramsSnapshot,
+                nextParamsSnapshot,
+              );
+              commitResult = { status: 'applied' };
+
+              return {
+                activeThreadId: threadId,
+                ...(paramsChanged
+                  ? {
+                      threads: {
+                        ...state.threads,
+                        [threadId]: updateThreadMetadata({
+                          ...existingThread,
+                          paramsSnapshot: nextParamsSnapshot,
+                        }),
+                      },
+                      inferenceRevision: state.inferenceRevision + 1,
+                    }
+                  : null),
+              };
+            });
+          } catch (error) {
+            if (get().inferenceRevision !== inferenceRevisionBeforeCommit) {
+              (set as any)({
+                inferenceRevision: inferenceRevisionBeforeCommit,
+              }, false);
+            }
+            return { status: 'persistence_failed', error };
+          }
+
+          return commitResult;
+        },
 
         updateThreadPresetSnapshot: (threadId, presetId, presetSnapshot) => {
           if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
@@ -2898,6 +3068,93 @@ export const useChatStore = create<ChatStoreState>()(
             inferenceRevision: state.inferenceRevision + 1,
           };
           });
+        },
+
+        commitThreadModelSelection: ({
+          threadId,
+          expectedCurrentModelId,
+          nextModelId,
+          paramsSnapshot,
+          at,
+        }) => {
+          let commitResult: ThreadModelSelectionCommitResult = { status: 'missing' };
+
+          try {
+            setWhenPrivateStorageWritable((state) => {
+              const existingThread = state.threads[threadId];
+              if (!existingThread) {
+                commitResult = { status: 'missing' };
+                return state;
+              }
+              if (state.activeThreadId !== threadId) {
+                commitResult = { status: 'stale' };
+                return state;
+              }
+
+              const prevModelId = getThreadActiveModelId(existingThread);
+              if (prevModelId !== expectedCurrentModelId) {
+                commitResult = { status: 'stale' };
+                return state;
+              }
+              if (getActiveBranchReplacementRuntime(existingThread)) {
+                commitResult = { status: 'busy' };
+                return state;
+              }
+              if (nextModelId === prevModelId) {
+                commitResult = { status: 'unchanged' };
+                return state;
+              }
+
+              const requestedCreatedAt = at ?? Date.now();
+              const lastMessageCreatedAt =
+                existingThread.messages[existingThread.messages.length - 1]?.createdAt;
+              const createdAt = typeof lastMessageCreatedAt === 'number'
+                ? Math.max(requestedCreatedAt, lastMessageCreatedAt)
+                : requestedCreatedAt;
+              const updatedAt = Math.max(Date.now(), existingThread.updatedAt, createdAt);
+              const switchMessage = createModelSwitchMessage({
+                fromModelId: prevModelId,
+                toModelId: nextModelId,
+                createdAt,
+              });
+              const nextThread: ChatThread = {
+                ...existingThread,
+                activeModelId: nextModelId,
+                paramsSnapshot: {
+                  temperature: paramsSnapshot.temperature,
+                  topP: paramsSnapshot.topP,
+                  topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
+                  minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
+                  repetitionPenalty:
+                    paramsSnapshot.repetitionPenalty ?? FALLBACK_REPETITION_PENALTY,
+                  maxTokens: paramsSnapshot.maxTokens,
+                  reasoningEffort: normalizeReasoningEffort(
+                    paramsSnapshot.reasoningEffort,
+                    (paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled,
+                  ),
+                  seed: paramsSnapshot.seed ?? null,
+                },
+                messages: [...existingThread.messages, switchMessage],
+                updatedAt,
+              };
+              commitResult = {
+                status: 'applied',
+                switchMessageId: switchMessage.id,
+              };
+
+              return {
+                threads: {
+                  ...state.threads,
+                  [threadId]: nextThread,
+                },
+                inferenceRevision: state.inferenceRevision + 1,
+              };
+            });
+          } catch (error) {
+            return { status: 'persistence_failed', error };
+          }
+
+          return commitResult;
         },
 
         switchThreadModel: (threadId, nextModelId, at) => {

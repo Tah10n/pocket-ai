@@ -76,6 +76,7 @@ interface ModelsListProps {
 
 interface ModelCardWithRuntimeStateProps {
   model: ModelMetadata;
+  localModel?: ModelMetadata;
   activeModelId: string | null | undefined;
   onOpenDetails: (modelId: string, model?: ModelMetadata) => void;
   onDownload: (model: ModelMetadata) => void;
@@ -144,6 +145,7 @@ function mergeSanitizedProjectorSelectionVariants(
 
 const ModelCardWithRuntimeState = React.memo(({
   model,
+  localModel,
   activeModelId,
   onOpenDetails,
   onDownload,
@@ -160,7 +162,6 @@ const ModelCardWithRuntimeState = React.memo(({
   onChat,
 }: ModelCardWithRuntimeStateProps) => {
   const queuedItem = useDownloadStore((state) => state.queue.find((item) => item.id === model.id));
-  const localModel = registry.getModel(model.id);
 
   const runtimeModel = mergeModelWithRuntimeState(model, {
     activeModelId: activeModelId ?? undefined,
@@ -374,7 +375,7 @@ export const ModelsList = ({
     syncDiscoveryTokenState,
   });
 
-  const displayModels = useMemo(() => {
+  const { displayModels, localModelsById } = useMemo(() => {
     void modelsRegistryRevision;
 
     const registryModels = typeof registry.getModels === 'function'
@@ -394,17 +395,22 @@ export const ModelsList = ({
       ? uniqueByKey([...models, ...registryModels, ...queuedItems], (model) => model.id)
       : models;
 
-    return baseModels.map((model) => {
+    const projectedModels = baseModels.map((model) => {
       const modelWithProjectorSelection = projectorSelectionOverrides[model.id]
         ? { ...model, ...projectorSelectionOverrides[model.id] }
         : model;
 
       return mergeModelWithRuntimeState(modelWithProjectorSelection, {
-        activeModelId: engineState.activeModelId,
+        activeModelId: engineState.activeModelId ?? undefined,
         localModel: localModelsById.get(model.id),
         queuedItem: queuedItemsById.get(model.id),
       });
     });
+
+    return {
+      displayModels: projectedModels,
+      localModelsById,
+    };
   }, [activeTab, engineState.activeModelId, models, modelsRegistryRevision, projectorSelectionOverrides, queueLifecycleSignature]);
 
   useEffect(() => {
@@ -870,6 +876,7 @@ export const ModelsList = ({
   const renderModelItem = useCallback<ListRenderItem<ModelMetadata>>(({ item }) => (
     <ModelCardWithRuntimeState
       model={item}
+      localModel={localModelsById.get(item.id)}
       activeModelId={engineState.activeModelId}
       onOpenDetails={openModelDetails}
       onDownload={handleDownload}
@@ -893,6 +900,7 @@ export const ModelsList = ({
     handleDownload,
     handleLoad,
     handleUnload,
+    localModelsById,
     openChat,
     openModelDetails,
     openModelPage,

@@ -171,6 +171,7 @@ jest.mock('expo-notifications', () => ({
   requestPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
   getNotificationChannelsAsync: jest.fn().mockResolvedValue([]),
   getLastNotificationResponseAsync: jest.fn().mockResolvedValue(null),
+  clearLastNotificationResponse: jest.fn(),
   scheduleNotificationAsync: jest.fn().mockResolvedValue('mock-notification-id'),
   dismissNotificationAsync: jest.fn().mockResolvedValue(undefined),
   addNotificationResponseReceivedListener: jest.fn(() => ({ remove: jest.fn() })),
@@ -356,12 +357,19 @@ jest.mock('react-native-background-actions', () => {
 jest.mock('@react-navigation/native', () => {
     const React = require('react');
     const actual = jest.requireActual('@react-navigation/native');
+    let isFocused = true;
 
     return {
         ...actual,
-        useIsFocused: () => true,
+        useIsFocused: () => isFocused,
         useFocusEffect: (effect) => {
-            React.useEffect(() => effect(), [effect]);
+            React.useEffect(
+                () => (isFocused ? effect() : undefined),
+                [effect, isFocused],
+            );
+        },
+        __setIsFocused: (nextIsFocused) => {
+            isFocused = nextIsFocused;
         },
     };
 });

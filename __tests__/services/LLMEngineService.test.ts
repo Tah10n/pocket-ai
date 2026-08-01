@@ -474,6 +474,282 @@ describe('LLMEngineService', () => {
     );
   });
 
+  it('keeps prompt state available across two normal turns without an unconditional cache clear', async () => {
+    await llmEngineService.load('test/model');
+    const clearCache = jest.fn().mockResolvedValue(undefined);
+    (llmEngineService as any).context.clearCache = clearCache;
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'First turn' }],
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [
+        { role: 'user', content: 'First turn' },
+        { role: 'assistant', content: 'First answer' },
+        { role: 'user', content: 'Second turn' },
+      ],
+    });
+
+    expect(
+      (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+    ).toHaveBeenCalledTimes(2);
+    expect(clearCache).not.toHaveBeenCalled();
+  });
+
+  it('keeps the common prefix reusable when regenerating without clearing the whole native cache', async () => {
+    await llmEngineService.load('test/model');
+    const clearCache = jest.fn().mockResolvedValue(undefined);
+    (llmEngineService as any).context.clearCache = clearCache;
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [
+        { role: 'system', content: 'Use the shared system prefix.' },
+        { role: 'user', content: 'Regenerate this turn.' },
+        { role: 'assistant', content: 'Previous answer' },
+      ],
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [
+        { role: 'system', content: 'Use the shared system prefix.' },
+        { role: 'user', content: 'Regenerate this turn.' },
+      ],
+    });
+
+    expect(clearCache).not.toHaveBeenCalled();
+    expect(
+      (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        messages: [
+          { role: 'system', content: 'Use the shared system prefix.' },
+          { role: 'user', content: 'Regenerate this turn.' },
+        ],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('sends only the selected chat payload after switching conversations', async () => {
+    await llmEngineService.load('test/model');
+    const completionMock = (
+      llamaRn as unknown as { __completionMock: jest.Mock }
+    ).__completionMock;
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'Synthetic fact from chat A' }],
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'Independent question from chat B' }],
+    });
+
+    const secondRequest = completionMock.mock.calls[1]?.[0];
+    expect(secondRequest).toEqual(expect.objectContaining({
+      messages: [{ role: 'user', content: 'Independent question from chat B' }],
+    }));
+    expect(JSON.stringify(secondRequest)).not.toContain('Synthetic fact from chat A');
+  });
+
+  it('passes explicit disabled prompt state cache parameters to every native init attempt', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedEmbeddedMtpModel());
+    const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+      if (options?.speculative) {
+        throw new Error('MTP init failed');
+      }
+      return baseInitImplementation?.(options);
+    });
+
+    await expect(llmEngineService.load('test/model', { forceReload: true })).resolves.toBeUndefined();
+
+    const initParams = (llamaRn.initLlama as jest.Mock).mock.calls.map(([params]) => params);
+    expect(initParams).toHaveLength(2);
+    for (const params of initParams) {
+      expect(params).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
+  });
+
+  it('keeps recurrent runtime metadata fail-closed even with ample memory', async () => {
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
+      'general.architecture': 'mamba',
+      'general.type': 'model',
+      'mamba.block_count': 32,
+      'mamba.embedding_length': 4096,
+    });
+
+    await expect(llmEngineService.load('test/model', { forceReload: true })).resolves.toBeUndefined();
+
+    const initParams = (llamaRn.initLlama as jest.Mock).mock.calls.map(([params]) => params);
+    expect(initParams.length).toBeGreaterThan(0);
+    for (const params of initParams) {
+      expect(params).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCacheEnabled: false,
+      stateCacheEligibility: 'eligible',
+      stateCachePolicyReason: 'native_memory_bound_unverified',
+      stateCachePolicyVersion: 2,
+      promptStateCacheBytes: 0,
+      stateCacheArchitecture: 'mamba',
+    }));
+  });
+
+  it('recalculates prompt state cache policy when the loaded model changes', async () => {
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      id: modelId,
+      localPath: modelId.endsWith('mamba') ? 'mamba.gguf' : 'llama.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: false,
+        canDisableThinking: true,
+      },
+    }));
+    (llamaRn.loadLlamaModelInfo as jest.Mock)
+      .mockResolvedValueOnce({
+        'general.architecture': 'mamba',
+        'general.type': 'model',
+        'mamba.block_count': 32,
+        'mamba.embedding_length': 4096,
+      })
+      .mockResolvedValueOnce({
+        'general.architecture': 'llama',
+        'general.type': 'model',
+        'llama.block_count': 32,
+        'llama.attention.head_count': 32,
+        'llama.embedding_length': 4096,
+      });
+
+    await llmEngineService.load('test/mamba', { forceReload: true });
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 0,
+      stateCacheEnabled: false,
+      stateCachePolicyReason: 'native_memory_bound_unverified',
+      stateCacheArchitecture: 'mamba',
+    }));
+
+    await llmEngineService.load('test/llama', { forceReload: true });
+    expect(llmEngineService.getState().diagnostics).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 0,
+      stateCacheEnabled: false,
+      stateCachePolicyReason: 'architecture_ineligible',
+      stateCacheArchitecture: 'llama',
+    }));
+    expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      state_cache_budget_mb: 0,
+      state_cache_max_checkpoints: 8,
+    }));
+  });
+
+  it('releases the old context and initializes a fresh model-specific cache on model switch', async () => {
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      id: modelId,
+      localPath: `${modelId.replace('/', '-')}.gguf`,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: false,
+        canDisableThinking: true,
+      },
+    }));
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValue({
+      'general.architecture': 'mamba',
+      'general.type': 'model',
+      'mamba.block_count': 32,
+      'mamba.embedding_length': 4096,
+    });
+
+    await llmEngineService.load('test/model-a', { forceReload: true });
+    const firstContext = (llmEngineService as any).context;
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
+    (llamaRn.initLlama as jest.Mock).mockClear();
+
+    await llmEngineService.load('test/model-b');
+    const secondContext = (llmEngineService as any).context;
+
+    expect(secondContext).not.toBe(firstContext);
+    expect(llamaRn.releaseAllLlama).toHaveBeenCalledTimes(1);
+    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+    expect((llamaRn.initLlama as jest.Mock).mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      state_cache_budget_mb: 0,
+      state_cache_max_checkpoints: 8,
+    }));
+    expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+      activeModelId: 'test/model-b',
+      diagnostics: expect.objectContaining({
+        stateCacheBudgetMb: 0,
+        stateCacheEnabled: false,
+        stateCachePolicyReason: 'native_memory_bound_unverified',
+        stateCacheArchitecture: 'mamba',
+      }),
+    }));
+  });
+
+  it('blocks completion at the service boundary when the expected thread model differs', async () => {
+    await llmEngineService.load('test/model');
+
+    await expect(llmEngineService.chatCompletion({
+      expectedModelId: 'other/model',
+      messages: [{ role: 'user', content: 'Do not run this prompt' }],
+    })).rejects.toMatchObject({
+      code: 'chat_model_mismatch',
+      details: {
+        expectedThreadModelId: 'other/model',
+        engineModelId: 'test/model',
+      },
+    });
+
+    expect(
+      (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
+    ).not.toHaveBeenCalled();
+  });
+
   it('marks llama.rn reasoning callbacks as accumulated snapshots', async () => {
     const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
     completionMock.mockImplementationOnce(async (_params, onToken) => {
@@ -617,6 +893,53 @@ describe('LLMEngineService', () => {
     expect(serializedDiagnostics).not.toContain('test-dir/chat-attachments/image.jpg');
     expect(serializedDiagnostics).not.toContain('chat-attachments');
     expect(serializedDiagnostics).not.toContain('test-dir/models/mmproj-model.gguf');
+  });
+
+  it('replaces image A with image B and removes media from a later text-only request', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    await llmEngineService.load('test/model');
+    const completionMock = (
+      llamaRn as unknown as { __completionMock: jest.Mock }
+    ).__completionMock;
+    const readiness = createReadyMultimodalReadiness();
+
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{
+        role: 'user',
+        content: 'Inspect image A',
+        mediaPaths: ['test-dir/chat-attachments/image-a.jpg'],
+      }],
+      multimodalReadiness: readiness,
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{
+        role: 'user',
+        content: 'Inspect image B',
+        mediaPaths: ['test-dir/chat-attachments/image-b.jpg'],
+      }],
+      multimodalReadiness: readiness,
+    });
+    await llmEngineService.chatCompletion({
+      expectedModelId: 'test/model',
+      messages: [{ role: 'user', content: 'Continue without an image' }],
+      multimodalReadiness: readiness,
+    });
+
+    expect(completionMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      media_paths: ['test-dir/chat-attachments/image-a.jpg'],
+    }));
+    expect(completionMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      media_paths: ['test-dir/chat-attachments/image-b.jpg'],
+    }));
+    expect(completionMock.mock.calls[1]?.[0]).not.toEqual(expect.objectContaining({
+      media_paths: expect.arrayContaining(['test-dir/chat-attachments/image-a.jpg']),
+    }));
+    expect(completionMock.mock.calls[2]?.[0]).not.toHaveProperty('media_paths');
+    expect(getFormattedChatMock().mock.calls[2]?.[0]).toEqual([
+      { role: 'user', content: 'Continue without an image' },
+    ]);
   });
 
   it('disables MTP per request when native image input is present', async () => {
@@ -4167,6 +4490,22 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
   });
 
+  it('marks completion telemetry as unsupported when the selected model has no MTP configuration', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      supported: false,
+      requested: false,
+      attempted: false,
+      fallbackUsed: false,
+      draftTokens: 0,
+      draftTokensAccepted: 0,
+    }));
+  });
+
   it('loads a Gemma MTP companion as model_draft and enables text speculative decoding', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedGemmaMtpModel());
 
@@ -4352,6 +4691,7 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock)
       .toHaveBeenLastCalledWith(expect.not.objectContaining({ speculative: expect.anything() }), expect.any(Function));
     expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      supported: true,
       requested: false,
       attempted: false,
       draftTokens: 0,
@@ -4389,6 +4729,7 @@ describe('LLMEngineService', () => {
       promptPerSecond: 14.25,
       timeToFirstTokenMs: expect.any(Number),
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,
@@ -4443,41 +4784,50 @@ describe('LLMEngineService', () => {
       kvCacheType: 'f16',
     });
     const baseInitImplementation = (llamaRn.initLlama as jest.Mock).getMockImplementation();
-    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
-      if (options?.speculative) {
-        throw new Error('GPU OOM while initializing MTP');
-      }
-      return baseInitImplementation?.(options);
-    });
+    const persistCalibrationFailureSpy = jest.spyOn(
+      llmEngineService as any,
+      'persistCalibrationFailure',
+    );
+    try {
+      (llamaRn.initLlama as jest.Mock).mockImplementation(async (options) => {
+        if (options?.speculative) {
+          throw new Error('GPU OOM while initializing MTP');
+        }
+        return baseInitImplementation?.(options);
+      });
 
-    await llmEngineService.load('test/model', { forceReload: true });
-    expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toHaveProperty('speculative');
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[1][0]).not.toHaveProperty('speculative');
+      await llmEngineService.load('test/model', { forceReload: true });
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toHaveProperty('speculative');
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[1][0]).not.toHaveProperty('speculative');
 
-    await llmEngineService.unload();
-    (llamaRn.initLlama as jest.Mock).mockClear();
-    await llmEngineService.load('test/model', { forceReload: true });
+      await llmEngineService.unload();
+      (llamaRn.initLlama as jest.Mock).mockClear();
+      await llmEngineService.load('test/model', { forceReload: true });
 
-    expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('speculative');
-    expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
-      n_gpu_layers: 4,
-    }));
-    expect(llmEngineService.getState().diagnostics?.backendInitAttempts).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        nGpuLayers: 4,
-        speculativeEnabled: true,
-        outcome: 'skipped',
-        failureCategory: 'known_oom_upper_bound',
-      }),
-      expect.objectContaining({
-        nGpuLayers: 4,
-        speculativeEnabled: false,
-        profileSource: 'speculative_fallback',
-        outcome: 'success',
-      }),
-    ]));
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).not.toHaveProperty('speculative');
+      expect((llamaRn.initLlama as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
+        n_gpu_layers: 4,
+      }));
+      expect(persistCalibrationFailureSpy).not.toHaveBeenCalled();
+      expect(llmEngineService.getState().diagnostics?.backendInitAttempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          nGpuLayers: 4,
+          speculativeEnabled: true,
+          outcome: 'skipped',
+          failureCategory: 'known_oom_upper_bound',
+        }),
+        expect.objectContaining({
+          nGpuLayers: 4,
+          speculativeEnabled: false,
+          profileSource: 'speculative_fallback',
+          outcome: 'success',
+        }),
+      ]));
+    } finally {
+      persistCalibrationFailureSpy.mockRestore();
+    }
   });
 
   it('persists an exact CPU MTP OOM marker and skips only speculative init after reload', async () => {
@@ -4633,6 +4983,14 @@ describe('LLMEngineService', () => {
         kvCacheTypeV: 'f16',
         speculativeEnabled: true,
         profileSource: 'requested',
+        stateCacheBudgetMb: 0,
+        stateCacheMaxCheckpoints: 8,
+        stateCacheEnabled: false,
+        stateCacheEligibility: 'ineligible',
+        stateCachePolicyReason: 'architecture_ineligible',
+        stateCachePolicyVersion: 2,
+        promptStateCacheBytes: 0,
+        stateCacheArchitecture: 'llama',
         probableOom: false,
         outcome: 'error',
         failureCategory: 'native_error',
@@ -4658,6 +5016,10 @@ describe('LLMEngineService', () => {
         candidate: 'cpu',
         speculativeEnabled: true,
         profileSource: 'requested',
+        stateCacheBudgetMb: 0,
+        stateCacheMaxCheckpoints: 8,
+        stateCacheEnabled: false,
+        stateCachePolicyReason: 'architecture_ineligible',
         outcome: 'error',
         failureCategory: 'native_error',
       }),
@@ -5232,6 +5594,12 @@ describe('LLMEngineService', () => {
       .map(([options]) => options?.n_gpu_layers ?? 0);
     expect(attemptedLayers).toEqual([3, 2, 1, 0]);
     expect(new Set(attemptedLayers).size).toBe(attemptedLayers.length);
+    for (const [options] of (llamaRn.initLlama as jest.Mock).mock.calls) {
+      expect(options).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
   });
 
   it('reports requested and loaded GPU layers separately after retrying with fewer layers', async () => {
@@ -5668,6 +6036,12 @@ describe('LLMEngineService', () => {
       devices: nativeCalls[0].devices,
     }));
     expect(nativeCalls[1]).not.toHaveProperty('speculative');
+    for (const options of nativeCalls) {
+      expect(options).toEqual(expect.objectContaining({
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }));
+    }
   });
 
   it('keeps malicious native failure text out of logs, diagnostics, and traces', async () => {
@@ -5689,6 +6063,23 @@ describe('LLMEngineService', () => {
       contextSize: 4096,
       gpuLayers: 1,
       kvCacheType: 'f16',
+    });
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValueOnce({
+      timestampMs: 1,
+      platform: 'android',
+      totalBytes: 8 * 1024 * 1024 * 1024,
+      availableBytes: 6 * 1024 * 1024 * 1024,
+      usedBytes: 2 * 1024 * 1024 * 1024,
+      appUsedBytes: 256 * 1024 * 1024,
+      lowMemory: false,
+      pressureLevel: 'normal',
+      thresholdBytes: 128 * 1024 * 1024,
+    });
+    (llamaRn.loadLlamaModelInfo as jest.Mock).mockResolvedValueOnce({
+      'general.architecture': 'mamba',
+      'general.type': 'model',
+      'mamba.block_count': 32,
+      'mamba.embedding_length': 4096,
     });
     (llamaRn.initLlama as jest.Mock).mockImplementation(async () => {
       const maliciousDetails: Record<string, unknown> = {
@@ -5756,7 +6147,14 @@ describe('LLMEngineService', () => {
         cpuInitFailureCategory: 'native_error',
         nativeLogCount: 1,
         backendInitAttempts: expect.arrayContaining([
-          expect.objectContaining({ failureCategory: 'native_error' }),
+          expect.objectContaining({
+            failureCategory: 'native_error',
+            stateCacheBudgetMb: 0,
+            stateCacheEnabled: false,
+            stateCachePolicyReason: 'native_memory_bound_unverified',
+            stateCachePolicyVersion: 2,
+            promptStateCacheBytes: 0,
+          }),
         ]),
       }));
       expect(privacyWarnSpy).toHaveBeenCalled();
@@ -6064,6 +6462,8 @@ describe('LLMEngineService', () => {
         n_ctx: 4096,
         n_gpu_layers: 12,
         devices: ['HTP0'],
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
       }),
       expect.any(Function),
     );

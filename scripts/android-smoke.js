@@ -93,6 +93,9 @@ const qaProvenanceReportPath = path.join(artifactsRoot, "build-provenance-latest
 const metroStartupTimeoutMs = 90_000;
 const metroBundleTimeoutMs = 120_000;
 const deviceStartupTimeoutMs = 180_000;
+const adbCommandTimeoutMs = 30_000;
+const adbWakeCommandTimeoutMs = 15_000;
+const adbInstallCommandTimeoutMs = 300_000;
 const screenshotAdbCommandTimeoutMs = 15_000;
 const appJsReadyTimeoutMs = 60_000;
 const appJsReadyPollIntervalMs = 1_000;
@@ -2180,10 +2183,7 @@ function installDebugApk(adbPath, serial, appPackage, options = {}) {
 
   log(`Installing ${apkVariant} APK...`);
 
-  const result = spawnSync(adbPath, ["-s", serial, "install", "-r", apkPath], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const result = runAdbInstall(adbPath, serial, apkPath);
 
   if (result.error) {
     throw result.error;
@@ -2904,13 +2904,18 @@ function captureAndroidScreenshot(adbPath, serial, outputPath, options = {}) {
 }
 
 function runCapture(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const result = runSpawnSync(command, args, {
     cwd: options.cwd || projectRoot,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: resolveCommandTimeout(command, options),
   });
 
   if (result.error) {
+    if (options.allowFailure) {
+      return result.stdout || "";
+    }
     throw result.error;
   }
 
@@ -2925,19 +2930,51 @@ function runCapture(command, args, options = {}) {
 }
 
 function runChecked(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  const result = runSpawnSync(command, args, {
     cwd: options.cwd || projectRoot,
     stdio: options.stdio || "inherit",
     env: options.env || process.env,
+    timeout: resolveCommandTimeout(command, options),
   });
 
   if (result.error) {
+    if (options.allowFailure) {
+      return result;
+    }
     throw result.error;
   }
 
   if (result.status !== 0 && !options.allowFailure) {
     throw new Error(`Command failed: ${command} ${args.join(" ")}`);
   }
+
+  return result;
+}
+
+function isAdbCommand(command) {
+  const executable = path.basename(`${command || ""}`).toLowerCase();
+  return executable === "adb" || executable === "adb.exe";
+}
+
+function resolveCommandTimeout(command, options = {}) {
+  if (options.timeout !== undefined) {
+    return options.timeout;
+  }
+  return isAdbCommand(command) ? adbCommandTimeoutMs : undefined;
+}
+
+function runAdbInstall(adbPath, serial, targetApkPath, options = {}) {
+  const runSpawnSync = options.spawnSync ?? spawnSync;
+  return runSpawnSync(
+    adbPath,
+    ["-s", serial, "install", "-r", targetApkPath],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: options.timeoutMs ?? adbInstallCommandTimeoutMs,
+    },
+  );
 }
 
 function parseCliOptions(argv) {
@@ -3147,18 +3184,25 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function wakeAndUnlockDevice(adbPath, serial) {
+function wakeAndUnlockDevice(adbPath, serial, options = {}) {
+  const runSpawnSync = options.spawnSync ?? spawnSync;
   runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "224"], {
     stdio: "ignore",
     allowFailure: true,
+    timeout: options.commandTimeoutMs ?? adbWakeCommandTimeoutMs,
+    spawnSync: runSpawnSync,
   });
   runChecked(adbPath, ["-s", serial, "shell", "wm", "dismiss-keyguard"], {
     stdio: "ignore",
     allowFailure: true,
+    timeout: options.commandTimeoutMs ?? adbWakeCommandTimeoutMs,
+    spawnSync: runSpawnSync,
   });
   runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "82"], {
     stdio: "ignore",
     allowFailure: true,
+    timeout: options.commandTimeoutMs ?? adbWakeCommandTimeoutMs,
+    spawnSync: runSpawnSync,
   });
 }
 
@@ -3194,7 +3238,10 @@ module.exports = {
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
   resolveDebugApkReuseDecision,
+  runAdbInstall,
   runAndroidGradleBuild,
+  runCapture,
+  runChecked,
   saveLogcat,
   spawnOwnedProcess,
   spawnWindowsJobProcess,
@@ -3204,4 +3251,5 @@ module.exports = {
   stopOwnedProcessTreeByPid,
   waitForAppJsReady,
   waitForAttachedMetroExit,
+  wakeAndUnlockDevice,
 };

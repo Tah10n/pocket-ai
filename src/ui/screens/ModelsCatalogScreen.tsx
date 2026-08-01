@@ -1,51 +1,59 @@
-import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { StyleSheet, type View } from 'react-native';
+import React, {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { StyleSheet, View } from 'react-native';
 import { SearchHeader } from '@/components/ui/SearchHeader';
 import { ScreenAndroidContentBlurTarget, ScreenContent, ScreenRoot } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
 import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-export const ModelsCatalogScreen = () => {
-  const router = useRouter();
-  const params = useLocalSearchParams<{ initialTab?: string }>();
-  const requestedTab = resolveModelsCatalogTab(params.initialTab);
-  const [activeTab, setActiveTab] = useState<ModelsCatalogTab>(requestedTab);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchSessionKey, setSearchSessionKey] = useState(0);
-  const catalogContentBlurTargetRef = useRef<View | null>(null);
+const DeferredModelsList = React.memo(ModelsList);
+DeferredModelsList.displayName = 'DeferredModelsList';
 
-  useEffect(() => {
-    setActiveTab(requestedTab);
-  }, [requestedTab]);
+interface CatalogRenderSnapshot {
+  activeTab: ModelsCatalogTab;
+  searchQuery: string;
+  searchSessionKey: number;
+}
 
-  const handleSearchChange = useCallback((query: string) => {
-    setSearchQuery((current) => {
-      if (current === query) {
-        return current;
-      }
+interface CatalogChromeContextValue {
+  activeTab: ModelsCatalogTab;
+  searchQuery: string;
+  isDeferredCatalogContentStale: boolean;
+  catalogContentBlurTargetRef: React.RefObject<View | null>;
+  onSearchChange: (query: string) => void;
+  onTabChange: (tab: ModelsCatalogTab) => void;
+  onOpenStorage: () => void;
+}
 
-      setSearchSessionKey((sessionKey) => sessionKey + 1);
-      return query;
-    });
-  }, []);
+const CatalogChromeContext = React.createContext<CatalogChromeContextValue | null>(null);
 
-  const handleTabChange = useCallback((tab: ModelsCatalogTab) => {
-    setActiveTab(tab);
-  }, []);
-  const renderCatalogContentContainer = useCallback((content: ReactNode) => (
+const CatalogContentContainer = React.memo(({ children }: { children: ReactNode }) => {
+  const chrome = React.useContext(CatalogChromeContext);
+  if (!chrome) {
+    throw new Error('CatalogContentContainer must be rendered inside CatalogChromeContext');
+  }
+
+  return (
     <ScreenAndroidContentBlurTarget
-      blurTargetRef={catalogContentBlurTargetRef}
+      blurTargetRef={chrome.catalogContentBlurTargetRef}
       style={styles.catalogContentBlurTarget}
       testID="models-catalog-content-blur-target"
     >
       <SearchHeader
-        searchQuery={searchQuery}
-        onSearchChange={handleSearchChange}
-        activeTab={activeTab}
-        onTabChange={handleTabChange}
+        searchQuery={chrome.searchQuery}
+        onSearchChange={chrome.onSearchChange}
+        activeTab={chrome.activeTab}
+        onTabChange={chrome.onTabChange}
         onBack={undefined}
-        onOpenStorage={() => router.push('/storage')}
+        onOpenStorage={chrome.onOpenStorage}
       />
       <ScreenContent
         testID="models-screen-content"
@@ -53,26 +61,105 @@ export const ModelsCatalogScreen = () => {
         respectFloatingHeader={false}
         style={{ paddingBottom: 0 }}
       >
-        {content}
+        <View
+          accessibilityElementsHidden={chrome.isDeferredCatalogContentStale}
+          importantForAccessibility={chrome.isDeferredCatalogContentStale ? 'no-hide-descendants' : 'auto'}
+          pointerEvents={chrome.isDeferredCatalogContentStale ? 'none' : 'auto'}
+          style={styles.deferredCatalogContent}
+          testID="models-deferred-catalog-content"
+        >
+          {children}
+        </View>
       </ScreenContent>
     </ScreenAndroidContentBlurTarget>
-  ), [activeTab, handleSearchChange, handleTabChange, router, searchQuery]);
+  );
+});
+
+CatalogContentContainer.displayName = 'CatalogContentContainer';
+
+function renderCatalogContentContainer(content: ReactNode): ReactNode {
+  return <CatalogContentContainer>{content}</CatalogContentContainer>;
+}
+
+export const ModelsCatalogScreen = () => {
+  const router = useRouter();
+  const params = useLocalSearchParams<{ initialTab?: string }>();
+  const requestedTab = resolveModelsCatalogTab(params.initialTab);
+  const [activeTab, setActiveTab] = useState<ModelsCatalogTab>(requestedTab);
+  const [searchState, setSearchState] = useState({ query: '', sessionKey: 0 });
+  const { query: searchQuery, sessionKey: searchSessionKey } = searchState;
+  const catalogRenderSnapshot = useMemo<CatalogRenderSnapshot>(() => ({
+    activeTab,
+    searchQuery,
+    searchSessionKey,
+  }), [activeTab, searchQuery, searchSessionKey]);
+  const deferredCatalogRenderSnapshot = useDeferredValue(catalogRenderSnapshot);
+  const isDeferredCatalogContentStale =
+    activeTab !== deferredCatalogRenderSnapshot.activeTab
+    || searchQuery !== deferredCatalogRenderSnapshot.searchQuery
+    || searchSessionKey !== deferredCatalogRenderSnapshot.searchSessionKey;
+  const catalogContentBlurTargetRef = useRef<View | null>(null);
+
+  useEffect(() => {
+    setActiveTab(requestedTab);
+  }, [requestedTab]);
+
+  const handleSearchChange = useCallback((query: string) => {
+    setSearchState((current) => {
+      if (current.query === query) {
+        return current;
+      }
+
+      return {
+        query,
+        sessionKey: current.sessionKey + 1,
+      };
+    });
+  }, []);
+
+  const handleTabChange = useCallback((tab: ModelsCatalogTab) => {
+    setActiveTab(tab);
+  }, []);
+  const handleOpenStorage = useCallback(() => {
+    router.push('/storage');
+  }, [router]);
+  const catalogChromeContextValue = useMemo<CatalogChromeContextValue>(() => ({
+    activeTab,
+    searchQuery,
+    isDeferredCatalogContentStale,
+    catalogContentBlurTargetRef,
+    onSearchChange: handleSearchChange,
+    onTabChange: handleTabChange,
+    onOpenStorage: handleOpenStorage,
+  }), [
+    activeTab,
+    handleOpenStorage,
+    handleSearchChange,
+    handleTabChange,
+    isDeferredCatalogContentStale,
+    searchQuery,
+  ]);
 
   return (
-    <ScreenRoot>
-      <ModelsList
-        activeTab={activeTab}
-        searchQuery={searchQuery}
-        searchSessionKey={searchSessionKey}
-        androidContentBlurTargetRef={catalogContentBlurTargetRef}
-        renderContentContainer={renderCatalogContentContainer}
-      />
-    </ScreenRoot>
+    <CatalogChromeContext.Provider value={catalogChromeContextValue}>
+      <ScreenRoot>
+        <DeferredModelsList
+          activeTab={deferredCatalogRenderSnapshot.activeTab}
+          searchQuery={deferredCatalogRenderSnapshot.searchQuery}
+          searchSessionKey={deferredCatalogRenderSnapshot.searchSessionKey}
+          androidContentBlurTargetRef={catalogContentBlurTargetRef}
+          renderContentContainer={renderCatalogContentContainer}
+        />
+      </ScreenRoot>
+    </CatalogChromeContext.Provider>
   );
 };
 
 const styles = StyleSheet.create({
   catalogContentBlurTarget: {
+    flex: 1,
+  },
+  deferredCatalogContent: {
     flex: 1,
   },
 });

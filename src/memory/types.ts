@@ -14,6 +14,7 @@ export type MemoryMetadataTrust = 'verified_local' | 'trusted_remote' | 'inferre
 export interface MemoryBreakdown {
   weightsBytes: number;
   kvCacheBytes: number;
+  promptStateCacheBytes: number;
   computeBytes: number;
   multimodalBytes: number;
   overheadBytes: number;
@@ -58,6 +59,9 @@ export interface CalibrationKey {
   useMmap: boolean;
   gpuLayers: number;
   hasMmproj: boolean;
+  stateCacheBudgetMb: number;
+  stateCacheMaxCheckpoints: number;
+  stateCachePolicyVersion: number;
 }
 
 export interface CalibrationRecord {

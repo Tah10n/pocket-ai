@@ -2,6 +2,27 @@ import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
 import { ModelsCatalogScreen } from '../../src/ui/screens/ModelsCatalogScreen';
 
+let mockHoldDeferredCatalogSnapshot = false;
+let mockDeferredCatalogSnapshot: unknown;
+let mockModelsListStates: string[] = [];
+const mockChangeStaleFilters = jest.fn();
+const mockOpenStaleRemoteModel = jest.fn();
+
+jest.mock('react', () => {
+  const actualReact = jest.requireActual('react');
+  return {
+    ...actualReact,
+    useDeferredValue: (value: unknown) => {
+      if (mockHoldDeferredCatalogSnapshot) {
+        return mockDeferredCatalogSnapshot ?? value;
+      }
+
+      mockDeferredCatalogSnapshot = value;
+      return value;
+    },
+  };
+});
+
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
   return {
@@ -31,7 +52,11 @@ jest.mock('../../src/components/ui/ScreenShell', () => {
   return {
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
     ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-    ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(
+      View,
+      { ...props, testID: props.testID ?? 'models-screen-root' },
+      children,
+    ),
     ScreenContent: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
   };
 });
@@ -80,23 +105,56 @@ jest.mock('../../src/components/ui/SearchHeader', () => {
 
 jest.mock('../../src/components/models/ModelsList', () => {
   const mockReact = require('react');
-  const { Text, View } = require('react-native');
+  const { Pressable, Text, View } = require('react-native');
   return {
     ModelsList: ({ activeTab, androidContentBlurTargetRef, renderContentContainer, searchQuery, searchSessionKey }: any) => {
+      const state = `${activeTab}:${searchQuery}:${searchSessionKey}`;
+      mockModelsListStates.push(state);
       const content = mockReact.createElement(
         View,
         { testID: 'models-list-props', androidContentBlurTargetRef },
-        mockReact.createElement(Text, { testID: 'models-list-state' }, `${activeTab}:${searchQuery}:${searchSessionKey}`),
+        mockReact.createElement(Text, { testID: 'models-list-state' }, state),
+        mockReact.createElement(
+          Pressable,
+          { testID: 'stale-models-filter', onPress: mockChangeStaleFilters },
+          mockReact.createElement(Text, null, 'Change stale filters'),
+        ),
+        mockReact.createElement(
+          Pressable,
+          { testID: 'stale-remote-model', onPress: mockOpenStaleRemoteModel },
+          mockReact.createElement(Text, null, 'Open stale remote model'),
+        ),
       );
 
-      return renderContentContainer ? renderContentContainer(content) : content;
+      return mockReact.createElement(
+        mockReact.Fragment,
+        null,
+        renderContentContainer ? renderContentContainer(content) : content,
+        mockReact.createElement(View, { testID: 'models-list-overlay' }),
+      );
     },
   };
 });
 
+function hasAncestorWithTestId(node: any, testID: string): boolean {
+  let ancestor = node.parent;
+  while (ancestor) {
+    if (ancestor.props?.testID === testID) {
+      return true;
+    }
+    ancestor = ancestor.parent;
+  }
+  return false;
+}
+
 describe('ModelsCatalogScreen', () => {
   afterEach(() => {
     mockInitialTab = 'downloaded';
+    mockHoldDeferredCatalogSnapshot = false;
+    mockDeferredCatalogSnapshot = undefined;
+    mockModelsListStates = [];
+    mockChangeStaleFilters.mockClear();
+    mockOpenStaleRemoteModel.mockClear();
     mockPush.mockClear();
   });
 
@@ -145,5 +203,55 @@ describe('ModelsCatalogScreen', () => {
 
     fireEvent.press(getByTestId('open-storage'));
     expect(mockPush).toHaveBeenCalledWith('/storage');
+  });
+
+  it('keeps Android catalog overlays at screen level instead of inside their blur target', () => {
+    const { getByTestId } = render(<ModelsCatalogScreen />);
+
+    expect(hasAncestorWithTestId(getByTestId('models-list-props'), 'models-catalog-content-blur-target'))
+      .toBe(true);
+    expect(hasAncestorWithTestId(getByTestId('models-list-overlay'), 'models-catalog-content-blur-target'))
+      .toBe(false);
+    expect(hasAncestorWithTestId(getByTestId('models-list-overlay'), 'models-screen-root'))
+      .toBe(true);
+  });
+
+  it('keeps a delayed All snapshot coherent and inert while switching to Downloaded', () => {
+    mockInitialTab = 'all';
+    const { getByTestId, rerender } = render(<ModelsCatalogScreen />);
+
+    expect(getByTestId('models-list-state').props.children).toBe('all::0');
+    expect(mockModelsListStates).toEqual(['all::0']);
+    mockHoldDeferredCatalogSnapshot = true;
+
+    fireEvent.press(getByTestId('switch-to-downloaded'));
+
+    expect(getByTestId('models-active-tab').props.children).toBe('downloaded');
+    expect(getByTestId('models-list-state', { includeHiddenElements: true }).props.children).toBe('all::0');
+    expect(getByTestId('models-deferred-catalog-content', { includeHiddenElements: true }).props).toEqual(expect.objectContaining({
+      accessibilityElementsHidden: true,
+      importantForAccessibility: 'no-hide-descendants',
+      pointerEvents: 'none',
+    }));
+
+    fireEvent.press(getByTestId('stale-models-filter', { includeHiddenElements: true }));
+    fireEvent.press(getByTestId('stale-remote-model', { includeHiddenElements: true }));
+    expect(mockChangeStaleFilters).not.toHaveBeenCalled();
+    expect(mockOpenStaleRemoteModel).not.toHaveBeenCalled();
+
+    fireEvent.press(getByTestId('search-mistral'));
+    expect(getByTestId('models-list-state', { includeHiddenElements: true }).props.children).toBe('all::0');
+    expect(mockModelsListStates).toEqual(['all::0']);
+
+    mockHoldDeferredCatalogSnapshot = false;
+    rerender(<ModelsCatalogScreen />);
+
+    expect(getByTestId('models-list-state').props.children).toBe('downloaded:mistral:1');
+    expect(mockModelsListStates).toEqual(['all::0', 'downloaded:mistral:1']);
+    expect(getByTestId('models-deferred-catalog-content').props).toEqual(expect.objectContaining({
+      accessibilityElementsHidden: false,
+      importantForAccessibility: 'auto',
+      pointerEvents: 'auto',
+    }));
   });
 });

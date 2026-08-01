@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-07-22
+Last updated: 2026-07-28
 
 ## Purpose
 
@@ -98,13 +98,19 @@ build/install provenance. Do not add `--skip-build` or `--preserve-running-app` 
 command. Record the device model, serial, supported ABI list, selected ABI, final Git HEAD,
 APK SHA-256, report path, and the result of every step in the release evidence.
 
-For PR CI, `android-pack-catalog` selects the hosted catalog pack.
-`android-pack-branch-regeneration` instead dispatches the destructive 15-step release pack
-with `--fail-on-skip` to the dedicated prepared self-hosted runner. The label fails when
-the runner, local model, fixture, or sentinel precondition is missing. If multiple Android
-pack labels are applied, CI uses this priority order: `android-pack-all`,
-`android-pack-branch-regeneration`, `android-pack-native`, `android-pack-runtime`,
-`android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+When a release changes llama.rn, prompt state caching, model/context switching, memory
+policy, multimodal prompt identity, or notification routing, also complete the
+[Runtime Hardening Device Validation](./runtime-hardening-device-validation.md) matrix.
+Record every unavailable physical device, model, projector, accelerator backend, and
+memory-pressure scenario as unverified; an emulator build does not substitute for those
+combinations.
+
+For PR CI, `android-pack-catalog` selects the hosted catalog pack. The destructive
+branch-regeneration pack is intentionally local-only and must be recorded as physical-device
+evidence; GitHub Actions does not dispatch it. If multiple hosted Android pack labels are
+applied, CI uses this priority order: `android-pack-all`, `android-pack-native`,
+`android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then
+`android-pack-extended`.
 
 ## Build commands
 
@@ -202,22 +208,25 @@ Audio is the only conditional target. If the installed runtime does not expose t
 attachment action, step 13 records `not_applicable` with explicit evidence. If audio is
 exposed, the audio fixture is mandatory and any missing precondition fails the pack.
 
-### PR runner contract
+For step 10, the runner selects `Off` when the active model exposes an optional reasoning
+control. A model that explicitly marks reasoning as unsupported is already authoritatively
+disabled and is recorded as such. A reasoning-required model without an `Off` control still
+fails the pack precondition.
 
-The `android-pack-branch-regeneration` label targets a serialized, ephemeral self-hosted
-Linux runner with the labels `android` and `pocket-ai-branch-regeneration`. Each runner
-instance must accept one job, retain no credentials or personal state, and be discarded
-or reimaged after the job. Before applying the label:
+### Local maintainer contract
 
-- expose the selected disposable device serial as the repository variable
-  `POCKET_AI_BRANCH_QA_SERIAL` or as the same runner environment variable;
-- keep `adb` on `PATH` and the selected device connected in the `device` state;
-- install the QA app with the same signing identity used by the runner build, then prepare
-  the model and conversations listed above;
-- remove secrets and personal data from both the runner and device.
+This pack is intentionally local-only and never runs in GitHub Actions. Run it from a
+trusted maintainer workstation connected directly to disposable QA app data. Before
+starting:
 
-The workflow verifies the serial, device state, and existing package before building and
-installing the current merge candidate. The pack then validates the loaded model, exact
+- keep `adb` available and pass the selected device explicitly with `--serial <serial>`;
+- install the QA app with the same signing identity used by the local release build, then
+  prepare the model and conversations listed above;
+- remove secrets and personal data from the workstation, fixture, and device;
+- record the exact Git `HEAD`, device serial, APK/build/install provenance, report path,
+  and per-step result in the PR or release evidence.
+
+The local command verifies the serial, device state, existing package, loaded model, exact
 fixture topology, release APK provenance, and all 15 ordered steps. Reprepare the device
 after every successful run because steps 14 and 15 delete the fixture and remaining history.
 
@@ -313,6 +322,10 @@ part of the production app surface.
 - Try loading a model or load profile that exceeds the estimated RAM budget and confirm the app shows a memory warning or blocks the load instead of crashing during native initialization.
 - Try loading a model that only fits at the minimum context window (512 tokens) and confirm it is marked as `Won't fit RAM` and loading is disabled.
 - Load the model and confirm the app reports the engine as ready.
+- For recurrent/hybrid, pure-attention, CPU, GPU, and NPU loads, confirm diagnostics report
+  `stateCacheBudgetMb: 0`, `stateCacheEnabled: false`, and
+  `promptStateCacheBytes: 0`; inspect native-init evidence for explicit
+  `state_cache_budget_mb: 0` and `state_cache_max_checkpoints: 8` on retries and fallbacks.
 - With the model active, apply a changed load profile and confirm the model reloads successfully with the updated settings.
 - Unload the model and confirm the UI returns to the unloaded state.
 

@@ -6,7 +6,8 @@ import { llmEngineService } from '../../src/services/LLMEngineService';
 import { getGenerationParametersForModel, getSettings } from '../../src/services/SettingsStore';
 import { EngineStatus, LifecycleStatus, ModelAccessState } from '../../src/types/models';
 import { estimateLlmMessagesTokens, flushPendingChatPersistenceWrites, useChatStore } from '../../src/store/chatStore';
-import { AppState } from 'react-native';
+import { Alert, AppState } from 'react-native';
+import { router } from 'expo-router';
 import { getAppStorage, storage } from '../../src/store/storage';
 import {
   CHAT_PERSISTENCE_INDEX_KEY,
@@ -48,6 +49,9 @@ import type { AttachmentDraft, MultimodalReadinessState } from '../../src/types/
 import { buildInferenceWindowWithAccurateTokenCounts } from '../../src/utils/inferenceWindow';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
+import { clearChatHistory } from '../../src/services/ChatHistoryService';
+import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationService';
+import i18n from '../../src/i18n';
 import {
   armAndroidQaGenerationGate,
   getAndroidQaGenerationEvidenceSnapshot,
@@ -82,6 +86,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  clearLegacyChatHistory: jest.fn().mockReturnValue(0),
   getSettings: jest.fn(),
   getGenerationParametersForModel: jest.fn(),
 }));
@@ -171,6 +176,53 @@ describe('useChatSession', () => {
       reject = rejectPromise;
     });
     return { promise, reject, resolve };
+  }
+
+  function createSavedThreadForNavigation(): string {
+    return useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: 'preset-1',
+      presetSnapshot: {
+        id: 'preset-1',
+        name: 'Helpful Assistant',
+        systemPrompt: 'Be concise.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        topK: 40,
+        minP: 0.05,
+        repetitionPenalty: 1,
+        maxTokens: 1024,
+        reasoningEffort: 'auto',
+        seed: null,
+      },
+    });
+  }
+
+  function routeInferenceNotificationForTest(threadId: string, date: number): void {
+    const service = notificationService as unknown as {
+      lifecycleGeneration: number;
+      routeNotificationResponse: (response: unknown, generation: number) => void;
+    };
+    service.routeNotificationResponse(
+      {
+        actionIdentifier: 'expo.modules.notifications.actions.DEFAULT',
+        notification: {
+          date,
+          request: {
+            identifier: `pocket-ai:inference:${threadId}`,
+            content: {
+              data: {
+                taskType: 'inference',
+                threadId,
+              },
+            },
+          },
+        },
+      },
+      service.lifecycleGeneration,
+    );
   }
 
   function renderHookHarness() {
@@ -828,6 +880,7 @@ describe('useChatSession', () => {
     }));
     expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        expectedModelId: 'author/model-q4',
         multimodalReadiness: expect.objectContaining({
           status: 'ready',
           support: ['vision'],
@@ -921,6 +974,7 @@ describe('useChatSession', () => {
     }));
     expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        expectedModelId: 'author/model-q4',
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
@@ -940,6 +994,69 @@ describe('useChatSession', () => {
       assistantMessageId: thread?.messages[1]?.id,
       attachments: [{ id: 'document-1', kind: 'document' }],
     });
+  });
+
+  it('stops in-flight document processing before it can mutate chat state', async () => {
+    const getSession = renderHookHarness();
+    const documentRead = createDeferred<string>();
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'document-stop-1',
+      pickerUri: 'content://documents/document-stop-1.txt',
+      localUri: 'test-dir/chat-attachments/document-stop-1.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'document-stop-1.txt',
+      displayName: 'Stop during processing.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    (FileSystem.readAsStringAsync as jest.Mock).mockReturnValueOnce(documentRead.promise);
+    (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    let sendPromise: Promise<void> | undefined;
+
+    act(() => {
+      sendPromise = getSession()?.appendUserMessage('', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    await waitFor(() => {
+      expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith(
+        documentDraft.localUri,
+        { encoding: FileSystem.EncodingType.UTF8 },
+      );
+    });
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await sendPromise;
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(listChatStreamingProgressStorageKeys(storage)).toEqual([]);
+
+    await act(async () => {
+      documentRead.resolve('Late document text must stay detached');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
   });
 
   it('resolves each stable retained attachment URI once and reuses the prepared payload for completion', async () => {
@@ -1271,7 +1388,10 @@ describe('useChatSession', () => {
     expect(llmEngineService.stopCompletion).toHaveBeenCalled();
     expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(tokenizerCallsAtStop);
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
-    expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    const stoppedThread = useChatStore.getState().getActiveThread()!;
+    expect(stoppedThread.status).toBe('stopped');
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expectNoStreamingProgressArtifacts(stoppedThread.id);
   });
 
   it('stops scheduling filesystem lookups after candidate attachment preparation is cancelled', async () => {
@@ -3081,6 +3201,7 @@ describe('useChatSession', () => {
 
     expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        expectedModelId: 'author/model-q4',
         params: expect.objectContaining({
           enable_thinking: false,
           reasoning_format: 'none',
@@ -5849,7 +5970,7 @@ describe('useChatSession', () => {
     );
   });
 
-  it('auto-switches the active thread model when the global active model changes', async () => {
+  it('keeps the thread model authoritative when the global and engine model change', async () => {
     const getSession = renderHookHarness();
 
     await act(async () => {
@@ -5874,7 +5995,11 @@ describe('useChatSession', () => {
     });
 
     await act(async () => {
-      await getSession()?.appendUserMessage('Use a different model now');
+      await expect(
+        getSession()?.appendUserMessage('Use a different model now'),
+      ).rejects.toMatchObject({
+        code: 'chat_model_mismatch',
+      });
     });
 
     const state = useChatStore.getState();
@@ -5882,37 +6007,12 @@ describe('useChatSession', () => {
 
     expect(activeThread?.id).toBe(originalThread?.id);
     expect(activeThread?.modelId).toBe('author/model-q4');
-    expect(activeThread?.activeModelId).toBe('author/model-q8');
+    expect(activeThread?.activeModelId).toBe('author/model-q4');
 
     const roles = activeThread?.messages.map((message) => message.role);
-    expect(roles).toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
-
-    const switchMessage = activeThread?.messages.find((message) => message.kind === 'model_switch');
-    expect(switchMessage).toEqual(
-      expect.objectContaining({
-        role: 'system',
-        kind: 'model_switch',
-        modelId: 'author/model-q8',
-        switchFromModelId: 'author/model-q4',
-        switchToModelId: 'author/model-q8',
-      }),
-    );
-
-    const lastUserMessage = [...(activeThread?.messages ?? [])].reverse().find((message) => message.role === 'user');
-    const lastAssistantMessage = activeThread?.messages.at(-1);
-    expect(lastUserMessage).toEqual(
-      expect.objectContaining({
-        kind: 'message',
-        modelId: 'author/model-q8',
-      }),
-    );
-    expect(lastAssistantMessage).toEqual(
-      expect.objectContaining({
-        role: 'assistant',
-        kind: 'message',
-        modelId: 'author/model-q8',
-      }),
-    );
+    expect(roles).toEqual(['user', 'assistant']);
+    expect(activeThread?.messages.some((message) => message.kind === 'model_switch')).toBe(false);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
 
     expect(originalThread?.modelId).toBe('author/model-q4');
     expect(state.getConversationIndex()).toHaveLength(1);
@@ -6105,6 +6205,175 @@ describe('useChatSession', () => {
     expect(afterLatePromptPreparation.status).toBe('idle');
     expect(afterLatePromptPreparation.messages.map((message) => message.id)).toEqual(originalMessageIds);
     expectNoStreamingProgressArtifacts(prepared.threadId);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a normal send during prompt counting and isolates the next generation', async () => {
+    const getSession = renderHookHarness();
+    const oldPromptCount = createDeferred<number>();
+    let blockingPromptCountCalls = 0;
+    exactPromptTokenCache.clear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+
+        blockingPromptCountCalls += 1;
+        if (blockingPromptCountCalls === 1) {
+          return oldPromptCount.promise;
+        }
+        return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+      },
+    );
+    let oldSendPromise: Promise<void> | undefined;
+
+    act(() => {
+      oldSendPromise = getSession()?.appendUserMessage('Request cleared during prompt count');
+    });
+    await waitFor(() => {
+      expect(blockingPromptCountCalls).toBe(1);
+      expect(useChatStore.getState().getActiveThread()?.status).toBe('generating');
+    });
+    const clearedThreadId = useChatStore.getState().activeThreadId!;
+
+    await act(async () => {
+      await expect(clearChatHistory()).resolves.toBe(1);
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(storage.getString(getChatThreadStorageKey(clearedThreadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(clearedThreadId);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Fresh request after clear');
+    });
+
+    const freshThread = useChatStore.getState().getActiveThread()!;
+    expect(freshThread.id).not.toBe(clearedThreadId);
+    expect(freshThread.messages.map((message) => message.content)).toEqual([
+      'Fresh request after clear',
+      'Hello back',
+    ]);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+
+    await act(async () => {
+      oldPromptCount.resolve(16);
+      await oldSendPromise;
+    });
+
+    expect(useChatStore.getState().getActiveThread()).toEqual(freshThread);
+    expect(useChatStore.getState().getActiveThread()?.messages.map(
+      (message) => message.content,
+    )).toEqual([
+      'Fresh request after clear',
+      'Hello back',
+    ]);
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expectNoStreamingProgressArtifacts(clearedThreadId);
+  });
+
+  it('clears history during pre-native branch regeneration without a late restore', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    let resolvePromptCount: (() => void) | undefined;
+    exactPromptTokenCache.clear();
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.countPromptTokens as jest.Mock).mockImplementation(
+      ({ messages, chatBlocking }: { messages: any[]; chatBlocking?: boolean }) => {
+        if (chatBlocking === false) {
+          return Promise.resolve(estimateLlmMessagesTokens(messages as any));
+        }
+        return new Promise((resolve) => {
+          resolvePromptCount = () => resolve(16);
+        });
+      },
+    );
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+    });
+    await waitFor(() => {
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      await expect(clearChatHistory()).resolves.toBe(1);
+    });
+
+    expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBeUndefined();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+
+    await act(async () => {
+      resolvePromptCount?.();
+      await regenerationPromise;
+    });
+
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expectNoStreamingProgressArtifacts(prepared.threadId);
+  });
+
+  it('clears history at the native-completion boundary without resurrecting the branch', async () => {
+    const getSession = renderHookHarness();
+    const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+    const completion = createDeferred<{ text: string }>();
+    let clearPromise: Promise<number> | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => {
+      clearPromise = clearChatHistory();
+      return completion.promise;
+    });
+    let regenerationPromise: Promise<boolean> | undefined;
+
+    await act(async () => {
+      regenerationPromise = getSession()?.regenerateLastResponse();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(clearPromise).toBeDefined();
+    });
+    await act(async () => {
+      await expect(clearPromise).resolves.toBe(1);
+    });
+
+    expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+
+    await act(async () => {
+      completion.resolve({ text: 'Late branch completion' });
+      await regenerationPromise;
+    });
+
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+    expect(storage.getString(getChatThreadStorageKey(prepared.threadId))).toBeUndefined();
+    expectNoStreamingProgressArtifacts(prepared.threadId);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
@@ -6843,6 +7112,168 @@ describe('useChatSession', () => {
     });
 
     expect(useChatStore.getState().activeThreadId).toBe(threadTwoId);
+  });
+
+  it('keeps notification navigation on the active thread during pre-native attachment preparation', async () => {
+    const threadA = createSavedThreadForNavigation();
+    const threadB = createSavedThreadForNavigation();
+    useChatStore.getState().setActiveThread(threadA);
+    const targetBefore = useChatStore.getState().threads[threadB];
+    const attachmentLookup = createDeferred<{ exists: boolean; size: number }>();
+    (FileSystem.getInfoAsync as jest.Mock).mockImplementationOnce(
+      () => attachmentLookup.promise,
+    );
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    try {
+      act(() => {
+        sendPromise = getSession()?.appendUserMessage(
+          'Keep this preparation on conversation A',
+          {
+            attachmentDrafts: [copiedDraftImageAttachment],
+            multimodalReadiness: {
+              modelId: 'author/model-q4',
+              status: 'ready',
+              support: ['vision'],
+              checkedAt: 1,
+            },
+          },
+        );
+      });
+      await waitFor(() => {
+        expect(FileSystem.getInfoAsync).toHaveBeenCalled();
+      });
+
+      expect(useChatStore.getState().threads[threadA].status).toBe('idle');
+      expect(hasActiveChatGenerationWork()).toBe(true);
+
+      act(() => {
+        routeInferenceNotificationForTest(threadB, 7_001);
+      });
+
+      expect(useChatStore.getState().activeThreadId).toBe(threadA);
+      expect(useChatStore.getState().threads[threadB]).toBe(targetBefore);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(alertSpy).toHaveBeenCalledWith(
+        i18n.t('notifications.conversationBusy.title'),
+        i18n.t('notifications.conversationBusy.body'),
+      );
+
+      await act(async () => {
+        attachmentLookup.resolve({ exists: true, size: 123_456 });
+        await sendPromise;
+      });
+
+      const settledState = useChatStore.getState();
+      const settledThreadA = settledState.threads[threadA];
+      expect(settledState.activeThreadId).toBe(threadA);
+      expect(settledThreadA.status).toBe('idle');
+      expect(settledThreadA.messages.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Hello back',
+        state: 'complete',
+      }));
+      expect(
+        settledThreadA.messages.some((message) => message.state === 'streaming'),
+      ).toBe(false);
+      expect(settledState.threads[threadB]).toBe(targetBefore);
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('preserves terminal callbacks after notification navigation is blocked during native completion', async () => {
+    const threadA = createSavedThreadForNavigation();
+    const threadB = createSavedThreadForNavigation();
+    useChatStore.getState().setActiveThread(threadA);
+    const targetBefore = useChatStore.getState().threads[threadB];
+    const nativeCompletion = createDeferred<{ text: string }>();
+    let onToken: ((token: string) => void) | undefined;
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
+      ({ onToken: tokenHandler }: { onToken?: (token: string) => void }) => {
+        onToken = tokenHandler;
+        return nativeCompletion.promise;
+      },
+    );
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const getSession = renderHookHarness();
+    let sendPromise: Promise<void> | undefined;
+
+    try {
+      act(() => {
+        sendPromise = getSession()?.appendUserMessage(
+          'Keep native completion on conversation A',
+        );
+      });
+      await waitFor(() => {
+        expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+        expect(useChatStore.getState().threads[threadA].status).toBe('generating');
+      });
+      expect(hasActiveChatGenerationWork()).toBe(true);
+
+      act(() => {
+        routeInferenceNotificationForTest(threadB, 7_002);
+      });
+
+      expect(useChatStore.getState().activeThreadId).toBe(threadA);
+      expect(useChatStore.getState().threads[threadB]).toBe(targetBefore);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(alertSpy).toHaveBeenCalledWith(
+        i18n.t('notifications.conversationBusy.title'),
+        i18n.t('notifications.conversationBusy.body'),
+      );
+
+      await act(async () => {
+        onToken?.('Native completion survived');
+        nativeCompletion.resolve({ text: 'Native completion survived' });
+        await sendPromise;
+      });
+
+      const settledState = useChatStore.getState();
+      const settledThreadA = settledState.threads[threadA];
+      expect(settledState.activeThreadId).toBe(threadA);
+      expect(settledThreadA.status).toBe('idle');
+      expect(settledThreadA.messages.at(-1)).toEqual(expect.objectContaining({
+        role: 'assistant',
+        content: 'Native completion survived',
+        state: 'complete',
+      }));
+      expect(
+        settledThreadA.messages.some((message) => message.state === 'streaming'),
+      ).toBe(false);
+      expect(settledState.threads[threadB]).toBe(targetBefore);
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('dismisses the thread inference notification after deleting the conversation', async () => {
+    const dismissSpy = jest.spyOn(
+      notificationService,
+      'dismissInferenceNotificationForThread',
+    ).mockResolvedValueOnce(undefined);
+    const getSession = renderHookHarness();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Conversation to delete');
+    });
+    const threadId = useChatStore.getState().activeThreadId!;
+
+    try {
+      act(() => {
+        getSession()?.deleteThread(threadId);
+      });
+
+      expect(useChatStore.getState().getThread(threadId)).toBeNull();
+      expect(dismissSpy).toHaveBeenCalledTimes(1);
+      expect(dismissSpy).toHaveBeenCalledWith(threadId);
+    } finally {
+      dismissSpy.mockRestore();
+    }
   });
 
   it('blocks deleting a live generating thread from another hook instance', async () => {

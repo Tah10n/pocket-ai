@@ -41,7 +41,20 @@ type CandidateRecord = {
   legacyId: string;
 };
 
+type ExactProjectorScopeInput = Pick<
+  ProjectorArtifact,
+  'downloadUrl' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId' | 'repoId'
+>;
+
+type ExactProjectorScopeCacheEntry = ExactProjectorScopeInput & {
+  scope: ExactProjectorScope | null;
+};
+
 const PROJECTOR_REQUIRED_INPUTS = new Set(['image', 'audio']);
+// Registry/catalog ownership is immutable: projector changes replace the
+// candidate object. Keep the parsed exact scope on that object so the strict
+// URL/repository/path validation is paid once per snapshot, not once per card.
+const exactProjectorScopeCache = new WeakMap<object, ExactProjectorScopeCacheEntry>();
 
 function normalizeOptionalString(value: unknown): string | undefined {
   if (typeof value !== 'string') {
@@ -86,12 +99,38 @@ function projectorDownloadUrlsAreCompatible(left: string, right: string): boolea
     && normalizedLeft === normalizeComparableOrdinaryDownloadUrl(right);
 }
 
-export function resolveExactProjectorScope(
-  projector: Pick<
-    ProjectorArtifact,
-    'downloadUrl' | 'fileName' | 'hfRevision' | 'ownerModelId' | 'ownerVariantId' | 'repoId'
-  >,
+function cacheExactProjectorScope(
+  projector: ExactProjectorScopeInput,
+  scope: ExactProjectorScope | null,
 ): ExactProjectorScope | null {
+  exactProjectorScopeCache.set(projector, {
+    downloadUrl: projector.downloadUrl,
+    fileName: projector.fileName,
+    hfRevision: projector.hfRevision,
+    ownerModelId: projector.ownerModelId,
+    ownerVariantId: projector.ownerVariantId,
+    repoId: projector.repoId,
+    scope,
+  });
+  return scope;
+}
+
+export function resolveExactProjectorScope(
+  projector: ExactProjectorScopeInput,
+): ExactProjectorScope | null {
+  const cached = exactProjectorScopeCache.get(projector);
+  if (
+    cached
+    && cached.downloadUrl === projector.downloadUrl
+    && cached.fileName === projector.fileName
+    && cached.hfRevision === projector.hfRevision
+    && cached.ownerModelId === projector.ownerModelId
+    && cached.ownerVariantId === projector.ownerVariantId
+    && cached.repoId === projector.repoId
+  ) {
+    return cached.scope;
+  }
+
   const ownerModelId = normalizeOptionalString(projector.ownerModelId);
   const repoId = normalizeHuggingFaceRepoId(projector.repoId);
   const filePath = normalizeHuggingFaceFilePath(projector.fileName);
@@ -107,17 +146,17 @@ export function resolveExactProjectorScope(
       downloadUrl: projector.downloadUrl,
     })
   ) {
-    return null;
+    return cacheExactProjectorScope(projector, null);
   }
 
   const ownerVariantId = normalizeOptionalString(projector.ownerVariantId);
-  return {
+  return cacheExactProjectorScope(projector, {
     ownerModelId,
     ...(ownerVariantId ? { ownerVariantId } : {}),
     repoId,
     revision,
     filePath,
-  };
+  });
 }
 
 export function getExactProjectorScopeKey(scope: ExactProjectorScope): string {

@@ -57,6 +57,8 @@ export type MtpFallbackReason =
   | 'completion_failed';
 
 export interface MtpCompletionTelemetry {
+  /** Undefined only for telemetry persisted before MTP capability tracking was added. */
+  supported?: boolean;
   requested: boolean;
   attempted: boolean;
   fallbackUsed: boolean;
@@ -302,6 +304,14 @@ export type EngineBackendInitAttempt = {
   nUbatch?: number;
   cacheTypeK: string;
   cacheTypeV: string;
+  stateCacheBudgetMb: number;
+  stateCacheMaxCheckpoints: number;
+  stateCacheEnabled: boolean;
+  stateCacheEligibility: 'eligible' | 'ineligible' | 'unknown';
+  stateCachePolicyReason: string;
+  stateCachePolicyVersion: number;
+  promptStateCacheBytes: number;
+  stateCacheArchitecture?: string;
   speculativeEnabled: boolean;
   profileSource: EngineModelInitProfileSource;
   probableOom: boolean;
@@ -341,6 +351,14 @@ export interface EngineDiagnostics {
   initNBatch?: number;
   initNUbatch?: number;
   initKvUnified?: boolean;
+  stateCacheBudgetMb?: number;
+  stateCacheMaxCheckpoints?: number;
+  stateCacheEnabled?: boolean;
+  stateCacheEligibility?: 'eligible' | 'ineligible' | 'unknown';
+  stateCachePolicyReason?: string;
+  stateCachePolicyVersion?: number;
+  promptStateCacheBytes?: number;
+  stateCacheArchitecture?: string;
   lastLifecycleEvent?: EngineLifecycleEvent;
   lastLifecycleError?: string;
   multimodal?: MultimodalDiagnosticsSummary;

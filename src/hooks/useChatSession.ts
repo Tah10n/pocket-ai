@@ -16,6 +16,16 @@ import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
 import { registry } from '../services/LocalStorageRegistry';
 import {
+  __resetChatGenerationServiceForTests,
+  beginChatGenerationWork,
+  isChatGenerationCancelledError,
+  registerActiveChatGenerationStop,
+  registerChatGenerationFallbackStop,
+  stopAllGenerationWork,
+  type ChatGenerationWorkHandle,
+} from '../services/ChatGenerationService';
+import { activateThreadForNavigation } from '../services/ChatThreadActivationService';
+import {
   ChatMessage,
   ChatThread,
   LlmChatMessage,
@@ -118,12 +128,22 @@ type AttachmentFileResolution = {
   exists: boolean;
 };
 
-type AttachmentFileResolver = (localUri: string) => Promise<AttachmentFileResolution>;
+type AttachmentCancellationGate = {
+  getCancellationError: () => unknown;
+  isCancellationRequested: () => boolean;
+};
+
+type AttachmentFileResolver = (
+  (localUri: string) => Promise<AttachmentFileResolution>
+) & {
+  cancellationGate?: AttachmentCancellationGate;
+};
 
 type PreparedAttachmentResolution = {
   readonly readinessIdentity: string;
   readonly uniqueFilesystemLookupCount: number;
   readonly finalFilesystemLookupCount: number;
+  readonly cancellationGate: AttachmentCancellationGate;
   resolveFile: AttachmentFileResolver;
   resolveFileForFinalValidation: AttachmentFileResolver;
   setCancellationCheck: (check: () => void) => void;
@@ -160,12 +180,99 @@ type PromptPreparationEngineSnapshot = {
   readonly contextIdentity: string;
 };
 
+function assertThreadModelExecutionInvariant(
+  threadId: string,
+  expectedModelId?: string,
+): ChatThread {
+  const chatState = useChatStore.getState();
+  const thread = chatState.getThread(threadId);
+  if (!thread || chatState.activeThreadId !== threadId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_mismatch',
+      'The active conversation changed before generation started.',
+      {
+        details: {
+          expectedThreadModelId: expectedModelId ?? null,
+          engineModelId: llmEngineService.getState().activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  const threadModelId = getThreadActiveModelId(thread);
+  if (threadModelId.length === 0) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_not_loaded',
+      'This conversation does not have a valid model.',
+      {
+        details: {
+          expectedThreadModelId: null,
+          engineModelId: llmEngineService.getState().activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  if (expectedModelId !== undefined && threadModelId !== expectedModelId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_mismatch',
+      'The conversation model changed before generation started.',
+      {
+        details: {
+          expectedThreadModelId: expectedModelId,
+          engineModelId: llmEngineService.getState().activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  const engineState = llmEngineService.getState();
+  if (engineState.status !== EngineStatus.READY || !engineState.activeModelId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_not_loaded',
+      'The conversation model is not loaded.',
+      {
+        details: {
+          expectedThreadModelId: threadModelId,
+          engineModelId: engineState.activeModelId ?? null,
+        },
+      },
+    );
+  }
+
+  if (engineState.activeModelId !== threadModelId) {
+    performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+    throw new AppError(
+      'chat_model_mismatch',
+      'The loaded model does not match the conversation model.',
+      {
+        details: {
+          expectedThreadModelId: threadModelId,
+          engineModelId: engineState.activeModelId,
+        },
+      },
+    );
+  }
+
+  return thread;
+}
+
 function capturePromptPreparationEngineSnapshot(expectedModelId: string): PromptPreparationEngineSnapshot {
   const engineState = llmEngineService.getState();
   if (engineState.status !== EngineStatus.READY || engineState.activeModelId !== expectedModelId) {
     throw new AppError(
-      'engine_not_ready',
+      engineState.activeModelId ? 'chat_model_mismatch' : 'chat_model_not_loaded',
       'The model context changed before prompt preparation started. Try again.',
+      {
+        details: {
+          expectedThreadModelId: expectedModelId,
+          engineModelId: engineState.activeModelId ?? null,
+        },
+      },
     );
   }
 
@@ -222,11 +329,69 @@ function createPreparedAttachmentResolution(
   const fileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
   const finalFileExistenceByNormalizedUri = new Map<string, Promise<boolean>>();
   let cancellationCheck: () => void = () => undefined;
+  let cancellationError: unknown = null;
   let readinessIdentity = buildPromptMultimodalReadinessIdentity(readiness, expectedModelId);
   let uniqueFilesystemLookupCount = 0;
   let finalFilesystemLookupCount = 0;
 
+  const cancellationGate: AttachmentCancellationGate = {
+    getCancellationError: () => (
+      cancellationError ?? new Error('Attachment preparation was cancelled.')
+    ),
+    isCancellationRequested: () => {
+      if (cancellationError) {
+        return true;
+      }
+      try {
+        cancellationCheck();
+        return false;
+      } catch (error) {
+        cancellationError = error;
+        return true;
+      }
+    },
+  };
+
+  const resolveFile: AttachmentFileResolver = (localUri) => {
+    if (cancellationGate.isCancellationRequested()) {
+      return Promise.reject(cancellationGate.getCancellationError());
+    }
+    const existing = fileResolutionByInputUri.get(localUri);
+    if (existing) {
+      return existing;
+    }
+    const resolution = resolvePreparedAttachmentFile(localUri);
+    fileResolutionByInputUri.set(localUri, resolution);
+    return resolution;
+  };
+  resolveFile.cancellationGate = cancellationGate;
+
+  const resolveFileForFinalValidation: AttachmentFileResolver = (localUri) => {
+    if (cancellationGate.isCancellationRequested()) {
+      return Promise.reject(cancellationGate.getCancellationError());
+    }
+    const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
+    if (!normalizedUri) {
+      return Promise.resolve({ normalizedUri: null, exists: false });
+    }
+
+    let lookup = finalFileExistenceByNormalizedUri.get(normalizedUri);
+    if (!lookup) {
+      finalFilesystemLookupCount += 1;
+      lookup = (async () => {
+        const exists = await doesChatAttachmentFileExist(normalizedUri);
+        cancellationGate.isCancellationRequested();
+        return exists;
+      })();
+      finalFileExistenceByNormalizedUri.set(normalizedUri, lookup);
+    }
+
+    return lookup.then((exists) => ({ normalizedUri, exists }));
+  };
+  resolveFileForFinalValidation.cancellationGate = cancellationGate;
+
   return {
+    cancellationGate,
     get readinessIdentity() {
       return readinessIdentity;
     },
@@ -236,38 +401,11 @@ function createPreparedAttachmentResolution(
     get finalFilesystemLookupCount() {
       return finalFilesystemLookupCount;
     },
-    resolveFile: (localUri) => {
-      cancellationCheck();
-      const existing = fileResolutionByInputUri.get(localUri);
-      if (existing) {
-        return existing;
-      }
-      const resolution = resolvePreparedAttachmentFile(localUri);
-      fileResolutionByInputUri.set(localUri, resolution);
-      return resolution;
-    },
-    resolveFileForFinalValidation: (localUri) => {
-      cancellationCheck();
-      const normalizedUri = normalizeChatAttachmentLocalUri(localUri);
-      if (!normalizedUri) {
-        return Promise.resolve({ normalizedUri: null, exists: false });
-      }
-
-      let lookup = finalFileExistenceByNormalizedUri.get(normalizedUri);
-      if (!lookup) {
-        finalFilesystemLookupCount += 1;
-        lookup = (async () => {
-          const exists = await doesChatAttachmentFileExist(normalizedUri);
-          cancellationCheck();
-          return exists;
-        })();
-        finalFileExistenceByNormalizedUri.set(normalizedUri, lookup);
-      }
-
-      return lookup.then((exists) => ({ normalizedUri, exists }));
-    },
+    resolveFile,
+    resolveFileForFinalValidation,
     setCancellationCheck: (check) => {
       cancellationCheck = check;
+      cancellationError = null;
     },
     updateReadinessIdentity: (nextReadiness, nextExpectedModelId) => {
       readinessIdentity = buildPromptMultimodalReadinessIdentity(nextReadiness, nextExpectedModelId);
@@ -285,7 +423,7 @@ function createPreparedAttachmentResolution(
       uniqueFilesystemLookupCount += 1;
       lookup = (async () => {
         const exists = await doesChatAttachmentFileExist(normalizedUri);
-        cancellationCheck();
+        cancellationGate.isCancellationRequested();
         return exists;
       })();
       fileExistenceByNormalizedUri.set(normalizedUri, lookup);
@@ -422,6 +560,7 @@ function resolveReadyMediaAttachmentDrafts({
 
 async function processDocumentAttachmentDraftsForInference(
   drafts: readonly ChatDocumentAttachmentDraft[],
+  cancellationGate?: AttachmentCancellationGate,
 ): Promise<ProcessedDocumentAttachmentDraftsForInference> {
   if (drafts.length === 0) {
     return { attachments: [], contentParts: [] };
@@ -442,6 +581,7 @@ async function processDocumentAttachmentDraftsForInference(
         contentPart: buildDocumentAttachmentTextPart(result),
       };
     },
+    cancellationGate,
   );
 
   return {
@@ -493,6 +633,42 @@ function createAssistantTurnPersistenceError(
   );
 }
 
+async function settleActiveChatGenerationForStop(
+  generation: ActiveGenerationState,
+): Promise<void> {
+  generation.stopRequested = true;
+  releaseAndroidQaGenerationGate(generation.messageId);
+
+  const settlementResult = generation.commitTerminalState
+    ? generation.commitTerminalState()
+    : useChatStore.getState().finalizeAssistantTurn(
+        generation.threadId,
+        generation.messageId,
+        { outcome: 'stopped' },
+      );
+  if (settlementResult.status === 'persistence_failed') {
+    throw createAssistantTurnPersistenceError(settlementResult);
+  }
+
+  if (
+    sharedGenerationState.current === generation
+    && !generation.nativeCompletionStarted
+  ) {
+    sharedGenerationState.current = null;
+  }
+}
+
+registerChatGenerationFallbackStop({
+  isActive: () => sharedGenerationState.current !== null,
+  hasNativeCompletion: () => sharedGenerationState.current?.nativeCompletionStarted === true,
+  stop: async () => {
+    const generation = sharedGenerationState.current;
+    if (generation) {
+      await settleActiveChatGenerationForStop(generation);
+    }
+  },
+});
+
 function isMatchingGeneration(threadId: string, messageId: string) {
   return (
     sharedGenerationState.current?.threadId === threadId &&
@@ -534,6 +710,7 @@ export function shouldFlushAssistantStreamPatchOnBoundary(content: string) {
 
 export function resetSharedGenerationStateForTests() {
   resetActiveChatGenerationRuntimeForPrivateStorageReset();
+  __resetChatGenerationServiceForTests();
 }
 
 export function resetActiveChatGenerationRuntimeForPrivateStorageReset(): void {
@@ -888,6 +1065,7 @@ async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
   mapper: (item: T, index: number) => Promise<R>,
+  cancellationGate?: AttachmentCancellationGate,
 ): Promise<R[]> {
   if (items.length === 0) {
     return [];
@@ -899,11 +1077,21 @@ async function mapWithConcurrency<T, R>(
 
   await Promise.all(Array.from({ length: workerCount }, async () => {
     while (nextIndex < items.length) {
+      if (cancellationGate?.isCancellationRequested()) {
+        return;
+      }
       const currentIndex = nextIndex;
       nextIndex += 1;
       results[currentIndex] = await mapper(items[currentIndex], currentIndex);
     }
   }));
+
+  if (cancellationGate?.isCancellationRequested()) {
+    // The owning generationWork waiter delivers the cancellation to the active
+    // pipeline. Returning only completed items lets already-started workers
+    // settle without producing a second, detached rejection.
+    return results.filter((result): result is R => result !== undefined);
+  }
 
   return results;
 }
@@ -950,6 +1138,7 @@ async function assertDraftAttachmentFilesExist(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const missingDrafts = attachmentChecks
@@ -988,6 +1177,7 @@ async function assertMediaDraftAttachmentFilesExist(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const missingDrafts = attachmentChecks
@@ -1022,6 +1212,7 @@ async function assertMessageAttachmentFilesExist(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const missingAttachments = attachmentChecks
@@ -1173,6 +1364,7 @@ async function resolveLlmMessageAttachmentsForInference(
         exists: resolution.exists,
       };
     },
+    resolveAttachmentFile.cancellationGate,
   );
 
   const nextAttachments: NonNullable<ChatMessage['attachments']> = [];
@@ -1282,6 +1474,7 @@ async function resolveRetainedMessagesForInferenceAttachments(
       multimodalReadiness,
       expectedModelId,
     ),
+    resolveAttachmentFile.cancellationGate,
   );
 
   assertMultimodalReadyForInferenceAttachments(resolvedMessages, multimodalReadiness, expectedModelId);
@@ -1582,7 +1775,6 @@ export const useChatSession = () => {
   const createThread = useChatStore((state) => state.createThread);
   const appendMessage = useChatStore((state) => state.appendMessage);
   const createAssistantPlaceholder = useChatStore((state) => state.createAssistantPlaceholder);
-  const switchThreadModel = useChatStore((state) => state.switchThreadModel);
   const deleteMessageBranch = useChatStore((state) => state.deleteMessageBranch);
   const deleteThreadState = useChatStore((state) => state.deleteThread);
   const finalizeAssistantTurn = useChatStore((state) => state.finalizeAssistantTurn);
@@ -1720,11 +1912,16 @@ export const useChatSession = () => {
     threadId: string,
     assistantMessageId: string,
     completionOptions: {
+      expectedModelId?: string;
       multimodalReadiness?: MultimodalReadinessState;
       attachmentResolution?: PreparedAttachmentResolution;
+      generationWork?: ChatGenerationWorkHandle;
     } = {},
   ) => {
-    const storedThread = useChatStore.getState().getThread(threadId);
+    const storedThread = assertThreadModelExecutionInvariant(
+      threadId,
+      completionOptions.expectedModelId,
+    );
     if (!storedThread) {
       throw new Error('Thread not found');
     }
@@ -1733,7 +1930,7 @@ export const useChatSession = () => {
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
 
-    const modelId = getThreadActiveModelId(storedThread);
+    const modelId = completionOptions.expectedModelId ?? getThreadActiveModelId(storedThread);
 
     performanceMonitor.mark('chat.send.start', { modelId });
     const generationSpan = performanceMonitor.startSpan('chat.generation', { modelId });
@@ -1745,15 +1942,18 @@ export const useChatSession = () => {
       nativeCompletionStarted: false,
     };
     sharedGenerationState.current = generationState;
+    let unregisterGenerationStop: () => void = () => undefined;
     const isAndroidQaEvidenceEnabled = isAndroidQaGenerationEvidenceEnabled();
     if (isAndroidQaEvidenceEnabled) {
       beginAndroidQaGeneration(assistantMessageId);
     }
 
     const throwIfGenerationStopped = () => {
+      completionOptions.generationWork?.assertCurrent();
       if (generationState.stopRequested) {
         throw new Error('Generation was stopped before native completion started.');
       }
+      assertThreadModelExecutionInvariant(threadId, modelId);
       if (useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart) {
         throw new AppError(
           'action_failed',
@@ -1764,6 +1964,9 @@ export const useChatSession = () => {
     const promptPreparationSpan = performanceMonitor.isEnabled()
       ? performanceMonitor.startSpan('chat.prompt.total')
       : null;
+    const waitForGenerationWork = <T>(promise: Promise<T>): Promise<T> => (
+      completionOptions.generationWork?.waitFor(promise) ?? promise
+    );
     const endPromptPreparationSpan = promptPreparationSpan
       ? (
           outcome: 'success' | 'cancelled' | 'error',
@@ -1842,10 +2045,17 @@ export const useChatSession = () => {
         ? llmEngineService.getContextSize()
         : DEFAULT_CONTEXT_SIZE;
 
-    const canMutateAssistantMessage = (options?: { allowStopped?: boolean }) => (
-      isMatchingGeneration(threadId, assistantMessageId)
-      && (options?.allowStopped === true || !generationState.stopRequested)
-    );
+    const canMutateAssistantMessage = (options?: { allowStopped?: boolean }) => {
+      const chatState = useChatStore.getState();
+      const currentThread = chatState.getThread(threadId);
+      return (
+        isMatchingGeneration(threadId, assistantMessageId)
+        && chatState.activeThreadId === threadId
+        && currentThread != null
+        && getThreadActiveModelId(currentThread) === modelId
+        && (options?.allowStopped === true || !generationState.stopRequested)
+      );
+    };
 
     const hasBufferedAssistantContent = () => {
       const presentation = presentationParser.getPresentation();
@@ -2029,6 +2239,10 @@ export const useChatSession = () => {
     };
 
     let releasePromptPreparation: (() => void) | null = null;
+    unregisterGenerationStop = registerActiveChatGenerationStop({
+      hasNativeCompletion: () => generationState.nativeCompletionStarted,
+      stop: () => settleActiveChatGenerationForStop(generationState),
+    });
     try {
       releasePromptPreparation = llmEngineService.beginPromptPreparation();
       const {
@@ -2045,7 +2259,7 @@ export const useChatSession = () => {
       attachmentResolution.setCancellationCheck(throwIfGenerationStopped);
       const promptContextIdentity = llmEngineService.getPromptContextIdentity();
 
-      await backgroundTaskService.startBackgroundInference(modelName);
+      await waitForGenerationWork(backgroundTaskService.startBackgroundInference(modelName));
 
       unsubscribeExpiration = backgroundTaskService.subscribeToExpiration(() => {
         if (!isMatchingGeneration(threadId, assistantMessageId)) {
@@ -2254,7 +2468,9 @@ export const useChatSession = () => {
         params: PromptTokenFormattingParams,
       ) => {
         throwIfGenerationStopped();
-        const resolvedWindowMessages = await resolvePreparedMessages(windowMessages);
+        const resolvedWindowMessages = await waitForGenerationWork(
+          resolvePreparedMessages(windowMessages),
+        );
         throwIfGenerationStopped();
 
         return countResolvedPromptTokens(resolvedWindowMessages, params);
@@ -2318,7 +2534,9 @@ export const useChatSession = () => {
             ...getPrivacySafeErrorLogDetails(error),
           });
           didUseHeuristicPromptTokens = true;
-          messages = await resolvePreparedMessages(getThreadInferenceWindow(thread, windowOptions).messages);
+          messages = await waitForGenerationWork(
+            resolvePreparedMessages(getThreadInferenceWindow(thread, windowOptions).messages),
+          );
           promptTokens = estimateLlmMessagesTokens(messages);
           promptSafetyMarginTokens = Math.max(
             0,
@@ -2394,20 +2612,24 @@ export const useChatSession = () => {
           };
         };
 
-        const preparedMessages = await resolvePreparedMessages(messages);
+        const preparedMessages = await waitForGenerationWork(resolvePreparedMessages(messages));
         throwIfGenerationStopped();
-        preparedRequest = await buildPreparedRequest(preparedMessages, promptTokens);
+        preparedRequest = await waitForGenerationWork(
+          buildPreparedRequest(preparedMessages, promptTokens),
+        );
 
         const latestPreparedUserMessageIndex = getLatestUserLlmMessageIndex(preparedRequest.messages);
         const latestPreparedUserMessage = preparedRequest.messages[latestPreparedUserMessageIndex];
         if (latestPreparedUserMessage?.attachments?.length) {
-          const revalidatedLatestUserMessage = await resolveLlmMessageAttachmentsForInference(
-            latestPreparedUserMessage,
-            true,
-            latestUserMessageId,
-            attachmentResolution.resolveFileForFinalValidation,
-            effectiveMultimodalReadiness,
-            activeModelId,
+          const revalidatedLatestUserMessage = await waitForGenerationWork(
+            resolveLlmMessageAttachmentsForInference(
+              latestPreparedUserMessage,
+              true,
+              latestUserMessageId,
+              attachmentResolution.resolveFileForFinalValidation,
+              effectiveMultimodalReadiness,
+              activeModelId,
+            ),
           );
           throwIfGenerationStopped();
 
@@ -2416,9 +2638,13 @@ export const useChatSession = () => {
             revalidatedMessages[latestPreparedUserMessageIndex] = revalidatedLatestUserMessage;
             const revalidatedPromptTokens = didUseHeuristicPromptTokens
               ? estimateLlmMessagesTokens(revalidatedMessages)
-              : await countResolvedPromptTokens(revalidatedMessages, selectedTokenCountParams);
+              : await waitForGenerationWork(
+                  countResolvedPromptTokens(revalidatedMessages, selectedTokenCountParams),
+                );
             throwIfGenerationStopped();
-            preparedRequest = await buildPreparedRequest(revalidatedMessages, revalidatedPromptTokens);
+            preparedRequest = await waitForGenerationWork(
+              buildPreparedRequest(revalidatedMessages, revalidatedPromptTokens),
+            );
           }
         }
       } finally {
@@ -2477,6 +2703,7 @@ export const useChatSession = () => {
         throw new Error('Wait for the current response to finish stopping before starting another response.');
       }
 
+      assertThreadModelExecutionInvariant(threadId, modelId);
       if (isAndroidQaEvidenceEnabled) {
         recordAndroidQaPreparedGenerationEvidence(buildAndroidQaPreparedGenerationEvidence({
           userMessageId: latestUserMessageId,
@@ -2487,6 +2714,7 @@ export const useChatSession = () => {
       generationState.nativeCompletionStarted = true;
       const completion = await llmEngineService.chatCompletion({
         messages,
+        expectedModelId: modelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         params: {
           temperature: thread.paramsSnapshot.temperature,
@@ -2675,10 +2903,15 @@ export const useChatSession = () => {
 
       const message = resolvePersistedAssistantErrorMessage(error);
       const userFacingError = resolveUserFacingGenerationError(error, message);
+      const appError = toAppError(error);
+      const assistantErrorCode = appError.code === 'chat_model_mismatch'
+        || appError.code === 'chat_model_not_loaded'
+        ? appError.code
+        : 'generation_failed';
 
       const errorResult = finalizeBufferedAssistantTurn({
           outcome: 'error',
-          errorCode: 'generation_failed',
+          errorCode: assistantErrorCode,
           errorMessage: message,
       });
       const errorCommitError = resolveTerminalCommitError(errorResult);
@@ -2709,6 +2942,7 @@ export const useChatSession = () => {
         sharedGenerationState.current = null;
       }
 
+      unregisterGenerationStop();
       if (wasCurrentGeneration && backgroundTaskService.isTaskActive('inference')) {
         await backgroundTaskService.stopBackgroundTask('inference');
       }
@@ -2729,15 +2963,8 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
-    const engineState = llmEngineService.getState();
-    if (engineState.status !== EngineStatus.READY) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
     const threadModelId = getThreadActiveModelId(thread);
-    if (engineState.activeModelId !== threadModelId) {
-      throw new Error(`Load ${threadModelId} before ${actionLabel}.`);
-    }
+    assertThreadModelExecutionInvariant(thread.id, threadModelId);
 
     if (
       llmEngineService.hasActiveCompletion()
@@ -2748,50 +2975,54 @@ export const useChatSession = () => {
     }
   }, []);
 
-  const ensureThreadUsesModelForSend = useCallback((thread: ChatThread, nextModelId: string) => {
-    const currentModelId = getThreadActiveModelId(thread);
-    if (nextModelId === currentModelId) {
-      return;
-    }
-
-    switchThreadModel(thread.id, nextModelId);
-    updateThreadParamsSnapshot(thread.id, getGenerationParametersForModel(nextModelId));
-  }, [switchThreadModel, updateThreadParamsSnapshot]);
-
   const appendUserMessage = useCallback(async (text: string, options: AppendUserMessageOptions = {}) => {
     markInteractiveWorkStarted();
     assertPrivateStorageWritableForChatMutation();
     const settings = getSettings();
-    const activeModelId = settings.activeModelId;
-    const activeModelParams = getGenerationParametersForModel(activeModelId);
+    const interactiveStateAtStart = useChatStore.getState();
+    const interactiveRevisionAtStart = interactiveStateAtStart.inferenceRevision;
+    const activeThreadIdAtStart = interactiveStateAtStart.activeThreadId;
+    const existingThreadAtStart = activeThreadIdAtStart
+      ? interactiveStateAtStart.getThread(activeThreadIdAtStart)
+      : undefined;
+    const targetModelId = existingThreadAtStart
+      ? getThreadActiveModelId(existingThreadAtStart)
+      : settings.activeModelId?.trim() ?? '';
+    const newThreadModelParams = getGenerationParametersForModel(targetModelId);
+
+    if (existingThreadAtStart) {
+      ensureThreadCanGenerate(existingThreadAtStart, 'sending another message');
+    } else {
+      const engineState = llmEngineService.getState();
+      if (!targetModelId || engineState.status !== EngineStatus.READY || !engineState.activeModelId) {
+        throw new AppError('chat_model_not_loaded', 'Load a model before starting a conversation.');
+      }
+      if (engineState.activeModelId !== targetModelId) {
+        performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
+        throw new AppError(
+          'chat_model_mismatch',
+          'The loaded model does not match the model selected for this conversation.',
+          {
+            details: {
+              expectedThreadModelId: targetModelId,
+              engineModelId: engineState.activeModelId,
+            },
+          },
+        );
+      }
+    }
+
     const attachmentDrafts = resolveReadyAttachmentDrafts({
       drafts: options.attachmentDrafts ?? [],
       readiness: options.multimodalReadiness,
-      expectedModelId: activeModelId,
+      expectedModelId: targetModelId,
     });
     const documentAttachmentDrafts = resolveReadyDocumentAttachmentDrafts(options.documentAttachmentDrafts ?? []);
     const mediaAttachmentDrafts = resolveReadyMediaAttachmentDrafts({
       drafts: options.mediaAttachmentDrafts ?? [],
       readiness: options.multimodalReadiness,
-      expectedModelId: activeModelId,
+      expectedModelId: targetModelId,
     });
-
-    if (!activeModelId) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
-    const engineState = llmEngineService.getState();
-    if (engineState.status !== EngineStatus.READY) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
-    if (engineState.activeModelId !== activeModelId) {
-      throw new Error('Model is not loaded or engine is not ready. Please select and load a model in the Models tab.');
-    }
-
-    if (activeThread?.status === 'generating') {
-      throw new Error('A response is already being generated for this thread.');
-    }
 
     if (
       llmEngineService.hasActiveCompletion()
@@ -2803,27 +3034,38 @@ export const useChatSession = () => {
 
     const attachmentResolution = createPreparedAttachmentResolution(
       options.multimodalReadiness,
-      activeModelId,
+      targetModelId,
     );
-    const interactiveStateAtStart = useChatStore.getState();
-    const interactiveRevisionAtStart = interactiveStateAtStart.inferenceRevision;
-    const activeThreadIdAtStart = interactiveStateAtStart.activeThreadId;
-    if ((activeThread?.id ?? null) !== activeThreadIdAtStart) {
-      throw new AppError(
-        'action_failed',
-        'The conversation changed before prompt preparation started. Try again.',
-      );
-    }
-    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
-    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(targetModelId);
+    const generationWork = beginChatGenerationWork('append_user_message');
+    attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
+    let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
-      await assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile);
-      await assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile);
-      const processedDocumentAttachments = await processDocumentAttachmentDraftsForInference(documentAttachmentDrafts);
+      releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+      await generationWork.waitFor(
+        assertDraftAttachmentFilesExist(attachmentDrafts, attachmentResolution.resolveFile),
+      );
+      await generationWork.waitFor(
+        assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile),
+      );
+      const processedDocumentAttachments = await generationWork.waitFor(
+        processDocumentAttachmentDraftsForInference(
+          documentAttachmentDrafts,
+          attachmentResolution.cancellationGate,
+        ),
+      );
+      generationWork.assertCurrent();
       const currentState = useChatStore.getState();
       if (
         currentState.inferenceRevision !== interactiveRevisionAtStart
         || currentState.activeThreadId !== activeThreadIdAtStart
+        || (
+          existingThreadAtStart != null
+          && (
+            currentState.getThread(existingThreadAtStart.id) !== existingThreadAtStart
+            || getThreadActiveModelId(existingThreadAtStart) !== targetModelId
+          )
+        )
       ) {
         throw new AppError(
           'action_failed',
@@ -2838,35 +3080,29 @@ export const useChatSession = () => {
         ? assertActiveMultimodalReadyForAttachmentMediaPaths({
             mediaPaths: imageAttachmentMediaPaths,
             multimodalReadiness: options.multimodalReadiness,
-            expectedModelId: activeModelId,
+            expectedModelId: targetModelId,
             mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
           })
         : options.multimodalReadiness;
-      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, targetModelId);
 
-      const threadId = activeThread?.id
+      const threadId = existingThreadAtStart?.id
         ?? createThread({
-          modelId: activeModelId,
+          modelId: targetModelId,
           presetId: settings.activePresetId,
           presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
-          paramsSnapshot: activeModelParams,
+          paramsSnapshot: newThreadModelParams,
         });
 
-      setActiveThread(threadId);
-
-      const existingThread = activeThread;
-      if (existingThread) {
-        ensureThreadUsesModelForSend(existingThread, activeModelId);
-        const nextThread = useChatStore.getState().getThread(threadId);
-        if (nextThread) {
-          syncThreadParametersCallback(nextThread, activeModelParams);
-        }
+      if (!setActiveThread(threadId)) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed before it could become active. Try again.',
+        );
       }
 
-      const threadAfterPossibleSwitch = useChatStore.getState().getThread(threadId);
-      const threadModelId = threadAfterPossibleSwitch
-        ? getThreadActiveModelId(threadAfterPossibleSwitch)
-        : activeModelId;
+      const threadForSend = assertThreadModelExecutionInvariant(threadId, targetModelId);
+      const threadModelId = getThreadActiveModelId(threadForSend);
 
       const userMessageId = createChatId('message');
       const normalizedText = text.trim();
@@ -2910,84 +3146,32 @@ export const useChatSession = () => {
       const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
 
       await runAssistantCompletion(threadId, assistantMessageId, {
+        expectedModelId: threadModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
+        generationWork,
       });
+    } catch (error) {
+      if (isChatGenerationCancelledError(error)) {
+        return;
+      }
+      throw error;
     } finally {
-      releaseInteractivePromptPreparation();
+      releaseInteractivePromptPreparation?.();
+      generationWork.finish();
     }
-  }, [activeThread, appendMessage, createAssistantPlaceholder, createThread, ensureThreadUsesModelForSend, runAssistantCompletion, setActiveThread, syncThreadParametersCallback]);
+  }, [
+    appendMessage,
+    createAssistantPlaceholder,
+    createThread,
+    ensureThreadCanGenerate,
+    runAssistantCompletion,
+    setActiveThread,
+  ]);
 
   const stopGeneration = useCallback(async () => {
     markInteractiveWorkStarted();
-    const generation = sharedGenerationState.current;
-    if (!generation) {
-      return;
-    }
-
-    generation.stopRequested = true;
-    releaseAndroidQaGenerationGate(generation.messageId);
-    let firstStopError: unknown;
-    let hasStopError = false;
-    let settlementResult: TerminalCommitResult | null = null;
-    const captureFirstStopError = (error: unknown) => {
-      if (!hasStopError) {
-        firstStopError = error;
-        hasStopError = true;
-      }
-    };
-
-    try {
-      settlementResult = generation.commitTerminalState
-        ? generation.commitTerminalState()
-        : useChatStore.getState().finalizeAssistantTurn(
-          generation.threadId,
-          generation.messageId,
-          { outcome: 'stopped' },
-        );
-      if (settlementResult.status === 'persistence_failed') {
-        captureFirstStopError(createAssistantTurnPersistenceError(settlementResult));
-      }
-    } catch (error) {
-      captureFirstStopError(error);
-    }
-
-    try {
-      if (generation.nativeCompletionStarted) {
-        await llmEngineService.interruptActiveCompletion();
-      } else {
-        if (typeof llmEngineService.cancelActiveContextOperations === 'function') {
-          const drainResult = await llmEngineService.cancelActiveContextOperations();
-          if (drainResult === 'timed_out') {
-            console.warn('[ChatSession] Timed out waiting for prompt preparation to stop');
-          }
-        }
-        await llmEngineService.stopCompletion();
-      }
-    } catch (error) {
-      captureFirstStopError(error);
-    }
-
-    try {
-      if (sharedGenerationState.current === generation && backgroundTaskService.isTaskActive('inference')) {
-        await backgroundTaskService.stopBackgroundTask('inference');
-      }
-    } catch (error) {
-      captureFirstStopError(error);
-    }
-
-    if (
-      sharedGenerationState.current === generation
-      && settlementResult
-      && settlementResult.status !== 'persistence_failed'
-      && !generation.nativeCompletionStarted
-    ) {
-      sharedGenerationState.current = null;
-    }
-
-    if (hasStopError) {
-      throw firstStopError;
-    }
+    await stopAllGenerationWork({ blockNewWork: false });
   }, []);
 
   const regenerateFromUserMessage = useCallback(async (
@@ -3019,14 +3203,20 @@ export const useChatSession = () => {
       activeModelId,
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
-    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    const generationWork = beginChatGenerationWork('regenerate_user_message');
+    attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
+    let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
-      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-        targetMessage,
-        requestedMultimodalReadiness,
-        activeModelId,
-        attachmentResolution.resolveFile,
+      releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+      const effectiveMultimodalReadiness = await generationWork.waitFor(
+        assertUserMessageAttachmentsReadyForRegeneration(
+          targetMessage,
+          requestedMultimodalReadiness,
+          activeModelId,
+          attachmentResolution.resolveFile,
+        ),
       );
+      generationWork.assertCurrent();
       attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
       const currentState = useChatStore.getState();
       const currentThread = currentState.threads[activeThread.id];
@@ -3051,13 +3241,21 @@ export const useChatSession = () => {
       }
 
       await runAssistantCompletion(activeThread.id, assistantMessageId, {
+        expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
+        generationWork,
       });
 
       return true;
+    } catch (error) {
+      if (isChatGenerationCancelledError(error)) {
+        return false;
+      }
+      throw error;
     } finally {
-      releaseInteractivePromptPreparation();
+      releaseInteractivePromptPreparation?.();
+      generationWork.finish();
     }
   }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
 
@@ -3103,14 +3301,20 @@ export const useChatSession = () => {
       activeModelId,
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
-    const releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+    const generationWork = beginChatGenerationWork('regenerate_last_response');
+    attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
+    let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
-      const effectiveMultimodalReadiness = await assertUserMessageAttachmentsReadyForRegeneration(
-        lastUserMessage,
-        model?.multimodalReadiness,
-        activeModelId,
-        attachmentResolution.resolveFile,
+      releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
+      const effectiveMultimodalReadiness = await generationWork.waitFor(
+        assertUserMessageAttachmentsReadyForRegeneration(
+          lastUserMessage,
+          model?.multimodalReadiness,
+          activeModelId,
+          attachmentResolution.resolveFile,
+        ),
       );
+      generationWork.assertCurrent();
       attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
       const currentState = useChatStore.getState();
       const currentThread = currentState.threads[activeThread.id];
@@ -3149,31 +3353,41 @@ export const useChatSession = () => {
         }
 
         await runAssistantCompletion(activeThread.id, assistantMessageId, {
+          expectedModelId: activeModelId,
           multimodalReadiness: effectiveMultimodalReadiness,
           attachmentResolution,
+          generationWork,
         });
 
         return true;
       };
 
       if (!canReplaceCurrentTurnAssistant) {
-        return regenerateFromLastUserWithPreparedAttachments();
+        return await regenerateFromLastUserWithPreparedAttachments();
       }
 
       const syncedThread = syncThreadParametersCallback(activeThread);
       const assistantMessageId = replaceLastAssistantMessage(syncedThread.id);
       if (!assistantMessageId) {
-        return regenerateFromLastUserWithPreparedAttachments();
+        return await regenerateFromLastUserWithPreparedAttachments();
       }
 
       await runAssistantCompletion(syncedThread.id, assistantMessageId, {
+        expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
+        generationWork,
       });
 
       return true;
+    } catch (error) {
+      if (isChatGenerationCancelledError(error)) {
+        return false;
+      }
+      throw error;
     } finally {
-      releaseInteractivePromptPreparation();
+      releaseInteractivePromptPreparation?.();
+      generationWork.finish();
     }
   }, [
     activeThread,
@@ -3194,24 +3408,36 @@ export const useChatSession = () => {
       throw new Error('Stop the current response before starting a new chat.');
     }
 
-    setActiveThread(null);
+    if (!setActiveThread(null)) {
+      throw new Error('The new conversation could not be opened.');
+    }
   }, [activeThread, setActiveThread]);
 
   const openThread = useCallback((threadId: string) => {
-    if (activeThread?.status === 'generating' && activeThread.id !== threadId) {
-      throw new Error('Stop the current response before switching conversations.');
+    const result = activateThreadForNavigation(threadId);
+    switch (result.status) {
+      case 'opened':
+      case 'already_active':
+        return;
+      case 'missing':
+        throw new AppError(
+          'action_failed',
+          'The selected conversation is no longer available.',
+        );
+      case 'generation_busy':
+        throw new AppError(
+          'engine_busy',
+          'Stop the current response before switching conversations.',
+        );
+      case 'stale':
+        throw new AppError(
+          'action_failed',
+          'The conversation changed before it could be opened. Try again.',
+        );
+      case 'persistence_failed':
+        throw toAppError(result.error);
     }
-
-    const thread = useChatStore.getState().getThread(threadId);
-    if (!thread) {
-      throw new Error('The selected conversation is no longer available.');
-    }
-
-    assertPrivateStorageWritableForChatMutation();
-
-    syncThreadParametersCallback(thread);
-    setActiveThread(threadId);
-  }, [activeThread, setActiveThread, syncThreadParametersCallback]);
+  }, []);
 
   const deleteThread = useCallback((threadId: string) => {
     const thread = useChatStore.getState().getThread(threadId);
@@ -3222,6 +3448,9 @@ export const useChatSession = () => {
     assertPrivateStorageWritableForChatMutation();
 
     deleteThreadState(threadId);
+    if (thread && !useChatStore.getState().getThread(threadId)) {
+      void notificationService.dismissInferenceNotificationForThread(threadId);
+    }
   }, [deleteThreadState]);
 
   const renameThread = useCallback((threadId: string, title: string) => {

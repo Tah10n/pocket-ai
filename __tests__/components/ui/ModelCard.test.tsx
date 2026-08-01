@@ -300,7 +300,7 @@ describe('ModelCard', () => {
     ).toBe(true);
   });
 
-  it('renders a vision badge for vision-capable primary chat models', () => {
+  it('renders vision capability as informational even when its projector is not downloaded', () => {
     render(
       <ModelCard
         model={{
@@ -325,7 +325,7 @@ describe('ModelCard', () => {
 
     expect(
       mockScreenBadge.mock.calls.some(([props]) => (
-        props.tone === 'warning'
+        props.tone === 'info'
         && props.iconName === 'visibility'
         && props.children === 'models.vision.badge'
       )),

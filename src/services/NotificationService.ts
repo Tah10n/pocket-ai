@@ -1,4 +1,4 @@
-import { Linking, Platform } from 'react-native';
+import { Alert, Linking, Platform } from 'react-native';
 import BackgroundService, { type BackgroundTaskOptions } from 'react-native-background-actions';
 import * as Notifications from 'expo-notifications';
 import { createURL } from 'expo-linking';
@@ -7,6 +7,8 @@ import { router } from 'expo-router';
 import i18n from '../i18n';
 import { useChatStore } from '../store/chatStore';
 import { semanticColorTokens } from '../utils/themeTokens';
+import { AppError, getPrivacySafeErrorLogDetails } from './AppError';
+import { performanceMonitor } from './PerformanceMonitor';
 
 export type NotificationTaskType = 'download' | 'inference';
 
@@ -34,6 +36,45 @@ const CHANNEL_IDS = {
 
 const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
 const FOREGROUND_SERVICE_NOTIFICATION_COLOR = semanticColorTokens.primary[500];
+const INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX = 'pocket-ai:inference:';
+const NOTIFICATION_RESPONSE_DEDUPE_TTL_MS = 5 * 60 * 1000;
+const NOTIFICATION_RESPONSE_DEDUPE_MAX_ENTRIES = 48;
+
+type NotificationResponseSource = 'initial' | 'listener';
+
+type NotificationResponseFailureCategory =
+    | 'routing_failed'
+    | 'native_last_response_read_failed'
+    | 'native_last_response_clear_failed';
+
+type NotificationInitializationFailureCategory =
+    | 'handler_setup_failed'
+    | 'download_channel_failed'
+    | 'inference_channel_failed'
+    | 'listener_registration_failed'
+    | 'initial_response_failed'
+    | 'disposed';
+
+function getInferenceNotificationIdentifier(threadId: string): string {
+    return `${INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX}${encodeURIComponent(threadId)}`;
+}
+
+function getNotificationResponseFingerprint(
+    response: Notifications.NotificationResponse,
+): string {
+    const identifier = typeof response?.notification?.request?.identifier === 'string'
+        ? response.notification.request.identifier
+        : '';
+    const actionIdentifier = typeof response?.actionIdentifier === 'string'
+        ? response.actionIdentifier
+        : '';
+    const notificationDate = typeof response?.notification?.date === 'number'
+        && Number.isFinite(response.notification.date)
+        ? response.notification.date
+        : '';
+
+    return JSON.stringify([identifier, actionIdentifier, notificationDate]);
+}
 
 function sleep(ms: number) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,78 +157,406 @@ function clampProgressPercent(value: number): number {
 
 class NotificationService {
     private initialized = false;
+    private initializationPromise: Promise<void> | null = null;
+    private lifecycleGeneration = 0;
     private permissionState: 'unknown' | 'granted' | 'denied' = 'unknown';
 
     private responseSubscription?: Notifications.EventSubscription;
-    private hasHandledInitialResponse = false;
+    private responseProcessingTail: Promise<void> = Promise.resolve();
+    private inFlightResponseOperations = new Map<
+        string,
+        { generation: number; promise: Promise<void> }
+    >();
+    private recentlyProcessedResponses = new Map<string, number>();
 
-    async initialize(): Promise<void> {
-        try {
-            await this.ensureInitialized();
-        } catch (error) {
-            console.warn('[NotificationService] Failed to initialize', error);
+    initialize(): Promise<void> {
+        return this.ensureInitialized();
+    }
+
+    private ensureInitialized(): Promise<void> {
+        if (this.initialized) {
+            return Promise.resolve();
+        }
+
+        if (this.initializationPromise) {
+            return this.initializationPromise;
+        }
+
+        const generation = this.lifecycleGeneration;
+        // Defer the async body by one microtask so the shared promise is assigned
+        // synchronously before any initialization work can yield or re-enter.
+        const initializationPromise = Promise.resolve().then(
+            () => this.performInitialization(generation),
+        );
+        this.initializationPromise = initializationPromise;
+        void initializationPromise.then(
+            () => {
+                if (this.initializationPromise === initializationPromise) {
+                    this.initializationPromise = null;
+                }
+            },
+            () => {
+                if (this.initializationPromise === initializationPromise) {
+                    this.initializationPromise = null;
+                }
+            },
+        );
+        return initializationPromise;
+    }
+
+    private assertInitializationGeneration(generation: number): void {
+        if (generation !== this.lifecycleGeneration) {
+            throw new Error('Notification initialization was disposed.');
         }
     }
 
-    private async ensureInitialized(): Promise<void> {
-        if (this.initialized) {
+    private async performInitialization(generation: number): Promise<void> {
+        let failureCategory: NotificationInitializationFailureCategory = 'handler_setup_failed';
+        let localResponseSubscription: Notifications.EventSubscription | undefined;
+        let localResponseSubscriptionWasPublished = false;
+
+        try {
+            this.assertInitializationGeneration(generation);
+            Notifications.setNotificationHandler({
+                handleNotification: async () => ({
+                    shouldShowBanner: true,
+                    shouldShowList: true,
+                    shouldPlaySound: false,
+                    shouldSetBadge: false,
+                }),
+            });
+            this.assertInitializationGeneration(generation);
+
+            if (Platform.OS === 'android') {
+                failureCategory = 'download_channel_failed';
+                await Notifications.setNotificationChannelAsync(CHANNEL_IDS.downloads, {
+                    name: 'Downloads',
+                    importance: Notifications.AndroidImportance.HIGH,
+                });
+                this.assertInitializationGeneration(generation);
+
+                failureCategory = 'inference_channel_failed';
+                await Notifications.setNotificationChannelAsync(CHANNEL_IDS.inference, {
+                    name: 'Inference',
+                    importance: Notifications.AndroidImportance.DEFAULT,
+                });
+                this.assertInitializationGeneration(generation);
+            }
+
+            failureCategory = 'listener_registration_failed';
+            localResponseSubscription = Notifications.addNotificationResponseReceivedListener(
+                (response) => {
+                    void this.processNotificationResponseOnce(
+                        response,
+                        'listener',
+                        generation,
+                    ).catch(() => undefined);
+                },
+            );
+            if (!localResponseSubscription || typeof localResponseSubscription.remove !== 'function') {
+                throw new Error('Notification response listener registration failed.');
+            }
+            this.assertInitializationGeneration(generation);
+            this.responseSubscription = localResponseSubscription;
+            localResponseSubscriptionWasPublished = true;
+
+            failureCategory = 'initial_response_failed';
+            const lastResponse = await Notifications.getLastNotificationResponseAsync();
+            this.assertInitializationGeneration(generation);
+            if (lastResponse) {
+                await this.processNotificationResponseOnce(
+                    lastResponse,
+                    'initial',
+                    generation,
+                );
+            }
+
+            this.assertInitializationGeneration(generation);
+            this.initialized = true;
+            performanceMonitor.mark('notification.initialization', {
+                notificationInitializationOutcome: 'success',
+            });
+        } catch (error) {
+            if (
+                localResponseSubscription
+                && (
+                    !localResponseSubscriptionWasPublished
+                    || this.responseSubscription === localResponseSubscription
+                )
+            ) {
+                try {
+                    localResponseSubscription.remove();
+                } catch {
+                    // Preserve the initialization error.
+                }
+            }
+            if (this.responseSubscription === localResponseSubscription) {
+                this.responseSubscription = undefined;
+            }
+            if (generation === this.lifecycleGeneration) {
+                this.initialized = false;
+            } else {
+                failureCategory = 'disposed';
+            }
+            performanceMonitor.mark('notification.initialization', {
+                notificationInitializationOutcome:
+                    failureCategory === 'disposed' ? 'disposed' : 'failure',
+                notificationInitializationFailureCategory: failureCategory,
+            });
+            throw error;
+        }
+    }
+
+    dispose(): void {
+        this.lifecycleGeneration += 1;
+        this.initialized = false;
+        this.initializationPromise = null;
+        this.permissionState = 'unknown';
+        // A disposed lifecycle may still be waiting on a native promise that
+        // cannot be cancelled. Detach the next lifecycle from that queue so a
+        // stale read cannot block notification handling after reinitialization.
+        this.responseProcessingTail = Promise.resolve();
+        this.inFlightResponseOperations.clear();
+        const subscription = this.responseSubscription;
+        this.responseSubscription = undefined;
+        try {
+            subscription?.remove();
+        } catch {
+            // Best-effort lifecycle cleanup.
+        }
+    }
+
+    private assertResponseGeneration(generation: number): void {
+        if (generation !== this.lifecycleGeneration) {
+            throw new Error('Notification response lifecycle was disposed.');
+        }
+    }
+
+    private pruneRecentlyProcessedResponses(now: number): void {
+        for (const [fingerprint, expiresAt] of this.recentlyProcessedResponses) {
+            if (expiresAt > now) {
+                continue;
+            }
+            this.recentlyProcessedResponses.delete(fingerprint);
+        }
+
+        while (
+            this.recentlyProcessedResponses.size
+            > NOTIFICATION_RESPONSE_DEDUPE_MAX_ENTRIES
+        ) {
+            const oldestFingerprint = this.recentlyProcessedResponses.keys().next().value;
+            if (typeof oldestFingerprint !== 'string') {
+                break;
+            }
+            this.recentlyProcessedResponses.delete(oldestFingerprint);
+        }
+    }
+
+    private rememberProcessedResponse(fingerprint: string, now: number): void {
+        this.recentlyProcessedResponses.delete(fingerprint);
+        this.recentlyProcessedResponses.set(
+            fingerprint,
+            now + NOTIFICATION_RESPONSE_DEDUPE_TTL_MS,
+        );
+        this.pruneRecentlyProcessedResponses(now);
+    }
+
+    private logNotificationResponseFailure(
+        source: NotificationResponseSource,
+        category: NotificationResponseFailureCategory,
+        error: unknown,
+    ): void {
+        performanceMonitor.mark('notification.response', {
+            notificationResponseOutcome: 'failure',
+            notificationResponseFailureCategory: category,
+            notificationResponseSource: source,
+        });
+        console.warn(
+            '[NotificationService] Notification response processing failed',
+            {
+                scope: 'notification_response',
+                category,
+                source,
+                ...getPrivacySafeErrorLogDetails(error),
+            },
+        );
+    }
+
+    private async clearNativeLastResponseIfMatching(
+        fingerprint: string,
+        source: NotificationResponseSource,
+        generation: number,
+    ): Promise<void> {
+        let lastResponse: Notifications.NotificationResponse | null | undefined;
+        try {
+            lastResponse = await Notifications.getLastNotificationResponseAsync();
+        } catch (error) {
+            this.logNotificationResponseFailure(
+                source,
+                'native_last_response_read_failed',
+                error,
+            );
             return;
         }
 
-        Notifications.setNotificationHandler({
-            handleNotification: async () => ({
-                shouldShowBanner: true,
-                shouldShowList: true,
-                shouldPlaySound: false,
-                shouldSetBadge: false,
-            }),
-        });
-
-        if (Platform.OS === 'android') {
-            await Notifications.setNotificationChannelAsync(CHANNEL_IDS.downloads, {
-                name: 'Downloads',
-                importance: Notifications.AndroidImportance.HIGH,
-            });
-
-            await Notifications.setNotificationChannelAsync(CHANNEL_IDS.inference, {
-                name: 'Inference',
-                importance: Notifications.AndroidImportance.DEFAULT,
-            });
+        if (generation !== this.lifecycleGeneration) {
+            return;
+        }
+        if (
+            !lastResponse
+            || getNotificationResponseFingerprint(lastResponse) !== fingerprint
+        ) {
+            return;
         }
 
-        this.responseSubscription = Notifications.addNotificationResponseReceivedListener(this.handleNotificationResponse);
-        if (!this.hasHandledInitialResponse) {
-            this.hasHandledInitialResponse = true;
-            try {
-                const lastResponse = await Notifications.getLastNotificationResponseAsync();
-                if (lastResponse) {
-                    this.handleNotificationResponse(lastResponse);
-                }
-            } catch {
-                // ignore
-            }
+        try {
+            Notifications.clearLastNotificationResponse();
+        } catch (error) {
+            this.logNotificationResponseFailure(
+                source,
+                'native_last_response_clear_failed',
+                error,
+            );
         }
-
-        this.initialized = true;
     }
 
-    private handleNotificationResponse = (response: Notifications.NotificationResponse) => {
+    private routeNotificationResponse(
+        response: Notifications.NotificationResponse,
+        generation: number,
+    ): void {
+        this.assertResponseGeneration(generation);
         const data = response.notification.request.content.data ?? {};
         const taskType = typeof data.taskType === 'string' ? data.taskType : null;
 
         if (taskType === 'download') {
+            this.assertResponseGeneration(generation);
             router.push('/(tabs)/models');
             return;
         }
 
         if (taskType === 'inference') {
-            const threadId = typeof data.threadId === 'string' ? data.threadId : null;
-            if (threadId) {
-                useChatStore.getState().setActiveThread(threadId);
+            const threadId = typeof data.threadId === 'string' && data.threadId.trim().length > 0
+                ? data.threadId
+                : '';
+            // Load chat activation only when an inference notification is
+            // opened. A static import closes a startup cycle through
+            // ChatGenerationService -> BackgroundTaskService -> this module
+            // and makes Metro show a warning banner over the bottom tabs.
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { activateThreadForNavigation } = require(
+                './ChatThreadActivationService'
+            ) as typeof import('./ChatThreadActivationService');
+            const activationResult = activateThreadForNavigation(threadId);
+
+            switch (activationResult.status) {
+                case 'opened':
+                case 'already_active':
+                    this.assertResponseGeneration(generation);
+                    router.push('/(tabs)/chat');
+                    return;
+                case 'missing':
+                    this.assertResponseGeneration(generation);
+                    performanceMonitor.incrementCounter('notification.staleTarget', 1, {
+                        staleNotificationTarget: true,
+                    });
+                    this.assertResponseGeneration(generation);
+                    Alert.alert(
+                        i18n.t('notifications.conversationUnavailable.title'),
+                        i18n.t('notifications.conversationUnavailable.body'),
+                    );
+                    this.assertResponseGeneration(generation);
+                    router.push('/conversations');
+                    return;
+                case 'generation_busy':
+                    this.assertResponseGeneration(generation);
+                    performanceMonitor.incrementCounter(
+                        'notification.navigationBlockedByGeneration',
+                        1,
+                        { notificationNavigationBlockedByGeneration: true },
+                    );
+                    this.assertResponseGeneration(generation);
+                    Alert.alert(
+                        i18n.t('notifications.conversationBusy.title'),
+                        i18n.t('notifications.conversationBusy.body'),
+                    );
+                    return;
+                case 'stale': {
+                    const latestChatState = useChatStore.getState();
+                    const hasValidActiveThread = latestChatState.activeThreadId === null
+                        || latestChatState.threads[latestChatState.activeThreadId] != null;
+                    throw new AppError(
+                        'action_failed',
+                        'Conversation navigation changed before it could complete. Try again.',
+                        { details: { hasValidActiveThread } },
+                    );
+                }
+                case 'persistence_failed':
+                    throw activationResult.error;
             }
-            router.push('/(tabs)/chat');
         }
-    };
+    }
+
+    private processNotificationResponseOnce(
+        response: Notifications.NotificationResponse,
+        source: NotificationResponseSource,
+        generation: number,
+    ): Promise<void> {
+        const fingerprint = getNotificationResponseFingerprint(response);
+        const now = Date.now();
+        this.pruneRecentlyProcessedResponses(now);
+
+        const existing = this.inFlightResponseOperations.get(fingerprint);
+        if (existing?.generation === generation) {
+            return existing.promise;
+        }
+
+        const operation = this.responseProcessingTail.then(async () => {
+            this.assertResponseGeneration(generation);
+
+            const processingStartedAt = Date.now();
+            this.pruneRecentlyProcessedResponses(processingStartedAt);
+            const queuedProcessedUntil = this.recentlyProcessedResponses.get(fingerprint);
+            if (
+                typeof queuedProcessedUntil === 'number'
+                && queuedProcessedUntil > processingStartedAt
+            ) {
+                await this.clearNativeLastResponseIfMatching(
+                    fingerprint,
+                    source,
+                    generation,
+                );
+                return;
+            }
+
+            try {
+                this.routeNotificationResponse(response, generation);
+            } catch (error) {
+                this.logNotificationResponseFailure(source, 'routing_failed', error);
+                throw error;
+            }
+
+            this.assertResponseGeneration(generation);
+            this.rememberProcessedResponse(fingerprint, Date.now());
+            await this.clearNativeLastResponseIfMatching(
+                fingerprint,
+                source,
+                generation,
+            );
+        });
+
+        this.responseProcessingTail = operation.catch(() => undefined);
+        this.inFlightResponseOperations.set(fingerprint, {
+            generation,
+            promise: operation,
+        });
+        const clearInFlightOperation = () => {
+            if (this.inFlightResponseOperations.get(fingerprint)?.promise === operation) {
+                this.inFlightResponseOperations.delete(fingerprint);
+            }
+        };
+        void operation.then(clearInFlightOperation, clearInFlightOperation);
+        return operation;
+    }
 
     async requestPermissions(): Promise<boolean> {
         await this.ensureInitialized();
@@ -312,17 +681,84 @@ class NotificationService {
 
     async sendLocalNotification(
         content: Notifications.NotificationContentInput,
-        options: { channelId?: string } = {},
+        options: { channelId?: string; identifier?: string } = {},
     ): Promise<string | null> {
-        await this.ensureInitialized();
+        try {
+            await this.ensureInitialized();
 
-        const hasPermission = await this.canSendLocalNotifications();
-        if (!hasPermission) {
+            const hasPermission = await this.canSendLocalNotifications();
+            if (!hasPermission) {
+                return null;
+            }
+
+            const trigger = options.channelId ? { channelId: options.channelId } : null;
+            return await Notifications.scheduleNotificationAsync({
+                ...(options.identifier ? { identifier: options.identifier } : null),
+                content,
+                trigger,
+            });
+        } catch (error) {
+            console.warn(
+                '[NotificationService] Failed to send local notification',
+                {
+                    scope: 'local_notification_send',
+                    ...getPrivacySafeErrorLogDetails(error),
+                },
+            );
             return null;
         }
+    }
 
-        const trigger = options.channelId ? { channelId: options.channelId } : null;
-        return await Notifications.scheduleNotificationAsync({ content, trigger });
+    async dismissInferenceNotificationForThread(threadId: string): Promise<void> {
+        if (typeof threadId !== 'string' || threadId.trim().length === 0) {
+            return;
+        }
+
+        try {
+            await Notifications.dismissNotificationAsync(
+                getInferenceNotificationIdentifier(threadId),
+            );
+        } catch (error) {
+            console.warn(
+                '[NotificationService] Failed to dismiss inference notification',
+                {
+                    scope: 'inference_notification_dismiss',
+                    ...getPrivacySafeErrorLogDetails(error),
+                },
+            );
+        }
+    }
+
+    async dismissInferenceNotificationsForThreads(threadIds: readonly string[]): Promise<void> {
+        try {
+            const uniqueThreadIds = Array.from(new Set(
+                threadIds.filter(
+                    (threadId) => typeof threadId === 'string' && threadId.trim().length > 0,
+                ),
+            ));
+
+            await Promise.all(uniqueThreadIds.map(async (threadId) => {
+                try {
+                    await this.dismissInferenceNotificationForThread(threadId);
+                } catch (error) {
+                    console.warn(
+                        '[NotificationService] Failed to dismiss inference notification',
+                        {
+                            scope: 'inference_notification_batch_dismiss',
+                            ...getPrivacySafeErrorLogDetails(error),
+                        },
+                    );
+                }
+            }));
+        } catch (error) {
+            console.warn(
+                '[NotificationService] Failed to dismiss inference notifications',
+                {
+                    scope: 'inference_notification_batch_dismiss',
+                    ...getPrivacySafeErrorLogDetails(error),
+                },
+            );
+        }
     }
 
     async updateNotification(update: NotificationUpdate): Promise<void> {
@@ -385,7 +821,12 @@ class NotificationService {
                 body: i18n.t('notifications.inference.complete.body'),
                 data: { taskType, threadId: params.threadId },
             },
-            { channelId: CHANNEL_IDS.inference },
+            {
+                channelId: CHANNEL_IDS.inference,
+                ...(params.threadId
+                    ? { identifier: getInferenceNotificationIdentifier(params.threadId) }
+                    : null),
+            },
         );
     }
 
@@ -396,7 +837,12 @@ class NotificationService {
                 body: i18n.t('notifications.inference.interrupted.body'),
                 data: { taskType: 'inference', threadId: params.threadId },
             },
-            { channelId: CHANNEL_IDS.inference },
+            {
+                channelId: CHANNEL_IDS.inference,
+                ...(params.threadId
+                    ? { identifier: getInferenceNotificationIdentifier(params.threadId) }
+                    : null),
+            },
         );
     }
 
@@ -407,7 +853,12 @@ class NotificationService {
                 body: i18n.t('notifications.inference.error.body'),
                 data: { taskType: 'inference', threadId: params.threadId },
             },
-            { channelId: CHANNEL_IDS.inference },
+            {
+                channelId: CHANNEL_IDS.inference,
+                ...(params.threadId
+                    ? { identifier: getInferenceNotificationIdentifier(params.threadId) }
+                    : null),
+            },
         );
     }
 

@@ -121,6 +121,12 @@ export type LlmContentPart =
 
 export interface LlmChatCompletionOptions {
   messages: LlmChatMessage[];
+  /**
+   * Model identity that must still own the native context when completion
+   * starts. Chat callers pass the thread model so the service can enforce the
+   * invariant again at the native boundary.
+   */
+  expectedModelId?: string;
   mediaPaths?: string[];
   multimodalReadiness?: MultimodalReadinessState;
   onToken?: (token: string | {
@@ -179,7 +185,14 @@ export function normalizeConversationTitle(title: string) {
 export function getThreadActiveModelId(
   thread: Pick<ChatThread, 'modelId' | 'activeModelId'>,
 ): string {
-  return thread.activeModelId ?? thread.modelId;
+  const activeModelId = typeof thread.activeModelId === 'string'
+    ? thread.activeModelId.trim()
+    : '';
+  if (activeModelId.length > 0) {
+    return activeModelId;
+  }
+
+  return typeof thread.modelId === 'string' ? thread.modelId.trim() : '';
 }
 
 export function deriveThreadActiveModelIdFromMessages(
@@ -278,13 +291,39 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
   const sanitizedMessages = thread.messages.filter(
     (message) => message.state !== 'streaming',
   );
+  const legacyThread = thread as ChatThread & {
+    modelId?: unknown;
+    activeModelId?: unknown;
+  };
+  const persistedModelId = typeof legacyThread.modelId === 'string'
+    ? legacyThread.modelId.trim()
+    : '';
+  const persistedActiveModelId = typeof legacyThread.activeModelId === 'string'
+    ? legacyThread.activeModelId.trim()
+    : '';
+  let messageModelId = '';
+  for (const message of sanitizedMessages) {
+    const kind = message.kind ?? 'message';
+    const candidate = kind === 'model_switch'
+      ? message.switchFromModelId ?? message.modelId ?? message.switchToModelId
+      : message.modelId;
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      messageModelId = candidate.trim();
+      break;
+    }
+  }
+  // Legacy records could predate the required thread model. Recover only from
+  // persisted thread/message evidence; never adopt the mutable global setting.
+  // An empty identity remains explicitly unavailable and keeps generation
+  // blocked until the user deliberately selects a model for the thread.
+  const baseModelId = persistedModelId || persistedActiveModelId || messageModelId;
 
   const hasModelSwitchMessages = sanitizedMessages.some(
     (message) => (message.kind ?? 'message') === 'model_switch',
   );
   let currentModelId = hasModelSwitchMessages
-    ? thread.modelId
-    : getThreadActiveModelId(thread);
+    ? baseModelId
+    : persistedActiveModelId || baseModelId;
   const migratedMessages = sanitizedMessages.map((message): ChatMessage => {
     const kind = message.kind ?? 'message';
 
@@ -305,12 +344,12 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     return {
       ...message,
       kind,
-      modelId: message.modelId ?? currentModelId,
+      modelId: message.modelId ?? (currentModelId || undefined),
     };
   });
 
   const activeModelId = deriveThreadActiveModelIdFromMessages({
-    modelId: thread.modelId,
+    modelId: baseModelId,
     messages: migratedMessages,
   });
 
@@ -319,6 +358,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
 
   return {
     ...thread,
+    modelId: baseModelId,
     activeModelId,
     presetSnapshot: thread.presetSnapshot ?? {
       ...DEFAULT_PRESET_SNAPSHOT,

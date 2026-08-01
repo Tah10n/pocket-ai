@@ -10,6 +10,7 @@ import {
   getAppStorageMetrics,
   resetAppSettings,
 } from '../../src/services/StorageManagerService';
+import { AppError } from '../../src/services/AppError';
 
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
@@ -108,6 +109,8 @@ describe('StorageManagerScreen', () => {
       activeModelId: null,
     });
     mockCleanupQuarantinedModelFiles.mockResolvedValue(0);
+    mockClearChatHistory.mockReset();
+    mockClearChatHistory.mockResolvedValue(0);
   });
 
   it('navigates back when possible', async () => {
@@ -268,6 +271,47 @@ describe('StorageManagerScreen', () => {
     });
 
     expect(mockClearChatHistory).toHaveBeenCalledTimes(1);
+    alertSpy.mockRestore();
+  });
+
+  it('shows a retry action instead of false success when chat history remains busy', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockClearChatHistory
+      .mockRejectedValueOnce(new AppError('chat_history_busy'))
+      .mockResolvedValueOnce(1);
+    const { getByTestId } = await renderScreen();
+
+    fireEvent.press(getByTestId('storage-manager-clear-chat'));
+    const confirmActions = alertSpy.mock.calls[0]?.[2] as Array<{ onPress: () => void }>;
+    await act(async () => {
+      confirmActions[1]?.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(alertSpy).toHaveBeenCalledWith(
+        'storageManager.clearChatHistoryBusyTitle',
+        'storageManager.clearChatHistoryBusyMessage',
+        expect.any(Array),
+      );
+    });
+    expect(mockClearChatHistory).toHaveBeenCalledTimes(1);
+
+    const busyAlert = alertSpy.mock.calls.find(
+      (call) => call[0] === 'storageManager.clearChatHistoryBusyTitle',
+    );
+    const retryActions = busyAlert?.[2] as Array<{ onPress: () => void }>;
+    await act(async () => {
+      retryActions[1]?.onPress();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockClearChatHistory).toHaveBeenCalledTimes(2);
+      expect(getByTestId('storage-manager-clear-chat')).not.toBeDisabled();
+    });
     alertSpy.mockRestore();
   });
 

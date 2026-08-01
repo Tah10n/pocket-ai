@@ -38,6 +38,7 @@ import {
 } from '../../utils/conversations';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
+import { notificationService } from '../../services/NotificationService';
 import { useChatStore } from '../../store/chatStore';
 import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
@@ -205,13 +206,14 @@ export function ConversationsScreen() {
 
   const applyChatRetention = (days: number | null) => {
     updateSettings({ chatRetentionDays: days });
-    const deletedCount = useChatStore.getState().pruneExpiredThreads(days);
+    const cleanupResult = useChatStore.getState().pruneExpiredThreads(days);
     setRetentionExpanded(false);
+    void notificationService.dismissInferenceNotificationsForThreads(cleanupResult.threadIds);
 
-    if (deletedCount > 0) {
+    if (cleanupResult.count > 0) {
       Alert.alert(
         t('conversations.retention.cleanupTitle'),
-        t('conversations.retention.cleanupMessage', { count: deletedCount }),
+        t('conversations.retention.cleanupMessage', { count: cleanupResult.count }),
       );
     }
   };

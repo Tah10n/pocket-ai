@@ -10,6 +10,7 @@ const mockGetStorageFallbackReport = jest.fn();
 const mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation = jest.fn();
 const mockRetryPrivateStorageInitialization = jest.fn();
 const mockNotificationInitialize = jest.fn();
+const mockNotificationDispose = jest.fn();
 const mockStaticThemeResolvedModes = jest.fn();
 const mockUseColorScheme = jest.fn(() => 'light');
 
@@ -151,6 +152,7 @@ jest.mock('../../src/services/PrivateStorageRecovery', () => ({
 jest.mock('../../src/services/NotificationService', () => ({
   notificationService: {
     initialize: (...args: unknown[]) => mockNotificationInitialize(...args),
+    dispose: (...args: unknown[]) => mockNotificationDispose(...args),
   },
 }));
 
@@ -193,6 +195,7 @@ describe('RootLayout storage recovery gate', () => {
     mockGetStorageFallbackReport.mockReturnValue(null);
     mockRetryPrivateStorageInitialization.mockResolvedValue(readyHealth);
     mockResetPrivateAppStorageAndRuntimeStateAfterConfirmation.mockResolvedValue(readyHealth);
+    mockNotificationInitialize.mockResolvedValue(undefined);
   });
 
   it('renders storage recovery and skips background bootstrap when critical storage is blocked', async () => {
@@ -279,5 +282,17 @@ describe('RootLayout storage recovery gate', () => {
     await waitFor(() => expect(mockBootstrapAppCritical).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(mockBootstrapAppBackground).toHaveBeenCalledTimes(1));
     expect(queryByTestId('storage-recovery-screen')).toBeNull();
+  });
+
+  it('disposes the notification listener lifecycle when the root navigator unmounts', async () => {
+    mockBootstrapAppCritical.mockResolvedValueOnce({ outcome: 'success' });
+
+    const view = render(<RootLayout />);
+    await view.findByTestId('root-stack');
+    await waitFor(() => expect(mockNotificationInitialize).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+
+    expect(mockNotificationDispose).toHaveBeenCalledTimes(1);
   });
 });

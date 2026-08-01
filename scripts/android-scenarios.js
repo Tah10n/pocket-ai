@@ -481,6 +481,9 @@ const LOGCAT_COLLECTOR_STOP_TIMEOUT_MS = 10_000;
 const LOGCAT_COLLECTOR_FORCE_STOP_TIMEOUT_MS = 5_000;
 const SCREENSHOT_CAPTURE_MAX_ATTEMPTS = 4;
 const SCREENSHOT_CAPTURE_RETRY_DELAY_MS = 350;
+// Keep physical screenshot transfers bounded so an interrupted ADB transport can resume from
+// one independently validated chunk instead of repeating the whole PNG.
+const PHYSICAL_SCREENSHOT_CHUNK_SIZE_BYTES = 32 * 1024;
 // Accessibility nodes can become visible before SurfaceFlinger has committed the final frame.
 // Give successful routes a short visual-settle window so QA evidence does not capture a
 // transient black surface immediately after navigation.
@@ -513,6 +516,7 @@ const PRIVATE_LOGCAT_DIRECTORY = path.join(
 const BRANCH_GENERATION_TIMEOUT_MS = 240_000;
 const BRANCH_PARTIAL_TIMEOUT_MS = 120_000;
 const BRANCH_FIXTURE_SCAN_LIMIT = 24;
+const BRANCH_TOPOLOGY_SWIPE_MAX_DISTANCE_PX = 480;
 const FATAL_LOG_PATTERNS = [
   /FATAL EXCEPTION/i,
   /Fatal signal\s+\d+|SIGABRT|SIGBUS|SIGFPE|SIGILL|SIGSEGV/i,
@@ -1126,32 +1130,34 @@ function createScenarioContext(adbPath, serial) {
       runChecked(adbPath, ["-s", serial, "shell", "input", "keyevent", "4"]);
       await delay(700);
     },
-    swipeUp: async () => {
+    swipeUp: async (options = {}) => {
+      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "up", options);
       runChecked(adbPath, [
         "-s",
         serial,
         "shell",
         "input",
         "swipe",
-        "540",
-        "1700",
-        "540",
-        "700",
+        `${gesture.startX}`,
+        `${gesture.startY}`,
+        `${gesture.endX}`,
+        `${gesture.endY}`,
         "250",
       ]);
       await delay(900);
     },
-    swipeDown: async () => {
+    swipeDown: async (options = {}) => {
+      const gesture = resolveScenarioVerticalSwipeGesture(options.snapshot, "down", options);
       runChecked(adbPath, [
         "-s",
         serial,
         "shell",
         "input",
         "swipe",
-        "540",
-        "700",
-        "540",
-        "1700",
+        `${gesture.startX}`,
+        `${gesture.startY}`,
+        `${gesture.endX}`,
+        `${gesture.endY}`,
         "250",
       ]);
       await delay(900);
@@ -1160,6 +1166,67 @@ function createScenarioContext(adbPath, serial) {
       const screenshotPath = path.join(artifactsRoot, fileName);
       return captureAndroidScreenshot(adbPath, serial, screenshotPath);
     },
+  };
+}
+
+function resolveScenarioVerticalSwipeGesture(snapshot, direction, options = {}) {
+  if (direction !== "up" && direction !== "down") {
+    throw new Error(`Unsupported scenario swipe direction "${direction}".`);
+  }
+
+  const fallback = {
+    startX: 540,
+    startY: direction === "up" ? 1700 : 700,
+    endX: 540,
+    endY: direction === "up" ? 700 : 1700,
+  };
+  if (!snapshot) {
+    return fallback;
+  }
+
+  const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  if (!viewport) {
+    return fallback;
+  }
+  if (!viewport.bounds) {
+    throw new Error("The visible chat list viewport has no bounds for a safe swipe.");
+  }
+
+  const composer = findResourceIdInSnapshot(snapshot, "chat-input-bar-container", {
+    visibleOnly: true,
+  });
+  const visibleBottom = composer?.bounds?.top > viewport.bounds.top
+    ? Math.min(viewport.bounds.bottom, composer.bounds.top)
+    : viewport.bounds.bottom;
+  const visibleHeight = visibleBottom - viewport.bounds.top;
+  if (visibleHeight < 320) {
+    throw new Error(
+      `The visible chat list viewport is too short for a safe swipe (${visibleHeight}px).`
+    );
+  }
+
+  const verticalInset = Math.min(160, Math.max(80, Math.floor(visibleHeight * 0.2)));
+  const upperY = viewport.bounds.top + verticalInset;
+  const lowerY = visibleBottom - verticalInset;
+  const availableDistance = lowerY - upperY;
+  if (availableDistance < 160) {
+    throw new Error("The visible chat list viewport cannot provide a safe swipe distance.");
+  }
+  const requestedMaxDistance = Number(options.maxDistancePx);
+  const swipeDistance = Number.isFinite(requestedMaxDistance) && requestedMaxDistance >= 160
+    ? Math.min(availableDistance, Math.floor(requestedMaxDistance))
+    : availableDistance;
+
+  const centerX = Math.round((viewport.bounds.left + viewport.bounds.right) / 2);
+  return {
+    startX: centerX,
+    startY: direction === "up" ? lowerY : upperY,
+    endX: centerX,
+    endY: direction === "up"
+      ? lowerY - swipeDistance
+      : upperY + swipeDistance,
   };
 }
 
@@ -2980,15 +3047,67 @@ function mergeOlderConversationOrder(olderTokens, currentOrder) {
   if (currentOrder.length === 0) {
     return [...olderTokens];
   }
-  const maxOverlap = Math.min(olderTokens.length, currentOrder.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    const olderSuffix = olderTokens.slice(olderTokens.length - overlap);
-    const currentPrefix = currentOrder.slice(0, overlap);
-    if (olderSuffix.every((token, index) => token.key === currentPrefix[index].key)) {
-      return [...olderTokens.slice(0, olderTokens.length - overlap), ...currentOrder];
+  if (olderTokens.length === 0) {
+    return [...currentOrder];
+  }
+
+  const currentIndexByKey = new Map(
+    currentOrder.map((token, index) => [token.key, index])
+  );
+  let previousCurrentIndex = -1;
+  for (const token of olderTokens) {
+    const currentIndex = currentIndexByKey.get(token.key);
+    if (currentIndex === undefined) {
+      continue;
+    }
+    if (currentIndex < previousCurrentIndex) {
+      const currentKeys = new Set(currentIndexByKey.keys());
+      return [
+        ...olderTokens.filter((candidate) => !currentKeys.has(candidate.key)),
+        ...currentOrder,
+      ];
+    }
+    previousCurrentIndex = currentIndex;
+  }
+
+  const lcsLengths = Array.from(
+    { length: olderTokens.length + 1 },
+    () => new Array(currentOrder.length + 1).fill(0)
+  );
+  for (let olderIndex = olderTokens.length - 1; olderIndex >= 0; olderIndex -= 1) {
+    for (let currentIndex = currentOrder.length - 1; currentIndex >= 0; currentIndex -= 1) {
+      lcsLengths[olderIndex][currentIndex] = (
+        olderTokens[olderIndex].key === currentOrder[currentIndex].key
+          ? 1 + lcsLengths[olderIndex + 1][currentIndex + 1]
+          : Math.max(
+            lcsLengths[olderIndex + 1][currentIndex],
+            lcsLengths[olderIndex][currentIndex + 1]
+          )
+      );
     }
   }
-  return [...olderTokens, ...currentOrder];
+
+  const merged = [];
+  let olderIndex = 0;
+  let currentIndex = 0;
+  while (olderIndex < olderTokens.length && currentIndex < currentOrder.length) {
+    if (olderTokens[olderIndex].key === currentOrder[currentIndex].key) {
+      merged.push(currentOrder[currentIndex]);
+      olderIndex += 1;
+      currentIndex += 1;
+    } else if (
+      lcsLengths[olderIndex + 1][currentIndex]
+      >= lcsLengths[olderIndex][currentIndex + 1]
+    ) {
+      merged.push(olderTokens[olderIndex]);
+      olderIndex += 1;
+    } else {
+      merged.push(currentOrder[currentIndex]);
+      currentIndex += 1;
+    }
+  }
+  merged.push(...olderTokens.slice(olderIndex), ...currentOrder.slice(currentIndex));
+  return merged;
 }
 
 function buildConversationTopology(order, snapshots) {
@@ -3088,14 +3207,21 @@ async function scanConversationTopology(ctx, options = {}) {
       break;
     }
     if (attempt < scanLimit - 1) {
-      await ctx.swipeDown();
+      await ctx.swipeDown({
+        snapshot,
+        maxDistancePx: BRANCH_TOPOLOGY_SWIPE_MAX_DISTANCE_PX,
+      });
       swipeCount += 1;
     }
   }
 
   if (options.restoreBottom !== false) {
+    const viewportSnapshot = snapshots.at(-1);
     for (let index = 0; index < swipeCount + 1; index += 1) {
-      await ctx.swipeUp();
+      await ctx.swipeUp({
+        snapshot: viewportSnapshot,
+        maxDistancePx: BRANCH_TOPOLOGY_SWIPE_MAX_DISTANCE_PX,
+      });
     }
   }
   if (!reachedHistoryStart) {
@@ -3298,34 +3424,68 @@ async function detectAudioAttachmentSupport(ctx) {
 }
 
 async function findChatResourceWithScroll(ctx, resourceId, options = {}) {
-  const adbPath = resolveAdbPath();
-  const findNow = () => findResourceIdInSnapshot(
-    createUiSnapshot(adbPath, ctx.serial),
-    resourceId,
-    { visibleOnly: true }
-  );
-  let node = findNow();
-  if (node) {
-    return node;
+  const adbPath = options.adbPath || resolveAdbPath();
+  const readSnapshot = options.readSnapshot
+    || (() => createUiSnapshot(adbPath, ctx.serial));
+  const observeNow = () => {
+    const snapshot = readSnapshot();
+    const candidate = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+    return {
+      node: candidate && (
+        options.requireTapSafe !== true
+        || isChatResourceTapSafe(snapshot, candidate)
+      )
+        ? candidate
+        : null,
+      snapshot,
+    };
+  };
+  let observation = observeNow();
+  if (observation.node) {
+    return observation.node;
   }
 
   const maxSwipes = options.maxSwipes ?? BRANCH_FIXTURE_SCAN_LIMIT;
   for (let attempt = 0; attempt < maxSwipes; attempt += 1) {
-    await ctx.swipeDown();
-    node = findNow();
-    if (node) {
-      return node;
+    await ctx.swipeDown({ snapshot: observation.snapshot });
+    observation = observeNow();
+    if (observation.node) {
+      return observation.node;
     }
   }
   for (let attempt = 0; attempt < maxSwipes; attempt += 1) {
-    await ctx.swipeUp();
-    node = findNow();
-    if (node) {
-      return node;
+    await ctx.swipeUp({ snapshot: observation.snapshot });
+    observation = observeNow();
+    if (observation.node) {
+      return observation.node;
     }
   }
   throw new Error(
     withUiSummary(adbPath, ctx.serial, `Could not find chat resource id "${resourceId}" while scanning the conversation.`)
+  );
+}
+
+function isChatResourceTapSafe(snapshot, node) {
+  if (!hasPositiveBounds(node?.bounds)) {
+    return false;
+  }
+  const viewport = findResourceIdInSnapshot(snapshot, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  if (!hasPositiveBounds(viewport?.bounds)) {
+    return false;
+  }
+  const composer = findResourceIdInSnapshot(snapshot, "chat-input-bar-container", {
+    visibleOnly: true,
+  });
+  const safeBottom = composer?.bounds?.top > viewport.bounds.top
+    ? Math.min(viewport.bounds.bottom, composer.bounds.top)
+    : viewport.bounds.bottom;
+  return (
+    node.bounds.left >= viewport.bounds.left
+    && node.bounds.right <= viewport.bounds.right
+    && node.bounds.top >= viewport.bounds.top
+    && node.bounds.bottom <= safeBottom
   );
 }
 
@@ -3359,7 +3519,9 @@ async function tapVisibleResource(ctx, resourceId, options = {}) {
 
 async function startBranchRegeneration(ctx, target) {
   const regenerateResourceId = `regenerate-message-${target.userId}`;
-  const regenerateButton = await findChatResourceWithScroll(ctx, regenerateResourceId);
+  const regenerateButton = await findChatResourceWithScroll(ctx, regenerateResourceId, {
+    requireTapSafe: true,
+  });
   if (!regenerateButton.bounds || !regenerateButton.enabled) {
     throw new Error(`Regeneration action for user message ${target.userId} is not enabled.`);
   }
@@ -3524,6 +3686,36 @@ async function interruptObservedBranchGeneration(ctx, options) {
   };
 }
 
+function resolveReasoningAuthoritativeClearConfiguration(snapshot) {
+  const reasoningOff = findResourceIdInSnapshot(
+    snapshot,
+    "reasoning-effort-off",
+    { visibleOnly: true }
+  );
+  if (!reasoningOff) {
+    throw new Error("reasoning-effort-off is not visible");
+  }
+  if (!reasoningOff.bounds) {
+    throw new Error("reasoning-effort-off has no tap bounds");
+  }
+
+  if (!reasoningOff.enabled) {
+    return {
+      reasoningEffort: "unsupported",
+      requiresSelection: false,
+      verifiedSelected: false,
+      verifiedUnsupported: true,
+    };
+  }
+
+  return {
+    reasoningEffort: "off",
+    requiresSelection: !reasoningOff.selected,
+    verifiedSelected: reasoningOff.selected,
+    verifiedUnsupported: false,
+  };
+}
+
 async function disableReasoningForAuthoritativeClear(ctx) {
   const adbPath = resolveAdbPath();
   try {
@@ -3534,14 +3726,18 @@ async function disableReasoningForAuthoritativeClear(ctx) {
       timeoutMs: 10_000,
       visibleOnly: true,
     });
-    const reasoningOff = await waitForResourceId(adbPath, ctx.serial, "reasoning-effort-off", {
+    await waitForResourceId(adbPath, ctx.serial, "reasoning-effort-off", {
       timeoutMs: 10_000,
       visibleOnly: true,
     });
-    if (!reasoningOff.enabled || !reasoningOff.bounds) {
-      throw new Error("reasoning-effort-off is disabled or not tappable");
-    }
-    if (!reasoningOff.selected) {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    const configuration = resolveReasoningAuthoritativeClearConfiguration(snapshot);
+    if (configuration.requiresSelection) {
+      const reasoningOff = findResourceIdInSnapshot(
+        snapshot,
+        "reasoning-effort-off",
+        { visibleOnly: true }
+      );
       tapBounds(adbPath, ctx.serial, reasoningOff.bounds);
       const { match, snapshot } = await waitForSnapshotMatch(
         adbPath,
@@ -3566,7 +3762,17 @@ async function disableReasoningForAuthoritativeClear(ctx) {
     await waitForNoResourceId(adbPath, ctx.serial, "model-parameters-sheet", {
       timeoutMs: 10_000,
     });
-    return { reasoningEffort: "off", verifiedSelected: true };
+    return configuration.reasoningEffort === "off"
+      ? {
+          reasoningEffort: "off",
+          verifiedSelected: true,
+          verifiedUnsupported: false,
+        }
+      : {
+          reasoningEffort: "unsupported",
+          verifiedSelected: false,
+          verifiedUnsupported: true,
+        };
   } catch (error) {
     throw new ScenarioPreconditionFailureError(
       `Reasoning authoritative-clear requires an optional reasoning-off control: ${error.message}`
@@ -5719,11 +5925,11 @@ function parseUiNodes(xml) {
   while (match) {
     const rawAttributes = match[1];
     const attributes = {};
-    const attrRegex = /([\w:-]+)="([^"]*)"/g;
+    const attrRegex = /([\w:-]+)=(?:"([^"]*)"|'([^']*)')/g;
     let attrMatch = attrRegex.exec(rawAttributes);
 
     while (attrMatch) {
-      attributes[attrMatch[1]] = decodeXmlEntities(attrMatch[2]);
+      attributes[attrMatch[1]] = decodeXmlEntities(attrMatch[2] ?? attrMatch[3]);
       attrMatch = attrRegex.exec(rawAttributes);
     }
 
@@ -5914,7 +6120,7 @@ function resolveViewportBounds(nodes) {
 }
 
 function isBoundsInViewport(bounds, viewportBounds) {
-  if (!bounds || !viewportBounds) {
+  if (!hasPositiveBounds(bounds) || !hasPositiveBounds(viewportBounds)) {
     return false;
   }
 
@@ -5924,6 +6130,14 @@ function isBoundsInViewport(bounds, viewportBounds) {
     && bounds.centerY >= viewportBounds.top
     && bounds.centerY <= viewportBounds.bottom
   );
+}
+
+function hasPositiveBounds(bounds) {
+  return Boolean(bounds)
+    && Number.isFinite(bounds.width)
+    && Number.isFinite(bounds.height)
+    && bounds.width > 0
+    && bounds.height > 0;
 }
 
 function findAnyNodeClearOfBottomOverlay(snapshot, labels, options = {}) {
@@ -6631,12 +6845,12 @@ async function stopAndroidLogcatStream(collector, stream, options = {}) {
   stream.stopRequested = true;
   let stopFailure = stream.error;
   if (!stream.closed) {
-    const killAccepted = stream.child.kill();
-    if (!killAccepted) {
-      stopFailure = stopFailure || new Error(
-        `The Android ${stream.kind} logcat process rejected its owned stop request.`
-      );
-    }
+    // ChildProcess.kill() can return false when the process exits between the
+    // closed-state check above and signal delivery. The close event, bounded
+    // wait, and authenticated ownership fallback are the authoritative stop
+    // proof; the advisory return value must not poison an otherwise complete
+    // evidence interval.
+    stream.child.kill();
     try {
       await awaitWithTimeout(
         stream.closedPromise,
@@ -7597,7 +7811,8 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
   const runSleepSync = options.sleepSync ?? sleepSync;
   const preferRemoteFile = options.preferRemoteFile ?? !isEmulatorSerial(serial);
   const copyRemoteFileInChunks = options.copyRemoteFileInChunks ?? preferRemoteFile;
-  const remoteChunkSizeBytes = options.remoteChunkSizeBytes ?? 32 * 1024;
+  const remoteChunkSizeBytes = options.remoteChunkSizeBytes
+    ?? PHYSICAL_SCREENSHOT_CHUNK_SIZE_BYTES;
   const commandTimeoutMs = options.commandTimeoutMs ?? ADB_COMMAND_TIMEOUT_MS;
 
   const copyRemoteScreenshotInChunks = (remotePath) => {
@@ -7658,13 +7873,16 @@ function captureAndroidScreenshot(adbPath, serial, screenshotPath, options = {})
         }
 
         sawChunkDeviceUnavailable = isAdbDeviceUnavailableResult(chunkResult);
+        const sawShortChunk = !chunkResult.error
+          && chunkResult.status === 0
+          && chunkResult.stdout?.length !== expectedChunkBytes;
         lastChunkFailure = chunkResult.error
           ? describeSpawnError(`read screenshot chunk ${chunkIndex + 1}/${chunkCount}`, chunkResult.error)
           : chunkResult.status === 0
             ? `read screenshot chunk ${chunkIndex + 1}/${chunkCount} returned ${chunkResult.stdout?.length ?? 0}/${expectedChunkBytes} bytes`
             : describeSpawnResult(`read screenshot chunk ${chunkIndex + 1}/${chunkCount}`, chunkResult);
 
-        if (sawChunkDeviceUnavailable) {
+        if (sawChunkDeviceUnavailable || sawShortChunk) {
           waitForAdbDevice(adbPath, serial, runSpawnSync);
         }
         if (chunkAttempt < 3) {
@@ -7957,6 +8175,7 @@ module.exports = {
   dumpUiHierarchy,
   dismissTransientSurfaceWithBack,
   findCatalogRiskModelCard,
+  findChatResourceWithScroll,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   openFirstVisibleVariantPicker,
   prepareCatalogForVariantPickerSmokeScenario,
@@ -7993,7 +8212,9 @@ module.exports = {
   readTransferredMetroOwnership,
   resolveAndroidPackageUid,
   resolveBranchRegenerationReplacement,
+  resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidQaGenerationGateObservation,
+  resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
   restoreLanguageAfterScenario,
   runCapture,

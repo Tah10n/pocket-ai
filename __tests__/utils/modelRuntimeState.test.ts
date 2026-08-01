@@ -1430,4 +1430,57 @@ describe('modelRuntimeState', () => {
     expect(merged.selectedProjectorId).toBeUndefined();
     expect(merged.multimodalReadiness).toBeUndefined();
   });
+
+  it('reuses one runtime projection across the list and card boundary and invalidates changed sources', () => {
+    const catalogModel = makeModel({
+      lifecycleStatus: LifecycleStatus.AVAILABLE,
+      downloadProgress: 0,
+    });
+    const localModel = makeModel({
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: 'model.gguf',
+    });
+    const options = { localModel };
+
+    const listProjection = mergeModelWithRuntimeState(catalogModel, options);
+
+    expect(mergeModelWithRuntimeState(catalogModel, options)).toBe(listProjection);
+    expect(mergeModelWithRuntimeState(listProjection, options)).toBe(listProjection);
+
+    const updatedLocalModel = {
+      ...localModel,
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.75,
+    };
+    const updatedProjection = mergeModelWithRuntimeState(listProjection, {
+      localModel: updatedLocalModel,
+    });
+
+    expect(updatedProjection).not.toBe(listProjection);
+    expect(updatedProjection).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.75,
+    }));
+
+    const queuedItem = makeModel({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.25,
+    });
+    const queuedProjection = mergeModelWithRuntimeState(catalogModel, { queuedItem });
+    expect(mergeModelWithRuntimeState(queuedProjection, { queuedItem })).toBe(queuedProjection);
+
+    const updatedQueuedItem = {
+      ...queuedItem,
+      downloadProgress: 0.9,
+    };
+    const updatedQueuedProjection = mergeModelWithRuntimeState(queuedProjection, {
+      queuedItem: updatedQueuedItem,
+    });
+    expect(updatedQueuedProjection).not.toBe(queuedProjection);
+    expect(updatedQueuedProjection).toEqual(expect.objectContaining({
+      lifecycleStatus: LifecycleStatus.PAUSED,
+      downloadProgress: 0.9,
+    }));
+  });
 });

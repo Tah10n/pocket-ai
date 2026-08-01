@@ -106,6 +106,10 @@ export function isAndroidQaGenerationEvidenceEnabled(): boolean {
   return enabled;
 }
 
+export function shouldReduceAndroidQaStreamingMotion(): boolean {
+  return enabled && process.env.EXPO_PUBLIC_ANDROID_QA === '1';
+}
+
 export function isAndroidQaGenerationGateArmed(
   phase: AndroidQaGenerationGatePhase,
 ): boolean {

@@ -32,7 +32,10 @@ const {
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
   resolveDebugApkReuseDecision,
+  runAdbInstall,
   runAndroidGradleBuild,
+  runCapture,
+  runChecked,
   saveLogcat,
   spawnWindowsJobProcess,
   startAndroidSmokeMain,
@@ -41,6 +44,7 @@ const {
   stopOwnedProcessTreeByPid,
   waitForAppJsReady,
   waitForAttachedMetroExit,
+  wakeAndUnlockDevice,
 } = require('../../scripts/android-smoke');
 
 describe('android-smoke Metro prewarm', () => {
@@ -101,6 +105,77 @@ describe('android-smoke storage failure detection', () => {
 
   it('does not match unrelated install failures', () => {
     expect(isInsufficientStorageInstallFailure('Failure [INSTALL_FAILED_VERSION_DOWNGRADE]')).toBe(false);
+  });
+});
+
+describe('android-smoke bounded ADB commands', () => {
+  it('applies a default timeout to captured ADB commands without constraining non-ADB tools', () => {
+    const spawnSync = jest.fn(() => ({
+      status: 0,
+      stdout: 'device\n',
+      stderr: '',
+    }));
+
+    expect(runCapture('adb', ['get-state'], { spawnSync })).toBe('device\n');
+    expect(spawnSync).toHaveBeenNthCalledWith(
+      1,
+      'adb',
+      ['get-state'],
+      expect.objectContaining({ timeout: 30_000 }),
+    );
+
+    runChecked('node', ['--version'], { spawnSync });
+    expect(spawnSync.mock.calls[1][2].timeout).toBeUndefined();
+  });
+
+  it('continues best-effort wake-up after one ADB command times out', () => {
+    const timeoutError = Object.assign(new Error('ADB command timed out'), {
+      code: 'ETIMEDOUT',
+    });
+    const spawnSync = jest.fn()
+      .mockReturnValueOnce({
+        error: timeoutError,
+        status: null,
+        stdout: '',
+        stderr: '',
+      })
+      .mockReturnValue({
+        status: 0,
+        stdout: '',
+        stderr: '',
+      });
+
+    expect(() => wakeAndUnlockDevice('adb', 'physical-device', {
+      spawnSync,
+    })).not.toThrow();
+
+    expect(spawnSync).toHaveBeenCalledTimes(3);
+    for (const call of spawnSync.mock.calls) {
+      expect(call[2]).toEqual(expect.objectContaining({
+        stdio: 'ignore',
+        timeout: 15_000,
+      }));
+    }
+  });
+
+  it('bounds APK installation separately from short ADB control commands', () => {
+    const spawnSync = jest.fn(() => ({
+      status: 0,
+      stdout: 'Success\n',
+      stderr: '',
+    }));
+
+    expect(runAdbInstall(
+      'adb',
+      'physical-device',
+      'app-release.apk',
+      { spawnSync },
+    )).toEqual(expect.objectContaining({ status: 0 }));
+    expect(spawnSync).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'physical-device', 'install', '-r', 'app-release.apk'],
+      expect.objectContaining({ timeout: 300_000 }),
+    );
   });
 });
 

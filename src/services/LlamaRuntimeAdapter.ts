@@ -11,6 +11,7 @@ import type {
 } from 'llama.rn';
 import type { LlmChatMessage } from '../types/chat';
 import { requireLlamaModule, type LlamaModule } from './llamaRnModule';
+import { applyPromptStateCacheSafetyGate } from './PromptStateCachePolicy';
 
 export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFormattedChat']>[2]>;
 export type LlamaContextInitParams = ContextParams;
@@ -595,7 +596,10 @@ export async function initLlamaContext(
   params: LlamaContextInitParams,
   onProgress?: (progress: number) => void,
 ): Promise<LlamaContext> {
-  return getLlamaModule().initLlama(params, onProgress);
+  return getLlamaModule().initLlama(
+    applyPromptStateCacheSafetyGate(params),
+    onProgress,
+  );
 }
 
 export function addNativeLlamaLogListener(

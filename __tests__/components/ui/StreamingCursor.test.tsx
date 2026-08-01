@@ -38,6 +38,8 @@ describe('StreamingCursor', () => {
     const screen = render(<StreamingCursor />);
 
     expect(screen.getByText('▏').props.className).toBe('text-sm leading-6 text-typography-500 opacity-70 dark:text-typography-400');
+    expect(screen.getByText('▏').props.accessible).toBe(false);
+    expect(screen.getByText('▏').props.importantForAccessibility).toBe('no');
     expect(mockWithTiming).toHaveBeenCalledWith(0, expect.objectContaining({ duration: 500 }));
     expect(mockWithRepeat).toHaveBeenCalledWith(mockWithTiming.mock.results[0]?.value, -1, true);
   });
@@ -46,5 +48,12 @@ describe('StreamingCursor', () => {
     const screen = render(<StreamingCursor compact />);
 
     expect(screen.getByText('▏').props.className).toBe('text-xs leading-4 text-typography-400 opacity-60 dark:text-typography-500');
+  });
+
+  it('keeps the decorative cursor static when deterministic QA motion is required', () => {
+    render(<StreamingCursor reduceMotion />);
+
+    expect(mockWithTiming).not.toHaveBeenCalled();
+    expect(mockWithRepeat).not.toHaveBeenCalled();
   });
 });

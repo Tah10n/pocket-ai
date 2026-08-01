@@ -38,7 +38,11 @@ jest.mock('../../src/components/ui/StreamingCursor', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    StreamingCursor: () => mockReact.createElement(Text, { testID: 'streaming-cursor' }, '|'),
+    StreamingCursor: ({ reduceMotion }: { reduceMotion?: boolean }) => mockReact.createElement(
+      Text,
+      { testID: 'streaming-cursor', reduceMotion },
+      '|',
+    ),
   };
 });
 
@@ -46,7 +50,11 @@ jest.mock('../../src/components/ui/ThinkingPulse', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    ThinkingPulse: () => mockReact.createElement(Text, { testID: 'thinking-pulse' }, 'pulse'),
+    ThinkingPulse: ({ reduceMotion }: { reduceMotion?: boolean }) => mockReact.createElement(
+      Text,
+      { testID: 'thinking-pulse', reduceMotion },
+      'pulse',
+    ),
   };
 });
 
@@ -96,6 +104,7 @@ describe('ChatMessageBubble', () => {
       'MTP {{accepted}}/{{drafted}} · {{percent}}%',
     );
     reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.mtpNotUsed', 'MTP not used');
+    reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.mtpOff', 'MTP off');
     reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.ttft', 'TTFT {{milliseconds}} ms');
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
   });
@@ -177,6 +186,31 @@ describe('ChatMessageBubble', () => {
     );
 
     expect(getByTestId('user-message-state-complete-user-state')).toBeTruthy();
+  });
+
+  it('disables streaming animations in explicit Android QA evidence builds', () => {
+    const originalAndroidQa = process.env.EXPO_PUBLIC_ANDROID_QA;
+    process.env.EXPO_PUBLIC_ANDROID_QA = '1';
+    try {
+      const { getByTestId } = render(
+        <ChatMessageBubble
+          id="assistant-qa-motion"
+          isUser={false}
+          content="<think>QA reasoning"
+          isStreaming
+        />,
+      );
+
+      expect(getByTestId('thinking-pulse').props.reduceMotion).toBe(true);
+      fireEvent.press(getByTestId('thought-toggle-assistant-qa-motion'));
+      expect(getByTestId('streaming-cursor').props.reduceMotion).toBe(true);
+    } finally {
+      if (originalAndroidQa === undefined) {
+        delete process.env.EXPO_PUBLIC_ANDROID_QA;
+      } else {
+        process.env.EXPO_PUBLIC_ANDROID_QA = originalAndroidQa;
+      }
+    }
   });
 
   it('renders a persisted thought disclosure and copies only the final markdown', async () => {
@@ -339,6 +373,7 @@ describe('ChatMessageBubble', () => {
           predictedPerSecond: 6.5,
           timeToFirstTokenMs: 910,
           mtp: {
+            supported: true,
             requested: true,
             attempted: true,
             fallbackUsed: false,
@@ -368,6 +403,7 @@ describe('ChatMessageBubble', () => {
           tokensEvaluated: 8,
           predictedPerSecond: 3.5,
           mtp: {
+            supported: true,
             requested: true,
             attempted: false,
             fallbackUsed: false,
@@ -380,6 +416,57 @@ describe('ChatMessageBubble', () => {
 
     expect(getByText('MTP not used')).toBeTruthy();
     expect(queryByText('MTP 0/0 · 0%')).toBeNull();
+  });
+
+  it('shows MTP off only when the selected model supports MTP', () => {
+    const supported = render(
+      <ChatMessageBubble
+        id="assistant-mtp-off-supported"
+        isUser={false}
+        content="Done"
+        inferenceMetrics={{
+          tokensPredicted: 12,
+          tokensEvaluated: 8,
+          predictedPerSecond: 3.5,
+          mtp: {
+            supported: true,
+            requested: false,
+            attempted: false,
+            fallbackUsed: false,
+            draftTokens: 0,
+            draftTokensAccepted: 0,
+          },
+        }}
+      />,
+    );
+
+    expect(supported.getByText('MTP off')).toBeTruthy();
+    expect(supported.getByTestId('mtp-telemetry-assistant-mtp-off-supported')).toBeTruthy();
+
+    supported.rerender(
+      <ChatMessageBubble
+        id="assistant-mtp-unsupported"
+        isUser={false}
+        content="Done"
+        inferenceMetrics={{
+          tokensPredicted: 12,
+          tokensEvaluated: 8,
+          predictedPerSecond: 3.5,
+          mtp: {
+            supported: false,
+            requested: false,
+            attempted: false,
+            fallbackUsed: false,
+            draftTokens: 0,
+            draftTokensAccepted: 0,
+          },
+        }}
+      />,
+    );
+
+    expect(supported.queryByText('MTP off')).toBeNull();
+    expect(supported.queryByTestId('mtp-telemetry-assistant-mtp-unsupported')).toBeNull();
+    expect(supported.getByText('3.5 t/s')).toBeTruthy();
   });
 
   it('renders regenerate and delete actions for eligible user messages', () => {

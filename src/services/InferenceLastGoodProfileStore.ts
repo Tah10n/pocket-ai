@@ -1,6 +1,12 @@
 import type { MMKV } from 'react-native-mmkv';
 import llamaPackageJson from 'llama.rn/package.json';
 import { assertPrivateStorageWritable, createStorage } from './storage';
+import {
+  DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+  ENABLE_NONZERO_PROMPT_STATE_CACHE,
+  PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+  PROMPT_STATE_CACHE_POLICY_VERSION,
+} from './PromptStateCachePolicy';
 
 const LLAMA_RN_VERSION: string = typeof llamaPackageJson?.version === 'string' ? llamaPackageJson.version : 'unknown';
 
@@ -8,6 +14,9 @@ export const DEFAULT_LAST_GOOD_PROFILE_MAX_AGE_MS = 180 * 24 * 60 * 60 * 1000;
 export const DEFAULT_MODEL_INIT_FAILURE_BOUND_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_MODEL_INIT_FAILURE_BOUND_FUTURE_SKEW_MS = 5 * 60 * 1000;
 export const MAX_MODEL_INIT_FAILURE_BOUND_ENTRIES = 64;
+export const LAST_GOOD_PROFILE_SCHEMA_VERSION = 2;
+export const MODEL_INIT_FAILURE_BOUND_SCHEMA_VERSION = 2;
+export const LEGACY_LAST_GOOD_STATE_CACHE_MAX_CHECKPOINTS = 8;
 
 const MODEL_INIT_FAILURE_BOUND_KEY_PREFIX = 'init-oom-bound:';
 
@@ -18,6 +27,7 @@ export function getCurrentNativeModuleVersion(): string {
 export type LastGoodBackendMode = 'cpu' | 'gpu' | 'npu';
 
 export type LastGoodInferenceProfile = {
+  schemaVersion?: number;
   createdAtMs: number;
   modelId: string;
   contextSize: number;
@@ -28,6 +38,10 @@ export type LastGoodInferenceProfile = {
   backendMode: LastGoodBackendMode;
   nGpuLayers: number;
   devices?: string[];
+  stateCacheBudgetMb?: number;
+  stateCacheMaxCheckpoints?: number;
+  stateCachePolicyVersion?: number;
+  profileIdentity?: string;
 };
 
 export type ModelInitFailureBoundCompanionIdentity = {
@@ -76,6 +90,9 @@ export type ModelInitFailureBoundIdentity = {
   noExtraBufts: boolean;
   kvUnified?: boolean | null;
   nParallel: number;
+  stateCacheBudgetMb: number;
+  stateCacheMaxCheckpoints: number;
+  stateCachePolicyVersion: number;
   projector?: ModelInitFailureBoundCompanionIdentity | null;
   speculative?: ModelInitFailureBoundSpeculativeIdentity | null;
 };
@@ -86,7 +103,7 @@ export type ModelInitFailureBound = {
 };
 
 type PersistedModelInitFailureBound = ModelInitFailureBound & {
-  schemaVersion: 1;
+  schemaVersion: 2;
   identityKey: string;
 };
 
@@ -174,6 +191,42 @@ function normalizeIdentityMarker(value: unknown): string {
   return normalized.length > 0 ? `text:${normalized}` : '';
 }
 
+export function buildLastGoodInferenceProfileIdentity(
+  profile: Pick<
+    LastGoodInferenceProfile,
+    | 'modelId'
+    | 'contextSize'
+    | 'kvCacheType'
+    | 'modelFileSizeBytes'
+    | 'modelSha256'
+    | 'nativeModuleVersion'
+    | 'backendMode'
+    | 'nGpuLayers'
+    | 'devices'
+    | 'stateCacheBudgetMb'
+    | 'stateCacheMaxCheckpoints'
+    | 'stateCachePolicyVersion'
+  >,
+): string {
+  return JSON.stringify({
+    modelId: normalizeIdentityText(profile.modelId),
+    contextSize: normalizeIdentityInteger(profile.contextSize, 1),
+    kvCacheType: normalizeIdentityText(profile.kvCacheType, 'auto').toLowerCase(),
+    modelFileSizeBytes: normalizeIdentityInteger(profile.modelFileSizeBytes, 1),
+    modelSha256: normalizeIdentityText(profile.modelSha256).toLowerCase(),
+    nativeModuleVersion: normalizeIdentityText(profile.nativeModuleVersion, 'unknown'),
+    backendMode: profile.backendMode,
+    nGpuLayers: normalizeIdentityInteger(profile.nGpuLayers),
+    devices: normalizeIdentityStringList(
+      profile.backendMode === 'npu' ? sanitizeDevices(profile.devices) : undefined,
+      true,
+    ),
+    stateCacheBudgetMb: normalizeIdentityInteger(profile.stateCacheBudgetMb),
+    stateCacheMaxCheckpoints: normalizeIdentityInteger(profile.stateCacheMaxCheckpoints),
+    stateCachePolicyVersion: normalizeIdentityInteger(profile.stateCachePolicyVersion),
+  });
+}
+
 function normalizeFailureBoundCompanion(
   value: ModelInitFailureBoundCompanionIdentity | null | undefined,
 ): Record<string, unknown> | null {
@@ -230,6 +283,9 @@ function buildModelInitFailureBoundIdentityKey(identity: ModelInitFailureBoundId
       noExtraBufts: identity.noExtraBufts === true,
       kvUnified: typeof identity.kvUnified === 'boolean' ? identity.kvUnified : null,
       nParallel: normalizeIdentityInteger(identity.nParallel, 1),
+      stateCacheBudgetMb: normalizeIdentityInteger(identity.stateCacheBudgetMb),
+      stateCacheMaxCheckpoints: normalizeIdentityInteger(identity.stateCacheMaxCheckpoints),
+      stateCachePolicyVersion: normalizeIdentityInteger(identity.stateCachePolicyVersion),
       projector: normalizeFailureBoundCompanion(identity.projector),
       speculative: identity.speculative
         ? {
@@ -289,7 +345,7 @@ function pruneModelInitFailureBounds(nowMs: number): void {
       const createdAtMs = normalizeIdentityInteger(parsed.createdAtMs);
       const upperBound = normalizeIdentityInteger(parsed.oomUpperBoundGpuLayers);
       if (
-        parsed.schemaVersion !== 1
+        parsed.schemaVersion !== MODEL_INIT_FAILURE_BOUND_SCHEMA_VERSION
         || typeof parsed.identityKey !== 'string'
         || createdAtMs === null
         || upperBound === null
@@ -397,8 +453,24 @@ export function readLastGoodInferenceProfile({
       }
     }
 
+    const isCurrentSchema = parsed.schemaVersion === LAST_GOOD_PROFILE_SCHEMA_VERSION;
+    const isLegacySchema = parsed.schemaVersion === undefined || parsed.schemaVersion === 1;
+    if (!isCurrentSchema && !isLegacySchema) {
+      return clearAndReturnNull();
+    }
+
     const devices = parsed.backendMode === 'npu' ? sanitizeDevices(parsed.devices) : undefined;
-    return {
+    const storedStateCacheBudgetMb = isCurrentSchema
+      ? normalizeIdentityInteger(parsed.stateCacheBudgetMb)
+      : 0;
+    const storedStateCacheMaxCheckpoints = isCurrentSchema
+      ? normalizeIdentityInteger(parsed.stateCacheMaxCheckpoints)
+      : LEGACY_LAST_GOOD_STATE_CACHE_MAX_CHECKPOINTS;
+    const storedStateCachePolicyVersion = isCurrentSchema
+      ? normalizeIdentityInteger(parsed.stateCachePolicyVersion)
+      : 0;
+    const normalizedProfile: LastGoodInferenceProfile = {
+      schemaVersion: isCurrentSchema ? LAST_GOOD_PROFILE_SCHEMA_VERSION : 1,
       createdAtMs: typeof parsed.createdAtMs === 'number' && Number.isFinite(parsed.createdAtMs)
         ? parsed.createdAtMs
         : Date.now(),
@@ -412,7 +484,33 @@ export function readLastGoodInferenceProfile({
       nativeModuleVersion: typeof parsed.nativeModuleVersion === 'string' ? parsed.nativeModuleVersion : expectedNativeModuleVersion,
       backendMode: parsed.backendMode,
       nGpuLayers: Math.max(0, Math.round(parsed.nGpuLayers)),
+      stateCacheBudgetMb: storedStateCacheBudgetMb ?? 0,
+      stateCacheMaxCheckpoints:
+        storedStateCacheMaxCheckpoints ?? LEGACY_LAST_GOOD_STATE_CACHE_MAX_CHECKPOINTS,
+      stateCachePolicyVersion: storedStateCachePolicyVersion ?? 0,
       ...(devices ? { devices } : null),
+    };
+    const profileIdentity = buildLastGoodInferenceProfileIdentity(normalizedProfile);
+    if (
+      isCurrentSchema
+      && (
+        typeof parsed.profileIdentity !== 'string'
+        || parsed.profileIdentity !== profileIdentity
+      )
+    ) {
+      return clearAndReturnNull();
+    }
+    const policyCompatibleProfile = ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizedProfile
+      : {
+          ...normalizedProfile,
+          stateCacheBudgetMb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+          stateCacheMaxCheckpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+          stateCachePolicyVersion: PROMPT_STATE_CACHE_POLICY_VERSION,
+        };
+    return {
+      ...policyCompatibleProfile,
+      profileIdentity: buildLastGoodInferenceProfileIdentity(policyCompatibleProfile),
     };
   } catch (error) {
     console.warn('[InferenceLastGoodProfileStore] Corrupted last-good payload, clearing.', error);
@@ -435,7 +533,8 @@ export function writeLastGoodInferenceProfile(profile: LastGoodInferenceProfile)
   const normalizedGpuLayers = Math.max(0, Math.round(profile.nGpuLayers));
   const devices = normalizedBackendMode === 'npu' ? sanitizeDevices(profile.devices) : undefined;
 
-  const persistable: LastGoodInferenceProfile = {
+  const persistableWithoutIdentity: LastGoodInferenceProfile = {
+    schemaVersion: LAST_GOOD_PROFILE_SCHEMA_VERSION,
     createdAtMs: typeof profile.createdAtMs === 'number' && Number.isFinite(profile.createdAtMs)
       ? profile.createdAtMs
       : Date.now(),
@@ -449,7 +548,21 @@ export function writeLastGoodInferenceProfile(profile: LastGoodInferenceProfile)
     nativeModuleVersion: profile.nativeModuleVersion ?? getCurrentNativeModuleVersion(),
     backendMode: normalizedBackendMode,
     nGpuLayers: normalizedBackendMode === 'cpu' ? 0 : normalizedGpuLayers,
+    stateCacheBudgetMb: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizeIdentityInteger(profile.stateCacheBudgetMb) ?? DISABLED_PROMPT_STATE_CACHE_BUDGET_MB
+      : DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+    stateCacheMaxCheckpoints: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizeIdentityInteger(profile.stateCacheMaxCheckpoints)
+        ?? LEGACY_LAST_GOOD_STATE_CACHE_MAX_CHECKPOINTS
+      : PROMPT_STATE_CACHE_MAX_CHECKPOINTS,
+    stateCachePolicyVersion: ENABLE_NONZERO_PROMPT_STATE_CACHE
+      ? normalizeIdentityInteger(profile.stateCachePolicyVersion) ?? 0
+      : PROMPT_STATE_CACHE_POLICY_VERSION,
     ...(devices ? { devices } : null),
+  };
+  const persistable: LastGoodInferenceProfile = {
+    ...persistableWithoutIdentity,
+    profileIdentity: buildLastGoodInferenceProfileIdentity(persistableWithoutIdentity),
   };
 
   getLastGoodStorage().set(key, JSON.stringify(persistable));
@@ -484,7 +597,7 @@ export function readModelInitFailureBound(
     const createdAtMs = normalizeIdentityInteger(parsed.createdAtMs);
     const oomUpperBoundGpuLayers = normalizeIdentityInteger(parsed.oomUpperBoundGpuLayers);
     if (
-      parsed.schemaVersion !== 1
+      parsed.schemaVersion !== MODEL_INIT_FAILURE_BOUND_SCHEMA_VERSION
       || parsed.identityKey !== identityKey
       || createdAtMs === null
       || oomUpperBoundGpuLayers === null
@@ -536,7 +649,7 @@ export function recordModelInitFailureBound(
   const identityKey = buildModelInitFailureBoundIdentityKey(identity);
   const storageKey = buildModelInitFailureBoundStorageKey(identityKey);
   const persisted: PersistedModelInitFailureBound = {
-    schemaVersion: 1,
+    schemaVersion: MODEL_INIT_FAILURE_BOUND_SCHEMA_VERSION,
     identityKey,
     ...next,
   };

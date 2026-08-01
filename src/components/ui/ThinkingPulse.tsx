@@ -14,16 +14,17 @@ import { useScreenAppearance } from './ScreenShell';
 
 const AnimatedView = Animated.createAnimatedComponent(View);
 
-export function ThinkingPulse() {
+export function ThinkingPulse({ reduceMotion = false }: { reduceMotion?: boolean }) {
   const motion = useMotionPreferences();
   const appearance = useScreenAppearance();
   const progress = useSharedValue(0);
+  const shouldRenderStatic = reduceMotion || motion.motionPreset === 'minimal';
   const haloClassName = appearance.surfaceKind === 'glass'
     ? 'absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/12'
     : `absolute h-8 w-8 rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`;
 
   useEffect(() => {
-    if (motion.motionPreset === 'minimal') {
+    if (shouldRenderStatic) {
       progress.value = 0;
       return;
     }
@@ -36,7 +37,7 @@ export function ThinkingPulse() {
       -1,
       false,
     );
-  }, [motion.motionPreset, progress]);
+  }, [motion.motionPreset, progress, shouldRenderStatic]);
 
   const haloStyle = useAnimatedStyle(() => ({
     opacity: interpolate(progress.value, [0, 0.5, 1], motion.motionPreset === 'full' ? [0.28, 0.12, 0.28] : [0.18, 0.12, 0.18], Extrapolation.CLAMP),
@@ -95,7 +96,7 @@ export function ThinkingPulse() {
     };
   });
 
-  if (motion.motionPreset === 'minimal') {
+  if (shouldRenderStatic) {
     return (
       <View className="relative h-8 w-8 items-center justify-center">
         <View className={haloClassName} />

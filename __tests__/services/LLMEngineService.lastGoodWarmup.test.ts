@@ -136,6 +136,45 @@ describe('LLMEngineService last-good warmup', () => {
     );
   });
 
+  it('treats last-good state-cache fields as history, not as authorization for the next load', async () => {
+    (readLastGoodInferenceProfile as jest.Mock).mockReturnValue({
+      schemaVersion: 2,
+      backendMode: 'gpu',
+      nGpuLayers: 10,
+      stateCacheBudgetMb: 160,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 1,
+    });
+
+    await runWithFreshService(async (llmEngineService) => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { registry } = require('../../src/services/LocalStorageRegistry') as typeof import('../../src/services/LocalStorageRegistry');
+      (registry.getModel as jest.Mock).mockReturnValue({
+        id: 'repo/model',
+        localPath: 'model.gguf',
+        lifecycleStatus: 'downloaded',
+        size: 1024,
+      });
+
+      await llmEngineService.load('repo/model', {
+        preferLastWorkingProfile: true,
+        loadParamsOverride: {
+          backendPolicy: 'gpu',
+          gpuLayers: 40,
+        },
+      });
+    });
+
+    expect(initLlama).toHaveBeenCalledWith(
+      expect.objectContaining({
+        n_gpu_layers: 10,
+        state_cache_budget_mb: 0,
+        state_cache_max_checkpoints: 8,
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('does not revisit a higher requested profile after the last-good profile establishes an OOM upper bound', async () => {
     (readLastGoodInferenceProfile as jest.Mock).mockReturnValue({
       backendMode: 'gpu',

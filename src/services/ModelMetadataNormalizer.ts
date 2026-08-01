@@ -1055,9 +1055,9 @@ export function normalizePersistedModelMetadata(
           return { ...artifact, requiredFor: ['audio' as const] };
         }
 
-        const hasLegacyImageOnlyRequirement = artifact.requiredFor.length === 1
-          && artifact.requiredFor[0] === 'image';
-        return canRepairUnifiedLegacyProjector && hasLegacyImageOnlyRequirement
+        const hasLegacySingleModalityRequirement = artifact.requiredFor.length === 1
+          && (artifact.requiredFor[0] === 'image' || artifact.requiredFor[0] === 'audio');
+        return canRepairUnifiedLegacyProjector && hasLegacySingleModalityRequirement
           ? { ...artifact, requiredFor: ['image' as const, 'audio' as const] }
           : artifact;
       })

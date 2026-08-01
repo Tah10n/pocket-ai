@@ -10,6 +10,7 @@ function createMemoryFit(overrides: Partial<MemoryFitResult> = {}): MemoryFitRes
     breakdown: {
       weightsBytes: 1_000_000_000,
       kvCacheBytes: 100_000_000,
+      promptStateCacheBytes: 0,
       computeBytes: 100_000_000,
       multimodalBytes: 0,
       overheadBytes: 100_000_000,

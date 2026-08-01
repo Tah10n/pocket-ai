@@ -24,6 +24,9 @@ function createAttempt(overrides: Partial<ModelInitAttemptIdentity> = {}): Model
     cacheTypeK: 'f16',
     cacheTypeV: 'f16',
     speculativeEnabled: false,
+    stateCacheBudgetMb: 0,
+    stateCacheMaxCheckpoints: 8,
+    stateCachePolicyVersion: 1,
     ...overrides,
   };
 }
@@ -86,6 +89,37 @@ describe('model init retry policy', () => {
     guard.recordProbableOom(speculative);
     expect(guard.tryStart(baseOnly)).toBe('started');
     expect(guard.tryStart(baseOnly)).toBe('duplicate');
+  });
+
+  it('keeps disabled and 160 MiB state-cache attempts and OOM bounds isolated', () => {
+    const guard = new ModelInitAttemptGuard();
+    const enabled = createAttempt({ stateCacheBudgetMb: 160 });
+    const disabled = createAttempt({ stateCacheBudgetMb: 0 });
+
+    expect(guard.tryStart(enabled)).toBe('started');
+    guard.recordProbableOom(enabled);
+
+    expect(guard.getKnownOomUpperBound(enabled)).toBe(12);
+    expect(guard.getKnownOomUpperBound(disabled)).toBeNull();
+    expect(guard.tryStart(disabled)).toBe('started');
+  });
+
+  it('does not reuse a policy-v1 failure bound for the fail-closed policy version', () => {
+    const guard = new ModelInitAttemptGuard();
+    const legacy = createAttempt({
+      stateCacheBudgetMb: 160,
+      stateCachePolicyVersion: 1,
+    });
+    const failClosed = createAttempt({
+      stateCacheBudgetMb: 0,
+      stateCachePolicyVersion: 2,
+    });
+
+    expect(guard.tryStart(legacy)).toBe('started');
+    guard.recordProbableOom(legacy);
+
+    expect(guard.getKnownOomUpperBound(failClosed)).toBeNull();
+    expect(guard.tryStart(failClosed)).toBe('started');
   });
 
   it('canonicalizes equivalent backend device sets before duplicate detection', () => {

@@ -372,7 +372,10 @@ function RootNavigator() {
       return;
     }
 
-    void notificationService.initialize();
+    void notificationService.initialize().catch(() => undefined);
+    return () => {
+      notificationService.dispose();
+    };
   }, [criticalOutcome]);
 
   useEffect(() => {

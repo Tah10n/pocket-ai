@@ -298,6 +298,49 @@ describe('ModelCatalogTransformer', () => {
     });
   });
 
+  it.each([
+    ['unsloth/gemma-4-E2B-it-GGUF', 'gemma-4-E2B-it-Q4_K_M.gguf'],
+    ['unsloth/gemma-4-E2B-it-qat-GGUF', 'gemma-4-E2B-it-UD-Q4_K_XL.gguf'],
+  ])('maps sparse Gemma 4 E2B tree metadata for %s to vision and audio support', (modelId, modelFileName) => {
+    const projectorFileName = 'mmproj-BF16.gguf';
+    const models = transformHFResponse([
+      {
+        id: modelId,
+        author: 'unsloth',
+        tags: ['gguf'],
+        siblings: [
+          { rfilename: modelFileName, size: REMOTE_SIZE },
+          { rfilename: projectorFileName, size: 1_000_000 },
+        ],
+        sha: 'main',
+      },
+    ], null, null);
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toEqual(expect.objectContaining({
+      chatModalities: ['text', 'vision', 'audio'],
+      activeVariantId: modelFileName,
+    }));
+    // Sparse catalog variants inherit the authoritative model-level modalities;
+    // ModelCard already falls back to those fields for the active variant.
+    expect(models[0].variants?.[0]?.chatModalities).toBeUndefined();
+    expect(models[0].inputCapabilities?.declared).toEqual(expect.objectContaining({
+      image: 'supported',
+      audio: 'supported',
+    }));
+    expect(models[0].artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'multimodal_projector',
+        remoteFileName: projectorFileName,
+        requiredFor: ['audio', 'image'],
+      }),
+    ]));
+    expect(resolveEffectiveActiveVariantNativeSupport(models[0])).toEqual({
+      vision: true,
+      audio: true,
+    });
+  });
+
   it('maps a sparse Phi-4 multimodal GGUF conversion to vision and audio support', () => {
     const modelFileName = 'Phi-4-multimodal-instruct-Q4_K_M.gguf';
     const projectorFileName = 'mmproj-Phi-4-multimodal-f16.gguf';

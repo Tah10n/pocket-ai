@@ -31,6 +31,7 @@ jest.mock('llama.rn/package.json', () => ({
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const lastGoodStore = require('../../src/services/InferenceLastGoodProfileStore') as typeof import('../../src/services/InferenceLastGoodProfileStore');
 const {
+  buildLastGoodInferenceProfileIdentity,
   MAX_MODEL_INIT_FAILURE_BOUND_ENTRIES,
   readLastGoodInferenceProfile,
   readModelInitFailureBound,
@@ -38,6 +39,7 @@ const {
   recordModelInitFailureBound,
   writeLastGoodInferenceProfile,
 } = lastGoodStore;
+type LastGoodInferenceProfile = import('../../src/services/InferenceLastGoodProfileStore').LastGoodInferenceProfile;
 type ModelInitFailureBoundIdentity = import('../../src/services/InferenceLastGoodProfileStore').ModelInitFailureBoundIdentity;
 
 function createFailureBoundIdentity(
@@ -76,6 +78,9 @@ function createFailureBoundIdentity(
     noExtraBufts: false,
     kvUnified: false,
     nParallel: 1,
+    stateCacheBudgetMb: 160,
+    stateCacheMaxCheckpoints: 8,
+    stateCachePolicyVersion: 1,
     projector: {
       id: 'projector-a',
       sizeBytes: 1000,
@@ -151,6 +156,9 @@ describe('InferenceLastGoodProfileStore', () => {
       backendMode: 'gpu',
       nGpuLayers: 12.9 as unknown as number,
       devices: ['HTP0'],
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
     });
 
     const read = readLastGoodInferenceProfile({
@@ -169,9 +177,157 @@ describe('InferenceLastGoodProfileStore', () => {
       backendMode: 'gpu',
       nGpuLayers: 13,
       nativeModuleVersion: '1.2.3-test',
+      schemaVersion: 2,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
     }));
     // Devices are only persisted for NPU.
     expect(read?.devices).toBeUndefined();
+  });
+
+  it('reads legacy profiles without activating the current state-cache policy', () => {
+    writeLastGoodInferenceProfile({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu',
+      nGpuLayers: 12,
+      stateCacheBudgetMb: 160,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 1,
+    });
+    const legacyKey = mockStorage.getAllKeys().find((key) => key.startsWith('last-good:'))!;
+    const legacyPayload = JSON.parse(mockStorage.getString(legacyKey)!) as Record<string, unknown>;
+    delete legacyPayload.schemaVersion;
+    delete legacyPayload.stateCacheBudgetMb;
+    delete legacyPayload.stateCacheMaxCheckpoints;
+    delete legacyPayload.stateCachePolicyVersion;
+    mockStorage.set(legacyKey, JSON.stringify(legacyPayload));
+
+    const read = readLastGoodInferenceProfile({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '1.2.3-test',
+    });
+
+    expect(read).toEqual(expect.objectContaining({
+      schemaVersion: 1,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    }));
+    expect(mockStorage.contains(legacyKey)).toBe(true);
+  });
+
+  it('rejects and removes an unknown future last-good profile schema', () => {
+    writeLastGoodInferenceProfile({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu',
+      nGpuLayers: 12,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    });
+    const key = mockStorage.getAllKeys().find((entry) => entry.startsWith('last-good:'))!;
+    const futurePayload = JSON.parse(mockStorage.getString(key)!) as Record<string, unknown>;
+    futurePayload.schemaVersion = 999;
+    mockStorage.set(key, JSON.stringify(futurePayload));
+
+    expect(readLastGoodInferenceProfile({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '1.2.3-test',
+    })).toBeNull();
+    expect(mockStorage.contains(key)).toBe(false);
+  });
+
+  it('normalizes an old non-zero current-schema profile to the fail-closed dimensions', () => {
+    writeLastGoodInferenceProfile({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu',
+      nGpuLayers: 12,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    });
+    const key = mockStorage.getAllKeys().find((entry) => entry.startsWith('last-good:'))!;
+    const oldProfile = JSON.parse(mockStorage.getString(key)!) as LastGoodInferenceProfile;
+    oldProfile.stateCacheBudgetMb = 160;
+    oldProfile.stateCachePolicyVersion = 1;
+    oldProfile.profileIdentity = buildLastGoodInferenceProfileIdentity(oldProfile);
+    mockStorage.set(key, JSON.stringify(oldProfile));
+
+    expect(readLastGoodInferenceProfile({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '1.2.3-test',
+    })).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    }));
+  });
+
+  it('does not treat a successful disabled-cache profile as proof that 160 MiB is safe', () => {
+    writeLastGoodInferenceProfile({
+      createdAtMs: Date.now(),
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu',
+      nGpuLayers: 12,
+      stateCacheBudgetMb: 0,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    });
+
+    expect(readLastGoodInferenceProfile({
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      expectedNativeModuleVersion: '1.2.3-test',
+    })).toEqual(expect.objectContaining({
+      stateCacheBudgetMb: 0,
+      stateCachePolicyVersion: 2,
+    }));
+  });
+
+  it('treats 0 and 160 MiB last-good profiles as distinct identities', () => {
+    const baseProfile = {
+      modelId: 'test/model',
+      contextSize: 4096,
+      kvCacheType: 'f16',
+      modelFileSizeBytes: 1234,
+      modelSha256: 'abcdef',
+      nativeModuleVersion: '1.2.3-test',
+      backendMode: 'gpu' as const,
+      nGpuLayers: 12,
+      stateCacheMaxCheckpoints: 8,
+      stateCachePolicyVersion: 2,
+    };
+
+    expect(buildLastGoodInferenceProfileIdentity({
+      ...baseProfile,
+      stateCacheBudgetMb: 0,
+    })).not.toBe(buildLastGoodInferenceProfileIdentity({
+      ...baseProfile,
+      stateCacheBudgetMb: 160,
+    }));
   });
 
   it('retries private profile storage creation after an early failure', () => {
@@ -370,6 +526,16 @@ describe('InferenceLastGoodProfileStore', () => {
     }));
   });
 
+  it('does not apply a 160 MiB state-cache OOM bound to the disabled profile', () => {
+    const enabled = createFailureBoundIdentity({ stateCacheBudgetMb: 160 });
+    const disabled = createFailureBoundIdentity({ stateCacheBudgetMb: 0 });
+
+    recordModelInitFailureBound(enabled, 12);
+
+    expect(readModelInitFailureBound(enabled)?.oomUpperBoundGpuLayers).toBe(12);
+    expect(readModelInitFailureBound(disabled)).toBeNull();
+  });
+
   it.each([
     ['model size', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelFileSizeBytes: 2_000_000 })],
     ['model SHA', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, modelSha256: 'new-model-sha' })],
@@ -388,6 +554,9 @@ describe('InferenceLastGoodProfileStore', () => {
     ['resolved V cache type', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, cacheTypeV: 'f16' })],
     ['batch', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, nBatch: 256 })],
     ['ubatch', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, nUbatch: 128 })],
+    ['state-cache budget', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, stateCacheBudgetMb: 0 })],
+    ['state-cache checkpoints', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, stateCacheMaxCheckpoints: 4 })],
+    ['state-cache policy version', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, stateCachePolicyVersion: 2 })],
     ['low-memory native buffers mode', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, noExtraBufts: true })],
     ['mmap', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, useMmap: false })],
     ['mlock', (identity: ModelInitFailureBoundIdentity) => ({ ...identity, useMlock: true })],
@@ -485,6 +654,18 @@ describe('InferenceLastGoodProfileStore', () => {
     recordModelInitFailureBound(identity, 12);
     const failureKey = mockStorage.getAllKeys().find((key) => key.startsWith('init-oom-bound:'))!;
     mockStorage.set(failureKey, '{private-path:C:\\Users\\someone');
+
+    expect(readModelInitFailureBound(identity)).toBeNull();
+    expect(mockStorage.contains(failureKey)).toBe(false);
+  });
+
+  it('ignores and removes legacy failure-bound schemas safely', () => {
+    const identity = createFailureBoundIdentity();
+    recordModelInitFailureBound(identity, 12);
+    const failureKey = mockStorage.getAllKeys().find((key) => key.startsWith('init-oom-bound:'))!;
+    const payload = JSON.parse(mockStorage.getString(failureKey)!) as Record<string, unknown>;
+    payload.schemaVersion = 1;
+    mockStorage.set(failureKey, JSON.stringify(payload));
 
     expect(readModelInitFailureBound(identity)).toBeNull();
     expect(mockStorage.contains(failureKey)).toBe(false);

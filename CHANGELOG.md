@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.6.2](https://github.com/Tah10n/pocket-ai/compare/v1.6.1...v1.6.2) (2026-08-01)
+
+
+### Bug Fixes
+
+* **chat:** keep conversations bound to their selected model ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+* **chat:** prevent late generation from restoring cleared messages ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+* **notifications:** reject stale targets and serialize initialization ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+* **runtime:** upgrade llama.rn to 0.12.7 with prompt-state caching disabled ([df238f5](https://github.com/Tah10n/pocket-ai/commit/df238f5be619de19e212534b62a88f2342a08a19))
+
 ## [Unreleased]
 
 ### Added

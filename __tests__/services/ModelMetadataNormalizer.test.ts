@@ -1044,6 +1044,91 @@ describe('ModelMetadataNormalizer', () => {
     });
   });
 
+  it('repairs sparse Gemma 4 E2B cache metadata from audio-only to vision and audio', () => {
+    const modelId = 'unsloth/gemma-4-E2B-it-qat-GGUF';
+    const modelFileName = 'gemma-4-E2B-it-UD-Q4_K_XL.gguf';
+    const projectorId = 'projector-gemma-4-e2b-qat-mmproj-bf16';
+    const projectorFileName = 'mmproj-BF16.gguf';
+    const projectorUrl = `https://huggingface.co/${modelId}/resolve/main/${projectorFileName}`;
+    const normalized = normalizePersistedModelMetadata({
+      id: modelId,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      localPath: modelFileName,
+      resolvedFileName: modelFileName,
+      activeVariantId: modelFileName,
+      chatModalities: ['text', 'audio'],
+      artifactRole: 'primary_chat_model',
+      inputCapabilities: {
+        detectedAt: 100,
+        declared: {
+          image: 'unknown',
+          audio: 'supported',
+          video: 'unknown',
+        },
+        evidence: [
+          { source: 'architecture', value: 'gemma4-e2b-audio-profile', confidence: 'high' },
+          { source: 'projector', value: projectorFileName, confidence: 'medium' },
+        ],
+      },
+      projectorCandidates: [
+        {
+          id: projectorId,
+          ownerModelId: modelId,
+          ownerVariantId: modelFileName,
+          repoId: modelId,
+          fileName: projectorFileName,
+          downloadUrl: projectorUrl,
+          hfRevision: 'main',
+          size: 1_000_000,
+          lifecycleStatus: 'downloaded',
+          matchStatus: 'matched',
+          localPath: projectorFileName,
+        },
+      ],
+      artifacts: [
+        {
+          id: projectorId,
+          kind: 'multimodal_projector',
+          requiredFor: ['audio'],
+          hfRevision: 'main',
+          remoteFileName: projectorFileName,
+          downloadUrl: projectorUrl,
+          sizeBytes: 1_000_000,
+          localPath: projectorFileName,
+          installState: 'installed',
+        },
+      ],
+      variants: [
+        {
+          variantId: modelFileName,
+          fileName: modelFileName,
+          quantizationLabel: 'Q4_K_XL',
+          size: 3_000_000_000,
+          chatModalities: ['text', 'audio'],
+          artifactRole: 'primary_chat_model',
+        },
+      ],
+    });
+
+    expect(normalized.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.inputCapabilities).toEqual(expect.objectContaining({
+      declared: expect.objectContaining({ image: 'supported', audio: 'supported' }),
+      evidence: expect.arrayContaining([{
+        source: 'repository_tree',
+        value: 'gemma4-e2b-vision-profile',
+        confidence: 'high',
+      }]),
+    }));
+    expect(normalized.variants?.[0]?.chatModalities).toEqual(['text', 'vision', 'audio']);
+    expect(normalized.artifacts?.find((artifact) => artifact.kind === 'multimodal_projector')?.requiredFor)
+      .toEqual(['audio', 'image']);
+    expect(resolveEffectiveActiveVariantNativeSupport(normalized)).toEqual({
+      vision: true,
+      audio: true,
+    });
+  });
+
   it('repairs legacy Voxtral metadata as audio-only without retaining projector-derived vision', () => {
     const modelId = 'community/Voxtral-Mini-3B-GGUF';
     const modelFileName = 'Voxtral-Mini-3B-Q4_K_M.gguf';

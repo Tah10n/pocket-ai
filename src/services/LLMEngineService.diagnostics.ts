@@ -78,6 +78,7 @@ export function buildInferenceCompletionTelemetry(source: {
       prompt_per_second?: unknown;
     } | null;
   };
+  mtpSupported: boolean;
   mtpRequested: boolean;
   mtpAttempted: boolean;
   mtpFallbackUsed: boolean;
@@ -97,6 +98,7 @@ export function buildInferenceCompletionTelemetry(source: {
     promptPerSecond: toOptionalPositiveNumber(source.result.timings?.prompt_per_second),
     timeToFirstTokenMs: toOptionalNonNegativeNumber(source.timeToFirstTokenMs),
     mtp: {
+      supported: source.mtpSupported,
       requested: source.mtpRequested,
       attempted: source.mtpAttempted,
       fallbackUsed: source.mtpFallbackUsed,

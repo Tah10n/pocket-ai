@@ -246,18 +246,26 @@ describe('modelInputCapabilities', () => {
     ]));
   });
 
-  it.each(['E2B', 'E4B', '12B'])('recognizes the Gemma 4 %s audio architecture profile', (size) => {
+  it.each(['E2B', 'E4B', '12B'])('recognizes the Gemma 4 %s vision and audio architecture profile', (size) => {
     const snapshot = inferDeclaredInputCapabilities({
       id: `unsloth/gemma-4-${size}-it-GGUF`,
       config: { model_type: 'gemma4' },
     }, [], { detectedAt: 0 });
 
+    expect(snapshot.declared.image).toBe('supported');
     expect(snapshot.declared.audio).toBe('supported');
-    expect(snapshot.evidence).toContainEqual({
-      source: 'architecture',
-      value: `gemma4-${size.toLowerCase()}-audio-profile`,
-      confidence: 'high',
-    });
+    expect(snapshot.evidence).toEqual(expect.arrayContaining([
+      {
+        source: 'architecture',
+        value: `gemma4-${size.toLowerCase()}-vision-profile`,
+        confidence: 'high',
+      },
+      {
+        source: 'architecture',
+        value: `gemma4-${size.toLowerCase()}-audio-profile`,
+        confidence: 'high',
+      },
+    ]));
   });
 
   it.each(['A4B', '31B'])('does not assign audio support to the Gemma 4 %s profile', (size) => {
@@ -272,7 +280,7 @@ describe('modelInputCapabilities', () => {
     ]));
   });
 
-  it('recognizes a legacy Gemma 4 audio profile from matching repo, model file, and projector evidence', () => {
+  it('recognizes a sparse Gemma 4 vision and audio profile from matching repo, model file, and projector evidence', () => {
     const snapshot = inferDeclaredInputCapabilities({
       id: 'unsloth/gemma-4-E2B-it-GGUF',
     }, [
@@ -280,8 +288,17 @@ describe('modelInputCapabilities', () => {
       { path: 'mmproj-BF16.gguf' },
     ], { detectedAt: 0 });
 
-    expect(snapshot.declared.audio).toBe('supported');
+    expect(snapshot.declared).toEqual({
+      image: 'supported',
+      audio: 'supported',
+      video: 'unknown',
+    });
     expect(snapshot.evidence).toEqual(expect.arrayContaining([
+      {
+        source: 'repository_tree',
+        value: 'gemma4-e2b-vision-profile',
+        confidence: 'high',
+      },
       {
         source: 'repository_tree',
         value: 'gemma4-e2b-audio-profile',
@@ -302,6 +319,7 @@ describe('modelInputCapabilities', () => {
       { path: 'gemma-4-E2B-it-Q4_K_M.gguf' },
     ], { detectedAt: 0 });
 
+    expect(snapshot.declared.image).toBe('unknown');
     expect(snapshot.declared.audio).toBe('unknown');
   });
 
@@ -310,6 +328,7 @@ describe('modelInputCapabilities', () => {
       id: 'example/gemma-4-E2B-lookalike',
     }, [], { detectedAt: 0 });
 
+    expect(snapshot.declared.image).toBe('unknown');
     expect(snapshot.declared.audio).toBe('unknown');
   });
 

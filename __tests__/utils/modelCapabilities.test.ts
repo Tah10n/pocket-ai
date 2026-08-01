@@ -171,7 +171,7 @@ describe('modelCapabilities', () => {
     expect(getModelVisionCapabilityStatusLabelKey(visionModel)).toBe('models.vision.capabilityNeedsProjector');
     expect(getModelVisionCapabilityBadgePresentation(visionModel)).toEqual({
       labelKey: 'models.vision.badge',
-      tone: 'warning',
+      tone: 'info',
       iconName: 'visibility',
     });
     expect(modelSupportsVision({
@@ -585,7 +585,7 @@ describe('modelCapabilities', () => {
     expect(getModelVisionCapabilityStatusLabelKey(model)).toBe('models.vision.projectorMissing');
     expect(getModelVisionCapabilityBadgePresentation(model)).toEqual({
       labelKey: 'models.vision.badge',
-      tone: 'warning',
+      tone: 'info',
       iconName: 'visibility',
     });
   });
@@ -602,14 +602,21 @@ describe('modelCapabilities', () => {
       matchStatus: 'matched' as const,
     };
 
-    expect(getModelVisionCapabilityStatusLabelKey({
+    const model = {
       id: 'author/model',
-      artifactRole: 'primary_chat_model',
-      chatModalities: ['text', 'vision'],
+      artifactRole: 'primary_chat_model' as const,
+      chatModalities: ['text', 'vision'] as Array<'text' | 'vision'>,
       activeVariantId: 'model.Q8_0.gguf',
       resolvedFileName: 'model.Q8_0.gguf',
       projectorCandidates: [modelWideProjector],
-    })).toBe('models.vision.capabilityReady');
+    };
+
+    expect(getModelVisionCapabilityStatusLabelKey(model)).toBe('models.vision.capabilityReady');
+    expect(getModelVisionCapabilityBadgePresentation(model)).toEqual({
+      labelKey: 'models.vision.badge',
+      tone: 'info',
+      iconName: 'visibility',
+    });
   });
 
   it('keeps scoped projector downloads ready when active variant scope is unavailable', () => {

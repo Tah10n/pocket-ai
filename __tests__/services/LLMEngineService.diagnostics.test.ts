@@ -17,6 +17,7 @@ describe('LLMEngineService MTP diagnostics', () => {
           prompt_per_second: 18.5,
         },
       },
+      mtpSupported: true,
       mtpRequested: true,
       mtpAttempted: true,
       mtpFallbackUsed: false,
@@ -28,6 +29,7 @@ describe('LLMEngineService MTP diagnostics', () => {
       promptPerSecond: 18.5,
       timeToFirstTokenMs: 913,
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,
@@ -51,6 +53,7 @@ describe('LLMEngineService MTP diagnostics', () => {
           prompt_per_second: Number.POSITIVE_INFINITY,
         },
       },
+      mtpSupported: true,
       mtpRequested: true,
       mtpAttempted: true,
       mtpFallbackUsed: true,
@@ -62,6 +65,7 @@ describe('LLMEngineService MTP diagnostics', () => {
       promptPerSecond: undefined,
       timeToFirstTokenMs: undefined,
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: true,

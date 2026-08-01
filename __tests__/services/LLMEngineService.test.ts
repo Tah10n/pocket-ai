@@ -4490,6 +4490,22 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.getLoadedGpuLayers()).toBe(12);
   });
 
+  it('marks completion telemetry as unsupported when the selected model has no MTP configuration', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
+    await llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      supported: false,
+      requested: false,
+      attempted: false,
+      fallbackUsed: false,
+      draftTokens: 0,
+      draftTokensAccepted: 0,
+    }));
+  });
+
   it('loads a Gemma MTP companion as model_draft and enables text speculative decoding', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedGemmaMtpModel());
 
@@ -4675,6 +4691,7 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock)
       .toHaveBeenLastCalledWith(expect.not.objectContaining({ speculative: expect.anything() }), expect.any(Function));
     expect(llmEngineService.getLastCompletionTelemetry()?.mtp).toEqual(expect.objectContaining({
+      supported: true,
       requested: false,
       attempted: false,
       draftTokens: 0,
@@ -4712,6 +4729,7 @@ describe('LLMEngineService', () => {
       promptPerSecond: 14.25,
       timeToFirstTokenMs: expect.any(Number),
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,

@@ -804,6 +804,9 @@ function sanitizeInferenceCompletionTelemetry(value: unknown): InferenceCompleti
     && MTP_FALLBACK_REASONS.has(mtpRecord.fallbackReason as MtpFallbackReason)
     ? mtpRecord.fallbackReason as MtpFallbackReason
     : undefined;
+  const supported = typeof mtpRecord.supported === 'boolean'
+    ? mtpRecord.supported
+    : undefined;
   const acceptanceRate = toOptionalNonNegativeNumber(mtpRecord.acceptanceRate);
 
   const sanitized: InferenceCompletionTelemetry = {
@@ -813,6 +816,7 @@ function sanitizeInferenceCompletionTelemetry(value: unknown): InferenceCompleti
     promptPerSecond: toOptionalNonNegativeNumber(record.promptPerSecond),
     timeToFirstTokenMs: toOptionalNonNegativeNumber(record.timeToFirstTokenMs),
     mtp: {
+      ...(supported !== undefined ? { supported } : {}),
       requested: mtpRecord.requested,
       attempted: mtpRecord.attempted,
       fallbackUsed: mtpRecord.fallbackUsed,
@@ -832,6 +836,7 @@ function sanitizeInferenceCompletionTelemetry(value: unknown): InferenceCompleti
     'mtp',
   ]);
   const allowedMtpKeys = new Set([
+    'supported',
     'requested',
     'attempted',
     'fallbackUsed',
@@ -847,6 +852,7 @@ function sanitizeInferenceCompletionTelemetry(value: unknown): InferenceCompleti
     && record.predictedPerSecond === sanitized.predictedPerSecond
     && record.promptPerSecond === sanitized.promptPerSecond
     && record.timeToFirstTokenMs === sanitized.timeToFirstTokenMs
+    && mtpRecord.supported === sanitized.mtp.supported
     && mtpRecord.requested === sanitized.mtp.requested
     && mtpRecord.attempted === sanitized.mtp.attempted
     && mtpRecord.fallbackUsed === sanitized.mtp.fallbackUsed

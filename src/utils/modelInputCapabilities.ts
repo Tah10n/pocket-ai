@@ -758,10 +758,12 @@ function addKnownInputProfileEvidence(
   ].map(normalizeSignal);
   const hasArchitectureSignal = architectureSignals.some(isGemma4ArchitectureSignal);
 
-  // Gemma 4 audio input is model-size-specific. E2B, E4B, and 12B expose
-  // native audio input; A4B and 31B do not. Require an exact supported size
-  // plus either Gemma 4 architecture metadata or matching repo, model-file,
-  // and projector evidence. A display name alone is never sufficient.
+  // Gemma 4 E2B, E4B, and 12B expose both native image and audio input.
+  // Require an exact supported size plus either Gemma 4 architecture metadata
+  // or matching repo, model-file, and projector evidence. This also repairs
+  // sparse GGUF catalog payloads that expose the shared projector and Gemma 4
+  // architecture but omit nested vision_config metadata. A display name alone
+  // is never sufficient.
   const size = resolveGemma4AudioProfileSize(payload);
   if (!size || (
     !hasArchitectureSignal
@@ -770,8 +772,14 @@ function addKnownInputProfileEvidence(
     return;
   }
 
+  const source = hasArchitectureSignal ? 'architecture' : 'repository_tree';
+  addEvidence(accumulator, 'image', {
+    source,
+    value: `gemma4-${size}-vision-profile`,
+    confidence: 'high',
+  });
   addEvidence(accumulator, 'audio', {
-    source: hasArchitectureSignal ? 'architecture' : 'repository_tree',
+    source,
     value: `gemma4-${size}-audio-profile`,
     confidence: 'high',
   });

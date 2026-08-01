@@ -104,6 +104,7 @@ describe('ChatMessageBubble', () => {
       'MTP {{accepted}}/{{drafted}} · {{percent}}%',
     );
     reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.mtpNotUsed', 'MTP not used');
+    reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.mtpOff', 'MTP off');
     reactI18nextMock.__setTranslationOverride('chat.inferenceMetrics.ttft', 'TTFT {{milliseconds}} ms');
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
   });
@@ -372,6 +373,7 @@ describe('ChatMessageBubble', () => {
           predictedPerSecond: 6.5,
           timeToFirstTokenMs: 910,
           mtp: {
+            supported: true,
             requested: true,
             attempted: true,
             fallbackUsed: false,
@@ -401,6 +403,7 @@ describe('ChatMessageBubble', () => {
           tokensEvaluated: 8,
           predictedPerSecond: 3.5,
           mtp: {
+            supported: true,
             requested: true,
             attempted: false,
             fallbackUsed: false,
@@ -413,6 +416,57 @@ describe('ChatMessageBubble', () => {
 
     expect(getByText('MTP not used')).toBeTruthy();
     expect(queryByText('MTP 0/0 · 0%')).toBeNull();
+  });
+
+  it('shows MTP off only when the selected model supports MTP', () => {
+    const supported = render(
+      <ChatMessageBubble
+        id="assistant-mtp-off-supported"
+        isUser={false}
+        content="Done"
+        inferenceMetrics={{
+          tokensPredicted: 12,
+          tokensEvaluated: 8,
+          predictedPerSecond: 3.5,
+          mtp: {
+            supported: true,
+            requested: false,
+            attempted: false,
+            fallbackUsed: false,
+            draftTokens: 0,
+            draftTokensAccepted: 0,
+          },
+        }}
+      />,
+    );
+
+    expect(supported.getByText('MTP off')).toBeTruthy();
+    expect(supported.getByTestId('mtp-telemetry-assistant-mtp-off-supported')).toBeTruthy();
+
+    supported.rerender(
+      <ChatMessageBubble
+        id="assistant-mtp-unsupported"
+        isUser={false}
+        content="Done"
+        inferenceMetrics={{
+          tokensPredicted: 12,
+          tokensEvaluated: 8,
+          predictedPerSecond: 3.5,
+          mtp: {
+            supported: false,
+            requested: false,
+            attempted: false,
+            fallbackUsed: false,
+            draftTokens: 0,
+            draftTokensAccepted: 0,
+          },
+        }}
+      />,
+    );
+
+    expect(supported.queryByText('MTP off')).toBeNull();
+    expect(supported.queryByTestId('mtp-telemetry-assistant-mtp-unsupported')).toBeNull();
+    expect(supported.getByText('3.5 t/s')).toBeTruthy();
   });
 
   it('renders regenerate and delete actions for eligible user messages', () => {

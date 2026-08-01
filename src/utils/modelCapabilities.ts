@@ -32,7 +32,9 @@ import { normalizeSha256Digest } from './sha256';
 
 export const MODEL_CAPABILITY_HEURISTIC_VERSION = 1;
 
-export type ModelNativeCapabilityBadgeTone = 'info' | 'warning';
+// Capability badges answer what input a model supports. Projector installation
+// and runtime readiness are separate statuses and must not change this tone.
+export type ModelNativeCapabilityBadgeTone = 'info';
 
 export interface ModelNativeCapabilityBadgePresentation {
   labelKey: string;
@@ -1200,7 +1202,7 @@ export function getModelVisionCapabilityBadgePresentation(
 
   return {
     labelKey: 'models.vision.badge',
-    tone: hasReadyProjectorCandidate(model) ? 'info' : 'warning',
+    tone: 'info',
     iconName: 'visibility',
   };
 }

@@ -3474,6 +3474,7 @@ class LLMEngineService {
         const finalizeCompletionResult = (result: LlamaCompletionResult): LlamaCompletionResult => {
           const telemetry = buildInferenceCompletionTelemetry({
             result,
+            mtpSupported: configuredSpeculativeDecoding !== null,
             mtpRequested: configuredSpeculativeDecoding?.enabled === true,
             mtpAttempted: activeSpeculativeConfig !== null && requestMediaInputOccurrenceCount === 0,
             mtpFallbackUsed: didUseSpeculativeCompletionFallback,

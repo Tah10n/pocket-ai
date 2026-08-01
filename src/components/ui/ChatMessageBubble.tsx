@@ -233,10 +233,22 @@ const ChatMessageBubbleComponent = ({
     !isUser &&
     typeof displayedTokensPerSecond === 'number' &&
     Number.isFinite(displayedTokensPerSecond);
-  const showInferenceTelemetry = !isUser && inferenceMetrics !== undefined;
   const mtpTelemetryLabel = (() => {
     const mtp = inferenceMetrics?.mtp;
     if (!mtp) {
+      return null;
+    }
+
+    const hasLegacyCapabilityEvidence = mtp.requested
+      || mtp.attempted
+      || mtp.fallbackUsed
+      || mtp.fallbackReason !== undefined
+      || mtp.draftTokens > 0
+      || mtp.draftTokensAccepted > 0;
+    if (
+      mtp.supported === false
+      || (mtp.supported !== true && !hasLegacyCapabilityEvidence)
+    ) {
       return null;
     }
 
@@ -261,6 +273,10 @@ const ChatMessageBubbleComponent = ({
       percent: acceptancePercent,
     });
   })();
+  const showInferenceTelemetry = !isUser && (
+    mtpTelemetryLabel !== null
+    || typeof inferenceMetrics?.timeToFirstTokenMs === 'number'
+  );
   const copyableContent = isUser
     ? content
     : hasExplicitThoughtContent

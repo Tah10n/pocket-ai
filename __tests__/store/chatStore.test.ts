@@ -8618,6 +8618,7 @@ describe('chatStore', () => {
       predictedPerSecond: 7.5,
       timeToFirstTokenMs: 640,
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,
@@ -8780,6 +8781,7 @@ describe('chatStore', () => {
       predictedPerSecond: 7.5,
       timeToFirstTokenMs: 640,
       mtp: {
+        supported: true,
         requested: true,
         attempted: true,
         fallbackUsed: false,

@@ -57,6 +57,8 @@ export type MtpFallbackReason =
   | 'completion_failed';
 
 export interface MtpCompletionTelemetry {
+  /** Undefined only for telemetry persisted before MTP capability tracking was added. */
+  supported?: boolean;
   requested: boolean;
   attempted: boolean;
   fallbackUsed: boolean;

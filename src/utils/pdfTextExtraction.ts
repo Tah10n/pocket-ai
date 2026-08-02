@@ -27,9 +27,39 @@ export interface PdfTextExtractionResult {
 }
 
 type PdfStreamCandidate = {
+  objectKey: string;
   dictionary: string;
   bytes: Uint8Array;
 };
+
+type PdfObjectReference = {
+  objectNumber: number;
+  generationNumber: number;
+  key: string;
+};
+
+type PdfDictionaryObject = PdfObjectReference & {
+  dictionary: string;
+  stream?: PdfStreamCandidate;
+};
+
+type CollectedPdfStructure = {
+  objects: Map<string, PdfDictionaryObject>;
+  objectOrder: PdfDictionaryObject[];
+  trailers: string[];
+};
+
+type PdfPageContentStructure = {
+  pageCount: number;
+  pages: PdfStreamCandidate[][];
+};
+
+type PdfDictionaryEntryRange = {
+  valueStart: number;
+  valueEnd: number;
+};
+
+type PdfStreamFilterMode = 'flate' | 'none' | 'unsupported';
 
 type PdfByteRange = {
   start: number;
@@ -50,13 +80,7 @@ type PdfContentToken =
   | { type: 'word'; value: string };
 
 const PDF_BINARY_HEADER_PATTERN = /^%PDF-\d+\.\d/u;
-const PDF_ENCRYPT_PATTERN = /\/Encrypt(?:\s|<|\/|\d)/u;
-const PDF_PAGE_PATTERN = /\/Type\s*\/Page(?!s)\b/u;
-const PDF_XREF_STREAM_PATTERN = /\/Type\s*\/XRef\b/u;
-const PDF_IMAGE_STREAM_PATTERN = /\/Subtype\s*\/Image\b/u;
-const PDF_FILTER_PATTERN = /\/Filter\s*(?:\/([A-Za-z0-9]+)|\[(.*?)\])/su;
 const PDF_OBJECT_HEADER_PATTERN = /(\d+)\s+(\d+)\s+obj\b/gu;
-const PDF_LENGTH_PATTERN = /\/Length\s+(?:(\d+)\s+(\d+)\s+R\b|(\d+)\b)/u;
 const PDF_WHITESPACE_PATTERN = /[\u0000\t\n\f\r ]/u;
 const PDF_DELIMITER_PATTERN = /[\u0000\t\n\f\r ()<>\[\]{}/%]/u;
 
@@ -65,6 +89,8 @@ const MAX_PDF_STREAM_COUNT = 256;
 const MAX_PDF_OBJECT_COUNT = 4_096;
 const MAX_PDF_XREF_SECTION_ENTRIES = 16_384;
 const MAX_PDF_XREF_CHAIN_DEPTH = 8;
+const MAX_PDF_PAGE_TREE_DEPTH = 64;
+const MAX_PDF_PAGE_CONTENT_REFERENCES = 16_384;
 const MAX_PDF_DECODED_STREAM_BYTES = 4 * 1024 * 1024;
 const MAX_PDF_DECODED_DOCUMENT_BYTES = 12 * 1024 * 1024;
 const MAX_PDF_DECOMPRESSION_RATIO = 128;
@@ -75,6 +101,10 @@ const MAX_PDF_OPERANDS = 32;
 const MAX_PDF_PROCESSING_MILLIS = 2_000;
 const INFLATE_INPUT_CHUNK_BYTES = 32 * 1024;
 const INFLATE_OUTPUT_CHUNK_BYTES = 64 * 1024;
+// TJ adjustments are expressed in thousandths of text space and subtracted
+// from the text position. A sufficiently negative value therefore represents
+// visible forward spacing rather than normal glyph kerning.
+const PDF_TJ_WORD_BREAK_THRESHOLD = -250;
 
 function createPdfExtractionError(
   reason: Extract<PdfTextExtractionFailureReason, 'resource_limit' | 'unsupported_structure'>,
@@ -243,6 +273,247 @@ function findDictionaryEnd(input: string, start: number, budget: PdfExtractionBu
   throw createPdfExtractionError('unsupported_structure', 'PDF contains an unterminated object dictionary.');
 }
 
+function readPdfNameToken(input: string, start: number): { next: number; value: string } {
+  if (input[start] !== '/') {
+    throw createPdfExtractionError('unsupported_structure', 'PDF dictionary name is malformed.');
+  }
+
+  let next = start + 1;
+  while (next < input.length && !isPdfDelimiter(input[next])) {
+    next += 1;
+  }
+
+  const value = input.slice(start + 1, next).replace(/#([0-9A-Fa-f]{2})/gu, (_match, hex: string) => (
+    String.fromCharCode(Number.parseInt(hex, 16))
+  ));
+  return { next, value };
+}
+
+function readIndirectReferenceAt(
+  input: string,
+  start: number,
+): { next: number; reference: PdfObjectReference } | undefined {
+  const firstStart = skipPdfWhitespaceAndComments(input, start);
+  const objectNumberMatch = /^(\d+)\b/u.exec(input.slice(firstStart));
+  if (!objectNumberMatch) {
+    return undefined;
+  }
+
+  const generationStart = skipPdfWhitespaceAndComments(
+    input,
+    firstStart + objectNumberMatch[0].length,
+  );
+  const generationNumberMatch = /^(\d+)\b/u.exec(input.slice(generationStart));
+  if (!generationNumberMatch) {
+    return undefined;
+  }
+
+  const referenceMarkerStart = skipPdfWhitespaceAndComments(
+    input,
+    generationStart + generationNumberMatch[0].length,
+  );
+  if (!isKeywordAt(input, referenceMarkerStart, 'R')) {
+    return undefined;
+  }
+
+  const objectNumber = Number.parseInt(objectNumberMatch[1] ?? '', 10);
+  const generationNumber = Number.parseInt(generationNumberMatch[1] ?? '', 10);
+  if (!Number.isSafeInteger(objectNumber) || !Number.isSafeInteger(generationNumber)) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF indirect object reference is invalid.');
+  }
+
+  return {
+    next: referenceMarkerStart + 1,
+    reference: {
+      objectNumber,
+      generationNumber,
+      key: `${objectNumber} ${generationNumber}`,
+    },
+  };
+}
+
+function readPdfObjectEnd(
+  input: string,
+  start: number,
+  budget: PdfExtractionBudget,
+  arrayDepth = 0,
+): number {
+  const cursor = skipPdfWhitespaceAndComments(input, start);
+  const char = input[cursor];
+  if (char === undefined) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF dictionary value is missing.');
+  }
+  if (char === '(') {
+    return skipLiteralString(input, cursor, budget);
+  }
+  if (input.startsWith('<<', cursor)) {
+    return findDictionaryEnd(input, cursor, budget);
+  }
+  if (char === '<') {
+    const end = input.indexOf('>', cursor + 1);
+    if (end < 0) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF contains an unterminated hex string.');
+    }
+    return end + 1;
+  }
+  if (char === '[') {
+    if (arrayDepth >= MAX_PDF_ARRAY_DEPTH) {
+      throw createPdfExtractionError('resource_limit', 'PDF dictionary array nesting exceeds local limits.');
+    }
+
+    let next = cursor + 1;
+    while (next < input.length) {
+      assertWithinProcessingTime(budget);
+      next = skipPdfWhitespaceAndComments(input, next);
+      if (input[next] === ']') {
+        return next + 1;
+      }
+      next = readPdfObjectEnd(input, next, budget, arrayDepth + 1);
+    }
+    throw createPdfExtractionError('unsupported_structure', 'PDF contains an unterminated dictionary array.');
+  }
+  if (char === '/') {
+    return readPdfNameToken(input, cursor).next;
+  }
+
+  const reference = readIndirectReferenceAt(input, cursor);
+  if (reference) {
+    return reference.next;
+  }
+
+  if (isPdfDelimiter(char)) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF dictionary value is malformed.');
+  }
+  let next = cursor + 1;
+  while (next < input.length && !isPdfDelimiter(input[next])) {
+    next += 1;
+  }
+  return next;
+}
+
+function findDictionaryEntry(
+  dictionary: string,
+  key: string,
+  budget: PdfExtractionBudget,
+): PdfDictionaryEntryRange | undefined {
+  if (!dictionary.startsWith('<<')) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF dictionary is malformed.');
+  }
+
+  let cursor = 2;
+  while (cursor < dictionary.length) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(dictionary, cursor);
+    if (dictionary.startsWith('>>', cursor)) {
+      return undefined;
+    }
+    if (dictionary[cursor] !== '/') {
+      throw createPdfExtractionError('unsupported_structure', 'PDF dictionary entry is malformed.');
+    }
+
+    const name = readPdfNameToken(dictionary, cursor);
+    const valueStart = skipPdfWhitespaceAndComments(dictionary, name.next);
+    const valueEnd = readPdfObjectEnd(dictionary, valueStart, budget);
+    if (name.value === key) {
+      return { valueStart, valueEnd };
+    }
+    cursor = valueEnd;
+  }
+
+  throw createPdfExtractionError('unsupported_structure', 'PDF dictionary is unterminated.');
+}
+
+function readDictionaryNameValue(
+  dictionary: string,
+  key: string,
+  budget: PdfExtractionBudget,
+): string | undefined {
+  const entry = findDictionaryEntry(dictionary, key, budget);
+  if (!entry) {
+    return undefined;
+  }
+  if (dictionary[entry.valueStart] !== '/') {
+    throw createPdfExtractionError('unsupported_structure', `PDF /${key} entry is not a name.`);
+  }
+  const name = readPdfNameToken(dictionary, entry.valueStart);
+  if (name.next !== entry.valueEnd) {
+    throw createPdfExtractionError('unsupported_structure', `PDF /${key} name entry is malformed.`);
+  }
+  return name.value;
+}
+
+function readDictionaryReference(
+  dictionary: string,
+  key: string,
+  budget: PdfExtractionBudget,
+): PdfObjectReference | undefined {
+  const entry = findDictionaryEntry(dictionary, key, budget);
+  if (!entry) {
+    return undefined;
+  }
+  const reference = readIndirectReferenceAt(dictionary, entry.valueStart);
+  if (!reference || reference.next !== entry.valueEnd) {
+    throw createPdfExtractionError('unsupported_structure', `PDF /${key} entry is not an indirect reference.`);
+  }
+  return reference.reference;
+}
+
+function readDictionaryNonNegativeInteger(
+  dictionary: string,
+  key: string,
+  budget: PdfExtractionBudget,
+): number | undefined {
+  const entry = findDictionaryEntry(dictionary, key, budget);
+  if (!entry) {
+    return undefined;
+  }
+  const rawValue = dictionary.slice(entry.valueStart, entry.valueEnd);
+  if (!/^\d+$/u.test(rawValue)) {
+    throw createPdfExtractionError('unsupported_structure', `PDF /${key} entry is not an integer.`);
+  }
+  const value = Number.parseInt(rawValue, 10);
+  if (!Number.isSafeInteger(value)) {
+    throw createPdfExtractionError('unsupported_structure', `PDF /${key} integer is invalid.`);
+  }
+  return value;
+}
+
+function readReferenceArray(
+  dictionary: string,
+  entry: PdfDictionaryEntryRange,
+  key: string,
+  budget: PdfExtractionBudget,
+): PdfObjectReference[] {
+  if (dictionary[entry.valueStart] !== '[') {
+    throw createPdfExtractionError('unsupported_structure', `PDF /${key} entry is not a reference array.`);
+  }
+
+  const references: PdfObjectReference[] = [];
+  let cursor = entry.valueStart + 1;
+  while (cursor < entry.valueEnd) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(dictionary, cursor);
+    if (dictionary[cursor] === ']') {
+      if (cursor + 1 !== entry.valueEnd) {
+        throw createPdfExtractionError('unsupported_structure', `PDF /${key} array is malformed.`);
+      }
+      return references;
+    }
+
+    const reference = readIndirectReferenceAt(dictionary, cursor);
+    if (!reference) {
+      throw createPdfExtractionError('unsupported_structure', `PDF /${key} array contains a direct object.`);
+    }
+    references.push(reference.reference);
+    if (references.length > MAX_PDF_PAGE_CONTENT_REFERENCES) {
+      throw createPdfExtractionError('resource_limit', `PDF /${key} array exceeds local limits.`);
+    }
+    cursor = reference.next;
+  }
+
+  throw createPdfExtractionError('unsupported_structure', `PDF /${key} array is unterminated.`);
+}
+
 function findKeyword(input: string, keyword: string, start: number): number {
   let cursor = input.indexOf(keyword, start);
   while (cursor >= 0) {
@@ -356,8 +627,7 @@ function parseClassicXrefOffsets(
     }
     const dictionaryEnd = findDictionaryEnd(pdfText, cursor, budget);
     const trailerDictionary = pdfText.slice(cursor, dictionaryEnd);
-    const previousMatch = /\/Prev\s+(\d+)\b/u.exec(trailerDictionary);
-    xrefOffset = previousMatch ? Number.parseInt(previousMatch[1] ?? '', 10) : undefined;
+    xrefOffset = readDictionaryNonNegativeInteger(trailerDictionary, 'Prev', budget);
   }
 
   return offsets;
@@ -401,21 +671,33 @@ function resolveStreamLength(
   dictionary: string,
   pdfText: string,
   xrefOffsets: Map<string, number>,
+  budget: PdfExtractionBudget,
 ): number {
-  const match = PDF_LENGTH_PATTERN.exec(dictionary);
-  if (!match) {
+  const entry = findDictionaryEntry(dictionary, 'Length', budget);
+  if (!entry) {
     throw createPdfExtractionError('unsupported_structure', 'PDF stream is missing a supported /Length entry.');
   }
 
-  const directLength = match[3];
-  const length = directLength !== undefined
-    ? Number.parseInt(directLength, 10)
-    : resolveIndirectInteger(
-        pdfText,
-        Number.parseInt(match[1] ?? '', 10),
-        Number.parseInt(match[2] ?? '', 10),
-        xrefOffsets,
-      );
+  const rawValue = dictionary.slice(entry.valueStart, entry.valueEnd);
+  const directLength = /^\d+$/u.test(rawValue)
+    ? Number.parseInt(rawValue, 10)
+    : undefined;
+  const indirectLengthReference = directLength === undefined
+    ? readIndirectReferenceAt(dictionary, entry.valueStart)
+    : undefined;
+  if (
+    directLength === undefined
+    && (!indirectLengthReference || indirectLengthReference.next !== entry.valueEnd)
+  ) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF stream length is not a supported integer.');
+  }
+
+  const length = directLength ?? resolveIndirectInteger(
+    pdfText,
+    indirectLengthReference!.reference.objectNumber,
+    indirectLengthReference!.reference.generationNumber,
+    xrefOffsets,
+  );
   if (!Number.isSafeInteger(length) || length < 0 || length > pdfText.length) {
     throw createPdfExtractionError('unsupported_structure', 'PDF stream length is outside the document bounds.');
   }
@@ -481,12 +763,13 @@ function collectPdfStructure(
   bytes: Uint8Array,
   pdfText: string,
   budget: PdfExtractionBudget,
-): { pageCount?: number; streams: PdfStreamCandidate[]; trailers: string[] } {
+): CollectedPdfStructure {
   const xrefOffsets = parseClassicXrefOffsets(pdfText, budget);
-  const streams: PdfStreamCandidate[] = [];
+  const objects = new Map<string, PdfDictionaryObject>();
+  const objectOrder: PdfDictionaryObject[] = [];
   const objectRanges: PdfByteRange[] = [];
-  let pageCount = 0;
   let objectCount = 0;
+  let streamCount = 0;
   let searchStart = 0;
 
   PDF_OBJECT_HEADER_PATTERN.lastIndex = 0;
@@ -503,27 +786,32 @@ function collectPdfStructure(
     }
 
     const objectStart = match.index;
+    const objectNumber = Number.parseInt(match[1] ?? '', 10);
+    const generationNumber = Number.parseInt(match[2] ?? '', 10);
+    if (!Number.isSafeInteger(objectNumber) || !Number.isSafeInteger(generationNumber)) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF object identifier is invalid.');
+    }
+    const objectKey = `${objectNumber} ${generationNumber}`;
     const contentStart = skipPdfWhitespaceAndComments(pdfText, PDF_OBJECT_HEADER_PATTERN.lastIndex);
     let objectEnd: number;
+    let dictionaryObject: PdfDictionaryObject | undefined;
 
     if (pdfText.startsWith('<<', contentStart)) {
       const dictionaryEnd = findDictionaryEnd(pdfText, contentStart, budget);
       const dictionary = pdfText.slice(contentStart, dictionaryEnd);
-      if (PDF_XREF_STREAM_PATTERN.test(dictionary)) {
+      if (readDictionaryNameValue(dictionary, 'Type', budget) === 'XRef') {
         throw createPdfExtractionError('unsupported_structure', 'PDF cross-reference streams are not supported.');
-      }
-      if (PDF_PAGE_PATTERN.test(dictionary)) {
-        pageCount += 1;
       }
 
       const afterDictionary = skipPdfWhitespaceAndComments(pdfText, dictionaryEnd);
       if (isKeywordAt(pdfText, afterDictionary, 'stream')) {
-        if (streams.length >= MAX_PDF_STREAM_COUNT) {
+        streamCount += 1;
+        if (streamCount > MAX_PDF_STREAM_COUNT) {
           throw createPdfExtractionError('resource_limit', 'PDF contains too many streams.');
         }
 
         const dataStart = resolveStreamDataStart(pdfText, afterDictionary + 'stream'.length);
-        const streamLength = resolveStreamLength(dictionary, pdfText, xrefOffsets);
+        const streamLength = resolveStreamLength(dictionary, pdfText, xrefOffsets, budget);
         const dataEnd = dataStart + streamLength;
         if (!Number.isSafeInteger(dataEnd) || dataEnd > bytes.length) {
           throw createPdfExtractionError('unsupported_structure', 'PDF stream extends past the document boundary.');
@@ -540,16 +828,30 @@ function collectPdfStructure(
           throw createPdfExtractionError('unsupported_structure', 'PDF stream object is missing endobj.');
         }
         objectEnd = endObjectStart + 'endobj'.length;
-        streams.push({
+        const stream = {
+          objectKey,
           dictionary,
           bytes: bytes.subarray(dataStart, dataEnd),
-        });
+        };
+        dictionaryObject = {
+          objectNumber,
+          generationNumber,
+          key: objectKey,
+          dictionary,
+          stream,
+        };
       } else {
         const endObjectStart = findKeyword(pdfText, 'endobj', dictionaryEnd);
         if (endObjectStart < 0) {
           throw createPdfExtractionError('unsupported_structure', 'PDF dictionary object is missing endobj.');
         }
         objectEnd = endObjectStart + 'endobj'.length;
+        dictionaryObject = {
+          objectNumber,
+          generationNumber,
+          key: objectKey,
+          dictionary,
+        };
       }
     } else {
       const endObjectStart = findKeyword(pdfText, 'endobj', contentStart);
@@ -560,15 +862,144 @@ function collectPdfStructure(
     }
 
     objectRanges.push({ start: objectStart, end: objectEnd });
+    if (dictionaryObject) {
+      objects.set(objectKey, dictionaryObject);
+      objectOrder.push(dictionaryObject);
+    }
     searchStart = objectEnd;
   }
 
   const trailers = collectTrailerDictionaries(pdfText, objectRanges, budget);
   return {
-    streams,
+    objects,
+    objectOrder,
     trailers,
-    ...(pageCount > 0 ? { pageCount } : null),
   };
+}
+
+function resolveCatalogObject(
+  structure: CollectedPdfStructure,
+  budget: PdfExtractionBudget,
+): PdfDictionaryObject {
+  for (let index = structure.trailers.length - 1; index >= 0; index -= 1) {
+    const rootReference = readDictionaryReference(structure.trailers[index], 'Root', budget);
+    if (!rootReference) {
+      continue;
+    }
+    const rootObject = structure.objects.get(rootReference.key);
+    if (!rootObject) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF trailer references a missing catalog object.');
+    }
+    if (readDictionaryNameValue(rootObject.dictionary, 'Type', budget) !== 'Catalog') {
+      throw createPdfExtractionError('unsupported_structure', 'PDF trailer root is not a catalog object.');
+    }
+    return rootObject;
+  }
+
+  for (let index = structure.objectOrder.length - 1; index >= 0; index -= 1) {
+    const candidate = structure.objectOrder[index];
+    if (structure.objects.get(candidate.key) !== candidate) {
+      continue;
+    }
+    if (readDictionaryNameValue(candidate.dictionary, 'Type', budget) === 'Catalog') {
+      return candidate;
+    }
+  }
+
+  throw createPdfExtractionError('unsupported_structure', 'PDF catalog could not be resolved.');
+}
+
+function readPageContentReferences(
+  dictionary: string,
+  budget: PdfExtractionBudget,
+): PdfObjectReference[] {
+  const entry = findDictionaryEntry(dictionary, 'Contents', budget);
+  if (!entry) {
+    return [];
+  }
+  if (dictionary[entry.valueStart] === '[') {
+    return readReferenceArray(dictionary, entry, 'Contents', budget);
+  }
+
+  const reference = readIndirectReferenceAt(dictionary, entry.valueStart);
+  if (!reference || reference.next !== entry.valueEnd) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      'PDF /Contents entry is not an indirect stream reference.',
+    );
+  }
+  return [reference.reference];
+}
+
+function resolvePageContentStructure(
+  structure: CollectedPdfStructure,
+  budget: PdfExtractionBudget,
+): PdfPageContentStructure {
+  const catalog = resolveCatalogObject(structure, budget);
+  const pagesReference = readDictionaryReference(catalog.dictionary, 'Pages', budget);
+  if (!pagesReference) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF catalog is missing its page tree reference.');
+  }
+
+  const pages: PdfStreamCandidate[][] = [];
+  const visited = new Set<string>();
+  const pending: { depth: number; reference: PdfObjectReference }[] = [{
+    depth: 0,
+    reference: pagesReference,
+  }];
+  let contentReferenceCount = 0;
+
+  while (pending.length > 0) {
+    assertWithinProcessingTime(budget);
+    const current = pending.pop();
+    if (!current) {
+      break;
+    }
+    if (current.depth > MAX_PDF_PAGE_TREE_DEPTH || visited.has(current.reference.key)) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF page tree is cyclic or too deep.');
+    }
+    visited.add(current.reference.key);
+
+    const object = structure.objects.get(current.reference.key);
+    if (!object) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF page tree references a missing object.');
+    }
+    const type = readDictionaryNameValue(object.dictionary, 'Type', budget);
+    if (type === 'Pages') {
+      const kidsEntry = findDictionaryEntry(object.dictionary, 'Kids', budget);
+      if (!kidsEntry) {
+        throw createPdfExtractionError('unsupported_structure', 'PDF page tree node is missing /Kids.');
+      }
+      const kids = readReferenceArray(object.dictionary, kidsEntry, 'Kids', budget);
+      for (let index = kids.length - 1; index >= 0; index -= 1) {
+        pending.push({ depth: current.depth + 1, reference: kids[index] });
+      }
+      continue;
+    }
+    if (type !== 'Page') {
+      throw createPdfExtractionError('unsupported_structure', 'PDF page tree contains a non-page object.');
+    }
+
+    const contentReferences = readPageContentReferences(object.dictionary, budget);
+    contentReferenceCount += contentReferences.length;
+    if (contentReferenceCount > MAX_PDF_PAGE_CONTENT_REFERENCES) {
+      throw createPdfExtractionError('resource_limit', 'PDF page content references exceed local limits.');
+    }
+
+    const pageStreams = contentReferences.map((reference) => {
+      const contentObject = structure.objects.get(reference.key);
+      if (!contentObject?.stream) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF page references a missing or non-stream content object.',
+        );
+      }
+      return contentObject.stream;
+    });
+    pages.push(pageStreams);
+  }
+
+  return { pageCount: pages.length, pages };
 }
 
 function decodePdfHexString(value: string): string {
@@ -767,6 +1198,45 @@ function findLastOperand<T extends PdfContentToken['type']>(
   return undefined;
 }
 
+function extractTextFromTextArray(entries: PdfContentToken[]): string {
+  const fragments: string[] = [];
+  let hasText = false;
+  let previousTextEndsWithWhitespace = false;
+  let pendingAdjustment = 0;
+
+  for (const entry of entries) {
+    if (entry.type === 'number') {
+      if (!Number.isFinite(entry.value)) {
+        throw createPdfExtractionError('unsupported_structure', 'PDF TJ array contains an invalid adjustment.');
+      }
+      pendingAdjustment += entry.value;
+      continue;
+    }
+    if (entry.type !== 'string') {
+      throw createPdfExtractionError('unsupported_structure', 'PDF TJ array contains an unsupported operand.');
+    }
+    if (entry.value.length === 0) {
+      continue;
+    }
+
+    const startsWithWhitespace = /^\s/u.test(entry.value);
+    if (
+      hasText
+      && pendingAdjustment <= PDF_TJ_WORD_BREAK_THRESHOLD
+      && !previousTextEndsWithWhitespace
+      && !startsWithWhitespace
+    ) {
+      fragments.push(' ');
+    }
+    fragments.push(entry.value);
+    hasText = true;
+    previousTextEndsWithWhitespace = /\s$/u.test(entry.value);
+    pendingAdjustment = 0;
+  }
+
+  return fragments.join('');
+}
+
 function extractTextFromContentStream(content: string, budget: PdfExtractionBudget): string {
   const output: string[] = [];
   const operands: PdfContentToken[] = [];
@@ -837,10 +1307,7 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
       appendShownText(findLastOperand(operands, 'string')?.value ?? '');
     } else if (operator === 'TJ') {
       const array = findLastOperand(operands, 'array');
-      const text = array?.value
-        .filter((entry): entry is Extract<PdfContentToken, { type: 'string' }> => entry.type === 'string')
-        .map((entry) => entry.value)
-        .join('') ?? '';
+      const text = array ? extractTextFromTextArray(array.value) : '';
       appendShownText(text);
     } else if (operator === '\'' || operator === '"') {
       requestLineBreak();
@@ -859,24 +1326,51 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
   return normalizeExtractedWhitespace(output.join(''));
 }
 
-function hasUnsupportedFilter(dictionary: string): boolean {
-  const match = PDF_FILTER_PATTERN.exec(dictionary);
-  if (!match) {
-    return false;
+function resolvePdfStreamFilterMode(
+  dictionary: string,
+  budget: PdfExtractionBudget,
+): PdfStreamFilterMode {
+  const entry = findDictionaryEntry(dictionary, 'Filter', budget);
+  if (!entry) {
+    return 'none';
   }
 
-  const singleFilter = match[1]?.trim();
-  if (singleFilter) {
-    return singleFilter !== 'FlateDecode';
+  if (dictionary[entry.valueStart] === '/') {
+    const filter = readPdfNameToken(dictionary, entry.valueStart);
+    if (filter.next !== entry.valueEnd) {
+      return 'unsupported';
+    }
+    return filter.value === 'FlateDecode' ? 'flate' : 'unsupported';
+  }
+  if (dictionary[entry.valueStart] !== '[') {
+    return 'unsupported';
   }
 
-  const filterList = match[2] ?? '';
-  const filters = Array.from(filterList.matchAll(/\/([A-Za-z0-9]+)/gu), (entry) => entry[1]);
-  return filters.some((filter) => filter !== 'FlateDecode');
-}
+  const filters: string[] = [];
+  let cursor = entry.valueStart + 1;
+  while (cursor < entry.valueEnd) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(dictionary, cursor);
+    if (dictionary[cursor] === ']') {
+      if (cursor + 1 !== entry.valueEnd) {
+        return 'unsupported';
+      }
+      if (filters.length === 0) {
+        return 'none';
+      }
+      return filters.length === 1 && filters[0] === 'FlateDecode'
+        ? 'flate'
+        : 'unsupported';
+    }
+    if (dictionary[cursor] !== '/') {
+      return 'unsupported';
+    }
+    const filter = readPdfNameToken(dictionary, cursor);
+    filters.push(filter.value);
+    cursor = filter.next;
+  }
 
-function isFlateEncoded(dictionary: string): boolean {
-  return /\/FlateDecode\b/u.test(dictionary);
+  return 'unsupported';
 }
 
 function inflateStream(candidate: PdfStreamCandidate, budget: PdfExtractionBudget): string {
@@ -916,16 +1410,17 @@ function decodeStream(
   candidate: PdfStreamCandidate,
   budget: PdfExtractionBudget,
 ): { text?: string; unsupportedFilter: boolean } {
-  if (PDF_IMAGE_STREAM_PATTERN.test(candidate.dictionary)) {
+  if (readDictionaryNameValue(candidate.dictionary, 'Subtype', budget) === 'Image') {
     return { unsupportedFilter: false };
   }
 
-  if (hasUnsupportedFilter(candidate.dictionary)) {
+  const filterMode = resolvePdfStreamFilterMode(candidate.dictionary, budget);
+  if (filterMode === 'unsupported') {
     return { unsupportedFilter: true };
   }
 
   try {
-    if (isFlateEncoded(candidate.dictionary)) {
+    if (filterMode === 'flate') {
       return { text: inflateStream(candidate, budget), unsupportedFilter: false };
     }
 
@@ -970,37 +1465,66 @@ export function extractTextFromPdfBase64(base64: string): PdfTextExtractionResul
     throw new PdfTextExtractionError('invalid_pdf', 'Document is not a valid PDF file.');
   }
 
-  const structure = collectPdfStructure(bytes, pdfText, budget);
-  if (structure.trailers.some((trailer) => PDF_ENCRYPT_PATTERN.test(trailer))) {
+  const collectedStructure = collectPdfStructure(bytes, pdfText, budget);
+  if (collectedStructure.trailers.some((trailer) => (
+    findDictionaryEntry(trailer, 'Encrypt', budget) !== undefined
+  ))) {
     throw new PdfTextExtractionError('encrypted', 'Encrypted PDF documents cannot be processed locally.');
   }
+  const structure = resolvePageContentStructure(collectedStructure, budget);
 
   let unsupportedFilterCount = 0;
-  const extractedStreams: string[] = [];
-  for (const stream of structure.streams) {
-    const decoded = decodeStream(stream, budget);
-    if (decoded.unsupportedFilter) {
-      unsupportedFilterCount += 1;
-      continue;
+  let referencedStreamCount = 0;
+  let processedPageContentBytes = 0;
+  const decodedStreamCache = new Map<
+    string,
+    { text?: string; unsupportedFilter: boolean }
+  >();
+  const extractedPages: string[] = [];
+  for (const page of structure.pages) {
+    const decodedPageStreams: string[] = [];
+    for (const stream of page) {
+      referencedStreamCount += 1;
+      let decoded = decodedStreamCache.get(stream.objectKey);
+      if (!decoded) {
+        decoded = decodeStream(stream, budget);
+        decodedStreamCache.set(stream.objectKey, decoded);
+      }
+      if (decoded.unsupportedFilter) {
+        unsupportedFilterCount += 1;
+        continue;
+      }
+      if (decoded.text) {
+        processedPageContentBytes += decoded.text.length;
+        if (processedPageContentBytes > MAX_PDF_DECODED_DOCUMENT_BYTES) {
+          throw createPdfExtractionError(
+            'resource_limit',
+            'PDF page content exceeds the local decoded-size limit.',
+          );
+        }
+        decodedPageStreams.push(decoded.text);
+      }
     }
 
-    const text = decoded.text ? extractTextFromContentStream(decoded.text, budget) : '';
-    if (text.trim().length > 0) {
-      extractedStreams.push(text);
+    const pageText = decodedPageStreams.length > 0
+      ? extractTextFromContentStream(decodedPageStreams.join('\n'), budget)
+      : '';
+    if (pageText.trim().length > 0) {
+      extractedPages.push(pageText);
     }
   }
   assertWithinProcessingTime(budget);
-  const text = normalizeExtractedWhitespace(extractedStreams.join('\n\n'));
+  const text = normalizeExtractedWhitespace(extractedPages.join('\n\n'));
 
   if (text.length > 0) {
     return {
       text,
       isScanned: false,
-      ...(structure.pageCount !== undefined ? { pageCount: structure.pageCount } : null),
+      pageCount: structure.pageCount,
     };
   }
 
-  if (unsupportedFilterCount > 0 && unsupportedFilterCount === structure.streams.length) {
+  if (referencedStreamCount > 0 && unsupportedFilterCount === referencedStreamCount) {
     throw new PdfTextExtractionError('unsupported_filter', 'PDF uses unsupported compression or content filters.');
   }
 

@@ -137,6 +137,8 @@ describe('AppError', () => {
   it('uses translation keys for known error codes', () => {
     const t = ((key: string) => `t:${key}`) as any;
     expect(getErrorMessage(new AppError('engine_not_ready'), t)).toBe('t:common.errors.engineNotReady');
+    expect(getErrorMessage(new AppError('engine_recovery_required'), t))
+      .toBe('t:common.errors.engineRecoveryRequired');
     expect(getErrorMessage(new AppError('download_http_error'), t)).toBe('t:common.errors.downloadHttpError');
     expect(getErrorMessage(new AppError('multimodal_not_ready', 'Vision chat is not ready.'), t))
       .toBe('t:common.errors.multimodalNotReady');

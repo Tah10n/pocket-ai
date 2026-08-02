@@ -347,6 +347,11 @@ describe('LLMEngineService', () => {
     (llmEngineService as any).orphanedContextOperationDrains?.clear?.();
     (llmEngineService as any).orphanedContextReleasePromise = null;
     (llmEngineService as any).orphanedContextReleaseError = null;
+    (llmEngineService as any).contextRecoveryAttempt += 1;
+    (llmEngineService as any).contextRecoveryPromise = null;
+    (llmEngineService as any).contextRecoveryStatus = 'idle';
+    (llmEngineService as any).contextRecoveryModelId = null;
+    (llmEngineService as any).thinkingCapabilityProbeBlockedModelIds?.clear?.();
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
     (llmEngineService as any).activeContextOperationRejects?.clear?.();
     (llmEngineService as any).activeCompletionReject = null;
@@ -4199,6 +4204,191 @@ describe('LLMEngineService', () => {
       await llmEngineService.unload();
     } finally {
       (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('recovers a context after the automatic thinking capability probe hangs', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+    allowThinkingCapabilityProbe();
+    jest.useFakeTimers();
+
+    let finishOldContextRelease!: () => void;
+    const oldContextRelease = jest.fn(() => new Promise<void>((resolve) => {
+      finishOldContextRelease = resolve;
+    }));
+    const hangingProbeFormat = jest.fn(() => new Promise(() => undefined));
+    const recoveredFormat = jest.fn().mockResolvedValue({
+      prompt: 'Recovered completion prompt',
+      additional_stops: [],
+    });
+    const recoveredCompletion = jest.fn().mockResolvedValue({ text: 'Recovered response' });
+    const createRuntimeContext = ({
+      getFormattedChat,
+      completion,
+      release,
+      gpu,
+    }: {
+      getFormattedChat: jest.Mock;
+      completion: jest.Mock;
+      release: jest.Mock;
+      gpu: boolean;
+    }) => ({
+      getFormattedChat,
+      completion,
+      release,
+      tokenize: getTokenizeMock(),
+      initMultimodal: getInitMultimodalMock(),
+      getMultimodalSupport: getMultimodalSupportMock(),
+      releaseMultimodal: getReleaseMultimodalMock(),
+      stopCompletion: jest.fn().mockResolvedValue(undefined),
+      gpu,
+      devices: gpu ? ['Adreno GPU'] : [],
+      reasonNoGPU: gpu ? '' : 'GPU disabled',
+      systemInfo: 'Android test device',
+      androidLib: gpu ? 'libOpenCL.so' : null,
+    });
+
+    (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => {
+      const gpu = (options?.n_gpu_layers ?? 0) > 0;
+      return (llamaRn.initLlama as jest.Mock).mock.calls.length === 1
+        ? createRuntimeContext({
+            getFormattedChat: hangingProbeFormat,
+            completion: jest.fn(),
+            release: oldContextRelease,
+            gpu,
+          })
+        : createRuntimeContext({
+            getFormattedChat: recoveredFormat,
+            completion: recoveredCompletion,
+            release: jest.fn().mockResolvedValue(undefined),
+            gpu,
+          });
+    });
+
+    try {
+      await llmEngineService.load('test/model', { forceReload: true });
+      for (let attempt = 0; attempt < 20 && hangingProbeFormat.mock.calls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(hangingProbeFormat).toHaveBeenCalledTimes(1);
+
+      const firstCompletion = llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Recover this runtime' }],
+        params: { n_predict: 16 },
+      });
+      const observedFirstCompletion = firstCompletion.catch((error) => error);
+      for (let attempt = 0; attempt < 20 && !llmEngineService.hasActiveCompletion(); attempt += 1) {
+        await Promise.resolve();
+      }
+
+      await jest.advanceTimersByTimeAsync(5000);
+
+      await expect(observedFirstCompletion).resolves.toMatchObject({
+        code: 'engine_recovery_required',
+      });
+      expect(oldContextRelease).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.ERROR,
+        activeModelId: 'test/model',
+        diagnostics: expect.objectContaining({
+          contextRecoveryStatus: 'required',
+          lastLifecycleEvent: 'thinking_capability_probe_timeout',
+        }),
+      }));
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+      await expect(llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Retry while recovery is pending' }],
+        params: { n_predict: 16 },
+      })).rejects.toMatchObject({
+        code: 'engine_recovery_required',
+      });
+
+      finishOldContextRelease();
+      for (let attempt = 0; attempt < 100 && llmEngineService.getState().status !== EngineStatus.READY; attempt += 1) {
+        await Promise.resolve();
+      }
+
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.READY,
+        activeModelId: 'test/model',
+      }));
+      expect(llmEngineService.getState().diagnostics?.contextRecoveryStatus).toBeUndefined();
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
+      expect(recoveredFormat).not.toHaveBeenCalled();
+
+      await expect(llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Try again after recovery' }],
+        params: { n_predict: 16 },
+      })).resolves.toEqual({ text: 'Recovered response' });
+      expect(recoveredFormat).toHaveBeenCalledTimes(1);
+      expect(recoveredCompletion).toHaveBeenCalledTimes(1);
+    } finally {
+      finishOldContextRelease?.();
+      if (llmEngineService.hasActiveContextOperation()) {
+        const service = llmEngineService as any;
+        service.contextOperationRunner.reset(new Error('thinking probe recovery test cleanup'));
+        service.completionRunner.reset();
+        service.setContext(null);
+        service.state = {
+          status: EngineStatus.IDLE,
+          loadProgress: 0,
+        };
+      } else {
+        await llmEngineService.unload().catch(() => undefined);
+      }
+      jest.useRealTimers();
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('lets an unload triggered by the recovery-required state supersede automatic reload', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
+    const service = llmEngineService as any;
+    const contextAtTimeout = service.context as { release: jest.Mock };
+    const generationAtTimeout = service.contextGeneration as number;
+    let finishRelease!: () => void;
+    contextAtTimeout.release = jest.fn(() => new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    }));
+    (llamaRn.initLlama as jest.Mock).mockClear();
+
+    let unloadPromise: Promise<void> | null = null;
+    const unsubscribe = llmEngineService.subscribe((state) => {
+      if (state.diagnostics?.contextRecoveryStatus === 'required' && !unloadPromise) {
+        unloadPromise = llmEngineService.unload();
+      }
+    });
+
+    try {
+      service.handleThinkingCapabilityProbeTimeout({
+        modelId: 'test/model',
+        context: contextAtTimeout,
+        generation: generationAtTimeout,
+      });
+
+      await waitForMockCall(contextAtTimeout.release);
+      expect(unloadPromise).not.toBeNull();
+      expect(contextAtTimeout.release).toHaveBeenCalledTimes(1);
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+
+      finishRelease();
+      await unloadPromise;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await Promise.resolve();
+      }
+
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.IDLE,
+        activeModelId: undefined,
+      }));
+      expect(llmEngineService.getState().diagnostics?.contextRecoveryStatus).toBeUndefined();
+    } finally {
+      unsubscribe();
+      finishRelease?.();
+      const pendingUnload = unloadPromise as Promise<void> | null;
+      await pendingUnload?.catch(() => undefined);
     }
   });
 

@@ -11,6 +11,7 @@ import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import {
   EngineBackendMode,
   type EngineBackendInitAttempt,
+  type EngineContextRecoveryStatus,
   type EngineLifecycleEvent,
   type EngineBackendPolicy,
   type EngineModelInitFailureCategory,
@@ -218,6 +219,8 @@ const CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting 
 const CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation to stop';
 const DETACHED_CONTEXT_CLEANUP_PENDING_MESSAGE = 'Detached model context cleanup is still in progress';
 const DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE = 'Failed to release detached model context';
+const THINKING_CAPABILITY_PROBE_WATCHDOG_MS = 5000;
+const THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE = 'Automatic model capability detection stopped responding; context recovery is required';
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const LOW_MEMORY_UNLOAD_FAILURE_MESSAGE = 'Failed to unload the model after a low-memory warning';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
@@ -331,6 +334,7 @@ type MultimodalReadinessRefreshRequest = {
 
 type InternalLoadOptions = {
   readonly backgroundReadinessRefresh?: MultimodalReadinessRefreshRequest;
+  readonly contextRecoveryAttempt?: number;
 };
 
 function getDeviceModelForInitFailureIdentity(): string {
@@ -1361,6 +1365,11 @@ class LLMEngineService {
   private orphanedContextOperationDrains = new Set<Promise<void>>();
   private orphanedContextReleasePromise: Promise<void> | null = null;
   private orphanedContextReleaseError: AppError | null = null;
+  private contextRecoveryStatus: EngineContextRecoveryStatus = 'idle';
+  private contextRecoveryModelId: string | null = null;
+  private contextRecoveryAttempt = 0;
+  private contextRecoveryPromise: Promise<void> | null = null;
+  private thinkingCapabilityProbeBlockedModelIds = new Set<string>();
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
   private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
@@ -1893,12 +1902,20 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    this.assertContextRecoveryNotRequired();
+
     const context = this.context;
     if (!context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
     return { context, generation: this.contextGeneration };
+  }
+
+  private assertContextRecoveryNotRequired(): void {
+    if (this.contextRecoveryStatus !== 'idle') {
+      throw new AppError('engine_recovery_required', THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE);
+    }
   }
 
   private assertExpectedCompletionModel(expectedModelId: string | undefined): void {
@@ -2018,7 +2035,7 @@ class LLMEngineService {
     const drainResult = await this.waitForActiveContextOperations({ timeoutMs });
     const chatBlockingDrainResult = await chatBlockingDrainPromise;
     if (chatBlockingDrainResult === 'timed_out' && options.detachOnTimeout !== false) {
-      this.detachCurrentContextAfterTimedOutStop(
+      this.detachCurrentContextAfterTimedOutOperation(
         this.state.activeModelId ?? null,
         new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE),
       );
@@ -2041,8 +2058,7 @@ class LLMEngineService {
     });
     if (drainResult === 'timed_out') {
       const timeoutError = new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE);
-      this.completionRunner.rejectActive(timeoutError);
-      this.detachCurrentContextAfterTimedOutStop(this.state.activeModelId ?? null, timeoutError);
+      this.detachCurrentContextAfterTimedOutOperation(this.state.activeModelId ?? null, timeoutError);
     }
 
     return drainResult;
@@ -2171,7 +2187,14 @@ class LLMEngineService {
     void orphanedRelease.catch(() => undefined);
   }
 
-  private detachCurrentContextAfterTimedOutStop(activeModelId: string | null, timeoutError: AppError): void {
+  private detachCurrentContextAfterTimedOutOperation(
+    activeModelId: string | null,
+    timeoutError: AppError,
+    options: {
+      lifecycleEvent?: EngineLifecycleEvent;
+      warningMessage?: string;
+    } = {},
+  ): void {
     const contextAtTimeout = this.context;
     const drainPromise = this.waitForActiveContextOperations().then(() => undefined);
     this.trackOrphanedContextOperationDrain(drainPromise);
@@ -2180,8 +2203,7 @@ class LLMEngineService {
       context: contextAtTimeout,
       drainPromise,
     });
-    this.lastLifecycleEvent = 'context_operation_unload_timeout';
-    this.lastLifecycleError = timeoutError.message;
+    this.completionRunner.rejectActive(timeoutError);
     this.contextOperationRunner.reset(timeoutError);
     this.completionRunner.reset();
 
@@ -2195,6 +2217,8 @@ class LLMEngineService {
       updateSettings({ activeModelId: null });
     }
 
+    this.lastLifecycleEvent = options.lifecycleEvent ?? 'context_operation_unload_timeout';
+    this.lastLifecycleError = timeoutError.message;
     this.updateState({
       status: EngineStatus.ERROR,
       activeModelId: activeModelId ?? undefined,
@@ -2203,10 +2227,91 @@ class LLMEngineService {
     });
 
     if (process.env.NODE_ENV !== 'test') {
-      console.warn('[LLMEngine] Prompt preparation stop timed out; detached active context', {
+      console.warn(options.warningMessage ?? '[LLMEngine] Prompt preparation stop timed out; detached active context', {
         activeModelId,
       });
     }
+  }
+
+  private cancelScheduledContextRecovery(): void {
+    if (this.contextRecoveryStatus === 'required'
+      || this.contextRecoveryStatus === 'recovering'
+      || this.contextRecoveryPromise) {
+      this.contextRecoveryAttempt += 1;
+    }
+  }
+
+  private handleThinkingCapabilityProbeTimeout({
+    modelId,
+    context,
+    generation,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+    generation: number;
+  }): void {
+    if (
+      this.context !== context
+      || this.contextGeneration !== generation
+      || this.isUnloading
+      || this.state.status !== EngineStatus.READY
+      || this.state.activeModelId !== modelId
+      || this.contextRecoveryStatus !== 'idle'
+      || this.contextRecoveryPromise !== null
+    ) {
+      return;
+    }
+
+    this.thinkingCapabilityProbeBlockedModelIds.add(modelId);
+    this.contextRecoveryStatus = 'required';
+    this.contextRecoveryModelId = modelId;
+    this.contextRecoveryAttempt += 1;
+    const recoveryAttempt = this.contextRecoveryAttempt;
+    const timeoutError = new AppError(
+      'engine_recovery_required',
+      THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE,
+    );
+
+    this.detachCurrentContextAfterTimedOutOperation(modelId, timeoutError, {
+      lifecycleEvent: 'thinking_capability_probe_timeout',
+      warningMessage: '[LLMEngine] Thinking capability probe timed out; detached active context for recovery',
+    });
+
+    let recoveryPromise!: Promise<void>;
+    recoveryPromise = (async () => {
+      await this.waitForOrphanedContextRelease();
+      if (this.contextRecoveryAttempt !== recoveryAttempt) {
+        return;
+      }
+
+      this.contextRecoveryStatus = 'recovering';
+      this.updateState(this.state);
+      await this.loadWithProjectorResolutionOperationCache(
+        modelId,
+        { forceReload: true },
+        new Map(),
+        { contextRecoveryAttempt: recoveryAttempt },
+      );
+    })()
+      .catch((error) => {
+        if (this.contextRecoveryAttempt !== recoveryAttempt) {
+          return;
+        }
+
+        this.contextRecoveryStatus = 'failed';
+        this.updateState(this.state);
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to recover context after thinking capability probe timeout', buildSafeErrorLogDetails(error));
+        }
+      })
+      .finally(() => {
+        if (this.contextRecoveryPromise === recoveryPromise) {
+          this.contextRecoveryPromise = null;
+        }
+      });
+
+    this.contextRecoveryPromise = recoveryPromise;
+    void recoveryPromise.catch(() => undefined);
   }
 
   private recordContextOperationUnloadTimeout(activeModelId: string | null): AppError {
@@ -3147,6 +3252,7 @@ class LLMEngineService {
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
+    this.cancelScheduledContextRecovery();
     await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
   }
 
@@ -3156,8 +3262,21 @@ class LLMEngineService {
     projectorResolutionOperationCache: ProjectorResolutionOperationCache,
     internalOptions: InternalLoadOptions = {},
   ): Promise<void> {
+    const recoveryAttempt = internalOptions.contextRecoveryAttempt;
+    if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
+      return;
+    }
+
     await this.waitForOrphanedContextRelease();
+    if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
+      return;
+    }
+
     await this.runExclusiveOperation(async () => {
+      if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
+        return;
+      }
+
       this.assertNoOrphanedContextReleasePending();
       const model = registry.getModel(modelId);
       if (!model || !model.localPath) {
@@ -3306,11 +3425,17 @@ class LLMEngineService {
   }
 
   public async unload(): Promise<void> {
+    this.cancelScheduledContextRecovery();
     await this.waitForOrphanedContextRelease();
     await this.runExclusiveOperation(async () => {
       this.assertNoOrphanedContextReleasePending();
       await this.unloadInternal();
     });
+    if (this.contextRecoveryStatus !== 'idle') {
+      this.contextRecoveryStatus = 'idle';
+      this.contextRecoveryModelId = null;
+      this.updateState(this.state);
+    }
   }
 
   public async chatCompletion({
@@ -3325,6 +3450,7 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    this.assertContextRecoveryNotRequired();
     this.assertExpectedCompletionModel(expectedModelId);
 
     if (this.completionRunner.hasActive()) {
@@ -3796,6 +3922,10 @@ class LLMEngineService {
   }
 
   private launchThinkingCapabilityProbe(modelId: string): void {
+    if (this.thinkingCapabilityProbeBlockedModelIds.has(modelId)) {
+      return;
+    }
+
     const contextAtProbeStart = this.context;
     const generationAtProbeStart = this.contextGeneration;
 
@@ -3816,17 +3946,29 @@ class LLMEngineService {
         return;
       }
 
-      const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart, cancellation);
-      cancellation.throwIfCancelled();
+      const watchdogId = setTimeout(() => {
+        this.handleThinkingCapabilityProbeTimeout({
+          modelId,
+          context: contextAtProbeStart,
+          generation: generationAtProbeStart,
+        });
+      }, THINKING_CAPABILITY_PROBE_WATCHDOG_MS);
 
-      if (thinkingCapability && isProbeStillCurrent()) {
-        const model = registry.getModel(modelId);
-        if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
-          registry.updateModel({
-            ...model,
-            thinkingCapability,
-          });
+      try {
+        const thinkingCapability = await this.probeThinkingCapability(contextAtProbeStart, cancellation);
+        cancellation.throwIfCancelled();
+
+        if (thinkingCapability && isProbeStillCurrent()) {
+          const model = registry.getModel(modelId);
+          if (model && isProbeStillCurrent() && !areThinkingCapabilitySnapshotsEqual(model.thinkingCapability, thinkingCapability)) {
+            registry.updateModel({
+              ...model,
+              thinkingCapability,
+            });
+          }
         }
+      } finally {
+        clearTimeout(watchdogId);
       }
     }, { chatBlocking: false, priority: 'passive_readiness' }).catch((error) => {
       if (this.isContextOperationStopError(error) || this.isUnloading) {
@@ -3862,6 +4004,7 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    this.assertContextRecoveryNotRequired();
     if (this.activeCompletionPromise) {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
@@ -4322,6 +4465,7 @@ class LLMEngineService {
       initKvUnified: this.initKvUnified,
       lastLifecycleEvent: this.lastLifecycleEvent,
       lastLifecycleError: this.lastLifecycleError,
+      contextRecoveryStatus: this.contextRecoveryStatus,
       multimodalDiagnostics: this.recentMultimodalDiagnostics,
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
       activePromptStateCachePolicy: this.activePromptStateCachePolicy,
@@ -7619,12 +7763,17 @@ class LLMEngineService {
         }
       }
       this.loadedArtifactIdentity = loadedArtifactIdentity;
+      if (this.contextRecoveryModelId === modelId && this.contextRecoveryStatus !== 'idle') {
+        this.contextRecoveryStatus = 'idle';
+        this.contextRecoveryModelId = null;
+      }
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
 
       const shouldProbeThinkingCapability = (() => {
         const model = registry.getModel(modelId);
-        return model ? model.thinkingCapability === undefined : true;
+        return !this.thinkingCapabilityProbeBlockedModelIds.has(modelId)
+          && (model ? model.thinkingCapability === undefined : true);
       })();
 
       const shouldLaunchThinkingProbe = process.env.NODE_ENV !== 'test';

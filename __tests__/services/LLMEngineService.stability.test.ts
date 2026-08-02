@@ -117,6 +117,11 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).orphanedContextOperationDrains?.clear?.();
         (llmEngineService as any).orphanedContextReleasePromise = null;
         (llmEngineService as any).orphanedContextReleaseError = null;
+        (llmEngineService as any).contextRecoveryAttempt += 1;
+        (llmEngineService as any).contextRecoveryPromise = null;
+        (llmEngineService as any).contextRecoveryStatus = 'idle';
+        (llmEngineService as any).contextRecoveryModelId = null;
+        (llmEngineService as any).thinkingCapabilityProbeBlockedModelIds?.clear?.();
         (llmEngineService as any).activeContextOperationPromises?.clear?.();
         (llmEngineService as any).activeContextOperationRejects?.clear?.();
         (llmEngineService as any).completionInterruptGeneration = 0;

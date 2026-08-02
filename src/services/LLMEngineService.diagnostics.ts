@@ -2,6 +2,7 @@ import type {
   EngineBackendInitAttempt,
   EngineBackendMode,
   EngineBackendPolicy,
+  EngineContextRecoveryStatus,
   EngineSpeculativeDecodingDiagnostics,
   EngineLifecycleEvent,
   EngineState,
@@ -271,6 +272,7 @@ export function buildEngineDiagnosticsSnapshot(source: {
   initKvUnified: boolean | null;
   lastLifecycleEvent: EngineLifecycleEvent | null;
   lastLifecycleError: string | null;
+  contextRecoveryStatus?: EngineContextRecoveryStatus;
   multimodalDiagnostics: MultimodalDiagnosticsSummary | null;
   speculativeDecodingDiagnostics?: EngineSpeculativeDecodingDiagnostics | null;
   activePromptStateCachePolicy: PromptStateCachePolicy | null;
@@ -341,6 +343,9 @@ export function buildEngineDiagnosticsSnapshot(source: {
     stateCacheArchitecture: source.activePromptStateCachePolicy?.architecture ?? undefined,
     lastLifecycleEvent: source.lastLifecycleEvent ?? undefined,
     lastLifecycleError: source.lastLifecycleError ?? undefined,
+    contextRecoveryStatus: source.contextRecoveryStatus === 'idle'
+      ? undefined
+      : source.contextRecoveryStatus,
     multimodal: source.multimodalDiagnostics ? { ...source.multimodalDiagnostics } : undefined,
     speculativeDecoding: source.speculativeDecodingDiagnostics
       ? {

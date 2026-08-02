@@ -141,6 +141,7 @@ import {
   initLlamaContext,
   loadLlamaModelInfo,
   releaseAllLlamaContexts,
+  releaseLlamaContext,
   releaseMultimodalFromContext,
   runCompletionOnContext,
   tokenizeFormattedPrompt,
@@ -215,6 +216,8 @@ const CONTEXT_OPERATION_STOP_MESSAGE = 'Prompt preparation was stopped before na
 const CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation before native completion started';
 const CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for background prompt preparation before counting prompt tokens';
 const CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation to stop';
+const DETACHED_CONTEXT_CLEANUP_PENDING_MESSAGE = 'Detached model context cleanup is still in progress';
+const DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE = 'Failed to release detached model context';
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const LOW_MEMORY_UNLOAD_FAILURE_MESSAGE = 'Failed to unload the model after a low-memory warning';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
@@ -1355,6 +1358,9 @@ class LLMEngineService {
   private pendingMultimodalReadinessRefresh: MultimodalReadinessRefreshRequest | null = null;
   private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
   private deferredContextReleasePromise: Promise<void> | null = null;
+  private orphanedContextOperationDrains = new Set<Promise<void>>();
+  private orphanedContextReleasePromise: Promise<void> | null = null;
+  private orphanedContextReleaseError: AppError | null = null;
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
   private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
@@ -1982,7 +1988,7 @@ class LLMEngineService {
   }
 
   public hasActiveContextOperation(): boolean {
-    return this.contextOperationRunner.hasActive();
+    return this.contextOperationRunner.hasActive() || this.orphanedContextOperationDrains.size > 0;
   }
 
   public hasActiveChatBlockingContextOperation(): boolean {
@@ -2079,9 +2085,101 @@ class LLMEngineService {
     }
   }
 
+  private trackOrphanedContextOperationDrain(drainPromise: Promise<void>): void {
+    this.orphanedContextOperationDrains.add(drainPromise);
+    void drainPromise.finally(() => {
+      this.orphanedContextOperationDrains.delete(drainPromise);
+    });
+  }
+
+  private async waitForOrphanedContextRelease(): Promise<void> {
+    while (this.orphanedContextReleasePromise) {
+      await this.orphanedContextReleasePromise;
+    }
+    if (this.orphanedContextReleaseError) {
+      throw this.orphanedContextReleaseError;
+    }
+  }
+
+  private assertNoOrphanedContextReleasePending(): void {
+    if (this.orphanedContextReleaseError) {
+      throw this.orphanedContextReleaseError;
+    }
+    if (this.orphanedContextReleasePromise) {
+      throw new AppError('engine_unloading', DETACHED_CONTEXT_CLEANUP_PENDING_MESSAGE);
+    }
+  }
+
+  private scheduleOrphanedContextRelease({
+    activeModelId,
+    context,
+    drainPromise,
+  }: {
+    activeModelId: string | null;
+    context: LlamaContext | null;
+    drainPromise: Promise<void>;
+  }): void {
+    const previousRelease = this.orphanedContextReleasePromise;
+    this.orphanedContextReleaseError = null;
+    const orphanedRelease = this.runExclusiveOperation(async () => {
+      if (previousRelease) {
+        await previousRelease;
+      }
+      if (context) {
+        await releaseLlamaContext(context);
+      } else {
+        await drainPromise;
+      }
+    })
+      .then(() => {
+        // Native context release waits for its tracked tasks before resolving.
+        // It is therefore the authoritative cleanup boundary even if a stale
+        // JavaScript wrapper promise never publishes its terminal callback.
+        this.orphanedContextOperationDrains.delete(drainPromise);
+      })
+      .catch((error) => {
+        const releaseError = new AppError(
+          'engine_unloading',
+          DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE,
+          { cause: error },
+        );
+        this.orphanedContextReleaseError = releaseError;
+        this.lastLifecycleEvent = 'context_operation_unload_timeout';
+        this.lastLifecycleError = releaseError.message;
+        this.updateState({
+          ...this.state,
+          status: EngineStatus.ERROR,
+          activeModelId: activeModelId ?? this.state.activeModelId,
+          loadProgress: 0,
+          lastError: releaseError.message,
+        });
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn(
+            '[LLMEngine] Failed to release detached context after prompt preparation timeout',
+            buildSafeErrorLogDetails(error),
+          );
+        }
+        throw releaseError;
+      })
+      .finally(() => {
+        if (this.orphanedContextReleasePromise === orphanedRelease) {
+          this.orphanedContextReleasePromise = null;
+        }
+      });
+
+    this.orphanedContextReleasePromise = orphanedRelease;
+    void orphanedRelease.catch(() => undefined);
+  }
+
   private detachCurrentContextAfterTimedOutStop(activeModelId: string | null, timeoutError: AppError): void {
     const contextAtTimeout = this.context;
     const drainPromise = this.waitForActiveContextOperations().then(() => undefined);
+    this.trackOrphanedContextOperationDrain(drainPromise);
+    this.scheduleOrphanedContextRelease({
+      activeModelId,
+      context: contextAtTimeout,
+      drainPromise,
+    });
     this.lastLifecycleEvent = 'context_operation_unload_timeout';
     this.lastLifecycleError = timeoutError.message;
     this.contextOperationRunner.reset(timeoutError);
@@ -2102,18 +2200,6 @@ class LLMEngineService {
       activeModelId: activeModelId ?? undefined,
       loadProgress: 0,
       lastError: timeoutError.message,
-    });
-
-    void drainPromise.catch(() => undefined).then(async () => {
-      if (this.context !== null || this.state.activeModelId !== activeModelId) {
-        return;
-      }
-
-      await releaseAllLlamaContexts().catch((error) => {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to release detached context after prompt preparation drain', buildSafeErrorLogDetails(error));
-        }
-      });
     });
 
     if (process.env.NODE_ENV !== 'test') {
@@ -3070,7 +3156,9 @@ class LLMEngineService {
     projectorResolutionOperationCache: ProjectorResolutionOperationCache,
     internalOptions: InternalLoadOptions = {},
   ): Promise<void> {
+    await this.waitForOrphanedContextRelease();
     await this.runExclusiveOperation(async () => {
+      this.assertNoOrphanedContextReleasePending();
       const model = registry.getModel(modelId);
       if (!model || !model.localPath) {
         throw new AppError('model_not_found', `Model ${modelId} not found or not downloaded`, {
@@ -3199,6 +3287,7 @@ class LLMEngineService {
         recentUnloadReclaim = await this.unloadInternal();
       }
 
+      this.assertNoOrphanedContextReleasePending();
       this.initPromise = this.initializeModel(
         modelId,
         model.localPath,
@@ -3217,7 +3306,9 @@ class LLMEngineService {
   }
 
   public async unload(): Promise<void> {
+    await this.waitForOrphanedContextRelease();
     await this.runExclusiveOperation(async () => {
+      this.assertNoOrphanedContextReleasePending();
       await this.unloadInternal();
     });
   }
@@ -6704,6 +6795,7 @@ class LLMEngineService {
             ),
           );
           try {
+            this.assertNoOrphanedContextReleasePending();
             const context = await initLlamaContext(
               buildOptions(
                 normalizedAttemptLayers,

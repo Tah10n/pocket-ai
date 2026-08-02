@@ -615,3 +615,15 @@ export async function toggleNativeLlamaLogs(enabled: boolean): Promise<void> {
 export async function releaseAllLlamaContexts(): Promise<void> {
   await getLlamaModule().releaseAllLlama();
 }
+
+export async function releaseLlamaContext(context: LlamaContext): Promise<void> {
+  const release = (context as LlamaContext & { release?: unknown }).release;
+  if (typeof release === 'function') {
+    await release.call(context);
+    return;
+  }
+
+  // Defensive compatibility for a context created by an older native runtime.
+  // Callers must await this global fallback before initializing another context.
+  await releaseAllLlamaContexts();
+}

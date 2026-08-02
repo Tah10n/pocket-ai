@@ -35,6 +35,7 @@ jest.mock('llama.rn', () => {
       initMultimodal,
       getMultimodalSupport,
       releaseMultimodal,
+      release: jest.fn().mockResolvedValue(undefined),
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
       devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
@@ -343,6 +344,9 @@ describe('LLMEngineService', () => {
     inferenceBackendService.clearCache();
     (llmEngineService as any).contextOperationQueue = Promise.resolve();
     (llmEngineService as any).contextOperationRunner?.reset?.(new Error('test reset'));
+    (llmEngineService as any).orphanedContextOperationDrains?.clear?.();
+    (llmEngineService as any).orphanedContextReleasePromise = null;
+    (llmEngineService as any).orphanedContextReleaseError = null;
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
     (llmEngineService as any).activeContextOperationRejects?.clear?.();
     (llmEngineService as any).activeCompletionReject = null;
@@ -369,6 +373,7 @@ describe('LLMEngineService', () => {
       initMultimodal: getInitMultimodalMock(),
       getMultimodalSupport: getMultimodalSupportMock(),
       releaseMultimodal: getReleaseMultimodalMock(),
+      release: jest.fn().mockResolvedValue(undefined),
       stopCompletion: jest.fn().mockResolvedValue(undefined),
       gpu: (options?.n_gpu_layers ?? 0) > 0,
       devices: (options?.n_gpu_layers ?? 0) > 0 ? ['Adreno GPU'] : [],
@@ -2194,19 +2199,47 @@ describe('LLMEngineService', () => {
     expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
   });
 
-  it('detaches the active context when direct stop does not drain prompt preparation', async () => {
+  it.each([
+    { label: 'the same model', targetModelId: 'test/model' },
+    { label: 'a different model', targetModelId: 'other/model' },
+  ])('blocks loading $label until detached context cleanup completes', async ({ targetModelId }) => {
+    await llmEngineService.unload().catch(() => undefined);
+    jest.clearAllMocks();
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      id: modelId,
+      localPath: modelId === 'test/model' ? 'model.gguf' : 'other-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: false,
+        canDisableThinking: true,
+      },
+    }));
     await llmEngineService.load('test/model');
+
+    const oldContext = (llmEngineService as any).context as {
+      release: jest.Mock;
+    };
+    let finishOldContextRelease!: () => void;
+    let didFinishOldContextRelease = false;
+    const oldContextReleaseGate = new Promise<void>((resolve) => {
+      finishOldContextRelease = resolve;
+    });
+    oldContext.release = jest.fn(async () => {
+      await oldContextReleaseGate;
+      didFinishOldContextRelease = true;
+    });
+    (llamaRn.initLlama as jest.Mock).mockClear();
+    (llamaRn.releaseAllLlama as jest.Mock).mockClear();
 
     let releasePromptPreparation!: () => void;
     getFormattedChatMock().mockImplementationOnce(() => new Promise((resolve) => {
       releasePromptPreparation = () => resolve({ prompt: 'Late formatted prompt', additional_stops: [] });
     }));
-
     const completionPromise = llmEngineService.chatCompletion({
       messages: [{ role: 'user', content: 'Direct stop during prompt prep' }],
       params: { n_predict: 1 },
     }).catch((error) => error);
-
     await waitForCondition(
       () => llmEngineService.hasActiveChatBlockingContextOperation(),
       'chat-blocking prompt preparation before direct stop',
@@ -2222,27 +2255,93 @@ describe('LLMEngineService', () => {
       jest.useRealTimers();
     }
 
-    await expect(completionPromise).resolves.toMatchObject({
-      code: 'engine_busy',
-    });
-    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
-    expect(llmEngineService.hasActiveCompletion()).toBe(false);
-    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
-    expect(llmEngineService.getState()).toEqual(expect.objectContaining({
-      status: EngineStatus.ERROR,
-      activeModelId: 'test/model',
-      lastError: 'Timed out waiting for prompt preparation to stop',
+    let reloadSettled = false;
+    let reloadPromise: Promise<void> | undefined;
+    try {
+      await expect(completionPromise).resolves.toMatchObject({ code: 'engine_busy' });
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.ERROR,
+        activeModelId: 'test/model',
+        lastError: 'Timed out waiting for prompt preparation to stop',
+      }));
+
+      reloadPromise = llmEngineService.load(targetModelId).then(() => {
+        reloadSettled = true;
+      });
+      for (let tick = 0; tick < 20; tick += 1) {
+        await Promise.resolve();
+      }
+
+      expect(oldContext.release).toHaveBeenCalledTimes(1);
+      expect(reloadSettled).toBe(false);
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+
+      releasePromptPreparation();
+      finishOldContextRelease();
+      await reloadPromise;
+
+      expect(didFinishOldContextRelease).toBe(true);
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+      expect(llamaRn.releaseAllLlama).not.toHaveBeenCalled();
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.READY,
+        activeModelId: targetModelId,
+      }));
+    } finally {
+      releasePromptPreparation();
+      finishOldContextRelease();
+      await completionPromise.catch(() => undefined);
+      await reloadPromise?.catch(() => undefined);
+    }
+  });
+
+  it('keeps model loading fail-closed when detached context release fails', async () => {
+    await llmEngineService.unload().catch(() => undefined);
+    jest.clearAllMocks();
+    await llmEngineService.load('test/model');
+
+    const oldContext = (llmEngineService as any).context as { release: jest.Mock };
+    oldContext.release = jest.fn().mockRejectedValue(new Error('native release failed'));
+    (llamaRn.initLlama as jest.Mock).mockClear();
+
+    let releasePromptPreparation!: () => void;
+    getFormattedChatMock().mockImplementationOnce(() => new Promise((resolve) => {
+      releasePromptPreparation = () => resolve({ prompt: 'Late formatted prompt', additional_stops: [] });
     }));
+    const completionPromise = llmEngineService.countPromptTokens({
+      messages: [{ role: 'user', content: 'Stop failed cleanup' }],
+    }).catch((error) => error);
+    await waitForCondition(
+      () => llmEngineService.hasActiveChatBlockingContextOperation(),
+      'chat-blocking prompt preparation before failed cleanup',
+    );
 
-    await expect(llmEngineService.load('test/model')).resolves.toBeUndefined();
-    releasePromptPreparation();
-    await Promise.resolve();
-    await Promise.resolve();
+    jest.useFakeTimers();
+    try {
+      const stopPromise = llmEngineService.stopCompletion();
+      await Promise.resolve();
+      jest.advanceTimersByTime(5000);
+      await stopPromise;
+    } finally {
+      jest.useRealTimers();
+    }
 
-    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).not.toHaveBeenCalled();
-    expect(llmEngineService.hasActiveCompletion()).toBe(false);
-    expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
-    expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+    try {
+      await expect(completionPromise).resolves.toMatchObject({ code: 'engine_busy' });
+      await waitForCondition(
+        () => (llmEngineService as any).orphanedContextReleaseError != null,
+        'detached context release failure',
+      );
+      await expect(llmEngineService.load('test/model')).rejects.toMatchObject({
+        code: 'engine_unloading',
+        message: 'Failed to release detached model context',
+      });
+      expect(oldContext.release).toHaveBeenCalledTimes(1);
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+    } finally {
+      releasePromptPreparation();
+      await completionPromise.catch(() => undefined);
+    }
   });
 
   it('ignores active multimodal readiness refresh results after context operation cancellation', async () => {

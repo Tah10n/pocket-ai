@@ -197,13 +197,32 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(buildDocumentAttachmentTextPart(result).text).toContain('Pages: 1');
   });
 
+  it('maps bounded PDF decompression failures to a safe attachment error', async () => {
+    const expandedText = `BT (${String('A').repeat(2 * 1024 * 1024)}) Tj ET`;
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(createTextPdfBase64(expandedText));
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'test-dir/chat-attachments/compressed.pdf',
+          fileName: 'compressed.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 4096,
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_too_large_for_context');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'resource_limit' }));
+  });
+
   it('classifies scanned PDFs as deterministic no-text failures', async () => {
     (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(fromByteArray(Buffer.from([
       '%PDF-1.4',
       '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
       '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
       '3 0 obj << /Type /Page /Contents 4 0 R >> endobj',
-      '4 0 obj << /Length 8 >> stream',
+      '4 0 obj << /Length 11 >> stream',
       'q /Im1 Do Q',
       'endstream endobj',
       '%%EOF',

@@ -206,9 +206,22 @@ function createPdfProcessingError(
         },
       );
     case 'unsupported_filter':
+    case 'unsupported_structure':
       return createAttachmentProcessingError(
         'chat_attachment_parse_failed',
-        'PDF uses unsupported compression or content filters.',
+        'PDF uses unsupported compression or document structure.',
+        {
+          attachment,
+          cause: error,
+          details: {
+            reason: error.reason,
+          },
+        },
+      );
+    case 'resource_limit':
+      return createAttachmentProcessingError(
+        'chat_attachment_too_large_for_context',
+        'PDF exceeds local processing limits.',
         {
           attachment,
           cause: error,

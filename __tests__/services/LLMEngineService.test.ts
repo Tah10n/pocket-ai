@@ -2277,11 +2277,16 @@ describe('LLMEngineService', () => {
         await Promise.resolve();
       }
 
-      expect(oldContext.release).toHaveBeenCalledTimes(1);
+      expect(oldContext.release).not.toHaveBeenCalled();
       expect(reloadSettled).toBe(false);
       expect(llamaRn.initLlama).not.toHaveBeenCalled();
 
       releasePromptPreparation();
+      await waitForMockCall(oldContext.release);
+      expect(oldContext.release).toHaveBeenCalledTimes(1);
+      expect(reloadSettled).toBe(false);
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+
       finishOldContextRelease();
       await reloadPromise;
 
@@ -2333,6 +2338,9 @@ describe('LLMEngineService', () => {
 
     try {
       await expect(completionPromise).resolves.toMatchObject({ code: 'engine_busy' });
+      expect(oldContext.release).not.toHaveBeenCalled();
+
+      releasePromptPreparation();
       await waitForCondition(
         () => (llmEngineService as any).orphanedContextReleaseError != null,
         'detached context release failure',
@@ -4217,7 +4225,14 @@ describe('LLMEngineService', () => {
     const oldContextRelease = jest.fn(() => new Promise<void>((resolve) => {
       finishOldContextRelease = resolve;
     }));
-    const hangingProbeFormat = jest.fn(() => new Promise(() => undefined));
+    let finishProbeFormat!: () => void;
+    const hangingProbeFormat = jest.fn(() => new Promise((resolve) => {
+      finishProbeFormat = () => resolve({
+        type: 'jinja',
+        prompt: 'Late capability probe result',
+        thinking_forced_open: false,
+      });
+    }));
     const recoveredFormat = jest.fn().mockResolvedValue({
       prompt: 'Recovered completion prompt',
       additional_stops: [],
@@ -4287,7 +4302,7 @@ describe('LLMEngineService', () => {
       await expect(observedFirstCompletion).resolves.toMatchObject({
         code: 'engine_recovery_required',
       });
-      expect(oldContextRelease).toHaveBeenCalledTimes(1);
+      expect(oldContextRelease).not.toHaveBeenCalled();
       expect(llmEngineService.getState()).toEqual(expect.objectContaining({
         status: EngineStatus.ERROR,
         activeModelId: 'test/model',
@@ -4303,6 +4318,13 @@ describe('LLMEngineService', () => {
       })).rejects.toMatchObject({
         code: 'engine_recovery_required',
       });
+
+      finishProbeFormat();
+      for (let attempt = 0; attempt < 50 && oldContextRelease.mock.calls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(oldContextRelease).toHaveBeenCalledTimes(1);
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
 
       finishOldContextRelease();
       for (let attempt = 0; attempt < 100 && llmEngineService.getState().status !== EngineStatus.READY; attempt += 1) {
@@ -4324,6 +4346,7 @@ describe('LLMEngineService', () => {
       expect(recoveredFormat).toHaveBeenCalledTimes(1);
       expect(recoveredCompletion).toHaveBeenCalledTimes(1);
     } finally {
+      finishProbeFormat?.();
       finishOldContextRelease?.();
       if (llmEngineService.hasActiveContextOperation()) {
         const service = llmEngineService as any;
@@ -4339,6 +4362,58 @@ describe('LLMEngineService', () => {
       }
       jest.useRealTimers();
       (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
+  it('clears stale recovery state after explicitly switching to another model', async () => {
+    (registry.getModel as jest.Mock).mockImplementation((modelId: string) => ({
+      id: modelId,
+      localPath: modelId === 'test/model' ? 'model.gguf' : 'other-model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: false,
+        canDisableThinking: true,
+      },
+    }));
+    await llmEngineService.load('test/model', { forceReload: true });
+
+    const service = llmEngineService as any;
+    const contextAtTimeout = service.context as { release: jest.Mock };
+    const generationAtTimeout = service.contextGeneration as number;
+    let finishRelease!: () => void;
+    contextAtTimeout.release = jest.fn(() => new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    }));
+    (llamaRn.initLlama as jest.Mock).mockClear();
+
+    service.handleThinkingCapabilityProbeTimeout({
+      modelId: 'test/model',
+      context: contextAtTimeout,
+      generation: generationAtTimeout,
+    });
+
+    const switchPromise = llmEngineService.load('other/model');
+    try {
+      await waitForMockCall(contextAtTimeout.release);
+      expect(llamaRn.initLlama).not.toHaveBeenCalled();
+
+      finishRelease();
+      await switchPromise;
+
+      expect(llamaRn.initLlama).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.READY,
+        activeModelId: 'other/model',
+      }));
+      expect(llmEngineService.getState().diagnostics?.contextRecoveryStatus).toBeUndefined();
+      await expect(llmEngineService.chatCompletion({
+        messages: [{ role: 'user', content: 'Use the explicitly selected model' }],
+        params: { n_predict: 16 },
+      })).resolves.toEqual({ text: 'Hello back' });
+    } finally {
+      finishRelease?.();
+      await switchPromise.catch(() => undefined);
     }
   });
 

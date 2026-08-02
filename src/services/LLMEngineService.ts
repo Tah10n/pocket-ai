@@ -2141,18 +2141,15 @@ class LLMEngineService {
       if (previousRelease) {
         await previousRelease;
       }
+      // llama.rn keeps a raw context pointer for in-flight JSI tasks. Its native
+      // release timeout is not a proof that those tasks have stopped using the
+      // pointer, so releasing before the captured raw operation settles can
+      // create a use-after-free when another context is initialized.
+      await drainPromise;
       if (context) {
         await releaseLlamaContext(context);
-      } else {
-        await drainPromise;
       }
     })
-      .then(() => {
-        // Native context release waits for its tracked tasks before resolving.
-        // It is therefore the authoritative cleanup boundary even if a stale
-        // JavaScript wrapper promise never publishes its terminal callback.
-        this.orphanedContextOperationDrains.delete(drainPromise);
-      })
       .catch((error) => {
         const releaseError = new AppError(
           'engine_unloading',
@@ -7763,7 +7760,10 @@ class LLMEngineService {
         }
       }
       this.loadedArtifactIdentity = loadedArtifactIdentity;
-      if (this.contextRecoveryModelId === modelId && this.contextRecoveryStatus !== 'idle') {
+      // A successful initialization establishes the only usable context,
+      // regardless of whether it came from automatic recovery or an explicit
+      // switch to another model. Do not leave stale recovery state blocking it.
+      if (this.contextRecoveryStatus !== 'idle') {
         this.contextRecoveryStatus = 'idle';
         this.contextRecoveryModelId = null;
       }

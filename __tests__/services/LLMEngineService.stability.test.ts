@@ -813,9 +813,12 @@ describe('LLMEngineService Stability', () => {
         }
     });
 
-    it('direct stopCompletion cancels a hung prompt token operation before native completion starts', async () => {
+    it('keeps timed-out prompt token cleanup active until the native operation settles', async () => {
         jest.useFakeTimers();
-        const getFormattedChat = jest.fn(() => new Promise(() => undefined));
+        let resolveFormatted: (() => void) | undefined;
+        const getFormattedChat = jest.fn(() => new Promise((resolve) => {
+            resolveFormatted = () => resolve({ prompt: 'Late prompt', additional_stops: [] });
+        }));
         const tokenize = jest.fn().mockResolvedValue({ tokens: [1, 2, 3] });
         const stopCompletion = jest.fn().mockResolvedValue(undefined);
 
@@ -848,10 +851,23 @@ describe('LLMEngineService Stability', () => {
             await expect(stopPromise).resolves.toBeUndefined();
 
             expect(llmEngineService.hasActiveCompletion()).toBe(false);
-            expect(llmEngineService.hasActiveContextOperation()).toBe(false);
+            expect(llmEngineService.hasActiveContextOperation()).toBe(true);
             expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+            expect(releaseAllLlama).not.toHaveBeenCalled();
+            expect(tokenize).not.toHaveBeenCalled();
+
+            resolveFormatted?.();
+            resolveFormatted = undefined;
+            await waitForMockCall(releaseAllLlama as jest.Mock);
+            for (let i = 0; i < 20 && llmEngineService.hasActiveContextOperation(); i += 1) {
+                await Promise.resolve();
+            }
+
+            expect(llmEngineService.hasActiveContextOperation()).toBe(false);
+            expect(releaseAllLlama).toHaveBeenCalledTimes(1);
             expect(tokenize).not.toHaveBeenCalled();
         } finally {
+            resolveFormatted?.();
             jest.useRealTimers();
         }
     });

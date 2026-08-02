@@ -10,6 +10,7 @@ import type {
   TokenData,
 } from 'llama.rn';
 import type { LlmChatMessage } from '../types/chat';
+import { hasEquivalentLlmTextContentPart } from '../utils/llmMessageText';
 import { requireLlamaModule, type LlamaModule } from './llamaRnModule';
 import { applyPromptStateCacheSafetyGate } from './PromptStateCachePolicy';
 
@@ -232,15 +233,6 @@ function hasNonTextContentParts(parts: readonly RNLlamaMessagePart[]): boolean {
   return parts.some((part) => part.type !== 'text');
 }
 
-function hasEquivalentTextContentPart(parts: readonly RNLlamaMessagePart[], content: string): boolean {
-  const trimmedContent = content.trim();
-  return parts.some((part) => (
-    part.type === 'text'
-    && typeof part.text === 'string'
-    && part.text.trim() === trimmedContent
-  ));
-}
-
 export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICompatibleMessage[] {
   if (!Array.isArray(messages)) {
     throw new Error('[LLMEngine] Invalid chat messages: expected array');
@@ -272,7 +264,7 @@ export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICo
 
     if (contentParts.length > 0 || (mediaPaths && mediaPaths.length > 0)) {
       const shouldUseContentFallback = content.trim().length > 0
-        && !hasEquivalentTextContentPart(contentParts, content);
+        && !hasEquivalentLlmTextContentPart(contentParts, content);
       const nativeContentParts: RNLlamaMessagePart[] = [
         ...(shouldUseContentFallback ? [{ type: 'text', text: content }] : []),
         ...contentParts,

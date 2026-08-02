@@ -3,6 +3,7 @@ import {
   buildInferenceWindowWithAccurateTokenCounts,
   estimateLlmMessageTokens,
   getThreadInferenceWindow,
+  MAX_EXACT_HISTORY_BACKFILL_MESSAGES,
 } from '../../src/utils/inferenceWindow';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
@@ -198,6 +199,102 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
         { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
       ],
     })).toBeGreaterThan(textOnlyEstimate);
+  });
+
+  it.each([
+    {
+      label: 'document text',
+      contentParts: [
+        { type: 'text' as const, text: 'Ask about this attachment' },
+        { type: 'text' as const, text: 'Extracted document body '.repeat(20) },
+      ],
+    },
+    {
+      label: 'audio input',
+      contentParts: [
+        { type: 'text' as const, text: 'Ask about this attachment' },
+        {
+          type: 'input_audio' as const,
+          input_audio: { format: 'wav' as const, url: 'file:///document/audio.wav' },
+        },
+      ],
+    },
+  ])('counts scalar content mirrored in $label parts only once', ({ contentParts }) => {
+    const mirroredEstimate = estimateLlmMessageTokens({
+      role: 'user',
+      content: 'Ask about this attachment',
+      contentParts,
+    });
+    const canonicalEstimate = estimateLlmMessageTokens({
+      role: 'user',
+      content: '',
+      contentParts,
+    });
+
+    expect(mirroredEstimate).toBe(canonicalEstimate);
+  });
+
+  it('backfills only a bounded number of messages after exact counting finds spare room', async () => {
+    const messages = Array.from({ length: 60 }, (_, index) => ({
+      id: `message-${index}`,
+      role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+      content: `message-${index}-${'x'.repeat(160)}`,
+      createdAt: index + 1,
+      state: 'complete' as const,
+    }));
+    const thread: ChatThread = {
+      id: 'thread-bounded-backfill',
+      title: 'Bounded backfill',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: '',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 64,
+        seed: null,
+      },
+      messages,
+      createdAt: 1,
+      updatedAt: 60,
+      status: 'idle',
+    };
+    const options = {
+      maxContextMessages: Number.MAX_SAFE_INTEGER,
+      maxContextTokens: 320,
+      responseReserveTokens: 0,
+      promptSafetyMarginTokens: 0,
+    };
+    const heuristicWindow = getThreadInferenceWindow(thread, options);
+    const exactPreparationCalls: LlmChatMessage[][] = [];
+
+    const result = await buildInferenceWindowWithAccurateTokenCounts(
+      thread,
+      options,
+      async (windowMessages) => {
+        exactPreparationCalls.push(windowMessages);
+        return windowMessages.length * 2;
+      },
+    );
+
+    expect(heuristicWindow.truncatedMessageIds.length).toBeGreaterThan(MAX_EXACT_HISTORY_BACKFILL_MESSAGES);
+    expect(result.truncatedMessageIds.length).toBeLessThan(heuristicWindow.truncatedMessageIds.length);
+    expect(heuristicWindow.truncatedMessageIds.length - result.truncatedMessageIds.length)
+      .toBeLessThanOrEqual(MAX_EXACT_HISTORY_BACKFILL_MESSAGES);
+
+    const earliestBackfillIndex = heuristicWindow.truncatedMessageIds.length
+      - MAX_EXACT_HISTORY_BACKFILL_MESSAGES;
+    const exactMessageIndexes = exactPreparationCalls.flatMap((windowMessages) => (
+      windowMessages.flatMap((message) => {
+        const match = message.content.match(/^message-(\d+)-/);
+        return match?.[1] ? [Number(match[1])] : [];
+      })
+    ));
+    expect(Math.min(...exactMessageIndexes)).toBeGreaterThanOrEqual(earliestBackfillIndex);
   });
 
   it('never sends heuristic-truncated attachment messages to exact-count preparation', async () => {

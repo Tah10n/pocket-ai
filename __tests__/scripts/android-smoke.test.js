@@ -158,6 +158,24 @@ describe('android-smoke bounded ADB commands', () => {
     }
   });
 
+  it('refreshes the device wake state after provisioning and before either launch path', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../../scripts/android-smoke.js'), 'utf8');
+    const installIndex = source.indexOf('const installResult = installDebugApk(');
+    const wakeIndex = source.indexOf(
+      'wakeAndUnlockDevice(tools.adb, device.serial);',
+      installIndex,
+    );
+    const devClientLaunchIndex = source.indexOf('launchDevClient(', installIndex);
+    const installedLaunchIndex = source.indexOf('launchInstalledApp(', installIndex);
+    const readinessIndex = source.indexOf('await waitForAppJsReady(', installIndex);
+
+    expect(installIndex).toBeGreaterThan(-1);
+    expect(wakeIndex).toBeGreaterThan(installIndex);
+    expect(devClientLaunchIndex).toBeGreaterThan(wakeIndex);
+    expect(installedLaunchIndex).toBeGreaterThan(wakeIndex);
+    expect(readinessIndex).toBeGreaterThan(installedLaunchIndex);
+  });
+
   it('bounds APK installation separately from short ADB control commands', () => {
     const spawnSync = jest.fn(() => ({
       status: 0,

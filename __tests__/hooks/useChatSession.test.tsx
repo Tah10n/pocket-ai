@@ -82,6 +82,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     hasActiveCompletion: jest.fn(),
     hasActiveContextOperation: jest.fn(),
     hasActiveChatBlockingContextOperation: jest.fn(),
+    assertContextRecoveryNotRequired: jest.fn(),
   },
 }));
 
@@ -318,6 +319,7 @@ describe('useChatSession', () => {
     (llmEngineService.hasActiveCompletion as jest.Mock).mockReturnValue(false);
     (llmEngineService.hasActiveContextOperation as jest.Mock).mockReturnValue(false);
     (llmEngineService.hasActiveChatBlockingContextOperation as jest.Mock).mockReturnValue(false);
+    (llmEngineService.assertContextRecoveryNotRequired as jest.Mock).mockImplementation(() => undefined);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((type: any, listener: any) => {
       if (type === 'change') {
         appStateListeners.push(listener);
@@ -2461,6 +2463,65 @@ describe('useChatSession', () => {
 
     expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('surfaces restart-required instead of model-not-loaded for a new thread when context recovery is terminal', async () => {
+    // A terminal recovery detaches the engine into ERROR, so the realistic
+    // state is ERROR + restart-required, not READY with a pending wait.
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.ERROR,
+      activeModelId: null,
+      loadProgress: 0,
+      lastError: 'A detached model context is still owned by an unresponsive native operation',
+    });
+    (llmEngineService.hasActiveChatBlockingContextOperation as jest.Mock).mockReturnValue(true);
+    (llmEngineService.assertContextRecoveryNotRequired as jest.Mock).mockImplementation(() => {
+      throw new AppError(
+        'engine_recovery_required',
+        'A detached model context is still owned by an unresponsive native operation; restart the app to recover the engine',
+      );
+    });
+
+    const getSession = renderHookHarness();
+
+    await expect(act(async () => {
+      await getSession()?.appendUserMessage('Send after terminal recovery');
+    })).rejects.toMatchObject({
+      code: 'engine_recovery_required',
+    });
+
+    expect(useChatStore.getState().getConversationIndex()).toHaveLength(0);
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('surfaces restart-required instead of model-not-loaded for an existing thread when context recovery is terminal', async () => {
+    const getSession = renderHookHarness();
+    await act(async () => {
+      await getSession()?.appendUserMessage('Seed the conversation');
+    });
+    expect(useChatStore.getState().getConversationIndex()).toHaveLength(1);
+
+    (llmEngineService.getState as jest.Mock).mockReturnValue({
+      status: EngineStatus.ERROR,
+      activeModelId: null,
+      loadProgress: 0,
+      lastError: 'A detached model context is still owned by an unresponsive native operation',
+    });
+    (llmEngineService.assertContextRecoveryNotRequired as jest.Mock).mockImplementation(() => {
+      throw new AppError(
+        'engine_recovery_required',
+        'A detached model context is still owned by an unresponsive native operation; restart the app to recover the engine',
+      );
+    });
+
+    await expect(act(async () => {
+      await getSession()?.appendUserMessage('Send after terminal recovery');
+    })).rejects.toMatchObject({
+      code: 'engine_recovery_required',
+    });
+
+    // Only the seeding generation ran; the blocked send never reached the engine.
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
   it('persists errored generation terminal state into bounded storage', async () => {

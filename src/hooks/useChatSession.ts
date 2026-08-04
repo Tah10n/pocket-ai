@@ -2959,6 +2959,11 @@ export const useChatSession = () => {
   );
 
   const ensureThreadCanGenerate = useCallback((thread: ChatThread, actionLabel: string) => {
+    // A terminal context recovery detaches the engine into ERROR and can never
+    // clear on its own, so its restart-required error must surface before the
+    // model-not-loaded invariant and the transient stop-wait checks below.
+    llmEngineService.assertContextRecoveryNotRequired();
+
     if (thread.status === 'generating') {
       throw new Error('A response is already being generated for this thread.');
     }
@@ -2993,6 +2998,9 @@ export const useChatSession = () => {
     if (existingThreadAtStart) {
       ensureThreadCanGenerate(existingThreadAtStart, 'sending another message');
     } else {
+      // Terminal recovery keeps the engine detached in ERROR, so its
+      // restart-required error must win over the generic model-not-loaded one.
+      llmEngineService.assertContextRecoveryNotRequired();
       const engineState = llmEngineService.getState();
       if (!targetModelId || engineState.status !== EngineStatus.READY || !engineState.activeModelId) {
         throw new AppError('chat_model_not_loaded', 'Load a model before starting a conversation.');
@@ -3029,6 +3037,7 @@ export const useChatSession = () => {
       || llmEngineService.hasActiveChatBlockingContextOperation()
       || isNativeCompletionSettlingAfterStop()
     ) {
+      llmEngineService.assertContextRecoveryNotRequired();
       throw new Error('Wait for the current response to finish stopping before sending another message.');
     }
 

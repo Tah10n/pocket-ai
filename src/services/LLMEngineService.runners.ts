@@ -23,6 +23,9 @@ type ContextOperationOptions = {
   readonly startTimeoutMs?: number;
   readonly createStartTimeoutError?: ErrorFactory;
   readonly createPriorityPreemptionError?: ErrorFactory;
+  readonly runtimeTimeoutMs?: number;
+  readonly createRuntimeTimeoutError?: ErrorFactory;
+  readonly onRuntimeTimeout?: (error: unknown) => void;
 };
 
 type ContextOperationCancelOptions = {
@@ -176,6 +179,13 @@ export class ContextOperationRunner {
     let operationStarted = false;
     let operationSettled = false;
     let startTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let runtimeTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    const clearRuntimeTimeoutTimer = () => {
+      if (runtimeTimeoutId !== null) {
+        clearTimeout(runtimeTimeoutId);
+        runtimeTimeoutId = null;
+      }
+    };
     const rawOperationPromise = new Promise<T>((resolve, reject) => {
       resolveRawOperation = resolve;
       rejectRawOperation = reject;
@@ -200,6 +210,22 @@ export class ContextOperationRunner {
         if (startTimeoutId !== null) {
           clearTimeout(startTimeoutId);
           startTimeoutId = null;
+        }
+        if (
+          typeof options.runtimeTimeoutMs === 'number'
+          && options.runtimeTimeoutMs > 0
+          && options.createRuntimeTimeoutError
+        ) {
+          runtimeTimeoutId = setTimeout(() => {
+            runtimeTimeoutId = null;
+            if (operationSettled) {
+              return;
+            }
+
+            const runtimeTimeoutError = options.createRuntimeTimeoutError?.() ?? getCancellationError();
+            this.activeOperations.get(operationPromise)?.cancel(runtimeTimeoutError);
+            options.onRuntimeTimeout?.(runtimeTimeoutError);
+          }, options.runtimeTimeoutMs);
         }
         this.runningOperation = scheduledOperation;
         void Promise.resolve()
@@ -248,10 +274,12 @@ export class ContextOperationRunner {
     void rawOperationPromise.then(
       () => {
         operationSettled = true;
+        clearRuntimeTimeoutTimer();
         this.clearRawActiveOperation(rawOperationPromise, scheduledOperation);
       },
       () => {
         operationSettled = true;
+        clearRuntimeTimeoutTimer();
         this.clearRawActiveOperation(rawOperationPromise, scheduledOperation);
       },
     );

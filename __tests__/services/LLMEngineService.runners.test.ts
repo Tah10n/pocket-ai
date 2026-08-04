@@ -380,6 +380,212 @@ describe('ContextOperationRunner', () => {
       jest.useRealTimers();
     }
   });
+
+  it('does not consume the runtime timeout while the operation waits in the queue', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+    let releaseOwner: () => void = () => undefined;
+    let markOwnerStarted: () => void = () => undefined;
+    const ownerStarted = new Promise<void>((resolve) => {
+      markOwnerStarted = resolve;
+    });
+    let releaseWatched: () => void = () => undefined;
+    let markWatchedStarted: () => void = () => undefined;
+    const watchedStarted = new Promise<void>((resolve) => {
+      markWatchedStarted = resolve;
+    });
+
+    const owner = runner.track(async () => {
+      markOwnerStarted();
+      await new Promise<void>((resolve) => {
+        releaseOwner = resolve;
+      });
+      return 'owner';
+    }, () => new Error('cancelled'), { priority: 'completion' });
+    const watchedBody = jest.fn(async () => {
+      markWatchedStarted();
+      await new Promise<void>((resolve) => {
+        releaseWatched = resolve;
+      });
+      return 'watched';
+    });
+    const watched = runner.track(watchedBody, () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedWatched = watched.catch((error) => error);
+
+    try {
+      await ownerStarted;
+
+      await jest.advanceTimersByTimeAsync(100);
+      expect(watchedBody).not.toHaveBeenCalled();
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      releaseOwner();
+      await owner;
+      await jest.advanceTimersByTimeAsync(0);
+      await watchedStarted;
+      expect(watchedBody).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(49);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(observedWatched).resolves.toBe(runtimeTimeoutError);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+
+      releaseWatched();
+      const drained = runner.waitForActive({ timeoutMs: 100 });
+      await jest.advanceTimersByTimeAsync(100);
+      await expect(drained).resolves.toBe('drained');
+
+      await jest.advanceTimersByTimeAsync(200);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseOwner();
+      releaseWatched();
+      await owner.catch(() => undefined);
+      await watched.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('times out a started hung operation exactly once', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+    let releaseRawOperation: () => void = () => undefined;
+    let markHungStarted: () => void = () => undefined;
+    const hungStarted = new Promise<void>((resolve) => {
+      markHungStarted = resolve;
+    });
+
+    const hungBody = jest.fn(async () => {
+      markHungStarted();
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'hung';
+    });
+    const hung = runner.track(hungBody, () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedHung = hung.catch((error) => error);
+
+    try {
+      await hungStarted;
+      expect(hungBody).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(50);
+
+      await expect(observedHung).resolves.toBe(runtimeTimeoutError);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+      expect(onRuntimeTimeout).toHaveBeenCalledWith(runtimeTimeoutError);
+      expect(runner.hasActive()).toBe(true);
+
+      releaseRawOperation();
+      const drained = runner.waitForActive({ timeoutMs: 100 });
+      await jest.advanceTimersByTimeAsync(100);
+      await expect(drained).resolves.toBe('drained');
+      expect(runner.hasActive()).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(200);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseRawOperation();
+      await hung.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not fire the runtime timeout when the operation settles before the deadline', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+
+    const watched = runner.track(async () => 'watched', () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+
+    try {
+      await expect(watched).resolves.toBe('watched');
+
+      await jest.advanceTimersByTimeAsync(100);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+      expect(runner.hasActive()).toBe(false);
+    } finally {
+      await watched.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the raw-owner watchdog armed after external cancellation', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const externalError = new Error('external cancellation');
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+    let releaseRawOperation: () => void = () => undefined;
+    let markWatchedStarted: () => void = () => undefined;
+    const watchedStarted = new Promise<void>((resolve) => {
+      markWatchedStarted = resolve;
+    });
+
+    const watched = runner.track(async () => {
+      markWatchedStarted();
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'watched';
+    }, () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedWatched = watched.catch((error) => error);
+
+    try {
+      await watchedStarted;
+      runner.cancelActive(externalError);
+
+      await expect(observedWatched).resolves.toBe(externalError);
+      expect(runner.hasActive()).toBe(true);
+
+      await jest.advanceTimersByTimeAsync(49);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(1);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+      expect(onRuntimeTimeout).toHaveBeenCalledWith(runtimeTimeoutError);
+
+      await jest.advanceTimersByTimeAsync(200);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+
+      releaseRawOperation();
+      const drained = runner.waitForActive({ timeoutMs: 100 });
+      await jest.advanceTimersByTimeAsync(100);
+      await expect(drained).resolves.toBe('drained');
+      expect(runner.hasActive()).toBe(false);
+    } finally {
+      releaseRawOperation();
+      await watched.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('ActiveCompletionRunner', () => {

@@ -33,7 +33,7 @@
     "errors": {
       "engineNotReady": "Load a local model before continuing.",
       "engineBusy": "Finish or stop the current operation before starting another one.",
-      "engineRecoveryRequired": "The model runtime stopped responding. Wait for recovery, then try again; reload the model if it does not recover.",
+      "engineRecoveryRequired": "The model runtime stopped responding. Wait for automatic recovery to finish, then try again. If it does not finish, restart Pocket AI.",
       "engineUnloading": "The current model is unloading. Wait a moment and try again.",
       "modelNotFound": "The selected model is no longer available on this device.",
       "modelLoadFailed": "The model could not be loaded. Try again or choose a different profile.",

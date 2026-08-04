@@ -464,13 +464,38 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     candidateHistoryStartIndex > minimumHistoryStartIndex
     && backfilledMessageCount < MAX_EXACT_HISTORY_BACKFILL_MESSAGES
   ) {
-    const candidateMessage = eligibleMessages[candidateHistoryStartIndex - 1];
-    if (!candidateMessage || hasFileBackedInferenceInput(candidateMessage)) {
+    const precedingIndex = candidateHistoryStartIndex - 1;
+    const precedingMessage = eligibleMessages[precedingIndex];
+    let groupStartIndex: number | null = null;
+
+    if (precedingMessage?.role === 'user') {
+      groupStartIndex = precedingIndex;
+    } else if (
+      precedingMessage?.role === 'assistant'
+      && precedingIndex - 1 >= minimumHistoryStartIndex
+      && eligibleMessages[precedingIndex - 1]?.role === 'user'
+    ) {
+      groupStartIndex = precedingIndex - 1;
+    } else {
       break;
     }
 
-    candidateHistoryStartIndex -= 1;
-    backfilledMessageCount += 1;
+    const groupMessages = eligibleMessages.slice(groupStartIndex, candidateHistoryStartIndex);
+    if (
+      backfilledMessageCount + groupMessages.length > MAX_EXACT_HISTORY_BACKFILL_MESSAGES
+      || groupMessages.some(hasFileBackedInferenceInput)
+    ) {
+      break;
+    }
+
+    candidateHistoryStartIndex = groupStartIndex;
+    backfilledMessageCount += groupMessages.length;
+  }
+  while (
+    candidateHistoryStartIndex < eligibleMessages.length
+    && eligibleMessages[candidateHistoryStartIndex]?.role !== 'user'
+  ) {
+    candidateHistoryStartIndex += 1;
   }
   const historyMessages = eligibleMessages
     .slice(candidateHistoryStartIndex)
@@ -655,9 +680,8 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   }
 
   while (
-    effectiveHistoryStartIndex > 0 &&
-    normalizedHistoryMessages.length > 1 &&
-    normalizedHistoryMessages[0]?.role === 'assistant'
+    normalizedHistoryMessages.length > 0 &&
+    normalizedHistoryMessages[0]?.role !== 'user'
   ) {
     effectiveHistoryStartIndex += 1;
     normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);

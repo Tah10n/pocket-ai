@@ -43,7 +43,10 @@ function createPlainTextPdf(textStream: string, options: { trailer?: string } = 
   ].join('\n'));
 }
 
-function createClassicXrefPdfWithIndirectLength(textStream: string): string {
+function createClassicXrefPdfWithIndirectLength(
+  textStream: string,
+  options: { omitEofMarker?: boolean; appendedTail?: string } = {},
+): string {
   let pdf = '%PDF-1.4\n';
   const offsets = new Map<number, number>();
   const appendObject = (objectNumber: number, body: string) => {
@@ -64,7 +67,141 @@ function createClassicXrefPdfWithIndirectLength(textStream: string): string {
   for (let objectNumber = 1; objectNumber <= 5; objectNumber += 1) {
     pdf += `${String(offsets.get(objectNumber)).padStart(10, '0')} 00000 n \n`;
   }
-  pdf += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  pdf += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n`;
+  if (!options.omitEofMarker) {
+    pdf += '%%EOF';
+  }
+  if (options.appendedTail) {
+    pdf += options.appendedTail;
+  }
+  return toBase64Pdf(pdf);
+}
+
+function createIncrementalUpdatePdf(options: {
+  freeIndirectLength?: boolean;
+  omitEofMarker?: boolean;
+  appendedTail?: (tail: {
+    tailStartOffset: number;
+    baseXrefOffset: number;
+    updateXrefOffset: number;
+  }) => string;
+} = {}): string {
+  let pdf = '%PDF-1.4\n';
+  const offsets = new Map<number, number>();
+  const appendObject = (objectNumber: number, body: string) => {
+    offsets.set(objectNumber, Buffer.byteLength(pdf, 'binary'));
+    pdf += `${objectNumber} 0 obj\n${body}\nendobj\n`;
+  };
+  const appendDirectLengthStreamObject = (objectNumber: number, streamText: string) => {
+    appendObject(
+      objectNumber,
+      `<< /Length ${Buffer.byteLength(streamText, 'binary')} >>\nstream\n${streamText}\nendstream`,
+    );
+  };
+
+  appendObject(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  appendObject(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  appendObject(3, '<< /Type /Page /Contents 4 0 R >>');
+
+  if (options.freeIndirectLength) {
+    const streamText = 'BT (Freed indirect length) Tj ET';
+    appendObject(4, `<< /Length 5 0 R >>\nstream\n${streamText}\nendstream`);
+    appendObject(5, String(Buffer.byteLength(streamText, 'binary')));
+  } else {
+    appendDirectLengthStreamObject(4, 'BT (Stale revision text) Tj ET');
+  }
+
+  const baseXrefOffset = Buffer.byteLength(pdf, 'binary');
+  const baseObjectCount = options.freeIndirectLength ? 6 : 5;
+  pdf += `xref\n0 ${baseObjectCount}\n`;
+  pdf += '0000000000 65535 f \n';
+  for (let objectNumber = 1; objectNumber < baseObjectCount; objectNumber += 1) {
+    pdf += `${String(offsets.get(objectNumber)).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${baseObjectCount} /Root 1 0 R >>\n`;
+
+  if (!options.freeIndirectLength) {
+    appendDirectLengthStreamObject(4, 'BT (Updated revision text) Tj ET');
+  }
+  const updateXrefOffset = Buffer.byteLength(pdf, 'binary');
+  if (options.freeIndirectLength) {
+    // The incremental update frees object 5. A freed entry carries the next
+    // generation (`5 1 f`), which differs from the older in-use key (`5 0`),
+    // so only object-number shadowing keeps the stale indirect /Length from
+    // being resurrected out of the base table.
+    pdf += 'xref\n5 1\n';
+    pdf += '0000000000 00001 f \n';
+  } else {
+    pdf += 'xref\n4 1\n';
+    pdf += `${String(offsets.get(4)).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${baseObjectCount} /Root 1 0 R /Prev ${baseXrefOffset} >>\n`;
+  pdf += `startxref\n${updateXrefOffset}\n`;
+  if (!options.omitEofMarker) {
+    pdf += '%%EOF';
+  }
+  if (options.appendedTail) {
+    pdf += options.appendedTail({
+      tailStartOffset: Buffer.byteLength(pdf, 'binary'),
+      baseXrefOffset,
+      updateXrefOffset,
+    });
+  }
+  return toBase64Pdf(pdf);
+}
+
+function createFakeStructurePdf(textStream: string): string {
+  const streamLength = Buffer.byteLength(textStream, 'binary');
+  const fakeLiteralObject = [
+    '5 0 obj',
+    '(endobj',
+    'trailer << /Root 99 0 R /Encrypt 6 0 R >>',
+    '99 0 obj << /Type /Catalog >> endobj',
+    'startxref',
+    '0',
+    '%%EOF)',
+    'endobj',
+  ].join('\n');
+  const fakeHexDigits = Array.from('99 0 obj endobj trailer << /Encrypt 6 0 R >> startxref 0', (char) => (
+    char.charCodeAt(0).toString(16).padStart(2, '0')
+  )).join('');
+  return toBase64Pdf([
+    '%PDF-1.4',
+    '% 99 0 obj endobj trailer << /Encrypt 6 0 R >> startxref 0 %%EOF',
+    '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+    fakeLiteralObject,
+    '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+    `<${fakeHexDigits}>`,
+    '3 0 obj << /Type /Page /Contents 4 0 R >> endobj',
+    `4 0 obj << /Length ${streamLength} >> stream`,
+    textStream,
+    'endstream endobj',
+    '%%EOF',
+  ].join('\n'));
+}
+
+function createClassicXrefPdfWithLateFakeCatalog(textStream: string): string {
+  let pdf = '%PDF-1.4\n';
+  const offsets = new Map<number, number>();
+  const appendObject = (objectNumber: number, body: string) => {
+    offsets.set(objectNumber, Buffer.byteLength(pdf, 'binary'));
+    pdf += `${objectNumber} 0 obj\n${body}\nendobj\n`;
+  };
+
+  appendObject(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  appendObject(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  appendObject(3, '<< /Type /Page /Contents 4 0 R >>');
+  const streamLength = Buffer.byteLength(textStream, 'binary');
+  appendObject(4, `<< /Length ${streamLength} >> stream\n${textStream}\nendstream`);
+  pdf += `% 1 0 obj << /Type /Catalog /Pages 9 0 R >> endobj trailer << /Root 1 0 R >>\n`;
+
+  const xrefOffset = Buffer.byteLength(pdf, 'binary');
+  pdf += 'xref\n0 5\n';
+  pdf += '0000000000 65535 f \n';
+  for (let objectNumber = 1; objectNumber <= 4; objectNumber += 1) {
+    pdf += `${String(offsets.get(objectNumber)).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
   return toBase64Pdf(pdf);
 }
 
@@ -104,6 +241,23 @@ describe('pdfTextExtraction', () => {
     expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
     try {
       extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'encrypted' });
+    }
+  });
+
+  it('rejects encrypted cross-reference streams before reporting unsupported structure', () => {
+    let pdf = '%PDF-1.4\n';
+    const xrefStreamOffset = Buffer.byteLength(pdf, 'binary');
+    const xrefStreamData = 'encrypted-xref';
+    pdf += `5 0 obj << /Type /XRef /Size 6 /Encrypt 6 0 R /Length ${Buffer.byteLength(xrefStreamData, 'binary')} >> stream\n`;
+    pdf += `${xrefStreamData}\nendstream endobj\n`;
+    pdf += `startxref\n${xrefStreamOffset}\n%%EOF`;
+    const base64Pdf = toBase64Pdf(pdf);
+
+    expect(() => extractTextFromPdfBase64(base64Pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(base64Pdf);
     } catch (error) {
       expect(error).toMatchObject({ reason: 'encrypted' });
     }
@@ -156,6 +310,38 @@ describe('pdfTextExtraction', () => {
     expect(extractTextFromPdfBase64(pdf).text).toBe('First\nSecond');
   });
 
+  it('concatenates consecutive show operations without synthetic spaces', () => {
+    const pdf = createPlainTextPdf('BT (Hel) Tj [(lo)] TJ T* <68747470> Tj (s://x) Tj ET');
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Hello\nhttps://x');
+  });
+
+  it('preserves explicit whitespace while concatenating adjacent fragments', () => {
+    const pdf = createPlainTextPdf('BT (Hello ) Tj (world) Tj ET');
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
+  });
+
+  it('treats only vertical Td and TD movement as a line break', () => {
+    const pdf = createPlainTextPdf('BT (A) Tj 5 0 Td (B) Tj 0 -15 TD (C) Tj 3 0 TD (D) Tj ET');
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('AB\nCD');
+  });
+
+  it('uses Tm Y movement for line breaks without splitting adjacent fragments', () => {
+    const pdf = createPlainTextPdf(
+      'BT 1 0 0 1 72 700 Tm (First) Tj 1 0 0 1 90 700 Tm (Second) Tj 1 0 0 1 72 680 Tm (Third) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('FirstSecond\nThird');
+  });
+
+  it('starts a new line before single-quote and double-quote show operations', () => {
+    const pdf = createPlainTextPdf('BT (First) Tj (Second) \' 0 0 (Third) " ET');
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('First\nSecond\nThird');
+  });
+
   it('does not treat literal stream text as a trailer encryption entry', () => {
     const pdf = createPlainTextPdf('BT (Use /Encrypt only in the trailer) Tj ET');
 
@@ -205,7 +391,7 @@ describe('pdfTextExtraction', () => {
   it('follows page-tree and content-array reference order instead of object order', () => {
     const firstPage = 'BT (First page) Tj ET';
     const secondPageStart = 'BT (Second) Tj';
-    const secondPageEnd = '(page) Tj ET';
+    const secondPageEnd = '( page) Tj ET';
     const pdf = toBase64Pdf([
       '%PDF-1.4',
       '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
@@ -248,6 +434,81 @@ describe('pdfTextExtraction', () => {
     }
   });
 
+  it('fails closed when a content array pairs a valid stream with an unsupported filter', () => {
+    const pageText = 'BT (Leading plain text) Tj ET';
+    const imageBytes = 'jpeg-image-bytes';
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents [4 0 R 5 0 R] >> endobj',
+      `4 0 obj << /Length ${Buffer.byteLength(pageText, 'binary')} >> stream`,
+      pageText,
+      'endstream endobj',
+      `5 0 obj << /Length ${Buffer.byteLength(imageBytes, 'binary')} /Filter /DCTDecode >> stream`,
+      imageBytes,
+      'endstream endobj',
+      '%%EOF',
+    ].join('\n'));
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_filter' });
+    }
+  });
+
+  it('fails closed when a content array pairs a valid stream with corrupt flate data', () => {
+    const pageText = 'BT (Readable first stream) Tj ET';
+    const corruptFlateBytes = bytesToBinaryString(new Uint8Array([0x78, 0x9c, 0xff, 0x00, 0x11, 0x22]));
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents [4 0 R 5 0 R] >> endobj',
+      `4 0 obj << /Length ${Buffer.byteLength(pageText, 'binary')} >> stream`,
+      pageText,
+      'endstream endobj',
+      `5 0 obj << /Length ${Buffer.byteLength(corruptFlateBytes, 'binary')} /Filter /FlateDecode >> stream`,
+      corruptFlateBytes,
+      'endstream endobj',
+      '%%EOF',
+    ].join('\n'));
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'invalid_pdf' });
+    }
+  });
+
+  it('rejects Form XObjects inherited from the page tree as unsupported structure', () => {
+    const contentStream = 'q /Fm1 Do Q';
+    const formStream = 'q Q';
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /Resources << /XObject << /Fm1 5 0 R >> >> >> endobj',
+      '3 0 obj << /Type /Page /Contents 4 0 R >> endobj',
+      `4 0 obj << /Length ${Buffer.byteLength(contentStream, 'binary')} >> stream`,
+      contentStream,
+      'endstream endobj',
+      `5 0 obj << /Type /XObject /Subtype /Form /Length ${Buffer.byteLength(formStream, 'binary')} >> stream`,
+      formStream,
+      'endstream endobj',
+      '%%EOF',
+    ].join('\n'));
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
   it('does not inflate unreferenced compressed streams', () => {
     const pageText = 'BT (Bounded page) Tj ET';
     const compressed = deflate(Buffer.from(`BT (${String('X').repeat(2 * 1024 * 1024)}) Tj ET`, 'binary'));
@@ -272,6 +533,21 @@ describe('pdfTextExtraction', () => {
     const pdf = createPlainTextPdf('BT (literal endstream marker) Tj ET');
 
     expect(extractTextFromPdfBase64(pdf).text).toBe('literal endstream marker');
+  });
+
+  it('treats declared stream length as authoritative when endstream follows the final data byte', () => {
+    const contentStream = 'BT (Declared length boundary) Tj ET';
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents 4 0 R >> endobj',
+      `4 0 obj << /Length ${Buffer.byteLength(contentStream, 'binary')} >> stream`,
+      `${contentStream}endstream endobj`,
+      '%%EOF',
+    ].join('\n'));
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Declared length boundary');
   });
 
   it('uses only top-level stream dictionary keys for length and filter parsing', () => {
@@ -327,5 +603,254 @@ describe('pdfTextExtraction', () => {
     } catch (error) {
       expect(error).toMatchObject({ reason: 'resource_limit' });
     }
+  });
+
+  it('ignores fake structure tokens in comments, literal strings, and hex strings', () => {
+    const pdf = createFakeStructurePdf('BT (Real visible text) Tj ET');
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Real visible text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('treats classic xref offsets as authoritative over a late fake catalog header', () => {
+    const pdf = createClassicXrefPdfWithLateFakeCatalog('BT (Authoritative catalog text) Tj ET');
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Authoritative catalog text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('prefers the newest cross-reference entry in an incremental /Prev chain', () => {
+    const pdf = createIncrementalUpdatePdf();
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Updated revision text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('keeps a freed newest entry from resurrecting an older cross-reference offset', () => {
+    const pdf = createIncrementalUpdatePdf({ freeIndirectLength: true });
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
+  it('keeps the newest revision when a comment after %%EOF forges an older startxref', () => {
+    const pdf = createIncrementalUpdatePdf({
+      // A genuine base-revision offset embedded in a trailing comment must not
+      // roll the document back to the stale revision.
+      appendedTail: ({ baseXrefOffset }) => `\n% preview startxref ${baseXrefOffset}\n`,
+    });
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Updated revision text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('prefers the newest revision when the tail is truncated after an incremental startxref', () => {
+    const pdf = createIncrementalUpdatePdf({ omitEofMarker: true });
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Updated revision text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('fails closed when the appended tail carries a conflicting revision chain', () => {
+    const pdf = createIncrementalUpdatePdf({
+      appendedTail: ({ tailStartOffset }) => {
+        const conflictingXrefOffset = tailStartOffset + 1;
+        return `\nxref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 1 >>\nstartxref\n${conflictingXrefOffset}\n`;
+      },
+    });
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
+  it('resolves indirect stream lengths when the document tail is truncated after startxref', () => {
+    const pdf = createClassicXrefPdfWithIndirectLength('BT (Truncated tail text) Tj ET', {
+      omitEofMarker: true,
+    });
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Truncated tail text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('resolves indirect stream lengths when bytes are appended after %%EOF', () => {
+    const pdf = createClassicXrefPdfWithIndirectLength('BT (Extended tail text) Tj ET', {
+      appendedTail: '\n% appended after the EOF marker',
+    });
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Extended tail text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('still fails closed on a truncated tail whose only startxref candidate is forged', () => {
+    const textStream = 'BT (Forged tail startxref) Tj ET';
+    const streamLength = Buffer.byteLength(textStream, 'binary');
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents [4 0 R 5 0 R] >> endobj',
+      `4 0 obj << /Length ${streamLength} >> stream`,
+      textStream,
+      'endstream endobj',
+      '5 0 obj << /Length 9 0 R >> stream',
+      'BT (Indirect length stream) Tj ET',
+      'endstream endobj',
+      '% fake startxref 999',
+    ].join('\n'));
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
+  it('extracts text when an empty page Resources entry overrides an inherited Form XObject', () => {
+    const contentStream = 'BT (Visible despite inherited form) Tj ET q /Fm1 Do Q';
+    const formStream = 'q Q';
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 /Resources << /XObject << /Fm1 5 0 R >> >> >> endobj',
+      '3 0 obj << /Type /Page /Contents 4 0 R /Resources << >> >> endobj',
+      `4 0 obj << /Length ${Buffer.byteLength(contentStream, 'binary')} >> stream`,
+      contentStream,
+      'endstream endobj',
+      `5 0 obj << /Type /XObject /Subtype /Form /Length ${Buffer.byteLength(formStream, 'binary')} >> stream`,
+      formStream,
+      'endstream endobj',
+      '%%EOF',
+    ].join('\n'));
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Visible despite inherited form',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('rejects Form XObjects declared in a page\'s own Resources as unsupported structure', () => {
+    const contentStream = 'q /Fm1 Do Q';
+    const formStream = 'q Q';
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents 4 0 R /Resources << /XObject << /Fm1 5 0 R >> >> >> endobj',
+      `4 0 obj << /Length ${Buffer.byteLength(contentStream, 'binary')} >> stream`,
+      contentStream,
+      'endstream endobj',
+      `5 0 obj << /Type /XObject /Subtype /Form /Length ${Buffer.byteLength(formStream, 'binary')} >> stream`,
+      formStream,
+      'endstream endobj',
+      '%%EOF',
+    ].join('\n'));
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
+  it('does not extract operator-shaped bytes hidden inside inline image data', () => {
+    const imageData = '\u00ff\u00d8 BT (HIDDEN_INLINE_IMAGE_PROMPT) Tj ET \u00ff';
+    const contentStream = `BT (Visible page text) Tj ET BI /W 4 /H 2 /BPC 8 /CS /DeviceRGB ID ${imageData} EI BT (Trailing page text) Tj ET`;
+    const pdf = createPlainTextPdf(contentStream);
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Visible page text\nTrailing page text',
+      pageCount: 1,
+      isScanned: false,
+    });
+  });
+
+  it('skips inline image bytes containing EI without a whitespace boundary', () => {
+    const imageData = '\u0000ABEI\u0000CD';
+    const contentStream = `BT (Before image) Tj ET BI /W 2 /H 2 ID ${imageData} EI BT (After image) Tj ET`;
+    const pdf = createPlainTextPdf(contentStream);
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Before image\nAfter image');
+  });
+
+  it('skips inline images declared inside a text object without parsing image bytes', () => {
+    const imageData = '\u00ff BT (HIDDEN_INLINE_IMAGE_PROMPT) Tj \u00ff';
+    const contentStream = `BT (Before) Tj BI /W 1 /H 1 ID ${imageData} EI (After) Tj ET`;
+    const pdf = createPlainTextPdf(contentStream);
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('BeforeAfter');
+  });
+
+  it('fails closed when an inline image never terminates with EI', () => {
+    const pdf = createPlainTextPdf('BT (Visible) Tj ET BI /W 1 /H 1 /BPC 8 ID \u0000\u0001\u0002');
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
+  it('fails closed when an inline image dictionary never reaches the ID keyword', () => {
+    const pdf = createPlainTextPdf('BT (Visible) Tj ET BI /W 1 /H 1 (raw bytes without ID)');
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'unsupported_structure' });
+    }
+  });
+
+  it('extracts visible text from a content stream that claims /Subtype /Image', () => {
+    const contentStream = 'BT (Visible despite image subtype) Tj ET';
+    const pdf = toBase64Pdf([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents 4 0 R >> endobj',
+      `4 0 obj << /Subtype /Image /Width 8 /Height 8 /Length ${Buffer.byteLength(contentStream, 'binary')} >> stream`,
+      contentStream,
+      'endstream endobj',
+      '%%EOF',
+    ].join('\n'));
+
+    expect(extractTextFromPdfBase64(pdf)).toEqual({
+      text: 'Visible despite image subtype',
+      pageCount: 1,
+      isScanned: false,
+    });
   });
 });

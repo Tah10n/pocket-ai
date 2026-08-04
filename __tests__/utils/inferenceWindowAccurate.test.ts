@@ -295,6 +295,7 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
       })
     ));
     expect(Math.min(...exactMessageIndexes)).toBeGreaterThanOrEqual(earliestBackfillIndex);
+    expect(result.messages.find((message) => message.role !== 'system')?.role).toBe('user');
   });
 
   it('never sends heuristic-truncated attachment messages to exact-count preparation', async () => {
@@ -360,5 +361,168 @@ describe('buildInferenceWindowWithAccurateTokenCounts', () => {
     expect(result.messages.at(-1)).toEqual(expect.objectContaining({
       content: 'Retained tail turn 999',
     }));
+  });
+
+  it('keeps the heuristic-truncated image pair out of exact preparation while retaining the text pair', async () => {
+    const imageUserContent = 'What is in this image?';
+    const imageAssistantContent = 'A detailed description of the image content. '.repeat(10);
+    const thread: ChatThread = {
+      id: 'thread-atomic-backfill',
+      title: 'Atomic backfill',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 64,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'image-user',
+          role: 'user',
+          content: imageUserContent,
+          createdAt: 1,
+          state: 'complete',
+          attachments: [copiedImageAttachment],
+        },
+        {
+          id: 'image-assistant',
+          role: 'assistant',
+          content: imageAssistantContent,
+          createdAt: 2,
+          state: 'complete',
+        },
+        {
+          id: 'text-user',
+          role: 'user',
+          content: 'Thanks for the description!',
+          createdAt: 3,
+          state: 'complete',
+        },
+        {
+          id: 'text-assistant',
+          role: 'assistant',
+          content: 'You are welcome.',
+          createdAt: 4,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 4,
+      status: 'idle',
+    };
+    const options = {
+      maxContextMessages: Number.MAX_SAFE_INTEGER,
+      maxContextTokens: 70,
+      responseReserveTokens: 0,
+      promptSafetyMarginTokens: 0,
+    };
+
+    // Heuristic precondition: the moderate assistant description plus the huge
+    // image attachment estimate push the image pair over the budget, so the
+    // estimate-based window drops exactly that pair.
+    const heuristicWindow = getThreadInferenceWindow(thread, options);
+    expect(heuristicWindow.truncatedMessageIds).toEqual(['image-user', 'image-assistant']);
+
+    const exactPreparationCalls: LlmChatMessage[][] = [];
+    const result = await buildInferenceWindowWithAccurateTokenCounts(
+      thread,
+      options,
+      async (messages) => {
+        exactPreparationCalls.push(messages);
+        return messages.length * 2;
+      },
+    );
+
+    expect(exactPreparationCalls.length).toBeGreaterThan(0);
+    for (const callMessages of exactPreparationCalls) {
+      expect(callMessages.some((message) => (
+        message.content === imageUserContent
+        || message.content === imageAssistantContent
+        || Boolean(message.attachments?.length)
+      ))).toBe(false);
+    }
+
+    const historyMessages = result.messages.filter((message) => message.role !== 'system');
+    expect(historyMessages.map((message) => message.content)).toEqual([
+      'Thanks for the description!',
+      'You are welcome.',
+    ]);
+    expect(result.truncatedMessageIds).toEqual(['image-user', 'image-assistant']);
+    expect(historyMessages[0]?.role).toBe('user');
+  });
+
+  it('drops a leading assistant message on the no-token-limit early return path', async () => {
+    const thread: ChatThread = {
+      id: 'thread-orphan-lead',
+      title: 'Orphan lead',
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 64,
+        seed: null,
+      },
+      messages: [
+        {
+          id: 'orphan-assistant',
+          role: 'assistant',
+          content: 'Orphan reply from an earlier run.',
+          createdAt: 1,
+          state: 'complete',
+        },
+        {
+          id: 'retained-user',
+          role: 'user',
+          content: 'What about this?',
+          createdAt: 2,
+          state: 'complete',
+        },
+        {
+          id: 'retained-assistant',
+          role: 'assistant',
+          content: 'Here is the answer.',
+          createdAt: 3,
+          state: 'complete',
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 3,
+      status: 'idle',
+    };
+    const exactPreparationCalls: LlmChatMessage[][] = [];
+
+    const result = await buildInferenceWindowWithAccurateTokenCounts(
+      thread,
+      { maxContextMessages: Number.MAX_SAFE_INTEGER },
+      async (messages) => {
+        exactPreparationCalls.push(messages);
+        return messages.length;
+      },
+    );
+
+    const historyMessages = result.messages.filter((message) => message.role !== 'system');
+    expect(historyMessages[0]?.role).toBe('user');
+    expect(historyMessages.map((message) => message.content)).toEqual([
+      'What about this?',
+      'Here is the answer.',
+    ]);
+    expect(result.truncatedMessageIds).toContain('orphan-assistant');
+    expect(result.messages.some((message) => (
+      message.content === 'Orphan reply from an earlier run.'
+    ))).toBe(false);
+    expect(exactPreparationCalls).toEqual([result.messages]);
   });
 });

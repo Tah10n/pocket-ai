@@ -247,6 +247,33 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(JSON.stringify(error.details)).not.toContain('scanned.pdf');
   });
 
+  it('maps PDFs referencing missing page content objects to a safe parse failure', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(fromByteArray(Buffer.from([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents 99 0 R >> endobj',
+      '%%EOF',
+    ].join('\n'), 'binary')));
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'test-dir/chat-attachments/missing-content.pdf',
+          fileName: 'missing-content.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 2048,
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_parse_failed');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'unsupported_structure' }));
+    expect(error.message).toBe('PDF uses unsupported compression or document structure.');
+    expect(error.message).not.toContain('missing-content.pdf');
+    expect(JSON.stringify(error.details)).not.toContain('missing-content.pdf');
+  });
+
   it('rejects unsupported document types without leaking filenames', async () => {
     const error = await expectProcessorError(
       chatAttachmentProcessorRegistry.processDocumentTextAttachment(

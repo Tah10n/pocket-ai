@@ -49,9 +49,20 @@ type CollectedPdfStructure = {
   trailers: string[];
 };
 
+type ClassicXrefParseResult = {
+  offsets: Map<string, number>;
+  trailers: string[];
+  hasStartXref: boolean;
+};
+
+type PdfPageContent = {
+  streams: PdfStreamCandidate[];
+  formXObjectNames: Set<string>;
+};
+
 type PdfPageContentStructure = {
   pageCount: number;
-  pages: PdfStreamCandidate[][];
+  pages: PdfPageContent[];
 };
 
 type PdfDictionaryEntryRange = {
@@ -60,11 +71,6 @@ type PdfDictionaryEntryRange = {
 };
 
 type PdfStreamFilterMode = 'flate' | 'none' | 'unsupported';
-
-type PdfByteRange = {
-  start: number;
-  end: number;
-};
 
 type PdfExtractionBudget = {
   deadlineMs: number;
@@ -80,9 +86,14 @@ type PdfContentToken =
   | { type: 'word'; value: string };
 
 const PDF_BINARY_HEADER_PATTERN = /^%PDF-\d+\.\d/u;
-const PDF_OBJECT_HEADER_PATTERN = /(\d+)\s+(\d+)\s+obj\b/gu;
 const PDF_WHITESPACE_PATTERN = /[\u0000\t\n\f\r ]/u;
 const PDF_DELIMITER_PATTERN = /[\u0000\t\n\f\r ()<>\[\]{}/%]/u;
+// Sticky patterns match in place at `lastIndex`, so integer tokens and object
+// headers can be validated without copying the remainder of the document for
+// every object the cross-reference table lists.
+const PDF_INTEGER_TOKEN_PATTERN = /(\d+)\b/yu;
+const PDF_OBJECT_HEADER_PATTERN = /(\d+)\s+(\d+)\s+obj\b/yu;
+const PDF_CONTENT_NUMBER_PATTERN = /[+-]?(?:\d+\.?\d*|\.\d+)/yu;
 
 const MAX_PDF_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_PDF_STREAM_COUNT = 256;
@@ -289,35 +300,54 @@ function readPdfNameToken(input: string, start: number): { next: number; value: 
   return { next, value };
 }
 
+function matchIntegerTokenAt(input: string, start: number): { value: string; next: number } | undefined {
+  PDF_INTEGER_TOKEN_PATTERN.lastIndex = start;
+  const match = PDF_INTEGER_TOKEN_PATTERN.exec(input);
+  if (!match) {
+    return undefined;
+  }
+  return { value: match[0], next: start + match[0].length };
+}
+
+function matchObjectHeaderAt(
+  input: string,
+  start: number,
+): { objectNumber: number; generationNumber: number; contentStart: number } | undefined {
+  PDF_OBJECT_HEADER_PATTERN.lastIndex = start;
+  const match = PDF_OBJECT_HEADER_PATTERN.exec(input);
+  if (!match) {
+    return undefined;
+  }
+  return {
+    objectNumber: Number.parseInt(match[1] ?? '', 10),
+    generationNumber: Number.parseInt(match[2] ?? '', 10),
+    contentStart: start + match[0].length,
+  };
+}
+
 function readIndirectReferenceAt(
   input: string,
   start: number,
 ): { next: number; reference: PdfObjectReference } | undefined {
   const firstStart = skipPdfWhitespaceAndComments(input, start);
-  const objectNumberMatch = /^(\d+)\b/u.exec(input.slice(firstStart));
+  const objectNumberMatch = matchIntegerTokenAt(input, firstStart);
   if (!objectNumberMatch) {
     return undefined;
   }
 
-  const generationStart = skipPdfWhitespaceAndComments(
-    input,
-    firstStart + objectNumberMatch[0].length,
-  );
-  const generationNumberMatch = /^(\d+)\b/u.exec(input.slice(generationStart));
+  const generationStart = skipPdfWhitespaceAndComments(input, objectNumberMatch.next);
+  const generationNumberMatch = matchIntegerTokenAt(input, generationStart);
   if (!generationNumberMatch) {
     return undefined;
   }
 
-  const referenceMarkerStart = skipPdfWhitespaceAndComments(
-    input,
-    generationStart + generationNumberMatch[0].length,
-  );
+  const referenceMarkerStart = skipPdfWhitespaceAndComments(input, generationNumberMatch.next);
   if (!isKeywordAt(input, referenceMarkerStart, 'R')) {
     return undefined;
   }
 
-  const objectNumber = Number.parseInt(objectNumberMatch[1] ?? '', 10);
-  const generationNumber = Number.parseInt(generationNumberMatch[1] ?? '', 10);
+  const objectNumber = Number.parseInt(objectNumberMatch.value, 10);
+  const generationNumber = Number.parseInt(generationNumberMatch.value, 10);
   if (!Number.isSafeInteger(objectNumber) || !Number.isSafeInteger(generationNumber)) {
     throw createPdfExtractionError('unsupported_structure', 'PDF indirect object reference is invalid.');
   }
@@ -329,6 +359,53 @@ function readIndirectReferenceAt(
       generationNumber,
       key: `${objectNumber} ${generationNumber}`,
     },
+  };
+}
+
+function readIndirectObjectHeaderAt(
+  input: string,
+  start: number,
+): {
+  start: number;
+  contentStart: number;
+  objectNumber: number;
+  generationNumber: number;
+  key: string;
+} | undefined {
+  const objectNumberMatch = matchIntegerTokenAt(input, start);
+  if (!objectNumberMatch) {
+    return undefined;
+  }
+
+  const generationStart = skipPdfWhitespaceAndComments(input, objectNumberMatch.next);
+  if (generationStart === objectNumberMatch.next) {
+    return undefined;
+  }
+  const generationNumberMatch = matchIntegerTokenAt(input, generationStart);
+  if (!generationNumberMatch) {
+    return undefined;
+  }
+
+  const keywordStart = skipPdfWhitespaceAndComments(input, generationNumberMatch.next);
+  if (keywordStart === generationNumberMatch.next) {
+    return undefined;
+  }
+  if (!isKeywordAt(input, keywordStart, 'obj')) {
+    return undefined;
+  }
+
+  const objectNumber = Number.parseInt(objectNumberMatch.value, 10);
+  const generationNumber = Number.parseInt(generationNumberMatch.value, 10);
+  if (!Number.isSafeInteger(objectNumber) || !Number.isSafeInteger(generationNumber)) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF object identifier is invalid.');
+  }
+
+  return {
+    start,
+    contentStart: skipPdfWhitespaceAndComments(input, keywordStart + 'obj'.length),
+    objectNumber,
+    generationNumber,
+    key: `${objectNumber} ${generationNumber}`,
   };
 }
 
@@ -389,6 +466,77 @@ function readPdfObjectEnd(
     next += 1;
   }
   return next;
+}
+
+function findTopLevelEndObjectStart(
+  input: string,
+  start: number,
+  budget: PdfExtractionBudget,
+): number {
+  let cursor = start;
+  while (cursor < input.length) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(input, cursor);
+    if (cursor >= input.length) {
+      return -1;
+    }
+    if (isKeywordAt(input, cursor, 'endobj')) {
+      return cursor;
+    }
+
+    const next = readPdfObjectEnd(input, cursor, budget);
+    if (next <= cursor) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF object is malformed.');
+    }
+    cursor = next;
+  }
+
+  return -1;
+}
+
+function findNextTopLevelStructure(
+  input: string,
+  start: number,
+  budget: PdfExtractionBudget,
+):
+  | { type: 'object'; header: NonNullable<ReturnType<typeof readIndirectObjectHeaderAt>> }
+  | { type: 'trailer'; start: number; next: number; dictionary: string }
+  | undefined {
+  let cursor = start;
+  while (cursor < input.length) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(input, cursor);
+    if (cursor >= input.length) {
+      return undefined;
+    }
+
+    const header = readIndirectObjectHeaderAt(input, cursor);
+    if (header) {
+      return { type: 'object', header };
+    }
+
+    if (isKeywordAt(input, cursor, 'trailer')) {
+      const dictionaryStart = skipPdfWhitespaceAndComments(input, cursor + 'trailer'.length);
+      if (!input.startsWith('<<', dictionaryStart)) {
+        throw createPdfExtractionError('unsupported_structure', 'PDF trailer dictionary is malformed.');
+      }
+      const dictionaryEnd = findDictionaryEnd(input, dictionaryStart, budget);
+      return {
+        type: 'trailer',
+        start: cursor,
+        next: dictionaryEnd,
+        dictionary: input.slice(dictionaryStart, dictionaryEnd),
+      };
+    }
+
+    const next = readPdfObjectEnd(input, cursor, budget);
+    if (next <= cursor) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF top-level structure is malformed.');
+    }
+    cursor = next;
+  }
+
+  return undefined;
 }
 
 function findDictionaryEntry(
@@ -514,17 +662,6 @@ function readReferenceArray(
   throw createPdfExtractionError('unsupported_structure', `PDF /${key} array is unterminated.`);
 }
 
-function findKeyword(input: string, keyword: string, start: number): number {
-  let cursor = input.indexOf(keyword, start);
-  while (cursor >= 0) {
-    if (isKeywordAt(input, cursor, keyword)) {
-      return cursor;
-    }
-    cursor = input.indexOf(keyword, cursor + keyword.length);
-  }
-  return -1;
-}
-
 function readLine(input: string, start: number): { line: string; next: number } {
   let end = start;
   while (end < input.length && input[end] !== '\n' && input[end] !== '\r') {
@@ -544,29 +681,276 @@ function readLine(input: string, start: number): { line: string; next: number } 
   return { line: input.slice(start, end).trim(), next };
 }
 
-function findLastStartXrefOffset(pdfText: string): number | undefined {
-  const pattern = /startxref\s+(\d+)/gu;
-  let offset: number | undefined;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(pdfText)) !== null) {
-    const candidate = Number.parseInt(match[1] ?? '', 10);
-    if (Number.isSafeInteger(candidate) && candidate >= 0) {
-      offset = candidate;
-    }
+// Parses backward from `endLimit` so `startxref` text embedded in comments, strings,
+// dictionaries, or stream bytes can never be selected. The strict call passes the
+// physical document end; the rescue path passes the position right after a `%%EOF`
+// marker so bytes appended after the marker cannot influence the parse.
+function findLastStartXrefOffset(pdfText: string, endLimit: number): number | undefined {
+  const startxrefKeyword = 'startxref';
+  const eofMarker = '%%EOF';
+
+  let end = Math.min(endLimit, pdfText.length);
+  while (end > 0 && isPdfWhitespace(pdfText[end - 1])) {
+    end -= 1;
+  }
+
+  if (end < eofMarker.length || !pdfText.endsWith(eofMarker, end)) {
+    return undefined;
+  }
+  end -= eofMarker.length;
+
+  const beforeEofMarker = end;
+  while (end > 0 && isPdfWhitespace(pdfText[end - 1])) {
+    end -= 1;
+  }
+  if (end === beforeEofMarker) {
+    return undefined;
+  }
+
+  const digitsEnd = end;
+  while (end > 0 && pdfText[end - 1] >= '0' && pdfText[end - 1] <= '9') {
+    end -= 1;
+  }
+  const digitsStart = end;
+  // Cap the digit span so parseInt cannot round beyond Number.MAX_SAFE_INTEGER.
+  if (digitsStart === digitsEnd || digitsEnd - digitsStart > 15) {
+    return undefined;
+  }
+
+  const beforeOffset = end;
+  while (end > 0 && isPdfWhitespace(pdfText[end - 1])) {
+    end -= 1;
+  }
+  if (end === beforeOffset) {
+    return undefined;
+  }
+
+  if (end < startxrefKeyword.length || !pdfText.endsWith(startxrefKeyword, end)) {
+    return undefined;
+  }
+  end -= startxrefKeyword.length;
+  if (end > 0 && !isPdfWhitespace(pdfText[end - 1])) {
+    return undefined;
+  }
+
+  const offset = Number.parseInt(pdfText.slice(digitsStart, digitsEnd), 10);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    return undefined;
   }
   return offset;
+}
+
+const MAX_PDF_STARTXREF_TAIL_SEARCH_BYTES = 1024;
+const PDF_EOF_MARKER = '%%EOF';
+
+// Returns every xref section offset reachable from `startOffset` through the
+// /Prev chain, or undefined when the chain is malformed and therefore cannot
+// prove which revision is the newest one.
+function collectXrefChainOffsets(
+  pdfText: string,
+  startOffset: number,
+  budget: PdfExtractionBudget,
+): Set<number> | undefined {
+  const chain = new Set<number>();
+  let xrefOffset: number | undefined = startOffset;
+  let parsedEntries = 0;
+
+  while (xrefOffset !== undefined) {
+    assertWithinProcessingTime(budget);
+    if (chain.size >= MAX_PDF_XREF_CHAIN_DEPTH || chain.has(xrefOffset)) {
+      return undefined;
+    }
+    if (!isKeywordAt(pdfText, xrefOffset, 'xref')) {
+      return undefined;
+    }
+    chain.add(xrefOffset);
+
+    let cursor = skipPdfWhitespaceAndComments(pdfText, xrefOffset + 'xref'.length);
+    while (!isKeywordAt(pdfText, cursor, 'trailer')) {
+      const section = readLine(pdfText, cursor);
+      const sectionMatch = /^(\d+)\s+(\d+)$/u.exec(section.line);
+      if (!sectionMatch) {
+        return undefined;
+      }
+      cursor = section.next;
+
+      const entryCount = Number.parseInt(sectionMatch[2] ?? '', 10);
+      if (!Number.isSafeInteger(entryCount)
+        || entryCount < 0
+        || parsedEntries + entryCount > MAX_PDF_XREF_SECTION_ENTRIES) {
+        return undefined;
+      }
+
+      for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+        const entry = readLine(pdfText, cursor);
+        if (!/^(\d{10})\s+(\d{5})\s+([fn])\b/u.test(entry.line)) {
+          return undefined;
+        }
+        cursor = entry.next;
+        parsedEntries += 1;
+      }
+
+      cursor = skipPdfWhitespaceAndComments(pdfText, cursor);
+    }
+
+    cursor = skipPdfWhitespaceAndComments(pdfText, cursor + 'trailer'.length);
+    if (!pdfText.startsWith('<<', cursor)) {
+      return undefined;
+    }
+    const dictionaryEnd = findDictionaryEnd(pdfText, cursor, budget);
+    const trailerDictionary = pdfText.slice(cursor, dictionaryEnd);
+    xrefOffset = readDictionaryNonNegativeInteger(trailerDictionary, 'Prev', budget);
+  }
+
+  return chain;
+}
+
+// Rescue for documents whose tail is truncated or extended after %%EOF: the
+// strict end-anchored parse rejects them even when a genuine startxref
+// survived near the end. Candidates are collected from the startxref
+// structure anchored at every surviving %%EOF marker (bytes appended after a
+// marker can never shadow the revision ending at the marker) plus bare
+// startxref keywords in the trailing window (a truncated incremental update
+// keeps its startxref after the previous revision's marker). Only candidates
+// whose offset points at a real `xref` keyword are kept, and the winner must
+// own every other candidate through its /Prev chain, so forged startxref
+// text pointing at an older revision is rejected instead of silently
+// rolling the document back.
+function findRescueStartXrefOffset(pdfText: string, budget: PdfExtractionBudget): number | undefined {
+  const candidatePositions = new Map<number, number>();
+  const registerCandidate = (offset: number, position: number) => {
+    candidatePositions.set(offset, Math.max(candidatePositions.get(offset) ?? -1, position));
+  };
+
+  let markerSearchFrom = 0;
+  while (markerSearchFrom < pdfText.length) {
+    assertWithinProcessingTime(budget);
+    const markerStart = pdfText.indexOf(PDF_EOF_MARKER, markerSearchFrom);
+    if (markerStart < 0) {
+      break;
+    }
+    markerSearchFrom = markerStart + PDF_EOF_MARKER.length;
+
+    const anchoredOffset = findLastStartXrefOffset(pdfText, markerStart + PDF_EOF_MARKER.length);
+    if (anchoredOffset !== undefined && isKeywordAt(pdfText, anchoredOffset, 'xref')) {
+      registerCandidate(anchoredOffset, markerStart);
+    }
+  }
+
+  const tailStart = Math.max(0, pdfText.length - MAX_PDF_STARTXREF_TAIL_SEARCH_BYTES);
+  const startxrefKeyword = 'startxref';
+  let searchFrom = pdfText.length - 1;
+  while (searchFrom >= tailStart) {
+    assertWithinProcessingTime(budget);
+    const keywordIndex = pdfText.lastIndexOf(startxrefKeyword, searchFrom);
+    if (keywordIndex < tailStart) {
+      break;
+    }
+    searchFrom = keywordIndex - 1;
+
+    if (keywordIndex > 0 && !isPdfWhitespace(pdfText[keywordIndex - 1])) {
+      continue;
+    }
+
+    let cursor = keywordIndex + startxrefKeyword.length;
+    if (cursor >= pdfText.length || !isPdfWhitespace(pdfText[cursor])) {
+      continue;
+    }
+    while (cursor < pdfText.length && isPdfWhitespace(pdfText[cursor])) {
+      cursor += 1;
+    }
+    const digitsStart = cursor;
+    while (cursor < pdfText.length && pdfText[cursor] >= '0' && pdfText[cursor] <= '9') {
+      cursor += 1;
+    }
+    if (cursor === digitsStart || cursor - digitsStart > 15) {
+      continue;
+    }
+
+    const offset = Number.parseInt(pdfText.slice(digitsStart, cursor), 10);
+    if (!Number.isSafeInteger(offset) || offset < 0 || !isKeywordAt(pdfText, offset, 'xref')) {
+      continue;
+    }
+    registerCandidate(offset, keywordIndex);
+  }
+
+  if (candidatePositions.size === 0) {
+    return undefined;
+  }
+
+  const candidates = [...candidatePositions.entries()]
+    .map(([offset, position]) => ({ offset, position }))
+    .sort((left, right) => right.position - left.position);
+  if (candidates.length === 1) {
+    return candidates[0]?.offset;
+  }
+
+  // Multiple surviving startxref sources: the newest revision's /Prev chain
+  // contains every older xref section, so only a candidate owning all the
+  // others can be the head. Ambiguous tails fail closed instead of guessing.
+  const chainCache = new Map<number, Set<number> | undefined>();
+  for (const candidate of candidates) {
+    let chain = chainCache.get(candidate.offset);
+    if (chain === undefined && !chainCache.has(candidate.offset)) {
+      chain = collectXrefChainOffsets(pdfText, candidate.offset, budget);
+      chainCache.set(candidate.offset, chain);
+    }
+    if (!chain) {
+      continue;
+    }
+    const ownsEveryOtherCandidate = candidates.every(
+      (other) => other.offset === candidate.offset || chain!.has(other.offset),
+    );
+    if (ownsEveryOtherCandidate) {
+      return candidate.offset;
+    }
+  }
+
+  throw createPdfExtractionError('unsupported_structure', 'PDF cross-reference tail is ambiguous.');
+}
+
+function throwIfDictionaryIsEncrypted(dictionary: string, budget: PdfExtractionBudget): void {
+  if (findDictionaryEntry(dictionary, 'Encrypt', budget) !== undefined) {
+    throw new PdfTextExtractionError('encrypted', 'Encrypted PDF documents cannot be processed locally.');
+  }
+}
+
+function throwIfStartXrefObjectIsEncrypted(
+  pdfText: string,
+  xrefOffset: number,
+  budget: PdfExtractionBudget,
+): void {
+  const headerMatch = matchObjectHeaderAt(pdfText, xrefOffset);
+  if (!headerMatch) {
+    return;
+  }
+  const dictionaryStart = skipPdfWhitespaceAndComments(pdfText, headerMatch.contentStart);
+  if (!pdfText.startsWith('<<', dictionaryStart)) {
+    return;
+  }
+  const dictionaryEnd = findDictionaryEnd(pdfText, dictionaryStart, budget);
+  const dictionary = pdfText.slice(dictionaryStart, dictionaryEnd);
+  if (readDictionaryNameValue(dictionary, 'Type', budget) !== 'XRef') {
+    return;
+  }
+  throwIfDictionaryIsEncrypted(dictionary, budget);
 }
 
 function parseClassicXrefOffsets(
   pdfText: string,
   budget: PdfExtractionBudget,
-): Map<string, number> {
+): ClassicXrefParseResult {
   const offsets = new Map<string, number>();
-  let xrefOffset = findLastStartXrefOffset(pdfText);
+  let xrefOffset = findLastStartXrefOffset(pdfText, pdfText.length);
   if (xrefOffset === undefined) {
-    return offsets;
+    xrefOffset = findRescueStartXrefOffset(pdfText, budget);
+  }
+  if (xrefOffset === undefined) {
+    return { offsets, trailers: [], hasStartXref: false };
   }
 
+  const trailers: string[] = [];
+  const seenObjectNumbers = new Set<number>();
   const visited = new Set<number>();
   for (let depth = 0; xrefOffset !== undefined; depth += 1) {
     assertWithinProcessingTime(budget);
@@ -576,6 +960,7 @@ function parseClassicXrefOffsets(
     visited.add(xrefOffset);
 
     if (!isKeywordAt(pdfText, xrefOffset, 'xref')) {
+      throwIfStartXrefObjectIsEncrypted(pdfText, xrefOffset, budget);
       throw createPdfExtractionError('unsupported_structure', 'PDF cross-reference streams are not supported.');
     }
 
@@ -607,14 +992,20 @@ function parseClassicXrefOffsets(
         cursor = entry.next;
         parsedEntries += 1;
 
+        const objectNumber = firstObjectNumber + entryIndex;
+        // The chain is traversed newest-to-oldest, so the first entry for an
+        // object number decides that object. Shadowing by object number (not
+        // by number+generation) is what lets a newer free entry such as
+        // `5 1 f` retire the older in-use entry `5 0 n`; otherwise a freed
+        // object would be resurrected from the previous revision.
+        if (seenObjectNumbers.has(objectNumber)) {
+          continue;
+        }
+        seenObjectNumbers.add(objectNumber);
         if (entryMatch[3] === 'n') {
-          const objectNumber = firstObjectNumber + entryIndex;
           const generationNumber = Number.parseInt(entryMatch[2] ?? '', 10);
           const objectOffset = Number.parseInt(entryMatch[1] ?? '', 10);
-          const key = `${objectNumber} ${generationNumber}`;
-          if (!offsets.has(key)) {
-            offsets.set(key, objectOffset);
-          }
+          offsets.set(`${objectNumber} ${generationNumber}`, objectOffset);
         }
       }
 
@@ -627,10 +1018,13 @@ function parseClassicXrefOffsets(
     }
     const dictionaryEnd = findDictionaryEnd(pdfText, cursor, budget);
     const trailerDictionary = pdfText.slice(cursor, dictionaryEnd);
+    // The /Prev chain is traversed newest-to-oldest, so unshift keeps the
+    // trailers in physical order (oldest first, newest last).
+    trailers.unshift(trailerDictionary);
     xrefOffset = readDictionaryNonNegativeInteger(trailerDictionary, 'Prev', budget);
   }
 
-  return offsets;
+  return { offsets, trailers, hasStartXref: true };
 }
 
 function resolveIndirectInteger(
@@ -647,20 +1041,20 @@ function resolveIndirectInteger(
     );
   }
 
-  const headerMatch = /^(\d+)\s+(\d+)\s+obj\b/u.exec(pdfText.slice(offset));
+  const headerMatch = matchObjectHeaderAt(pdfText, offset);
   if (!headerMatch
-    || Number.parseInt(headerMatch[1] ?? '', 10) !== objectNumber
-    || Number.parseInt(headerMatch[2] ?? '', 10) !== generationNumber) {
+    || headerMatch.objectNumber !== objectNumber
+    || headerMatch.generationNumber !== generationNumber) {
     throw createPdfExtractionError('unsupported_structure', 'PDF indirect length object is invalid.');
   }
 
-  const valueStart = skipPdfWhitespaceAndComments(pdfText, offset + headerMatch[0].length);
-  const valueMatch = /^(\d+)\b/u.exec(pdfText.slice(valueStart));
+  const valueStart = skipPdfWhitespaceAndComments(pdfText, headerMatch.contentStart);
+  const valueMatch = matchIntegerTokenAt(pdfText, valueStart);
   if (!valueMatch) {
     throw createPdfExtractionError('unsupported_structure', 'PDF indirect stream length is not an integer.');
   }
-  const value = Number.parseInt(valueMatch[1] ?? '', 10);
-  const valueEnd = skipPdfWhitespaceAndComments(pdfText, valueStart + valueMatch[0].length);
+  const value = Number.parseInt(valueMatch.value, 10);
+  const valueEnd = skipPdfWhitespaceAndComments(pdfText, valueMatch.next);
   if (!isKeywordAt(pdfText, valueEnd, 'endobj') || !Number.isSafeInteger(value) || value < 0) {
     throw createPdfExtractionError('unsupported_structure', 'PDF indirect stream length object is malformed.');
   }
@@ -728,35 +1122,91 @@ function resolveEndStreamTokenStart(pdfText: string, dataEnd: number): number {
   return dataEnd;
 }
 
-function collectTrailerDictionaries(
+function hasEndStreamKeywordAt(pdfText: string, start: number): boolean {
+  // The byte before `endstream` is arbitrary stream data when the declared
+  // /Length ends exactly at the keyword, so only the trailing delimiter is
+  // validated here.
+  return pdfText.startsWith('endstream', start)
+    && isPdfDelimiter(pdfText[start + 'endstream'.length]);
+}
+
+function parseIndirectObjectAt(
+  bytes: Uint8Array,
   pdfText: string,
-  objectRanges: PdfByteRange[],
+  header: NonNullable<ReturnType<typeof readIndirectObjectHeaderAt>>,
+  xrefOffsets: Map<string, number>,
   budget: PdfExtractionBudget,
-): string[] {
-  const trailers: string[] = [];
-  let rangeIndex = 0;
-  let cursor = 0;
-  while ((cursor = findKeyword(pdfText, 'trailer', cursor)) >= 0) {
-    assertWithinProcessingTime(budget);
-    while (rangeIndex < objectRanges.length && objectRanges[rangeIndex].end <= cursor) {
-      rangeIndex += 1;
-    }
-    if (rangeIndex < objectRanges.length
-      && objectRanges[rangeIndex].start <= cursor
-      && cursor < objectRanges[rangeIndex].end) {
-      cursor = objectRanges[rangeIndex].end;
-      continue;
+): { objectEnd: number; dictionaryObject?: PdfDictionaryObject; isStream: boolean } {
+  const contentStart = header.contentStart;
+  const objectKey = header.key;
+
+  if (pdfText.startsWith('<<', contentStart)) {
+    const dictionaryEnd = findDictionaryEnd(pdfText, contentStart, budget);
+    const dictionary = pdfText.slice(contentStart, dictionaryEnd);
+    if (readDictionaryNameValue(dictionary, 'Type', budget) === 'XRef') {
+      throwIfDictionaryIsEncrypted(dictionary, budget);
+      throw createPdfExtractionError('unsupported_structure', 'PDF cross-reference streams are not supported.');
     }
 
-    const dictionaryStart = skipPdfWhitespaceAndComments(pdfText, cursor + 'trailer'.length);
-    if (!pdfText.startsWith('<<', dictionaryStart)) {
-      throw createPdfExtractionError('unsupported_structure', 'PDF trailer dictionary is malformed.');
+    const afterDictionary = skipPdfWhitespaceAndComments(pdfText, dictionaryEnd);
+    if (!isKeywordAt(pdfText, afterDictionary, 'stream')) {
+      if (!isKeywordAt(pdfText, afterDictionary, 'endobj')) {
+        throw createPdfExtractionError('unsupported_structure', 'PDF dictionary object is missing endobj.');
+      }
+      return {
+        objectEnd: afterDictionary + 'endobj'.length,
+        dictionaryObject: {
+          objectNumber: header.objectNumber,
+          generationNumber: header.generationNumber,
+          key: objectKey,
+          dictionary,
+        },
+        isStream: false,
+      };
     }
-    const dictionaryEnd = findDictionaryEnd(pdfText, dictionaryStart, budget);
-    trailers.push(pdfText.slice(dictionaryStart, dictionaryEnd));
-    cursor = dictionaryEnd;
+
+    const dataStart = resolveStreamDataStart(pdfText, afterDictionary + 'stream'.length);
+    const streamLength = resolveStreamLength(dictionary, pdfText, xrefOffsets, budget);
+    const dataEnd = dataStart + streamLength;
+    if (!Number.isSafeInteger(dataEnd) || dataEnd > bytes.length) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF stream extends past the document boundary.');
+    }
+    const endStreamStart = resolveEndStreamTokenStart(pdfText, dataEnd);
+    if (!hasEndStreamKeywordAt(pdfText, endStreamStart)) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF stream length does not match its endstream boundary.');
+    }
+    const endObjectStart = skipPdfWhitespaceAndComments(
+      pdfText,
+      endStreamStart + 'endstream'.length,
+    );
+    if (!isKeywordAt(pdfText, endObjectStart, 'endobj')) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF stream object is missing endobj.');
+    }
+    return {
+      objectEnd: endObjectStart + 'endobj'.length,
+      dictionaryObject: {
+        objectNumber: header.objectNumber,
+        generationNumber: header.generationNumber,
+        key: objectKey,
+        dictionary,
+        stream: {
+          objectKey,
+          dictionary,
+          bytes: bytes.subarray(dataStart, dataEnd),
+        },
+      },
+      isStream: true,
+    };
   }
-  return trailers;
+
+  const endObjectStart = findTopLevelEndObjectStart(pdfText, contentStart, budget);
+  if (endObjectStart < 0) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF object is missing endobj.');
+  }
+  return {
+    objectEnd: endObjectStart + 'endobj'.length,
+    isStream: false,
+  };
 }
 
 function collectPdfStructure(
@@ -764,112 +1214,82 @@ function collectPdfStructure(
   pdfText: string,
   budget: PdfExtractionBudget,
 ): CollectedPdfStructure {
-  const xrefOffsets = parseClassicXrefOffsets(pdfText, budget);
+  const classicXref = parseClassicXrefOffsets(pdfText, budget);
   const objects = new Map<string, PdfDictionaryObject>();
   const objectOrder: PdfDictionaryObject[] = [];
-  const objectRanges: PdfByteRange[] = [];
   let objectCount = 0;
   let streamCount = 0;
-  let searchStart = 0;
 
-  PDF_OBJECT_HEADER_PATTERN.lastIndex = 0;
-  while (searchStart < pdfText.length) {
-    assertWithinProcessingTime(budget);
-    PDF_OBJECT_HEADER_PATTERN.lastIndex = searchStart;
-    const match = PDF_OBJECT_HEADER_PATTERN.exec(pdfText);
-    if (!match) {
-      break;
-    }
+  const registerObject = (header: NonNullable<ReturnType<typeof readIndirectObjectHeaderAt>>): number => {
     objectCount += 1;
     if (objectCount > MAX_PDF_OBJECT_COUNT) {
       throw createPdfExtractionError('resource_limit', 'PDF contains too many objects.');
     }
 
-    const objectStart = match.index;
-    const objectNumber = Number.parseInt(match[1] ?? '', 10);
-    const generationNumber = Number.parseInt(match[2] ?? '', 10);
-    if (!Number.isSafeInteger(objectNumber) || !Number.isSafeInteger(generationNumber)) {
-      throw createPdfExtractionError('unsupported_structure', 'PDF object identifier is invalid.');
-    }
-    const objectKey = `${objectNumber} ${generationNumber}`;
-    const contentStart = skipPdfWhitespaceAndComments(pdfText, PDF_OBJECT_HEADER_PATTERN.lastIndex);
-    let objectEnd: number;
-    let dictionaryObject: PdfDictionaryObject | undefined;
-
-    if (pdfText.startsWith('<<', contentStart)) {
-      const dictionaryEnd = findDictionaryEnd(pdfText, contentStart, budget);
-      const dictionary = pdfText.slice(contentStart, dictionaryEnd);
-      if (readDictionaryNameValue(dictionary, 'Type', budget) === 'XRef') {
-        throw createPdfExtractionError('unsupported_structure', 'PDF cross-reference streams are not supported.');
+    const parsedObject = parseIndirectObjectAt(bytes, pdfText, header, classicXref.offsets, budget);
+    if (parsedObject.isStream) {
+      streamCount += 1;
+      if (streamCount > MAX_PDF_STREAM_COUNT) {
+        throw createPdfExtractionError('resource_limit', 'PDF contains too many streams.');
       }
+    }
 
-      const afterDictionary = skipPdfWhitespaceAndComments(pdfText, dictionaryEnd);
-      if (isKeywordAt(pdfText, afterDictionary, 'stream')) {
-        streamCount += 1;
-        if (streamCount > MAX_PDF_STREAM_COUNT) {
-          throw createPdfExtractionError('resource_limit', 'PDF contains too many streams.');
-        }
+    if (parsedObject.dictionaryObject) {
+      objects.set(header.key, parsedObject.dictionaryObject);
+      objectOrder.push(parsedObject.dictionaryObject);
+    }
+    return parsedObject.objectEnd;
+  };
 
-        const dataStart = resolveStreamDataStart(pdfText, afterDictionary + 'stream'.length);
-        const streamLength = resolveStreamLength(dictionary, pdfText, xrefOffsets, budget);
-        const dataEnd = dataStart + streamLength;
-        if (!Number.isSafeInteger(dataEnd) || dataEnd > bytes.length) {
-          throw createPdfExtractionError('unsupported_structure', 'PDF stream extends past the document boundary.');
-        }
-        const endStreamStart = resolveEndStreamTokenStart(pdfText, dataEnd);
-        if (!isKeywordAt(pdfText, endStreamStart, 'endstream')) {
-          throw createPdfExtractionError('unsupported_structure', 'PDF stream length does not match its endstream boundary.');
-        }
-        const endObjectStart = skipPdfWhitespaceAndComments(
-          pdfText,
-          endStreamStart + 'endstream'.length,
+  const trailers: string[] = [];
+  if (classicXref.hasStartXref) {
+    trailers.push(...classicXref.trailers);
+
+    const offsetEntries: [string, number][] = [];
+    classicXref.offsets.forEach((offset, key) => {
+      offsetEntries.push([key, offset]);
+    });
+    offsetEntries.sort((left, right) => (left[1] - right[1]));
+
+    for (const [key, offset] of offsetEntries) {
+      assertWithinProcessingTime(budget);
+      const header = Number.isSafeInteger(offset) && offset >= 0 && offset < pdfText.length
+        ? readIndirectObjectHeaderAt(pdfText, offset)
+        : undefined;
+      if (!header || header.key !== key) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF cross-reference entry points to an invalid object.',
         );
-        if (!isKeywordAt(pdfText, endObjectStart, 'endobj')) {
-          throw createPdfExtractionError('unsupported_structure', 'PDF stream object is missing endobj.');
-        }
-        objectEnd = endObjectStart + 'endobj'.length;
-        const stream = {
-          objectKey,
-          dictionary,
-          bytes: bytes.subarray(dataStart, dataEnd),
-        };
-        dictionaryObject = {
-          objectNumber,
-          generationNumber,
-          key: objectKey,
-          dictionary,
-          stream,
-        };
-      } else {
-        const endObjectStart = findKeyword(pdfText, 'endobj', dictionaryEnd);
-        if (endObjectStart < 0) {
-          throw createPdfExtractionError('unsupported_structure', 'PDF dictionary object is missing endobj.');
-        }
-        objectEnd = endObjectStart + 'endobj'.length;
-        dictionaryObject = {
-          objectNumber,
-          generationNumber,
-          key: objectKey,
-          dictionary,
-        };
       }
-    } else {
-      const endObjectStart = findKeyword(pdfText, 'endobj', contentStart);
-      if (endObjectStart < 0) {
-        throw createPdfExtractionError('unsupported_structure', 'PDF object is missing endobj.');
-      }
-      objectEnd = endObjectStart + 'endobj'.length;
+      registerObject(header);
     }
+  } else {
+    let cursor = 0;
+    while (cursor < pdfText.length) {
+      assertWithinProcessingTime(budget);
+      const topLevelStructure = findNextTopLevelStructure(pdfText, cursor, budget);
+      if (!topLevelStructure) {
+        break;
+      }
 
-    objectRanges.push({ start: objectStart, end: objectEnd });
-    if (dictionaryObject) {
-      objects.set(objectKey, dictionaryObject);
-      objectOrder.push(dictionaryObject);
+      if (topLevelStructure.type === 'trailer') {
+        if (topLevelStructure.next <= cursor) {
+          throw createPdfExtractionError('unsupported_structure', 'PDF top-level structure is malformed.');
+        }
+        trailers.push(topLevelStructure.dictionary);
+        cursor = topLevelStructure.next;
+        continue;
+      }
+
+      const objectEnd = registerObject(topLevelStructure.header);
+      if (objectEnd <= cursor) {
+        throw createPdfExtractionError('unsupported_structure', 'PDF top-level structure is malformed.');
+      }
+      cursor = objectEnd;
     }
-    searchStart = objectEnd;
   }
 
-  const trailers = collectTrailerDictionaries(pdfText, objectRanges, budget);
   return {
     objects,
     objectOrder,
@@ -931,6 +1351,124 @@ function readPageContentReferences(
   return [reference.reference];
 }
 
+function resolveDictionaryEntryAsDictionary(
+  structure: CollectedPdfStructure,
+  ownerDictionary: string,
+  key: string,
+  budget: PdfExtractionBudget,
+): string | undefined {
+  const entry = findDictionaryEntry(ownerDictionary, key, budget);
+  if (!entry) {
+    return undefined;
+  }
+
+  if (ownerDictionary.startsWith('<<', entry.valueStart)) {
+    const dictionaryEnd = findDictionaryEnd(ownerDictionary, entry.valueStart, budget);
+    if (dictionaryEnd !== entry.valueEnd) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        `PDF /${key} entry does not resolve to a dictionary.`,
+      );
+    }
+    return ownerDictionary.slice(entry.valueStart, dictionaryEnd);
+  }
+
+  const reference = readIndirectReferenceAt(ownerDictionary, entry.valueStart);
+  if (!reference || reference.next !== entry.valueEnd) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      `PDF /${key} entry does not resolve to a dictionary.`,
+    );
+  }
+
+  const object = structure.objects.get(reference.reference.key);
+  if (!object || object.stream) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      `PDF /${key} entry does not resolve to a dictionary.`,
+    );
+  }
+
+  return object.dictionary;
+}
+
+function readNamedReferenceDictionary(
+  dictionary: string,
+  budget: PdfExtractionBudget,
+): { name: string; reference: PdfObjectReference }[] {
+  if (!dictionary.startsWith('<<')) {
+    throw createPdfExtractionError('unsupported_structure', 'PDF resource dictionary is malformed.');
+  }
+
+  const entries: { name: string; reference: PdfObjectReference }[] = [];
+  let cursor = 2;
+  while (cursor < dictionary.length) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(dictionary, cursor);
+    if (dictionary.startsWith('>>', cursor)) {
+      if (cursor + 2 !== dictionary.length) {
+        throw createPdfExtractionError('unsupported_structure', 'PDF resource dictionary is malformed.');
+      }
+      return entries;
+    }
+    if (dictionary[cursor] !== '/') {
+      throw createPdfExtractionError('unsupported_structure', 'PDF resource dictionary is malformed.');
+    }
+
+    const entryStart = cursor;
+    const name = readPdfNameToken(dictionary, cursor);
+    const valueStart = skipPdfWhitespaceAndComments(dictionary, name.next);
+    const valueEnd = readPdfObjectEnd(dictionary, valueStart, budget);
+    if (valueEnd <= entryStart) {
+      throw createPdfExtractionError('unsupported_structure', 'PDF resource dictionary is malformed.');
+    }
+    const reference = readIndirectReferenceAt(dictionary, valueStart);
+    if (!reference || reference.next !== valueEnd) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF resource dictionary contains an unsupported direct object.',
+      );
+    }
+
+    entries.push({ name: name.value, reference: reference.reference });
+    if (entries.length > MAX_PDF_PAGE_CONTENT_REFERENCES) {
+      throw createPdfExtractionError('resource_limit', 'PDF page content references exceed local limits.');
+    }
+    cursor = valueEnd;
+  }
+
+  throw createPdfExtractionError('unsupported_structure', 'PDF resource dictionary is malformed.');
+}
+
+function resolveFormXObjectNames(
+  structure: CollectedPdfStructure,
+  resourcesDictionary: string,
+  budget: PdfExtractionBudget,
+): Set<string> {
+  const xObjectDictionary = resolveDictionaryEntryAsDictionary(structure, resourcesDictionary, 'XObject', budget);
+  if (!xObjectDictionary) {
+    return new Set();
+  }
+
+  const names = new Set<string>();
+  for (const entry of readNamedReferenceDictionary(xObjectDictionary, budget)) {
+    assertWithinProcessingTime(budget);
+    const object = structure.objects.get(entry.reference.key);
+    if (!object || !object.stream) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF /XObject entry references a missing or non-stream object.',
+      );
+    }
+    if (readDictionaryNameValue(object.dictionary, 'Subtype', budget) !== 'Form') {
+      continue;
+    }
+    names.add(entry.name);
+  }
+
+  return names;
+}
+
 function resolvePageContentStructure(
   structure: CollectedPdfStructure,
   budget: PdfExtractionBudget,
@@ -941,9 +1479,10 @@ function resolvePageContentStructure(
     throw createPdfExtractionError('unsupported_structure', 'PDF catalog is missing its page tree reference.');
   }
 
-  const pages: PdfStreamCandidate[][] = [];
+  const pages: PdfPageContent[] = [];
   const visited = new Set<string>();
-  const pending: { depth: number; reference: PdfObjectReference }[] = [{
+  const formXObjectNamesCache = new Map<string, Set<string>>();
+  const pending: { depth: number; reference: PdfObjectReference; resourcesDictionary?: string }[] = [{
     depth: 0,
     reference: pagesReference,
   }];
@@ -966,19 +1505,40 @@ function resolvePageContentStructure(
     }
     const type = readDictionaryNameValue(object.dictionary, 'Type', budget);
     if (type === 'Pages') {
+      const ownResourcesDictionary = resolveDictionaryEntryAsDictionary(
+        structure,
+        object.dictionary,
+        'Resources',
+        budget,
+      );
+      // An object's own Resources entry overrides inherited resources whenever
+      // it is present, even as an explicit empty dictionary.
+      const effectiveResourcesDictionary = ownResourcesDictionary ?? current.resourcesDictionary;
       const kidsEntry = findDictionaryEntry(object.dictionary, 'Kids', budget);
       if (!kidsEntry) {
         throw createPdfExtractionError('unsupported_structure', 'PDF page tree node is missing /Kids.');
       }
       const kids = readReferenceArray(object.dictionary, kidsEntry, 'Kids', budget);
       for (let index = kids.length - 1; index >= 0; index -= 1) {
-        pending.push({ depth: current.depth + 1, reference: kids[index] });
+        pending.push({
+          depth: current.depth + 1,
+          reference: kids[index],
+          resourcesDictionary: effectiveResourcesDictionary,
+        });
       }
       continue;
     }
     if (type !== 'Page') {
       throw createPdfExtractionError('unsupported_structure', 'PDF page tree contains a non-page object.');
     }
+
+    const ownResourcesDictionary = resolveDictionaryEntryAsDictionary(
+      structure,
+      object.dictionary,
+      'Resources',
+      budget,
+    );
+    const effectiveResourcesDictionary = ownResourcesDictionary ?? current.resourcesDictionary;
 
     const contentReferences = readPageContentReferences(object.dictionary, budget);
     contentReferenceCount += contentReferences.length;
@@ -996,7 +1556,21 @@ function resolvePageContentStructure(
       }
       return contentObject.stream;
     });
-    pages.push(pageStreams);
+    let formXObjectNames: Set<string>;
+    if (effectiveResourcesDictionary === undefined) {
+      formXObjectNames = new Set<string>();
+    } else {
+      // Pages inheriting the same resources dictionary share one resolution;
+      // re-parsing it per page competes with content extraction for the budget.
+      const cachedFormXObjectNames = formXObjectNamesCache.get(effectiveResourcesDictionary);
+      if (cachedFormXObjectNames) {
+        formXObjectNames = cachedFormXObjectNames;
+      } else {
+        formXObjectNames = resolveFormXObjectNames(structure, effectiveResourcesDictionary, budget);
+        formXObjectNamesCache.set(effectiveResourcesDictionary, formXObjectNames);
+      }
+    }
+    pages.push({ streams: pageStreams, formXObjectNames });
   }
 
   return { pageCount: pages.length, pages };
@@ -1161,14 +1735,12 @@ function readContentToken(
   }
 
   if (char === '/') {
-    let end = cursor + 1;
-    while (end < input.length && !isPdfDelimiter(input[end])) {
-      end += 1;
-    }
-    return { next: end, token: { type: 'name', value: input.slice(cursor, end) } };
+    const name = readPdfNameToken(input, cursor);
+    return { next: name.next, token: { type: 'name', value: name.value } };
   }
 
-  const numberMatch = /^[+-]?(?:\d+\.?\d*|\.\d+)/u.exec(input.slice(cursor));
+  PDF_CONTENT_NUMBER_PATTERN.lastIndex = cursor;
+  const numberMatch = PDF_CONTENT_NUMBER_PATTERN.exec(input);
   if (numberMatch) {
     return {
       next: cursor + numberMatch[0].length,
@@ -1237,13 +1809,84 @@ function extractTextFromTextArray(entries: PdfContentToken[]): string {
   return fragments.join('');
 }
 
-function extractTextFromContentStream(content: string, budget: PdfExtractionBudget): string {
+function readTrailingNumberOperands(
+  operands: PdfContentToken[],
+  count: number,
+): number[] | undefined {
+  if (operands.length < count) {
+    return undefined;
+  }
+  const values: number[] = [];
+  for (let index = operands.length - count; index < operands.length; index += 1) {
+    const operand = operands[index];
+    if (operand.type !== 'number' || !Number.isFinite(operand.value)) {
+      return undefined;
+    }
+    values.push(operand.value);
+  }
+  return values;
+}
+
+// Inline images (`BI <dictionary> ID <data> EI`) embed raw image bytes in a
+// content stream. The data region must stay opaque to the operator parser:
+// interpreting it would let image bytes shaped like `BT (text) Tj ET` inject
+// hidden text into the extraction. The dictionary is tokenized until the `ID`
+// keyword, then the scan stops at the first `EI` preceded by whitespace and
+// followed by a delimiter or the stream end — the boundary readers apply.
+function skipInlineImage(
+  content: string,
+  dictionaryStart: number,
+  budget: PdfExtractionBudget,
+): number {
+  let cursor = dictionaryStart;
+  let reachedImageData = false;
+  while (!reachedImageData) {
+    const result = readContentToken(content, cursor, budget);
+    if (!result.token) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF inline image is missing its ID keyword.',
+      );
+    }
+    cursor = result.next;
+    reachedImageData = result.token.type === 'word' && result.token.value === 'ID';
+  }
+
+  // The ID keyword is followed by a single whitespace byte and then the raw
+  // image data; tolerate extra whitespace before scanning for the terminator.
+  while (cursor < content.length && isPdfWhitespace(content[cursor])) {
+    cursor += 1;
+  }
+
+  let terminatorStart = content.indexOf('EI', cursor);
+  while (terminatorStart >= 0) {
+    assertWithinProcessingTime(budget);
+    const beforeTerminator = content[terminatorStart - 1];
+    const afterTerminator = content[terminatorStart + 'EI'.length];
+    if (isPdfWhitespace(beforeTerminator) && isPdfDelimiter(afterTerminator)) {
+      return terminatorStart + 'EI'.length;
+    }
+    terminatorStart = content.indexOf('EI', terminatorStart + 1);
+  }
+
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF inline image is missing its EI terminator.',
+  );
+}
+
+function extractTextFromContentStream(
+  content: string,
+  budget: PdfExtractionBudget,
+  formXObjectNames: ReadonlySet<string>,
+): string {
   const output: string[] = [];
   const operands: PdfContentToken[] = [];
   let cursor = 0;
   let insideTextObject = false;
   let hasShownText = false;
-  let pendingSeparator: 'line' | 'space' | undefined;
+  let pendingSeparator: 'line' | undefined;
+  let textLineY: number | undefined;
 
   const rememberOperand = (token: PdfContentToken) => {
     operands.push(token);
@@ -1260,12 +1903,12 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
     if (text.length === 0) {
       return;
     }
-    if (hasShownText) {
-      output.push(pendingSeparator === 'line' ? '\n' : ' ');
+    if (hasShownText && pendingSeparator === 'line') {
+      output.push('\n');
     }
     output.push(text);
     hasShownText = true;
-    pendingSeparator = 'space';
+    pendingSeparator = undefined;
   };
 
   while (cursor < content.length) {
@@ -1277,9 +1920,7 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
     }
 
     if (token.type !== 'word') {
-      if (insideTextObject) {
-        rememberOperand(token);
-      }
+      rememberOperand(token);
       continue;
     }
 
@@ -1290,6 +1931,7 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
       }
       insideTextObject = true;
       requestLineBreak();
+      textLineY = undefined;
       operands.length = 0;
       continue;
     }
@@ -1299,7 +1941,22 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
       operands.length = 0;
       continue;
     }
+    if (operator === 'Do') {
+      const nameOperand = findLastOperand(operands, 'name');
+      if (nameOperand && formXObjectNames.has(nameOperand.value)) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF Form XObjects are not supported for local text extraction.',
+        );
+      }
+    }
+    if (operator === 'BI') {
+      cursor = skipInlineImage(content, cursor, budget);
+      operands.length = 0;
+      continue;
+    }
     if (!insideTextObject) {
+      operands.length = 0;
       continue;
     }
 
@@ -1311,9 +1968,33 @@ function extractTextFromContentStream(content: string, budget: PdfExtractionBudg
       appendShownText(text);
     } else if (operator === '\'' || operator === '"') {
       requestLineBreak();
+      textLineY = undefined;
       appendShownText(findLastOperand(operands, 'string')?.value ?? '');
-    } else if (operator === 'T*' || operator === 'Td' || operator === 'TD') {
+    } else if (operator === 'T*') {
       requestLineBreak();
+      textLineY = undefined;
+    } else if (operator === 'Td' || operator === 'TD') {
+      const movement = readTrailingNumberOperands(operands, 2);
+      if (movement) {
+        const ty = movement[1];
+        if (ty !== 0) {
+          requestLineBreak();
+        }
+        if (textLineY !== undefined) {
+          textLineY += ty;
+        }
+      } else {
+        textLineY = undefined;
+      }
+    } else if (operator === 'Tm') {
+      const matrix = readTrailingNumberOperands(operands, 6);
+      if (matrix) {
+        const nextLineY = matrix[5];
+        if (textLineY !== undefined && nextLineY !== textLineY) {
+          requestLineBreak();
+        }
+        textLineY = nextLineY;
+      }
     }
 
     operands.length = 0;
@@ -1406,35 +2087,32 @@ function inflateStream(candidate: PdfStreamCandidate, budget: PdfExtractionBudge
   return textChunks.join('');
 }
 
+// Receives streams already selected as page /Contents. Readers execute those
+// as operators regardless of stray dictionary keys, so /Subtype is ignored
+// here: honoring it would let a content stream hide its visible text by
+// claiming to be an image.
 function decodeStream(
   candidate: PdfStreamCandidate,
   budget: PdfExtractionBudget,
-): { text?: string; unsupportedFilter: boolean } {
-  if (readDictionaryNameValue(candidate.dictionary, 'Subtype', budget) === 'Image') {
-    return { unsupportedFilter: false };
-  }
-
+): string {
   const filterMode = resolvePdfStreamFilterMode(candidate.dictionary, budget);
   if (filterMode === 'unsupported') {
-    return { unsupportedFilter: true };
+    throw new PdfTextExtractionError('unsupported_filter', 'PDF uses unsupported compression or content filters.');
   }
 
   try {
     if (filterMode === 'flate') {
-      return { text: inflateStream(candidate, budget), unsupportedFilter: false };
+      return inflateStream(candidate, budget);
     }
 
     reserveDecodedBytes(candidate.bytes.length, 0, undefined, budget);
     assertWithinProcessingTime(budget);
-    return {
-      text: bytesToBinaryString(candidate.bytes),
-      unsupportedFilter: false,
-    };
+    return bytesToBinaryString(candidate.bytes);
   } catch (error) {
     if (error instanceof PdfTextExtractionError) {
       throw error;
     }
-    return { unsupportedFilter: true };
+    throw new PdfTextExtractionError('invalid_pdf', 'PDF stream data could not be decoded.');
   }
 }
 
@@ -1473,41 +2151,31 @@ export function extractTextFromPdfBase64(base64: string): PdfTextExtractionResul
   }
   const structure = resolvePageContentStructure(collectedStructure, budget);
 
-  let unsupportedFilterCount = 0;
-  let referencedStreamCount = 0;
   let processedPageContentBytes = 0;
-  const decodedStreamCache = new Map<
-    string,
-    { text?: string; unsupportedFilter: boolean }
-  >();
+  const decodedStreamCache = new Map<string, string>();
   const extractedPages: string[] = [];
   for (const page of structure.pages) {
     const decodedPageStreams: string[] = [];
-    for (const stream of page) {
-      referencedStreamCount += 1;
-      let decoded = decodedStreamCache.get(stream.objectKey);
-      if (!decoded) {
-        decoded = decodeStream(stream, budget);
-        decodedStreamCache.set(stream.objectKey, decoded);
+    for (const stream of page.streams) {
+      let decodedText = decodedStreamCache.get(stream.objectKey);
+      if (decodedText === undefined) {
+        decodedText = decodeStream(stream, budget);
+        decodedStreamCache.set(stream.objectKey, decodedText);
       }
-      if (decoded.unsupportedFilter) {
-        unsupportedFilterCount += 1;
-        continue;
+      processedPageContentBytes += decodedText.length;
+      if (processedPageContentBytes > MAX_PDF_DECODED_DOCUMENT_BYTES) {
+        throw createPdfExtractionError(
+          'resource_limit',
+          'PDF page content exceeds the local decoded-size limit.',
+        );
       }
-      if (decoded.text) {
-        processedPageContentBytes += decoded.text.length;
-        if (processedPageContentBytes > MAX_PDF_DECODED_DOCUMENT_BYTES) {
-          throw createPdfExtractionError(
-            'resource_limit',
-            'PDF page content exceeds the local decoded-size limit.',
-          );
-        }
-        decodedPageStreams.push(decoded.text);
+      if (decodedText.length > 0) {
+        decodedPageStreams.push(decodedText);
       }
     }
 
     const pageText = decodedPageStreams.length > 0
-      ? extractTextFromContentStream(decodedPageStreams.join('\n'), budget)
+      ? extractTextFromContentStream(decodedPageStreams.join('\n'), budget, page.formXObjectNames)
       : '';
     if (pageText.trim().length > 0) {
       extractedPages.push(pageText);
@@ -1522,10 +2190,6 @@ export function extractTextFromPdfBase64(base64: string): PdfTextExtractionResul
       isScanned: false,
       pageCount: structure.pageCount,
     };
-  }
-
-  if (referencedStreamCount > 0 && unsupportedFilterCount === referencedStreamCount) {
-    throw new PdfTextExtractionError('unsupported_filter', 'PDF uses unsupported compression or content filters.');
   }
 
   throw new PdfTextExtractionError('no_extractable_text', 'PDF has no extractable text.');

@@ -345,11 +345,29 @@ describe('pdfTextExtraction', () => {
     expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
   });
 
-  it('treats only vertical Td and TD movement as a line break', () => {
+  it('preserves word gaps for horizontal Td and TD movement and lines for vertical movement', () => {
     const pdf = createPlainTextPdf('BT (A) Tj 5 0 Td (B) Tj 0 -15 TD (C) Tj 3 0 TD (D) Tj ET');
 
-    expect(extractTextFromPdfBase64(pdf).text).toBe('AB\nCD');
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B\nC D');
   });
+
+  it.each(['-45 0 Td', '-45 0 TD'])(
+    'preserves a word gap after negative horizontal movement with %s',
+    (movement) => {
+      const pdf = createPlainTextPdf(`BT (Invoice) Tj ${movement} (Total) Tj ET`);
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe('Invoice Total');
+    },
+  );
+
+  it.each(['0 0 Td', '0 0 TD'])(
+    'does not synthesize a separator for zero movement with %s',
+    (movement) => {
+      const pdf = createPlainTextPdf(`BT (Hel) Tj ${movement} (lo) Tj ET`);
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe('Hello');
+    },
+  );
 
   it('uses Tm Y movement for line breaks without splitting adjacent fragments', () => {
     const pdf = createPlainTextPdf(

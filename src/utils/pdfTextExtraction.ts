@@ -2406,7 +2406,7 @@ function extractTextFromContentStream(
   let cursor = 0;
   let insideTextObject = false;
   let hasShownText = false;
-  let pendingSeparator: 'line' | undefined;
+  let pendingSeparator: 'space' | 'line' | undefined;
   let textLineY: number | undefined;
 
   const rememberOperand = (token: PdfContentToken) => {
@@ -2420,12 +2420,19 @@ function extractTextFromContentStream(
       pendingSeparator = 'line';
     }
   };
+  const requestWordBreak = () => {
+    if (hasShownText && pendingSeparator !== 'line') {
+      pendingSeparator = 'space';
+    }
+  };
   const appendShownText = (text: string) => {
     if (text.length === 0) {
       return;
     }
     if (hasShownText && pendingSeparator === 'line') {
       output.push('\n');
+    } else if (hasShownText && pendingSeparator === 'space') {
+      output.push(' ');
     }
     output.push(text);
     hasShownText = true;
@@ -2503,9 +2510,11 @@ function extractTextFromContentStream(
     } else if (operator === 'Td' || operator === 'TD') {
       const movement = readTrailingNumberOperands(operands, 2);
       if (movement) {
-        const ty = movement[1];
+        const [tx, ty] = movement;
         if (ty !== 0) {
           requestLineBreak();
+        } else if (tx !== 0) {
+          requestWordBreak();
         }
         if (textLineY !== undefined) {
           textLineY += ty;

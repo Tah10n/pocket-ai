@@ -245,6 +245,7 @@ const BACKGROUND_TOKEN_COUNT_SOFT_TIMEOUT_MS = 10000;
 const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_BASE_MS = 20000;
 const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MAX_MS = 180000;
 const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_CHARS_PER_SECOND = 4000;
+const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MEDIA_INPUT_ALLOWANCE_MS = 30000;
 const MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS = 90000;
 const MODEL_INIT_NO_PROGRESS_TIMEOUT_MS = 90000;
 const MODEL_INIT_HARD_TIMEOUT_MS = 600000;
@@ -2261,9 +2262,9 @@ class LLMEngineService {
 
   private resolveBackgroundTokenCountHardTimeoutMs(messages: readonly LlmChatMessage[]): number {
     // Token counting formats and tokenizes the whole history, and strict-role
-    // templates can repeat that pass once more. Scale the hard ownership limit
-    // with the prompt size instead of treating a slow-but-healthy large count
-    // as a hang.
+    // templates can repeat that pass once more. Native media tokenization also
+    // does substantially more work than text alone, so budget every retained
+    // image/audio occurrence before deciding that a READY context is hung.
     let totalChars = 0;
     for (const message of messages) {
       if (typeof message.content === 'string') {
@@ -2277,8 +2278,13 @@ class LLMEngineService {
     const promptSizeAllowanceMs = Math.ceil(
       totalChars / BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_CHARS_PER_SECOND,
     ) * 1000;
+    const mediaInputOccurrenceCount = countMessageMediaPathOccurrences(messages)
+      + countMessageAudioInputOccurrencesInMessages(messages);
+    const mediaInputAllowanceMs = mediaInputOccurrenceCount
+      * BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MEDIA_INPUT_ALLOWANCE_MS;
     const scaledTimeoutMs = BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_BASE_MS
-      + promptSizeAllowanceMs;
+      + promptSizeAllowanceMs
+      + mediaInputAllowanceMs;
     return Math.min(scaledTimeoutMs, BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MAX_MS);
   }
 
@@ -2506,6 +2512,7 @@ class LLMEngineService {
     lifecycleEvent,
     warningMessage,
     blockThinkingCapabilityProbe = false,
+    allowInitializing = false,
   }: {
     modelId: string;
     context: LlamaContext;
@@ -2514,12 +2521,16 @@ class LLMEngineService {
     lifecycleEvent: EngineLifecycleEvent;
     warningMessage: string;
     blockThinkingCapabilityProbe?: boolean;
+    allowInitializing?: boolean;
   }): void {
     if (
       this.context !== context
       || this.contextGeneration !== generation
       || this.isUnloading
-      || this.state.status !== EngineStatus.READY
+      || (
+        this.state.status !== EngineStatus.READY
+        && !(allowInitializing && this.state.status === EngineStatus.INITIALIZING)
+      )
       || this.state.activeModelId !== modelId
       || this.contextRecoveryStatus !== 'idle'
       || this.contextRecoveryPromise !== null
@@ -8319,16 +8330,13 @@ class LLMEngineService {
         this.contextRecoveryStatus = 'idle';
         this.contextRecoveryModelId = null;
       }
-      this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
-      updateSettings({ activeModelId: modelId });
 
-      // The base text model is READY before the optional projector work: a
-      // hanging projector init must not keep the load path (and the exclusive
-      // queue behind it) blocked forever. The tracked operation gives the
-      // projector init a realistic hard deadline and an ownership barrier.
-      if (this.context) {
-        const multimodalContextAtLoad = this.context;
-        const multimodalGenerationAtLoad = this.contextGeneration;
+      // Keep the engine INITIALIZING while the optional projector owns the raw
+      // native context. Publishing READY earlier lets a text completion queue
+      // behind this owner and exhaust its much shorter start deadline.
+      const multimodalContextAtLoad = this.context;
+      const multimodalGenerationAtLoad = this.contextGeneration;
+      if (multimodalContextAtLoad) {
         try {
           await this.trackContextOperation(async (cancellation) => {
             if (
@@ -8344,11 +8352,10 @@ class LLMEngineService {
               useGpu: resolvedInitActualGpu === true,
             }, cancellation, projectorResolutionOperationCache);
           }, {
-            chatBlocking: false,
-            // Initial projector ownership must not be caller-cancelled by a
-            // media completion that depends on its result. Text completion can
-            // use the READY state immediately, while its own context operation
-            // still queues behind the same raw native owner.
+            chatBlocking: true,
+            // Initial projector ownership is part of model readiness. Chat and
+            // prompt preparation must wait on initPromise instead of entering
+            // the context queue behind this raw native owner.
             priority: 'completion',
             runtimeTimeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
             createRuntimeTimeoutError: () => new AppError(
@@ -8363,6 +8370,7 @@ class LLMEngineService {
                 timeoutError: toAppError(error),
                 lifecycleEvent: 'context_operation_runtime_timeout',
                 warningMessage: '[LLMEngine] Multimodal projector initialization timed out; detached active context for recovery',
+                allowInitializing: true,
               });
             },
           });
@@ -8370,13 +8378,34 @@ class LLMEngineService {
           if (!this.isContextOperationStopError(error)) {
             throw error;
           }
-          // Foreground work only cancels the caller-facing projector result.
-          // The raw native owner remains tracked and keeps the context-operation
-          // queue closed until it settles; its hard watchdog also remains armed.
-          // Do not destroy the already-READY text context merely because the
-          // optional projector result was preempted.
+          // Cancellation only rejects the caller-facing result. Do not publish
+          // READY until the raw native owner has actually drained; its runtime
+          // watchdog remains responsible for detaching a hung context.
+          const drainResult = await this.waitForActiveContextOperations({
+            timeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
+          });
+          if (drainResult !== 'drained') {
+            throw new AppError(
+              'engine_recovery_required',
+              BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+            );
+          }
         }
       }
+
+      if (
+        !this.context
+        || this.state.status !== EngineStatus.INITIALIZING
+        || this.state.activeModelId !== modelId
+      ) {
+        throw new AppError(
+          'engine_recovery_required',
+          this.state.lastError ?? BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+        );
+      }
+
+      this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
+      updateSettings({ activeModelId: modelId });
 
       const modelForThinkingProbe = registry.getModel(modelId);
       if (retryBlockedCapabilityProbes && modelForThinkingProbe?.thinkingCapability === undefined) {

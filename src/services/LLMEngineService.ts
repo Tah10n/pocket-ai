@@ -191,8 +191,9 @@ export interface LoadModelOptions {
   loadParamsOverride?: Partial<ModelLoadParameters>;
   preferLastWorkingProfile?: boolean;
   /**
-   * Explicit user retry: clears a persisted fail-closed thinking-probe block
-   * for this model so the optional capability probe may run again.
+   * Explicit user retry from the separately named thinking-detection action.
+   * The persisted fail-closed block is cleared only after load/recovery
+   * barriers succeed and immediately before the optional probe is relaunched.
    */
   retryBlockedCapabilityProbes?: boolean;
 }
@@ -1404,7 +1405,7 @@ class LLMEngineService {
   private contextRecoveryModelId: string | null = null;
   private contextRecoveryAttempt = 0;
   private contextRecoveryPromise: Promise<void> | null = null;
-  private thinkingCapabilityProbeBlockedModelIds = new Set<string>();
+  private thinkingCapabilityProbeBlocksByModelId = new Map<string, ModelThinkingProbeBlockedMarker>();
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
   private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
@@ -2527,10 +2528,11 @@ class LLMEngineService {
     }
 
     if (blockThinkingCapabilityProbe) {
-      this.thinkingCapabilityProbeBlockedModelIds.add(modelId);
+      const marker = this.buildThinkingCapabilityProbeBlockedMarker();
+      this.thinkingCapabilityProbeBlocksByModelId.set(modelId, marker);
       // Persist the fail-closed block so a restart does not re-run the same
       // hanging probe against the same artifact/runtime combination.
-      this.persistThinkingCapabilityProbeBlockedMarker(modelId);
+      this.persistThinkingCapabilityProbeBlockedMarker(modelId, marker);
     }
     this.contextRecoveryStatus = 'required';
     this.contextRecoveryModelId = modelId;
@@ -3462,10 +3464,23 @@ class LLMEngineService {
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
     this.cancelScheduledContextRecovery();
-    if (options?.retryBlockedCapabilityProbes === true) {
-      this.resetThinkingCapabilityProbeBlock(modelId);
+    const retryMarker = options?.retryBlockedCapabilityProbes === true
+      ? this.captureThinkingCapabilityProbeBlockedMarker(modelId)
+      : null;
+    try {
+      await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+    } catch (error) {
+      // A retry request is transactional: terminal recovery, lifecycle, memory,
+      // or initialization failures must not consume the persisted consent gate.
+      if (retryMarker) {
+        this.restoreThinkingCapabilityProbeBlockedMarkerIfMissing(modelId, retryMarker);
+      }
+      throw error;
     }
-    await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+  }
+
+  public async retryThinkingCapabilityDetection(modelId: string): Promise<void> {
+    await this.load(modelId, { retryBlockedCapabilityProbes: true });
   }
 
   private async loadWithProjectorResolutionOperationCache(
@@ -3599,11 +3614,14 @@ class LLMEngineService {
         if (
           options?.retryBlockedCapabilityProbes === true
           && model.thinkingCapability === undefined
-          && process.env.NODE_ENV !== 'test'
         ) {
-          // A same-model Retry does not enter initializeModel(), so explicitly
-          // restart the optional probe after clearing its persisted block.
-          this.launchThinkingCapabilityProbe(modelId);
+          // This READY context has already crossed the orphan and lifecycle
+          // barriers. Consume explicit consent only immediately before the
+          // separately requested probe.
+          this.resetThinkingCapabilityProbeBlock(modelId);
+          if (process.env.NODE_ENV !== 'test') {
+            this.launchThinkingCapabilityProbe(modelId);
+          }
         }
         return;
       }
@@ -3659,6 +3677,7 @@ class LLMEngineService {
         fallbackDownloadMarker,
         resolvedArtifactInfo,
         projectorResolutionOperationCache,
+        options?.retryBlockedCapabilityProbes === true,
       );
       await this.initPromise;
     });
@@ -4190,21 +4209,73 @@ class LLMEngineService {
     };
   }
 
-  private persistThinkingCapabilityProbeBlockedMarker(modelId: string): void {
+  private captureThinkingCapabilityProbeBlockedMarker(
+    modelId: string,
+  ): ModelThinkingProbeBlockedMarker | null {
+    try {
+      const marker = registry.getModel(modelId)?.thinkingProbeBlocked;
+      if (marker?.status === 'blocked') {
+        return { ...marker };
+      }
+    } catch {
+      // Fall back to the current-process identity below. The private registry
+      // may be temporarily unavailable, but an in-memory fail-closed block is
+      // still valid transaction state.
+    }
+    const inMemoryMarker = this.thinkingCapabilityProbeBlocksByModelId.get(modelId);
+    return inMemoryMarker ? { ...inMemoryMarker } : null;
+  }
+
+  private persistThinkingCapabilityProbeBlockedMarker(
+    modelId: string,
+    marker: ModelThinkingProbeBlockedMarker = this.buildThinkingCapabilityProbeBlockedMarker(),
+  ): void {
     try {
       const model = registry.getModel(modelId);
       if (!model) {
         return;
       }
-      const marker = this.buildThinkingCapabilityProbeBlockedMarker();
+      const persistedMarker = { ...marker };
       if (typeof model.sha256 === 'string' && model.sha256.trim().length > 0) {
-        marker.artifactSha256 = model.sha256.trim().toLowerCase();
+        persistedMarker.artifactSha256 = model.sha256.trim().toLowerCase();
       }
-      registry.updateModel({ ...model, thinkingProbeBlocked: marker });
+      this.thinkingCapabilityProbeBlocksByModelId.set(modelId, persistedMarker);
+      registry.updateModel({ ...model, thinkingProbeBlocked: persistedMarker });
     } catch (error) {
       if (process.env.NODE_ENV !== 'test') {
         console.warn(
           '[LLMEngine] Failed to persist thinking capability probe block marker',
+          buildSafeErrorLogDetails(error),
+        );
+      }
+    }
+  }
+
+  private restoreThinkingCapabilityProbeBlockedMarkerIfMissing(
+    modelId: string,
+    marker: ModelThinkingProbeBlockedMarker,
+  ): void {
+    const restoredMarker = { ...marker };
+    // Restore the current-process fail-closed identity before touching the
+    // registry. A transient private-storage failure must not reopen the probe
+    // in memory after an unsuccessful explicit retry.
+    this.thinkingCapabilityProbeBlocksByModelId.set(modelId, restoredMarker);
+    try {
+      const model = registry.getModel(modelId);
+      if (!model) {
+        return;
+      }
+      if (model.thinkingProbeBlocked?.status === 'blocked') {
+        this.thinkingCapabilityProbeBlocksByModelId.set(modelId, {
+          ...model.thinkingProbeBlocked,
+        });
+        return;
+      }
+      registry.updateModel({ ...model, thinkingProbeBlocked: restoredMarker });
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn(
+          '[LLMEngine] Failed to restore thinking capability probe block marker',
           buildSafeErrorLogDetails(error),
         );
       }
@@ -4240,13 +4311,16 @@ class LLMEngineService {
     ) {
       return false;
     }
+    let hasComparedArtifactSignal = false;
     if (marker.artifactSha256 !== undefined) {
       const currentSha256 = typeof model?.sha256 === 'string' ? model.sha256.trim().toLowerCase() : '';
-      return currentSha256.length > 0 && currentSha256 === marker.artifactSha256.trim().toLowerCase();
+      if (currentSha256.length === 0 || currentSha256 !== marker.artifactSha256.trim().toLowerCase()) {
+        return false;
+      }
+      hasComparedArtifactSignal = true;
     }
 
     const identity = this.loadedArtifactIdentity;
-    let hasComparedArtifactSignal = false;
     if (marker.artifactPath !== undefined) {
       const currentPath = identity?.resolvedPath ?? identity?.localPath ?? model?.localPath ?? null;
       if (currentPath === null || marker.artifactPath !== currentPath) {
@@ -4275,18 +4349,26 @@ class LLMEngineService {
     model: ModelMetadata | null | undefined,
     modelId: string,
   ): boolean {
-    if (this.thinkingCapabilityProbeBlockedModelIds.has(modelId)) {
+    const persistedMarker = model?.thinkingProbeBlocked;
+    const inMemoryMarker = this.thinkingCapabilityProbeBlocksByModelId.get(modelId);
+
+    if (inMemoryMarker) {
+      if (this.thinkingProbeMarkerMatchesCurrentEnvironment(inMemoryMarker, model ?? null)) {
+        return true;
+      }
+      this.thinkingCapabilityProbeBlocksByModelId.delete(modelId);
+    }
+
+    if (
+      persistedMarker?.status === 'blocked'
+      && this.thinkingProbeMarkerMatchesCurrentEnvironment(persistedMarker, model ?? null)
+    ) {
+      this.thinkingCapabilityProbeBlocksByModelId.set(modelId, { ...persistedMarker });
       return true;
     }
 
-    const marker = model?.thinkingProbeBlocked;
-    if (!marker || marker.status !== 'blocked') {
+    if (persistedMarker?.status !== 'blocked') {
       return false;
-    }
-
-    if (this.thinkingProbeMarkerMatchesCurrentEnvironment(marker, model ?? null)) {
-      this.thinkingCapabilityProbeBlockedModelIds.add(modelId);
-      return true;
     }
 
     // The GGUF artifact, native runtime, or app version changed since the
@@ -4297,8 +4379,8 @@ class LLMEngineService {
     return false;
   }
 
-  public resetThinkingCapabilityProbeBlock(modelId: string): void {
-    this.thinkingCapabilityProbeBlockedModelIds.delete(modelId);
+  private resetThinkingCapabilityProbeBlock(modelId: string): void {
+    this.thinkingCapabilityProbeBlocksByModelId.delete(modelId);
     const model = registry.getModel(modelId);
     if (model) {
       this.clearThinkingCapabilityProbeBlockedMarker(model);
@@ -6003,6 +6085,7 @@ class LLMEngineService {
     fallbackDownloadMarker: number | null = null,
     resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null,
     projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map(),
+    retryBlockedCapabilityProbes = false,
   ): Promise<void> {
     const initTotalSpan = performanceMonitor.startSpan('model.init.total', { modelId });
     let initTotalOutcome: 'success' | 'error' = 'error';
@@ -8239,12 +8322,6 @@ class LLMEngineService {
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
 
-      const shouldProbeThinkingCapability = (() => {
-        const model = registry.getModel(modelId);
-        return !this.shouldSkipThinkingCapabilityProbe(model, modelId)
-          && (model ? model.thinkingCapability === undefined : true);
-      })();
-
       // The base text model is READY before the optional projector work: a
       // hanging projector init must not keep the load path (and the exclusive
       // queue behind it) blocked forever. The tracked operation gives the
@@ -8300,6 +8377,19 @@ class LLMEngineService {
           // optional projector result was preempted.
         }
       }
+
+      const modelForThinkingProbe = registry.getModel(modelId);
+      if (retryBlockedCapabilityProbes && modelForThinkingProbe?.thinkingCapability === undefined) {
+        // All awaited load work and ownership barriers have succeeded. This is
+        // the first safe point to consume explicit retry consent.
+        this.resetThinkingCapabilityProbeBlock(modelId);
+      }
+      const shouldProbeThinkingCapability = !this.shouldSkipThinkingCapabilityProbe(
+        retryBlockedCapabilityProbes && modelForThinkingProbe
+          ? { ...modelForThinkingProbe, thinkingProbeBlocked: undefined }
+          : modelForThinkingProbe,
+        modelId,
+      ) && (modelForThinkingProbe ? modelForThinkingProbe.thinkingCapability === undefined : true);
 
       // Queue the passive probe only after the completion-priority projector
       // operation so it cannot overtake the initial native owner.

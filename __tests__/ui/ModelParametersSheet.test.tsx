@@ -576,6 +576,22 @@ describe('ModelParametersSheet', () => {
     expect(screen.getByText('GPU layers disabled on CPU')).toBeTruthy();
   });
 
+  it('shows blocked thinking detection as a separate explicit retry action', () => {
+    const onRetryThinkingCapabilityDetection = jest.fn();
+    const screen = renderSheet({
+      showThinkingCapabilityRetry: true,
+      canRetryThinkingCapabilityDetection: true,
+      onRetryThinkingCapabilityDetection,
+    });
+
+    expect(screen.getByTestId('thinking-capability-retry-card')).toBeTruthy();
+    expect(screen.getByText('chat.modelControls.thinkingDetectionRetry')).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId('retry-thinking-capability-detection-button'));
+
+    expect(onRetryThinkingCapabilityDetection).toHaveBeenCalledTimes(1);
+  });
+
   it('shows cancelled autotune results and runs autotune when requested', () => {
     const onRunAutotune = jest.fn();
     const screen = renderSheet({

@@ -224,6 +224,7 @@ export function useModelParametersSheetController({
     backendPolicy: undefined,
   });
   const [isApplyingModelProfile, setApplyingModelProfile] = useState(false);
+  const [isRetryingThinkingCapabilityDetection, setRetryingThinkingCapabilityDetection] = useState(false);
   const [didSaveLoadProfile, setDidSaveLoadProfile] = useState(false);
   const [subscribedActiveModelId, setSubscribedActiveModelId] = useState<string | null>(
     () => getSettings().activeModelId,
@@ -462,6 +463,13 @@ export function useModelParametersSheetController({
     && !isApplyingModelProfile
     && !isRunningAutotune
     && !showApplyReload;
+  const showThinkingCapabilityRetry = isLoadedProfileActive
+    && persistedConfigurableModel?.thinkingProbeBlocked?.status === 'blocked'
+    && persistedConfigurableModel.thinkingCapability === undefined;
+  const canRetryThinkingCapabilityDetection = showThinkingCapabilityRetry
+    && !isApplyingModelProfile
+    && !isRunningAutotune
+    && !isRetryingThinkingCapabilityDetection;
 
   const openModelParameters = useCallback((modelId: string | null | undefined) => {
     if (!modelId) {
@@ -484,6 +492,21 @@ export function useModelParametersSheetController({
     setOpen(false);
   }, []);
 
+  const handleRetryThinkingCapabilityDetection = useCallback(async () => {
+    if (!configurableModelId || !showThinkingCapabilityRetry) {
+      return;
+    }
+
+    setRetryingThinkingCapabilityDetection(true);
+    try {
+      await llmEngineService.retryThinkingCapabilityDetection(configurableModelId);
+    } catch (error) {
+      showError('ModelParametersSheet.retryThinkingCapabilityDetection', error);
+    } finally {
+      setRetryingThinkingCapabilityDetection(false);
+    }
+  }, [configurableModelId, showError, showThinkingCapabilityRetry]);
+
   useEffect(() => {
     if (!isOpen) {
       // Ensure any in-flight autotune is cancelled when the sheet closes.
@@ -502,6 +525,7 @@ export function useModelParametersSheetController({
         discoveryUnavailable: null,
       });
       setDidSaveLoadProfile(false);
+      setRetryingThinkingCapabilityDetection(false);
       setRunningAutotune(false);
       setAutotuneResult(null);
       setAutotuneProgress(null);
@@ -1314,6 +1338,9 @@ export function useModelParametersSheetController({
       isNpuBackendAvailable: backendAvailability.npuBackendAvailable,
       isBackendDiscoveryUnavailable: backendAvailability.discoveryUnavailable,
       didSaveLoadProfile,
+      showThinkingCapabilityRetry,
+      canRetryThinkingCapabilityDetection,
+      isRetryingThinkingCapabilityDetection,
       applyAction,
       applyButtonLabel,
       canApplyReload: Boolean(configurableModelId) && canApplyReload && !isApplyingModelProfile && !isRunningAutotune,
@@ -1330,6 +1357,7 @@ export function useModelParametersSheetController({
       autotuneProgress,
       onRunAutotune: handleRunAutotune,
       onCancelAutotune: handleCancelAutotune,
+      onRetryThinkingCapabilityDetection: handleRetryThinkingCapabilityDetection,
       onClose: closeModelParameters,
       onChangeParams: handleChangeParams,
       onChangeLoadParams: handleChangeLoadParams,

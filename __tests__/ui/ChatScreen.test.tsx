@@ -117,6 +117,7 @@ const mockGetRecommendedLoadProfile = jest.fn<Promise<{ recommendedGpuLayers: nu
   })),
 );
 const mockLoadModel = jest.fn().mockResolvedValue(undefined);
+const mockRetryThinkingCapabilityDetection = jest.fn().mockResolvedValue(undefined);
 const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
 const mockAttachImages = jest.fn();
@@ -232,6 +233,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
         status: 'ready',
       };
     },
+    retryThinkingCapabilityDetection: (modelId: string) => mockRetryThinkingCapabilityDetection(modelId),
     getSafeModeLoadLimits: () => mockSafeModeLoadLimits,
     getContextSize: () => {
       if (typeof mockLoadedContextSize === 'number') {
@@ -943,6 +945,8 @@ describe('ChatScreen', () => {
     lastChatInputBarProps = null;
     mockLoadModel.mockReset();
     mockLoadModel.mockResolvedValue(undefined);
+    mockRetryThinkingCapabilityDetection.mockReset();
+    mockRetryThinkingCapabilityDetection.mockResolvedValue(undefined);
     hardwareStatusListener = null;
     mockHardwareBannerInputs = {
       showLowMemoryWarning: false,
@@ -3180,6 +3184,42 @@ describe('ChatScreen', () => {
     expect(lastModelParametersSheetProps?.applyAction).toBe('reload');
   });
 
+  it('exposes a blocked thinking check as a separate explicitly named model action', async () => {
+    registry.saveModels([{
+      id: 'author/model-q4',
+      name: 'Model Q4',
+      author: 'Test',
+      size: 1024,
+      localPath: 'model-q4.gguf',
+      lifecycleStatus: 'downloaded',
+      thinkingProbeBlocked: {
+        status: 'blocked',
+        failedAt: 1,
+        artifactPath: 'model-q4.gguf',
+        runtimeVersion: 'test-runtime',
+        appVersion: '1.0.0',
+      },
+    }]);
+    updateSettings({ activeModelId: 'author/model-q4' });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-controls-button'));
+      await Promise.resolve();
+    });
+
+    expect(lastModelParametersSheetProps?.showThinkingCapabilityRetry).toBe(true);
+    expect(lastModelParametersSheetProps?.canRetryThinkingCapabilityDetection).toBe(true);
+    mockLoadModel.mockClear();
+
+    await act(async () => {
+      await lastModelParametersSheetProps?.onRetryThinkingCapabilityDetection();
+    });
+
+    expect(mockRetryThinkingCapabilityDetection).toHaveBeenCalledWith('author/model-q4');
+    expect(mockLoadModel).not.toHaveBeenCalled();
+  });
+
   it('closes the selector and updates the header immediately while the model is still loading', async () => {
     registry.saveModels([
       {
@@ -3619,9 +3659,9 @@ describe('ChatScreen', () => {
         'author/model-q4',
         expect.objectContaining({
           preferLastWorkingProfile: true,
-          retryBlockedCapabilityProbes: true,
         }),
       );
+      expect(mockLoadModel.mock.calls[1]?.[1]).not.toHaveProperty('retryBlockedCapabilityProbes');
     } finally {
       consoleErrorSpy.mockRestore();
     }

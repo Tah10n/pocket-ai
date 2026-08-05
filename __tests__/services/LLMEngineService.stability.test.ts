@@ -122,7 +122,7 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).contextRecoveryPromise = null;
         (llmEngineService as any).contextRecoveryStatus = 'idle';
         (llmEngineService as any).contextRecoveryModelId = null;
-        (llmEngineService as any).thinkingCapabilityProbeBlockedModelIds?.clear?.();
+        (llmEngineService as any).thinkingCapabilityProbeBlocksByModelId?.clear?.();
         (llmEngineService as any).activeContextOperationPromises?.clear?.();
         (llmEngineService as any).activeContextOperationRejects?.clear?.();
         (llmEngineService as any).completionInterruptGeneration = 0;

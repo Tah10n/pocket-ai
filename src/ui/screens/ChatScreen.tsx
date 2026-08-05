@@ -1555,7 +1555,6 @@ export const ChatScreen = () => {
                 applySelection: false,
                 options: {
                     preferLastWorkingProfile: true,
-                    retryBlockedCapabilityProbes: true,
                 },
             });
             if (result.status === 'failed') {

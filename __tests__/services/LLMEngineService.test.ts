@@ -354,7 +354,7 @@ describe('LLMEngineService', () => {
     (llmEngineService as any).contextRecoveryPromise = null;
     (llmEngineService as any).contextRecoveryStatus = 'idle';
     (llmEngineService as any).contextRecoveryModelId = null;
-    (llmEngineService as any).thinkingCapabilityProbeBlockedModelIds?.clear?.();
+    (llmEngineService as any).thinkingCapabilityProbeBlocksByModelId?.clear?.();
     (llmEngineService as any).activeContextOperationPromises?.clear?.();
     (llmEngineService as any).activeContextOperationRejects?.clear?.();
     (llmEngineService as any).activeCompletionReject = null;
@@ -2777,6 +2777,17 @@ describe('LLMEngineService', () => {
     jest.clearAllMocks();
     await llmEngineService.load('test/model');
 
+    const service = llmEngineService as any;
+    const blockedMarker = service.buildThinkingCapabilityProbeBlockedMarker();
+    let persistedModel = {
+      ...(registry.getModel as jest.Mock)('test/model'),
+      thinkingProbeBlocked: blockedMarker,
+    };
+    (registry.getModel as jest.Mock).mockImplementation(() => persistedModel);
+    (registry.updateModel as jest.Mock).mockImplementation((model) => {
+      persistedModel = model;
+    });
+
     const oldContext = (llmEngineService as any).context as { release: jest.Mock };
     oldContext.release = jest.fn().mockRejectedValue(new Error('native release failed'));
     (llamaRn.initLlama as jest.Mock).mockClear();
@@ -2813,10 +2824,13 @@ describe('LLMEngineService', () => {
         () => (llmEngineService as any).orphanedContextReleaseError != null,
         'detached context release failure',
       );
-      await expect(llmEngineService.load('test/model')).rejects.toMatchObject({
+      await expect(llmEngineService.load('test/model', {
+        retryBlockedCapabilityProbes: true,
+      })).rejects.toMatchObject({
         code: 'engine_recovery_required',
         message: expect.stringMatching(/restart the app/i),
       });
+      expect(persistedModel.thinkingProbeBlocked).toEqual(blockedMarker);
       await expect(llmEngineService.unload()).rejects.toMatchObject({
         code: 'engine_recovery_required',
         message: expect.stringMatching(/restart the app/i),
@@ -5126,9 +5140,9 @@ describe('LLMEngineService', () => {
       expect(llamaRn.initLlama).toHaveBeenCalledTimes(2);
       expect(recoveredFormat).not.toHaveBeenCalled();
 
-      // Simulate a process restart: the in-memory Set is empty again, but the
+      // Simulate a process restart: the in-memory identity map is empty again, but the
       // persisted marker must still suppress the same optional probe.
-      (llmEngineService as any).thinkingCapabilityProbeBlockedModelIds.clear();
+      (llmEngineService as any).thinkingCapabilityProbeBlocksByModelId.clear();
       (llmEngineService as any).launchThinkingCapabilityProbe('test/model');
       await Promise.resolve();
       expect(recoveredFormat).not.toHaveBeenCalled();
@@ -5172,6 +5186,62 @@ describe('LLMEngineService', () => {
     }
   });
 
+  it('loads a text context after restart without rerunning a matching blocked thinking probe', async () => {
+    const previousEnv = process.env.NODE_ENV;
+    (process.env as any).NODE_ENV = 'development';
+    const service = llmEngineService as any;
+    let persistedModel: any = {
+      id: 'test/model',
+      localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      sha256: 'a'.repeat(64),
+      thinkingCapability: {
+        detectedAt: 1,
+        supportsThinking: false,
+        canDisableThinking: true,
+      },
+    };
+    (registry.getModel as jest.Mock).mockImplementation(() => persistedModel);
+    (registry.updateModel as jest.Mock).mockImplementation((model) => {
+      persistedModel = model;
+    });
+
+    try {
+      await llmEngineService.load('test/model');
+      const marker = {
+        ...service.buildThinkingCapabilityProbeBlockedMarker(),
+        artifactSha256: persistedModel.sha256,
+      };
+      await llmEngineService.unload();
+
+      persistedModel = {
+        ...persistedModel,
+        lifecycleStatus: LifecycleStatus.DOWNLOADED,
+        thinkingCapability: undefined,
+        thinkingProbeBlocked: marker,
+      };
+      service.thinkingCapabilityProbeBlocksByModelId.clear();
+      getFormattedChatMock().mockClear();
+      (llamaRn.initLlama as jest.Mock).mockClear();
+
+      await llmEngineService.load('test/model');
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await Promise.resolve();
+      }
+
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.READY,
+        activeModelId: 'test/model',
+      }));
+      expect(llamaRn.initLlama).toHaveBeenCalled();
+      expect(getFormattedChatMock()).not.toHaveBeenCalled();
+      expect(persistedModel.thinkingProbeBlocked).toEqual(marker);
+    } finally {
+      await llmEngineService.unload().catch(() => undefined);
+      (process.env as any).NODE_ENV = previousEnv;
+    }
+  });
+
   it('invalidates persisted thinking-probe blocks when app, runtime, or GGUF identity changes', async () => {
     const service = llmEngineService as any;
     const model: any = {
@@ -5191,13 +5261,38 @@ describe('LLMEngineService', () => {
     const matchingModel = { ...model, thinkingProbeBlocked: marker };
     expect(service.shouldSkipThinkingCapabilityProbe(matchingModel, model.id)).toBe(true);
 
+    const originalLoadedArtifactIdentity = service.loadedArtifactIdentity;
+    service.loadedArtifactIdentity = {
+      ...originalLoadedArtifactIdentity,
+      localPath: 'replacement-model.gguf',
+      resolvedPath: '/mock/replacement-model.gguf',
+      sizeBytes: (originalLoadedArtifactIdentity?.sizeBytes ?? 1024) + 1,
+    };
+    (registry.updateModel as jest.Mock).mockClear();
+
+    // The matching identity was already cached in memory, but replacing the
+    // GGUF under the same model id must invalidate it without a process restart.
+    let shouldSkipReplacementArtifact: boolean;
+    try {
+      shouldSkipReplacementArtifact = service.shouldSkipThinkingCapabilityProbe(matchingModel, model.id);
+    } finally {
+      service.loadedArtifactIdentity = originalLoadedArtifactIdentity;
+    }
+    expect(shouldSkipReplacementArtifact).toBe(false);
+    expect(service.thinkingCapabilityProbeBlocksByModelId.has(model.id)).toBe(false);
+    expect(registry.updateModel).toHaveBeenCalledWith(expect.objectContaining({
+      id: model.id,
+      thinkingProbeBlocked: undefined,
+    }));
+
     const staleMarkers = [
       { ...marker, appVersion: 'stale-app-version' },
       { ...marker, runtimeVersion: 'stale-runtime-version' },
       { ...marker, artifactSha256: 'b'.repeat(64) },
+      { ...marker, artifactPath: 'replacement-model.gguf' },
     ];
     for (const staleMarker of staleMarkers) {
-      service.thinkingCapabilityProbeBlockedModelIds.clear();
+      service.thinkingCapabilityProbeBlocksByModelId.clear();
       (registry.updateModel as jest.Mock).mockClear();
       const staleModel = { ...model, thinkingProbeBlocked: staleMarker };
 
@@ -5207,6 +5302,19 @@ describe('LLMEngineService', () => {
         thinkingProbeBlocked: undefined,
       }));
     }
+  });
+
+  it('restores the in-memory thinking-probe block when retry rollback cannot read private storage', () => {
+    const service = llmEngineService as any;
+    const marker = service.buildThinkingCapabilityProbeBlockedMarker();
+    service.thinkingCapabilityProbeBlocksByModelId.clear();
+    (registry.getModel as jest.Mock).mockImplementation(() => {
+      throw new Error('private registry unavailable');
+    });
+
+    service.restoreThinkingCapabilityProbeBlockedMarkerIfMissing('test/model', marker);
+
+    expect(service.thinkingCapabilityProbeBlocksByModelId.get('test/model')).toEqual(marker);
   });
 
   it('clears stale recovery state after explicitly switching to another model', async () => {

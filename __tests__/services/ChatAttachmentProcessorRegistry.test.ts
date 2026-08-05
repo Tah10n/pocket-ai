@@ -24,6 +24,28 @@ function bytesToBinaryString(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => String.fromCharCode(byte)).join('');
 }
 
+function encodeAscii85(bytes: Uint8Array): string {
+  const encoded: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 4) {
+    const available = Math.min(4, bytes.length - offset);
+    let value = 0;
+    for (let index = 0; index < 4; index += 1) {
+      value = value * 256 + (index < available ? bytes[offset + index] : 0);
+    }
+    if (available === 4 && value === 0) {
+      encoded.push('z');
+      continue;
+    }
+    const tuple = new Array<number>(5);
+    for (let index = tuple.length - 1; index >= 0; index -= 1) {
+      tuple[index] = value % 85;
+      value = Math.floor(value / 85);
+    }
+    encoded.push(...tuple.slice(0, available + 1).map((digit) => String.fromCharCode(digit + 33)));
+  }
+  return `${encoded.join('')}~>`;
+}
+
 function createTextPdfBase64(textStream: string): string {
   const compressed = deflate(Buffer.from(textStream, 'binary'));
   const pdf = [
@@ -195,6 +217,31 @@ describe('ChatAttachmentProcessorRegistry', () => {
       isScanned: false,
     }));
     expect(buildDocumentAttachmentTextPart(result).text).toContain('Pages: 1');
+  });
+
+  it('processes PDFs with ReportLab-style inline images through the local fallback', async () => {
+    const compressedPixels = deflate(Uint8Array.from([255, 0, 0, 0, 255, 0]));
+    const inlineImage = encodeAscii85(compressedPixels);
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(createTextPdfBase64(
+      `BT (Visible before image) Tj ET BI /W 2 /H 1 /BPC 8 /CS /RGB /F [/A85 /Fl] ID\n${inlineImage}\nEI BT (Visible after image) Tj ET`,
+    ));
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'test-dir/chat-attachments/inline-image.pdf',
+        fileName: 'inline-image.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 2048,
+      }),
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      runtimeInput: 'document_text',
+      processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION,
+      text: 'Visible before image\nVisible after image',
+      pageCount: 1,
+      isScanned: false,
+    }));
   });
 
   it('maps bounded PDF decompression failures to a safe attachment error', async () => {

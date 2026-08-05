@@ -109,6 +109,8 @@ const MIN_PDF_RATIO_ALLOWANCE_BYTES = 1024 * 1024;
 const MAX_PDF_CONTENT_TOKENS = 200_000;
 const MAX_PDF_ARRAY_DEPTH = 16;
 const MAX_PDF_OPERANDS = 32;
+const MAX_PDF_INLINE_IMAGE_DICTIONARY_ENTRIES = 64;
+const MAX_PDF_INLINE_IMAGE_DECODED_BYTES = 16 * 1024 * 1024;
 const MAX_PDF_PROCESSING_MILLIS = 2_000;
 const INFLATE_INPUT_CHUNK_BYTES = 32 * 1024;
 const INFLATE_OUTPUT_CHUNK_BYTES = 64 * 1024;
@@ -1827,52 +1829,571 @@ function readTrailingNumberOperands(
   return values;
 }
 
-// Inline images (`BI <dictionary> ID <data> EI`) embed raw image bytes in a
-// content stream. The data region must stay opaque to the operator parser:
-// interpreting it would let image bytes shaped like `BT (text) Tj ET` inject
-// hidden text into the extraction. The dictionary is tokenized until the `ID`
-// keyword, then the scan stops at the first `EI` preceded by whitespace and
-// followed by a delimiter or the stream end — the boundary readers apply.
+type PdfInlineImageDictionary = {
+  entries: ReadonlyMap<string, PdfContentToken>;
+  dataStart: number;
+};
+
+type PakoInflateInputState = {
+  ended?: boolean;
+  strm?: {
+    total_in?: number;
+  };
+};
+
+const INLINE_IMAGE_KEY_ALIASES: Readonly<Record<string, string>> = {
+  BPC: 'BitsPerComponent',
+  CS: 'ColorSpace',
+  F: 'Filter',
+  H: 'Height',
+  IM: 'ImageMask',
+  W: 'Width',
+};
+
+const INLINE_IMAGE_FILTER_ALIASES: Readonly<Record<string, string>> = {
+  A85: 'ASCII85Decode',
+  AHx: 'ASCIIHexDecode',
+  DCT: 'DCTDecode',
+  Fl: 'FlateDecode',
+  RL: 'RunLengthDecode',
+};
+
+const INLINE_IMAGE_BOUNDARY_KEYS = new Set([
+  'BitsPerComponent',
+  'ColorSpace',
+  'Filter',
+  'Height',
+  'ImageMask',
+  'Width',
+]);
+
+function normalizeInlineImageKey(value: string): string {
+  return INLINE_IMAGE_KEY_ALIASES[value] ?? value;
+}
+
+function normalizeInlineImageFilter(value: string): string {
+  return INLINE_IMAGE_FILTER_ALIASES[value] ?? value;
+}
+
+function readInlineImageDictionaryValue(
+  content: string,
+  start: number,
+  end: number,
+  budget: PdfExtractionBudget,
+): PdfContentToken {
+  const result = readContentToken(content, start, budget);
+  if (!result.token || result.next !== end) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      'PDF inline image dictionary contains an unsupported value.',
+    );
+  }
+  return result.token;
+}
+
+function readInlineImageDictionary(
+  content: string,
+  dictionaryStart: number,
+  budget: PdfExtractionBudget,
+): PdfInlineImageDictionary {
+  const entries = new Map<string, PdfContentToken>();
+  const seenKeys = new Set<string>();
+  let cursor = dictionaryStart;
+  let entryCount = 0;
+
+  while (cursor < content.length) {
+    assertWithinProcessingTime(budget);
+    cursor = skipPdfWhitespaceAndComments(content, cursor);
+    if (isKeywordAt(content, cursor, 'ID')) {
+      const separatorStart = cursor + 'ID'.length;
+      const separator = content[separatorStart];
+      if (!isPdfWhitespace(separator)) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF inline image ID keyword is missing its data separator.',
+        );
+      }
+
+      // PDF treats CRLF as one end-of-line marker. Consume exactly one
+      // separator unit rather than all whitespace so leading pixel bytes are
+      // retained when an unfiltered image starts with a whitespace byte.
+      const dataStart = separator === '\r' && content[separatorStart + 1] === '\n'
+        ? separatorStart + 2
+        : separatorStart + 1;
+      return { entries, dataStart };
+    }
+
+    if (content[cursor] !== '/') {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF inline image dictionary is malformed.',
+      );
+    }
+
+    const key = readPdfNameToken(content, cursor);
+    const normalizedKey = normalizeInlineImageKey(key.value);
+    const valueStart = skipPdfWhitespaceAndComments(content, key.next);
+    if (valueStart >= content.length || isKeywordAt(content, valueStart, 'ID')) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF inline image dictionary entry is missing its value.',
+      );
+    }
+    const valueEnd = readPdfObjectEnd(content, valueStart, budget);
+    if (valueEnd <= valueStart) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF inline image dictionary is malformed.',
+      );
+    }
+
+    entryCount += 1;
+    if (entryCount > MAX_PDF_INLINE_IMAGE_DICTIONARY_ENTRIES) {
+      throw createPdfExtractionError(
+        'resource_limit',
+        'PDF inline image dictionary exceeds local limits.',
+      );
+    }
+    if (seenKeys.has(normalizedKey)) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF inline image dictionary contains duplicate entries.',
+      );
+    }
+    seenKeys.add(normalizedKey);
+    if (INLINE_IMAGE_BOUNDARY_KEYS.has(normalizedKey)) {
+      entries.set(
+        normalizedKey,
+        readInlineImageDictionaryValue(content, valueStart, valueEnd, budget),
+      );
+    }
+    cursor = valueEnd;
+  }
+
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF inline image is missing its ID keyword.',
+  );
+}
+
+function readInlineImageFilters(entries: ReadonlyMap<string, PdfContentToken>): string[] {
+  const filter = entries.get('Filter');
+  if (!filter) {
+    return [];
+  }
+  if (filter.type === 'name') {
+    return [normalizeInlineImageFilter(filter.value)];
+  }
+  if (filter.type === 'array' && filter.value.every((entry) => entry.type === 'name')) {
+    return filter.value.map((entry) => normalizeInlineImageFilter(
+      (entry as Extract<PdfContentToken, { type: 'name' }>).value,
+    ));
+  }
+  throw new PdfTextExtractionError(
+    'unsupported_filter',
+    'PDF inline image uses an unsupported filter declaration.',
+  );
+}
+
+function readInlineImagePositiveInteger(
+  entries: ReadonlyMap<string, PdfContentToken>,
+  key: string,
+): number {
+  const entry = entries.get(key);
+  if (
+    entry?.type !== 'number'
+    || !Number.isSafeInteger(entry.value)
+    || entry.value <= 0
+  ) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      `PDF inline image /${key} entry is missing or invalid.`,
+    );
+  }
+  return entry.value;
+}
+
+function readInlineImageBoolean(
+  entries: ReadonlyMap<string, PdfContentToken>,
+  key: string,
+  fallback: boolean,
+): boolean {
+  const entry = entries.get(key);
+  if (!entry) {
+    return fallback;
+  }
+  if (entry.type === 'word' && (entry.value === 'true' || entry.value === 'false')) {
+    return entry.value === 'true';
+  }
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    `PDF inline image /${key} entry is invalid.`,
+  );
+}
+
+function resolveInlineImageColorComponents(
+  entries: ReadonlyMap<string, PdfContentToken>,
+  imageMask: boolean,
+): number {
+  if (imageMask) {
+    return 1;
+  }
+
+  const colorSpace = entries.get('ColorSpace');
+  const name = colorSpace?.type === 'name'
+    ? colorSpace.value
+    : colorSpace?.type === 'array' && colorSpace.value[0]?.type === 'name'
+      ? colorSpace.value[0].value
+      : undefined;
+  switch (name) {
+    case 'G':
+    case 'DeviceGray':
+    case 'I':
+    case 'Indexed':
+      return 1;
+    case 'RGB':
+    case 'DeviceRGB':
+      return 3;
+    case 'CMYK':
+    case 'DeviceCMYK':
+      return 4;
+    default:
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF unfiltered inline image uses an unsupported color space.',
+      );
+  }
+}
+
+function resolveUnfilteredInlineImageByteLength(
+  entries: ReadonlyMap<string, PdfContentToken>,
+): number {
+  const width = readInlineImagePositiveInteger(entries, 'Width');
+  const height = readInlineImagePositiveInteger(entries, 'Height');
+  const imageMask = readInlineImageBoolean(entries, 'ImageMask', false);
+  const bitsPerComponent = imageMask
+    ? 1
+    : readInlineImagePositiveInteger(entries, 'BitsPerComponent');
+  if (![1, 2, 4, 8, 16].includes(bitsPerComponent)) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      'PDF inline image uses an unsupported bits-per-component value.',
+    );
+  }
+  const components = resolveInlineImageColorComponents(entries, imageMask);
+  const bitsPerRow = width * components * bitsPerComponent;
+  if (!Number.isSafeInteger(bitsPerRow)) {
+    throw createPdfExtractionError('resource_limit', 'PDF inline image dimensions exceed local limits.');
+  }
+  const byteLength = Math.ceil(bitsPerRow / 8) * height;
+  if (!Number.isSafeInteger(byteLength) || byteLength > MAX_PDF_DECODED_STREAM_BYTES) {
+    throw createPdfExtractionError('resource_limit', 'PDF inline image data exceeds local limits.');
+  }
+  return byteLength;
+}
+
+function findAsciiHexInlineImageEnd(
+  content: string,
+  dataStart: number,
+  budget: PdfExtractionBudget,
+): number {
+  for (let cursor = dataStart; cursor < content.length; cursor += 1) {
+    if ((cursor & 0xfff) === 0) {
+      assertWithinProcessingTime(budget);
+    }
+    const char = content[cursor];
+    if (char === '>') {
+      return cursor + 1;
+    }
+    if (!isPdfWhitespace(char) && !/[0-9A-Fa-f]/u.test(char)) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF ASCIIHex inline image data is malformed.',
+      );
+    }
+  }
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF ASCIIHex inline image is missing its end marker.',
+  );
+}
+
+function findAscii85InlineImageEnd(
+  content: string,
+  dataStart: number,
+  budget: PdfExtractionBudget,
+): number {
+  let tupleLength = 0;
+  for (let cursor = dataStart; cursor < content.length; cursor += 1) {
+    if ((cursor & 0xfff) === 0) {
+      assertWithinProcessingTime(budget);
+    }
+    const char = content[cursor];
+    if (isPdfWhitespace(char)) {
+      continue;
+    }
+    if (char === '~') {
+      if (content[cursor + 1] !== '>' || tupleLength === 1) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF ASCII85 inline image data is malformed.',
+        );
+      }
+      return cursor + 2;
+    }
+    if (char === 'z') {
+      if (tupleLength !== 0) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF ASCII85 inline image data is malformed.',
+        );
+      }
+      continue;
+    }
+    const code = char.charCodeAt(0);
+    if (code < 33 || code > 117) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF ASCII85 inline image data is malformed.',
+      );
+    }
+    tupleLength = (tupleLength + 1) % 5;
+  }
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF ASCII85 inline image is missing its end marker.',
+  );
+}
+
+function findRunLengthInlineImageEnd(
+  content: string,
+  dataStart: number,
+  budget: PdfExtractionBudget,
+): number {
+  let cursor = dataStart;
+  while (cursor < content.length) {
+    assertWithinProcessingTime(budget);
+    const runLength = content.charCodeAt(cursor) & 0xff;
+    cursor += 1;
+    if (runLength === 128) {
+      return cursor;
+    }
+    const encodedByteCount = runLength <= 127 ? runLength + 1 : 1;
+    if (cursor + encodedByteCount > content.length) {
+      break;
+    }
+    cursor += encodedByteCount;
+  }
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF RunLength inline image is missing its end marker.',
+  );
+}
+
+function binaryStringSliceToBytes(content: string, start: number, end: number): Uint8Array {
+  const bytes = new Uint8Array(end - start);
+  for (let index = start; index < end; index += 1) {
+    bytes[index - start] = content.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
+
+function findFlateInlineImageEnd(
+  content: string,
+  dataStart: number,
+  budget: PdfExtractionBudget,
+): number {
+  const inflater = new Inflate({ chunkSize: INFLATE_OUTPUT_CHUNK_BYTES });
+  let decodedBytes = 0;
+  inflater.onData = (chunk) => {
+    decodedBytes += chunk.length;
+    if (decodedBytes > MAX_PDF_INLINE_IMAGE_DECODED_BYTES) {
+      throw createPdfExtractionError(
+        'resource_limit',
+        'PDF inline image decoded data exceeds local limits.',
+      );
+    }
+    assertWithinProcessingTime(budget);
+  };
+
+  for (let offset = dataStart; offset < content.length; offset += INFLATE_INPUT_CHUNK_BYTES) {
+    assertWithinProcessingTime(budget);
+    const end = Math.min(content.length, offset + INFLATE_INPUT_CHUNK_BYTES);
+    const accepted = inflater.push(binaryStringSliceToBytes(content, offset, end), false);
+    if (!accepted || inflater.err) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF Flate inline image data is malformed.',
+      );
+    }
+    const inputState = inflater as unknown as PakoInflateInputState;
+    if (inputState.ended) {
+      const consumedBytes = inputState.strm?.total_in;
+      if (
+        typeof consumedBytes !== 'number'
+        || !Number.isSafeInteger(consumedBytes)
+        || consumedBytes <= 0
+        || dataStart + consumedBytes > content.length
+      ) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF Flate inline image boundary is invalid.',
+        );
+      }
+      return dataStart + consumedBytes;
+    }
+  }
+
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF Flate inline image is missing its end marker.',
+  );
+}
+
+function findDctInlineImageEnd(
+  content: string,
+  dataStart: number,
+  budget: PdfExtractionBudget,
+): number {
+  if (content.charCodeAt(dataStart) !== 0xff || content.charCodeAt(dataStart + 1) !== 0xd8) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      'PDF DCT inline image is missing its JPEG start marker.',
+    );
+  }
+
+  let cursor = dataStart + 2;
+  let insideEntropyData = false;
+  while (cursor < content.length) {
+    assertWithinProcessingTime(budget);
+    if (insideEntropyData) {
+      while (cursor < content.length && content.charCodeAt(cursor) !== 0xff) {
+        cursor += 1;
+        if ((cursor & 0xfff) === 0) {
+          assertWithinProcessingTime(budget);
+        }
+      }
+    } else if (content.charCodeAt(cursor) !== 0xff) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF DCT inline image contains malformed JPEG markers.',
+      );
+    }
+
+    if (cursor >= content.length) {
+      break;
+    }
+    while (content.charCodeAt(cursor) === 0xff) {
+      cursor += 1;
+    }
+    const marker = content.charCodeAt(cursor) & 0xff;
+    cursor += 1;
+
+    if (insideEntropyData && marker === 0x00) {
+      continue;
+    }
+    if (marker === 0xd9) {
+      return cursor;
+    }
+    if (marker === 0xd8 || marker === 0x00) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF DCT inline image contains malformed JPEG markers.',
+      );
+    }
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      continue;
+    }
+    if (cursor + 1 >= content.length) {
+      break;
+    }
+    const segmentLength = (content.charCodeAt(cursor) << 8) | content.charCodeAt(cursor + 1);
+    if (segmentLength < 2 || cursor + segmentLength > content.length) {
+      throw createPdfExtractionError(
+        'unsupported_structure',
+        'PDF DCT inline image contains an invalid JPEG segment.',
+      );
+    }
+    cursor += segmentLength;
+    insideEntropyData = marker === 0xda;
+  }
+  throw createPdfExtractionError(
+    'unsupported_structure',
+    'PDF DCT inline image is missing its JPEG end marker.',
+  );
+}
+
+function requireInlineImageEndOperator(
+  content: string,
+  dataEnd: number,
+  budget: PdfExtractionBudget,
+): number {
+  if (!isPdfWhitespace(content[dataEnd])) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      'PDF inline image data is not followed by a valid EI separator.',
+    );
+  }
+  const operatorStart = skipPdfWhitespaceAndComments(content, dataEnd);
+  assertWithinProcessingTime(budget);
+  if (!isKeywordAt(content, operatorStart, 'EI')) {
+    throw createPdfExtractionError(
+      'unsupported_structure',
+      'PDF inline image is missing its EI operator.',
+    );
+  }
+  return operatorStart + 'EI'.length;
+}
+
+// Inline images (`BI <dictionary> ID <data> EI`) embed arbitrary binary data
+// in a content stream. Never locate their end by searching for the first
+// whitespace-delimited `EI`: pixel bytes may contain that sequence and then
+// attacker-shaped text operators. Instead, derive an exact boundary from the
+// outer encoding's end marker (or from dimensions for unfiltered samples),
+// discard the opaque bytes, and require the real EI operator immediately
+// afterwards. Unknown encodings remain fail-closed.
 function skipInlineImage(
   content: string,
   dictionaryStart: number,
   budget: PdfExtractionBudget,
 ): number {
-  let cursor = dictionaryStart;
-  let reachedImageData = false;
-  while (!reachedImageData) {
-    const result = readContentToken(content, cursor, budget);
-    if (!result.token) {
-      throw createPdfExtractionError(
-        'unsupported_structure',
-        'PDF inline image is missing its ID keyword.',
+  const dictionary = readInlineImageDictionary(content, dictionaryStart, budget);
+  const filters = readInlineImageFilters(dictionary.entries);
+  let dataEnd: number;
+
+  switch (filters[0]) {
+    case undefined:
+      dataEnd = dictionary.dataStart + resolveUnfilteredInlineImageByteLength(dictionary.entries);
+      if (dataEnd > content.length) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF unfiltered inline image data is truncated.',
+        );
+      }
+      break;
+    case 'ASCIIHexDecode':
+      dataEnd = findAsciiHexInlineImageEnd(content, dictionary.dataStart, budget);
+      break;
+    case 'ASCII85Decode':
+      dataEnd = findAscii85InlineImageEnd(content, dictionary.dataStart, budget);
+      break;
+    case 'RunLengthDecode':
+      dataEnd = findRunLengthInlineImageEnd(content, dictionary.dataStart, budget);
+      break;
+    case 'FlateDecode':
+      dataEnd = findFlateInlineImageEnd(content, dictionary.dataStart, budget);
+      break;
+    case 'DCTDecode':
+      dataEnd = findDctInlineImageEnd(content, dictionary.dataStart, budget);
+      break;
+    default:
+      throw new PdfTextExtractionError(
+        'unsupported_filter',
+        'PDF inline image uses an unsupported compression filter.',
       );
-    }
-    cursor = result.next;
-    reachedImageData = result.token.type === 'word' && result.token.value === 'ID';
   }
 
-  // The ID keyword is followed by a single whitespace byte and then the raw
-  // image data; tolerate extra whitespace before scanning for the terminator.
-  while (cursor < content.length && isPdfWhitespace(content[cursor])) {
-    cursor += 1;
-  }
-
-  let terminatorStart = content.indexOf('EI', cursor);
-  while (terminatorStart >= 0) {
-    assertWithinProcessingTime(budget);
-    const beforeTerminator = content[terminatorStart - 1];
-    const afterTerminator = content[terminatorStart + 'EI'.length];
-    if (isPdfWhitespace(beforeTerminator) && isPdfDelimiter(afterTerminator)) {
-      return terminatorStart + 'EI'.length;
-    }
-    terminatorStart = content.indexOf('EI', terminatorStart + 1);
-  }
-
-  throw createPdfExtractionError(
-    'unsupported_structure',
-    'PDF inline image is missing its EI terminator.',
-  );
+  return requireInlineImageEndOperator(content, dataEnd, budget);
 }
 
 function extractTextFromContentStream(
@@ -1951,6 +2472,12 @@ function extractTextFromContentStream(
       }
     }
     if (operator === 'BI') {
+      if (insideTextObject) {
+        throw createPdfExtractionError(
+          'unsupported_structure',
+          'PDF inline images are not valid inside text objects.',
+        );
+      }
       cursor = skipInlineImage(content, cursor, budget);
       operands.length = 0;
       continue;

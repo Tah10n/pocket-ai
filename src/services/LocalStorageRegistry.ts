@@ -478,6 +478,7 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
     downloadIntegrity: model.downloadIntegrity ? { ...model.downloadIntegrity } : undefined,
     gguf: model.gguf ? { ...model.gguf } : undefined,
     thinkingCapability: model.thinkingCapability ? { ...model.thinkingCapability } : undefined,
+    thinkingProbeBlocked: model.thinkingProbeBlocked ? { ...model.thinkingProbeBlocked } : undefined,
     architectures: model.architectures ? [...model.architectures] : undefined,
     baseModels: model.baseModels ? [...model.baseModels] : undefined,
     datasets: model.datasets ? [...model.datasets] : undefined,

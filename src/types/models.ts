@@ -155,6 +155,25 @@ export interface ModelThinkingCapabilitySnapshot {
   thinkingEndTag?: string;
 }
 
+/**
+ * Fail-closed marker persisted after an automatic thinking capability probe
+ * had to be aborted by the ownership watchdog. While the marker matches the
+ * current artifact/runtime/app identity, the optional probe must not run
+ * again and block ordinary text chat; it resets when the GGUF artifact, the
+ * llama.rn runtime version, or the app version changes, or when the user
+ * explicitly retries loading the model.
+ */
+export interface ModelThinkingProbeBlockedMarker {
+  status: 'blocked';
+  failedAt: number;
+  appVersion?: string;
+  runtimeVersion?: string;
+  artifactSha256?: string;
+  artifactPath?: string;
+  artifactSizeBytes?: number;
+  artifactModifiedAt?: number;
+}
+
 export interface ModelFileIntegrityMarker {
   kind: 'sha256' | 'size';
   sizeBytes: number;
@@ -247,6 +266,7 @@ export interface ModelMetadata {
   variants?: ModelVariant[];
   activeVariantId?: string;
   thinkingCapability?: ModelThinkingCapabilitySnapshot;
+  thinkingProbeBlocked?: ModelThinkingProbeBlockedMarker;
   artifacts?: ModelArtifactMetadata[];
   chatModalities?: ModelChatModality[];
   inputCapabilities?: ModelInputCapabilitySnapshot;
@@ -275,7 +295,8 @@ export type EngineLifecycleEvent =
   | 'context_operation_unload_timeout'
   | 'context_operation_runtime_timeout'
   | 'thinking_capability_probe_timeout'
-  | 'active_completion_unload_timeout';
+  | 'active_completion_unload_timeout'
+  | 'model_init_watchdog_timeout';
 
 export type EngineContextRecoveryStatus = 'idle' | 'required' | 'recovering' | 'failed';
 

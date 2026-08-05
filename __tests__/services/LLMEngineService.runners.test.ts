@@ -586,6 +586,123 @@ describe('ContextOperationRunner', () => {
       jest.useRealTimers();
     }
   });
+
+  it('uses a soft timeout only for the caller result while a healthy raw owner settles after 15 seconds', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const softTimeoutError = new Error('soft result timeout');
+    const hardTimeoutError = new Error('hard ownership timeout');
+    const onRuntimeTimeout = jest.fn();
+    let releaseRawOperation: () => void = () => undefined;
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+
+    const operation = runner.track(async () => {
+      markStarted();
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'late healthy result';
+    }, () => new Error('cancelled'), {
+      chatBlocking: false,
+      priority: 'background_probe',
+      softRuntimeTimeoutMs: 5000,
+      createSoftRuntimeTimeoutError: () => softTimeoutError,
+      runtimeTimeoutMs: 20_000,
+      createRuntimeTimeoutError: () => hardTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedOperation = operation.catch((error) => error);
+
+    try {
+      await started;
+      await jest.advanceTimersByTimeAsync(5000);
+
+      await expect(observedOperation).resolves.toBe(softTimeoutError);
+      expect(runner.hasActive()).toBe(true);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(10_000);
+      releaseRawOperation();
+      await jest.advanceTimersByTimeAsync(0);
+      await expect(runner.waitForActive()).resolves.toBe('drained');
+
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+      expect(runner.hasActive()).toBe(false);
+    } finally {
+      releaseRawOperation();
+      await operation.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('contains a synchronous exception from the hard-timeout recovery callback', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    let releaseRawOperation: () => void = () => undefined;
+
+    const operation = runner.track(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'late';
+    }, () => new Error('cancelled'), {
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout: () => {
+        throw new Error('recovery callback failed');
+      },
+    });
+    const observedOperation = operation.catch((error) => error);
+
+    try {
+      await jest.advanceTimersByTimeAsync(50);
+      await expect(observedOperation).resolves.toBe(runtimeTimeoutError);
+      expect(runner.hasActive()).toBe(true);
+    } finally {
+      releaseRawOperation();
+      await jest.advanceTimersByTimeAsync(0);
+      await operation.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('contains a rejected promise from the hard-timeout recovery callback', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    let releaseRawOperation: () => void = () => undefined;
+
+    const operation = runner.track(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'late';
+    }, () => new Error('cancelled'), {
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout: async () => {
+        throw new Error('async recovery callback failed');
+      },
+    });
+    const observedOperation = operation.catch((error) => error);
+
+    try {
+      await jest.advanceTimersByTimeAsync(50);
+      await expect(observedOperation).resolves.toBe(runtimeTimeoutError);
+      await Promise.resolve();
+      expect(runner.hasActive()).toBe(true);
+    } finally {
+      releaseRawOperation();
+      await jest.advanceTimersByTimeAsync(0);
+      await operation.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('ActiveCompletionRunner', () => {

@@ -3611,6 +3611,17 @@ describe('ChatScreen', () => {
       expect(getByText('chat.loadThreadModel')).toBeTruthy();
       expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
       expect(mockEngineState.activeModelId).toBe('author/model-q8');
+
+      fireEvent.press(getByText('chat.loadThreadModel'));
+      await waitFor(() => expect(mockLoadModel).toHaveBeenCalledTimes(2));
+      expect(mockLoadModel).toHaveBeenNthCalledWith(
+        2,
+        'author/model-q4',
+        expect.objectContaining({
+          preferLastWorkingProfile: true,
+          retryBlockedCapabilityProbes: true,
+        }),
+      );
     } finally {
       consoleErrorSpy.mockRestore();
     }

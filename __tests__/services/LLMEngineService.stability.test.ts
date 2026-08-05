@@ -116,6 +116,8 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).orphanedContextOperationDrains?.clear?.();
         (llmEngineService as any).orphanedContextReleasePromise = null;
         (llmEngineService as any).orphanedContextReleaseError = null;
+        (llmEngineService as any).orphanedContextReleaseTerminalReason = null;
+        (llmEngineService as any).orphanedContextReleaseWatchActive = false;
         (llmEngineService as any).contextRecoveryAttempt += 1;
         (llmEngineService as any).contextRecoveryPromise = null;
         (llmEngineService as any).contextRecoveryStatus = 'idle';
@@ -416,12 +418,19 @@ describe('LLMEngineService Stability', () => {
 
             await expect(observedUnload).resolves.toMatchObject({ code: 'engine_unloading' });
             await expect(observedCompletion).resolves.toMatchObject({ code: 'engine_unloading' });
+            // The detach's bounded ownership watch must drive the engine into
+            // the terminal restart-required state on its own, without waiting
+            // for a subsequent load()/unload() call.
             expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+                status: 'error',
+                lastError: expect.stringMatching(/restart the app/i),
                 diagnostics: expect.objectContaining({
-                    lastLifecycleEvent: 'active_completion_unload_timeout',
-                    lastLifecycleError: 'Timed out waiting for active completion during unload',
+                    contextRecoveryStatus: 'failed',
                 }),
             }));
+            expect(() => llmEngineService.assertContextRecoveryNotRequired()).toThrow(
+                expect.objectContaining({ code: 'engine_recovery_required' }),
+            );
             expect(llmEngineService.hasActiveCompletion()).toBe(false);
             // Elapsed drain timeouts and runner resets are not proof that the raw
             // native completion/stopCompletion owners are gone, so the detached
@@ -438,6 +447,17 @@ describe('LLMEngineService Stability', () => {
             }
             expect(releaseAllLlama).toHaveBeenCalledTimes(1);
             expect(llmEngineService.hasActiveContextOperation()).toBe(false);
+            // Once the late drain and targeted release succeed, the stale
+            // terminal block is lifted and manual loading works again.
+            for (let i = 0; i < 50 && llmEngineService.getState().status !== 'idle'; i += 1) {
+                await Promise.resolve();
+            }
+            expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+                status: 'idle',
+                lastError: undefined,
+            }));
+            expect(() => llmEngineService.assertContextRecoveryNotRequired()).not.toThrow();
+            await expect(llmEngineService.load(mockModel.id)).resolves.toBeUndefined();
         } finally {
             resolveStopCompletion?.();
             resolveCompletion?.();
@@ -631,6 +651,22 @@ describe('LLMEngineService Stability', () => {
                     lastLifecycleError: 'Timed out waiting for active context operations during unload',
                 }),
             }));
+
+            // The original unload itself owns the bounded terminal watch. A
+            // second load()/unload() call is not required to surface the
+            // restart-required state for a permanently hung native owner.
+            await jest.advanceTimersByTimeAsync(5000);
+            expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+                status: 'error',
+                lastError: expect.stringMatching(/restart the app/i),
+                diagnostics: expect.objectContaining({
+                    contextRecoveryStatus: 'failed',
+                    lastLifecycleEvent: 'context_operation_unload_timeout',
+                }),
+            }));
+            expect(() => llmEngineService.assertContextRecoveryNotRequired()).toThrow(
+                expect.objectContaining({ code: 'engine_recovery_required' }),
+            );
         } finally {
             jest.useRealTimers();
         }

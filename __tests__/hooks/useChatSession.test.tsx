@@ -51,6 +51,7 @@ import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { clearChatHistory } from '../../src/services/ChatHistoryService';
 import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationService';
+import { DOCUMENT_TEXT_PROCESSOR_VERSION } from '../../src/services/ChatAttachmentProcessorRegistry';
 import i18n from '../../src/i18n';
 import {
   armAndroidQaGenerationGate,
@@ -961,7 +962,7 @@ describe('useChatSession', () => {
           sizeBytes: 128,
           document: expect.objectContaining({
             processorId: 'document-text',
-            processorVersion: 1,
+            processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION,
             extractedCharCount: 'Doc line\nNext line'.length,
             isScanned: false,
           }),

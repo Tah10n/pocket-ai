@@ -15,7 +15,7 @@ import {
 import { AppError, type AppErrorCode } from './AppError';
 
 export const DOCUMENT_TEXT_PROCESSOR_ID = 'document-text';
-export const DOCUMENT_TEXT_PROCESSOR_VERSION = 1;
+export const DOCUMENT_TEXT_PROCESSOR_VERSION = 2;
 export const DEFAULT_DOCUMENT_TEXT_MAX_CHARS = 40_000;
 export const DEFAULT_DOCUMENT_TEXT_MAX_FILE_BYTES = MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES;
 
@@ -206,9 +206,22 @@ function createPdfProcessingError(
         },
       );
     case 'unsupported_filter':
+    case 'unsupported_structure':
       return createAttachmentProcessingError(
         'chat_attachment_parse_failed',
-        'PDF uses unsupported compression or content filters.',
+        'PDF uses unsupported compression or document structure.',
+        {
+          attachment,
+          cause: error,
+          details: {
+            reason: error.reason,
+          },
+        },
+      );
+    case 'resource_limit':
+      return createAttachmentProcessingError(
+        'chat_attachment_too_large_for_context',
+        'PDF exceeds local processing limits.',
         {
           attachment,
           cause: error,
@@ -402,6 +415,10 @@ export class ChatAttachmentProcessorRegistry {
     let pageCount: number | undefined;
     let isScanned = false;
     if (processable.mimeType === 'application/pdf') {
+      // The bundled llama.rn contract currently exposes native image/audio
+      // inputs, not a typed PDF input. Keep PDF bytes out of media_paths and
+      // use the bounded local extractor until the runtime itself provides a
+      // verifiable native-PDF capability and payload contract.
       try {
         const pdfResult = extractTextFromPdfBase64(rawText);
         parsedText = pdfResult.text;

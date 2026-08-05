@@ -1553,7 +1553,9 @@ export const ChatScreen = () => {
                 threadId,
                 expectedThreadModelId: threadModelId,
                 applySelection: false,
-                options: { preferLastWorkingProfile: true },
+                options: {
+                    preferLastWorkingProfile: true,
+                },
             });
             if (result.status === 'failed') {
                 showAlertForError(

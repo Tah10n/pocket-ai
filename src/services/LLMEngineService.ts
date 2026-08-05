@@ -11,6 +11,7 @@ import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import {
   EngineBackendMode,
   type EngineBackendInitAttempt,
+  type EngineContextRecoveryStatus,
   type EngineLifecycleEvent,
   type EngineBackendPolicy,
   type EngineModelInitFailureCategory,
@@ -24,8 +25,13 @@ import {
   type ModelMetadata,
   type ModelSpeculativeDecodingConfig,
   type ModelThinkingCapabilitySnapshot,
+  type ModelThinkingProbeBlockedMarker,
 } from '../types/models';
-import { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
+import {
+  LlmChatCompletionOptions,
+  LlmChatMessage,
+  type LlmTextContentPart,
+} from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import {
   getModelLoadParametersForModel,
@@ -141,6 +147,7 @@ import {
   initLlamaContext,
   loadLlamaModelInfo,
   releaseAllLlamaContexts,
+  releaseLlamaContext,
   releaseMultimodalFromContext,
   runCompletionOnContext,
   tokenizeFormattedPrompt,
@@ -183,6 +190,12 @@ export interface LoadModelOptions {
   allowUnsafeMemoryLoad?: boolean;
   loadParamsOverride?: Partial<ModelLoadParameters>;
   preferLastWorkingProfile?: boolean;
+  /**
+   * Explicit user retry from the separately named thinking-detection action.
+   * The persisted fail-closed block is cleared only after load/recovery
+   * barriers succeed and immediately before the optional probe is relaunched.
+   */
+  retryBlockedCapabilityProbes?: boolean;
 }
 
 type InitInferenceProfile = ResolvedInferenceProfile & {
@@ -215,6 +228,28 @@ const CONTEXT_OPERATION_STOP_MESSAGE = 'Prompt preparation was stopped before na
 const CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation before native completion started';
 const CONTEXT_OPERATION_PROMPT_COUNT_DRAIN_TIMEOUT_MESSAGE = 'Timed out waiting for background prompt preparation before counting prompt tokens';
 const CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for prompt preparation to stop';
+const DETACHED_CONTEXT_CLEANUP_PENDING_MESSAGE = 'Detached model context cleanup is still in progress';
+const DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE = 'Failed to release detached model context; restart the app to recover the engine';
+const DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE = 'A detached model context is still owned by an unresponsive native operation; restart the app to recover the engine';
+const MODEL_INIT_WATCHDOG_TIMEOUT_MESSAGE = 'Model initialization stopped reporting progress; restart the app to recover the engine';
+const BACKGROUND_CONTEXT_OPERATION_SOFT_TIMEOUT_MESSAGE = 'The background model operation took too long; its result was discarded';
+// Runtime watchdogs are deliberately split per operation shape:
+// - the thinking probe formats two tiny prompts, so a short hard limit is safe;
+// - prompt token counting formats and tokenizes the full history (up to the
+//   131k-token context allowance, potentially twice for strict-role retries),
+//   so its hard limit scales with the prompt size;
+// - multimodal readiness owns projector lookup plus native projector init, so
+//   it gets its own generous limit.
+const THINKING_CAPABILITY_PROBE_RUNTIME_TIMEOUT_MS = 15000;
+const BACKGROUND_TOKEN_COUNT_SOFT_TIMEOUT_MS = 10000;
+const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_BASE_MS = 20000;
+const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MAX_MS = 180000;
+const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_CHARS_PER_SECOND = 4000;
+const MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS = 90000;
+const MODEL_INIT_NO_PROGRESS_TIMEOUT_MS = 90000;
+const MODEL_INIT_HARD_TIMEOUT_MS = 600000;
+const THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE = 'Automatic model capability detection stopped responding; context recovery is required';
+const BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE = 'A background model operation stopped responding; context recovery is required';
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const LOW_MEMORY_UNLOAD_FAILURE_MESSAGE = 'Failed to unload the model after a low-memory warning';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
@@ -328,6 +363,7 @@ type MultimodalReadinessRefreshRequest = {
 
 type InternalLoadOptions = {
   readonly backgroundReadinessRefresh?: MultimodalReadinessRefreshRequest;
+  readonly contextRecoveryAttempt?: number;
 };
 
 function getDeviceModelForInitFailureIdentity(): string {
@@ -439,8 +475,10 @@ function countMessageAudioInputOccurrences(message: LlmChatMessage): number {
   }).length ?? 0;
 }
 
-function getMessageTextContentParts(message: LlmChatMessage) {
-  return message.contentParts?.filter((part) => part.type === 'text' && part.text.trim().length > 0) ?? [];
+function getMessageTextContentParts(message: LlmChatMessage): LlmTextContentPart[] {
+  return message.contentParts?.filter((part): part is LlmTextContentPart => (
+    part.type === 'text' && part.text.trim().length > 0
+  )) ?? [];
 }
 
 function countMessageTextContentOccurrences(message: LlmChatMessage): number {
@@ -1354,7 +1392,20 @@ class LLMEngineService {
   private loadedContextDisablesContextShiftForMultimodal = false;
   private pendingMultimodalReadinessRefresh: MultimodalReadinessRefreshRequest | null = null;
   private pendingMultimodalReadinessRefreshPromise: Promise<void> | null = null;
-  private deferredContextReleasePromise: Promise<void> | null = null;
+  private orphanedContextOperationDrains = new Set<Promise<void>>();
+  private orphanedContextReleasePromise: Promise<void> | null = null;
+  private orphanedContextReleaseError: AppError | null = null;
+  private orphanedContextReleaseTerminalReason:
+    | 'drain_timeout'
+    | 'release_failed'
+    | 'model_init_watchdog'
+    | null = null;
+  private orphanedContextReleaseWatchActive = false;
+  private contextRecoveryStatus: EngineContextRecoveryStatus = 'idle';
+  private contextRecoveryModelId: string | null = null;
+  private contextRecoveryAttempt = 0;
+  private contextRecoveryPromise: Promise<void> | null = null;
+  private thinkingCapabilityProbeBlocksByModelId = new Map<string, ModelThinkingProbeBlockedMarker>();
   private lastLifecycleEvent: EngineLifecycleEvent | null = null;
   private lastLifecycleError: string | null = null;
   private recentMultimodalDiagnostics: MultimodalDiagnosticsSummary | null = null;
@@ -1887,12 +1938,20 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    this.assertContextRecoveryNotRequired();
+
     const context = this.context;
     if (!context || this.state.status !== EngineStatus.READY) {
       throw new AppError('engine_not_ready', 'Engine not ready');
     }
 
     return { context, generation: this.contextGeneration };
+  }
+
+  public assertContextRecoveryNotRequired(): void {
+    if (this.contextRecoveryStatus !== 'idle') {
+      throw new AppError('engine_recovery_required', THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE);
+    }
   }
 
   private assertExpectedCompletionModel(expectedModelId: string | undefined): void {
@@ -1962,6 +2021,11 @@ class LLMEngineService {
       readonly priority?: ContextOperationPriority;
       readonly startTimeoutMs?: number;
       readonly createStartTimeoutError?: () => unknown;
+      readonly runtimeTimeoutMs?: number;
+      readonly createRuntimeTimeoutError?: () => unknown;
+      readonly onRuntimeTimeout?: (error: unknown) => void | Promise<void>;
+      readonly softRuntimeTimeoutMs?: number;
+      readonly createSoftRuntimeTimeoutError?: () => unknown;
     } = {},
   ): Promise<T> {
     return this.contextOperationRunner.track(
@@ -1982,7 +2046,7 @@ class LLMEngineService {
   }
 
   public hasActiveContextOperation(): boolean {
-    return this.contextOperationRunner.hasActive();
+    return this.contextOperationRunner.hasActive() || this.orphanedContextOperationDrains.size > 0;
   }
 
   public hasActiveChatBlockingContextOperation(): boolean {
@@ -2012,7 +2076,7 @@ class LLMEngineService {
     const drainResult = await this.waitForActiveContextOperations({ timeoutMs });
     const chatBlockingDrainResult = await chatBlockingDrainPromise;
     if (chatBlockingDrainResult === 'timed_out' && options.detachOnTimeout !== false) {
-      this.detachCurrentContextAfterTimedOutStop(
+      this.detachCurrentContextAfterTimedOutOperation(
         this.state.activeModelId ?? null,
         new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE),
       );
@@ -2035,8 +2099,7 @@ class LLMEngineService {
     });
     if (drainResult === 'timed_out') {
       const timeoutError = new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE);
-      this.completionRunner.rejectActive(timeoutError);
-      this.detachCurrentContextAfterTimedOutStop(this.state.activeModelId ?? null, timeoutError);
+      this.detachCurrentContextAfterTimedOutOperation(this.state.activeModelId ?? null, timeoutError);
     }
 
     return drainResult;
@@ -2055,36 +2118,350 @@ class LLMEngineService {
     return waitForPromiseWithTimeout(promise, timeoutMs);
   }
 
-  private async waitForDeferredContextReleaseDrain(
-    drainPromise: Promise<unknown>,
-    timeoutMessage: string,
-  ): Promise<void> {
-    const drainResult = await this.waitForUnloadPromise(
-      drainPromise.catch(() => undefined),
-      CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
-    );
+  private trackOrphanedContextOperationDrain(drainPromise: Promise<void>): void {
+    this.orphanedContextOperationDrains.add(drainPromise);
+    void drainPromise.finally(() => {
+      this.orphanedContextOperationDrains.delete(drainPromise);
+    });
+  }
 
-    if (drainResult !== 'timed_out') {
-      return;
+  private async waitForOrphanedContextRelease(): Promise<void> {
+    if (this.orphanedContextReleaseError) {
+      throw this.orphanedContextReleaseError;
     }
-
-    const timeoutError = new AppError('engine_unloading', timeoutMessage);
-    this.contextOperationRunner.reset(timeoutError);
-    this.completionRunner.reset();
-
-    if (process.env.NODE_ENV !== 'test') {
-      console.warn('[LLMEngine] Deferred context release drain timed out; forcing context release', {
-        message: timeoutMessage,
-      });
+    let pendingRelease = this.orphanedContextReleasePromise;
+    while (pendingRelease) {
+      const drainResult = await this.waitForUnloadPromise(
+        pendingRelease.catch(() => undefined),
+        CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+      );
+      if (drainResult === 'timed_out' && this.orphanedContextReleasePromise === pendingRelease) {
+        throw this.recordOrphanedContextReleaseTerminalError({
+          message: DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE,
+          reason: 'drain_timeout',
+        });
+      }
+      pendingRelease = this.orphanedContextReleasePromise;
+    }
+    if (this.orphanedContextReleaseError) {
+      throw this.orphanedContextReleaseError;
     }
   }
 
-  private detachCurrentContextAfterTimedOutStop(activeModelId: string | null, timeoutError: AppError): void {
+  private assertNoOrphanedContextReleasePending(): void {
+    if (this.orphanedContextReleaseError) {
+      throw this.orphanedContextReleaseError;
+    }
+    if (this.orphanedContextReleasePromise) {
+      throw new AppError('engine_unloading', DETACHED_CONTEXT_CLEANUP_PENDING_MESSAGE);
+    }
+  }
+
+  private beginBoundedOrphanedContextReleaseWatch(): void {
+    // Every detach path must bound how long a never-settling raw owner keeps
+    // the detached context pinned: the watch resolves the orphaned release
+    // within the drain timeout so the engine reaches the terminal
+    // restart-required state instead of blocking chat forever.
+    if (this.orphanedContextReleaseWatchActive) {
+      return;
+    }
+    this.orphanedContextReleaseWatchActive = true;
+    const watchedRelease = this.orphanedContextReleasePromise;
+    void this.waitForOrphanedContextRelease()
+      .catch(() => undefined)
+      .finally(() => {
+        this.orphanedContextReleaseWatchActive = false;
+        // Hand the bounded watch over only when a newer detach replaced the
+        // release promise and no terminal state was recorded; otherwise the
+        // watch has already fulfilled its purpose and must not re-arm.
+        if (
+          this.orphanedContextReleasePromise !== null
+          && this.orphanedContextReleasePromise !== watchedRelease
+          && this.orphanedContextReleaseError === null
+        ) {
+          this.beginBoundedOrphanedContextReleaseWatch();
+        }
+      });
+  }
+
+  private recordOrphanedContextReleaseTerminalError({
+    message,
+    cause,
+    activeModelId = null,
+    reason,
+    lifecycleEvent = 'context_operation_unload_timeout',
+  }: {
+    message: string;
+    cause?: unknown;
+    activeModelId?: string | null;
+    reason: 'drain_timeout' | 'release_failed' | 'model_init_watchdog';
+    lifecycleEvent?: EngineLifecycleEvent;
+  }): AppError {
+    const existingError = this.orphanedContextReleaseError;
+    if (existingError instanceof AppError && existingError.code === 'engine_recovery_required') {
+      return existingError;
+    }
+    const terminalError = cause === undefined
+      ? new AppError('engine_recovery_required', message)
+      : new AppError('engine_recovery_required', message, { cause });
+    this.orphanedContextReleaseError = terminalError;
+    this.orphanedContextReleaseTerminalReason = reason;
+    this.contextRecoveryStatus = 'failed';
+    this.lastLifecycleEvent = lifecycleEvent;
+    this.lastLifecycleError = terminalError.message;
+    this.updateState({
+      ...this.state,
+      status: EngineStatus.ERROR,
+      activeModelId: activeModelId ?? this.state.activeModelId,
+      loadProgress: 0,
+      lastError: terminalError.message,
+    });
+    return terminalError;
+  }
+
+  private clearRecoveredOrphanedContextTerminalState(): void {
+    // A late successful drain plus targeted release proves the native ownership
+    // that produced a drain-timeout terminal state is gone. Lift the stale
+    // restart-required block so the user can load a model manually again.
+    if (
+      this.orphanedContextReleaseTerminalReason !== 'drain_timeout'
+      || this.orphanedContextReleasePromise !== null
+      || this.context !== null
+      || this.isUnloading
+      || this.contextRecoveryPromise !== null
+      || this.contextRecoveryStatus === 'recovering'
+    ) {
+      return;
+    }
+
+    this.orphanedContextReleaseError = null;
+    this.orphanedContextReleaseTerminalReason = null;
+    this.contextRecoveryStatus = 'idle';
+    this.contextRecoveryModelId = null;
+    this.updateState({
+      status: EngineStatus.IDLE,
+      activeModelId: undefined,
+      loadProgress: 0,
+      lastError: undefined,
+    });
+  }
+
+  private persistActiveModelIdSettingBestEffort(activeModelId: string | null): void {
+    try {
+      updateSettings({ activeModelId });
+    } catch (error) {
+      // Persistence must not abort ownership transitions: memory ownership,
+      // recovery state, and terminal state all have to move forward even when
+      // the private storage is unavailable.
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[LLMEngine] Failed to persist activeModelId', buildSafeErrorLogDetails(error));
+      }
+    }
+  }
+
+  private resolveBackgroundTokenCountHardTimeoutMs(messages: readonly LlmChatMessage[]): number {
+    // Token counting formats and tokenizes the whole history, and strict-role
+    // templates can repeat that pass once more. Scale the hard ownership limit
+    // with the prompt size instead of treating a slow-but-healthy large count
+    // as a hang.
+    let totalChars = 0;
+    for (const message of messages) {
+      if (typeof message.content === 'string') {
+        totalChars += message.content.length;
+      }
+      for (const textPart of getMessageTextContentParts(message)) {
+        totalChars += textPart.text.length;
+      }
+    }
+
+    const promptSizeAllowanceMs = Math.ceil(
+      totalChars / BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_CHARS_PER_SECOND,
+    ) * 1000;
+    const scaledTimeoutMs = BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_BASE_MS
+      + promptSizeAllowanceMs;
+    return Math.min(scaledTimeoutMs, BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MAX_MS);
+  }
+
+  private isModelInitWatchdogTerminalError(error: unknown): boolean {
+    return error instanceof AppError
+      && error.code === 'engine_recovery_required'
+      && error.message === MODEL_INIT_WATCHDOG_TIMEOUT_MESSAGE;
+  }
+
+  private awaitModelInitWithProgressWatchdog(
+    startInit: (progressListener: (progress: number) => void) => Promise<LlamaContext>,
+    onProgress: (progress: number) => void,
+  ): Promise<LlamaContext> {
+    // Native model initialization has no cancellation API. A never-settling
+    // init promise must not pin the engine in INITIALIZING forever (queueing
+    // every later load/unload behind it), so a progress-aware inactivity timer
+    // plus an absolute hard cap abort the await and move the engine into the
+    // terminal restart-required state without releasing memory that the still
+    // running native init may own.
+    let inactivityTimerId: ReturnType<typeof setTimeout> | null = null;
+    let hardTimerId: ReturnType<typeof setTimeout> | null = null;
+    let watchdogFired = false;
+    let lastProgress: number | null = null;
+    let rawInitPromise!: Promise<LlamaContext>;
+
+    const clearWatchdogTimers = () => {
+      if (inactivityTimerId !== null) {
+        clearTimeout(inactivityTimerId);
+        inactivityTimerId = null;
+      }
+      if (hardTimerId !== null) {
+        clearTimeout(hardTimerId);
+        hardTimerId = null;
+      }
+    };
+
+    return new Promise<LlamaContext>((resolve, reject) => {
+      const fireWatchdog = () => {
+        if (watchdogFired) {
+          return;
+        }
+        watchdogFired = true;
+        clearWatchdogTimers();
+        this.recordOrphanedContextReleaseTerminalError({
+          message: MODEL_INIT_WATCHDOG_TIMEOUT_MESSAGE,
+          reason: 'model_init_watchdog',
+          lifecycleEvent: 'model_init_watchdog_timeout',
+        });
+        this.persistActiveModelIdSettingBestEffort(null);
+        // If the abandoned init ever finishes anyway, clean the orphaned
+        // context best-effort; never release it while the init may still run.
+        void rawInitPromise.then(
+          (lateContext) => {
+            void releaseLlamaContext(lateContext).catch(() => undefined);
+          },
+          () => undefined,
+        );
+        reject(new AppError('engine_recovery_required', MODEL_INIT_WATCHDOG_TIMEOUT_MESSAGE));
+      };
+
+      const resetInactivityTimer = () => {
+        if (watchdogFired) {
+          return;
+        }
+        if (inactivityTimerId !== null) {
+          clearTimeout(inactivityTimerId);
+        }
+        inactivityTimerId = setTimeout(fireWatchdog, MODEL_INIT_NO_PROGRESS_TIMEOUT_MS);
+      };
+
+      const progressListener = (progress: number) => {
+        if (watchdogFired) {
+          return;
+        }
+        if (progress !== lastProgress) {
+          lastProgress = progress;
+          resetInactivityTimer();
+        }
+        onProgress(progress);
+      };
+
+      rawInitPromise = startInit(progressListener);
+      resetInactivityTimer();
+      hardTimerId = setTimeout(fireWatchdog, MODEL_INIT_HARD_TIMEOUT_MS);
+
+      void rawInitPromise.then(
+        (context) => {
+          if (watchdogFired) {
+            return;
+          }
+          clearWatchdogTimers();
+          resolve(context);
+        },
+        (error) => {
+          if (watchdogFired) {
+            return;
+          }
+          clearWatchdogTimers();
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private scheduleOrphanedContextRelease({
+    activeModelId,
+    context,
+    drainPromise,
+  }: {
+    activeModelId: string | null;
+    context: LlamaContext | null;
+    drainPromise: Promise<void>;
+  }): void {
+    const previousRelease = this.orphanedContextReleasePromise;
+    let releaseFailed = false;
+    const orphanedRelease = this.runExclusiveOperation(async () => {
+      if (previousRelease) {
+        await previousRelease;
+      }
+      // llama.rn keeps a raw context pointer for in-flight JSI tasks. Its native
+      // release timeout is not a proof that those tasks have stopped using the
+      // pointer, so releasing before the captured raw operation settles can
+      // create a use-after-free when another context is initialized.
+      await drainPromise;
+      if (context) {
+        await releaseLlamaContext(context);
+      }
+    })
+      .catch((error) => {
+        releaseFailed = true;
+        const releaseError = this.recordOrphanedContextReleaseTerminalError({
+          message: DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE,
+          cause: error,
+          activeModelId,
+          reason: 'release_failed',
+        });
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn(
+            '[LLMEngine] Failed to release detached context after prompt preparation timeout',
+            buildSafeErrorLogDetails(error),
+          );
+        }
+        throw releaseError;
+      })
+      .finally(() => {
+        if (this.orphanedContextReleasePromise === orphanedRelease) {
+          this.orphanedContextReleasePromise = null;
+        }
+        if (!releaseFailed) {
+          // Runs after the release pointer is cleared so the stale drain-timeout
+          // terminal state can be lifted for a late but successful release.
+          this.clearRecoveredOrphanedContextTerminalState();
+        }
+      });
+
+    this.orphanedContextReleasePromise = orphanedRelease;
+    void orphanedRelease.catch(() => undefined);
+  }
+
+  private detachCurrentContextAfterTimedOutOperation(
+    activeModelId: string | null,
+    timeoutError: AppError,
+    options: {
+      lifecycleEvent?: EngineLifecycleEvent;
+      warningMessage?: string;
+      drainPromise?: Promise<void>;
+    } = {},
+  ): void {
     const contextAtTimeout = this.context;
-    const drainPromise = this.waitForActiveContextOperations().then(() => undefined);
-    this.lastLifecycleEvent = 'context_operation_unload_timeout';
-    this.lastLifecycleError = timeoutError.message;
-    this.contextOperationRunner.reset(timeoutError);
+    const drainPromise = options.drainPromise
+      ?? this.waitForActiveContextOperations().then(() => undefined);
+    this.trackOrphanedContextOperationDrain(drainPromise);
+    this.scheduleOrphanedContextRelease({
+      activeModelId,
+      context: contextAtTimeout,
+      drainPromise,
+    });
+    // A single hard ownership watch bounds every detach: direct Stop, explicit
+    // unload, active-completion unload, low-memory unload, and background
+    // runtime timeouts all funnel through this method.
+    this.beginBoundedOrphanedContextReleaseWatch();
+    this.completionRunner.rejectActive(timeoutError);
+    this.contextOperationRunner.cancelActive(timeoutError);
     this.completionRunner.reset();
 
     if (contextAtTimeout) {
@@ -2094,9 +2471,11 @@ class LLMEngineService {
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
       this.resetRuntimeTelemetry();
-      updateSettings({ activeModelId: null });
+      this.persistActiveModelIdSettingBestEffort(null);
     }
 
+    this.lastLifecycleEvent = options.lifecycleEvent ?? 'context_operation_unload_timeout';
+    this.lastLifecycleError = timeoutError.message;
     this.updateState({
       status: EngineStatus.ERROR,
       activeModelId: activeModelId ?? undefined,
@@ -2104,23 +2483,132 @@ class LLMEngineService {
       lastError: timeoutError.message,
     });
 
-    void drainPromise.catch(() => undefined).then(async () => {
-      if (this.context !== null || this.state.activeModelId !== activeModelId) {
-        return;
-      }
-
-      await releaseAllLlamaContexts().catch((error) => {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn('[LLMEngine] Failed to release detached context after prompt preparation drain', buildSafeErrorLogDetails(error));
-        }
-      });
-    });
-
     if (process.env.NODE_ENV !== 'test') {
-      console.warn('[LLMEngine] Prompt preparation stop timed out; detached active context', {
+      console.warn(options.warningMessage ?? '[LLMEngine] Prompt preparation stop timed out; detached active context', {
         activeModelId,
       });
     }
+  }
+
+  private cancelScheduledContextRecovery(): void {
+    if (this.contextRecoveryStatus === 'required'
+      || this.contextRecoveryStatus === 'recovering'
+      || this.contextRecoveryPromise) {
+      this.contextRecoveryAttempt += 1;
+    }
+  }
+
+  private handleTimedOutContextOperation({
+    modelId,
+    context,
+    generation,
+    timeoutError,
+    lifecycleEvent,
+    warningMessage,
+    blockThinkingCapabilityProbe = false,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+    generation: number;
+    timeoutError: AppError;
+    lifecycleEvent: EngineLifecycleEvent;
+    warningMessage: string;
+    blockThinkingCapabilityProbe?: boolean;
+  }): void {
+    if (
+      this.context !== context
+      || this.contextGeneration !== generation
+      || this.isUnloading
+      || this.state.status !== EngineStatus.READY
+      || this.state.activeModelId !== modelId
+      || this.contextRecoveryStatus !== 'idle'
+      || this.contextRecoveryPromise !== null
+    ) {
+      return;
+    }
+
+    if (blockThinkingCapabilityProbe) {
+      const marker = this.buildThinkingCapabilityProbeBlockedMarker();
+      this.thinkingCapabilityProbeBlocksByModelId.set(modelId, marker);
+      // Persist the fail-closed block so a restart does not re-run the same
+      // hanging probe against the same artifact/runtime combination.
+      this.persistThinkingCapabilityProbeBlockedMarker(modelId, marker);
+    }
+    this.contextRecoveryStatus = 'required';
+    this.contextRecoveryModelId = modelId;
+    this.contextRecoveryAttempt += 1;
+    const recoveryAttempt = this.contextRecoveryAttempt;
+
+    this.detachCurrentContextAfterTimedOutOperation(modelId, timeoutError, {
+      lifecycleEvent,
+      warningMessage,
+    });
+
+    let recoveryPromise!: Promise<void>;
+    recoveryPromise = (async () => {
+      await this.waitForOrphanedContextRelease();
+      if (this.contextRecoveryAttempt !== recoveryAttempt) {
+        return;
+      }
+
+      this.contextRecoveryStatus = 'recovering';
+      this.updateState(this.state);
+      await this.loadWithProjectorResolutionOperationCache(
+        modelId,
+        { forceReload: true },
+        new Map(),
+        { contextRecoveryAttempt: recoveryAttempt },
+      );
+    })()
+      .catch((error) => {
+        if (this.contextRecoveryAttempt !== recoveryAttempt) {
+          return;
+        }
+
+        if (this.orphanedContextReleaseError) {
+          // The bounded orphan release wait already recorded the terminal
+          // recovery state and message; do not overwrite that honest failure.
+          return;
+        }
+
+        this.contextRecoveryStatus = 'failed';
+        this.updateState(this.state);
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] Failed to recover context after timed-out context operation', buildSafeErrorLogDetails(error));
+        }
+      })
+      .finally(() => {
+        if (this.contextRecoveryPromise === recoveryPromise) {
+          this.contextRecoveryPromise = null;
+        }
+        this.clearRecoveredOrphanedContextTerminalState();
+      });
+
+    this.contextRecoveryPromise = recoveryPromise;
+    void recoveryPromise.catch(() => undefined);
+  }
+
+  private handleThinkingCapabilityProbeTimeout({
+    modelId,
+    context,
+    generation,
+  }: {
+    modelId: string;
+    context: LlamaContext;
+    generation: number;
+  }): void {
+    this.handleTimedOutContextOperation({
+      modelId,
+      context,
+      generation,
+      timeoutError: new AppError(
+        'engine_recovery_required',
+        THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE,
+      ),
+      lifecycleEvent: 'thinking_capability_probe_timeout',
+      warningMessage: '[LLMEngine] Thinking capability probe timed out; detached active context for recovery',
+      blockThinkingCapabilityProbe: true,
+    });
   }
 
   private recordContextOperationUnloadTimeout(activeModelId: string | null): AppError {
@@ -2165,95 +2653,9 @@ class LLMEngineService {
     return timeoutError;
   }
 
-  private scheduleDeferredContextReleaseAfterCompletionDrain({
-    drainPromise,
-    context,
-    generation,
-  }: {
-    drainPromise: Promise<unknown>;
-    context: LlamaContext;
-    generation: number;
-  }): void {
-    if (this.deferredContextReleasePromise) {
-      return;
-    }
-
-    const deferredRelease = this.waitForDeferredContextReleaseDrain(
-      drainPromise,
-      ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE,
-    )
-      .then(() => this.runExclusiveOperation(async () => {
-        if (this.context !== context || this.contextGeneration !== generation) {
-          return;
-        }
-
-        await this.unloadInternal();
-        this.lastLifecycleEvent = 'active_completion_unload_timeout';
-        this.lastLifecycleError = ACTIVE_COMPLETION_UNLOAD_TIMEOUT_MESSAGE;
-        this.updateState(this.state);
-      }))
-      .catch((error) => {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn(
-            '[LLMEngine] Deferred context release after active completion unload timeout failed',
-            buildSafeErrorLogDetails(error),
-          );
-        }
-      })
-      .finally(() => {
-        if (this.deferredContextReleasePromise === deferredRelease) {
-          this.deferredContextReleasePromise = null;
-        }
-      });
-
-    this.deferredContextReleasePromise = deferredRelease;
-  }
-
   private cancelActiveContextOperationsForDeferredUnload(error: unknown): Promise<void> {
     this.contextOperationRunner.cancelActive(error);
     return this.waitForActiveContextOperations().then(() => undefined);
-  }
-
-  private scheduleDeferredContextReleaseAfterDrain({
-    context,
-    generation,
-  }: {
-    context: LlamaContext;
-    generation: number;
-  }): void {
-    if (this.deferredContextReleasePromise) {
-      return;
-    }
-
-    const deferredRelease = this.waitForDeferredContextReleaseDrain(
-      this.waitForActiveContextOperations(),
-      CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE,
-    )
-      .then(() => this.runExclusiveOperation(async () => {
-        if (this.context !== context || this.contextGeneration !== generation) {
-          return;
-        }
-
-        await this.unloadInternal();
-        this.lastLifecycleEvent = 'context_operation_unload_timeout';
-        this.lastLifecycleError = CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE;
-        this.updateState(this.state);
-      }))
-      .catch((error) => {
-        if (process.env.NODE_ENV !== 'test') {
-          console.warn(
-            '[LLMEngine] Deferred context release after unload timeout failed',
-            buildSafeErrorLogDetails(error),
-          );
-        }
-      })
-      .finally(() => {
-        if (this.deferredContextReleasePromise === deferredRelease) {
-          this.deferredContextReleasePromise = null;
-        }
-      });
-
-    this.deferredContextReleasePromise = deferredRelease;
   }
 
   private buildAdditionalStopWordsCacheKey({
@@ -3061,7 +3463,24 @@ class LLMEngineService {
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
-    await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+    this.cancelScheduledContextRecovery();
+    const retryMarker = options?.retryBlockedCapabilityProbes === true
+      ? this.captureThinkingCapabilityProbeBlockedMarker(modelId)
+      : null;
+    try {
+      await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+    } catch (error) {
+      // A retry request is transactional: terminal recovery, lifecycle, memory,
+      // or initialization failures must not consume the persisted consent gate.
+      if (retryMarker) {
+        this.restoreThinkingCapabilityProbeBlockedMarkerIfMissing(modelId, retryMarker);
+      }
+      throw error;
+    }
+  }
+
+  public async retryThinkingCapabilityDetection(modelId: string): Promise<void> {
+    await this.load(modelId, { retryBlockedCapabilityProbes: true });
   }
 
   private async loadWithProjectorResolutionOperationCache(
@@ -3070,7 +3489,22 @@ class LLMEngineService {
     projectorResolutionOperationCache: ProjectorResolutionOperationCache,
     internalOptions: InternalLoadOptions = {},
   ): Promise<void> {
+    const recoveryAttempt = internalOptions.contextRecoveryAttempt;
+    if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
+      return;
+    }
+
+    await this.waitForOrphanedContextRelease();
+    if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
+      return;
+    }
+
     await this.runExclusiveOperation(async () => {
+      if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
+        return;
+      }
+
+      this.assertNoOrphanedContextReleasePending();
       const model = registry.getModel(modelId);
       if (!model || !model.localPath) {
         throw new AppError('model_not_found', `Model ${modelId} not found or not downloaded`, {
@@ -3132,6 +3566,7 @@ class LLMEngineService {
           if (this.activeCompletionPromise) {
             this.queueMultimodalReadinessRefresh(refreshRequest);
           } else {
+            const refreshContextGeneration = this.contextGeneration;
             try {
               await this.trackContextOperation(async (cancellation) => {
                 if (
@@ -3148,7 +3583,25 @@ class LLMEngineService {
                   cancellation,
                   projectorResolutionOperationCache,
                 );
-              }, { chatBlocking: false, priority: 'user_action' });
+              }, {
+                chatBlocking: false,
+                priority: 'user_action',
+                runtimeTimeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
+                createRuntimeTimeoutError: () => new AppError(
+                  'engine_recovery_required',
+                  BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+                ),
+                onRuntimeTimeout: (error: unknown) => {
+                  this.handleTimedOutContextOperation({
+                    modelId: refreshRequest.modelId,
+                    context: refreshRequest.context,
+                    generation: refreshContextGeneration,
+                    timeoutError: toAppError(error),
+                    lifecycleEvent: 'context_operation_runtime_timeout',
+                    warningMessage: '[LLMEngine] Multimodal readiness refresh timed out; detached active context for recovery',
+                  });
+                },
+              });
             } catch (error) {
               if (!this.isContextOperationStopError(error) || !this.activeCompletionPromise) {
                 throw error;
@@ -3156,6 +3609,18 @@ class LLMEngineService {
 
               this.queueMultimodalReadinessRefresh(refreshRequest);
             }
+          }
+        }
+        if (
+          options?.retryBlockedCapabilityProbes === true
+          && model.thinkingCapability === undefined
+        ) {
+          // This READY context has already crossed the orphan and lifecycle
+          // barriers. Consume explicit consent only immediately before the
+          // separately requested probe.
+          this.resetThinkingCapabilityProbeBlock(modelId);
+          if (process.env.NODE_ENV !== 'test') {
+            this.launchThinkingCapabilityProbe(modelId);
           }
         }
         return;
@@ -3199,6 +3664,7 @@ class LLMEngineService {
         recentUnloadReclaim = await this.unloadInternal();
       }
 
+      this.assertNoOrphanedContextReleasePending();
       this.initPromise = this.initializeModel(
         modelId,
         model.localPath,
@@ -3211,15 +3677,24 @@ class LLMEngineService {
         fallbackDownloadMarker,
         resolvedArtifactInfo,
         projectorResolutionOperationCache,
+        options?.retryBlockedCapabilityProbes === true,
       );
       await this.initPromise;
     });
   }
 
   public async unload(): Promise<void> {
+    this.cancelScheduledContextRecovery();
+    await this.waitForOrphanedContextRelease();
     await this.runExclusiveOperation(async () => {
+      this.assertNoOrphanedContextReleasePending();
       await this.unloadInternal();
     });
+    if (this.contextRecoveryStatus !== 'idle') {
+      this.contextRecoveryStatus = 'idle';
+      this.contextRecoveryModelId = null;
+      this.updateState(this.state);
+    }
   }
 
   public async chatCompletion({
@@ -3234,6 +3709,7 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    this.assertContextRecoveryNotRequired();
     this.assertExpectedCompletionModel(expectedModelId);
 
     if (this.completionRunner.hasActive()) {
@@ -3295,7 +3771,13 @@ class LLMEngineService {
 
     const completionDriver = (async () => {
       try {
-        if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
+        if (
+          this.initPromise
+          && (
+            this.state.status === EngineStatus.INITIALIZING
+            || requestMediaInputOccurrenceCount > 0
+          )
+        ) {
           await this.initPromise;
         }
 
@@ -3704,7 +4186,212 @@ class LLMEngineService {
     return null;
   }
 
+  private getCurrentRuntimeIdentityForProbeMarker(): string {
+    try {
+      return buildNativeRuntimeIdentity(getLlamaBuildInfo());
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  private buildThinkingCapabilityProbeBlockedMarker(): ModelThinkingProbeBlockedMarker {
+    const identity = this.loadedArtifactIdentity;
+    const artifactPath = identity?.resolvedPath ?? identity?.localPath;
+    const artifactModifiedAt = identity?.modificationTime ?? identity?.fallbackDownloadMarker;
+    return {
+      status: 'blocked',
+      failedAt: Date.now(),
+      appVersion: APP_VERSION,
+      runtimeVersion: this.getCurrentRuntimeIdentityForProbeMarker(),
+      ...(artifactPath ? { artifactPath } : null),
+      ...(identity?.sizeBytes != null ? { artifactSizeBytes: identity.sizeBytes } : null),
+      ...(artifactModifiedAt != null ? { artifactModifiedAt } : null),
+    };
+  }
+
+  private captureThinkingCapabilityProbeBlockedMarker(
+    modelId: string,
+  ): ModelThinkingProbeBlockedMarker | null {
+    try {
+      const marker = registry.getModel(modelId)?.thinkingProbeBlocked;
+      if (marker?.status === 'blocked') {
+        return { ...marker };
+      }
+    } catch {
+      // Fall back to the current-process identity below. The private registry
+      // may be temporarily unavailable, but an in-memory fail-closed block is
+      // still valid transaction state.
+    }
+    const inMemoryMarker = this.thinkingCapabilityProbeBlocksByModelId.get(modelId);
+    return inMemoryMarker ? { ...inMemoryMarker } : null;
+  }
+
+  private persistThinkingCapabilityProbeBlockedMarker(
+    modelId: string,
+    marker: ModelThinkingProbeBlockedMarker = this.buildThinkingCapabilityProbeBlockedMarker(),
+  ): void {
+    try {
+      const model = registry.getModel(modelId);
+      if (!model) {
+        return;
+      }
+      const persistedMarker = { ...marker };
+      if (typeof model.sha256 === 'string' && model.sha256.trim().length > 0) {
+        persistedMarker.artifactSha256 = model.sha256.trim().toLowerCase();
+      }
+      this.thinkingCapabilityProbeBlocksByModelId.set(modelId, persistedMarker);
+      registry.updateModel({ ...model, thinkingProbeBlocked: persistedMarker });
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn(
+          '[LLMEngine] Failed to persist thinking capability probe block marker',
+          buildSafeErrorLogDetails(error),
+        );
+      }
+    }
+  }
+
+  private restoreThinkingCapabilityProbeBlockedMarkerIfMissing(
+    modelId: string,
+    marker: ModelThinkingProbeBlockedMarker,
+  ): void {
+    const restoredMarker = { ...marker };
+    // Restore the current-process fail-closed identity before touching the
+    // registry. A transient private-storage failure must not reopen the probe
+    // in memory after an unsuccessful explicit retry.
+    this.thinkingCapabilityProbeBlocksByModelId.set(modelId, restoredMarker);
+    try {
+      const model = registry.getModel(modelId);
+      if (!model) {
+        return;
+      }
+      if (model.thinkingProbeBlocked?.status === 'blocked') {
+        this.thinkingCapabilityProbeBlocksByModelId.set(modelId, {
+          ...model.thinkingProbeBlocked,
+        });
+        return;
+      }
+      registry.updateModel({ ...model, thinkingProbeBlocked: restoredMarker });
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn(
+          '[LLMEngine] Failed to restore thinking capability probe block marker',
+          buildSafeErrorLogDetails(error),
+        );
+      }
+    }
+  }
+
+  private clearThinkingCapabilityProbeBlockedMarker(model: ModelMetadata): void {
+    if (!model.thinkingProbeBlocked) {
+      return;
+    }
+    try {
+      registry.updateModel({ ...model, thinkingProbeBlocked: undefined });
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn(
+          '[LLMEngine] Failed to clear thinking capability probe block marker',
+          buildSafeErrorLogDetails(error),
+        );
+      }
+    }
+  }
+
+  private thinkingProbeMarkerMatchesCurrentEnvironment(
+    marker: ModelThinkingProbeBlockedMarker,
+    model: ModelMetadata | null,
+  ): boolean {
+    if (marker.appVersion !== undefined && marker.appVersion !== APP_VERSION) {
+      return false;
+    }
+    if (
+      marker.runtimeVersion !== undefined
+      && marker.runtimeVersion !== this.getCurrentRuntimeIdentityForProbeMarker()
+    ) {
+      return false;
+    }
+    let hasComparedArtifactSignal = false;
+    if (marker.artifactSha256 !== undefined) {
+      const currentSha256 = typeof model?.sha256 === 'string' ? model.sha256.trim().toLowerCase() : '';
+      if (currentSha256.length === 0 || currentSha256 !== marker.artifactSha256.trim().toLowerCase()) {
+        return false;
+      }
+      hasComparedArtifactSignal = true;
+    }
+
+    const identity = this.loadedArtifactIdentity;
+    if (marker.artifactPath !== undefined) {
+      const currentPath = identity?.resolvedPath ?? identity?.localPath ?? model?.localPath ?? null;
+      if (currentPath === null || marker.artifactPath !== currentPath) {
+        return false;
+      }
+      hasComparedArtifactSignal = true;
+    }
+    if (marker.artifactSizeBytes !== undefined) {
+      const currentSize = identity?.sizeBytes ?? model?.size ?? null;
+      if (currentSize === null || marker.artifactSizeBytes !== currentSize) {
+        return false;
+      }
+      hasComparedArtifactSignal = true;
+    }
+    if (marker.artifactModifiedAt !== undefined) {
+      const currentModified = identity?.modificationTime ?? identity?.fallbackDownloadMarker ?? null;
+      if (currentModified === null || marker.artifactModifiedAt !== currentModified) {
+        return false;
+      }
+      hasComparedArtifactSignal = true;
+    }
+    return hasComparedArtifactSignal;
+  }
+
+  private shouldSkipThinkingCapabilityProbe(
+    model: ModelMetadata | null | undefined,
+    modelId: string,
+  ): boolean {
+    const persistedMarker = model?.thinkingProbeBlocked;
+    const inMemoryMarker = this.thinkingCapabilityProbeBlocksByModelId.get(modelId);
+
+    if (inMemoryMarker) {
+      if (this.thinkingProbeMarkerMatchesCurrentEnvironment(inMemoryMarker, model ?? null)) {
+        return true;
+      }
+      this.thinkingCapabilityProbeBlocksByModelId.delete(modelId);
+    }
+
+    if (
+      persistedMarker?.status === 'blocked'
+      && this.thinkingProbeMarkerMatchesCurrentEnvironment(persistedMarker, model ?? null)
+    ) {
+      this.thinkingCapabilityProbeBlocksByModelId.set(modelId, { ...persistedMarker });
+      return true;
+    }
+
+    if (persistedMarker?.status !== 'blocked') {
+      return false;
+    }
+
+    // The GGUF artifact, native runtime, or app version changed since the
+    // block was recorded, so the old fail-closed marker no longer applies.
+    if (model) {
+      this.clearThinkingCapabilityProbeBlockedMarker(model);
+    }
+    return false;
+  }
+
+  private resetThinkingCapabilityProbeBlock(modelId: string): void {
+    this.thinkingCapabilityProbeBlocksByModelId.delete(modelId);
+    const model = registry.getModel(modelId);
+    if (model) {
+      this.clearThinkingCapabilityProbeBlockedMarker(model);
+    }
+  }
+
   private launchThinkingCapabilityProbe(modelId: string): void {
+    if (this.shouldSkipThinkingCapabilityProbe(registry.getModel(modelId), modelId)) {
+      return;
+    }
+
     const contextAtProbeStart = this.context;
     const generationAtProbeStart = this.contextGeneration;
 
@@ -3737,7 +4424,22 @@ class LLMEngineService {
           });
         }
       }
-    }, { chatBlocking: false, priority: 'passive_readiness' }).catch((error) => {
+    }, {
+      chatBlocking: false,
+      priority: 'passive_readiness',
+      runtimeTimeoutMs: THINKING_CAPABILITY_PROBE_RUNTIME_TIMEOUT_MS,
+      createRuntimeTimeoutError: () => new AppError(
+        'engine_recovery_required',
+        THINKING_CAPABILITY_PROBE_TIMEOUT_MESSAGE,
+      ),
+      onRuntimeTimeout: () => {
+        this.handleThinkingCapabilityProbeTimeout({
+          modelId,
+          context: contextAtProbeStart,
+          generation: generationAtProbeStart,
+        });
+      },
+    }).catch((error) => {
       if (this.isContextOperationStopError(error) || this.isUnloading) {
         return;
       }
@@ -3771,6 +4473,7 @@ class LLMEngineService {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
 
+    this.assertContextRecoveryNotRequired();
     if (this.activeCompletionPromise) {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
@@ -3814,6 +4517,10 @@ class LLMEngineService {
       ? mediaAwareMessages
       : mediaAwareMessages.map(withoutMediaPaths);
 
+    let contextAtTokenCount: LlamaContext | null = null;
+    let generationAtTokenCount: number | null = null;
+    let modelIdAtTokenCount: string | null = null;
+
     return this.trackContextOperation(async (cancellation) => {
       if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
         await this.initPromise;
@@ -3825,6 +4532,9 @@ class LLMEngineService {
       }
 
       const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+      contextAtTokenCount = context;
+      generationAtTokenCount = contextGeneration;
+      modelIdAtTokenCount = this.state.activeModelId ?? null;
 
       let strictRoleSystemNormalization: StrictRoleSystemNormalization = 'plain';
       const countTokens = async (promptMessages: LlmChatMessage[]) => {
@@ -3885,7 +4595,39 @@ class LLMEngineService {
       chatBlocking,
       priority: chatBlocking === false ? 'background_probe' : 'prompt_preparation',
       ...(chatBlocking === false
-        ? null
+        ? {
+            runtimeTimeoutMs: this.resolveBackgroundTokenCountHardTimeoutMs(requestMessages),
+            createRuntimeTimeoutError: () => new AppError(
+              'engine_recovery_required',
+              BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+            ),
+            // The soft watchdog only discards the background result so a slow
+            // but healthy count cannot keep its caller waiting; the raw native
+            // owner keeps running and only the size-scaled hard watchdog above
+            // may treat it as hung and detach the context.
+            softRuntimeTimeoutMs: BACKGROUND_TOKEN_COUNT_SOFT_TIMEOUT_MS,
+            createSoftRuntimeTimeoutError: () => new AppError(
+              'engine_busy',
+              BACKGROUND_CONTEXT_OPERATION_SOFT_TIMEOUT_MESSAGE,
+            ),
+            onRuntimeTimeout: (error: unknown) => {
+              const timedOutContext = contextAtTokenCount;
+              const timedOutGeneration = generationAtTokenCount;
+              const timedOutModelId = modelIdAtTokenCount;
+              if (timedOutContext === null || timedOutGeneration === null || timedOutModelId === null) {
+                return;
+              }
+
+              this.handleTimedOutContextOperation({
+                modelId: timedOutModelId,
+                context: timedOutContext,
+                generation: timedOutGeneration,
+                timeoutError: toAppError(error),
+                lifecycleEvent: 'context_operation_runtime_timeout',
+                warningMessage: '[LLMEngine] Background prompt token count timed out; detached active context for recovery',
+              });
+            },
+          }
         : {
             startTimeoutMs: CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS,
             createStartTimeoutError: () => new AppError(
@@ -4231,6 +4973,7 @@ class LLMEngineService {
       initKvUnified: this.initKvUnified,
       lastLifecycleEvent: this.lastLifecycleEvent,
       lastLifecycleError: this.lastLifecycleError,
+      contextRecoveryStatus: this.contextRecoveryStatus,
       multimodalDiagnostics: this.recentMultimodalDiagnostics,
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
       activePromptStateCachePolicy: this.activePromptStateCachePolicy,
@@ -4615,6 +5358,7 @@ class LLMEngineService {
         return;
       }
 
+      const contextGenerationAtReadiness = this.contextGeneration;
       await this.trackContextOperation(async (cancellation) => {
         if (this.activeCompletionPromise) {
           this.queueMultimodalReadinessRefresh(pendingRefresh);
@@ -4633,7 +5377,25 @@ class LLMEngineService {
           cancellation,
           projectorResolutionOperationCache,
         );
-      }, { chatBlocking: false, priority: 'passive_readiness' });
+      }, {
+        chatBlocking: false,
+        priority: 'passive_readiness',
+        runtimeTimeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
+        createRuntimeTimeoutError: () => new AppError(
+          'engine_recovery_required',
+          BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+        ),
+        onRuntimeTimeout: (error: unknown) => {
+          this.handleTimedOutContextOperation({
+            modelId: pendingRefresh.modelId,
+            context: pendingRefresh.context,
+            generation: contextGenerationAtReadiness,
+            timeoutError: toAppError(error),
+            lifecycleEvent: 'context_operation_runtime_timeout',
+            warningMessage: '[LLMEngine] Deferred multimodal readiness timed out; detached active context for recovery',
+          });
+        },
+      });
     } catch (error) {
       if (this.isContextOperationStopError(error)) {
         if (this.isMultimodalReadinessRefreshCurrent(pendingRefresh)) {
@@ -5148,12 +5910,23 @@ class LLMEngineService {
     }
   }
 
-  private updateState(newState: EngineState) {
+  private updateState(newState: EngineState): void {
     this.state = {
       ...newState,
       diagnostics: this.buildDiagnosticsSnapshot(),
     };
-    this.listeners.forEach((l) => l(this.state));
+    this.listeners.forEach((listener) => {
+      try {
+        listener(this.state);
+      } catch (error) {
+        // State observers are outside the engine's ownership boundary. A UI
+        // listener must not interrupt detach, recovery, or terminal-state
+        // transitions after the native owner has already changed.
+        if (process.env.NODE_ENV !== 'test') {
+          console.warn('[LLMEngine] State listener failed', buildSafeErrorLogDetails(error));
+        }
+      }
+    });
   }
 
   private resetBackendTelemetry(): void {
@@ -5312,6 +6085,7 @@ class LLMEngineService {
     fallbackDownloadMarker: number | null = null,
     resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null,
     projectorResolutionOperationCache: ProjectorResolutionOperationCache = new Map(),
+    retryBlockedCapabilityProbes = false,
   ): Promise<void> {
     const initTotalSpan = performanceMonitor.startSpan('model.init.total', { modelId });
     let initTotalOutcome: 'success' | 'error' = 'error';
@@ -6704,11 +7478,15 @@ class LLMEngineService {
             ),
           );
           try {
-            const context = await initLlamaContext(
-              buildOptions(
-                normalizedAttemptLayers,
-                speculativeConfig,
-                promptStateCachePolicy,
+            this.assertNoOrphanedContextReleasePending();
+            const context = await this.awaitModelInitWithProgressWatchdog(
+              (progressListener) => initLlamaContext(
+                buildOptions(
+                  normalizedAttemptLayers,
+                  speculativeConfig,
+                  promptStateCachePolicy,
+                ),
+                progressListener,
               ),
               onProgress,
             );
@@ -6737,6 +7515,11 @@ class LLMEngineService {
               promptStateCachePolicy,
             };
           } catch (error) {
+            if (this.isModelInitWatchdogTerminalError(error)) {
+              // The engine already entered the terminal restart-required state;
+              // do not classify this as a retryable attempt failure.
+              throw error;
+            }
             const durationMs = Math.max(0, Date.now() - startedAtMs);
             const probableOom = isProbableMemoryFailure(error);
             if (probableOom) {
@@ -6837,6 +7620,11 @@ class LLMEngineService {
               profileSource: 'speculative_fallback',
             });
           } catch (error) {
+            if (this.isModelInitWatchdogTerminalError(error)) {
+              // Never release memory out from under a possibly running native
+              // init; the terminal state already blocks further loading.
+              throw error;
+            }
             await releaseAllLlamaContexts().catch(() => undefined);
             speculativeDecodingForLoad = null;
             this.speculativeDecodingFallbackReason = 'initialization_failed';
@@ -7367,6 +8155,11 @@ class LLMEngineService {
           gpuInitError = null;
           break;
         } catch (error) {
+          if (this.isModelInitWatchdogTerminalError(error)) {
+            // Terminal restart-required state: stop the candidate loop without
+            // releasing memory a hung native init may still own.
+            throw error;
+          }
           lastBackendInitError = error;
 
           if (candidate === 'cpu') {
@@ -7482,14 +8275,6 @@ class LLMEngineService {
         ? { maxContextTokens: finalContextSize, requestedGpuLayers, loadedGpuLayers: reportedLoadedGpuLayers }
         : null;
 
-      if (this.context) {
-        await this.initializeMultimodalReadinessForLoadedContext({
-          modelId,
-          context: this.context,
-          useGpu: resolvedInitActualGpu === true,
-        }, undefined, projectorResolutionOperationCache);
-      }
-
       if (resolvedInitProfile) {
         const isAcceleratorRequested = normalizedBackendPolicy === 'auto'
           || normalizedBackendPolicy === 'gpu'
@@ -7527,21 +8312,102 @@ class LLMEngineService {
         }
       }
       this.loadedArtifactIdentity = loadedArtifactIdentity;
+      // A successful initialization establishes the only usable context,
+      // regardless of whether it came from automatic recovery or an explicit
+      // switch to another model. Do not leave stale recovery state blocking it.
+      if (this.contextRecoveryStatus !== 'idle') {
+        this.contextRecoveryStatus = 'idle';
+        this.contextRecoveryModelId = null;
+      }
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
       updateSettings({ activeModelId: modelId });
 
-      const shouldProbeThinkingCapability = (() => {
-        const model = registry.getModel(modelId);
-        return model ? model.thinkingCapability === undefined : true;
-      })();
+      // The base text model is READY before the optional projector work: a
+      // hanging projector init must not keep the load path (and the exclusive
+      // queue behind it) blocked forever. The tracked operation gives the
+      // projector init a realistic hard deadline and an ownership barrier.
+      if (this.context) {
+        const multimodalContextAtLoad = this.context;
+        const multimodalGenerationAtLoad = this.contextGeneration;
+        try {
+          await this.trackContextOperation(async (cancellation) => {
+            if (
+              this.context !== multimodalContextAtLoad
+              || this.contextGeneration !== multimodalGenerationAtLoad
+            ) {
+              return;
+            }
 
+            await this.initializeMultimodalReadinessForLoadedContext({
+              modelId,
+              context: multimodalContextAtLoad,
+              useGpu: resolvedInitActualGpu === true,
+            }, cancellation, projectorResolutionOperationCache);
+          }, {
+            chatBlocking: false,
+            // Initial projector ownership must not be caller-cancelled by a
+            // media completion that depends on its result. Text completion can
+            // use the READY state immediately, while its own context operation
+            // still queues behind the same raw native owner.
+            priority: 'completion',
+            runtimeTimeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
+            createRuntimeTimeoutError: () => new AppError(
+              'engine_recovery_required',
+              BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+            ),
+            onRuntimeTimeout: (error: unknown) => {
+              this.handleTimedOutContextOperation({
+                modelId,
+                context: multimodalContextAtLoad,
+                generation: multimodalGenerationAtLoad,
+                timeoutError: toAppError(error),
+                lifecycleEvent: 'context_operation_runtime_timeout',
+                warningMessage: '[LLMEngine] Multimodal projector initialization timed out; detached active context for recovery',
+              });
+            },
+          });
+        } catch (error) {
+          if (!this.isContextOperationStopError(error)) {
+            throw error;
+          }
+          // Foreground work only cancels the caller-facing projector result.
+          // The raw native owner remains tracked and keeps the context-operation
+          // queue closed until it settles; its hard watchdog also remains armed.
+          // Do not destroy the already-READY text context merely because the
+          // optional projector result was preempted.
+        }
+      }
+
+      const modelForThinkingProbe = registry.getModel(modelId);
+      if (retryBlockedCapabilityProbes && modelForThinkingProbe?.thinkingCapability === undefined) {
+        // All awaited load work and ownership barriers have succeeded. This is
+        // the first safe point to consume explicit retry consent.
+        this.resetThinkingCapabilityProbeBlock(modelId);
+      }
+      const shouldProbeThinkingCapability = !this.shouldSkipThinkingCapabilityProbe(
+        retryBlockedCapabilityProbes && modelForThinkingProbe
+          ? { ...modelForThinkingProbe, thinkingProbeBlocked: undefined }
+          : modelForThinkingProbe,
+        modelId,
+      ) && (modelForThinkingProbe ? modelForThinkingProbe.thinkingCapability === undefined : true);
+
+      // Queue the passive probe only after the completion-priority projector
+      // operation so it cannot overtake the initial native owner.
       const shouldLaunchThinkingProbe = process.env.NODE_ENV !== 'test';
-
       if (shouldProbeThinkingCapability && shouldLaunchThinkingProbe) {
         this.launchThinkingCapabilityProbe(modelId);
       }
       initTotalOutcome = 'success';
     } catch (error) {
+      if (
+        this.isModelInitWatchdogTerminalError(error)
+        || (error instanceof AppError && error.code === 'engine_recovery_required')
+      ) {
+        // Terminal ownership state is already managed by the init watchdog or
+        // the timed-out context operation recovery path; the generic failure
+        // handling would only overwrite the honest restart-required message.
+        throw error;
+      }
       const baseError = toAppError(error, 'model_load_failed');
       const safeErrorCode = getSafeAppErrorCode(baseError.code, 'model_load_failed');
       const extraDetails = sanitizeModelLoadErrorDetails(initDiagnostics, baseError.details);
@@ -7611,7 +8477,7 @@ class LLMEngineService {
       this.activeGpuLayers = null;
       this.safeModeLoadLimits = null;
       this.resetRuntimeTelemetry();
-      updateSettings({ activeModelId: null });
+      this.persistActiveModelIdSettingBestEffort(null);
       this.updateState({
         status: EngineStatus.ERROR,
         activeModelId: undefined,
@@ -7686,13 +8552,14 @@ class LLMEngineService {
           const contextOperationDrainPromise = this.cancelActiveContextOperationsForDeferredUnload(
             deferredContextReleaseError,
           );
-          this.scheduleDeferredContextReleaseAfterCompletionDrain({
-            drainPromise: Promise.all([
-              completionAndStopDrainPromise,
-              contextOperationDrainPromise,
-            ]).then(() => undefined),
-            context: this.context,
-            generation: this.contextGeneration,
+          const orphanedContextDrainPromise = Promise.all([
+            completionAndStopDrainPromise,
+            contextOperationDrainPromise,
+          ]).then(() => undefined);
+          this.detachCurrentContextAfterTimedOutOperation(previousModelId, deferredContextReleaseError, {
+            lifecycleEvent: 'active_completion_unload_timeout',
+            warningMessage: '[LLMEngine] Active completion unload timed out; detached active context',
+            drainPromise: orphanedContextDrainPromise,
           });
         }
       }
@@ -7702,17 +8569,17 @@ class LLMEngineService {
           new AppError('engine_unloading', CONTEXT_OPERATION_UNLOAD_TIMEOUT_MESSAGE),
           { chatBlocking: false },
         );
-        const contextDrainResult = await this.waitForActiveContextOperations({
-          timeoutMs: CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
-        });
+        const contextOperationDrainPromise = this.waitForActiveContextOperations().then(() => undefined);
+        const contextDrainResult = await this.waitForUnloadPromise(
+          contextOperationDrainPromise,
+          CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS,
+        );
         if (contextDrainResult === 'timed_out') {
-          const contextAtTimeout = this.context;
-          const contextGenerationAtTimeout = this.contextGeneration;
           deferredContextReleaseError = this.recordContextOperationUnloadTimeout(previousModelId);
-          if (contextAtTimeout) {
-            this.scheduleDeferredContextReleaseAfterDrain({
-              context: contextAtTimeout,
-              generation: contextGenerationAtTimeout,
+          if (this.context) {
+            this.detachCurrentContextAfterTimedOutOperation(previousModelId, deferredContextReleaseError, {
+              warningMessage: '[LLMEngine] Context operation unload timed out; detached active context',
+              drainPromise: contextOperationDrainPromise,
             });
           }
         } else if (this.context) {
@@ -7761,7 +8628,7 @@ class LLMEngineService {
         this.activeGpuLayers = null;
         this.safeModeLoadLimits = null;
         this.resetRuntimeTelemetry();
-        updateSettings({ activeModelId: null });
+        this.persistActiveModelIdSettingBestEffort(null);
         hardwareListenerService.resetLowMemoryFlag();
       }
 

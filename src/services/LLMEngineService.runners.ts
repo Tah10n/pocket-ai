@@ -23,6 +23,22 @@ type ContextOperationOptions = {
   readonly startTimeoutMs?: number;
   readonly createStartTimeoutError?: ErrorFactory;
   readonly createPriorityPreemptionError?: ErrorFactory;
+  /**
+   * Hard ownership watchdog. When it fires, the raw native owner is treated
+   * as hung and `onRuntimeTimeout` runs the ownership recovery path. It stays
+   * armed across external cancellation on purpose: the detached raw owner is
+   * exactly what the recovery path must bound.
+   */
+  readonly runtimeTimeoutMs?: number;
+  readonly createRuntimeTimeoutError?: ErrorFactory;
+  readonly onRuntimeTimeout?: (error: unknown) => void | Promise<void>;
+  /**
+   * Soft result watchdog. It only rejects the caller-facing promise so slow
+   * but healthy operations do not keep their callers waiting; the raw native
+   * owner keeps running and the hard watchdog stays armed for it.
+   */
+  readonly softRuntimeTimeoutMs?: number;
+  readonly createSoftRuntimeTimeoutError?: ErrorFactory;
 };
 
 type ContextOperationCancelOptions = {
@@ -176,6 +192,18 @@ export class ContextOperationRunner {
     let operationStarted = false;
     let operationSettled = false;
     let startTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let runtimeTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let softRuntimeTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    const clearRuntimeWatchdogTimers = () => {
+      if (runtimeTimeoutId !== null) {
+        clearTimeout(runtimeTimeoutId);
+        runtimeTimeoutId = null;
+      }
+      if (softRuntimeTimeoutId !== null) {
+        clearTimeout(softRuntimeTimeoutId);
+        softRuntimeTimeoutId = null;
+      }
+    };
     const rawOperationPromise = new Promise<T>((resolve, reject) => {
       resolveRawOperation = resolve;
       rejectRawOperation = reject;
@@ -200,6 +228,44 @@ export class ContextOperationRunner {
         if (startTimeoutId !== null) {
           clearTimeout(startTimeoutId);
           startTimeoutId = null;
+        }
+        if (
+          typeof options.runtimeTimeoutMs === 'number'
+          && options.runtimeTimeoutMs > 0
+          && options.createRuntimeTimeoutError
+        ) {
+          runtimeTimeoutId = setTimeout(() => {
+            runtimeTimeoutId = null;
+            if (operationSettled) {
+              return;
+            }
+
+            const runtimeTimeoutError = options.createRuntimeTimeoutError?.() ?? getCancellationError();
+            this.activeOperations.get(operationPromise)?.cancel(runtimeTimeoutError);
+            try {
+              const callbackResult = options.onRuntimeTimeout?.(runtimeTimeoutError);
+              void Promise.resolve(callbackResult).catch(() => undefined);
+            } catch {
+              // A throwing recovery callback must not escape the timer as an
+              // uncaught error while the engine is mid-detach. Rejected async
+              // callbacks are consumed above for the same reason.
+            }
+          }, options.runtimeTimeoutMs);
+        }
+        if (
+          typeof options.softRuntimeTimeoutMs === 'number'
+          && options.softRuntimeTimeoutMs > 0
+          && options.createSoftRuntimeTimeoutError
+        ) {
+          softRuntimeTimeoutId = setTimeout(() => {
+            softRuntimeTimeoutId = null;
+            if (operationSettled || operationCancelled) {
+              return;
+            }
+
+            const softTimeoutError = options.createSoftRuntimeTimeoutError?.() ?? getCancellationError();
+            this.activeOperations.get(operationPromise)?.cancel(softTimeoutError);
+          }, options.softRuntimeTimeoutMs);
         }
         this.runningOperation = scheduledOperation;
         void Promise.resolve()
@@ -248,10 +314,12 @@ export class ContextOperationRunner {
     void rawOperationPromise.then(
       () => {
         operationSettled = true;
+        clearRuntimeWatchdogTimers();
         this.clearRawActiveOperation(rawOperationPromise, scheduledOperation);
       },
       () => {
         operationSettled = true;
+        clearRuntimeWatchdogTimers();
         this.clearRawActiveOperation(rawOperationPromise, scheduledOperation);
       },
     );

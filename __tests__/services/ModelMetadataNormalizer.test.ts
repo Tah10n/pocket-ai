@@ -1876,4 +1876,48 @@ describe('ModelMetadataNormalizer', () => {
     expect(normalized.multimodalReadiness?.support).toEqual(['vision']);
     expect(normalized.multimodalReadiness?.requestedSupport).toEqual(['vision', 'audio']);
   });
+
+  it('normalizes the persisted fail-closed thinking-probe marker', () => {
+    const normalized = normalizePersistedModelMetadata({
+      id: 'author/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingProbeBlocked: {
+        status: 'blocked',
+        failedAt: 1234.6,
+        appVersion: ' 1.2.3 ',
+        runtimeVersion: ' llama.rn:test ',
+        artifactSha256: VALID_SHA256.toUpperCase(),
+        artifactPath: ' C:\\models\\model.gguf ',
+        artifactSizeBytes: 4096.4,
+        artifactModifiedAt: 9876.6,
+      },
+    });
+
+    expect(normalized.thinkingProbeBlocked).toEqual({
+      status: 'blocked',
+      failedAt: 1235,
+      appVersion: '1.2.3',
+      runtimeVersion: 'llama.rn:test',
+      artifactSha256: VALID_SHA256,
+      artifactPath: 'C:\\models\\model.gguf',
+      artifactSizeBytes: 4096,
+      artifactModifiedAt: 9877,
+    });
+  });
+
+  it('drops malformed thinking-probe markers instead of treating them as durable blocks', () => {
+    const wrongStatus = normalizePersistedModelMetadata({
+      id: 'author/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingProbeBlocked: { status: 'failed', failedAt: 1 } as never,
+    });
+    const missingTimestamp = normalizePersistedModelMetadata({
+      id: 'author/model',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      thinkingProbeBlocked: { status: 'blocked' } as never,
+    });
+
+    expect(wrongStatus.thinkingProbeBlocked).toBeUndefined();
+    expect(missingTimestamp.thinkingProbeBlocked).toBeUndefined();
+  });
 });

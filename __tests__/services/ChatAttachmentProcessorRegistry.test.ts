@@ -24,6 +24,28 @@ function bytesToBinaryString(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => String.fromCharCode(byte)).join('');
 }
 
+function encodeAscii85(bytes: Uint8Array): string {
+  const encoded: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 4) {
+    const available = Math.min(4, bytes.length - offset);
+    let value = 0;
+    for (let index = 0; index < 4; index += 1) {
+      value = value * 256 + (index < available ? bytes[offset + index] : 0);
+    }
+    if (available === 4 && value === 0) {
+      encoded.push('z');
+      continue;
+    }
+    const tuple = new Array<number>(5);
+    for (let index = tuple.length - 1; index >= 0; index -= 1) {
+      tuple[index] = value % 85;
+      value = Math.floor(value / 85);
+    }
+    encoded.push(...tuple.slice(0, available + 1).map((digit) => String.fromCharCode(digit + 33)));
+  }
+  return `${encoded.join('')}~>`;
+}
+
 function createTextPdfBase64(textStream: string): string {
   const compressed = deflate(Buffer.from(textStream, 'binary'));
   const pdf = [
@@ -197,13 +219,57 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(buildDocumentAttachmentTextPart(result).text).toContain('Pages: 1');
   });
 
+  it('processes PDFs with ReportLab-style inline images through the local fallback', async () => {
+    const compressedPixels = deflate(Uint8Array.from([255, 0, 0, 0, 255, 0]));
+    const inlineImage = encodeAscii85(compressedPixels);
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(createTextPdfBase64(
+      `BT (Visible before image) Tj ET BI /W 2 /H 1 /BPC 8 /CS /RGB /F [/A85 /Fl] ID\n${inlineImage}\nEI BT (Visible after image) Tj ET`,
+    ));
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'test-dir/chat-attachments/inline-image.pdf',
+        fileName: 'inline-image.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 2048,
+      }),
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      runtimeInput: 'document_text',
+      processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION,
+      text: 'Visible before image\nVisible after image',
+      pageCount: 1,
+      isScanned: false,
+    }));
+  });
+
+  it('maps bounded PDF decompression failures to a safe attachment error', async () => {
+    const expandedText = `BT (${String('A').repeat(2 * 1024 * 1024)}) Tj ET`;
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(createTextPdfBase64(expandedText));
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'test-dir/chat-attachments/compressed.pdf',
+          fileName: 'compressed.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 4096,
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_too_large_for_context');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'resource_limit' }));
+  });
+
   it('classifies scanned PDFs as deterministic no-text failures', async () => {
     (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(fromByteArray(Buffer.from([
       '%PDF-1.4',
       '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
       '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
       '3 0 obj << /Type /Page /Contents 4 0 R >> endobj',
-      '4 0 obj << /Length 8 >> stream',
+      '4 0 obj << /Length 11 >> stream',
       'q /Im1 Do Q',
       'endstream endobj',
       '%%EOF',
@@ -226,6 +292,33 @@ describe('ChatAttachmentProcessorRegistry', () => {
       isScanned: true,
     }));
     expect(JSON.stringify(error.details)).not.toContain('scanned.pdf');
+  });
+
+  it('maps PDFs referencing missing page content objects to a safe parse failure', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(fromByteArray(Buffer.from([
+      '%PDF-1.4',
+      '1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj',
+      '2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj',
+      '3 0 obj << /Type /Page /Contents 99 0 R >> endobj',
+      '%%EOF',
+    ].join('\n'), 'binary')));
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'test-dir/chat-attachments/missing-content.pdf',
+          fileName: 'missing-content.pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 2048,
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_parse_failed');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'unsupported_structure' }));
+    expect(error.message).toBe('PDF uses unsupported compression or document structure.');
+    expect(error.message).not.toContain('missing-content.pdf');
+    expect(JSON.stringify(error.details)).not.toContain('missing-content.pdf');
   });
 
   it('rejects unsupported document types without leaking filenames', async () => {

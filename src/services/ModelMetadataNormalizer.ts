@@ -10,6 +10,7 @@ import {
   type ModelMetadataTrust,
   type ModelVariant,
   type ModelThinkingCapabilitySnapshot,
+  type ModelThinkingProbeBlockedMarker,
 } from '../types/models';
 import type {
   ModelArtifactRole,
@@ -524,6 +525,49 @@ function normalizeThinkingCapabilitySnapshot(value: unknown): ModelThinkingCapab
   };
 }
 
+function normalizeThinkingProbeBlockedMarker(
+  value: unknown,
+): ModelThinkingProbeBlockedMarker | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.status !== 'blocked') {
+    return undefined;
+  }
+
+  const failedAt = typeof record.failedAt === 'number' && Number.isFinite(record.failedAt)
+    ? Math.max(0, Math.round(record.failedAt))
+    : null;
+  if (failedAt === null) {
+    return undefined;
+  }
+
+  const appVersion = normalizeNonEmptyString(record.appVersion);
+  const runtimeVersion = normalizeNonEmptyString(record.runtimeVersion);
+  const artifactSha256 = normalizeSha256Digest(
+    typeof record.artifactSha256 === 'string' ? record.artifactSha256 : undefined,
+  );
+  const artifactPath = normalizeNonEmptyString(record.artifactPath);
+  const artifactSizeBytes = normalizePositiveInteger(record.artifactSizeBytes);
+  const artifactModifiedAt = typeof record.artifactModifiedAt === 'number'
+    && Number.isFinite(record.artifactModifiedAt)
+    ? Math.max(0, Math.round(record.artifactModifiedAt))
+    : undefined;
+
+  return {
+    status: 'blocked',
+    failedAt,
+    ...(appVersion ? { appVersion } : {}),
+    ...(runtimeVersion ? { runtimeVersion } : {}),
+    ...(artifactSha256 ? { artifactSha256 } : {}),
+    ...(artifactPath ? { artifactPath } : {}),
+    ...(artifactSizeBytes !== undefined ? { artifactSizeBytes } : {}),
+    ...(artifactModifiedAt !== undefined ? { artifactModifiedAt } : {}),
+  };
+}
+
 function normalizeModelVariant(value: unknown): ModelVariant | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -694,6 +738,9 @@ export function normalizePersistedModelMetadata(
   );
   const thinkingCapability = normalizeThinkingCapabilitySnapshot(
     (model as PersistedModelMetadata & { thinkingCapability?: unknown }).thinkingCapability,
+  );
+  const thinkingProbeBlocked = normalizeThinkingProbeBlockedMarker(
+    (model as PersistedModelMetadata & { thinkingProbeBlocked?: unknown }).thinkingProbeBlocked,
   );
   const normalizedActiveVariantId = normalizeNonEmptyString(model.activeVariantId);
   const normalizedResolvedFileName = normalizeNonEmptyString(model.resolvedFileName);
@@ -1143,6 +1190,7 @@ export function normalizePersistedModelMetadata(
     ...(metadataTrust !== undefined ? { metadataTrust } : {}),
     ...(gguf !== undefined ? { gguf } : {}),
     ...(thinkingCapability !== undefined ? { thinkingCapability } : {}),
+    ...(thinkingProbeBlocked !== undefined ? { thinkingProbeBlocked } : {}),
     accessState: normalizeAccessState(model.accessState),
     isGated: model.isGated === true,
     isPrivate: model.isPrivate === true,

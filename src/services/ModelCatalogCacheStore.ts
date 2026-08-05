@@ -107,12 +107,12 @@ const CACHE_MAINTENANCE_VERSION = 1;
 // Cache-tier persistence is intentionally limited to anonymous catalog data.
 // Auth-scoped searches/snapshots can include gated/private access state, so
 // they stay memory-only and anonymous snapshots are sanitized before storage.
-export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 10;
+export const MODEL_CATALOG_CACHE_PERSISTED_VERSION = 11;
 export const MODEL_CATALOG_CACHE_MAX_PAYLOAD_BYTES = 192_000;
 // v8/v9 payloads could retain the full GGUF metadata map (including large chat
 // templates) and block the JS thread during startup normalization. Drop those
 // optional generations before parsing; older compact payloads still migrate.
-const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, 7, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
+const SUPPORTED_PERSISTED_CACHE_VERSIONS = new Set([3, 4, 5, 6, 7, 10, MODEL_CATALOG_CACHE_PERSISTED_VERSION]);
 const MAX_PERSISTED_SEARCH_ENTRIES = 6;
 const MAX_PERSISTED_SNAPSHOT_ENTRIES = 40;
 const INCREMENTAL_HYDRATION_MODELS_PER_BATCH = 4;
@@ -1343,6 +1343,9 @@ export function sanitizeCatalogModelRuntimeState(
   return normalizePersistedModelMetadata({
     ...model,
     localPath: undefined,
+    // Capability-probe recovery is private runtime state. Never let its local
+    // artifact identity cross into anonymous catalog/search persistence.
+    thinkingProbeBlocked: undefined,
     downloadedAt: undefined,
     downloadIntegrity: undefined,
     resumeData: undefined,

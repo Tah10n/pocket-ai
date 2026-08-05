@@ -2310,6 +2310,38 @@ describe('LocalStorageRegistry', () => {
     }));
   });
 
+  it('persists and deep-clones thinking-probe block markers', () => {
+    const freshRegistry = new (LocalStorageRegistry as any)();
+    (freshRegistry as any).storage = mockStorage;
+    freshRegistry.updateModel(createMockModel({
+      thinkingProbeBlocked: {
+        status: 'blocked',
+        failedAt: 100,
+        appVersion: '1.2.3',
+        runtimeVersion: 'llama.rn:test',
+        artifactSha256: 'a'.repeat(64),
+      },
+    }));
+
+    expect(mockStorage.set).toHaveBeenCalledWith(
+      'models-registry:model-v1:test%2Fmodel',
+      expect.stringContaining('"thinkingProbeBlocked":{"status":"blocked"'),
+    );
+
+    const firstRead = freshRegistry.getModel(mockModel.id);
+    if (firstRead?.thinkingProbeBlocked) {
+      firstRead.thinkingProbeBlocked.failedAt = 999;
+    }
+
+    expect(freshRegistry.getModel(mockModel.id)?.thinkingProbeBlocked).toEqual({
+      status: 'blocked',
+      failedAt: 100,
+      appVersion: '1.2.3',
+      runtimeVersion: 'llama.rn:test',
+      artifactSha256: 'a'.repeat(64),
+    });
+  });
+
   it('updates the downloaded count only for completed local model files', () => {
     const freshRegistry = new (LocalStorageRegistry as any)();
     (freshRegistry as any).storage = mockStorage;

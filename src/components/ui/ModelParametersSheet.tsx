@@ -60,6 +60,9 @@ interface ModelParametersSheetProps {
   isNpuBackendAvailable?: boolean | null;
   isBackendDiscoveryUnavailable?: boolean | null;
   didSaveLoadProfile?: boolean;
+  showThinkingCapabilityRetry?: boolean;
+  canRetryThinkingCapabilityDetection?: boolean;
+  isRetryingThinkingCapabilityDetection?: boolean;
   applyAction: 'reload' | 'save';
   applyButtonLabel: string;
   canApplyReload: boolean;
@@ -79,6 +82,7 @@ interface ModelParametersSheetProps {
   autotuneProgress?: AutotuneProgressSnapshot | null;
   onRunAutotune?: () => void;
   onCancelAutotune?: () => void;
+  onRetryThinkingCapabilityDetection?: () => void;
   onClose: () => void;
   onChangeParams: (partial: Partial<GenerationParameters>) => void;
   onChangeLoadParams: (partial: Partial<ModelLoadParameters>) => void;
@@ -421,6 +425,9 @@ export function ModelParametersSheet({
   isNpuBackendAvailable,
   isBackendDiscoveryUnavailable,
   didSaveLoadProfile = false,
+  showThinkingCapabilityRetry = false,
+  canRetryThinkingCapabilityDetection = false,
+  isRetryingThinkingCapabilityDetection = false,
   applyAction,
   applyButtonLabel,
   canApplyReload,
@@ -440,6 +447,7 @@ export function ModelParametersSheet({
   autotuneProgress,
   onRunAutotune,
   onCancelAutotune,
+  onRetryThinkingCapabilityDetection,
   onClose,
   onChangeParams,
   onChangeLoadParams,
@@ -974,6 +982,31 @@ export function ModelParametersSheet({
                 <ButtonText>{t('common.resetAll')}</ButtonText>
               </ModelParametersSheetButton>
             </ScreenCard>
+
+            {showThinkingCapabilityRetry ? (
+              <ScreenCard testID="thinking-capability-retry-card" className="mb-3" tone="warning" padding="compact">
+                <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+                  {t('chat.modelControls.thinkingDetectionPausedTitle')}
+                </Text>
+                <Text className="mt-1 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                  {t('chat.modelControls.thinkingDetectionPausedDescription')}
+                </Text>
+                <ModelParametersSheetButton
+                  testID="retry-thinking-capability-detection-button"
+                  className="mt-3 self-start"
+                  action="softPrimary"
+                  size="sm"
+                  disabled={!canRetryThinkingCapabilityDetection || isRetryingThinkingCapabilityDetection}
+                  onPress={onRetryThinkingCapabilityDetection}
+                >
+                  <ButtonText>
+                    {isRetryingThinkingCapabilityDetection
+                      ? t('chat.modelControls.thinkingDetectionRetrying')
+                      : t('chat.modelControls.thinkingDetectionRetry')}
+                  </ButtonText>
+                </ModelParametersSheetButton>
+              </ScreenCard>
+            ) : null}
 
             <ScreenStack gap="default" className="pb-2">
               <ScreenCard tone="accent">

@@ -109,6 +109,7 @@ const MIN_PDF_RATIO_ALLOWANCE_BYTES = 1024 * 1024;
 const MAX_PDF_CONTENT_TOKENS = 200_000;
 const MAX_PDF_ARRAY_DEPTH = 16;
 const MAX_PDF_OPERANDS = 32;
+const MAX_PDF_TRACKED_GRAPHICS_STATE_DEPTH = 64;
 const MAX_PDF_INLINE_IMAGE_DICTIONARY_ENTRIES = 64;
 const MAX_PDF_INLINE_IMAGE_DECODED_BYTES = 16 * 1024 * 1024;
 const MAX_PDF_PROCESSING_MILLIS = 2_000;
@@ -1792,6 +1793,10 @@ type PdfTextAdvanceState = {
   wordSpacing: number;
 };
 
+type PdfTrackedTextState = PdfTextAdvanceState & {
+  leading: number;
+};
+
 type PdfTextMatrix = [number, number, number, number, number, number];
 
 type PdfTextArrayResolution = {
@@ -2575,6 +2580,7 @@ function extractTextFromContentStream(
   let textCharacterSpacing = 0;
   let textWordSpacing = 0;
   let textLeading = 0;
+  const trackedTextStateStack: PdfTrackedTextState[] = [];
 
   const rememberOperand = (token: PdfContentToken) => {
     operands.push(token);
@@ -2679,6 +2685,38 @@ function extractTextFromContentStream(
     }
 
     const operator = token.value;
+    if (operator === 'q') {
+      if (trackedTextStateStack.length >= MAX_PDF_TRACKED_GRAPHICS_STATE_DEPTH) {
+        throw createPdfExtractionError(
+          'resource_limit',
+          'PDF graphics-state nesting exceeds local limits.',
+        );
+      }
+      // Text-state parameters are part of the graphics state even though the
+      // text and text-line matrices themselves are not. Preserve every value
+      // used by endpoint estimation so Q cannot leave temporary metrics active.
+      trackedTextStateStack.push({
+        fontSize: textFontSize,
+        horizontalScale: textHorizontalScale,
+        characterSpacing: textCharacterSpacing,
+        wordSpacing: textWordSpacing,
+        leading: textLeading,
+      });
+      operands.length = 0;
+      continue;
+    }
+    if (operator === 'Q') {
+      const restoredTextState = trackedTextStateStack.pop();
+      if (restoredTextState) {
+        textFontSize = restoredTextState.fontSize;
+        textHorizontalScale = restoredTextState.horizontalScale;
+        textCharacterSpacing = restoredTextState.characterSpacing;
+        textWordSpacing = restoredTextState.wordSpacing;
+        textLeading = restoredTextState.leading;
+      }
+      operands.length = 0;
+      continue;
+    }
     if (operator === 'BT') {
       if (insideTextObject) {
         throw createPdfExtractionError('unsupported_structure', 'PDF contains nested text objects.');
@@ -2819,7 +2857,6 @@ function extractTextFromContentStream(
         }
         if (textLineMatrix) {
           const nextLineMatrix = translatePdfTextMatrix(textLineMatrix, tx, ty);
-          requestSeparatorForTextPosition(nextLineMatrix);
           textLineMatrix = nextLineMatrix;
           textMatrix = nextLineMatrix;
         } else {
@@ -2833,7 +2870,6 @@ function extractTextFromContentStream(
       const matrix = readTrailingNumberOperands(operands, 6);
       if (matrix) {
         const nextTextMatrix = matrix as PdfTextMatrix;
-        requestSeparatorForTextPosition(nextTextMatrix);
         textLineMatrix = nextTextMatrix;
         textMatrix = nextTextMatrix;
       } else {

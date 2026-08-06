@@ -467,6 +467,67 @@ describe('pdfTextExtraction', () => {
     expect(extractTextFromPdfBase64(pdf).text).toBe('FirstSecond\nThird');
   });
 
+  it.each([
+    '0 1 -1 0 0 0 Tm 1 0 0 1 6 0 Tm',
+    '0 20 Td 6 -20 Td',
+  ])(
+    'chooses a separator from the final text position after compensated positioning: %s',
+    (positioning) => {
+      const pdf = createPlainTextPdf(
+        `BT /F1 12 Tf (A) Tj ${positioning} (B) Tj ET`,
+      );
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe('AB');
+    },
+  );
+
+  it.each([
+    {
+      name: 'font size',
+      restoredState: '/F1 12 Tf',
+      temporaryState: '/F1 100 Tf',
+      showOperators: '(A) Tj 12 0 Td (B) Tj',
+      expected: 'A B',
+    },
+    {
+      name: 'horizontal scaling',
+      restoredState: '100 Tz',
+      temporaryState: '1000 Tz',
+      showOperators: '(A) Tj 12 0 Td (B) Tj',
+      expected: 'A B',
+    },
+    {
+      name: 'character spacing',
+      restoredState: '0 Tc',
+      temporaryState: '100 Tc',
+      showOperators: '(A) Tj 12 0 Td (B) Tj',
+      expected: 'A B',
+    },
+    {
+      name: 'word spacing',
+      restoredState: '0 Tw',
+      temporaryState: '100 Tw',
+      showOperators: '(A A) Tj 24 0 Td (B) Tj',
+      expected: 'A A B',
+    },
+    {
+      name: 'text leading',
+      restoredState: '12 TL',
+      temporaryState: '100 TL',
+      showOperators: '(A) Tj T* (B) Tj 1 0 0 1 12 -12 Tm (C) Tj',
+      expected: 'A\nB C',
+    },
+  ])(
+    'restores $name from the q/Q graphics-state stack',
+    ({ restoredState, temporaryState, showOperators, expected }) => {
+      const pdf = createPlainTextPdf(
+        `BT ${restoredState} ET q BT ${temporaryState} ET Q BT ${showOperators} ET`,
+      );
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe(expected);
+    },
+  );
+
   it('starts a new line before single-quote and double-quote show operations', () => {
     const pdf = createPlainTextPdf('BT (First) Tj (Second) \' 0 0 (Third) " ET');
 
@@ -727,6 +788,17 @@ describe('pdfTextExtraction', () => {
 
   it('rejects documents with more than the bounded stream count', () => {
     const pdf = createPdfWithStreamCount(257);
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'resource_limit' });
+    }
+  });
+
+  it('bounds tracked q graphics-state nesting', () => {
+    const pdf = createPlainTextPdf(`${'q '.repeat(65)}BT (Hidden) Tj ET`);
 
     expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
     try {

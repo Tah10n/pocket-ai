@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.6.3](https://github.com/Tah10n/pocket-ai/compare/v1.6.2...v1.6.3) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** resolve Dependabot alerts ([#141](https://github.com/Tah10n/pocket-ai/issues/141)) ([f3361c3](https://github.com/Tah10n/pocket-ai/commit/f3361c35671a281c4fd3fd24fc32e92abc16f62f))
+* harden inference recovery and PDF extraction ([#144](https://github.com/Tah10n/pocket-ai/issues/144)) ([e2ca311](https://github.com/Tah10n/pocket-ai/commit/e2ca31145ed4bcccc0f627f9b667e98476317ddc))
+* harden llama.rn runtime and PDF extraction ([#145](https://github.com/Tah10n/pocket-ai/issues/145)) ([bac9fc7](https://github.com/Tah10n/pocket-ai/commit/bac9fc79adc3bf25bbc76cec561df811cb4ae269))
+
 ## [1.6.2](https://github.com/Tah10n/pocket-ai/compare/v1.6.1...v1.6.2) (2026-08-01)
 
 

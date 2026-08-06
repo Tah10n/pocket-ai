@@ -159,6 +159,80 @@ describe('ContextOperationRunner', () => {
     expect(runner.hasActiveChatBlocking()).toBe(false);
   });
 
+  it('keeps lifecycle-owned context work outside generation cancellation and drains', async () => {
+    const runner = new ContextOperationRunner();
+    const stopError = new Error('generation stopped');
+    let releaseLifecycleOwner: () => void = () => undefined;
+    let markLifecycleOwnerStarted: () => void = () => undefined;
+    const lifecycleOwnerStarted = new Promise<void>((resolve) => {
+      markLifecycleOwnerStarted = resolve;
+    });
+
+    const lifecycleOwner = runner.track(async (cancellation) => {
+      markLifecycleOwnerStarted();
+      await new Promise<void>((resolve) => {
+        releaseLifecycleOwner = resolve;
+      });
+      cancellation.throwIfCancelled();
+      return 'lifecycle';
+    }, () => new Error('lifecycle cancelled'), {
+      chatBlocking: false,
+      generationOwned: false,
+      priority: 'completion',
+    });
+
+    await lifecycleOwnerStarted;
+    const generationOperation = runner.track(
+      async () => 'generation',
+      () => new Error('cancelled'),
+      { priority: 'completion' },
+    );
+
+    runner.cancelGenerationOwned(stopError);
+
+    await expect(generationOperation).rejects.toThrow('generation stopped');
+    await expect(runner.waitForActive({ generationOwned: true })).resolves.toBe('drained');
+    expect(runner.hasActive()).toBe(true);
+
+    releaseLifecycleOwner();
+    await expect(lifecycleOwner).resolves.toBe('lifecycle');
+    await expect(runner.waitForActive()).resolves.toBe('drained');
+  });
+
+  it('cancels pre-admission waits with the same foreground/background ownership rules', async () => {
+    const runner = new ContextOperationRunner();
+    let releaseBackground: () => void = () => undefined;
+    const foreground = runner.raceAgainstCancellation(
+      new Promise<void>(() => undefined),
+      () => new Error('foreground stopped'),
+      { chatBlocking: true, generationOwned: true },
+    );
+    const background = runner.raceAgainstCancellation(
+      new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      }),
+      () => new Error('background stopped'),
+      { chatBlocking: false, generationOwned: true },
+    );
+
+    runner.invalidateChatBlocking();
+
+    await expect(foreground).rejects.toThrow('foreground stopped');
+    let backgroundSettled = false;
+    void background.then(
+      () => {
+        backgroundSettled = true;
+      },
+      () => undefined,
+    );
+    await Promise.resolve();
+    expect(backgroundSettled).toBe(false);
+
+    runner.invalidateGenerationOwned();
+    await expect(background).rejects.toThrow('background stopped');
+    releaseBackground();
+  });
+
   it('resets stale raw operations so future operations are not blocked', async () => {
     const runner = new ContextOperationRunner();
     const resetError = new Error('unload timeout');
@@ -719,6 +793,54 @@ describe('ActiveCompletionRunner', () => {
 
     runner.clearIfActive(completion);
     expect(runner.hasActive()).toBe(false);
+  });
+
+  it('interrupts a lifecycle barrier without cancelling its underlying owner', async () => {
+    const runner = new ActiveCompletionRunner<string>();
+    const completion = new Promise<string>(() => undefined);
+    const generation = runner.start(completion, jest.fn());
+    let releaseLifecycleBarrier: (value: number) => void = () => undefined;
+    const lifecycleBarrier = new Promise<number>((resolve) => {
+      releaseLifecycleBarrier = resolve;
+    });
+    const wait = runner.raceAgainstInterruption(
+      lifecycleBarrier,
+      generation,
+      () => new Error('completion stopped'),
+    );
+
+    runner.interruptIfActive();
+
+    await expect(wait).rejects.toThrow('completion stopped');
+    releaseLifecycleBarrier(42);
+    await expect(lifecycleBarrier).resolves.toBe(42);
+    runner.clearIfActive(completion);
+  });
+
+  it('rejects a resolved lifecycle barrier when reset lands before its race continuation', async () => {
+    const runner = new ActiveCompletionRunner<string>();
+    const completion = new Promise<string>(() => undefined);
+    const generation = runner.start(completion, jest.fn());
+    let releaseLifecycleBarrier: (value: number) => void = () => undefined;
+    const lifecycleBarrier = new Promise<number>((resolve) => {
+      releaseLifecycleBarrier = resolve;
+    });
+    const wait = runner.raceAgainstInterruption(
+      lifecycleBarrier,
+      generation,
+      () => new Error('stale completion reset'),
+    );
+
+    // Queue the source-promise reaction first, then reset before either race
+    // continuation runs. The post-race generation check must still reject.
+    releaseLifecycleBarrier(42);
+    runner.reset();
+
+    await expect(wait).rejects.toThrow('stale completion reset');
+    expect(() => runner.assertNotInterrupted(
+      generation,
+      () => new Error('stale completion generation'),
+    )).toThrow('stale completion generation');
   });
 });
 

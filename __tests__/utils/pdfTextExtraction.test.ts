@@ -327,6 +327,31 @@ describe('pdfTextExtraction', () => {
     expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
   });
 
+  it.each([
+    '(Hello) Tj [-1200 (world)] TJ',
+    '[(Hello) -1200] TJ (world) Tj',
+  ])('preserves TJ word spacing across adjacent show operators: %s', (operators) => {
+    const pdf = createPlainTextPdf(`BT ${operators} ET`);
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
+  });
+
+  it('cancels opposite TJ adjustments before deciding whether to preserve a gap', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf [(A) -1200] TJ [1200 (B)] TJ ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('AB');
+  });
+
+  it('accumulates TJ adjustments across operators before deciding whether to preserve a gap', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf (A) Tj [-200] TJ [-200 (B)] TJ ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B');
+  });
+
   it('preserves the order of multiple text objects', () => {
     const pdf = createPlainTextPdf('BT (First) Tj ET BT (Second) Tj ET');
 
@@ -345,10 +370,93 @@ describe('pdfTextExtraction', () => {
     expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
   });
 
-  it('treats only vertical Td and TD movement as a line break', () => {
-    const pdf = createPlainTextPdf('BT (A) Tj 5 0 Td (B) Tj 0 -15 TD (C) Tj 3 0 TD (D) Tj ET');
+  it('preserves word gaps for horizontal Td and TD movement and lines for vertical movement', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf (A) Tj 12 0 Td (B) Tj 0 -15 TD (C) Tj 12 0 TD (D) Tj ET',
+    );
 
-    expect(extractTextFromPdfBase64(pdf).text).toBe('AB\nCD');
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B\nC D');
+  });
+
+  it.each(['-45 0 Td', '-45 0 TD'])(
+    'does not synthesize a word gap when %s moves behind the shown text',
+    (movement) => {
+      const pdf = createPlainTextPdf(`BT (Invoice) Tj ${movement} (Total) Tj ET`);
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe('InvoiceTotal');
+    },
+  );
+
+  it('preserves a real gap between the shown-text endpoint and a new Td position', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 0 0 Td (Invoice) Tj 45 0 Td (Total) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Invoice Total');
+  });
+
+  it('preserves a final horizontal gap across consecutive Td positioning operations', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf (A) Tj 12 0 Td 0 0 Td (B) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B');
+  });
+
+  it('does not treat an absolute Td reset behind the shown-text endpoint as a gap', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 0 0 Td (Hello) Tj 5 0 Td (world) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Helloworld');
+  });
+
+  it.each([
+    '0 0 Td',
+    '0 0 TD',
+    '0.01 0 Td',
+    '0.01 0 TD',
+    '-0.01 0 Td',
+    '-0.01 0 TD',
+  ])(
+    'does not synthesize a separator for zero or sub-point movement with %s',
+    (movement) => {
+      const pdf = createPlainTextPdf(`BT (Hel) Tj ${movement} (lo) Tj ET`);
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe('Hello');
+    },
+  );
+
+  it('scales meaningful horizontal gaps with the active text font size', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 100 Tf (A) Tj 55 0 Td (B) Tj /F1 10 Tf 60 0 Td (C) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('AB C');
+  });
+
+  it('scales meaningful horizontal gaps with Tz horizontal scaling', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 10 Tz (A) Tj 1.2 0 Td (B) Tj 200 Tz (C) Tj 15 0 Td (D) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A BCD');
+  });
+
+  it('preserves a real same-line gap introduced by an absolute Tm position', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 1 0 0 1 0 0 Tm (A) Tj 1 0 0 1 12 0 Tm (B) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B');
+  });
+
+  it('projects Tm movement onto a rotated baseline before choosing word or line separators', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 0 1 -1 0 0 0 Tm (A) Tj 0 1 -1 0 0 12 Tm (B) Tj 0 1 -1 0 -12 0 Tm (C) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B\nC');
   });
 
   it('uses Tm Y movement for line breaks without splitting adjacent fragments', () => {
@@ -358,6 +466,67 @@ describe('pdfTextExtraction', () => {
 
     expect(extractTextFromPdfBase64(pdf).text).toBe('FirstSecond\nThird');
   });
+
+  it.each([
+    '0 1 -1 0 0 0 Tm 1 0 0 1 6 0 Tm',
+    '0 20 Td 6 -20 Td',
+  ])(
+    'chooses a separator from the final text position after compensated positioning: %s',
+    (positioning) => {
+      const pdf = createPlainTextPdf(
+        `BT /F1 12 Tf (A) Tj ${positioning} (B) Tj ET`,
+      );
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe('AB');
+    },
+  );
+
+  it.each([
+    {
+      name: 'font size',
+      restoredState: '/F1 12 Tf',
+      temporaryState: '/F1 100 Tf',
+      showOperators: '(A) Tj 12 0 Td (B) Tj',
+      expected: 'A B',
+    },
+    {
+      name: 'horizontal scaling',
+      restoredState: '100 Tz',
+      temporaryState: '1000 Tz',
+      showOperators: '(A) Tj 12 0 Td (B) Tj',
+      expected: 'A B',
+    },
+    {
+      name: 'character spacing',
+      restoredState: '0 Tc',
+      temporaryState: '100 Tc',
+      showOperators: '(A) Tj 12 0 Td (B) Tj',
+      expected: 'A B',
+    },
+    {
+      name: 'word spacing',
+      restoredState: '0 Tw',
+      temporaryState: '100 Tw',
+      showOperators: '(A A) Tj 24 0 Td (B) Tj',
+      expected: 'A A B',
+    },
+    {
+      name: 'text leading',
+      restoredState: '12 TL',
+      temporaryState: '100 TL',
+      showOperators: '(A) Tj T* (B) Tj 1 0 0 1 12 -12 Tm (C) Tj',
+      expected: 'A\nB C',
+    },
+  ])(
+    'restores $name from the q/Q graphics-state stack',
+    ({ restoredState, temporaryState, showOperators, expected }) => {
+      const pdf = createPlainTextPdf(
+        `BT ${restoredState} ET q BT ${temporaryState} ET Q BT ${showOperators} ET`,
+      );
+
+      expect(extractTextFromPdfBase64(pdf).text).toBe(expected);
+    },
+  );
 
   it('starts a new line before single-quote and double-quote show operations', () => {
     const pdf = createPlainTextPdf('BT (First) Tj (Second) \' 0 0 (Third) " ET');
@@ -619,6 +788,17 @@ describe('pdfTextExtraction', () => {
 
   it('rejects documents with more than the bounded stream count', () => {
     const pdf = createPdfWithStreamCount(257);
+
+    expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
+    try {
+      extractTextFromPdfBase64(pdf);
+    } catch (error) {
+      expect(error).toMatchObject({ reason: 'resource_limit' });
+    }
+  });
+
+  it('bounds tracked q graphics-state nesting', () => {
+    const pdf = createPlainTextPdf(`${'q '.repeat(65)}BT (Hidden) Tj ET`);
 
     expect(() => extractTextFromPdfBase64(pdf)).toThrow(PdfTextExtractionError);
     try {

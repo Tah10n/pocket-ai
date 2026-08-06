@@ -245,6 +245,7 @@ const BACKGROUND_TOKEN_COUNT_SOFT_TIMEOUT_MS = 10000;
 const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_BASE_MS = 20000;
 const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MAX_MS = 180000;
 const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_CHARS_PER_SECOND = 4000;
+const BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MEDIA_INPUT_ALLOWANCE_MS = 30000;
 const MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS = 90000;
 const MODEL_INIT_NO_PROGRESS_TIMEOUT_MS = 90000;
 const MODEL_INIT_HARD_TIMEOUT_MS = 600000;
@@ -1434,6 +1435,14 @@ class LLMEngineService {
     this.contextOperationRunner.cancelGeneration = value;
   }
 
+  private get contextOperationGenerationOwnedCancelGeneration(): number {
+    return this.contextOperationRunner.generationOwnedCancelGeneration;
+  }
+
+  private get contextOperationChatBlockingCancelGeneration(): number {
+    return this.contextOperationRunner.chatBlockingCancelGeneration;
+  }
+
   private get activeCompletionPromise(): Promise<LlamaCompletionResult> | null {
     return this.completionRunner.activePromise;
   }
@@ -1954,7 +1963,12 @@ class LLMEngineService {
     }
   }
 
-  private assertExpectedCompletionModel(expectedModelId: string | undefined): void {
+  private assertExpectedCompletionModel(
+    expectedModelId: string | undefined,
+    { allowMatchingInitialization = false }: {
+      allowMatchingInitialization?: boolean;
+    } = {},
+  ): void {
     if (expectedModelId === undefined) {
       return;
     }
@@ -1963,10 +1977,16 @@ class LLMEngineService {
     const engineModelId = typeof this.state.activeModelId === 'string'
       ? this.state.activeModelId.trim()
       : '';
+    const hasUsableModelState = this.state.status === EngineStatus.READY
+      || (
+        allowMatchingInitialization
+        && this.state.status === EngineStatus.INITIALIZING
+        && this.initPromise !== null
+      );
     if (
       normalizedExpectedModelId.length === 0
       || engineModelId.length === 0
-      || this.state.status !== EngineStatus.READY
+      || !hasUsableModelState
       || !this.context
     ) {
       performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
@@ -2010,14 +2030,19 @@ class LLMEngineService {
   private assertCompletionNotInterrupted(generation: number): void {
     this.completionRunner.assertNotInterrupted(
       generation,
-      () => new AppError('engine_not_ready', 'Completion was interrupted before generation started'),
+      () => this.createCompletionInterruptedError(),
     );
+  }
+
+  private createCompletionInterruptedError(): AppError {
+    return new AppError('engine_not_ready', 'Completion was interrupted before generation started');
   }
 
   private trackContextOperation<T>(
     operation: (cancellation: ContextOperationCancellationToken) => Promise<T>,
     options: {
       readonly chatBlocking?: boolean;
+      readonly generationOwned?: boolean;
       readonly priority?: ContextOperationPriority;
       readonly startTimeoutMs?: number;
       readonly createStartTimeoutError?: () => unknown;
@@ -2041,7 +2066,11 @@ class LLMEngineService {
     );
   }
 
-  private waitForActiveContextOperations(options: { timeoutMs?: number; chatBlocking?: boolean } = {}): Promise<ContextOperationDrainResult> {
+  private waitForActiveContextOperations(options: {
+    timeoutMs?: number;
+    chatBlocking?: boolean;
+    generationOwned?: boolean;
+  } = {}): Promise<ContextOperationDrainResult> {
     return this.contextOperationRunner.waitForActive(options);
   }
 
@@ -2065,15 +2094,23 @@ class LLMEngineService {
   }
 
   public async cancelActiveContextOperations(options: { timeoutMs?: number; detachOnTimeout?: boolean } = {}): Promise<ContextOperationDrainResult> {
-    const hadChatBlockingOperation = this.hasActiveChatBlockingContextOperation();
     const timeoutMs = options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS;
-    this.contextOperationRunner.cancelActive(
+    // Establish the cache boundary synchronously. Promise rejection propagates
+    // through microtasks, so waiting for it alone leaves an immediate retry able
+    // to join the cancelled in-flight entry.
+    exactPromptTokenCache.detachInFlight();
+    this.contextOperationRunner.cancelGenerationOwned(
       new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
     );
-    const chatBlockingDrainPromise = hadChatBlockingOperation
-      ? this.waitForActiveContextOperations({ timeoutMs, chatBlocking: true })
-      : Promise.resolve<ContextOperationDrainResult>('drained');
-    const drainResult = await this.waitForActiveContextOperations({ timeoutMs });
+    const chatBlockingDrainPromise = this.waitForActiveContextOperations({
+      timeoutMs,
+      chatBlocking: true,
+      generationOwned: true,
+    });
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs,
+      generationOwned: true,
+    });
     const chatBlockingDrainResult = await chatBlockingDrainPromise;
     if (chatBlockingDrainResult === 'timed_out' && options.detachOnTimeout !== false) {
       this.detachCurrentContextAfterTimedOutOperation(
@@ -2261,9 +2298,9 @@ class LLMEngineService {
 
   private resolveBackgroundTokenCountHardTimeoutMs(messages: readonly LlmChatMessage[]): number {
     // Token counting formats and tokenizes the whole history, and strict-role
-    // templates can repeat that pass once more. Scale the hard ownership limit
-    // with the prompt size instead of treating a slow-but-healthy large count
-    // as a hang.
+    // templates can repeat that pass once more. Native media tokenization also
+    // does substantially more work than text alone, so budget every retained
+    // image/audio occurrence before deciding that a READY context is hung.
     let totalChars = 0;
     for (const message of messages) {
       if (typeof message.content === 'string') {
@@ -2277,8 +2314,13 @@ class LLMEngineService {
     const promptSizeAllowanceMs = Math.ceil(
       totalChars / BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_CHARS_PER_SECOND,
     ) * 1000;
+    const mediaInputOccurrenceCount = countMessageMediaPathOccurrences(messages)
+      + countMessageAudioInputOccurrencesInMessages(messages);
+    const mediaInputAllowanceMs = mediaInputOccurrenceCount
+      * BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MEDIA_INPUT_ALLOWANCE_MS;
     const scaledTimeoutMs = BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_BASE_MS
-      + promptSizeAllowanceMs;
+      + promptSizeAllowanceMs
+      + mediaInputAllowanceMs;
     return Math.min(scaledTimeoutMs, BACKGROUND_TOKEN_COUNT_HARD_TIMEOUT_MAX_MS);
   }
 
@@ -2506,6 +2548,7 @@ class LLMEngineService {
     lifecycleEvent,
     warningMessage,
     blockThinkingCapabilityProbe = false,
+    allowInitializing = false,
   }: {
     modelId: string;
     context: LlamaContext;
@@ -2514,12 +2557,16 @@ class LLMEngineService {
     lifecycleEvent: EngineLifecycleEvent;
     warningMessage: string;
     blockThinkingCapabilityProbe?: boolean;
+    allowInitializing?: boolean;
   }): void {
     if (
       this.context !== context
       || this.contextGeneration !== generation
       || this.isUnloading
-      || this.state.status !== EngineStatus.READY
+      || (
+        this.state.status !== EngineStatus.READY
+        && !(allowInitializing && this.state.status === EngineStatus.INITIALIZING)
+      )
       || this.state.activeModelId !== modelId
       || this.contextRecoveryStatus !== 'idle'
       || this.contextRecoveryPromise !== null
@@ -3710,7 +3757,12 @@ class LLMEngineService {
     }
 
     this.assertContextRecoveryNotRequired();
-    this.assertExpectedCompletionModel(expectedModelId);
+    this.assertExpectedCompletionModel(expectedModelId, {
+      // A matching model may still be completing projector initialization.
+      // The completion driver waits on the same initPromise and validates the
+      // fully READY model again before it touches the native context.
+      allowMatchingInitialization: true,
+    });
 
     if (this.completionRunner.hasActive()) {
       throw new AppError('engine_busy', 'A response is already being generated.');
@@ -3778,7 +3830,12 @@ class LLMEngineService {
             || requestMediaInputOccurrenceCount > 0
           )
         ) {
-          await this.initPromise;
+          await this.completionRunner.raceAgainstInterruption(
+            this.initPromise,
+            interruptGeneration,
+            () => this.createCompletionInterruptedError(),
+          );
+          this.assertCompletionNotInterrupted(interruptGeneration);
         }
 
         this.assertExpectedCompletionModel(expectedModelId);
@@ -4474,6 +4531,42 @@ class LLMEngineService {
     }
 
     this.assertContextRecoveryNotRequired();
+    const generationOwnedCancelGenerationAtRequest = this.contextOperationGenerationOwnedCancelGeneration;
+    const chatBlockingCancelGenerationAtRequest = this.contextOperationChatBlockingCancelGeneration;
+    const initializationAtRequest = this.state.status === EngineStatus.INITIALIZING
+      ? this.initPromise
+      : null;
+    if (initializationAtRequest) {
+      this.assertExpectedCompletionModel(expectedModelId ?? undefined, {
+        allowMatchingInitialization: true,
+      });
+      // Projector setup already owns the serialized native context. Await the
+      // load barrier before admitting prompt preparation so its short queue
+      // start deadline cannot expire behind healthy lifecycle work. Keep this
+      // pre-admission wait on the same cancellation boundary as the operation
+      // it will become so Stop can evict a stale exact-token promise promptly.
+      await this.contextOperationRunner.raceAgainstCancellation(
+        initializationAtRequest,
+        () => new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+        { chatBlocking, generationOwned: true },
+      );
+      if (this.isUnloading) {
+        throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
+      }
+      this.assertContextRecoveryNotRequired();
+      if (
+        this.contextOperationGenerationOwnedCancelGeneration
+        !== generationOwnedCancelGenerationAtRequest
+        || (
+          chatBlocking
+          && this.contextOperationChatBlockingCancelGeneration
+            !== chatBlockingCancelGenerationAtRequest
+        )
+      ) {
+        throw new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE);
+      }
+    }
+    this.assertExpectedCompletionModel(expectedModelId ?? undefined);
     if (this.activeCompletionPromise) {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
@@ -4522,15 +4615,13 @@ class LLMEngineService {
     let modelIdAtTokenCount: string | null = null;
 
     return this.trackContextOperation(async (cancellation) => {
-      if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
-        await this.initPromise;
-      }
       cancellation.throwIfCancelled();
 
       if (this.activeCompletionPromise) {
         throw new AppError('engine_busy', 'A response is already being generated.');
       }
 
+      this.assertExpectedCompletionModel(expectedModelId ?? undefined);
       const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
       contextAtTokenCount = context;
       generationAtTokenCount = contextGeneration;
@@ -4639,6 +4730,13 @@ class LLMEngineService {
   }
 
   public async stopCompletion(): Promise<void> {
+    // Prompt token counting may still be outside the context runner while it
+    // awaits model initialization. Invalidate that pre-admission work as part
+    // of the same stop boundary without touching lifecycle-owned warmup. Detach
+    // cached in-flight work first so a same-tick retry cannot join it while the
+    // cancellation rejection is still crossing the promise microtask queue.
+    exactPromptTokenCache.detachInFlight();
+    this.contextOperationRunner.invalidateChatBlocking();
     await this.stopCompletionInternal({ drainPromptPreparation: true });
   }
 
@@ -8319,16 +8417,13 @@ class LLMEngineService {
         this.contextRecoveryStatus = 'idle';
         this.contextRecoveryModelId = null;
       }
-      this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
-      updateSettings({ activeModelId: modelId });
 
-      // The base text model is READY before the optional projector work: a
-      // hanging projector init must not keep the load path (and the exclusive
-      // queue behind it) blocked forever. The tracked operation gives the
-      // projector init a realistic hard deadline and an ownership barrier.
-      if (this.context) {
-        const multimodalContextAtLoad = this.context;
-        const multimodalGenerationAtLoad = this.contextGeneration;
+      // Keep the engine INITIALIZING while the optional projector owns the raw
+      // native context. Publishing READY earlier lets a text completion queue
+      // behind this owner and exhaust its much shorter start deadline.
+      const multimodalContextAtLoad = this.context;
+      const multimodalGenerationAtLoad = this.contextGeneration;
+      if (multimodalContextAtLoad) {
         try {
           await this.trackContextOperation(async (cancellation) => {
             if (
@@ -8345,10 +8440,12 @@ class LLMEngineService {
             }, cancellation, projectorResolutionOperationCache);
           }, {
             chatBlocking: false,
-            // Initial projector ownership must not be caller-cancelled by a
-            // media completion that depends on its result. Text completion can
-            // use the READY state immediately, while its own context operation
-            // still queues behind the same raw native owner.
+            generationOwned: false,
+            // Initial projector ownership belongs to model loading, not to a
+            // chat generation. Stop/Clear must leave it running, while unload
+            // and the hard watchdog still observe the serialized raw owner.
+            // Chat and prompt preparation wait on initPromise before entering
+            // the context queue.
             priority: 'completion',
             runtimeTimeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
             createRuntimeTimeoutError: () => new AppError(
@@ -8363,6 +8460,7 @@ class LLMEngineService {
                 timeoutError: toAppError(error),
                 lifecycleEvent: 'context_operation_runtime_timeout',
                 warningMessage: '[LLMEngine] Multimodal projector initialization timed out; detached active context for recovery',
+                allowInitializing: true,
               });
             },
           });
@@ -8370,13 +8468,34 @@ class LLMEngineService {
           if (!this.isContextOperationStopError(error)) {
             throw error;
           }
-          // Foreground work only cancels the caller-facing projector result.
-          // The raw native owner remains tracked and keeps the context-operation
-          // queue closed until it settles; its hard watchdog also remains armed.
-          // Do not destroy the already-READY text context merely because the
-          // optional projector result was preempted.
+          // Cancellation only rejects the caller-facing result. Do not publish
+          // READY until the raw native owner has actually drained; its runtime
+          // watchdog remains responsible for detaching a hung context.
+          const drainResult = await this.waitForActiveContextOperations({
+            timeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
+          });
+          if (drainResult !== 'drained') {
+            throw new AppError(
+              'engine_recovery_required',
+              BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+            );
+          }
         }
       }
+
+      if (
+        !this.context
+        || this.state.status !== EngineStatus.INITIALIZING
+        || this.state.activeModelId !== modelId
+      ) {
+        throw new AppError(
+          'engine_recovery_required',
+          this.state.lastError ?? BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE,
+        );
+      }
+
+      this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
+      updateSettings({ activeModelId: modelId });
 
       const modelForThinkingProbe = registry.getModel(modelId);
       if (retryBlockedCapabilityProbes && modelForThinkingProbe?.thinkingCapability === undefined) {

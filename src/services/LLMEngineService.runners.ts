@@ -19,6 +19,12 @@ const CONTEXT_OPERATION_PRIORITY_RANK: Record<ContextOperationPriority, number> 
 
 type ContextOperationOptions = {
   readonly chatBlocking?: boolean;
+  /**
+   * Whether Stop/Clear generation cancellation owns this operation. Lifecycle
+   * work can opt out while remaining serialized, watchdog-bounded, and visible
+   * to unload drains. Defaults to true.
+   */
+  readonly generationOwned?: boolean;
   readonly priority?: ContextOperationPriority;
   readonly startTimeoutMs?: number;
   readonly createStartTimeoutError?: ErrorFactory;
@@ -43,12 +49,19 @@ type ContextOperationOptions = {
 
 type ContextOperationCancelOptions = {
   readonly chatBlocking?: boolean;
+  readonly generationOwned?: boolean;
   readonly lowerPriorityThan?: ContextOperationPriority;
 };
 
 type ContextOperationWaitOptions = {
   readonly timeoutMs?: number;
   readonly chatBlocking?: boolean;
+  readonly generationOwned?: boolean;
+};
+
+type ContextOperationCancellationWaitOptions = {
+  readonly chatBlocking?: boolean;
+  readonly generationOwned?: boolean;
 };
 
 export type ContextOperationCancellationToken = {
@@ -59,6 +72,7 @@ export type ContextOperationCancellationToken = {
 type ActiveContextOperation = {
   readonly promise: Promise<unknown>;
   readonly chatBlocking: boolean;
+  readonly generationOwned: boolean;
   readonly priority: ContextOperationPriority;
   readonly cancel: (error: unknown) => void;
 };
@@ -73,6 +87,12 @@ type ContextOperationAdmissionWaiter = {
   readonly resolve: () => void;
 };
 
+type ContextOperationCancellationWaiter = {
+  readonly chatBlocking: boolean;
+  readonly generationOwned: boolean;
+  readonly cancel: () => void;
+};
+
 type ScheduledContextOperation = {
   readonly sequence: number;
   readonly priority: ContextOperationPriority;
@@ -85,16 +105,20 @@ export class ContextOperationRunner {
   public activePromises: Set<Promise<unknown>> = new Set();
   public rawActivePromises: Set<Promise<unknown>> = new Set();
   public chatBlockingRawActivePromises: Set<Promise<unknown>> = new Set();
+  public generationOwnedRawActivePromises: Set<Promise<unknown>> = new Set();
   public activeRejects: Map<Promise<unknown>, (error: unknown) => void> = new Map();
   private activeOperations: Map<Promise<unknown>, ActiveContextOperation> = new Map();
   private pendingOperations: ScheduledContextOperation[] = [];
   private runningOperation: ScheduledContextOperation | null = null;
   private reservations = new Map<number, ContextOperationReservation>();
   private admissionWaiters = new Set<ContextOperationAdmissionWaiter>();
+  private cancellationWaiters = new Set<ContextOperationCancellationWaiter>();
   private nextOperationSequence = 0;
   private nextReservationId = 0;
   private resolveQueueDrain: (() => void) | null = null;
   public cancelGeneration = 0;
+  public generationOwnedCancelGeneration = 0;
+  public chatBlockingCancelGeneration = 0;
 
   public reserve(priority: ContextOperationPriority, error: unknown): () => void {
     const reservationId = this.nextReservationId;
@@ -133,6 +157,65 @@ export class ContextOperationRunner {
     });
   }
 
+  /**
+   * Keeps work that must wait outside the native queue on the same cancellation
+   * boundary as tracked context operations. This is used for lifecycle barriers
+   * that already own the queue, where admitting a placeholder operation would
+   * create a queue-start timeout or a false raw native owner.
+   */
+  public raceAgainstCancellation<T>(
+    promise: Promise<T>,
+    createCancellationError: ErrorFactory,
+    options: ContextOperationCancellationWaitOptions = {},
+  ): Promise<T> {
+    const isChatBlocking = options.chatBlocking !== false;
+    const isGenerationOwned = options.generationOwned !== false;
+    if (!isChatBlocking && !isGenerationOwned) {
+      return promise;
+    }
+
+    const generationOwnedCancelGeneration = this.generationOwnedCancelGeneration;
+    const chatBlockingCancelGeneration = this.chatBlockingCancelGeneration;
+    let didCancel = false;
+    let rejectCancellation: (error: unknown) => void = () => undefined;
+    const cancellationPromise = new Promise<never>((_, reject) => {
+      rejectCancellation = reject;
+    });
+    const waiter: ContextOperationCancellationWaiter = {
+      chatBlocking: isChatBlocking,
+      generationOwned: isGenerationOwned,
+      cancel: () => {
+        if (didCancel) {
+          return;
+        }
+        didCancel = true;
+        let cancellationError: unknown;
+        try {
+          cancellationError = createCancellationError();
+        } catch (error) {
+          cancellationError = error;
+        }
+        rejectCancellation(cancellationError);
+      },
+    };
+    this.cancellationWaiters.add(waiter);
+
+    // Keep the generation check adjacent to registration so an invalidation at
+    // the barrier boundary cannot leave this waiter attached to a stale epoch.
+    if (
+      (isGenerationOwned
+        && this.generationOwnedCancelGeneration !== generationOwnedCancelGeneration)
+      || (isChatBlocking
+        && this.chatBlockingCancelGeneration !== chatBlockingCancelGeneration)
+    ) {
+      waiter.cancel();
+    }
+
+    return Promise.race([promise, cancellationPromise]).finally(() => {
+      this.cancellationWaiters.delete(waiter);
+    });
+  }
+
   public isAdmissionAllowed(priority: ContextOperationPriority): boolean {
     return !this.getBlockingReservation(priority);
   }
@@ -159,6 +242,7 @@ export class ContextOperationRunner {
   ): Promise<T> {
     const operationGeneration = this.cancelGeneration;
     const isChatBlocking = options.chatBlocking !== false;
+    const isGenerationOwned = options.generationOwned !== false;
     const priority = options.priority
       ?? (isChatBlocking ? 'prompt_preparation' : 'background_probe');
     const blockingReservation = this.getBlockingReservation(priority);
@@ -213,6 +297,9 @@ export class ContextOperationRunner {
     this.rawActivePromises.add(rawOperationPromise);
     if (isChatBlocking) {
       this.chatBlockingRawActivePromises.add(rawOperationPromise);
+    }
+    if (isGenerationOwned) {
+      this.generationOwnedRawActivePromises.add(rawOperationPromise);
     }
 
     const operationPromise = Promise.race([rawOperationPromise, cancellationPromise]);
@@ -297,6 +384,7 @@ export class ContextOperationRunner {
     this.activeOperations.set(operationPromise, {
       promise: operationPromise,
       chatBlocking: isChatBlocking,
+      generationOwned: isGenerationOwned,
       priority,
       cancel: (error) => {
         operationCancelled = true;
@@ -348,7 +436,7 @@ export class ContextOperationRunner {
   }
 
   public waitForActive(options: ContextOperationWaitOptions = {}): Promise<ContextOperationDrainResult> {
-    const activeContextOperations = this.getRawActiveOperations(options.chatBlocking);
+    const activeContextOperations = this.getRawActiveOperations(options);
     if (activeContextOperations.length === 0) {
       return Promise.resolve('drained');
     }
@@ -363,14 +451,18 @@ export class ContextOperationRunner {
 
   public cancelActive(error: unknown, options: ContextOperationCancelOptions = {}): void {
     const hasChatBlockingFilter = typeof options.chatBlocking === 'boolean';
+    const hasGenerationOwnedFilter = typeof options.generationOwned === 'boolean';
     const hasPriorityFilter = options.lowerPriorityThan != null;
-    const isSelectiveCancellation = hasChatBlockingFilter || hasPriorityFilter;
+    const isSelectiveCancellation = hasChatBlockingFilter || hasGenerationOwnedFilter || hasPriorityFilter;
     if (!isSelectiveCancellation) {
       this.cancelGeneration += 1;
+      this.invalidateGenerationOwned();
+      this.invalidateChatBlocking();
     }
 
     const operationsToCancel = Array.from(this.activeOperations.values()).filter((operation) => (
       (!hasChatBlockingFilter || operation.chatBlocking === options.chatBlocking)
+      && (!hasGenerationOwnedFilter || operation.generationOwned === options.generationOwned)
       && (
         options.lowerPriorityThan == null
         || this.isLowerPriority(operation.priority, options.lowerPriorityThan)
@@ -388,8 +480,25 @@ export class ContextOperationRunner {
     }
   }
 
+  public invalidateGenerationOwned(): void {
+    this.generationOwnedCancelGeneration += 1;
+    this.cancelCancellationWaiters('generationOwned');
+  }
+
+  public invalidateChatBlocking(): void {
+    this.chatBlockingCancelGeneration += 1;
+    this.cancelCancellationWaiters('chatBlocking');
+  }
+
+  public cancelGenerationOwned(error: unknown): void {
+    this.invalidateGenerationOwned();
+    this.cancelActive(error, { generationOwned: true });
+  }
+
   public reset(error?: unknown): void {
     this.cancelGeneration += 1;
+    this.invalidateGenerationOwned();
+    this.invalidateChatBlocking();
     const activeOperations = Array.from(this.activeOperations.values());
     activeOperations.forEach((operation) => operation.cancel(error ?? new Error('Context operation reset')));
     this.pendingOperations = [];
@@ -401,6 +510,7 @@ export class ContextOperationRunner {
     this.activeRejects.clear();
     this.rawActivePromises.clear();
     this.chatBlockingRawActivePromises.clear();
+    this.generationOwnedRawActivePromises.clear();
     this.resolveQueueDrain?.();
     this.resolveQueueDrain = null;
     this.queue = Promise.resolve();
@@ -414,17 +524,30 @@ export class ContextOperationRunner {
     return this.chatBlockingRawActivePromises.size > 0;
   }
 
-  private getRawActiveOperations(chatBlocking?: boolean): Promise<unknown>[] {
-    if (chatBlocking === true) {
-      return Array.from(this.chatBlockingRawActivePromises);
+  private cancelCancellationWaiters(
+    ownership: 'chatBlocking' | 'generationOwned',
+  ): void {
+    for (const waiter of [...this.cancellationWaiters]) {
+      if (waiter[ownership]) {
+        waiter.cancel();
+      }
     }
+  }
 
-    if (chatBlocking === false) {
-      return Array.from(this.rawActivePromises)
-        .filter((promise) => !this.chatBlockingRawActivePromises.has(promise));
-    }
+  private getRawActiveOperations(options: ContextOperationWaitOptions): Promise<unknown>[] {
+    const hasChatBlockingFilter = typeof options.chatBlocking === 'boolean';
+    const hasGenerationOwnedFilter = typeof options.generationOwned === 'boolean';
 
-    return Array.from(this.rawActivePromises);
+    return Array.from(this.rawActivePromises).filter((promise) => (
+      (
+        !hasChatBlockingFilter
+        || this.chatBlockingRawActivePromises.has(promise) === options.chatBlocking
+      )
+      && (
+        !hasGenerationOwnedFilter
+        || this.generationOwnedRawActivePromises.has(promise) === options.generationOwned
+      )
+    ));
   }
 
   private assertNotCancelled(isCancelled: () => boolean, getCancellationError: ErrorFactory): void {
@@ -445,6 +568,7 @@ export class ContextOperationRunner {
   ): void {
     this.rawActivePromises.delete(rawOperationPromise);
     this.chatBlockingRawActivePromises.delete(rawOperationPromise);
+    this.generationOwnedRawActivePromises.delete(rawOperationPromise);
     if (this.runningOperation === scheduledOperation) {
       this.runningOperation = null;
     } else {
@@ -547,6 +671,7 @@ export class ActiveCompletionRunner<T> {
   public activeDriverPromise: Promise<unknown> | null = null;
   public activeReject: ((error: unknown) => void) | null = null;
   public interruptGeneration = 0;
+  private interruptionWaiters = new Set<{ cancel: () => void }>();
 
   public hasActive(): boolean {
     return this.activePromise !== null || this.activeDriverPromise !== null;
@@ -576,9 +701,63 @@ export class ActiveCompletionRunner<T> {
     return this.activeDriverPromise ?? this.activePromise;
   }
 
+  /**
+   * Makes pre-generation lifecycle barriers obey the same Stop boundary as the
+   * completion driver. The underlying lifecycle promise keeps running; only
+   * the caller-facing completion is interrupted.
+   */
+  public raceAgainstInterruption<TAwaited>(
+    promise: Promise<TAwaited>,
+    generation: number,
+    createInterruptedError: ErrorFactory,
+  ): Promise<TAwaited> {
+    let didInterrupt = false;
+    let rejectInterruption: (error: unknown) => void = () => undefined;
+    const interruptionPromise = new Promise<never>((_, reject) => {
+      rejectInterruption = reject;
+    });
+    const waiter = {
+      cancel: () => {
+        if (didInterrupt) {
+          return;
+        }
+        didInterrupt = true;
+        let interruptionError: unknown;
+        try {
+          interruptionError = createInterruptedError();
+        } catch (error) {
+          interruptionError = error;
+        }
+        rejectInterruption(interruptionError);
+      },
+    };
+    this.interruptionWaiters.add(waiter);
+
+    // Keep registration and the generation check adjacent so Stop cannot land
+    // between them and leave a stale waiter attached to the old generation.
+    if (this.interruptGeneration !== generation) {
+      waiter.cancel();
+    }
+
+    return Promise.race([promise, interruptionPromise])
+      .then((value) => {
+        // A resolved source may already have queued its reaction when Stop or
+        // reset lands. Recheck after race settlement so that ordering cannot
+        // let a stale driver cross the barrier.
+        if (this.interruptGeneration !== generation) {
+          throw createInterruptedError();
+        }
+        return value;
+      })
+      .finally(() => {
+        this.interruptionWaiters.delete(waiter);
+      });
+  }
+
   public interruptIfActive(): void {
     if (this.activePromise) {
       this.interruptGeneration += 1;
+      this.cancelInterruptionWaiters();
     }
   }
 
@@ -593,9 +772,17 @@ export class ActiveCompletionRunner<T> {
   }
 
   public reset(): void {
+    this.interruptGeneration += 1;
+    this.cancelInterruptionWaiters();
     this.activePromise = null;
     this.activeDriverPromise = null;
     this.activeReject = null;
+  }
+
+  private cancelInterruptionWaiters(): void {
+    for (const waiter of [...this.interruptionWaiters]) {
+      waiter.cancel();
+    }
   }
 }
 

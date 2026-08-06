@@ -109,6 +109,7 @@ const MIN_PDF_RATIO_ALLOWANCE_BYTES = 1024 * 1024;
 const MAX_PDF_CONTENT_TOKENS = 200_000;
 const MAX_PDF_ARRAY_DEPTH = 16;
 const MAX_PDF_OPERANDS = 32;
+const MAX_PDF_TRACKED_GRAPHICS_STATE_DEPTH = 64;
 const MAX_PDF_INLINE_IMAGE_DICTIONARY_ENTRIES = 64;
 const MAX_PDF_INLINE_IMAGE_DECODED_BYTES = 16 * 1024 * 1024;
 const MAX_PDF_PROCESSING_MILLIS = 2_000;
@@ -118,6 +119,19 @@ const INFLATE_OUTPUT_CHUNK_BYTES = 64 * 1024;
 // from the text position. A sufficiently negative value therefore represents
 // visible forward spacing rather than normal glyph kerning.
 const PDF_TJ_WORD_BREAK_THRESHOLD = -250;
+// This lightweight extractor intentionally does not load font dictionaries or
+// glyph widths. Track text-space position with a documented average glyph
+// advance so Td/TD can be compared with the end of the preceding text instead
+// of being mistaken for a relative gap. A typical PDF word space is roughly
+// 0.2-0.3 em; the floor keeps malformed zero-sized font state from turning
+// every tiny movement into a separator.
+const PDF_DEFAULT_TEXT_FONT_SIZE = 12;
+const PDF_ESTIMATED_GLYPH_ADVANCE_EM = 0.5;
+const PDF_HORIZONTAL_WORD_BREAK_EM_THRESHOLD = 0.2;
+const PDF_HORIZONTAL_WORD_BREAK_MIN_USER_UNITS = 0.5;
+const PDF_TEXT_POSITION_EPSILON_USER_UNITS = 0.01;
+const PDF_TEXT_BASELINE_ALIGNMENT_COSINE = 0.999;
+const PDF_TEXT_ADVANCE_BUDGET_CHECK_INTERVAL = 4096;
 
 function createPdfExtractionError(
   reason: Extract<PdfTextExtractionFailureReason, 'resource_limit' | 'unsupported_structure'>,
@@ -1772,18 +1786,91 @@ function findLastOperand<T extends PdfContentToken['type']>(
   return undefined;
 }
 
-function extractTextFromTextArray(entries: PdfContentToken[]): string {
+type PdfTextAdvanceState = {
+  fontSize: number;
+  horizontalScale: number;
+  characterSpacing: number;
+  wordSpacing: number;
+};
+
+type PdfTrackedTextState = PdfTextAdvanceState & {
+  leading: number;
+};
+
+type PdfTextMatrix = [number, number, number, number, number, number];
+
+type PdfTextArrayResolution = {
+  text: string;
+  estimatedAdvance: number;
+  firstShownStartAdvance: number | undefined;
+  lastShownEndAdvance: number | undefined;
+};
+
+function resolvePdfTextFontSize(fontSize: number): number {
+  return Number.isFinite(fontSize) && fontSize !== 0
+    ? Math.abs(fontSize)
+    : PDF_DEFAULT_TEXT_FONT_SIZE;
+}
+
+function estimateShownTextAdvance(
+  text: string,
+  state: PdfTextAdvanceState,
+  budget: PdfExtractionBudget,
+): number {
+  const fontSize = resolvePdfTextFontSize(state.fontSize);
+  const horizontalScale = Number.isFinite(state.horizontalScale)
+    ? state.horizontalScale
+    : 1;
+  const characterSpacing = Number.isFinite(state.characterSpacing)
+    ? state.characterSpacing
+    : 0;
+  const wordSpacing = Number.isFinite(state.wordSpacing)
+    ? state.wordSpacing
+    : 0;
+  let explicitSpaceCount = 0;
+  if (wordSpacing !== 0) {
+    for (let index = text.indexOf(' '); index >= 0; index = text.indexOf(' ', index + 1)) {
+      explicitSpaceCount += 1;
+      if (explicitSpaceCount % PDF_TEXT_ADVANCE_BUDGET_CHECK_INTERVAL === 0) {
+        assertWithinProcessingTime(budget);
+      }
+    }
+  }
+
+  return (
+    (text.length * ((fontSize * PDF_ESTIMATED_GLYPH_ADVANCE_EM) + characterSpacing))
+    + (explicitSpaceCount * wordSpacing)
+  ) * horizontalScale;
+}
+
+function resolveTextFromTextArray(
+  entries: PdfContentToken[],
+  state: PdfTextAdvanceState,
+  budget: PdfExtractionBudget,
+): PdfTextArrayResolution {
   const fragments: string[] = [];
   let hasText = false;
   let previousTextEndsWithWhitespace = false;
   let pendingAdjustment = 0;
+  let estimatedAdvance = 0;
+  let firstShownStartAdvance: number | undefined;
+  let lastShownEndAdvance: number | undefined;
+  const fontSize = resolvePdfTextFontSize(state.fontSize);
+  const horizontalScale = Number.isFinite(state.horizontalScale)
+    ? state.horizontalScale
+    : 1;
 
-  for (const entry of entries) {
+  for (let index = 0; index < entries.length; index += 1) {
+    if (index % PDF_TEXT_ADVANCE_BUDGET_CHECK_INTERVAL === 0) {
+      assertWithinProcessingTime(budget);
+    }
+    const entry = entries[index];
     if (entry.type === 'number') {
       if (!Number.isFinite(entry.value)) {
         throw createPdfExtractionError('unsupported_structure', 'PDF TJ array contains an invalid adjustment.');
       }
       pendingAdjustment += entry.value;
+      estimatedAdvance += (-entry.value / 1000) * fontSize * horizontalScale;
       continue;
     }
     if (entry.type !== 'string') {
@@ -1802,13 +1889,21 @@ function extractTextFromTextArray(entries: PdfContentToken[]): string {
     ) {
       fragments.push(' ');
     }
+    firstShownStartAdvance ??= estimatedAdvance;
     fragments.push(entry.value);
+    estimatedAdvance += estimateShownTextAdvance(entry.value, state, budget);
+    lastShownEndAdvance = estimatedAdvance;
     hasText = true;
     previousTextEndsWithWhitespace = /\s$/u.test(entry.value);
     pendingAdjustment = 0;
   }
 
-  return fragments.join('');
+  return {
+    text: fragments.join(''),
+    estimatedAdvance,
+    firstShownStartAdvance,
+    lastShownEndAdvance,
+  };
 }
 
 function readTrailingNumberOperands(
@@ -1827,6 +1922,76 @@ function readTrailingNumberOperands(
     values.push(operand.value);
   }
   return values;
+}
+
+function isMeaningfulHorizontalTextGap(
+  gap: number,
+  fontSize: number,
+  horizontalScale: number,
+): boolean {
+  const normalizedFontSize = resolvePdfTextFontSize(fontSize);
+  const normalizedHorizontalScale = Number.isFinite(horizontalScale)
+    ? Math.abs(horizontalScale)
+    : 1;
+  const wordBreakThreshold = Math.max(
+    PDF_HORIZONTAL_WORD_BREAK_MIN_USER_UNITS,
+    normalizedFontSize * normalizedHorizontalScale * PDF_HORIZONTAL_WORD_BREAK_EM_THRESHOLD,
+  );
+  return gap >= wordBreakThreshold;
+}
+
+function translatePdfTextMatrix(
+  matrix: PdfTextMatrix,
+  tx: number,
+  ty: number,
+): PdfTextMatrix {
+  const [a, b, c, d, e, f] = matrix;
+  return [
+    a,
+    b,
+    c,
+    d,
+    e + (tx * a) + (ty * c),
+    f + (tx * b) + (ty * d),
+  ];
+}
+
+type PdfTextPositionDelta = {
+  baselineCompatible: boolean;
+  forwardTextUnits: number;
+  perpendicularUserUnits: number;
+};
+
+function resolvePdfTextPositionDelta(
+  from: PdfTextMatrix,
+  to: PdfTextMatrix,
+): PdfTextPositionDelta | undefined {
+  const fromBaselineSquared = (from[0] * from[0]) + (from[1] * from[1]);
+  const toBaselineSquared = (to[0] * to[0]) + (to[1] * to[1]);
+  if (
+    !Number.isFinite(fromBaselineSquared)
+    || !Number.isFinite(toBaselineSquared)
+    || fromBaselineSquared <= 0
+    || toBaselineSquared <= 0
+  ) {
+    return undefined;
+  }
+
+  const fromBaselineLength = Math.sqrt(fromBaselineSquared);
+  const toBaselineLength = Math.sqrt(toBaselineSquared);
+  const baselineCosine = (
+    (from[0] * to[0]) + (from[1] * to[1])
+  ) / (fromBaselineLength * toBaselineLength);
+  const deltaX = to[4] - from[4];
+  const deltaY = to[5] - from[5];
+
+  return {
+    baselineCompatible: baselineCosine >= PDF_TEXT_BASELINE_ALIGNMENT_COSINE,
+    forwardTextUnits: ((deltaX * from[0]) + (deltaY * from[1])) / fromBaselineSquared,
+    perpendicularUserUnits: Math.abs(
+      ((-deltaX * from[1]) + (deltaY * from[0])) / fromBaselineLength,
+    ),
+  };
 }
 
 type PdfInlineImageDictionary = {
@@ -2406,8 +2571,16 @@ function extractTextFromContentStream(
   let cursor = 0;
   let insideTextObject = false;
   let hasShownText = false;
-  let pendingSeparator: 'line' | undefined;
-  let textLineY: number | undefined;
+  let pendingSeparator: 'space' | 'line' | undefined;
+  let textLineMatrix: PdfTextMatrix | undefined;
+  let textMatrix: PdfTextMatrix | undefined;
+  let lastShownTextEndMatrix: PdfTextMatrix | undefined;
+  let textFontSize = PDF_DEFAULT_TEXT_FONT_SIZE;
+  let textHorizontalScale = 1;
+  let textCharacterSpacing = 0;
+  let textWordSpacing = 0;
+  let textLeading = 0;
+  const trackedTextStateStack: PdfTrackedTextState[] = [];
 
   const rememberOperand = (token: PdfContentToken) => {
     operands.push(token);
@@ -2420,16 +2593,82 @@ function extractTextFromContentStream(
       pendingSeparator = 'line';
     }
   };
-  const appendShownText = (text: string) => {
-    if (text.length === 0) {
+  const requestWordBreak = () => {
+    if (hasShownText && pendingSeparator !== 'line') {
+      pendingSeparator = 'space';
+    }
+  };
+  const clearPendingWordBreak = () => {
+    if (pendingSeparator === 'space') {
+      pendingSeparator = undefined;
+    }
+  };
+  const getTextAdvanceState = (): PdfTextAdvanceState => ({
+    fontSize: textFontSize,
+    horizontalScale: textHorizontalScale,
+    characterSpacing: textCharacterSpacing,
+    wordSpacing: textWordSpacing,
+  });
+  const requestSeparatorForTextPosition = (nextMatrix: PdfTextMatrix) => {
+    if (!hasShownText || !lastShownTextEndMatrix) {
       return;
     }
-    if (hasShownText && pendingSeparator === 'line') {
-      output.push('\n');
+    const delta = resolvePdfTextPositionDelta(lastShownTextEndMatrix, nextMatrix);
+    if (
+      !delta
+      || !delta.baselineCompatible
+      || delta.perpendicularUserUnits > PDF_TEXT_POSITION_EPSILON_USER_UNITS
+    ) {
+      requestLineBreak();
+      return;
     }
-    output.push(text);
-    hasShownText = true;
-    pendingSeparator = undefined;
+    if (isMeaningfulHorizontalTextGap(
+      delta.forwardTextUnits,
+      textFontSize,
+      textHorizontalScale,
+    )) {
+      requestWordBreak();
+    } else {
+      clearPendingWordBreak();
+    }
+  };
+  const appendShownText = (
+    text: string,
+    estimatedAdvance: number,
+    lastShownEndAdvance: number | undefined = text.length > 0 ? estimatedAdvance : undefined,
+  ) => {
+    const textMatrixAtStart = textMatrix;
+    if (text.length > 0) {
+      if (hasShownText && pendingSeparator === 'line') {
+        output.push('\n');
+      } else if (hasShownText && pendingSeparator === 'space') {
+        output.push(' ');
+      }
+      output.push(text);
+      hasShownText = true;
+      pendingSeparator = undefined;
+    }
+    if (textMatrixAtStart && Number.isFinite(estimatedAdvance)) {
+      textMatrix = translatePdfTextMatrix(textMatrixAtStart, estimatedAdvance, 0);
+    } else {
+      textMatrix = undefined;
+    }
+    if (text.length > 0) {
+      lastShownTextEndMatrix = textMatrixAtStart && lastShownEndAdvance !== undefined
+        && Number.isFinite(lastShownEndAdvance)
+        ? translatePdfTextMatrix(textMatrixAtStart, lastShownEndAdvance, 0)
+        : undefined;
+    }
+  };
+  const moveToNextTextLine = () => {
+    requestLineBreak();
+    if (textLineMatrix && Number.isFinite(textLeading)) {
+      textLineMatrix = translatePdfTextMatrix(textLineMatrix, 0, -textLeading);
+      textMatrix = textLineMatrix;
+    } else {
+      textLineMatrix = undefined;
+      textMatrix = undefined;
+    }
   };
 
   while (cursor < content.length) {
@@ -2446,19 +2685,56 @@ function extractTextFromContentStream(
     }
 
     const operator = token.value;
+    if (operator === 'q') {
+      if (trackedTextStateStack.length >= MAX_PDF_TRACKED_GRAPHICS_STATE_DEPTH) {
+        throw createPdfExtractionError(
+          'resource_limit',
+          'PDF graphics-state nesting exceeds local limits.',
+        );
+      }
+      // Text-state parameters are part of the graphics state even though the
+      // text and text-line matrices themselves are not. Preserve every value
+      // used by endpoint estimation so Q cannot leave temporary metrics active.
+      trackedTextStateStack.push({
+        fontSize: textFontSize,
+        horizontalScale: textHorizontalScale,
+        characterSpacing: textCharacterSpacing,
+        wordSpacing: textWordSpacing,
+        leading: textLeading,
+      });
+      operands.length = 0;
+      continue;
+    }
+    if (operator === 'Q') {
+      const restoredTextState = trackedTextStateStack.pop();
+      if (restoredTextState) {
+        textFontSize = restoredTextState.fontSize;
+        textHorizontalScale = restoredTextState.horizontalScale;
+        textCharacterSpacing = restoredTextState.characterSpacing;
+        textWordSpacing = restoredTextState.wordSpacing;
+        textLeading = restoredTextState.leading;
+      }
+      operands.length = 0;
+      continue;
+    }
     if (operator === 'BT') {
       if (insideTextObject) {
         throw createPdfExtractionError('unsupported_structure', 'PDF contains nested text objects.');
       }
       insideTextObject = true;
       requestLineBreak();
-      textLineY = undefined;
+      textLineMatrix = [1, 0, 0, 1, 0, 0];
+      textMatrix = textLineMatrix;
+      lastShownTextEndMatrix = undefined;
       operands.length = 0;
       continue;
     }
     if (operator === 'ET') {
       insideTextObject = false;
       requestLineBreak();
+      textLineMatrix = undefined;
+      textMatrix = undefined;
+      lastShownTextEndMatrix = undefined;
       operands.length = 0;
       continue;
     }
@@ -2488,39 +2764,117 @@ function extractTextFromContentStream(
     }
 
     if (operator === 'Tj') {
-      appendShownText(findLastOperand(operands, 'string')?.value ?? '');
+      const text = findLastOperand(operands, 'string')?.value ?? '';
+      if (text.length > 0 && textMatrix) {
+        requestSeparatorForTextPosition(textMatrix);
+      }
+      appendShownText(
+        text,
+        estimateShownTextAdvance(text, getTextAdvanceState(), budget),
+      );
     } else if (operator === 'TJ') {
       const array = findLastOperand(operands, 'array');
-      const text = array ? extractTextFromTextArray(array.value) : '';
-      appendShownText(text);
+      const resolution = array
+        ? resolveTextFromTextArray(array.value, getTextAdvanceState(), budget)
+        : {
+            text: '',
+            estimatedAdvance: 0,
+            firstShownStartAdvance: undefined,
+            lastShownEndAdvance: undefined,
+          };
+      if (
+        textMatrix
+        && resolution.firstShownStartAdvance !== undefined
+        && Number.isFinite(resolution.firstShownStartAdvance)
+      ) {
+        requestSeparatorForTextPosition(translatePdfTextMatrix(
+          textMatrix,
+          resolution.firstShownStartAdvance,
+          0,
+        ));
+      }
+      appendShownText(
+        resolution.text,
+        resolution.estimatedAdvance,
+        resolution.lastShownEndAdvance,
+      );
     } else if (operator === '\'' || operator === '"') {
-      requestLineBreak();
-      textLineY = undefined;
-      appendShownText(findLastOperand(operands, 'string')?.value ?? '');
+      if (operator === '"' && operands.length >= 3) {
+        const wordSpacing = operands[operands.length - 3];
+        const characterSpacing = operands[operands.length - 2];
+        const text = operands[operands.length - 1];
+        if (
+          wordSpacing.type === 'number'
+          && characterSpacing.type === 'number'
+          && text.type === 'string'
+        ) {
+          textWordSpacing = wordSpacing.value;
+          textCharacterSpacing = characterSpacing.value;
+        }
+      }
+      moveToNextTextLine();
+      const text = findLastOperand(operands, 'string')?.value ?? '';
+      if (text.length > 0 && textMatrix) {
+        requestSeparatorForTextPosition(textMatrix);
+      }
+      appendShownText(
+        text,
+        estimateShownTextAdvance(text, getTextAdvanceState(), budget),
+      );
     } else if (operator === 'T*') {
-      requestLineBreak();
-      textLineY = undefined;
+      moveToNextTextLine();
+    } else if (operator === 'Tf') {
+      const fontSize = readTrailingNumberOperands(operands, 1)?.[0];
+      if (fontSize !== undefined && fontSize !== 0) {
+        textFontSize = Math.abs(fontSize);
+      }
+    } else if (operator === 'Tz') {
+      const horizontalScale = readTrailingNumberOperands(operands, 1)?.[0];
+      if (horizontalScale !== undefined) {
+        textHorizontalScale = horizontalScale / 100;
+      }
+    } else if (operator === 'Tc') {
+      const characterSpacing = readTrailingNumberOperands(operands, 1)?.[0];
+      if (characterSpacing !== undefined) {
+        textCharacterSpacing = characterSpacing;
+      }
+    } else if (operator === 'Tw') {
+      const wordSpacing = readTrailingNumberOperands(operands, 1)?.[0];
+      if (wordSpacing !== undefined) {
+        textWordSpacing = wordSpacing;
+      }
+    } else if (operator === 'TL') {
+      const leading = readTrailingNumberOperands(operands, 1)?.[0];
+      if (leading !== undefined) {
+        textLeading = leading;
+      }
     } else if (operator === 'Td' || operator === 'TD') {
       const movement = readTrailingNumberOperands(operands, 2);
       if (movement) {
-        const ty = movement[1];
-        if (ty !== 0) {
-          requestLineBreak();
+        const [tx, ty] = movement;
+        if (operator === 'TD') {
+          textLeading = -ty;
         }
-        if (textLineY !== undefined) {
-          textLineY += ty;
+        if (textLineMatrix) {
+          const nextLineMatrix = translatePdfTextMatrix(textLineMatrix, tx, ty);
+          textLineMatrix = nextLineMatrix;
+          textMatrix = nextLineMatrix;
+        } else {
+          textMatrix = undefined;
         }
       } else {
-        textLineY = undefined;
+        textLineMatrix = undefined;
+        textMatrix = undefined;
       }
     } else if (operator === 'Tm') {
       const matrix = readTrailingNumberOperands(operands, 6);
       if (matrix) {
-        const nextLineY = matrix[5];
-        if (textLineY !== undefined && nextLineY !== textLineY) {
-          requestLineBreak();
-        }
-        textLineY = nextLineY;
+        const nextTextMatrix = matrix as PdfTextMatrix;
+        textLineMatrix = nextTextMatrix;
+        textMatrix = nextTextMatrix;
+      } else {
+        textLineMatrix = undefined;
+        textMatrix = undefined;
       }
     }
 

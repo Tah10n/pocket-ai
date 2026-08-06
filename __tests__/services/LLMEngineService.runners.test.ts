@@ -159,6 +159,46 @@ describe('ContextOperationRunner', () => {
     expect(runner.hasActiveChatBlocking()).toBe(false);
   });
 
+  it('keeps lifecycle-owned context work outside generation cancellation and drains', async () => {
+    const runner = new ContextOperationRunner();
+    const stopError = new Error('generation stopped');
+    let releaseLifecycleOwner: () => void = () => undefined;
+    let markLifecycleOwnerStarted: () => void = () => undefined;
+    const lifecycleOwnerStarted = new Promise<void>((resolve) => {
+      markLifecycleOwnerStarted = resolve;
+    });
+
+    const lifecycleOwner = runner.track(async (cancellation) => {
+      markLifecycleOwnerStarted();
+      await new Promise<void>((resolve) => {
+        releaseLifecycleOwner = resolve;
+      });
+      cancellation.throwIfCancelled();
+      return 'lifecycle';
+    }, () => new Error('lifecycle cancelled'), {
+      chatBlocking: false,
+      generationOwned: false,
+      priority: 'completion',
+    });
+
+    await lifecycleOwnerStarted;
+    const generationOperation = runner.track(
+      async () => 'generation',
+      () => new Error('cancelled'),
+      { priority: 'completion' },
+    );
+
+    runner.cancelGenerationOwned(stopError);
+
+    await expect(generationOperation).rejects.toThrow('generation stopped');
+    await expect(runner.waitForActive({ generationOwned: true })).resolves.toBe('drained');
+    expect(runner.hasActive()).toBe(true);
+
+    releaseLifecycleOwner();
+    await expect(lifecycleOwner).resolves.toBe('lifecycle');
+    await expect(runner.waitForActive()).resolves.toBe('drained');
+  });
+
   it('resets stale raw operations so future operations are not blocked', async () => {
     const runner = new ContextOperationRunner();
     const resetError = new Error('unload timeout');

@@ -1435,6 +1435,14 @@ class LLMEngineService {
     this.contextOperationRunner.cancelGeneration = value;
   }
 
+  private get contextOperationGenerationOwnedCancelGeneration(): number {
+    return this.contextOperationRunner.generationOwnedCancelGeneration;
+  }
+
+  private get contextOperationChatBlockingCancelGeneration(): number {
+    return this.contextOperationRunner.chatBlockingCancelGeneration;
+  }
+
   private get activeCompletionPromise(): Promise<LlamaCompletionResult> | null {
     return this.completionRunner.activePromise;
   }
@@ -2030,6 +2038,7 @@ class LLMEngineService {
     operation: (cancellation: ContextOperationCancellationToken) => Promise<T>,
     options: {
       readonly chatBlocking?: boolean;
+      readonly generationOwned?: boolean;
       readonly priority?: ContextOperationPriority;
       readonly startTimeoutMs?: number;
       readonly createStartTimeoutError?: () => unknown;
@@ -2053,7 +2062,11 @@ class LLMEngineService {
     );
   }
 
-  private waitForActiveContextOperations(options: { timeoutMs?: number; chatBlocking?: boolean } = {}): Promise<ContextOperationDrainResult> {
+  private waitForActiveContextOperations(options: {
+    timeoutMs?: number;
+    chatBlocking?: boolean;
+    generationOwned?: boolean;
+  } = {}): Promise<ContextOperationDrainResult> {
     return this.contextOperationRunner.waitForActive(options);
   }
 
@@ -2077,15 +2090,19 @@ class LLMEngineService {
   }
 
   public async cancelActiveContextOperations(options: { timeoutMs?: number; detachOnTimeout?: boolean } = {}): Promise<ContextOperationDrainResult> {
-    const hadChatBlockingOperation = this.hasActiveChatBlockingContextOperation();
     const timeoutMs = options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS;
-    this.contextOperationRunner.cancelActive(
+    this.contextOperationRunner.cancelGenerationOwned(
       new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
     );
-    const chatBlockingDrainPromise = hadChatBlockingOperation
-      ? this.waitForActiveContextOperations({ timeoutMs, chatBlocking: true })
-      : Promise.resolve<ContextOperationDrainResult>('drained');
-    const drainResult = await this.waitForActiveContextOperations({ timeoutMs });
+    const chatBlockingDrainPromise = this.waitForActiveContextOperations({
+      timeoutMs,
+      chatBlocking: true,
+      generationOwned: true,
+    });
+    const drainResult = await this.waitForActiveContextOperations({
+      timeoutMs,
+      generationOwned: true,
+    });
     const chatBlockingDrainResult = await chatBlockingDrainPromise;
     if (chatBlockingDrainResult === 'timed_out' && options.detachOnTimeout !== false) {
       this.detachCurrentContextAfterTimedOutOperation(
@@ -4501,6 +4518,36 @@ class LLMEngineService {
     }
 
     this.assertContextRecoveryNotRequired();
+    const generationOwnedCancelGenerationAtRequest = this.contextOperationGenerationOwnedCancelGeneration;
+    const chatBlockingCancelGenerationAtRequest = this.contextOperationChatBlockingCancelGeneration;
+    const initializationAtRequest = this.state.status === EngineStatus.INITIALIZING
+      ? this.initPromise
+      : null;
+    if (initializationAtRequest) {
+      this.assertExpectedCompletionModel(expectedModelId ?? undefined, {
+        allowMatchingInitialization: true,
+      });
+      // Projector setup already owns the serialized native context. Await the
+      // load barrier before admitting prompt preparation so its short queue
+      // start deadline cannot expire behind healthy lifecycle work.
+      await initializationAtRequest;
+      if (this.isUnloading) {
+        throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
+      }
+      this.assertContextRecoveryNotRequired();
+      if (
+        this.contextOperationGenerationOwnedCancelGeneration
+        !== generationOwnedCancelGenerationAtRequest
+        || (
+          chatBlocking
+          && this.contextOperationChatBlockingCancelGeneration
+            !== chatBlockingCancelGenerationAtRequest
+        )
+      ) {
+        throw new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE);
+      }
+    }
+    this.assertExpectedCompletionModel(expectedModelId ?? undefined);
     if (this.activeCompletionPromise) {
       throw new AppError('engine_busy', 'A response is already being generated.');
     }
@@ -4549,15 +4596,13 @@ class LLMEngineService {
     let modelIdAtTokenCount: string | null = null;
 
     return this.trackContextOperation(async (cancellation) => {
-      if (this.state.status === EngineStatus.INITIALIZING && this.initPromise) {
-        await this.initPromise;
-      }
       cancellation.throwIfCancelled();
 
       if (this.activeCompletionPromise) {
         throw new AppError('engine_busy', 'A response is already being generated.');
       }
 
+      this.assertExpectedCompletionModel(expectedModelId ?? undefined);
       const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
       contextAtTokenCount = context;
       generationAtTokenCount = contextGeneration;
@@ -4666,6 +4711,10 @@ class LLMEngineService {
   }
 
   public async stopCompletion(): Promise<void> {
+    // Prompt token counting may still be outside the context runner while it
+    // awaits model initialization. Invalidate that pre-admission work as part
+    // of the same stop boundary without touching lifecycle-owned warmup.
+    this.contextOperationRunner.invalidateChatBlocking();
     await this.stopCompletionInternal({ drainPromptPreparation: true });
   }
 
@@ -8368,10 +8417,13 @@ class LLMEngineService {
               useGpu: resolvedInitActualGpu === true,
             }, cancellation, projectorResolutionOperationCache);
           }, {
-            chatBlocking: true,
-            // Initial projector ownership is part of model readiness. Chat and
-            // prompt preparation must wait on initPromise instead of entering
-            // the context queue behind this raw native owner.
+            chatBlocking: false,
+            generationOwned: false,
+            // Initial projector ownership belongs to model loading, not to a
+            // chat generation. Stop/Clear must leave it running, while unload
+            // and the hard watchdog still observe the serialized raw owner.
+            // Chat and prompt preparation wait on initPromise before entering
+            // the context queue.
             priority: 'completion',
             runtimeTimeoutMs: MULTIMODAL_READINESS_RUNTIME_TIMEOUT_MS,
             createRuntimeTimeoutError: () => new AppError(

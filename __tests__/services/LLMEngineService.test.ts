@@ -1834,7 +1834,141 @@ describe('LLMEngineService', () => {
     }
   });
 
-  it('does not publish READY when a cancelled initial projector owner detaches before draining', async () => {
+  it('waits for initial projector setup before admitting prompt token counting to the context queue', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    let finishProjectorInit: () => void = () => undefined;
+    getInitMultimodalMock().mockImplementationOnce(() => new Promise((resolve) => {
+      finishProjectorInit = () => resolve(true);
+    }));
+    getTokenizeMock().mockResolvedValueOnce({ tokens: [1, 2, 3] });
+
+    let observedLoad: Promise<unknown> | undefined;
+    let observedCount: Promise<unknown> | undefined;
+    jest.useFakeTimers();
+    try {
+      const loadPromise = llmEngineService.load('test/model', { forceReload: true });
+      observedLoad = loadPromise.catch((error) => error);
+      for (let tick = 0; tick < 50 && getInitMultimodalMock().mock.calls.length === 0; tick += 1) {
+        await jest.advanceTimersByTimeAsync(0);
+      }
+
+      expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
+
+      await expect(llmEngineService.countPromptTokens({
+        expectedModelId: 'other/model',
+        messages: [{ role: 'user', content: 'Do not count this prompt' }],
+      })).rejects.toMatchObject({
+        code: 'chat_model_mismatch',
+        details: {
+          expectedThreadModelId: 'other/model',
+          engineModelId: 'test/model',
+        },
+      });
+
+      const countPromise = llmEngineService.countPromptTokens({
+        expectedModelId: 'test/model',
+        messages: [{ role: 'user', content: 'Count after initialization' }],
+      });
+      observedCount = countPromise.catch((error) => error);
+
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(getFormattedChatMock()).not.toHaveBeenCalled();
+      expect(getTokenizeMock()).not.toHaveBeenCalled();
+      expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
+
+      finishProjectorInit();
+      await jest.advanceTimersByTimeAsync(0);
+      await expect(observedLoad).resolves.toBeUndefined();
+      await expect(observedCount).resolves.toBe(3);
+      expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+      expect(getTokenizeMock()).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+    } finally {
+      finishProjectorInit();
+      await jest.advanceTimersByTimeAsync(0);
+      await observedLoad?.catch(() => undefined);
+      await observedCount?.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['cancelActiveContextOperations', true, true],
+    ['stopCompletion', true, true],
+    ['stopCompletion', false, false],
+  ] as const)(
+    'handles a pre-admission prompt token count after %s with chatBlocking=%s',
+    async (stopMethod, chatBlocking, shouldCancelCount) => {
+      (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+      let finishProjectorInit: () => void = () => undefined;
+      getInitMultimodalMock().mockImplementationOnce(() => new Promise((resolve) => {
+        finishProjectorInit = () => resolve(true);
+      }));
+      getTokenizeMock().mockResolvedValueOnce({ tokens: [1, 2] });
+
+      let observedLoad: Promise<unknown> | undefined;
+      let observedCount: Promise<unknown> | undefined;
+      jest.useFakeTimers();
+      try {
+        const loadPromise = llmEngineService.load('test/model', { forceReload: true });
+        observedLoad = loadPromise.catch((error) => error);
+        for (let tick = 0; tick < 50 && getInitMultimodalMock().mock.calls.length === 0; tick += 1) {
+          await jest.advanceTimersByTimeAsync(0);
+        }
+
+        expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+        const countPromise = llmEngineService.countPromptTokens({
+          expectedModelId: 'test/model',
+          messages: [{ role: 'user', content: 'Discard this stale count' }],
+          chatBlocking,
+        });
+        observedCount = countPromise.catch((error) => error);
+
+        if (stopMethod === 'cancelActiveContextOperations') {
+          await expect(
+            llmEngineService.cancelActiveContextOperations({ timeoutMs: 1000 }),
+          ).resolves.toBe('drained');
+        } else {
+          await expect(llmEngineService.stopCompletion()).resolves.toBeUndefined();
+        }
+        expect(getFormattedChatMock()).not.toHaveBeenCalled();
+        expect(getTokenizeMock()).not.toHaveBeenCalled();
+
+        finishProjectorInit();
+        await jest.advanceTimersByTimeAsync(0);
+        await expect(observedLoad).resolves.toBeUndefined();
+        expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+
+        if (shouldCancelCount) {
+          await expect(observedCount).resolves.toMatchObject({
+            code: 'engine_busy',
+            message: 'Prompt preparation was stopped before native completion started',
+          });
+          expect(getFormattedChatMock()).not.toHaveBeenCalled();
+          expect(getTokenizeMock()).not.toHaveBeenCalled();
+
+          await expect(llmEngineService.countPromptTokens({
+            expectedModelId: 'test/model',
+            messages: [{ role: 'user', content: 'Count fresh work only' }],
+          })).resolves.toBe(2);
+        } else {
+          await expect(observedCount).resolves.toBe(2);
+        }
+        expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+        expect(getTokenizeMock()).toHaveBeenCalledTimes(1);
+      } finally {
+        finishProjectorInit();
+        await jest.advanceTimersByTimeAsync(0);
+        await observedLoad?.catch(() => undefined);
+        await observedCount?.catch(() => undefined);
+        jest.useRealTimers();
+      }
+    },
+  );
+
+  it('keeps initial projector ownership running across generation cancellation', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     let finishProjectorInit: () => void = () => undefined;
     getInitMultimodalMock().mockImplementationOnce(() => new Promise((resolve) => {
@@ -1842,7 +1976,6 @@ describe('LLMEngineService', () => {
     }));
 
     let observedLoad: Promise<unknown> | undefined;
-    let observedCancellation: Promise<unknown> | undefined;
     let capturedContext: { release: jest.Mock } | null = null;
     jest.useFakeTimers();
     try {
@@ -1856,32 +1989,31 @@ describe('LLMEngineService', () => {
       capturedContext = (llmEngineService as any).context as { release: jest.Mock };
       capturedContext.release.mockClear();
       expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
+      expect(llmEngineService.hasActiveContextOperation()).toBe(true);
+      expect(llmEngineService.hasActiveChatBlockingContextOperation()).toBe(false);
 
-      const cancellationPromise = llmEngineService.cancelActiveContextOperations({ timeoutMs: 1000 });
-      observedCancellation = cancellationPromise.catch((error) => error);
-      await jest.advanceTimersByTimeAsync(1000);
-      await expect(observedCancellation).resolves.toBe('timed_out');
-      expect(llmEngineService.getState().status).toBe(EngineStatus.ERROR);
-      expect((llmEngineService as any).context).toBeNull();
+      await expect(
+        llmEngineService.cancelActiveContextOperations({ timeoutMs: 1000 }),
+      ).resolves.toBe('drained');
+      await jest.advanceTimersByTimeAsync(6000);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
+      expect((llmEngineService as any).context).toBe(capturedContext);
       expect(capturedContext.release).not.toHaveBeenCalled();
 
       finishProjectorInit();
       await jest.advanceTimersByTimeAsync(0);
-      await expect(observedLoad).resolves.toMatchObject({ code: 'engine_recovery_required' });
-      expect(llmEngineService.getState().status).toBe(EngineStatus.ERROR);
-      expect((llmEngineService as any).context).toBeNull();
-      for (let tick = 0; tick < 50 && capturedContext.release.mock.calls.length === 0; tick += 1) {
-        await Promise.resolve();
-      }
+      await expect(observedLoad).resolves.toBeUndefined();
+      expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+      expect((llmEngineService as any).context).toBe(capturedContext);
+      expect(capturedContext.release).not.toHaveBeenCalled();
     } finally {
       finishProjectorInit();
       await jest.advanceTimersByTimeAsync(0);
-      await observedCancellation?.catch(() => undefined);
       await observedLoad?.catch(() => undefined);
       jest.useRealTimers();
     }
 
-    expect(capturedContext?.release).toHaveBeenCalledTimes(1);
+    expect(capturedContext?.release).not.toHaveBeenCalled();
   });
 
   it('bounds a never-settling initial initMultimodal owner without releasing its context early', async () => {

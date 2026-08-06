@@ -210,6 +210,15 @@ export class BoundedExactPromptTokenCache {
   public invalidateContext(): void {
     this.contextEpoch += 1;
     this.clearSettledEntries();
+    this.detachInFlight();
+  }
+
+  /**
+   * Detaches current in-flight work without discarding settled values for the
+   * still-loaded context. Existing consumers retain their promises, while a
+   * request admitted after a Stop boundary can never join stale work.
+   */
+  public detachInFlight(): void {
     for (const entry of [...this.currentInFlightEntries.values()]) {
       entry.attachedToCurrentEpoch = false;
       if (entry.state !== 'pending') {

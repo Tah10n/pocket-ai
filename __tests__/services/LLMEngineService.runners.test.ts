@@ -199,6 +199,40 @@ describe('ContextOperationRunner', () => {
     await expect(runner.waitForActive()).resolves.toBe('drained');
   });
 
+  it('cancels pre-admission waits with the same foreground/background ownership rules', async () => {
+    const runner = new ContextOperationRunner();
+    let releaseBackground: () => void = () => undefined;
+    const foreground = runner.raceAgainstCancellation(
+      new Promise<void>(() => undefined),
+      () => new Error('foreground stopped'),
+      { chatBlocking: true, generationOwned: true },
+    );
+    const background = runner.raceAgainstCancellation(
+      new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      }),
+      () => new Error('background stopped'),
+      { chatBlocking: false, generationOwned: true },
+    );
+
+    runner.invalidateChatBlocking();
+
+    await expect(foreground).rejects.toThrow('foreground stopped');
+    let backgroundSettled = false;
+    void background.then(
+      () => {
+        backgroundSettled = true;
+      },
+      () => undefined,
+    );
+    await Promise.resolve();
+    expect(backgroundSettled).toBe(false);
+
+    runner.invalidateGenerationOwned();
+    await expect(background).rejects.toThrow('background stopped');
+    releaseBackground();
+  });
+
   it('resets stale raw operations so future operations are not blocked', async () => {
     const runner = new ContextOperationRunner();
     const resetError = new Error('unload timeout');

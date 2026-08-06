@@ -59,6 +59,11 @@ type ContextOperationWaitOptions = {
   readonly generationOwned?: boolean;
 };
 
+type ContextOperationCancellationWaitOptions = {
+  readonly chatBlocking?: boolean;
+  readonly generationOwned?: boolean;
+};
+
 export type ContextOperationCancellationToken = {
   readonly isCancelled: () => boolean;
   readonly throwIfCancelled: () => void;
@@ -82,6 +87,12 @@ type ContextOperationAdmissionWaiter = {
   readonly resolve: () => void;
 };
 
+type ContextOperationCancellationWaiter = {
+  readonly chatBlocking: boolean;
+  readonly generationOwned: boolean;
+  readonly cancel: () => void;
+};
+
 type ScheduledContextOperation = {
   readonly sequence: number;
   readonly priority: ContextOperationPriority;
@@ -101,6 +112,7 @@ export class ContextOperationRunner {
   private runningOperation: ScheduledContextOperation | null = null;
   private reservations = new Map<number, ContextOperationReservation>();
   private admissionWaiters = new Set<ContextOperationAdmissionWaiter>();
+  private cancellationWaiters = new Set<ContextOperationCancellationWaiter>();
   private nextOperationSequence = 0;
   private nextReservationId = 0;
   private resolveQueueDrain: (() => void) | null = null;
@@ -142,6 +154,65 @@ export class ContextOperationRunner {
         this.admissionWaiters.delete(waiter);
         resolve();
       }
+    });
+  }
+
+  /**
+   * Keeps work that must wait outside the native queue on the same cancellation
+   * boundary as tracked context operations. This is used for lifecycle barriers
+   * that already own the queue, where admitting a placeholder operation would
+   * create a queue-start timeout or a false raw native owner.
+   */
+  public raceAgainstCancellation<T>(
+    promise: Promise<T>,
+    createCancellationError: ErrorFactory,
+    options: ContextOperationCancellationWaitOptions = {},
+  ): Promise<T> {
+    const isChatBlocking = options.chatBlocking !== false;
+    const isGenerationOwned = options.generationOwned !== false;
+    if (!isChatBlocking && !isGenerationOwned) {
+      return promise;
+    }
+
+    const generationOwnedCancelGeneration = this.generationOwnedCancelGeneration;
+    const chatBlockingCancelGeneration = this.chatBlockingCancelGeneration;
+    let didCancel = false;
+    let rejectCancellation: (error: unknown) => void = () => undefined;
+    const cancellationPromise = new Promise<never>((_, reject) => {
+      rejectCancellation = reject;
+    });
+    const waiter: ContextOperationCancellationWaiter = {
+      chatBlocking: isChatBlocking,
+      generationOwned: isGenerationOwned,
+      cancel: () => {
+        if (didCancel) {
+          return;
+        }
+        didCancel = true;
+        let cancellationError: unknown;
+        try {
+          cancellationError = createCancellationError();
+        } catch (error) {
+          cancellationError = error;
+        }
+        rejectCancellation(cancellationError);
+      },
+    };
+    this.cancellationWaiters.add(waiter);
+
+    // Keep the generation check adjacent to registration so an invalidation at
+    // the barrier boundary cannot leave this waiter attached to a stale epoch.
+    if (
+      (isGenerationOwned
+        && this.generationOwnedCancelGeneration !== generationOwnedCancelGeneration)
+      || (isChatBlocking
+        && this.chatBlockingCancelGeneration !== chatBlockingCancelGeneration)
+    ) {
+      waiter.cancel();
+    }
+
+    return Promise.race([promise, cancellationPromise]).finally(() => {
+      this.cancellationWaiters.delete(waiter);
     });
   }
 
@@ -411,10 +482,12 @@ export class ContextOperationRunner {
 
   public invalidateGenerationOwned(): void {
     this.generationOwnedCancelGeneration += 1;
+    this.cancelCancellationWaiters('generationOwned');
   }
 
   public invalidateChatBlocking(): void {
     this.chatBlockingCancelGeneration += 1;
+    this.cancelCancellationWaiters('chatBlocking');
   }
 
   public cancelGenerationOwned(error: unknown): void {
@@ -449,6 +522,16 @@ export class ContextOperationRunner {
 
   public hasActiveChatBlocking(): boolean {
     return this.chatBlockingRawActivePromises.size > 0;
+  }
+
+  private cancelCancellationWaiters(
+    ownership: 'chatBlocking' | 'generationOwned',
+  ): void {
+    for (const waiter of [...this.cancellationWaiters]) {
+      if (waiter[ownership]) {
+        waiter.cancel();
+      }
+    }
   }
 
   private getRawActiveOperations(options: ContextOperationWaitOptions): Promise<unknown>[] {

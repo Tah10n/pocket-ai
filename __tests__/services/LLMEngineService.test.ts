@@ -1968,6 +1968,86 @@ describe('LLMEngineService', () => {
     },
   );
 
+  it.each(['stopCompletion', 'cancelActiveContextOperations'] as const)(
+    'evicts a cancelled pre-init exact-token promise before a same-key retry after %s',
+    async (stopMethod) => {
+      (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+      let finishProjectorInit: () => void = () => undefined;
+      getInitMultimodalMock().mockImplementationOnce(() => new Promise((resolve) => {
+        finishProjectorInit = () => resolve(true);
+      }));
+      getTokenizeMock().mockResolvedValueOnce({ tokens: [1, 2] });
+
+      const cacheKey = `pre-init-stop:${stopMethod}`;
+      const countSamePrompt = () => llmEngineService.countPromptTokens({
+        expectedModelId: 'test/model',
+        messages: [{ role: 'user', content: 'Count the same prompt after Stop' }],
+      });
+      let observedLoad: Promise<unknown> | undefined;
+      let staleLookup: ReturnType<typeof exactPromptTokenCache.getOrCreate> | undefined;
+      let freshLookup: ReturnType<typeof exactPromptTokenCache.getOrCreate> | undefined;
+      jest.useFakeTimers();
+      try {
+        const loadPromise = llmEngineService.load('test/model', { forceReload: true });
+        observedLoad = loadPromise.catch((error) => error);
+        for (let tick = 0; tick < 50 && getInitMultimodalMock().mock.calls.length === 0; tick += 1) {
+          await jest.advanceTimersByTimeAsync(0);
+        }
+
+        expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+        staleLookup = exactPromptTokenCache.getOrCreate(cacheKey, countSamePrompt);
+        const observedStale = staleLookup.promise.catch((error) => error);
+
+        const stopPromise = stopMethod === 'stopCompletion'
+          ? llmEngineService.stopCompletion()
+          : llmEngineService.cancelActiveContextOperations({
+            timeoutMs: 1000,
+          });
+
+        // The cache boundary must be visible in the same turn as Stop, before
+        // the cancellation rejection has crossed any promise microtask.
+        freshLookup = exactPromptTokenCache.getOrCreate(cacheKey, countSamePrompt);
+        expect(freshLookup.hit).toBe(false);
+        expect(freshLookup.promise).not.toBe(staleLookup.promise);
+        expect(getFormattedChatMock()).not.toHaveBeenCalled();
+        expect(getTokenizeMock()).not.toHaveBeenCalled();
+
+        if (stopMethod === 'stopCompletion') {
+          await expect(stopPromise).resolves.toBeUndefined();
+        } else {
+          await expect(stopPromise).resolves.toBe('drained');
+        }
+        await jest.advanceTimersByTimeAsync(0);
+
+        await expect(observedStale).resolves.toMatchObject({
+          code: 'engine_busy',
+          message: 'Prompt preparation was stopped before native completion started',
+        });
+        staleLookup.release('discard');
+        expect(exactPromptTokenCache.has(cacheKey)).toBe(true);
+
+        finishProjectorInit();
+        await jest.advanceTimersByTimeAsync(0);
+        await expect(observedLoad).resolves.toBeUndefined();
+        await expect(freshLookup.promise).resolves.toBe(2);
+        freshLookup.release('success');
+
+        expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+        expect(getTokenizeMock()).toHaveBeenCalledTimes(1);
+      } finally {
+        staleLookup?.release('discard');
+        freshLookup?.release('discard');
+        exactPromptTokenCache.delete(cacheKey);
+        finishProjectorInit();
+        await jest.advanceTimersByTimeAsync(0);
+        await observedLoad?.catch(() => undefined);
+        await staleLookup?.promise.catch(() => undefined);
+        await freshLookup?.promise.catch(() => undefined);
+        jest.useRealTimers();
+      }
+    },
+  );
+
   it('keeps initial projector ownership running across generation cancellation', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     let finishProjectorInit: () => void = () => undefined;

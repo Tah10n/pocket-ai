@@ -2091,6 +2091,10 @@ class LLMEngineService {
 
   public async cancelActiveContextOperations(options: { timeoutMs?: number; detachOnTimeout?: boolean } = {}): Promise<ContextOperationDrainResult> {
     const timeoutMs = options.timeoutMs ?? CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS;
+    // Establish the cache boundary synchronously. Promise rejection propagates
+    // through microtasks, so waiting for it alone leaves an immediate retry able
+    // to join the cancelled in-flight entry.
+    exactPromptTokenCache.detachInFlight();
     this.contextOperationRunner.cancelGenerationOwned(
       new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
     );
@@ -4529,8 +4533,14 @@ class LLMEngineService {
       });
       // Projector setup already owns the serialized native context. Await the
       // load barrier before admitting prompt preparation so its short queue
-      // start deadline cannot expire behind healthy lifecycle work.
-      await initializationAtRequest;
+      // start deadline cannot expire behind healthy lifecycle work. Keep this
+      // pre-admission wait on the same cancellation boundary as the operation
+      // it will become so Stop can evict a stale exact-token promise promptly.
+      await this.contextOperationRunner.raceAgainstCancellation(
+        initializationAtRequest,
+        () => new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
+        { chatBlocking, generationOwned: true },
+      );
       if (this.isUnloading) {
         throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
       }
@@ -4713,7 +4723,10 @@ class LLMEngineService {
   public async stopCompletion(): Promise<void> {
     // Prompt token counting may still be outside the context runner while it
     // awaits model initialization. Invalidate that pre-admission work as part
-    // of the same stop boundary without touching lifecycle-owned warmup.
+    // of the same stop boundary without touching lifecycle-owned warmup. Detach
+    // cached in-flight work first so a same-tick retry cannot join it while the
+    // cancellation rejection is still crossing the promise microtask queue.
+    exactPromptTokenCache.detachInFlight();
     this.contextOperationRunner.invalidateChatBlocking();
     await this.stopCompletionInternal({ drainPromptPreparation: true });
   }

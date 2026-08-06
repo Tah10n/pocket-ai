@@ -118,6 +118,14 @@ const INFLATE_OUTPUT_CHUNK_BYTES = 64 * 1024;
 // from the text position. A sufficiently negative value therefore represents
 // visible forward spacing rather than normal glyph kerning.
 const PDF_TJ_WORD_BREAK_THRESHOLD = -250;
+// This lightweight extractor intentionally does not load font dictionaries or
+// glyph widths. Use the active text font size to distinguish a layout-sized
+// horizontal Td/TD move from sub-point positioning jitter. A typical PDF word
+// space is roughly 0.2-0.3 em; the floor keeps malformed zero-sized font state
+// from turning every tiny movement into a separator.
+const PDF_DEFAULT_TEXT_FONT_SIZE = 12;
+const PDF_HORIZONTAL_WORD_BREAK_EM_THRESHOLD = 0.2;
+const PDF_HORIZONTAL_WORD_BREAK_MIN_USER_UNITS = 0.5;
 
 function createPdfExtractionError(
   reason: Extract<PdfTextExtractionFailureReason, 'resource_limit' | 'unsupported_structure'>,
@@ -1829,6 +1837,17 @@ function readTrailingNumberOperands(
   return values;
 }
 
+function isMeaningfulHorizontalTextMove(tx: number, fontSize: number): boolean {
+  const normalizedFontSize = Number.isFinite(fontSize) && fontSize !== 0
+    ? Math.abs(fontSize)
+    : PDF_DEFAULT_TEXT_FONT_SIZE;
+  const wordBreakThreshold = Math.max(
+    PDF_HORIZONTAL_WORD_BREAK_MIN_USER_UNITS,
+    normalizedFontSize * PDF_HORIZONTAL_WORD_BREAK_EM_THRESHOLD,
+  );
+  return Math.abs(tx) >= wordBreakThreshold;
+}
+
 type PdfInlineImageDictionary = {
   entries: ReadonlyMap<string, PdfContentToken>;
   dataStart: number;
@@ -2408,6 +2427,7 @@ function extractTextFromContentStream(
   let hasShownText = false;
   let pendingSeparator: 'space' | 'line' | undefined;
   let textLineY: number | undefined;
+  let textFontSize = PDF_DEFAULT_TEXT_FONT_SIZE;
 
   const rememberOperand = (token: PdfContentToken) => {
     operands.push(token);
@@ -2507,13 +2527,18 @@ function extractTextFromContentStream(
     } else if (operator === 'T*') {
       requestLineBreak();
       textLineY = undefined;
+    } else if (operator === 'Tf') {
+      const fontSize = readTrailingNumberOperands(operands, 1)?.[0];
+      if (fontSize !== undefined && fontSize !== 0) {
+        textFontSize = Math.abs(fontSize);
+      }
     } else if (operator === 'Td' || operator === 'TD') {
       const movement = readTrailingNumberOperands(operands, 2);
       if (movement) {
         const [tx, ty] = movement;
         if (ty !== 0) {
           requestLineBreak();
-        } else if (tx !== 0) {
+        } else if (isMeaningfulHorizontalTextMove(tx, textFontSize)) {
           requestWordBreak();
         }
         if (textLineY !== undefined) {

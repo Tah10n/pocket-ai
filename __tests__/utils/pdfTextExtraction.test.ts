@@ -360,14 +360,29 @@ describe('pdfTextExtraction', () => {
     },
   );
 
-  it.each(['0 0 Td', '0 0 TD'])(
-    'does not synthesize a separator for zero movement with %s',
+  it.each([
+    '0 0 Td',
+    '0 0 TD',
+    '0.01 0 Td',
+    '0.01 0 TD',
+    '-0.01 0 Td',
+    '-0.01 0 TD',
+  ])(
+    'does not synthesize a separator for zero or sub-point movement with %s',
     (movement) => {
       const pdf = createPlainTextPdf(`BT (Hel) Tj ${movement} (lo) Tj ET`);
 
       expect(extractTextFromPdfBase64(pdf).text).toBe('Hello');
     },
   );
+
+  it('scales meaningful horizontal gaps with the active text font size', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 100 Tf (Hel) Tj 5 0 Td (lo) Tj /F1 10 Tf 5 0 Td (World) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Hello World');
+  });
 
   it('uses Tm Y movement for line breaks without splitting adjacent fragments', () => {
     const pdf = createPlainTextPdf(

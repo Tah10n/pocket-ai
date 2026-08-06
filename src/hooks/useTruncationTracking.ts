@@ -373,6 +373,7 @@ export function useTruncationTracking(
           if (
             errorCode === 'engine_busy'
             || errorCode === 'engine_not_ready'
+            || errorCode === 'engine_recovery_required'
             || errorCode === 'engine_unloading'
             || errorCode === 'message_too_long'
           ) {

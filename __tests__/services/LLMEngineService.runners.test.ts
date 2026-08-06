@@ -159,6 +159,80 @@ describe('ContextOperationRunner', () => {
     expect(runner.hasActiveChatBlocking()).toBe(false);
   });
 
+  it('keeps lifecycle-owned context work outside generation cancellation and drains', async () => {
+    const runner = new ContextOperationRunner();
+    const stopError = new Error('generation stopped');
+    let releaseLifecycleOwner: () => void = () => undefined;
+    let markLifecycleOwnerStarted: () => void = () => undefined;
+    const lifecycleOwnerStarted = new Promise<void>((resolve) => {
+      markLifecycleOwnerStarted = resolve;
+    });
+
+    const lifecycleOwner = runner.track(async (cancellation) => {
+      markLifecycleOwnerStarted();
+      await new Promise<void>((resolve) => {
+        releaseLifecycleOwner = resolve;
+      });
+      cancellation.throwIfCancelled();
+      return 'lifecycle';
+    }, () => new Error('lifecycle cancelled'), {
+      chatBlocking: false,
+      generationOwned: false,
+      priority: 'completion',
+    });
+
+    await lifecycleOwnerStarted;
+    const generationOperation = runner.track(
+      async () => 'generation',
+      () => new Error('cancelled'),
+      { priority: 'completion' },
+    );
+
+    runner.cancelGenerationOwned(stopError);
+
+    await expect(generationOperation).rejects.toThrow('generation stopped');
+    await expect(runner.waitForActive({ generationOwned: true })).resolves.toBe('drained');
+    expect(runner.hasActive()).toBe(true);
+
+    releaseLifecycleOwner();
+    await expect(lifecycleOwner).resolves.toBe('lifecycle');
+    await expect(runner.waitForActive()).resolves.toBe('drained');
+  });
+
+  it('cancels pre-admission waits with the same foreground/background ownership rules', async () => {
+    const runner = new ContextOperationRunner();
+    let releaseBackground: () => void = () => undefined;
+    const foreground = runner.raceAgainstCancellation(
+      new Promise<void>(() => undefined),
+      () => new Error('foreground stopped'),
+      { chatBlocking: true, generationOwned: true },
+    );
+    const background = runner.raceAgainstCancellation(
+      new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      }),
+      () => new Error('background stopped'),
+      { chatBlocking: false, generationOwned: true },
+    );
+
+    runner.invalidateChatBlocking();
+
+    await expect(foreground).rejects.toThrow('foreground stopped');
+    let backgroundSettled = false;
+    void background.then(
+      () => {
+        backgroundSettled = true;
+      },
+      () => undefined,
+    );
+    await Promise.resolve();
+    expect(backgroundSettled).toBe(false);
+
+    runner.invalidateGenerationOwned();
+    await expect(background).rejects.toThrow('background stopped');
+    releaseBackground();
+  });
+
   it('resets stale raw operations so future operations are not blocked', async () => {
     const runner = new ContextOperationRunner();
     const resetError = new Error('unload timeout');
@@ -380,6 +454,329 @@ describe('ContextOperationRunner', () => {
       jest.useRealTimers();
     }
   });
+
+  it('does not consume the runtime timeout while the operation waits in the queue', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+    let releaseOwner: () => void = () => undefined;
+    let markOwnerStarted: () => void = () => undefined;
+    const ownerStarted = new Promise<void>((resolve) => {
+      markOwnerStarted = resolve;
+    });
+    let releaseWatched: () => void = () => undefined;
+    let markWatchedStarted: () => void = () => undefined;
+    const watchedStarted = new Promise<void>((resolve) => {
+      markWatchedStarted = resolve;
+    });
+
+    const owner = runner.track(async () => {
+      markOwnerStarted();
+      await new Promise<void>((resolve) => {
+        releaseOwner = resolve;
+      });
+      return 'owner';
+    }, () => new Error('cancelled'), { priority: 'completion' });
+    const watchedBody = jest.fn(async () => {
+      markWatchedStarted();
+      await new Promise<void>((resolve) => {
+        releaseWatched = resolve;
+      });
+      return 'watched';
+    });
+    const watched = runner.track(watchedBody, () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedWatched = watched.catch((error) => error);
+
+    try {
+      await ownerStarted;
+
+      await jest.advanceTimersByTimeAsync(100);
+      expect(watchedBody).not.toHaveBeenCalled();
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      releaseOwner();
+      await owner;
+      await jest.advanceTimersByTimeAsync(0);
+      await watchedStarted;
+      expect(watchedBody).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(49);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(observedWatched).resolves.toBe(runtimeTimeoutError);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+
+      releaseWatched();
+      const drained = runner.waitForActive({ timeoutMs: 100 });
+      await jest.advanceTimersByTimeAsync(100);
+      await expect(drained).resolves.toBe('drained');
+
+      await jest.advanceTimersByTimeAsync(200);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseOwner();
+      releaseWatched();
+      await owner.catch(() => undefined);
+      await watched.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('times out a started hung operation exactly once', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+    let releaseRawOperation: () => void = () => undefined;
+    let markHungStarted: () => void = () => undefined;
+    const hungStarted = new Promise<void>((resolve) => {
+      markHungStarted = resolve;
+    });
+
+    const hungBody = jest.fn(async () => {
+      markHungStarted();
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'hung';
+    });
+    const hung = runner.track(hungBody, () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedHung = hung.catch((error) => error);
+
+    try {
+      await hungStarted;
+      expect(hungBody).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(50);
+
+      await expect(observedHung).resolves.toBe(runtimeTimeoutError);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+      expect(onRuntimeTimeout).toHaveBeenCalledWith(runtimeTimeoutError);
+      expect(runner.hasActive()).toBe(true);
+
+      releaseRawOperation();
+      const drained = runner.waitForActive({ timeoutMs: 100 });
+      await jest.advanceTimersByTimeAsync(100);
+      await expect(drained).resolves.toBe('drained');
+      expect(runner.hasActive()).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(200);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseRawOperation();
+      await hung.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not fire the runtime timeout when the operation settles before the deadline', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+
+    const watched = runner.track(async () => 'watched', () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+
+    try {
+      await expect(watched).resolves.toBe('watched');
+
+      await jest.advanceTimersByTimeAsync(100);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+      expect(runner.hasActive()).toBe(false);
+    } finally {
+      await watched.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('keeps the raw-owner watchdog armed after external cancellation', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const externalError = new Error('external cancellation');
+    const runtimeTimeoutError = new Error('runtime timed out');
+    const onRuntimeTimeout = jest.fn();
+    let releaseRawOperation: () => void = () => undefined;
+    let markWatchedStarted: () => void = () => undefined;
+    const watchedStarted = new Promise<void>((resolve) => {
+      markWatchedStarted = resolve;
+    });
+
+    const watched = runner.track(async () => {
+      markWatchedStarted();
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'watched';
+    }, () => new Error('cancelled'), {
+      priority: 'completion',
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedWatched = watched.catch((error) => error);
+
+    try {
+      await watchedStarted;
+      runner.cancelActive(externalError);
+
+      await expect(observedWatched).resolves.toBe(externalError);
+      expect(runner.hasActive()).toBe(true);
+
+      await jest.advanceTimersByTimeAsync(49);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(1);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+      expect(onRuntimeTimeout).toHaveBeenCalledWith(runtimeTimeoutError);
+
+      await jest.advanceTimersByTimeAsync(200);
+      expect(onRuntimeTimeout).toHaveBeenCalledTimes(1);
+
+      releaseRawOperation();
+      const drained = runner.waitForActive({ timeoutMs: 100 });
+      await jest.advanceTimersByTimeAsync(100);
+      await expect(drained).resolves.toBe('drained');
+      expect(runner.hasActive()).toBe(false);
+    } finally {
+      releaseRawOperation();
+      await watched.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('uses a soft timeout only for the caller result while a healthy raw owner settles after 15 seconds', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const softTimeoutError = new Error('soft result timeout');
+    const hardTimeoutError = new Error('hard ownership timeout');
+    const onRuntimeTimeout = jest.fn();
+    let releaseRawOperation: () => void = () => undefined;
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+
+    const operation = runner.track(async () => {
+      markStarted();
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'late healthy result';
+    }, () => new Error('cancelled'), {
+      chatBlocking: false,
+      priority: 'background_probe',
+      softRuntimeTimeoutMs: 5000,
+      createSoftRuntimeTimeoutError: () => softTimeoutError,
+      runtimeTimeoutMs: 20_000,
+      createRuntimeTimeoutError: () => hardTimeoutError,
+      onRuntimeTimeout,
+    });
+    const observedOperation = operation.catch((error) => error);
+
+    try {
+      await started;
+      await jest.advanceTimersByTimeAsync(5000);
+
+      await expect(observedOperation).resolves.toBe(softTimeoutError);
+      expect(runner.hasActive()).toBe(true);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(10_000);
+      releaseRawOperation();
+      await jest.advanceTimersByTimeAsync(0);
+      await expect(runner.waitForActive()).resolves.toBe('drained');
+
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(onRuntimeTimeout).not.toHaveBeenCalled();
+      expect(runner.hasActive()).toBe(false);
+    } finally {
+      releaseRawOperation();
+      await operation.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('contains a synchronous exception from the hard-timeout recovery callback', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    let releaseRawOperation: () => void = () => undefined;
+
+    const operation = runner.track(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'late';
+    }, () => new Error('cancelled'), {
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout: () => {
+        throw new Error('recovery callback failed');
+      },
+    });
+    const observedOperation = operation.catch((error) => error);
+
+    try {
+      await jest.advanceTimersByTimeAsync(50);
+      await expect(observedOperation).resolves.toBe(runtimeTimeoutError);
+      expect(runner.hasActive()).toBe(true);
+    } finally {
+      releaseRawOperation();
+      await jest.advanceTimersByTimeAsync(0);
+      await operation.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
+  it('contains a rejected promise from the hard-timeout recovery callback', async () => {
+    jest.useFakeTimers();
+    const runner = new ContextOperationRunner();
+    const runtimeTimeoutError = new Error('runtime timed out');
+    let releaseRawOperation: () => void = () => undefined;
+
+    const operation = runner.track(async () => {
+      await new Promise<void>((resolve) => {
+        releaseRawOperation = resolve;
+      });
+      return 'late';
+    }, () => new Error('cancelled'), {
+      runtimeTimeoutMs: 50,
+      createRuntimeTimeoutError: () => runtimeTimeoutError,
+      onRuntimeTimeout: async () => {
+        throw new Error('async recovery callback failed');
+      },
+    });
+    const observedOperation = operation.catch((error) => error);
+
+    try {
+      await jest.advanceTimersByTimeAsync(50);
+      await expect(observedOperation).resolves.toBe(runtimeTimeoutError);
+      await Promise.resolve();
+      expect(runner.hasActive()).toBe(true);
+    } finally {
+      releaseRawOperation();
+      await jest.advanceTimersByTimeAsync(0);
+      await operation.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('ActiveCompletionRunner', () => {
@@ -396,6 +793,54 @@ describe('ActiveCompletionRunner', () => {
 
     runner.clearIfActive(completion);
     expect(runner.hasActive()).toBe(false);
+  });
+
+  it('interrupts a lifecycle barrier without cancelling its underlying owner', async () => {
+    const runner = new ActiveCompletionRunner<string>();
+    const completion = new Promise<string>(() => undefined);
+    const generation = runner.start(completion, jest.fn());
+    let releaseLifecycleBarrier: (value: number) => void = () => undefined;
+    const lifecycleBarrier = new Promise<number>((resolve) => {
+      releaseLifecycleBarrier = resolve;
+    });
+    const wait = runner.raceAgainstInterruption(
+      lifecycleBarrier,
+      generation,
+      () => new Error('completion stopped'),
+    );
+
+    runner.interruptIfActive();
+
+    await expect(wait).rejects.toThrow('completion stopped');
+    releaseLifecycleBarrier(42);
+    await expect(lifecycleBarrier).resolves.toBe(42);
+    runner.clearIfActive(completion);
+  });
+
+  it('rejects a resolved lifecycle barrier when reset lands before its race continuation', async () => {
+    const runner = new ActiveCompletionRunner<string>();
+    const completion = new Promise<string>(() => undefined);
+    const generation = runner.start(completion, jest.fn());
+    let releaseLifecycleBarrier: (value: number) => void = () => undefined;
+    const lifecycleBarrier = new Promise<number>((resolve) => {
+      releaseLifecycleBarrier = resolve;
+    });
+    const wait = runner.raceAgainstInterruption(
+      lifecycleBarrier,
+      generation,
+      () => new Error('stale completion reset'),
+    );
+
+    // Queue the source-promise reaction first, then reset before either race
+    // continuation runs. The post-race generation check must still reject.
+    releaseLifecycleBarrier(42);
+    runner.reset();
+
+    await expect(wait).rejects.toThrow('stale completion reset');
+    expect(() => runner.assertNotInterrupted(
+      generation,
+      () => new Error('stale completion generation'),
+    )).toThrow('stale completion generation');
   });
 });
 

@@ -2427,7 +2427,7 @@ describe('ModelCatalogCacheStore', () => {
     expect(storage.getString(SNAPSHOT_CACHE_KEY)).toBe(rewrittenSnapshot);
   });
 
-  it('rewrites unmarked current-version search and snapshot payloads after field-level sanitization', () => {
+  it('rewrites v10 search and snapshot payloads without private thinking-probe recovery state', () => {
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const id = 'rewrite/current-version-runtime-state';
     const scope = { query: id, cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
@@ -2443,9 +2443,18 @@ describe('ModelCatalogCacheStore', () => {
         declared: { image: 'unknown', audio: 'supported', video: 'unknown' },
         evidence: [{ source: 'runtime', value: 'audio', confidence: 'high' }],
       },
+      thinkingProbeBlocked: {
+        status: 'blocked',
+        failedAt: 92,
+        artifactPath: 'private-current-version-model.gguf',
+        artifactSha256: 'b'.repeat(64),
+        runtimeVersion: 'private-runtime-identity',
+        appVersion: '1.2.3',
+      },
     });
     storage.set(SEARCH_CACHE_KEY, JSON.stringify({
-      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      version: 10,
+      sanitized: true,
       entries: [{
         key: `${id}::__initial__::20::__default__::anon`,
         timestamp: Date.now(),
@@ -2454,7 +2463,8 @@ describe('ModelCatalogCacheStore', () => {
       }],
     }));
     storage.set(SNAPSHOT_CACHE_KEY, JSON.stringify({
-      version: MODEL_CATALOG_CACHE_PERSISTED_VERSION,
+      version: 10,
+      sanitized: true,
       entries: [{
         key: `${id}::anon`,
         id,
@@ -2474,6 +2484,7 @@ describe('ModelCatalogCacheStore', () => {
       expect(model?.resumeData).toBeUndefined();
       expect(model?.chatModalities).toEqual(['text']);
       expect(model?.inputCapabilities).toBeUndefined();
+      expect(model?.thinkingProbeBlocked).toBeUndefined();
     }
 
     for (const key of [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY]) {
@@ -2484,6 +2495,10 @@ describe('ModelCatalogCacheStore', () => {
       expect(raw).not.toContain('private-current-version-model.gguf');
       expect(raw).not.toContain('private-current-version-resume-token');
       expect(raw).not.toContain('"source":"runtime"');
+      expect(raw).not.toContain('thinkingProbeBlocked');
+      expect(raw).not.toContain('artifactPath');
+      expect(raw).not.toContain('artifactSha256');
+      expect(raw).not.toContain('runtimeVersion');
     }
   });
 
@@ -2943,45 +2958,66 @@ describe('ModelCatalogCacheStore', () => {
     const store = new ModelCatalogCacheStore();
     const storage = createStorage(STORAGE_ID, { tier: 'cache' });
     const anonScope = { query: 'q', cursor: null, pageSize: 20, sort: null, authScope: 'anon' as const };
+    const modelWithLocalRuntime = buildModel({
+      id: 'public/downloaded-model',
+      localPath: 'private-local-file.gguf',
+      downloadedAt: 123,
+      downloadIntegrity: {
+        kind: 'sha256',
+        sizeBytes: 123,
+        checkedAt: 456,
+        sha256: 'a'.repeat(64),
+      },
+      lifecycleStatus: LifecycleStatus.DOWNLOADED,
+      downloadProgress: 1,
+      metadataTrust: 'verified_local',
+      sha256: 'a'.repeat(64),
+      resumeData: 'resume-token',
+      thinkingProbeBlocked: {
+        status: 'blocked',
+        failedAt: 789,
+        artifactPath: 'private-local-file.gguf',
+        artifactSha256: 'a'.repeat(64),
+        runtimeVersion: 'private-native-runtime',
+        appVersion: '1.2.3',
+      },
+    });
 
     store.putSearch(anonScope, {
-      models: [buildModel({
-        id: 'public/downloaded-model',
-        localPath: 'private-local-file.gguf',
-        downloadedAt: 123,
-        downloadIntegrity: {
-          kind: 'sha256',
-          sizeBytes: 123,
-          checkedAt: 456,
-          sha256: 'a'.repeat(64),
-        },
-        lifecycleStatus: LifecycleStatus.DOWNLOADED,
-        downloadProgress: 1,
-        metadataTrust: 'verified_local',
-        sha256: 'a'.repeat(64),
-        resumeData: 'resume-token',
-      })],
+      models: [modelWithLocalRuntime],
       hasMore: false,
       nextCursor: null,
     });
+    store.putModelSnapshots([modelWithLocalRuntime], 'anon');
 
-    const cached = store.getSearch(anonScope, 1000);
-    const model = cached?.models[0];
-    expect(model).toEqual(expect.objectContaining({
-      id: 'public/downloaded-model',
-      lifecycleStatus: LifecycleStatus.AVAILABLE,
-      downloadProgress: 0,
-    }));
-    expect(model?.localPath).toBeUndefined();
-    expect(model?.downloadedAt).toBeUndefined();
-    expect(model?.downloadIntegrity).toBeUndefined();
-    expect(model?.metadataTrust).toBeUndefined();
-    expect(model?.sha256).toBeUndefined();
-    expect(model?.resumeData).toBeUndefined();
+    const cachedModels = [
+      store.getSearch(anonScope, 1000)?.models[0],
+      store.getModelSnapshot(modelWithLocalRuntime.id, 'anon', 1000),
+    ];
+    for (const model of cachedModels) {
+      expect(model).toEqual(expect.objectContaining({
+        id: 'public/downloaded-model',
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
+        downloadProgress: 0,
+      }));
+      expect(model?.localPath).toBeUndefined();
+      expect(model?.downloadedAt).toBeUndefined();
+      expect(model?.downloadIntegrity).toBeUndefined();
+      expect(model?.metadataTrust).toBeUndefined();
+      expect(model?.sha256).toBeUndefined();
+      expect(model?.resumeData).toBeUndefined();
+      expect(model?.thinkingProbeBlocked).toBeUndefined();
+    }
 
-    const raw = storage.getString(SEARCH_CACHE_KEY) as string;
-    expect(raw).not.toContain('private-local-file.gguf');
-    expect(raw).not.toContain('resume-token');
+    for (const key of [SEARCH_CACHE_KEY, SNAPSHOT_CACHE_KEY]) {
+      const raw = storage.getString(key) as string;
+      expect(raw).not.toContain('private-local-file.gguf');
+      expect(raw).not.toContain('resume-token');
+      expect(raw).not.toContain('thinkingProbeBlocked');
+      expect(raw).not.toContain('artifactPath');
+      expect(raw).not.toContain('artifactSha256');
+      expect(raw).not.toContain('runtimeVersion');
+    }
   });
 
   it('keeps vision catalog metadata but strips projector runtime from anonymous caches', () => {

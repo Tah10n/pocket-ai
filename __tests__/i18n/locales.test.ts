@@ -18,6 +18,7 @@ describe('chat locale coverage', () => {
     'chat.modelSelector.subtitle',
     'chat.modelSelector.emptyTitle',
     'chat.modelSelector.emptyDescription',
+    'common.errors.engineRecoveryRequired',
     'storageRecovery.privateUnavailableMessage',
   ];
 
@@ -31,5 +32,18 @@ describe('chat locale coverage', () => {
     expect(getNestedValue(en, 'chat.modelSwitchedLine')).toContain('{{to}}');
     expect(getNestedValue(ru, 'chat.modelSwitchedLine')).toContain('{{from}}');
     expect(getNestedValue(ru, 'chat.modelSwitchedLine')).toContain('{{to}}');
+  });
+
+  it('keeps engine recovery copy pointing at automatic recovery and app restart, not model reload', () => {
+    const enValue = String(getNestedValue(en, 'common.errors.engineRecoveryRequired'));
+    const ruValue = String(getNestedValue(ru, 'common.errors.engineRecoveryRequired'));
+
+    expect(enValue.toLowerCase()).toContain('automatic recovery');
+    expect(enValue.toLowerCase()).toContain('restart pocket ai');
+    expect(enValue.toLowerCase()).not.toContain('reload the model');
+
+    expect(ruValue.toLowerCase()).toContain('автоматического восстановления');
+    expect(ruValue.toLowerCase()).toContain('перезапустите pocket ai');
+    expect(ruValue.toLowerCase()).not.toContain('перезагрузите модель');
   });
 });

@@ -250,6 +250,44 @@ describe('BoundedExactPromptTokenCache', () => {
     expect(cache.getDebugSnapshot().detachedInFlightEntryCount).toBe(0);
   });
 
+  it('detaches in-flight work synchronously without discarding settled values', async () => {
+    const cache = new BoundedExactPromptTokenCache({ maxEntries: 4, maxApproxBytes: 4096 });
+    const settledCount = jest.fn(async () => 7);
+    const settled = cache.getOrCreate('settled', settledCount);
+    await expect(settled.promise).resolves.toBe(7);
+    settled.release('success');
+
+    let resolveOld: ((tokens: number) => void) | undefined;
+    const oldCount = jest.fn(() => new Promise<number>((resolve) => {
+      resolveOld = resolve;
+    }));
+    const old = cache.getOrCreate('pending', oldCount);
+
+    cache.detachInFlight();
+
+    expect(cache.has('pending')).toBe(false);
+    expect(cache.has('settled')).toBe(true);
+    expect(cache.getDebugSnapshot().detachedInFlightEntryCount).toBe(1);
+
+    const freshCount = jest.fn(async () => 11);
+    const fresh = cache.getOrCreate('pending', freshCount);
+    expect(fresh.hit).toBe(false);
+    expect(fresh.promise).not.toBe(old.promise);
+    await expect(fresh.promise).resolves.toBe(11);
+    fresh.release('success');
+
+    const retained = cache.getOrCreate('settled', settledCount);
+    expect(retained.hit).toBe(true);
+    await expect(retained.promise).resolves.toBe(7);
+    retained.release('success');
+    expect(settledCount).toHaveBeenCalledTimes(1);
+
+    resolveOld?.(5);
+    await expect(old.promise).resolves.toBe(5);
+    old.release('success');
+    expect(cache.getDebugSnapshot().detachedInFlightEntryCount).toBe(0);
+  });
+
   it('keeps detached pending work in in-flight admission accounting', async () => {
     const cache = new BoundedExactPromptTokenCache({
       maxEntries: 4,

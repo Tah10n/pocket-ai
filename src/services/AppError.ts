@@ -5,6 +5,7 @@ export type AppErrorCode =
   | 'action_failed'
   | 'engine_not_ready'
   | 'engine_busy'
+  | 'engine_recovery_required'
   | 'engine_unloading'
   | 'model_not_found'
   | 'model_load_blocked'
@@ -39,6 +40,7 @@ export type AppErrorCode =
 const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_not_ready: 'common.errors.engineNotReady',
   engine_busy: 'common.errors.engineBusy',
+  engine_recovery_required: 'common.errors.engineRecoveryRequired',
   engine_unloading: 'common.errors.engineUnloading',
   model_not_found: 'common.errors.modelNotFound',
   model_load_blocked: 'models.loadMemoryBlockedMessage',
@@ -123,6 +125,7 @@ const SAFE_APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
   'action_failed',
   'engine_not_ready',
   'engine_busy',
+  'engine_recovery_required',
   'engine_unloading',
   'model_not_found',
   'model_load_blocked',

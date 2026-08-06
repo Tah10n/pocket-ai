@@ -13,6 +13,7 @@ import {
   normalizeChatAttachmentLocalUri,
   toAttachmentMediaPath,
 } from './chatImageAttachments';
+import { getNativeLlmMessageTextCharacterCount } from './llmMessageText';
 
 export interface ThreadInferenceWindow {
   messages: LlmChatMessage[];
@@ -29,16 +30,14 @@ export interface ThreadInferenceWindowOptions {
 const CHARS_PER_ESTIMATED_TOKEN = 4;
 const MESSAGE_TOKEN_OVERHEAD = 6;
 const IMAGE_ATTACHMENT_ESTIMATED_TOKENS = 576;
+export const MAX_EXACT_HISTORY_BACKFILL_MESSAGES = 16;
 export const DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS = 64;
 const RESPONSE_RESERVE_BALANCING_MIN_TOKENS = 256;
 const MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET = 0.5;
 
 export function estimateLlmMessageTokens(message: LlmChatMessage) {
-  const textContentPartChars = message.contentParts
-    ?.filter((part) => part.type === 'text')
-    .reduce((total, part) => total + part.text.trim().length, 0) ?? 0;
   const mediaPathCount = getLlmMessageMediaPaths(message).length + getLlmMessageAudioInputCount(message);
-  return Math.max(1, Math.ceil((message.content.trim().length + textContentPartChars) / CHARS_PER_ESTIMATED_TOKEN))
+  return Math.max(1, Math.ceil(getNativeLlmMessageTextCharacterCount(message) / CHARS_PER_ESTIMATED_TOKEN))
     + MESSAGE_TOKEN_OVERHEAD
     + (mediaPathCount * IMAGE_ATTACHMENT_ESTIMATED_TOKENS);
 }
@@ -157,6 +156,11 @@ function getAudioContentPartsFromAttachments(
 
 function hasAudioAttachmentInput(attachments: ChatMessage['attachments']): boolean {
   return getAudioContentPartsFromAttachments(attachments).length > 0;
+}
+
+function hasFileBackedInferenceInput(message: ChatMessage): boolean {
+  return (message.attachments?.length ?? 0) > 0
+    || message.contentParts?.some((part) => part.type !== 'text') === true;
 }
 
 function toLlmChatMessage(message: ChatMessage): LlmChatMessage {
@@ -431,15 +435,78 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     Math.round(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens),
   );
 
-  // Seed exact fitting from the conservative, filesystem-free heuristic window.
-  // Exact preparation may shrink this candidate, but it must never reopen older
-  // history: doing so would resolve attachments that were already excluded from
-  // the inference window.
-  const { messages: fullMessages, truncatedMessageIds: baseTruncatedMessageIds } = getThreadInferenceWindow(
+  // Seed exact fitting from the conservative, filesystem-free heuristic window,
+  // while allowing a small bounded backfill through attachment-free history. This
+  // lets native tokenization recover from conservative estimates without reopening
+  // filesystem-backed inputs that the heuristic window already excluded.
+  const heuristicWindow = getThreadInferenceWindow(
     thread,
     options,
   );
   const eligibleMessages = getEligibleThreadMessages(thread);
+  const messageBoundedWindow = getThreadInferenceWindow(thread, {
+    maxContextMessages: options.maxContextMessages,
+  });
+  const messageBoundedSystemMessages: LlmChatMessage[] = [];
+  let messageBoundedHistoryIndex = 0;
+  while (
+    messageBoundedHistoryIndex < messageBoundedWindow.messages.length
+    && messageBoundedWindow.messages[messageBoundedHistoryIndex]?.role === 'system'
+  ) {
+    messageBoundedSystemMessages.push(messageBoundedWindow.messages[messageBoundedHistoryIndex]);
+    messageBoundedHistoryIndex += 1;
+  }
+  const minimumHistoryStartIndex = messageBoundedWindow.truncatedMessageIds.length;
+  const heuristicHistoryStartIndex = heuristicWindow.truncatedMessageIds.length;
+  let candidateHistoryStartIndex = Math.max(minimumHistoryStartIndex, heuristicHistoryStartIndex);
+  let backfilledMessageCount = 0;
+  while (
+    candidateHistoryStartIndex > minimumHistoryStartIndex
+    && backfilledMessageCount < MAX_EXACT_HISTORY_BACKFILL_MESSAGES
+  ) {
+    const precedingIndex = candidateHistoryStartIndex - 1;
+    const precedingMessage = eligibleMessages[precedingIndex];
+    let groupStartIndex: number | null = null;
+
+    if (precedingMessage?.role === 'user') {
+      groupStartIndex = precedingIndex;
+    } else if (
+      precedingMessage?.role === 'assistant'
+      && precedingIndex - 1 >= minimumHistoryStartIndex
+      && eligibleMessages[precedingIndex - 1]?.role === 'user'
+    ) {
+      groupStartIndex = precedingIndex - 1;
+    } else {
+      break;
+    }
+
+    const groupMessages = eligibleMessages.slice(groupStartIndex, candidateHistoryStartIndex);
+    if (
+      backfilledMessageCount + groupMessages.length > MAX_EXACT_HISTORY_BACKFILL_MESSAGES
+      || groupMessages.some(hasFileBackedInferenceInput)
+    ) {
+      break;
+    }
+
+    candidateHistoryStartIndex = groupStartIndex;
+    backfilledMessageCount += groupMessages.length;
+  }
+  while (
+    candidateHistoryStartIndex < eligibleMessages.length
+    && eligibleMessages[candidateHistoryStartIndex]?.role !== 'user'
+  ) {
+    candidateHistoryStartIndex += 1;
+  }
+  const historyMessages = eligibleMessages
+    .slice(candidateHistoryStartIndex)
+    .map(toLlmChatMessage);
+  const baseTruncatedMessageIds = eligibleMessages
+    .slice(0, candidateHistoryStartIndex)
+    .map((message) => message.id);
+  const fullMessages = [
+    ...messageBoundedSystemMessages,
+    ...historyMessages,
+  ];
 
   if (maxContextTokens === null) {
     return {
@@ -450,14 +517,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     };
   }
 
-  const systemMessages: LlmChatMessage[] = [];
-  let firstHistoryIndex = 0;
-  while (firstHistoryIndex < fullMessages.length && fullMessages[firstHistoryIndex]?.role === 'system') {
-    systemMessages.push(fullMessages[firstHistoryIndex]);
-    firstHistoryIndex += 1;
-  }
-
-  const historyMessages = fullMessages.slice(firstHistoryIndex);
+  const systemMessages = messageBoundedSystemMessages;
   const lastUserHistoryIndex = (() => {
     for (let i = historyMessages.length - 1; i >= 0; i -= 1) {
       if (historyMessages[i]?.role === 'user') {
@@ -467,7 +527,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
     return -1;
   })();
   const historyMessageIds = eligibleMessages
-    .slice(baseTruncatedMessageIds.length, baseTruncatedMessageIds.length + historyMessages.length)
+    .slice(candidateHistoryStartIndex, candidateHistoryStartIndex + historyMessages.length)
     .map((message) => message.id);
   if (historyMessages.length === 0) {
     return {
@@ -620,9 +680,8 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   }
 
   while (
-    effectiveHistoryStartIndex > 0 &&
-    normalizedHistoryMessages.length > 1 &&
-    normalizedHistoryMessages[0]?.role === 'assistant'
+    normalizedHistoryMessages.length > 0 &&
+    normalizedHistoryMessages[0]?.role !== 'user'
   ) {
     effectiveHistoryStartIndex += 1;
     normalizedHistoryMessages = historyMessages.slice(effectiveHistoryStartIndex);

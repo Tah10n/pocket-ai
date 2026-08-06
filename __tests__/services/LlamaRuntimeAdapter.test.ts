@@ -1,4 +1,4 @@
-import { initLlama, type LlamaContext } from 'llama.rn';
+import { initLlama, releaseAllLlama, type LlamaContext } from 'llama.rn';
 import {
   getFormattedChatFromContext,
   getMultimodalSupportFromContext,
@@ -7,6 +7,7 @@ import {
   normalizeBackendDeviceInfoList,
   normalizeCompletionResult,
   normalizeLlamaMessages,
+  releaseLlamaContext,
   releaseMultimodalFromContext,
   runCompletionOnContext,
 } from '../../src/services/LlamaRuntimeAdapter';
@@ -16,6 +17,27 @@ function createContext(overrides: Record<string, unknown>): LlamaContext {
 }
 
 describe('LlamaRuntimeAdapter', () => {
+  it('releases a captured context without affecting newer llama contexts', async () => {
+    const release = jest.fn().mockResolvedValue(undefined);
+    const releaseAllLlamaMock = releaseAllLlama as jest.Mock;
+    releaseAllLlamaMock.mockClear();
+
+    await expect(releaseLlamaContext(createContext({ release }))).resolves.toBeUndefined();
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(releaseAllLlamaMock).not.toHaveBeenCalled();
+  });
+
+  it('awaits the global fallback for legacy contexts without release support', async () => {
+    const releaseAllLlamaMock = releaseAllLlama as jest.Mock;
+    releaseAllLlamaMock.mockClear();
+    releaseAllLlamaMock.mockResolvedValueOnce(undefined);
+
+    await expect(releaseLlamaContext(createContext({}))).resolves.toBeUndefined();
+
+    expect(releaseAllLlamaMock).toHaveBeenCalledTimes(1);
+  });
+
   it('forces the disabled prompt state cache profile for every native init caller', async () => {
     const onProgress = jest.fn();
     const initLlamaMock = initLlama as jest.Mock;

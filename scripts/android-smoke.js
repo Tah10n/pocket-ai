@@ -290,6 +290,9 @@ async function main() {
       reverseMetroPort(tools.adb, device.serial, metro.port);
     }
 
+    // A physical device can relock while Gradle builds or the APK installs.
+    // Refresh the wake state at the point where it matters for UI readiness.
+    wakeAndUnlockDevice(tools.adb, device.serial);
     if (metro) {
       launchDevClient(tools.adb, device.serial, appPackage, appScheme, metro.port);
     } else {

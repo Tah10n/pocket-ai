@@ -327,6 +327,31 @@ describe('pdfTextExtraction', () => {
     expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
   });
 
+  it.each([
+    '(Hello) Tj [-1200 (world)] TJ',
+    '[(Hello) -1200] TJ (world) Tj',
+  ])('preserves TJ word spacing across adjacent show operators: %s', (operators) => {
+    const pdf = createPlainTextPdf(`BT ${operators} ET`);
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Hello world');
+  });
+
+  it('cancels opposite TJ adjustments before deciding whether to preserve a gap', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf [(A) -1200] TJ [1200 (B)] TJ ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('AB');
+  });
+
+  it('accumulates TJ adjustments across operators before deciding whether to preserve a gap', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf (A) Tj [-200] TJ [-200 (B)] TJ ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B');
+  });
+
   it('preserves the order of multiple text objects', () => {
     const pdf = createPlainTextPdf('BT (First) Tj ET BT (Second) Tj ET');
 
@@ -346,19 +371,45 @@ describe('pdfTextExtraction', () => {
   });
 
   it('preserves word gaps for horizontal Td and TD movement and lines for vertical movement', () => {
-    const pdf = createPlainTextPdf('BT (A) Tj 5 0 Td (B) Tj 0 -15 TD (C) Tj 3 0 TD (D) Tj ET');
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf (A) Tj 12 0 Td (B) Tj 0 -15 TD (C) Tj 12 0 TD (D) Tj ET',
+    );
 
     expect(extractTextFromPdfBase64(pdf).text).toBe('A B\nC D');
   });
 
   it.each(['-45 0 Td', '-45 0 TD'])(
-    'preserves a word gap after negative horizontal movement with %s',
+    'does not synthesize a word gap when %s moves behind the shown text',
     (movement) => {
       const pdf = createPlainTextPdf(`BT (Invoice) Tj ${movement} (Total) Tj ET`);
 
-      expect(extractTextFromPdfBase64(pdf).text).toBe('Invoice Total');
+      expect(extractTextFromPdfBase64(pdf).text).toBe('InvoiceTotal');
     },
   );
+
+  it('preserves a real gap between the shown-text endpoint and a new Td position', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 0 0 Td (Invoice) Tj 45 0 Td (Total) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Invoice Total');
+  });
+
+  it('preserves a final horizontal gap across consecutive Td positioning operations', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf (A) Tj 12 0 Td 0 0 Td (B) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B');
+  });
+
+  it('does not treat an absolute Td reset behind the shown-text endpoint as a gap', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 0 0 Td (Hello) Tj 5 0 Td (world) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('Helloworld');
+  });
 
   it.each([
     '0 0 Td',
@@ -378,10 +429,34 @@ describe('pdfTextExtraction', () => {
 
   it('scales meaningful horizontal gaps with the active text font size', () => {
     const pdf = createPlainTextPdf(
-      'BT /F1 100 Tf (Hel) Tj 5 0 Td (lo) Tj /F1 10 Tf 5 0 Td (World) Tj ET',
+      'BT /F1 100 Tf (A) Tj 55 0 Td (B) Tj /F1 10 Tf 60 0 Td (C) Tj ET',
     );
 
-    expect(extractTextFromPdfBase64(pdf).text).toBe('Hello World');
+    expect(extractTextFromPdfBase64(pdf).text).toBe('AB C');
+  });
+
+  it('scales meaningful horizontal gaps with Tz horizontal scaling', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 10 Tz (A) Tj 1.2 0 Td (B) Tj 200 Tz (C) Tj 15 0 Td (D) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A BCD');
+  });
+
+  it('preserves a real same-line gap introduced by an absolute Tm position', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 1 0 0 1 0 0 Tm (A) Tj 1 0 0 1 12 0 Tm (B) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B');
+  });
+
+  it('projects Tm movement onto a rotated baseline before choosing word or line separators', () => {
+    const pdf = createPlainTextPdf(
+      'BT /F1 12 Tf 0 1 -1 0 0 0 Tm (A) Tj 0 1 -1 0 0 12 Tm (B) Tj 0 1 -1 0 -12 0 Tm (C) Tj ET',
+    );
+
+    expect(extractTextFromPdfBase64(pdf).text).toBe('A B\nC');
   });
 
   it('uses Tm Y movement for line breaks without splitting adjacent fragments', () => {

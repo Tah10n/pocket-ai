@@ -1834,6 +1834,62 @@ describe('LLMEngineService', () => {
     }
   });
 
+  it('interrupts a text completion waiting for initial projector setup without cancelling the load owner', async () => {
+    (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
+    let finishProjectorInit: () => void = () => undefined;
+    getInitMultimodalMock().mockImplementationOnce(() => new Promise((resolve) => {
+      finishProjectorInit = () => resolve(true);
+    }));
+    const completionMock = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+
+    let observedLoad: Promise<unknown> | undefined;
+    let observedCompletion: Promise<unknown> | undefined;
+    jest.useFakeTimers();
+    try {
+      const loadPromise = llmEngineService.load('test/model', { forceReload: true });
+      observedLoad = loadPromise.catch((error) => error);
+      for (let tick = 0; tick < 50 && getInitMultimodalMock().mock.calls.length === 0; tick += 1) {
+        await jest.advanceTimersByTimeAsync(0);
+      }
+
+      expect(getInitMultimodalMock()).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
+
+      const completionPromise = llmEngineService.chatCompletion({
+        expectedModelId: 'test/model',
+        messages: [{ role: 'user', content: 'Stop before projector setup completes' }],
+        params: { n_predict: 16 },
+      });
+      observedCompletion = completionPromise.catch((error) => error);
+      expect(llmEngineService.hasActiveCompletion()).toBe(true);
+
+      await expect(llmEngineService.stopCompletion()).resolves.toBeUndefined();
+      await expect(observedCompletion).resolves.toMatchObject({
+        code: 'engine_not_ready',
+        message: 'Completion was interrupted before generation started',
+      });
+      expect(llmEngineService.hasActiveCompletion()).toBe(false);
+      expect(completionMock).not.toHaveBeenCalled();
+      expect(getFormattedChatMock()).not.toHaveBeenCalled();
+      expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
+
+      finishProjectorInit();
+      await jest.advanceTimersByTimeAsync(0);
+      await expect(observedLoad).resolves.toBeUndefined();
+      expect(llmEngineService.getState()).toEqual(expect.objectContaining({
+        status: EngineStatus.READY,
+        activeModelId: 'test/model',
+      }));
+      expect(completionMock).not.toHaveBeenCalled();
+    } finally {
+      finishProjectorInit();
+      await jest.advanceTimersByTimeAsync(0);
+      await observedLoad?.catch(() => undefined);
+      await observedCompletion?.catch(() => undefined);
+      jest.useRealTimers();
+    }
+  });
+
   it('waits for initial projector setup before admitting prompt token counting to the context queue', async () => {
     (registry.getModel as jest.Mock).mockReturnValue(createDownloadedVisionModel());
     let finishProjectorInit: () => void = () => undefined;

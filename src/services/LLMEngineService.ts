@@ -2030,8 +2030,12 @@ class LLMEngineService {
   private assertCompletionNotInterrupted(generation: number): void {
     this.completionRunner.assertNotInterrupted(
       generation,
-      () => new AppError('engine_not_ready', 'Completion was interrupted before generation started'),
+      () => this.createCompletionInterruptedError(),
     );
+  }
+
+  private createCompletionInterruptedError(): AppError {
+    return new AppError('engine_not_ready', 'Completion was interrupted before generation started');
   }
 
   private trackContextOperation<T>(
@@ -3826,7 +3830,12 @@ class LLMEngineService {
             || requestMediaInputOccurrenceCount > 0
           )
         ) {
-          await this.initPromise;
+          await this.completionRunner.raceAgainstInterruption(
+            this.initPromise,
+            interruptGeneration,
+            () => this.createCompletionInterruptedError(),
+          );
+          this.assertCompletionNotInterrupted(interruptGeneration);
         }
 
         this.assertExpectedCompletionModel(expectedModelId);

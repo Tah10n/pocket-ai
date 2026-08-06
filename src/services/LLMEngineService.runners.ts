@@ -671,6 +671,7 @@ export class ActiveCompletionRunner<T> {
   public activeDriverPromise: Promise<unknown> | null = null;
   public activeReject: ((error: unknown) => void) | null = null;
   public interruptGeneration = 0;
+  private interruptionWaiters = new Set<{ cancel: () => void }>();
 
   public hasActive(): boolean {
     return this.activePromise !== null || this.activeDriverPromise !== null;
@@ -700,9 +701,63 @@ export class ActiveCompletionRunner<T> {
     return this.activeDriverPromise ?? this.activePromise;
   }
 
+  /**
+   * Makes pre-generation lifecycle barriers obey the same Stop boundary as the
+   * completion driver. The underlying lifecycle promise keeps running; only
+   * the caller-facing completion is interrupted.
+   */
+  public raceAgainstInterruption<TAwaited>(
+    promise: Promise<TAwaited>,
+    generation: number,
+    createInterruptedError: ErrorFactory,
+  ): Promise<TAwaited> {
+    let didInterrupt = false;
+    let rejectInterruption: (error: unknown) => void = () => undefined;
+    const interruptionPromise = new Promise<never>((_, reject) => {
+      rejectInterruption = reject;
+    });
+    const waiter = {
+      cancel: () => {
+        if (didInterrupt) {
+          return;
+        }
+        didInterrupt = true;
+        let interruptionError: unknown;
+        try {
+          interruptionError = createInterruptedError();
+        } catch (error) {
+          interruptionError = error;
+        }
+        rejectInterruption(interruptionError);
+      },
+    };
+    this.interruptionWaiters.add(waiter);
+
+    // Keep registration and the generation check adjacent so Stop cannot land
+    // between them and leave a stale waiter attached to the old generation.
+    if (this.interruptGeneration !== generation) {
+      waiter.cancel();
+    }
+
+    return Promise.race([promise, interruptionPromise])
+      .then((value) => {
+        // A resolved source may already have queued its reaction when Stop or
+        // reset lands. Recheck after race settlement so that ordering cannot
+        // let a stale driver cross the barrier.
+        if (this.interruptGeneration !== generation) {
+          throw createInterruptedError();
+        }
+        return value;
+      })
+      .finally(() => {
+        this.interruptionWaiters.delete(waiter);
+      });
+  }
+
   public interruptIfActive(): void {
     if (this.activePromise) {
       this.interruptGeneration += 1;
+      this.cancelInterruptionWaiters();
     }
   }
 
@@ -717,9 +772,17 @@ export class ActiveCompletionRunner<T> {
   }
 
   public reset(): void {
+    this.interruptGeneration += 1;
+    this.cancelInterruptionWaiters();
     this.activePromise = null;
     this.activeDriverPromise = null;
     this.activeReject = null;
+  }
+
+  private cancelInterruptionWaiters(): void {
+    for (const waiter of [...this.interruptionWaiters]) {
+      waiter.cancel();
+    }
   }
 }
 

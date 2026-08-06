@@ -794,6 +794,54 @@ describe('ActiveCompletionRunner', () => {
     runner.clearIfActive(completion);
     expect(runner.hasActive()).toBe(false);
   });
+
+  it('interrupts a lifecycle barrier without cancelling its underlying owner', async () => {
+    const runner = new ActiveCompletionRunner<string>();
+    const completion = new Promise<string>(() => undefined);
+    const generation = runner.start(completion, jest.fn());
+    let releaseLifecycleBarrier: (value: number) => void = () => undefined;
+    const lifecycleBarrier = new Promise<number>((resolve) => {
+      releaseLifecycleBarrier = resolve;
+    });
+    const wait = runner.raceAgainstInterruption(
+      lifecycleBarrier,
+      generation,
+      () => new Error('completion stopped'),
+    );
+
+    runner.interruptIfActive();
+
+    await expect(wait).rejects.toThrow('completion stopped');
+    releaseLifecycleBarrier(42);
+    await expect(lifecycleBarrier).resolves.toBe(42);
+    runner.clearIfActive(completion);
+  });
+
+  it('rejects a resolved lifecycle barrier when reset lands before its race continuation', async () => {
+    const runner = new ActiveCompletionRunner<string>();
+    const completion = new Promise<string>(() => undefined);
+    const generation = runner.start(completion, jest.fn());
+    let releaseLifecycleBarrier: (value: number) => void = () => undefined;
+    const lifecycleBarrier = new Promise<number>((resolve) => {
+      releaseLifecycleBarrier = resolve;
+    });
+    const wait = runner.raceAgainstInterruption(
+      lifecycleBarrier,
+      generation,
+      () => new Error('stale completion reset'),
+    );
+
+    // Queue the source-promise reaction first, then reset before either race
+    // continuation runs. The post-race generation check must still reject.
+    releaseLifecycleBarrier(42);
+    runner.reset();
+
+    await expect(wait).rejects.toThrow('stale completion reset');
+    expect(() => runner.assertNotInterrupted(
+      generation,
+      () => new Error('stale completion generation'),
+    )).toThrow('stale completion generation');
+  });
 });
 
 describe('waitForPromiseWithTimeout', () => {

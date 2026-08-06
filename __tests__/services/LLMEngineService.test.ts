@@ -1787,7 +1787,21 @@ describe('LLMEngineService', () => {
       capturedContext.release.mockClear();
       expect(llmEngineService.getState().status).toBe(EngineStatus.INITIALIZING);
 
+      await expect(llmEngineService.chatCompletion({
+        expectedModelId: 'other/model',
+        messages: [{ role: 'user', content: 'Do not run this prompt' }],
+        params: { n_predict: 16 },
+      })).rejects.toMatchObject({
+        code: 'chat_model_mismatch',
+        details: {
+          expectedThreadModelId: 'other/model',
+          engineModelId: 'test/model',
+        },
+      });
+      expect(llmEngineService.hasActiveCompletion()).toBe(false);
+
       const completionPromise = llmEngineService.chatCompletion({
+        expectedModelId: 'test/model',
         messages: [{ role: 'user', content: 'Use the text model now' }],
         params: { n_predict: 16 },
       });

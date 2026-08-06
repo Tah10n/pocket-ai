@@ -1955,7 +1955,12 @@ class LLMEngineService {
     }
   }
 
-  private assertExpectedCompletionModel(expectedModelId: string | undefined): void {
+  private assertExpectedCompletionModel(
+    expectedModelId: string | undefined,
+    { allowMatchingInitialization = false }: {
+      allowMatchingInitialization?: boolean;
+    } = {},
+  ): void {
     if (expectedModelId === undefined) {
       return;
     }
@@ -1964,10 +1969,16 @@ class LLMEngineService {
     const engineModelId = typeof this.state.activeModelId === 'string'
       ? this.state.activeModelId.trim()
       : '';
+    const hasUsableModelState = this.state.status === EngineStatus.READY
+      || (
+        allowMatchingInitialization
+        && this.state.status === EngineStatus.INITIALIZING
+        && this.initPromise !== null
+      );
     if (
       normalizedExpectedModelId.length === 0
       || engineModelId.length === 0
-      || this.state.status !== EngineStatus.READY
+      || !hasUsableModelState
       || !this.context
     ) {
       performanceMonitor.incrementCounter('chat.modelMismatchBlocked');
@@ -3721,7 +3732,12 @@ class LLMEngineService {
     }
 
     this.assertContextRecoveryNotRequired();
-    this.assertExpectedCompletionModel(expectedModelId);
+    this.assertExpectedCompletionModel(expectedModelId, {
+      // A matching model may still be completing projector initialization.
+      // The completion driver waits on the same initPromise and validates the
+      // fully READY model again before it touches the native context.
+      allowMatchingInitialization: true,
+    });
 
     if (this.completionRunner.hasActive()) {
       throw new AppError('engine_busy', 'A response is already being generated.');

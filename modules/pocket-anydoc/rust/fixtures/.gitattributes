@@ -1,0 +1,30 @@
+*.csv text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.tsv text eol=lf
+*.txt text eol=lf
+*.rtf -text -whitespace
+*.doc -text
+*.docm -text
+*.docx -text
+*.epub -text
+*.jpg -text
+*.jpeg -text
+*.odp -text
+*.ods -text
+*.odt -text
+*.pdf -text
+*.png -text
+*.pot -text
+*.potm -text
+*.potx -text
+*.pps -text
+*.ppsm -text
+*.ppsx -text
+*.ppt -text
+*.pptm -text
+*.pptx -text
+*.xls -text
+*.xlsb -text
+*.xlsm -text
+*.xlsx -text

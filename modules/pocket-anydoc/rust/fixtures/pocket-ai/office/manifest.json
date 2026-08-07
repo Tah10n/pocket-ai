@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "generator": "Microsoft Office COM 16.0 via generate-office-corpus.ps1",
+  "privacy": "synthetic-only",
+  "files": [
+    {
+      "file": "benchmark-100-slide.pptx",
+      "bytes": 151871,
+      "sha256": "c6506eaec76482338760c0786269fe57798a1940cdae0517be7410bbf6f291b8"
+    },
+    {
+      "file": "benchmark-20-sheet.xlsx",
+      "bytes": 63121,
+      "sha256": "c03d96b3f2411dd247c49b4427115533c6882dafcd8d2b7cd10e75e477363cd9"
+    },
+    {
+      "file": "benchmark-40-page.docx",
+      "bytes": 15570,
+      "sha256": "16271f40086907752239d481580090448eeab11c4b3a414c8bbaf9d06f69e160"
+    },
+    {
+      "file": "embedded-sentinel.jpg",
+      "bytes": 1574,
+      "sha256": "339286a7f644c88a378d382a92ac658becbe4584cf82873164880df003229c5f"
+    },
+    {
+      "file": "embedded-sentinel.png",
+      "bytes": 407,
+      "sha256": "7681fb407e3f501028b893d673fdd083c54039ac22305f4ffed7bc6b777639d2"
+    },
+    {
+      "file": "multilingual.doc",
+      "bytes": 32256,
+      "sha256": "69abab769b4d9ef4c76a1cf9577ec6030ab6fba8d6069beba300827d8b123270"
+    },
+    {
+      "file": "multilingual.docm",
+      "bytes": 20478,
+      "sha256": "39b41dca9ad722dba8693fb5e4661043c3971a1213fa63fa8e59e84a13c14e90"
+    },
+    {
+      "file": "multilingual.docx",
+      "bytes": 20477,
+      "sha256": "b2a6b080d1260ee05d76c667fa0784376bd710d10d65a5eda163cc76dcc85c67"
+    },
+    {
+      "file": "multilingual.odp",
+      "bytes": 48711,
+      "sha256": "dec1b81275d291324dbeedf2713cd82f47b60040533de6f129f83970ba48dc23"
+    },
+    {
+      "file": "multilingual.ods",
+      "bytes": 3807,
+      "sha256": "9c7f8d1fa5b6b17e0d04b5a08bc6c884b36a3bc97def036b866a6cc19010ac08"
+    },
+    {
+      "file": "multilingual.odt",
+      "bytes": 10379,
+      "sha256": "d0066175be40d8bee980a898b2e3807f5b83ce0a922406efb7126666f47c9911"
+    },
+    {
+      "file": "multilingual.pdf",
+      "bytes": 185806,
+      "sha256": "254f8f5c45276ab99f737c61a0e874dfadf61974e63bfcc238690be5febb4eff"
+    },
+    {
+      "file": "multilingual.ppt",
+      "bytes": 287232,
+      "sha256": "fcd752cb07d6ff7e80e1f0dc7ca5a2ce8acc02f7d719ca63393d7d49238cc8c8"
+    },
+    {
+      "file": "multilingual.pptx",
+      "bytes": 46875,
+      "sha256": "5fa338949ee71e2594a48a953fb87aba2c3619aef23bb3f5a8b166e387d5ae82"
+    },
+    {
+      "file": "multilingual.rtf",
+      "bytes": 92631,
+      "sha256": "cff7fc5dfc54eb2363de190b3dc55ecf451ee7ace67f6af77e1ffd685ecfbe4a"
+    },
+    {
+      "file": "multilingual.xls",
+      "bytes": 27648,
+      "sha256": "9a375ac5a1c45ef17375c4c46e009d1217cf7a6b3eaa9c5da0407cdbef9af24c"
+    },
+    {
+      "file": "multilingual.xlsb",
+      "bytes": 9628,
+      "sha256": "1dd9a3f7651df9d0b3658a3ca29503bdec9f8c2d92ffee2213a8bfce4d5cdd8a"
+    },
+    {
+      "file": "multilingual.xlsm",
+      "bytes": 10125,
+      "sha256": "4c280675f43af4a4e3e1e6e374175a73ae358a99bd2bf2f84f556dd431fb2a2d"
+    },
+    {
+      "file": "multilingual.xlsx",
+      "bytes": 10091,
+      "sha256": "8b902499593655f9a486460b21f744f2c203711ea937cca19fe9d7a7a4e34dec"
+    }
+  ]
+}

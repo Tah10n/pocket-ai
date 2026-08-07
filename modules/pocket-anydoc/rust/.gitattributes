@@ -1,0 +1,2 @@
+# Vendored snapshots are retained byte-for-byte from their documented upstream revisions.
+vendor/** -whitespace

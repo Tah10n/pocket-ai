@@ -29,7 +29,11 @@ const OUTPUT_ROOT = join(MODULE_ROOT, 'android', 'build', 'generated', 'pocketAn
 const JNI_LIBS_ROOT = join(OUTPUT_ROOT, 'jniLibs');
 const FINGERPRINT_FILE = join(OUTPUT_ROOT, 'fingerprint.json');
 const LIBRARY_NAME = 'libpocket_anydoc.so';
-const PAGE_SIZE_LINK_FLAGS = '-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384';
+const ANDROID_LINK_FLAGS = [
+  '-C link-arg=-Wl,-z,max-page-size=16384',
+  '-C link-arg=-Wl,-z,common-page-size=16384',
+  `-C link-arg=-Wl,-soname,${LIBRARY_NAME}`,
+].join(' ');
 
 function resolveNdkRoot() {
   const appRoot = resolve(MODULE_ROOT, '..', '..');
@@ -115,6 +119,16 @@ function validatePageAlignment(readElf, library) {
   }
 }
 
+function validateSoname(readElf, library) {
+  const dynamicSection = run(readElf, ['-dW', library], { capture: true });
+  const sonames = dynamicSection
+    .split(/\r?\n/u)
+    .filter((line) => /\(SONAME\)/u.test(line));
+  if (sonames.length !== 1 || !sonames[0].includes(`[${LIBRARY_NAME}]`)) {
+    fail(`${relative(MODULE_ROOT, library)} must expose the canonical ${LIBRARY_NAME} SONAME.`);
+  }
+}
+
 function removeKnownCargoNdkDependencyArtifacts(readElf) {
   for (const [abi, library] of Object.entries(expectedLibraries())) {
     ensureFile(library, `${abi} ${LIBRARY_NAME}`);
@@ -153,7 +167,7 @@ const metadata = {
   ndkVersion: ANDROID_NDK_VERSION,
   profile: 'release',
   rustc: run('rustc', [`+${toolchain}`, '--version', '--verbose'], { capture: true }),
-  rustflags: PAGE_SIZE_LINK_FLAGS,
+  rustflags: ANDROID_LINK_FLAGS,
   toolchain,
 };
 const fingerprint = hashInputs([...requiredRustInputs(), fileURLToPath(import.meta.url)], metadata);
@@ -166,6 +180,7 @@ if (previous?.fingerprint === fingerprint) {
     if (checksumsMatch) {
       for (const library of Object.values(expectedLibraries())) {
         validatePageAlignment(llvmReadElf, library);
+        validateSoname(llvmReadElf, library);
       }
       console.log(`[pocket-anydoc] Android native artifacts are current (${fingerprint.slice(0, 12)}).`);
       process.exit(0);
@@ -196,7 +211,7 @@ run('cargo', [
   env: {
     ANDROID_NDK_HOME: ndkRoot,
     CARGO_PROFILE_RELEASE_STRIP: 'symbols',
-    RUSTFLAGS: PAGE_SIZE_LINK_FLAGS,
+    RUSTFLAGS: ANDROID_LINK_FLAGS,
   },
 });
 
@@ -206,6 +221,7 @@ const artifacts = {};
 for (const [abi, library] of Object.entries(expectedLibraries())) {
   run(llvmStrip, ['--strip-unneeded', library]);
   validatePageAlignment(llvmReadElf, library);
+  validateSoname(llvmReadElf, library);
   artifacts[abi] = {
     file: `${abi}/${basename(library)}`,
     sha256: sha256File(library),

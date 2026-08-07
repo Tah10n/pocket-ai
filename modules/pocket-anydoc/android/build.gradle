@@ -173,6 +173,31 @@ def verifyPocketAnyDocReleaseArtifacts = tasks.register('verifyPocketAnyDocRelea
           throw new GradleException("${abi}/${libraryName} is not 16 KiB page aligned.")
         }
 
+        def dynamic = new ByteArrayOutputStream()
+        exec {
+          commandLine readElf.absolutePath, '-dW', library.absolutePath
+          standardOutput = dynamic
+        }
+        def dynamicLines = dynamic.toString('UTF-8').readLines()
+        def neededLibraries = dynamicLines
+          .findAll { line -> line.contains('(NEEDED)') }
+          .collect { line -> (line =~ /\[([^\]]+)\]/)[0][1] }
+        if (neededLibraries.any { dependency ->
+          dependency.contains('/') || dependency.contains('\\') || dependency.contains(':')
+        }) {
+          throw new GradleException("${abi}/${libraryName} contains a path-qualified DT_NEEDED entry.")
+        }
+        if (libraryName == rustLibraryName) {
+          def sonames = dynamicLines
+            .findAll { line -> line.contains('(SONAME)') }
+            .collect { line -> (line =~ /\[([^\]]+)\]/)[0][1] }
+          if (sonames != [rustLibraryName]) {
+            throw new GradleException("${abi}/${libraryName} has an invalid SONAME.")
+          }
+        } else if (neededLibraries.count(rustLibraryName) != 1) {
+          throw new GradleException("${abi}/${libraryName} must depend on ${rustLibraryName} exactly once.")
+        }
+
         def sections = new ByteArrayOutputStream()
         exec {
           commandLine readElf.absolutePath, '-SW', library.absolutePath

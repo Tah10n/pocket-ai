@@ -11,7 +11,14 @@ if(NOT EXISTS "${POCKET_ANYDOC_LIBRARY}")
 endif()
 
 add_library(pocket_anydoc SHARED IMPORTED GLOBAL)
-set_target_properties(pocket_anydoc PROPERTIES IMPORTED_LOCATION "${POCKET_ANYDOC_LIBRARY}")
+set_target_properties(
+  pocket_anydoc
+  PROPERTIES
+    IMPORTED_LOCATION "${POCKET_ANYDOC_LIBRARY}"
+    # Link by -lpocket_anydoc instead of embedding the host build path in
+    # libpocket_anydoc_jni.so when the imported artifact lacks a SONAME.
+    IMPORTED_NO_SONAME TRUE
+)
 
 add_library(pocket_anydoc_jni SHARED pocket_anydoc_jni.cpp)
 target_include_directories(pocket_anydoc_jni PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../include")

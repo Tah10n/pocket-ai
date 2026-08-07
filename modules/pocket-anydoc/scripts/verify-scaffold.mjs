@@ -65,6 +65,7 @@ const jni = read('android/src/main/cpp/pocket_anydoc_jni.cpp');
 const header = read('include/pocket_anydoc.h');
 requireText(cmake, '-Wl,-z,max-page-size=16384', 'Android JNI linker flags');
 requireText(cmake, 'libpocket_anydoc.so', 'Android CMake import');
+requireText(cmake, 'IMPORTED_NO_SONAME TRUE', 'Android host-path-free CMake linkage');
 requireText(cmake, 'add_library(pocket_anydoc_jni SHARED', 'Android JNI shared library');
 if (cmake.includes('Missing ${POCKET_ANYDOC_LIBRARY}')) {
   fail('Android CMake errors must not expose the generated library absolute path.');
@@ -174,6 +175,10 @@ requireText(androidBuild, `CARGO_NDK_VERSION`, `cargo-ndk ${CARGO_NDK_VERSION} p
 requireText(androidBuild, 'isExactCargoNdkVersion(cargoNdkVersion)', 'Android exact cargo-ndk check');
 requireText(androidBuild, 'cwd: RUST_ROOT', 'cargo-ndk Rust package working directory');
 requireText(androidGradle, 'Long.decode', 'NDK hexadecimal ELF alignment parser');
+requireText(androidBuild, '-Wl,-soname,${LIBRARY_NAME}', 'Android Rust SONAME linker flag');
+requireText(androidBuild, 'validateSoname(llvmReadElf, library)', 'Android Rust SONAME verification');
+requireText(androidGradle, "dependency.contains('/') || dependency.contains('\\\\') || dependency.contains(':')", 'Android path-qualified DT_NEEDED rejection');
+requireText(androidGradle, 'neededLibraries.count(rustLibraryName) != 1', 'Android JNI dependency verification');
 requireText(androidBuild, "'--lib'", 'Android host-runner exclusion');
 const setup = read('scripts/setup.mjs');
 requireText(setup, 'isExactCargoNdkVersion(cargoNdkVersion)', 'Setup exact cargo-ndk check');

@@ -604,6 +604,9 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "prompt-focus-start",
   "prompt-confirmed",
   "send-tapped",
+  "stop-tapped",
+  "cancel-settled",
+  "stale-window-cleared",
 ]);
 
 function recordDocumentQaHostCheckpoint(adbPath, serial, stage, options = {}) {
@@ -613,7 +616,7 @@ function recordDocumentQaHostCheckpoint(adbPath, serial, stage, options = {}) {
   const runCommand = options.runCommand ?? runChecked;
   const writeLog = options.logFn ?? log;
   runCommand(adbPath, [
-    "-s", serial, "shell", "log", "-t", "PocketAnyDocQaHost", `stage=${stage}`,
+    "-s", serial, "shell", "log", "-p", "i", "-t", "PocketAnyDocQaHost", `stage=${stage}`,
   ], { stdio: "ignore" });
   writeLog(`Document QA checkpoint: ${stage}.`);
 }
@@ -3015,14 +3018,18 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     ? await resolveAlternateModelResourceId(ctx)
     : null;
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
-    await sendDocumentPromptImmediately(ctx, buildDocumentQaPromptSentinel(kind));
+    const sendActionBounds = await sendDocumentPromptImmediately(
+      ctx,
+      buildDocumentQaPromptSentinel(kind)
+    );
     if (kind === "stop-race") {
-      const stopButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_STOP_RESOURCE_ID, {
-        timeoutMs: 3_000,
-        visibleOnly: true,
-      });
-      tapRequiredNode(adbPath, ctx.serial, stopButton, "document parsing stop action");
+      // Reuse the primary action bounds immediately. Waiting for a full uiautomator dump can
+      // take longer than these synthetic documents need to parse on a release-mode phone,
+      // turning a stop-during-parse check into a stop-after-prompt-preparation check.
+      tapBounds(adbPath, ctx.serial, sendActionBounds);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "stop-tapped");
       await waitForDocumentCancellationSettlement(adbPath, ctx.serial);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "cancel-settled");
     } else if (kind === "thread-race") {
       tapBottomTabImmediately(adbPath, ctx.serial, HOME_TAB_LABELS);
       await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
@@ -3047,6 +3054,7 @@ async function runDocumentRaceScenario(ctx, session, kind) {
       throw new Error(`Unsupported document race kind: ${kind}.`);
     }
     await assertDocumentSentinelsStayAbsent(adbPath, ctx.serial, expectedSentinelIds);
+    recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "stale-window-cleared");
     return null;
   });
   return {
@@ -3079,6 +3087,7 @@ async function sendDocumentPromptImmediately(ctx, promptSentinel) {
   }
   tapRequiredNode(adbPath, ctx.serial, sendButton, "document QA send action");
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "send-tapped");
+  return sendButton.bounds;
 }
 
 async function stopDocumentGenerationIfActive(ctx) {

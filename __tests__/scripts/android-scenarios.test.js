@@ -1381,7 +1381,7 @@ describe('android-scenarios npm defaults', () => {
 
     expect(runCommand).toHaveBeenCalledWith(
       'adb',
-      ['-s', 'device-1', 'shell', 'log', '-t', 'PocketAnyDocQaHost', 'stage=prompt-confirmed'],
+      ['-s', 'device-1', 'shell', 'log', '-p', 'i', '-t', 'PocketAnyDocQaHost', 'stage=prompt-confirmed'],
       { stdio: 'ignore' }
     );
     expect(logFn).toHaveBeenCalledWith('Document QA checkpoint: prompt-confirmed.');

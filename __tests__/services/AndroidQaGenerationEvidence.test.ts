@@ -130,7 +130,7 @@ describe('AndroidQaGenerationEvidence', () => {
     expect(serialized).not.toContain('contentParts');
   });
 
-  it('records only fixed sentinel ids for synthetic prepared document context', () => {
+  it('records only fixed sentinel ids from prepared document text content parts', () => {
     const documentAttachment = {
       id: 'document-1',
       kind: 'document',
@@ -140,7 +140,11 @@ describe('AndroidQaGenerationEvidence', () => {
       assistantMessageId: 'assistant-document',
       preparedMessages: [{
         role: 'user',
-        content: 'private prefix ORCHID-742 private middle ZEBRA-END-991 private suffix',
+        content: 'neutral user question',
+        contentParts: [{
+          type: 'text',
+          text: 'private prefix ORCHID-742 private middle ZEBRA-END-991 private suffix',
+        }],
         attachments: [documentAttachment],
       }],
     });

@@ -70,6 +70,15 @@ function resolveAttachmentKind(
   return 'kind' in attachment ? attachment.kind : 'image';
 }
 
+function messageContainsDocumentSentinel(message: LlmChatMessage, value: string): boolean {
+  if (message.content.includes(value)) {
+    return true;
+  }
+  return message.contentParts?.some((part) => (
+    part.type === 'text' && part.text.includes(value)
+  )) === true;
+}
+
 export function buildAndroidQaPreparedGenerationEvidence({
   userMessageId,
   assistantMessageId,
@@ -105,7 +114,7 @@ export function buildAndroidQaPreparedGenerationEvidence({
   const documentSentinelIds = hasDocumentAttachment
     ? ANDROID_QA_DOCUMENT_SENTINELS
       .filter((sentinel) => preparedMessages.some((message) => (
-        typeof message.content === 'string' && message.content.includes(sentinel.value)
+        messageContainsDocumentSentinel(message, sentinel.value)
       )))
       .map((sentinel) => sentinel.id)
     : [];

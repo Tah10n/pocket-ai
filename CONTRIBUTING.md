@@ -154,18 +154,19 @@ npm run verify:mobile-change:android
 
 This command expects a connected Android phone by default and runs the fail-closed `runtime` scenario pack. Use the explicit `:emulator` scripts only when you intentionally want emulator coverage.
 
-Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `branch-regeneration` for the destructive prepared 15-step branch replacement matrix, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The state-mutating `storage` and `branch-regeneration` packs are intentionally excluded from `all`:
+Android scenario packs are intentionally small. The default pack is `core` (`home-smoke`, `bottom-tabs`, `new-chat-cta`); use `catalog` for live model-catalog checks such as `variant-picker-smoke`, `dependency-ui` for styling dependency changes, `runtime` for i18n or state changes, `storage` for Storage Manager or cache-clear changes, `documents` for the heavyweight synthetic document release matrix, `branch-regeneration` for the destructive prepared 15-step branch replacement matrix, `native` for Expo or native-module changes, `extended` for the broader stable pass without live catalog smoke, and `all` only for targeted investigation. The `storage`, `documents`, `document-benchmark`, and `branch-regeneration` packs are intentionally excluded from `all`:
 
 ```bash
 npm run android:scenarios -- --pack catalog
 npm run android:scenarios -- --pack dependency-ui
 npm run android:scenarios -- --pack runtime
 npm run android:scenarios:storage -- --skip-build
+npm run android:scenarios:documents
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
 npm run android:scenarios -- --pack native
 ```
 
-In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a hosted pack. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+In GitHub PRs, `Run Android checks` runs the fail-closed `runtime` pack by default. `Run Android scenarios` keeps the legacy extended pack. Maintainers can apply `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, or `android-pack-extended` labels to choose a hosted pack. The preconditioned `documents` and `document-benchmark` packs remain explicit maintainer/device commands and are not selected by a hosted label or by `android-pack-all`. If multiple pack labels are present, CI uses the first match in this priority order: `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
 The destructive `branch-regeneration` pack is local-only and is never dispatched by GitHub Actions. Run it with `--fail-on-skip` from a trusted maintainer workstation connected to a disposable device that contains a loaded local model plus the prepared fixture and sentinel conversations. Missing device, model, fixture, or provenance preconditions must fail the local run. A successful run destroys the prepared conversations, so reprepare the device before running it again. Use `android-pack-catalog` for hosted live catalog checks such as `variant-picker-smoke`; keep performance scenarios targeted via `--scenario <id>` unless `android-pack-all` is selected.
 

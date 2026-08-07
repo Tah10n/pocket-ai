@@ -9,13 +9,28 @@ For general development setup, see the main [README](../README.md).
 - macOS with Xcode installed (latest stable recommended)
 - An [Apple Developer](https://developer.apple.com/) account enrolled in the Apple Developer Program
 - CocoaPods (`sudo gem install cocoapods` or via Homebrew)
+- Rust through `rustup`; the repository pins Rust 1.94.0 and the device, Apple Silicon
+  simulator, and Intel simulator targets used by the local document module
+
+Build the deterministic static XCFramework before CocoaPods evaluates the local pod:
+
+```bash
+npm run anydoc:setup -- --platform=ios
+npm run anydoc:verify
+npm run anydoc:build:ios
+```
+
+The output contains separate device and universal simulator slices. Its fingerprint covers
+the lockfile, vendored parser sources, C ABI, exact Rust/Xcode versions, deployment target,
+and output hashes. Do not commit `ios/generated/` or add the library manually to Xcode.
+EAS invokes the same setup and build through `eas-build-pre-install`, before `pod install`.
 
 ## Generate the native project
 
-If the `ios/` directory is missing, generate it once:
+After the XCFramework exists, generate the native project from tracked Expo inputs:
 
 ```bash
-npx expo prebuild --platform ios
+npx expo prebuild --clean --platform ios --no-install
 ```
 
 Then install CocoaPods dependencies:

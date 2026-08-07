@@ -12,6 +12,23 @@ release flow, see the [Release Checklist](./release-checklist.md).
 - Install a supported JDK and the Android SDK.
 - Set `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or provide `android/local.properties` with
   `sdk.dir=...`.
+- Install Rust through `rustup`. The document module pins Rust 1.94.0, Android NDK
+  27.1.12297006, Android API 24, and `cargo-ndk` 4.1.2.
+
+Prepare and verify the document toolchain once:
+
+```bash
+npm run anydoc:setup -- --platform=android
+npm run anydoc:verify
+npm run anydoc:build:android
+```
+
+The Android build produces the Rust `libpocket_anydoc.so` and its thin
+`libpocket_anydoc_jni.so` adapter for `arm64-v8a` and `x86_64`.
+Its fingerprint covers the Rust toolchain, lockfile, vendored parser sources, C ABI,
+target, profile, NDK, and linker flags. Cached output is reused only while both the input
+fingerprint and output SHA-256 still match. Release ELF `LOAD` segments are checked for
+16 KiB page compatibility and stripped before packaging.
 
 The repository-owned build and Android QA scripts manage Expo prebuild. They run the
 equivalent of this clean command when the generated native project is absent or stale:
@@ -39,7 +56,8 @@ release build, or the reverse. Missing, malformed, cross-variant, input-mismatch
 native-output-mismatched stamps trigger clean regeneration. Inputs are checked again after
 prebuild, and a variant history stamp is written before the shared active stamp.
 
-Pocket AI relies on native modules and Expo config plugins, including `llama.rn`, background
+Pocket AI relies on native modules and Expo config plugins, including `llama.rn`, the local
+`PocketAnydoc` Expo module, background
 actions, Android QA release guards, and native memory/app-cache metrics. The system-metrics
 plugin currently supports Kotlin `MainApplication` files. A project that switches that
 generated entry point to Java must adapt the registration step before prebuild can inject

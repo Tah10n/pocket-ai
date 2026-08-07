@@ -57,6 +57,9 @@ npm run verify:release
 This expands to:
 
 ```bash
+npm run anydoc:fmt:check
+npm run anydoc:clippy
+npm run anydoc:test
 npm run typecheck
 npm run lint
 npm test
@@ -105,7 +108,9 @@ Record every unavailable physical device, model, projector, accelerator backend,
 memory-pressure scenario as unverified; an emulator build does not substitute for those
 combinations.
 
-For PR CI, `android-pack-catalog` selects the hosted catalog pack. The destructive
+For PR CI, `android-pack-catalog` selects the hosted catalog pack. The preconditioned
+document packs remain explicit maintainer/device commands and are not selected by a hosted
+label or by `android-pack-all`. The destructive
 branch-regeneration pack is intentionally local-only and must be recorded as physical-device
 evidence; GitHub Actions does not dispatch it. If multiple hosted Android pack labels are
 applied, CI uses this priority order: `android-pack-all`, `android-pack-native`,
@@ -329,7 +334,26 @@ part of the production app surface.
 - With the model active, apply a changed load profile and confirm the model reloads successfully with the updated settings.
 - Unload the model and confirm the UI returns to the unloaded state.
 
-### Multimodal attachments and MTP
+### Local documents, multimodal attachments, and MTP
+
+- The platform document verification commands provision the pinned Rust toolchain and
+  requested Android or Apple targets before running the shared Rust verification gate.
+- Run `npm run verify:documents:android` and confirm the release artifact contains only
+  the canonical ABI set and includes `libpocket_anydoc.so` plus
+  `libpocket_anydoc_jni.so` for both `arm64-v8a` and `x86_64`; record each library
+  SHA-256 from release provenance.
+- On macOS or EAS, run `npm run verify:documents:ios`, then a clean prebuild, pod install,
+  simulator build, and device archive. Confirm the XCFramework has device and simulator
+  slices and no duplicate-symbol or architecture-link failure.
+- Attach synthetic DOCX, PPTX, XLSX, EPUB, CSV, and text-PDF fixtures. Verify structure,
+  slide and sheet labels, percentages, cancellation, four-document order/fairness,
+  partial failure, relaunch restoration, and deterministic cleanup.
+- Verify malformed, encrypted, scanned/textless, wrong-extension, and work-limit fixtures
+  return localized stable errors without paths or content in logs.
+- Inspect a question-specific request and a whole-document summary request. Confirm selected
+  context uses BEGIN/END document boundaries, reports truncation, preserves the current
+  question/system prompt, and does not transfer a full multi-megabyte conversion over the
+  JS bridge.
 
 - Load a known image-capable model with its matching projector and confirm the composer exposes image attachment only after runtime vision support is ready.
 - Select an image through the system picker, confirm preview and remove both work, then send it and verify the local model returns a grounded response.

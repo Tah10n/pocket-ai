@@ -47,3 +47,23 @@ Maintainers aim to:
 - Share an initial triage outcome or next-step update within 10 business days
 
 Response and remediation timelines can vary with severity, reproducibility, and maintainer availability.
+
+## Untrusted document processing
+
+Pocket AI treats every attached document as hostile input. Office archives, legacy OLE
+files, OpenDocument packages, RTF, EPUB, CSV, and PDF are parsed locally by a pinned Rust
+dependency graph behind a small native boundary. The app does not execute macros,
+embedded objects, scripts, or executables, recursively open embedded documents, or fetch
+external document resources.
+
+Document handling is constrained by format-specific source limits and global archive,
+XML, expansion, work, output, asset, cache, and deadline budgets. Heavy conversions are
+serialized. Cancellation and stale-request checks prevent an old document result from
+entering a different chat or model request. Native code revalidates that the source is a
+regular file inside the app-owned attachment directory and rejects traversal, symlinks,
+external `content://` URIs, and files that change during a request.
+
+Security reports involving parser hangs, excessive memory use, semantic spreadsheet
+corruption, path escape, FFI ownership, or crafted archive/PDF crashes are in scope. Use
+private vulnerability reporting and do not attach a real private document to a public
+issue.

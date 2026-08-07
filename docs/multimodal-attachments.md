@@ -12,7 +12,7 @@ old persisted video metadata may still be read for chat-history compatibility.
 ## Current Runtime Contract
 
 The app pins `llama.rn` through `package.json` and validates the installed runtime declarations
-before relying on native multimodal behavior. With `llama.rn@0.12.6`, the native chat message
+before relying on native multimodal behavior. With `llama.rn@0.12.8`, the native chat message
 contract accepts:
 
 - plain text message content
@@ -93,8 +93,10 @@ Before inference:
 - images are passed as `image_url` parts only when the active model has a ready multimodal projector
   and runtime support confirms vision capability
 - audio attachments are passed as `input_audio` parts only when runtime audio capability is confirmed
-- text, Markdown, JSON, CSV, TSV, and text-based PDF documents are locally extracted and injected as
-  bounded text context
+- text, Markdown, JSON, and TSV files use the lightweight direct-text processor
+- Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files use the
+  serial native document processor and question-aware bounded context selection described in
+  [`document-processing.md`](./document-processing.md)
 - video attachments are not accepted for new sends and legacy video metadata is not converted into
   inference content
 
@@ -120,8 +122,10 @@ from sanitized diagnostic objects, and local file URLs are redacted.
 ## Document Attachments
 
 Document attachments use local processors before inference. Plain text family documents are decoded
-as bounded text. Text-based PDFs are extracted locally. Unsupported, encrypted, malformed, binary, or
-scanned documents resolve to deterministic user-facing errors instead of being silently dropped.
+directly. Structured formats are parsed by the local Rust module outside the JS/UI thread, and only
+bounded selected chunks cross the bridge. Text-based PDFs are extracted locally. Unsupported,
+encrypted, malformed, binary, or scanned documents resolve to deterministic user-facing errors
+instead of being silently dropped.
 
 Extracted document text is not written into diagnostics or exported error reports. Prompt-window
 logic can truncate or omit bounded extracted text according to context budget, but it must not

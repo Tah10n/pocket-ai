@@ -72,6 +72,8 @@
 
 - Persistent on-device chat history, encrypted at rest
 - Capability-gated chat attachments for images, audio, and local documents
+- Fully local document questions and summaries for Word, PowerPoint, Excel,
+  OpenDocument, RTF, EPUB, CSV, and text-based PDF files
 - In-chat model switching keeps one conversation thread while recording when the active model changes
 - Per-message model metadata keeps edits, regeneration, and history restoration aligned with the model that produced each turn
 - System prompt presets for different assistant behaviors
@@ -104,6 +106,7 @@
 | State | [Zustand](https://zustand.docs.pmnd.rs/) |
 | Storage | [MMKV](https://github.com/mrousavy/react-native-mmkv) |
 | Inference | [llama.rn](https://github.com/mybigday/llama.rn) |
+| Document processing | Pinned Rust [AnyDoc](https://github.com/firecrawl/anydoc) core through a local Expo module |
 
 ## Getting started
 
@@ -192,6 +195,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Changelog](CHANGELOG.md) | Release history |
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
+| [Document Processing](docs/document-processing.md) | Offline formats, native architecture, limits, context selection, and maintenance |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
 | [Android Build Guide](docs/android-build.md) | Deterministic Android release builds, signing, provenance, and current-head QA |

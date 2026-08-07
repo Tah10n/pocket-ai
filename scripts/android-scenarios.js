@@ -2982,6 +2982,7 @@ async function runDocumentErrorIteration(ctx, session, { promptSentinel }) {
     await waitForAnyNode(resolveAdbPath(), ctx.serial, expectedLabels, {
       timeoutMs: 30_000,
       visibleOnly: true,
+      matchMode: "fragment",
     });
     return expectedErrorCode;
   });

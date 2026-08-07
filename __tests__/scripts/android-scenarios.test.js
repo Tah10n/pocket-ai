@@ -1434,6 +1434,25 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(match.node.text).toBe('Home');
   });
 
+  it('matches a document error phrase inside the combined Android alert body', () => {
+    const errorPhrase = 'This document is damaged or does not match its file type.';
+    const alertSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Some documents could not be processed. Review the failed files before sending.&#10;&#10;pqa-invalid.docx: ${errorPhrase}" resource-id="android:id/message" bounds="[80,600][1000,1200]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(alertSnapshot, [errorPhrase], { visibleOnly: true })).toBeNull();
+    expect(findAnyNodeInSnapshot(alertSnapshot, [errorPhrase], {
+      visibleOnly: true,
+      matchMode: 'fragment',
+    })).toEqual(expect.objectContaining({
+      label: errorPhrase,
+      node: expect.objectContaining({ resourceId: 'android:id/message' }),
+    }));
+  });
+
   it('accepts a node from the final timeout-boundary snapshot', async () => {
     const finalSnapshot = parseUiSnapshot(`
       <hierarchy>

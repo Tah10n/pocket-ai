@@ -606,6 +606,12 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "send-tapped",
   "stop-tapped",
   "cancel-settled",
+  "thread-switch-tapped",
+  "thread-home-ready",
+  "replacement-chat-ready",
+  "model-selector-tapped",
+  "model-option-tapped",
+  "model-switch-settled",
   "stale-window-cleared",
 ]);
 
@@ -3014,8 +3020,11 @@ async function runDocumentRaceScenario(ctx, session, kind) {
   const expectedSentinelIds = [...new Set(
     session.fixtures.flatMap((entry) => entry.fixture.sentinelIds)
   )].sort();
-  const alternateModelResourceId = kind === "model-race"
+  const alternateModelTarget = kind === "model-race"
     ? await resolveAlternateModelResourceId(ctx)
+    : null;
+  const threadSwitchTapPoint = kind === "thread-race"
+    ? resolveBottomTabTapPoint(adbPath, ctx.serial, HOME_TAB_LABELS)
     : null;
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
     const sendActionBounds = await sendDocumentPromptImmediately(
@@ -3031,25 +3040,26 @@ async function runDocumentRaceScenario(ctx, session, kind) {
       await waitForDocumentCancellationSettlement(adbPath, ctx.serial);
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "cancel-settled");
     } else if (kind === "thread-race") {
-      tapBottomTabImmediately(adbPath, ctx.serial, HOME_TAB_LABELS);
+      tapBottomTabImmediately(adbPath, ctx.serial, threadSwitchTapPoint);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "thread-switch-tapped");
       await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "thread-home-ready");
       await ctx.tapAnyText(NEW_CHAT_LABELS, { afterTapDelayMs: 0 });
       await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "replacement-chat-ready");
     } else if (kind === "model-race") {
-      const selector = await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_RESOURCE_ID, {
-        timeoutMs: 3_000,
-        visibleOnly: true,
-      });
-      tapRequiredNode(adbPath, ctx.serial, selector, "chat model selector");
-      await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
+      tapBounds(adbPath, ctx.serial, alternateModelTarget.selectorBounds);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-selector-tapped");
+      // The preflight sheet established stable bounds while no document work was active. Give
+      // the native sheet one short animation window, then select the alternate model without a
+      // post-send hierarchy dump that would let prompt preparation win the race.
+      await delay(250);
+      tapBounds(adbPath, ctx.serial, alternateModelTarget.optionBounds);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-option-tapped");
+      await waitForNoResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
         timeoutMs: 5_000,
-        visibleOnly: true,
       });
-      const alternate = await waitForResourceId(adbPath, ctx.serial, alternateModelResourceId, {
-        timeoutMs: 5_000,
-        visibleOnly: true,
-      });
-      tapRequiredNode(adbPath, ctx.serial, alternate, "alternate loaded model");
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-switch-settled");
     } else {
       throw new Error(`Unsupported document race kind: ${kind}.`);
     }
@@ -3166,7 +3176,11 @@ async function resolveAlternateModelResourceId(ctx) {
       "Document model-switch QA requires a second downloaded model visible in the selector."
     );
   }
-  return normalizeAndroidResourceId(candidates[0].resourceId);
+  return {
+    resourceId: normalizeAndroidResourceId(candidates[0].resourceId),
+    selectorBounds: selector.bounds,
+    optionBounds: candidates[0].bounds,
+  };
 }
 
 async function waitForPreparedDocumentAttachmentCount(adbPath, serial, expectedCount, options = {}) {
@@ -3217,13 +3231,16 @@ async function assertDocumentSentinelsStayAbsent(adbPath, serial, sentinelIds, o
   }
 }
 
-function tapBottomTabImmediately(adbPath, serial, labels) {
+function resolveBottomTabTapPoint(adbPath, serial, labels) {
   const snapshot = createUiSnapshot(adbPath, serial);
   const match = findBottomTabNodeInSnapshot(snapshot, labels);
   if (!match?.node) {
     throw new Error("Document race could not find the requested bottom tab.");
   }
-  const tapPoint = getBottomTabTapPoint(match.node);
+  return getBottomTabTapPoint(match.node);
+}
+
+function tapBottomTabImmediately(adbPath, serial, tapPoint) {
   runChecked(adbPath, [
     "-s", serial, "shell", "input", "tap", `${tapPoint.centerX}`, `${tapPoint.centerY}`,
   ], { stdio: "ignore" });

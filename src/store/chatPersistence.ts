@@ -594,7 +594,12 @@ function sanitizePersistedChatAttachmentValue(
 ): PersistedChatAttachment | null {
   const genericAttachment = normalizePersistedChatAttachment(value, { threadId, messageId });
   if (genericAttachment) {
-    return toLegacyChatImageAttachment(genericAttachment) ?? genericAttachment;
+    // Keep processor-derived images in the generic shape: video-frame and document-asset
+    // reconciliation depends on their typed linkage metadata. User-picked ready images retain
+    // the historical legacy shape for backward-compatible persisted messages.
+    return genericAttachment.source === 'derived_processor'
+      ? genericAttachment
+      : toLegacyChatImageAttachment(genericAttachment) ?? genericAttachment;
   }
 
   return sanitizePersistedChatImageAttachment(value, threadId, messageId);
@@ -612,16 +617,17 @@ function isVideoAttachment(attachment: PersistedChatAttachment): attachment is E
   return isGenericChatAttachment(attachment) && attachment.kind === 'video';
 }
 
-function isDerivedProcessorImageAttachment(attachment: PersistedChatAttachment): attachment is Extract<ChatAttachment, { kind: 'image' }> {
-  return isGenericChatAttachment(attachment)
-    && attachment.kind === 'image'
+function isDerivedProcessorImageAttachment(
+  attachment: PersistedChatAttachment,
+): attachment is PersistedChatAttachment & { source: 'derived_processor' } {
+  return resolvePersistedAttachmentKind(attachment) === 'image'
     && attachment.source === 'derived_processor';
 }
 
 function isVideoDerivedImageAttachment(
   attachment: PersistedChatAttachment,
   retainedVideoFrameIdsByVideoId: ReadonlyMap<string, ReadonlySet<string>>,
-): attachment is Extract<ChatAttachment, { kind: 'image' }> & { derivedFromAttachmentId: string } {
+): attachment is PersistedChatAttachment & { derivedFromAttachmentId: string } {
   if (
     !isDerivedProcessorImageAttachment(attachment)
     || !attachment.derivedFromAttachmentId
@@ -630,6 +636,37 @@ function isVideoDerivedImageAttachment(
   }
 
   return retainedVideoFrameIdsByVideoId.get(attachment.derivedFromAttachmentId)?.has(attachment.id) === true;
+}
+
+function getRetainedDocumentAttachmentIds(
+  attachments: readonly PersistedChatAttachment[],
+): Set<string> {
+  const retainedDocumentIds = new Set<string>();
+  attachments.forEach((attachment) => {
+    if (
+      isGenericChatAttachment(attachment)
+      && attachment.kind === 'document'
+      && retainedDocumentIds.size < MAX_CHAT_ATTACHMENTS_BY_KIND.document
+    ) {
+      retainedDocumentIds.add(attachment.id);
+    }
+  });
+  return retainedDocumentIds;
+}
+
+function isDocumentDerivedImageAttachment(
+  attachment: PersistedChatAttachment,
+  retainedDocumentIds: ReadonlySet<string>,
+): attachment is PersistedChatAttachment & {
+  derivedFromAttachmentId: string;
+  derivedFromAssetId: number;
+} {
+  return isDerivedProcessorImageAttachment(attachment)
+    && typeof attachment.derivedFromAttachmentId === 'string'
+    && retainedDocumentIds.has(attachment.derivedFromAttachmentId)
+    && typeof attachment.derivedFromAssetId === 'number'
+    && Number.isSafeInteger(attachment.derivedFromAssetId)
+    && attachment.derivedFromAssetId >= 0;
 }
 
 function getRetainedVideoFrameIdsByVideoId(attachments: readonly PersistedChatAttachment[]): Map<string, Set<string>> {
@@ -682,6 +719,7 @@ function sanitizePersistedChatMessageAttachments(message: ChatMessage, threadId:
     return sanitized ? [sanitized] : [];
   });
   const retainedVideoFrameIdsByVideoId = getRetainedVideoFrameIdsByVideoId(sanitizedAttachments);
+  const retainedDocumentAttachmentIds = getRetainedDocumentAttachmentIds(sanitizedAttachments);
   const retainedDerivedFrameIdsByVideoId = new Map<string, Set<string>>();
   const counts: Record<PersistedAttachmentKind, number> = {
     image: 0,
@@ -706,6 +744,14 @@ function sanitizePersistedChatMessageAttachments(message: ChatMessage, threadId:
 
       retainedFrameIds.add(sanitized.id);
       retainedDerivedFrameIdsByVideoId.set(videoId, retainedFrameIds);
+      return [sanitized];
+    }
+
+    if (isDocumentDerivedImageAttachment(sanitized, retainedDocumentAttachmentIds)) {
+      if (counts.image >= limits.image) {
+        return [];
+      }
+      counts.image += 1;
       return [sanitized];
     }
 

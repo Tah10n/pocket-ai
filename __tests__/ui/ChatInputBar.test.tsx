@@ -1,12 +1,13 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import { AccessibilityInfo, Platform, Text as RNText } from 'react-native';
+import { AccessibilityInfo, Alert, Platform, Text as RNText } from 'react-native';
 import {
   ChatInputBar,
   getGlassComposerCapsuleStyle,
   getModeBannerGlassStyle,
   getPrimaryActionGlassStyle,
   markChatInputDraftConsumedError,
+  markChatInputErrorReported,
 } from '../../src/components/ui/ChatInputBar';
 import { screenChromeTokens } from '../../src/utils/themeTokens';
 import { getSendableDraftImageAttachments } from '../../src/utils/chatImageAttachments';
@@ -247,6 +248,31 @@ describe('ChatInputBar', () => {
       expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
     } finally {
       consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it('restores a retryable draft without showing a second alert for an already-reported error', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(jest.fn());
+    const onSendMessage = jest.fn().mockRejectedValue(
+      markChatInputErrorReported(new Error('document failure already reported')),
+    );
+
+    try {
+      const { getByPlaceholderText, getByTestId } = render(
+        <ChatInputBar onSendMessage={onSendMessage} />,
+      );
+      const input = getByPlaceholderText('chat.inputPlaceholder');
+      fireEvent.changeText(input, 'Retry with the restored document');
+      fireEvent.press(getByTestId('chat-primary-action-send'));
+
+      await waitFor(() => {
+        expect(onSendMessage).toHaveBeenCalledWith('Retry with the restored document');
+      });
+      expect(getByPlaceholderText('chat.inputPlaceholder').props.value)
+        .toBe('Retry with the restored document');
+      expect(alertSpy).not.toHaveBeenCalled();
+    } finally {
+      alertSpy.mockRestore();
     }
   });
 

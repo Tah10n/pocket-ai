@@ -10,6 +10,7 @@ export type ChatGenerationDrainResult = 'drained' | 'timed_out';
 export interface ChatGenerationWorkHandle {
   assertCurrent: () => void;
   finish: () => void;
+  onCancel: (listener: () => void) => () => void;
   waitFor: <T>(promise: Promise<T>) => Promise<T>;
 }
 
@@ -69,6 +70,7 @@ export function beginChatGenerationWork(scope: string): ChatGenerationWorkHandle
   const id = Symbol(scope);
   const generation = cancellationGeneration;
   let finished = false;
+  const ownedCancellationListeners = new Set<() => void>();
   let resolveFinished!: () => void;
   const finishedPromise = new Promise<void>((resolve) => {
     resolveFinished = resolve;
@@ -88,8 +90,32 @@ export function beginChatGenerationWork(scope: string): ChatGenerationWorkHandle
         return;
       }
       finished = true;
+      ownedCancellationListeners.forEach((listener) => cancellationListeners.delete(listener));
+      ownedCancellationListeners.clear();
       activeWork.delete(id);
       resolveFinished();
+    },
+    onCancel: (listener: () => void): (() => void) => {
+      assertCurrent();
+      let subscribed = true;
+      const wrapped = () => {
+        if (!subscribed) {
+          return;
+        }
+        subscribed = false;
+        ownedCancellationListeners.delete(wrapped);
+        listener();
+      };
+      ownedCancellationListeners.add(wrapped);
+      cancellationListeners.add(wrapped);
+      return () => {
+        if (!subscribed) {
+          return;
+        }
+        subscribed = false;
+        ownedCancellationListeners.delete(wrapped);
+        cancellationListeners.delete(wrapped);
+      };
     },
     waitFor: <T>(promise: Promise<T>): Promise<T> => {
       try {

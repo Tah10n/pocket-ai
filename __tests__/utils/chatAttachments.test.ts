@@ -1,4 +1,9 @@
 import {
+  CHAT_DOCUMENT_PICKER_MIME_TYPES,
+  MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES,
   getRemainingChatAttachmentSlots,
   getSendableDraftDocumentAttachments,
   hasFailedDraftDocumentAttachments,
@@ -8,6 +13,7 @@ import {
   normalizeChatAttachmentProcessingState,
   normalizePersistedChatAttachment,
   resolveChatProcessableDocumentMimeType,
+  resolveChatDocumentMaxBytes,
   resolveChatTextDocumentMimeType,
   resolveChatAttachmentKind,
   resolveChatAttachmentKindFromFileName,
@@ -25,6 +31,15 @@ import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
 import { copiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 
 describe('chatAttachments generic attachment helpers', () => {
+  it('includes controlled generic Android provider MIME types in the document picker', () => {
+    expect(CHAT_DOCUMENT_PICKER_MIME_TYPES).toEqual(expect.arrayContaining([
+      'application/octet-stream',
+      'application/zip',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/epub+zip',
+    ]));
+  });
+
   it('normalizes known attachment kinds and processing states', () => {
     expect(normalizeChatAttachmentKind(' IMAGE ')).toBe('image');
     expect(normalizeChatAttachmentKind('document')).toBe('document');
@@ -110,7 +125,7 @@ describe('chatAttachments generic attachment helpers', () => {
     expect(resolveRequiredNativeCapabilities('video')).toEqual([]);
   });
 
-  it('validates sendable copied text document drafts', () => {
+  it('validates sendable copied document drafts across direct and AnyDoc formats', () => {
     const readyDraft: ChatDocumentAttachmentDraft = {
       id: 'document-1',
       pickerUri: 'content://documents/document-1.txt',
@@ -136,8 +151,36 @@ describe('chatAttachments generic attachment helpers', () => {
       .toBe('text/tab-separated-values');
     expect(resolveChatProcessableDocumentMimeType({ fileName: 'paper.pdf' }))
       .toBe('application/pdf');
+    expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'application/octet-stream',
+      fileName: 'report.docx',
+    })).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'application/zip',
+      fileName: 'book.epub',
+    })).toBe('application/epub+zip');
+    expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'application/octet-stream',
+      fileName: 'arbitrary.zip',
+    })).toBeNull();
+    expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'application/pdf',
+      fileName: 'renamed.bin',
+    })).toBe('application/pdf');
+    expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      fileName: 'misleading.pdf',
+    })).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'text/plain',
+      fileName: 'binary.docx',
+    })).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(resolveChatTextDocumentMimeType({
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      fileName: 'binary.txt',
+    })).toBeNull();
     expect(isSupportedChatDocumentDraftFormat(readyDraft)).toBe(true);
-    expect(isSupportedChatDocumentDraftFormat(failedDraft)).toBe(false);
+    expect(isSupportedChatDocumentDraftFormat(failedDraft)).toBe(true);
     expect(getSendableDraftDocumentAttachments([readyDraft, failedDraft])).toEqual([readyDraft]);
     expect(hasFailedDraftDocumentAttachments([readyDraft, failedDraft])).toBe(true);
     expect(validateChatDocumentAttachmentLimit(3, 1)).toEqual({
@@ -149,6 +192,16 @@ describe('chatAttachments generic attachment helpers', () => {
       reason: 'limit_exceeded',
       allowedRemaining: 1,
     });
+  });
+
+  it('mirrors the native mobile source-byte profile for every document family', () => {
+    expect(resolveChatDocumentMaxBytes('text/csv')).toBe(MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES);
+    expect(resolveChatDocumentMaxBytes('application/pdf')).toBe(MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES);
+    expect(resolveChatDocumentMaxBytes('application/rtf')).toBe(MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES);
+    expect(resolveChatDocumentMaxBytes('application/epub+zip')).toBe(MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES);
+    expect(resolveChatDocumentMaxBytes(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    )).toBe(MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES);
   });
 
   it('normalizes persisted generic attachment metadata and rejects unsafe local URIs', () => {
@@ -192,6 +245,139 @@ describe('chatAttachments generic attachment helpers', () => {
       source: 'photo_library',
       createdAt: 1,
     })).toBeNull();
+  });
+
+  it('loads legacy processor-version 2 document metadata without rewriting its hash contract', () => {
+    expect(normalizePersistedChatAttachment({
+      id: 'legacy-document',
+      kind: 'document',
+      state: 'ready',
+      threadId: 'thread-1',
+      messageId: 'message-1',
+      localUri: 'test-dir/chat-attachments/legacy-document.pdf',
+      pathCategory: 'chat_attachment',
+      fileName: 'legacy-document.pdf',
+      displayName: 'Original legacy.pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 10_000,
+      source: 'document_picker',
+      createdAt: 1,
+      document: {
+        processorId: 'document-text',
+        processorVersion: 2,
+        contentHash: 'fnv1a32:deadbeef',
+        pageCount: 2,
+        extractedCharCount: 321,
+        isScanned: false,
+      },
+    })).toEqual(expect.objectContaining({
+      displayName: 'Original legacy.pdf',
+      document: {
+        processorId: 'document-text',
+        processorVersion: 2,
+        contentHash: 'fnv1a32:deadbeef',
+        pageCount: 2,
+        extractedCharCount: 321,
+        isScanned: false,
+      },
+    }));
+  });
+
+  it('drops mismatched or unbounded v3 document metadata while preserving the safe attachment', () => {
+    const normalized = normalizePersistedChatAttachment({
+      id: 'strict-document',
+      kind: 'document',
+      state: 'ready',
+      threadId: 'thread-1',
+      messageId: 'message-1',
+      localUri: 'test-dir/chat-attachments/strict-document.md',
+      pathCategory: 'chat_attachment',
+      fileName: 'strict-document.md',
+      mimeType: 'text/markdown',
+      sizeBytes: 10_000,
+      source: 'document_picker',
+      createdAt: 1,
+      document: {
+        processorId: 'document-text',
+        processorVersion: 3,
+        contentHash: `sha256:${'b'.repeat(64)}`,
+        contentSha256: 'a'.repeat(64),
+        canonicalFormat: 'future-format',
+        parserId: 'unsafe\nparser',
+        parserVersion: '1.0\u202e',
+        exactAnyDocCommit: 'A'.repeat(40),
+        sourceByteCount: (16 * 1024 * 1024) + 1,
+        sourceCharCount: 100,
+        selectedCharCount: 101,
+        chunkCount: 2,
+        selectedChunkCount: 3,
+        slideCount: Number.MAX_SAFE_INTEGER + 1,
+        warnings: ['context_truncated', 'unknown_warning', 'x'.repeat(1_000)],
+      },
+    });
+
+    expect(normalized).toEqual(expect.objectContaining({
+      kind: 'document',
+      document: expect.objectContaining({
+        processorId: 'document-text',
+        processorVersion: 3,
+        sourceCharCount: 100,
+        chunkCount: 2,
+        warnings: ['context_truncated'],
+      }),
+    }));
+    const document = normalized?.kind === 'document' ? normalized.document : undefined;
+    expect(document).not.toEqual(expect.objectContaining({ contentHash: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ contentSha256: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ sourceByteCount: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ selectedCharCount: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ selectedChunkCount: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ canonicalFormat: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ parserId: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ parserVersion: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ exactAnyDocCommit: expect.anything() }));
+    expect(document).not.toEqual(expect.objectContaining({ slideCount: expect.anything() }));
+  });
+
+  it('preserves only an exact matching SHA-256 identity and bounded v3 processor metadata', () => {
+    const sha256 = 'a'.repeat(64);
+    const normalized = normalizePersistedChatAttachment({
+      id: 'strict-valid-document',
+      kind: 'document',
+      state: 'ready',
+      threadId: 'thread-1',
+      messageId: 'message-1',
+      localUri: 'test-dir/chat-attachments/strict-valid-document.docx',
+      pathCategory: 'chat_attachment',
+      fileName: 'strict-valid-document.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      sizeBytes: 10_000,
+      source: 'document_picker',
+      createdAt: 1,
+      document: {
+        processorId: 'pocket-anydoc',
+        processorVersion: 3,
+        contentHash: `sha256:${sha256}`,
+        contentSha256: sha256,
+        canonicalFormat: 'docx',
+        parserId: 'anydoc',
+        parserVersion: '0.1.7',
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        warnings: ['format_hint_mismatch', 'hidden_content_unverified'],
+      },
+    });
+
+    expect(normalized).toEqual(expect.objectContaining({
+      document: expect.objectContaining({
+        contentHash: `sha256:${sha256}`,
+        contentSha256: sha256,
+        canonicalFormat: 'docx',
+        parserId: 'anydoc',
+        parserVersion: '0.1.7',
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        warnings: ['format_hint_mismatch', 'hidden_content_unverified'],
+      }),
+    }));
   });
 
   it('adapts legacy image attachments to generic metadata and back for migration', () => {

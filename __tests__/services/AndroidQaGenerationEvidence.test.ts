@@ -12,6 +12,7 @@ import {
   shouldHoldAndroidQaGenerationBeforeFirstOutput,
   waitForAndroidQaGenerationGateRelease,
 } from '../../src/services/AndroidQaGenerationEvidence';
+import type { LlmChatMessage } from '../../src/types/chat';
 
 describe('AndroidQaGenerationEvidence', () => {
   beforeEach(() => {
@@ -127,6 +128,35 @@ describe('AndroidQaGenerationEvidence', () => {
     expect(serialized).not.toContain('audio.mp3');
     expect(serialized).not.toContain('latest secret prompt');
     expect(serialized).not.toContain('contentParts');
+  });
+
+  it('records only fixed sentinel ids for synthetic prepared document context', () => {
+    const documentAttachment = {
+      id: 'document-1',
+      kind: 'document',
+    } as NonNullable<LlmChatMessage['attachments']>[number];
+    const evidence = buildAndroidQaPreparedGenerationEvidence({
+      userMessageId: 'user-document',
+      assistantMessageId: 'assistant-document',
+      preparedMessages: [{
+        role: 'user',
+        content: 'private prefix ORCHID-742 private middle ZEBRA-END-991 private suffix',
+        attachments: [documentAttachment],
+      }],
+    });
+
+    expect(evidence).toEqual({
+      userMessageId: 'user-document',
+      assistantMessageId: 'assistant-document',
+      attachments: [{ id: 'document-1', kind: 'document' }],
+      documentSentinelIds: ['orchid-742', 'zebra-end-991'],
+    });
+    const serialized = JSON.stringify(evidence);
+    expect(serialized).not.toContain('private prefix');
+    expect(serialized).not.toContain('private middle');
+    expect(serialized).not.toContain('private suffix');
+    expect(serialized).not.toContain('ORCHID-742');
+    expect(serialized).not.toContain('ZEBRA-END-991');
   });
 
   it('clears stale prepared evidence when the next generation begins', () => {

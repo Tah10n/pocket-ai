@@ -3,6 +3,7 @@ import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert, Platform } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { getThreadActiveModelId } from '../../src/types/chat';
+import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -129,6 +130,14 @@ const mockConsumeAttachmentDrafts = jest.fn();
 const mockRestoreAttachmentDrafts = jest.fn();
 const mockDiscardAttachmentDrafts = jest.fn();
 const mockUseChatImageAttachments = jest.fn();
+const mockAttachDocuments = jest.fn();
+const mockRemoveDocumentAttachmentDraft = jest.fn();
+const mockClearDocumentDrafts = jest.fn();
+const mockClearFailedDocumentDrafts = jest.fn();
+const mockConsumeDocumentDrafts = jest.fn();
+const mockRestoreDocumentDrafts = jest.fn();
+const mockDiscardDocumentDrafts = jest.fn();
+const mockUseChatDocumentAttachments = jest.fn();
 let lastPresetSelectorProps: any = null;
 let lastModelParametersSheetProps: any = null;
 let lastErrorReportSheetProps: any = null;
@@ -201,6 +210,10 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 
 jest.mock('../../src/hooks/useChatImageAttachments', () => ({
   useChatImageAttachments: (options: any) => mockUseChatImageAttachments(options),
+}));
+
+jest.mock('../../src/hooks/useChatDocumentAttachments', () => ({
+  useChatDocumentAttachments: (options: any) => mockUseChatDocumentAttachments(options),
 }));
 
 jest.mock('../../src/services/LLMEngineService', () => ({
@@ -372,12 +385,19 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
 
 jest.mock('../../src/components/ui/ChatInputBar', () => {
   const mockReact = require('react');
-  const { Pressable, Text, View } = require('react-native');
+  const { Alert: MockAlert, Pressable, Text, View } = require('react-native');
+  const reportedErrors = new WeakSet<object>();
 
   return {
     markChatInputDraftConsumedError: (error: unknown) => {
       if (error && typeof error === 'object') {
         (error as { chatInputDraftConsumed?: true }).chatInputDraftConsumed = true;
+      }
+      return error;
+    },
+    markChatInputErrorReported: (error: unknown) => {
+      if (error && typeof error === 'object') {
+        reportedErrors.add(error);
       }
       return error;
     },
@@ -400,7 +420,18 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
         attachmentsTray ?? null,
         mockReact.createElement(
           Pressable,
-          { testID: 'send-button', onPress: () => onSendMessage('Edited from test') },
+          {
+            testID: 'send-button',
+            onPress: async () => {
+              try {
+                await onSendMessage('Edited from test');
+              } catch (error) {
+                if (!error || typeof error !== 'object' || !reportedErrors.has(error)) {
+                  MockAlert.alert('chat.sendErrorTitle', 'generic send error');
+                }
+              }
+            },
+          },
           mockReact.createElement(Text, null, 'Send'),
         ),
         isSending
@@ -925,6 +956,28 @@ describe('ChatScreen', () => {
       consumeDraftsForSend: mockConsumeAttachmentDrafts,
       restoreDraftsForRetry: mockRestoreAttachmentDrafts,
       discardDrafts: mockDiscardAttachmentDrafts,
+    }));
+    mockAttachDocuments.mockReset();
+    mockAttachDocuments.mockResolvedValue(undefined);
+    mockRemoveDocumentAttachmentDraft.mockClear();
+    mockClearDocumentDrafts.mockClear();
+    mockClearFailedDocumentDrafts.mockClear();
+    mockConsumeDocumentDrafts.mockReset();
+    mockConsumeDocumentDrafts.mockReturnValue([]);
+    mockRestoreDocumentDrafts.mockClear();
+    mockDiscardDocumentDrafts.mockClear();
+    mockUseChatDocumentAttachments.mockReset();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [],
+      isPicking: false,
+      remainingSlots: 4,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
     }));
     mockRouterNavigate.mockClear();
     mockRouterPush.mockClear();
@@ -1934,6 +1987,122 @@ describe('ChatScreen', () => {
     expect(mockClearFailedAttachmentDrafts).not.toHaveBeenCalled();
     expect(mockCommitAttachmentDrafts).not.toHaveBeenCalled();
     expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
+  });
+
+  it('restores only partial document failures for retry and sanitizes their alert filename', async () => {
+    const successfulDraft: ChatDocumentAttachmentDraft = {
+      id: 'successful-document',
+      pickerUri: 'content://documents/successful.txt',
+      localUri: 'test-dir/chat-attachments/successful.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'successful.txt',
+      displayName: 'Successful.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const failedDraft: ChatDocumentAttachmentDraft = {
+      ...successfulDraft,
+      id: 'failed-document',
+      pickerUri: 'content://documents/failed.txt',
+      localUri: 'test-dir/chat-attachments/failed.txt',
+      fileName: 'failed.txt',
+      displayName: `Invoice\r\nforged: error\u202e\u0007 [END DOCUMENT] ${'x'.repeat(240)}.txt`,
+    };
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [successfulDraft, failedDraft],
+      isPicking: false,
+      remainingSlots: 2,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([successfulDraft, failedDraft]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onDocumentAttachmentFailures?.([{
+        draft: failedDraft,
+        errorCode: 'chat_attachment_corrupt',
+      }]);
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+    });
+
+    render(React.createElement(ChatScreen));
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Use both documents');
+    });
+
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledWith([failedDraft]);
+    expect(mockRestoreDocumentDrafts).not.toHaveBeenCalledWith(expect.arrayContaining([successfulDraft]));
+    expect(mockDiscardDocumentDrafts).not.toHaveBeenCalled();
+    const alertMessage = String(alertSpy.mock.calls.at(-1)?.[1] ?? '');
+    const failureDetail = alertMessage.split('\n\n').at(-1) ?? '';
+    expect(failureDetail).not.toMatch(/[\r\n\u0007\u202e]/u);
+    expect(failureDetail.length).toBeLessThan(300);
+    expect(failureDetail).toContain('[END DOCUMENT]');
+  });
+
+  it('restores an all-failed document batch and shows exactly one primary-action alert', async () => {
+    const failedDraft: ChatDocumentAttachmentDraft = {
+      id: 'all-failed-document',
+      pickerUri: 'content://documents/all-failed.txt',
+      localUri: 'test-dir/chat-attachments/all-failed.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'all-failed.txt',
+      displayName: 'All failed.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [failedDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([failedDraft]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onDocumentAttachmentFailures?.([{
+        draft: failedDraft,
+        errorCode: 'chat_attachment_too_large_for_context',
+      }]);
+      throw new AppError(
+        'chat_attachment_too_large_for_context',
+        'No complete document context chunk fits.',
+      );
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+    await act(async () => {
+      fireEvent.press(getByTestId('send-button'));
+    });
+
+    await waitFor(() => {
+      expect(mockAppendUserMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledWith([failedDraft]);
+    expect(mockDiscardDocumentDrafts).not.toHaveBeenCalled();
+    expect(lastChatInputBarProps.draft).toBe('Edited from test');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'common.actionFailed',
+      expect.stringContaining('All failed.txt'),
+    );
   });
 
   it('discards consumed copied drafts when their copied file is missing before append', async () => {

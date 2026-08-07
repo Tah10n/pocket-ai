@@ -1,5 +1,5 @@
 import { AppState, AppStateStatus } from 'react-native';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
 import {
@@ -54,6 +54,7 @@ import {
   createTruncationState,
   estimateLlmMessagesTokens,
   getThreadInferenceWindow,
+  resolveBalancedResponseReserveTokens,
   resolveThreadInferenceWindowOptions,
   type InferenceBudgetOptions,
 } from '../utils/inferenceWindow';
@@ -69,23 +70,39 @@ import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPriv
 import { useTruncationTracking } from './useTruncationTracking';
 import { markInteractiveWorkStarted } from '../utils/idleTask';
 import {
+  chatAttachmentStorageService,
   materializeAttachmentDraftsForMessage,
   materializeDocumentDraftsForProcessing,
   materializeMediaDraftsForMessage,
 } from '../services/ChatAttachmentStorageService';
 import {
-  buildDocumentAttachmentTextPart,
   chatAttachmentProcessorRegistry,
   withProcessedDocumentAttachmentMetadata,
+  type ChatDocumentTextProcessorResult,
+  type PocketAnydocAssetLease,
 } from '../services/ChatAttachmentProcessorRegistry';
+import {
+  rebuildDocumentContextSelection,
+  selectDocumentContext,
+  type DocumentContextInput,
+  type DocumentContextSelection,
+} from '../services/DocumentContextService';
+import {
+  POCKET_ANYDOC_MAX_SELECTION_CHARS,
+  POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+  getCapabilities as getPocketAnydocCapabilities,
+} from '../../modules/pocket-anydoc';
 import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReason';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
+  MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
   getChatImageAttachmentMediaPaths,
   getSendableDraftImageAttachments,
   normalizeChatAttachmentLocalUri,
+  resolveSupportedChatImageExtensionFromMimeType,
   toAttachmentMediaPath,
   validateChatImageAttachmentLimit,
+  validateChatImageAttachmentBounds,
 } from '../utils/chatImageAttachments';
 import {
   getSendableDraftDocumentAttachments,
@@ -115,12 +132,36 @@ export const LONG_STREAM_PATCH_INTERVAL_MS = 320;
 export const LONG_STREAM_PATCH_TOKEN_THRESHOLD = 64;
 export const LONG_STREAM_PATCH_CHAR_THRESHOLD = 1200;
 const ATTACHMENT_FILE_CHECK_CONCURRENCY = 8;
+const DOCUMENT_PROCESSING_CONCURRENCY = 1;
 const ESTIMATED_MEDIA_PROMPT_TOKENS_PER_INPUT = 576;
 const EXACT_MEDIA_PROMPT_RECOUNT_MARGIN_TOKENS_PER_INPUT = 1024;
 
 type ProcessedDocumentAttachmentDraftsForInference = {
   attachments: Extract<ChatAttachment, { kind: 'document' }>[];
   contentParts: LlmTextContentPart[];
+  failures: DocumentAttachmentProcessingFailure[];
+  /** Full processor results retained so exact-token/media recounts can reselect from every chunk. */
+  candidates: ProcessedDocumentAttachmentCandidate[];
+  /** The concrete post-selection chunks represented by attachments/contentParts. */
+  selectedCandidates: ProcessedDocumentAttachmentCandidate[];
+  allFailedError?: AppError;
+};
+
+type ProcessedDocumentAttachmentCandidate = {
+  draft: ChatDocumentAttachmentDraft;
+  attachment: Extract<ChatAttachment, { kind: 'document' }>;
+  result: ChatDocumentTextProcessorResult;
+};
+
+type MaterializedDocumentImageDraft = {
+  documentAttachmentId: string;
+  assetId: number;
+  draft: AttachmentDraft;
+};
+
+export type DocumentAttachmentProcessingFailure = {
+  draft: ChatDocumentAttachmentDraft;
+  errorCode: AppError['code'];
 };
 
 type AttachmentFileResolution = {
@@ -311,6 +352,8 @@ export type AppendUserMessageOptions = {
   mediaAttachmentDrafts?: readonly ChatMediaAttachmentDraft[];
   multimodalReadiness?: MultimodalReadinessState;
   onUserMessageAppended?: (message: ChatMessage) => void;
+  onDocumentAttachmentFailures?: (failures: readonly DocumentAttachmentProcessingFailure[]) => void;
+  onPreparationCancelled?: () => void;
 };
 
 export type RegenerateUserMessageOptions = {
@@ -558,12 +601,101 @@ function resolveReadyMediaAttachmentDrafts({
   return sendableDrafts;
 }
 
+function toDocumentContextInputs(
+  candidates: readonly ProcessedDocumentAttachmentCandidate[],
+): DocumentContextInput[] {
+  return candidates.map(({ attachment, result }) => ({
+    attachmentId: attachment.id,
+    displayName: attachment.displayName ?? attachment.fileName,
+    canonicalFormat: result.canonicalFormat,
+    chunks: result.chunks,
+    sourceCharCount: result.sourceCharCount,
+    truncated: result.truncated,
+    warnings: result.warnings,
+  }));
+}
+
+function applyDocumentContextSelection(
+  candidates: readonly ProcessedDocumentAttachmentCandidate[],
+  selectedContext: DocumentContextSelection,
+  failures: readonly DocumentAttachmentProcessingFailure[],
+): ProcessedDocumentAttachmentDraftsForInference {
+  const selectedDocumentById = new Map(
+    selectedContext.documents.map((document) => [document.attachmentId, document]),
+  );
+  const selectedResults = candidates.flatMap(({ draft, attachment, result }) => {
+    const selection = selectedDocumentById.get(attachment.id);
+    if (!selection) {
+      return [];
+    }
+    const selectedChunkIndexes = new Set(selection.selectedChunkIndexes);
+    const selectedChunks = result.chunks.filter((chunk) => selectedChunkIndexes.has(chunk.index));
+    const selectedText = selectedChunks.map((chunk) => chunk.text).join('\n\n');
+    const normalizedResult: ChatDocumentTextProcessorResult = {
+      ...result,
+      text: selectedText,
+      chunks: selectedChunks,
+      extractedCharCount: selection.selectedCharCount,
+      selectedChunkCount: selection.selectedChunkIndexes.length,
+      truncated: selection.truncated,
+      warnings: selection.warnings,
+    };
+    return [{
+      draft,
+      attachment: withProcessedDocumentAttachmentMetadata(attachment, normalizedResult),
+      result: normalizedResult,
+    }];
+  });
+  const selectedAttachmentIds = new Set(selectedResults.map(({ attachment }) => attachment.id));
+  const finalFailures = failures.filter(
+    (failure) => failure.errorCode !== 'chat_attachment_too_large_for_context',
+  );
+  candidates.forEach(({ draft, attachment }) => {
+    if (
+      !selectedAttachmentIds.has(attachment.id)
+      && !finalFailures.some((failure) => (
+        failure.draft === draft || (draft.id && failure.draft.id === draft.id)
+      ))
+    ) {
+      finalFailures.push({
+        draft,
+        errorCode: 'chat_attachment_too_large_for_context',
+      });
+    }
+  });
+
+  const allFailedError = candidates.length > 0 && selectedResults.length === 0
+    ? new AppError(
+        'chat_attachment_too_large_for_context',
+        'No complete document context chunk fits the available document budget.',
+      )
+    : undefined;
+  return {
+    attachments: selectedResults.map((entry) => entry.attachment),
+    contentParts: selectedContext.contentParts,
+    failures: finalFailures,
+    candidates: [...candidates],
+    selectedCandidates: selectedResults,
+    ...(allFailedError ? { allFailedError } : null),
+  };
+}
+
 async function processDocumentAttachmentDraftsForInference(
+  question: string,
   drafts: readonly ChatDocumentAttachmentDraft[],
+  signal?: AbortSignal,
   cancellationGate?: AttachmentCancellationGate,
+  retainNativeAssetLeases = false,
+  onNativeAssetLeaseCreated?: (lease: PocketAnydocAssetLease) => void,
 ): Promise<ProcessedDocumentAttachmentDraftsForInference> {
   if (drafts.length === 0) {
-    return { attachments: [], contentParts: [] };
+    return {
+      attachments: [],
+      contentParts: [],
+      failures: [],
+      candidates: [],
+      selectedCandidates: [],
+    };
   }
 
   const processingAttachments = materializeDocumentDraftsForProcessing({
@@ -573,21 +705,302 @@ async function processDocumentAttachmentDraftsForInference(
   });
   const results = await mapWithConcurrency(
     processingAttachments,
-    ATTACHMENT_FILE_CHECK_CONCURRENCY,
-    async (attachment: Extract<ChatAttachment, { kind: 'document' }>) => {
-      const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment);
-      return {
-        attachment: withProcessedDocumentAttachmentMetadata(attachment, result),
-        contentPart: buildDocumentAttachmentTextPart(result),
-      };
+    DOCUMENT_PROCESSING_CONCURRENCY,
+    async (attachment: Extract<ChatAttachment, { kind: 'document' }>, index) => {
+      try {
+        const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, {
+          query: question,
+          signal,
+          maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+          maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+          retainNativeAssetLease: retainNativeAssetLeases,
+          onNativeAssetLeaseCreated,
+        });
+        return { status: 'fulfilled' as const, draft: drafts[index], attachment, result };
+      } catch (error) {
+        if (cancellationGate?.isCancellationRequested()) {
+          throw cancellationGate.getCancellationError();
+        }
+        const appError = toAppError(error, 'chat_attachment_native_failed');
+        if (appError.code === 'chat_attachment_processing_cancelled') {
+          throw cancellationGate?.getCancellationError() ?? appError;
+        }
+        return {
+          status: 'rejected' as const,
+          draft: drafts[index],
+          error: appError,
+        };
+      }
     },
     cancellationGate,
   );
 
-  return {
-    attachments: results.map((result) => result.attachment),
-    contentParts: results.map((result) => result.contentPart),
+  const fulfilled = results.filter((entry): entry is Extract<typeof entry, { status: 'fulfilled' }> => (
+    entry.status === 'fulfilled'
+  ));
+  const rejected = results.filter((entry): entry is Extract<typeof entry, { status: 'rejected' }> => (
+    entry.status === 'rejected'
+  ));
+  if (fulfilled.length === 0 && rejected.length > 0) {
+    return {
+      attachments: [],
+      contentParts: [],
+      failures: rejected.map(({ draft, error }) => ({ draft, errorCode: error.code })),
+      candidates: [],
+      selectedCandidates: [],
+      allFailedError: rejected[0].error,
+    };
+  }
+
+  const candidates: ProcessedDocumentAttachmentCandidate[] = fulfilled.map(({ draft, attachment, result }) => ({
+    draft,
+    attachment,
+    result,
+  }));
+  const selectedContext = await selectDocumentContext({
+    question,
+    documents: toDocumentContextInputs(candidates),
+    maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+    maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+  });
+  return applyDocumentContextSelection(
+    candidates,
+    selectedContext,
+    rejected.map(({ draft, error }) => ({ draft, errorCode: error.code })),
+  );
+}
+
+function throwIfDocumentAssetMaterializationCancelled(
+  signal: AbortSignal | undefined,
+  cancellationGate: AttachmentCancellationGate | undefined,
+): void {
+  if (cancellationGate?.isCancellationRequested()) {
+    throw cancellationGate.getCancellationError();
+  }
+  if (signal?.aborted) {
+    throw new AppError(
+      'chat_attachment_processing_cancelled',
+      'Document asset materialization was cancelled.',
+    );
+  }
+}
+
+function collectSelectedDocumentAssetKeys(
+  processed: ProcessedDocumentAttachmentDraftsForInference,
+): Set<string> {
+  const keys = new Set<string>();
+  processed.selectedCandidates.forEach(({ attachment, result }) => {
+    result.chunks.forEach((chunk) => {
+      chunk.assetIds?.forEach((assetId) => keys.add(`${attachment.id}:${assetId}`));
+    });
+  });
+  return keys;
+}
+
+function finalizeSelectedDocumentAssetWarnings(
+  processed: ProcessedDocumentAttachmentDraftsForInference,
+  materialized: readonly MaterializedDocumentImageDraft[],
+): ProcessedDocumentAttachmentDraftsForInference {
+  const deliveredKeys = new Set(
+    materialized.map((entry) => `${entry.documentAttachmentId}:${entry.assetId}`),
+  );
+  const selectedAssetIdsByAttachment = new Map<string, Set<number>>();
+  processed.selectedCandidates.forEach(({ attachment, result }) => {
+    const selectedAssetIds = new Set<number>();
+    result.chunks.forEach((chunk) => {
+      chunk.assetIds?.forEach((assetId) => selectedAssetIds.add(assetId));
+    });
+    selectedAssetIdsByAttachment.set(attachment.id, selectedAssetIds);
+  });
+
+  const updateResult = (
+    attachmentId: string,
+    result: ChatDocumentTextProcessorResult,
+  ): ChatDocumentTextProcessorResult => {
+    const selectedAssetIds = selectedAssetIdsByAttachment.get(attachmentId) ?? new Set<number>();
+    const nativeWarnings = result.warnings ?? [];
+    const deliveredEverySelectedAsset = [...selectedAssetIds].every(
+      (assetId) => deliveredKeys.has(`${attachmentId}:${assetId}`),
+    );
+    // Asset descriptors outside the final selected chunks are already covered by context
+    // truncation and must not create a false partial-vision warning. Preserve native semantic
+    // warnings (for example unsupported_assets), but derive assets_skipped only from selected IDs.
+    const warnings = nativeWarnings.filter((warning) => warning !== 'assets_skipped');
+    if (selectedAssetIds.size > 0 && !deliveredEverySelectedAsset) {
+      warnings.push('assets_skipped');
+    }
+    return {
+      ...result,
+      warnings: [...new Set(warnings)],
+    };
   };
+
+  const candidates = processed.candidates.map((candidate) => ({
+      ...candidate,
+      result: updateResult(candidate.attachment.id, candidate.result),
+    }));
+  const selectedCandidates = processed.selectedCandidates.map((candidate) => ({
+      ...candidate,
+      result: updateResult(candidate.attachment.id, candidate.result),
+    }));
+  const selectedContext = rebuildDocumentContextSelection({
+    documents: toDocumentContextInputs(candidates),
+    selectedDocuments: selectedCandidates.map(({ attachment, result }) => ({
+      attachmentId: attachment.id,
+      selectedChunkIndexes: result.chunks.map((chunk) => chunk.index),
+    })),
+  });
+  return applyDocumentContextSelection(candidates, selectedContext, processed.failures);
+}
+
+async function materializeSelectedDocumentImageDrafts({
+  processed,
+  maxAssets,
+  signal,
+  cancellationGate,
+  onDraftMaterialized,
+}: {
+  processed: ProcessedDocumentAttachmentDraftsForInference;
+  maxAssets: number;
+  signal?: AbortSignal;
+  cancellationGate?: AttachmentCancellationGate;
+  onDraftMaterialized: (entry: MaterializedDocumentImageDraft) => void;
+}): Promise<MaterializedDocumentImageDraft[]> {
+  if (maxAssets <= 0) {
+    return [];
+  }
+  const queues = processed.selectedCandidates.flatMap(({ attachment, result }) => {
+    const lease = result.nativeAssetLease;
+    if (!lease) {
+      return [];
+    }
+    const descriptorById = new Map(lease.assets.map((asset) => [asset.id, asset]));
+    const seenAssetIds = new Set<number>();
+    const linkedAssets = result.chunks.flatMap((chunk) => chunk.assetIds ?? [])
+      .flatMap((assetId) => {
+        if (seenAssetIds.has(assetId)) {
+          return [];
+        }
+        seenAssetIds.add(assetId);
+        const descriptor = descriptorById.get(assetId);
+        if (
+          !descriptor
+          || !resolveSupportedChatImageExtensionFromMimeType(descriptor.mediaType)
+          || !validateChatImageAttachmentBounds({
+            size: descriptor.byteLength,
+            width: descriptor.width,
+            height: descriptor.height,
+          }).ok
+        ) {
+          return [];
+        }
+        return [{ attachmentId: attachment.id, assetId, descriptor, lease }];
+      });
+    return linkedAssets.length > 0 ? [linkedAssets] : [];
+  });
+  const orderedCandidates = [] as (typeof queues)[number][number][];
+  for (let queueIndex = 0; orderedCandidates.length < maxAssets; queueIndex += 1) {
+    let found = false;
+    queues.forEach((queue) => {
+      const candidate = queue[queueIndex];
+      if (candidate && orderedCandidates.length < maxAssets) {
+        orderedCandidates.push(candidate);
+        found = true;
+      }
+    });
+    if (!found) {
+      break;
+    }
+  }
+
+  const materializedDrafts: MaterializedDocumentImageDraft[] = [];
+  let remainingByteBudget = maxAssets * MAX_CHAT_IMAGE_ATTACHMENT_BYTES;
+  for (const candidate of orderedCandidates) {
+    if (candidate.descriptor.byteLength > remainingByteBudget) {
+      continue;
+    }
+    throwIfDocumentAssetMaterializationCancelled(signal, cancellationGate);
+    try {
+      const materialized = await candidate.lease.materializeAsset(candidate.assetId, signal);
+      throwIfDocumentAssetMaterializationCancelled(signal, cancellationGate);
+      const copiedDraft = await chatAttachmentStorageService.copyImageAssetToDraft({
+        uri: materialized.localUri,
+        type: 'image',
+        mimeType: materialized.mediaType,
+        fileSize: materialized.byteLength,
+        width: materialized.width,
+        height: materialized.height,
+      });
+      const draft: AttachmentDraft = {
+        ...copiedDraft,
+        source: 'derived_processor',
+        derivedFromAttachmentId: candidate.attachmentId,
+        derivedFromAssetId: candidate.assetId,
+      };
+      try {
+        // `generationWork.waitFor` intentionally detaches from slow work on stop. If copying
+        // completes after that detach, clean the newly owned file locally before any ownership
+        // callback can mutate state that the outer finally block has already drained.
+        throwIfDocumentAssetMaterializationCancelled(signal, cancellationGate);
+      } catch (error) {
+        try {
+          await chatAttachmentStorageService.discardDraft(draft);
+        } catch (discardError) {
+          console.warn('[ChatSession] Failed to discard a cancelled document image draft', {
+            ...getPrivacySafeErrorLogDetails(discardError),
+          });
+        }
+        throw error;
+      }
+      const entry = {
+        documentAttachmentId: candidate.attachmentId,
+        assetId: candidate.assetId,
+        draft,
+      };
+      onDraftMaterialized(entry);
+      materializedDrafts.push(entry);
+      remainingByteBudget -= materialized.byteLength;
+    } catch (error) {
+      throwIfDocumentAssetMaterializationCancelled(signal, cancellationGate);
+      console.warn('[ChatSession] Skipped a document image asset', {
+        ...getPrivacySafeErrorLogDetails(error),
+      });
+    }
+  }
+  return materializedDrafts;
+}
+
+async function discardUnselectedDocumentImageDrafts(
+  entries: readonly MaterializedDocumentImageDraft[],
+  selectedAssetKeys: ReadonlySet<string>,
+): Promise<MaterializedDocumentImageDraft[]> {
+  const retained: MaterializedDocumentImageDraft[] = [];
+  const discarded: MaterializedDocumentImageDraft[] = [];
+  entries.forEach((entry) => {
+    if (selectedAssetKeys.has(`${entry.documentAttachmentId}:${entry.assetId}`)) {
+      retained.push(entry);
+    } else {
+      discarded.push(entry);
+    }
+  });
+  if (discarded.length > 0) {
+    await chatAttachmentStorageService.discardDrafts(discarded.map((entry) => entry.draft));
+  }
+  return retained;
+}
+
+async function releasePocketAnydocAssetLeases(
+  leases: Iterable<PocketAnydocAssetLease>,
+): Promise<void> {
+  await Promise.all(Array.from(leases, async (lease) => {
+    try {
+      await lease.release();
+    } catch (error) {
+      console.warn('[ChatSession] Failed to release a document asset handle', {
+        ...getPrivacySafeErrorLogDetails(error),
+      });
+    }
+  }));
 }
 
 function assertActiveMultimodalReadyForAttachmentMediaPaths({
@@ -1702,6 +2115,109 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   };
 }
 
+async function refineDocumentContextWithExactPromptBudget({
+  question,
+  processed,
+  baseThread,
+  provisionalUserMessage,
+  multimodalReadiness,
+  expectedModelId,
+  attachmentResolution,
+  generationWork,
+}: {
+  question: string;
+  processed: ProcessedDocumentAttachmentDraftsForInference;
+  baseThread: ChatThread;
+  provisionalUserMessage: ChatMessage;
+  multimodalReadiness?: MultimodalReadinessState;
+  expectedModelId: string;
+  attachmentResolution: PreparedAttachmentResolution;
+  generationWork: ChatGenerationWorkHandle;
+}): Promise<ProcessedDocumentAttachmentDraftsForInference> {
+  if (processed.candidates.length === 0) {
+    return processed;
+  }
+
+  const { runtimeConfig } = resolveThreadReasoningRuntimeConfig(baseThread);
+  const maxContextTokens = typeof llmEngineService.getContextSize === 'function'
+    ? llmEngineService.getContextSize()
+    : DEFAULT_CONTEXT_SIZE;
+  const windowOptions = resolveThreadInferenceWindowOptions(baseThread, {
+    maxContextTokens,
+    responseReserveTokens: runtimeConfig.responseReserveTokens,
+  });
+  const tokenCountParams = {
+    enable_thinking: runtimeConfig.enableThinking,
+    reasoning_format: runtimeConfig.reasoningFormat,
+  };
+  const countResolvedMessages = async (messages: readonly LlmChatMessage[]): Promise<number> => {
+    generationWork.assertCurrent();
+    const resolvedMessages = await generationWork.waitFor(
+      resolveRetainedMessagesForInferenceAttachments(
+        messages,
+        multimodalReadiness,
+        provisionalUserMessage.id,
+        attachmentResolution.resolveFile,
+        expectedModelId,
+      ),
+    );
+    generationWork.assertCurrent();
+    return generationWork.waitFor(llmEngineService.countPromptTokens({
+      messages: resolvedMessages,
+      params: tokenCountParams,
+      multimodalReadiness,
+      expectedModelId,
+    }));
+  };
+
+  // Freeze the exact-token history window without document text first. Chunk backoff then
+  // preserves that system/question/history budget instead of replacing removed document chunks
+  // with older turns on every recount.
+  const baseUserMessage: ChatMessage = {
+    ...provisionalUserMessage,
+    contentParts: undefined,
+  };
+  const baseWindow = await buildInferenceWindowWithAccurateTokenCounts(
+    { ...baseThread, messages: [...baseThread.messages, baseUserMessage] },
+    windowOptions,
+    (messages) => countResolvedMessages(messages),
+    { throwIfCancelled: generationWork.assertCurrent },
+  );
+  const latestUserIndex = getLatestUserLlmMessageIndex(baseWindow.messages);
+  if (latestUserIndex < 0) {
+    throw new AppError('message_too_long', 'The document question cannot fit in the current context window.');
+  }
+  const totalPromptBudget = Math.max(
+    0,
+    maxContextTokens - baseWindow.promptSafetyMarginTokens,
+  );
+  const reservedResponseTokens = resolveBalancedResponseReserveTokens(
+    runtimeConfig.responseReserveTokens,
+    totalPromptBudget,
+  );
+  const maxPromptTokens = Math.max(1, totalPromptBudget - reservedResponseTokens);
+  const selectedContext = await selectDocumentContext({
+    question,
+    documents: toDocumentContextInputs(processed.candidates),
+    maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+    maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+    maxPromptTokens,
+    countPromptTokens: async (contentParts) => {
+      const candidateMessages = baseWindow.messages.map((message, index) => (
+        index === latestUserIndex
+          ? { ...message, contentParts: [...contentParts] }
+          : message
+      ));
+      return countResolvedMessages(candidateMessages);
+    },
+  });
+  return applyDocumentContextSelection(
+    processed.candidates,
+    selectedContext,
+    processed.failures,
+  );
+}
+
 function resolveSuccessfulAssistantContent({
   completionContent,
   completionText,
@@ -1769,6 +2285,9 @@ export function getThreadTruncationState(thread: ChatThread, options?: Inference
 }
 
 export const useChatSession = () => {
+  const [isPreparingDocuments, setIsPreparingDocuments] = useState(false);
+  const isMountedRef = useRef(true);
+  const documentPreparationAbortControllersRef = useRef(new Set<AbortController>());
   const activeThread = useChatStore((state) => state.getActiveThread());
   const messageListRevision = useChatStore((state) => state.streamingRevision);
   const inferenceRevision = useChatStore((state) => state.inferenceRevision);
@@ -1807,6 +2326,8 @@ export const useChatSession = () => {
   );
   const appStateRef = useRef<AppStateStatus>(AppState.currentState ?? 'active');
   useEffect(() => {
+    isMountedRef.current = true;
+    const documentPreparationAbortControllers = documentPreparationAbortControllersRef.current;
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       const previousAppState = appStateRef.current;
       appStateRef.current = nextAppState;
@@ -1904,6 +2425,9 @@ export const useChatSession = () => {
     });
 
     return () => {
+      isMountedRef.current = false;
+      documentPreparationAbortControllers.forEach((controller) => controller.abort());
+      documentPreparationAbortControllers.clear();
       subscription.remove();
     };
   }, []);
@@ -3047,8 +3571,16 @@ export const useChatSession = () => {
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(targetModelId);
     const generationWork = beginChatGenerationWork('append_user_message');
+    const documentAbortController = new AbortController();
+    documentPreparationAbortControllersRef.current.add(documentAbortController);
+    const unsubscribeDocumentCancellation = generationWork.onCancel(() => {
+      documentAbortController.abort();
+    });
+    const pocketAnydocAssetLeases = new Set<PocketAnydocAssetLease>();
+    let ownedMaterializedDocumentImageDrafts: MaterializedDocumentImageDraft[] = [];
     attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
     let releaseInteractivePromptPreparation: (() => void) | null = null;
+    let didAppendUserMessage = false;
     try {
       releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
       await generationWork.waitFor(
@@ -3057,12 +3589,49 @@ export const useChatSession = () => {
       await generationWork.waitFor(
         assertMediaDraftAttachmentFilesExist(mediaAttachmentDrafts, attachmentResolution.resolveFile),
       );
-      const processedDocumentAttachments = await generationWork.waitFor(
+      const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
+      let effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
+        ? assertActiveMultimodalReadyForAttachmentMediaPaths({
+            mediaPaths: imageAttachmentMediaPaths,
+            multimodalReadiness: options.multimodalReadiness,
+            expectedModelId: targetModelId,
+            mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
+          })
+        : options.multimodalReadiness;
+      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, targetModelId);
+      const remainingDocumentImageSlots = Math.max(
+        0,
+        MAX_CHAT_IMAGE_ATTACHMENTS - imageAttachmentMediaPaths.length,
+      );
+      let retainNativeDocumentAssetLeases = false;
+      if (
+        documentAttachmentDrafts.length > 0
+        && remainingDocumentImageSlots > 0
+        && isVisionReady(effectiveMultimodalReadiness, targetModelId)
+      ) {
+        const capabilities = await generationWork.waitFor(getPocketAnydocCapabilities());
+        generationWork.assertCurrent();
+        retainNativeDocumentAssetLeases = capabilities.available && capabilities.supportsAssets;
+      }
+      if (documentAttachmentDrafts.length > 0) {
+        setIsPreparingDocuments(true);
+      }
+      let processedDocumentAttachments = await generationWork.waitFor(
         processDocumentAttachmentDraftsForInference(
+          text,
           documentAttachmentDrafts,
+          documentAbortController.signal,
           attachmentResolution.cancellationGate,
+          retainNativeDocumentAssetLeases,
+          (lease) => pocketAnydocAssetLeases.add(lease),
         ),
       );
+      if (processedDocumentAttachments.allFailedError) {
+        if (processedDocumentAttachments.failures.length > 0) {
+          options.onDocumentAttachmentFailures?.(processedDocumentAttachments.failures);
+        }
+        throw processedDocumentAttachments.allFailedError;
+      }
       generationWork.assertCurrent();
       const currentState = useChatStore.getState();
       if (
@@ -3083,23 +3652,235 @@ export const useChatSession = () => {
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
 
+      const userMessageId = createChatId('message');
+      const userMessageCreatedAt = Date.now();
+      const normalizedText = text.trim();
+      const provisionalThreadId = existingThreadAtStart?.id ?? 'pending';
+      const provisionalDocumentContentParts = processedDocumentAttachments.contentParts;
+      const provisionalUserMessageContent = normalizedText.length > 0
+        || provisionalDocumentContentParts.length === 0
+        ? normalizedText
+        : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
+      const provisionalMessageAttachments = [
+        ...materializeAttachmentDraftsForMessage({
+          threadId: provisionalThreadId,
+          messageId: userMessageId,
+          drafts: attachmentDrafts,
+        }),
+        ...processedDocumentAttachments.attachments.map((attachment) => ({
+          ...attachment,
+          threadId: provisionalThreadId,
+          messageId: userMessageId,
+        })),
+        ...materializeMediaDraftsForMessage({
+          threadId: provisionalThreadId,
+          messageId: userMessageId,
+          drafts: mediaAttachmentDrafts,
+        }),
+      ];
+      const newThreadPresetSnapshot = resolvePresetSnapshot(settings.activePresetId);
+      const provisionalBaseThread: ChatThread = existingThreadAtStart ?? {
+        id: provisionalThreadId,
+        title: 'New Conversation',
+        titleSource: 'derived',
+        modelId: targetModelId,
+        activeModelId: targetModelId,
+        presetId: settings.activePresetId,
+        presetSnapshot: newThreadPresetSnapshot,
+        paramsSnapshot: newThreadModelParams,
+        messages: [],
+        createdAt: userMessageCreatedAt,
+        updatedAt: userMessageCreatedAt,
+        status: 'idle',
+      };
+      const provisionalUserMessage: ChatMessage = {
+        id: userMessageId,
+        role: 'user',
+        content: provisionalUserMessageContent,
+        createdAt: userMessageCreatedAt,
+        state: 'complete',
+        kind: 'message',
+        modelId: targetModelId,
+        ...(provisionalDocumentContentParts.length > 0
+          ? { contentParts: provisionalDocumentContentParts }
+          : null),
+        ...(provisionalMessageAttachments.length > 0
+          ? { attachments: provisionalMessageAttachments }
+          : null),
+      };
+      processedDocumentAttachments = await generationWork.waitFor(
+        refineDocumentContextWithExactPromptBudget({
+          question: text,
+          processed: processedDocumentAttachments,
+          baseThread: provisionalBaseThread,
+          provisionalUserMessage,
+          multimodalReadiness: effectiveMultimodalReadiness,
+          expectedModelId: targetModelId,
+          attachmentResolution,
+          generationWork,
+        }),
+      );
+      generationWork.assertCurrent();
+      const stateAfterDocumentTokenization = useChatStore.getState();
+      if (
+        stateAfterDocumentTokenization.inferenceRevision !== interactiveRevisionAtStart
+        || stateAfterDocumentTokenization.activeThreadId !== activeThreadIdAtStart
+        || (
+          existingThreadAtStart != null
+          && (
+            stateAfterDocumentTokenization.getThread(existingThreadAtStart.id) !== existingThreadAtStart
+            || getThreadActiveModelId(existingThreadAtStart) !== targetModelId
+          )
+        )
+      ) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while selecting document context. Try again.',
+        );
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+
+      if (retainNativeDocumentAssetLeases && pocketAnydocAssetLeases.size > 0) {
+        const initiallyMaterializedDocumentImages = await materializeSelectedDocumentImageDrafts({
+          processed: processedDocumentAttachments,
+          maxAssets: remainingDocumentImageSlots,
+          signal: documentAbortController.signal,
+          cancellationGate: attachmentResolution.cancellationGate,
+          onDraftMaterialized: (entry) => {
+            ownedMaterializedDocumentImageDrafts.push(entry);
+          },
+        });
+        generationWork.assertCurrent();
+        const textSelectedDocumentAttachments = processedDocumentAttachments;
+        let budgetedDocumentImages = [...initiallyMaterializedDocumentImages];
+        while (true) {
+          const materializedImageDrafts = budgetedDocumentImages.map((entry) => entry.draft);
+          const materializedImageMediaPaths = getDraftImageAttachmentMediaPaths(materializedImageDrafts);
+          if (materializedImageMediaPaths.length > 0) {
+            effectiveMultimodalReadiness = assertActiveMultimodalReadyForAttachmentMediaPaths({
+              mediaPaths: materializedImageMediaPaths,
+              multimodalReadiness: effectiveMultimodalReadiness,
+              expectedModelId: targetModelId,
+              mediaPathOccurrenceCount: imageAttachmentMediaPaths.length + materializedImageMediaPaths.length,
+            });
+            attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, targetModelId);
+          }
+          const provisionalDocumentImageAttachments = materializeAttachmentDraftsForMessage({
+            threadId: provisionalThreadId,
+            messageId: userMessageId,
+            drafts: materializedImageDrafts,
+          });
+          try {
+            const mediaBudgetSelection = await generationWork.waitFor(
+              refineDocumentContextWithExactPromptBudget({
+                question: text,
+                processed: finalizeSelectedDocumentAssetWarnings(
+                  textSelectedDocumentAttachments,
+                  budgetedDocumentImages,
+                ),
+                baseThread: provisionalBaseThread,
+                provisionalUserMessage: {
+                  ...provisionalUserMessage,
+                  attachments: [
+                    ...provisionalMessageAttachments,
+                    ...provisionalDocumentImageAttachments,
+                  ],
+                },
+                multimodalReadiness: effectiveMultimodalReadiness,
+                expectedModelId: targetModelId,
+                attachmentResolution,
+                generationWork,
+              }),
+            );
+            generationWork.assertCurrent();
+            const retainedDocumentIds = new Set(
+              mediaBudgetSelection.selectedCandidates.map(({ attachment }) => attachment.id),
+            );
+            const droppedDocumentForMedia = textSelectedDocumentAttachments.selectedCandidates.some(
+              ({ attachment }) => !retainedDocumentIds.has(attachment.id),
+            );
+            if (droppedDocumentForMedia && budgetedDocumentImages.length > 0) {
+              const removed = budgetedDocumentImages.at(-1)!;
+              await chatAttachmentStorageService.discardDraft(removed.draft);
+              ownedMaterializedDocumentImageDrafts = ownedMaterializedDocumentImageDrafts.filter(
+                (entry) => entry !== removed,
+              );
+              budgetedDocumentImages = budgetedDocumentImages.slice(0, -1);
+              processedDocumentAttachments = textSelectedDocumentAttachments;
+              continue;
+            }
+            processedDocumentAttachments = mediaBudgetSelection;
+            break;
+          } catch (error) {
+            throwIfDocumentAssetMaterializationCancelled(
+              documentAbortController.signal,
+              attachmentResolution.cancellationGate,
+            );
+            const appError = toAppError(error);
+            if (
+              budgetedDocumentImages.length === 0
+              || (
+                appError.code !== 'message_too_long'
+                && appError.code !== 'chat_attachment_too_large_for_context'
+              )
+            ) {
+              throw error;
+            }
+            const removed = budgetedDocumentImages.at(-1)!;
+            await chatAttachmentStorageService.discardDraft(removed.draft);
+            ownedMaterializedDocumentImageDrafts = ownedMaterializedDocumentImageDrafts.filter(
+              (entry) => entry !== removed,
+            );
+            budgetedDocumentImages = budgetedDocumentImages.slice(0, -1);
+            processedDocumentAttachments = textSelectedDocumentAttachments;
+          }
+        }
+        const retainedMaterializedDocumentImages = await discardUnselectedDocumentImageDrafts(
+          budgetedDocumentImages,
+          collectSelectedDocumentAssetKeys(processedDocumentAttachments),
+        );
+        ownedMaterializedDocumentImageDrafts = retainedMaterializedDocumentImages;
+      }
+      processedDocumentAttachments = finalizeSelectedDocumentAssetWarnings(
+        processedDocumentAttachments,
+        ownedMaterializedDocumentImageDrafts,
+      );
+      generationWork.assertCurrent();
+      const stateAfterDocumentAssets = useChatStore.getState();
+      if (
+        stateAfterDocumentAssets.inferenceRevision !== interactiveRevisionAtStart
+        || stateAfterDocumentAssets.activeThreadId !== activeThreadIdAtStart
+        || (
+          existingThreadAtStart != null
+          && (
+            stateAfterDocumentAssets.getThread(existingThreadAtStart.id) !== existingThreadAtStart
+            || getThreadActiveModelId(existingThreadAtStart) !== targetModelId
+          )
+        )
+      ) {
+        throw new AppError(
+          'action_failed',
+          'The conversation changed while materializing document images. Try again.',
+        );
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
+      pocketAnydocAssetLeases.clear();
+
+      if (processedDocumentAttachments.failures.length > 0) {
+        options.onDocumentAttachmentFailures?.(processedDocumentAttachments.failures);
+      }
+      if (processedDocumentAttachments.allFailedError) {
+        throw processedDocumentAttachments.allFailedError;
+      }
+
       const documentContentParts = processedDocumentAttachments.contentParts;
-      const imageAttachmentMediaPaths = getDraftImageAttachmentMediaPaths(attachmentDrafts);
-      const effectiveMultimodalReadiness = imageAttachmentMediaPaths.length > 0
-        ? assertActiveMultimodalReadyForAttachmentMediaPaths({
-            mediaPaths: imageAttachmentMediaPaths,
-            multimodalReadiness: options.multimodalReadiness,
-            expectedModelId: targetModelId,
-            mediaPathOccurrenceCount: imageAttachmentMediaPaths.length,
-          })
-        : options.multimodalReadiness;
-      attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, targetModelId);
 
       const threadId = existingThreadAtStart?.id
         ?? createThread({
           modelId: targetModelId,
           presetId: settings.activePresetId,
-          presetSnapshot: resolvePresetSnapshot(settings.activePresetId),
+          presetSnapshot: newThreadPresetSnapshot,
           paramsSnapshot: newThreadModelParams,
         });
 
@@ -3113,8 +3894,6 @@ export const useChatSession = () => {
       const threadForSend = assertThreadModelExecutionInvariant(threadId, targetModelId);
       const threadModelId = getThreadActiveModelId(threadForSend);
 
-      const userMessageId = createChatId('message');
-      const normalizedText = text.trim();
       const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
         ? normalizedText
         : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
@@ -3123,6 +3902,11 @@ export const useChatSession = () => {
           threadId,
           messageId: userMessageId,
           drafts: attachmentDrafts,
+        }),
+        ...materializeAttachmentDraftsForMessage({
+          threadId,
+          messageId: userMessageId,
+          drafts: ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
         }),
         ...processedDocumentAttachments.attachments.map((attachment) => ({
           ...attachment,
@@ -3139,7 +3923,7 @@ export const useChatSession = () => {
         id: userMessageId,
         role: 'user',
         content: userMessageContent,
-        createdAt: Date.now(),
+        createdAt: userMessageCreatedAt,
         state: 'complete',
         kind: 'message',
         modelId: threadModelId,
@@ -3150,6 +3934,8 @@ export const useChatSession = () => {
       };
 
       appendMessage(threadId, userMessage);
+      didAppendUserMessage = true;
+      ownedMaterializedDocumentImageDrafts = [];
       options.onUserMessageAppended?.(userMessage);
 
       const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
@@ -3162,10 +3948,32 @@ export const useChatSession = () => {
       });
     } catch (error) {
       if (isChatGenerationCancelledError(error)) {
+        if (!didAppendUserMessage) {
+          options.onPreparationCancelled?.();
+        }
         return;
       }
       throw error;
     } finally {
+      unsubscribeDocumentCancellation();
+      documentPreparationAbortControllersRef.current.delete(documentAbortController);
+      if (ownedMaterializedDocumentImageDrafts.length > 0) {
+        try {
+          await chatAttachmentStorageService.discardDrafts(
+            ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+          );
+        } catch (error) {
+          console.warn('[ChatSession] Failed to discard unpersisted document image drafts', {
+            ...getPrivacySafeErrorLogDetails(error),
+          });
+        }
+        ownedMaterializedDocumentImageDrafts = [];
+      }
+      await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
+      pocketAnydocAssetLeases.clear();
+      if (isMountedRef.current) {
+        setIsPreparingDocuments(false);
+      }
       releaseInteractivePromptPreparation?.();
       generationWork.finish();
     }
@@ -3491,6 +4299,7 @@ export const useChatSession = () => {
     messages: activeThread?.messages ?? [],
     messageListRevision,
     isGenerating: activeThread?.status === 'generating',
+    isPreparingDocuments,
     shouldOfferSummary: truncationState.shouldOfferSummary,
     truncatedMessageCount: truncationState.truncatedMessageIds.length,
     appendUserMessage,

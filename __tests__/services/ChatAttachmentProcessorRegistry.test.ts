@@ -1,6 +1,6 @@
 jest.mock('expo-file-system/legacy', () => ({
   EncodingType: { Base64: 'base64', UTF8: 'utf8' },
-  documentDirectory: 'test-dir/',
+  documentDirectory: 'file:///test-dir/',
   getInfoAsync: jest.fn(),
   readAsStringAsync: jest.fn(),
 }));
@@ -8,15 +8,28 @@ jest.mock('expo-file-system/legacy', () => ({
 import { fromByteArray } from 'base64-js';
 import { deflate } from 'pako';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as RNFS from 'react-native-fs';
 import {
   buildDocumentAttachmentTextPart,
   chatAttachmentProcessorRegistry,
   DOCUMENT_TEXT_PROCESSOR_ID,
   DOCUMENT_TEXT_PROCESSOR_VERSION,
+  MAX_DIRECT_DOCUMENT_STRUCTURAL_LINES,
   withProcessedDocumentAttachmentMetadata,
+  type PocketAnydocAssetLease,
 } from '../../src/services/ChatAttachmentProcessorRegistry';
 import { AppError } from '../../src/services/AppError';
 import type { ChatAttachment } from '../../src/types/attachments';
+import {
+  MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES,
+} from '../../src/utils/chatAttachments';
+import {
+  __setPocketAnydocNativeModuleForTests,
+  type PocketAnydocNativeModule,
+} from '../../modules/pocket-anydoc';
 
 type ChatDocumentAttachment = Extract<ChatAttachment, { kind: 'document' }>;
 
@@ -73,7 +86,7 @@ function createDocumentAttachment(
     state: 'staged',
     threadId: 'thread-1',
     messageId: 'message-1',
-    localUri: 'test-dir/chat-attachments/document-1.txt',
+    localUri: 'file:///test-dir/chat-attachments/document-1.txt',
     pathCategory: 'chat_attachment',
     fileName: 'document-1.txt',
     mimeType: 'text/plain',
@@ -102,6 +115,56 @@ async function expectProcessorError(
   throw new Error('Expected processor to reject.');
 }
 
+function createPocketAnydocNativeModule(
+  overrides: Partial<PocketAnydocNativeModule> = {},
+): jest.Mocked<PocketAnydocNativeModule> {
+  return {
+    getCapabilities: jest.fn(async () => ({ ok: true, data: {} })),
+    getVersion: jest.fn(async () => ({ ok: true, data: {} })),
+    prepareDocument: jest.fn(async () => ({
+      ok: true,
+      data: {
+        handle: 'handle-1',
+        canonicalFormat: 'docx',
+        parserId: 'anydoc',
+        parserVersion: '0.1.7',
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        sourceByteCount: 128,
+        sourceCharCount: 1_000,
+        contentSha256: 'b'.repeat(64),
+        chunkCount: 3,
+        pageCount: 2,
+        assetCount: 1,
+        warnings: ['assets_skipped'],
+      },
+    })),
+    selectContext: jest.fn(async () => ({
+      ok: true,
+      data: {
+        chunks: [{ index: 1, text: 'Quarterly total is 42.', kind: 'paragraph', pageNumber: 2 }],
+        selectedCharCount: 22,
+        truncated: true,
+        warnings: ['context_truncated'],
+      },
+    })),
+    materializeAsset: jest.fn(async ({ assetId }) => ({
+      ok: true,
+      data: {
+        assetId,
+        mediaType: 'image/png',
+        byteLength: 512,
+        sha256: 'c'.repeat(64),
+        width: 32,
+        height: 24,
+        localUri: `file:///data/user/0/com.pocket/cache/pocket-anydoc-assets/${assetId.toString(16).padStart(32, '0')}.png`,
+      },
+    })),
+    cancel: jest.fn(async () => ({ ok: true, data: { cancelledCount: 1 } })),
+    release: jest.fn(async () => ({ ok: true, data: { releasedCount: 1 } })),
+    ...overrides,
+  } as jest.Mocked<PocketAnydocNativeModule>;
+}
+
 describe('ChatAttachmentProcessorRegistry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -111,6 +174,11 @@ describe('ChatAttachmentProcessorRegistry', () => {
       size: 128,
     });
     (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('Document text');
+    __setPocketAnydocNativeModuleForTests(undefined);
+  });
+
+  afterEach(() => {
+    __setPocketAnydocNativeModuleForTests(undefined);
   });
 
   it('processes app-owned text documents into bounded text content parts', async () => {
@@ -118,7 +186,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
 
     const result = await chatAttachmentProcessorRegistry.processAttachment(createDocumentAttachment());
 
-    expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith('test-dir/chat-attachments/document-1.txt', {
+    expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith('file:///test-dir/chat-attachments/document-1.txt', {
       encoding: FileSystem.EncodingType.UTF8,
     });
     expect(result).toEqual(expect.objectContaining({
@@ -131,7 +199,8 @@ describe('ChatAttachmentProcessorRegistry', () => {
       truncated: false,
       extractedCharCount: 17,
       sourceCharCount: 17,
-      contentHash: expect.stringMatching(/^fnv1a32:[0-9a-f]{8}$/u),
+      contentHash: `sha256:${'a'.repeat(64)}`,
+      contentSha256: 'a'.repeat(64),
     }));
 
     const textPart = buildDocumentAttachmentTextPart(result);
@@ -146,7 +215,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
 
     const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
       createDocumentAttachment({
-        localUri: 'test-dir/chat-attachments/payload.json',
+        localUri: 'file:///test-dir/chat-attachments/payload.json',
         fileName: 'payload.json',
         mimeType: 'application/json',
       }),
@@ -160,22 +229,99 @@ describe('ChatAttachmentProcessorRegistry', () => {
     }));
   });
 
-  it('truncates document text deterministically to the configured prompt budget', async () => {
-    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('abcdefghijklmno');
+  it('selects only whole structural chunks that fit the configured prompt budget', async () => {
+    const firstParagraph = 'alpha '.repeat(70).trim();
+    const secondParagraph = 'beta '.repeat(70).trim();
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(
+      `${firstParagraph}\n\n${secondParagraph}`,
+    );
 
     const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
       createDocumentAttachment(),
-      { maxChars: 10 },
+      { maxChars: 500 },
     );
 
     expect(result).toEqual(expect.objectContaining({
-      text: 'abcdefghij',
+      text: firstParagraph,
       truncated: true,
-      extractedCharCount: 10,
-      sourceCharCount: 15,
+      extractedCharCount: firstParagraph.length,
+      sourceCharCount: `${firstParagraph}\n\n${secondParagraph}`.length,
     }));
     expect(buildDocumentAttachmentTextPart(result).text)
-      .toContain('Excerpt: first 10 of 15 characters');
+      .toContain(`Selected context: ${firstParagraph.length} of ${`${firstParagraph}\n\n${secondParagraph}`.length} characters (truncated)`);
+  });
+
+  it('retains a late relevant whole chunk instead of truncating selected chunks in source order', async () => {
+    const earlyParagraph = 'background '.repeat(40).trim();
+    const lateRelevantParagraph = 'needle evidence '.repeat(28).trim();
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(
+      `${earlyParagraph}\n\n${lateRelevantParagraph}`,
+    );
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment(),
+      { maxChars: 500, query: 'needle evidence' },
+    );
+
+    expect(result.text).toBe(lateRelevantParagraph);
+    expect(result.text).not.toContain(earlyParagraph);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('routes direct Markdown through heading-aware chunking and retains section metadata', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue([
+      '# Overview',
+      'General background.',
+      '',
+      'Revenue details',
+      '---------------',
+      'The needle revenue value is 42 credits.',
+    ].join('\n'));
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        fileName: 'report.md',
+        localUri: 'file:///test-dir/chat-attachments/report.md',
+        mimeType: 'text/markdown',
+      }),
+      { maxChunks: 1, query: 'needle revenue' },
+    );
+
+    expect(result.canonicalFormat).toBe('markdown');
+    expect(result.chunks).toEqual([
+      expect.objectContaining({
+        kind: 'paragraph',
+        heading: 'Revenue details',
+        text: 'The needle revenue value is 42 credits.',
+      }),
+    ]);
+  });
+
+  it('routes direct TSV through row-atomic table chunking and safely omits an oversized row', async () => {
+    const oversizedRow = `oversized\t${'x'.repeat(5_000)}`;
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue([
+      'name\tvalue',
+      oversizedRow,
+      'target\t42',
+    ].join('\n'));
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        fileName: 'table.tsv',
+        localUri: 'file:///test-dir/chat-attachments/table.tsv',
+        mimeType: 'text/tab-separated-values',
+      }),
+      { maxChars: 800, maxChunks: 3, query: 'target' },
+    );
+
+    expect(result.canonicalFormat).toBe('tsv');
+    expect(result.chunkCount).toBe(3);
+    expect(result.chunks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'table', text: 'target\t42' }),
+    ]));
+    expect(result.chunks.every((chunk) => chunk.kind === 'table')).toBe(true);
+    expect(result.text).not.toContain(oversizedRow);
+    expect(result.warnings).toContain('context_truncated');
   });
 
   it('rejects attachments outside app-owned chat attachment storage without leaking paths', async () => {
@@ -200,14 +346,14 @@ describe('ChatAttachmentProcessorRegistry', () => {
 
     const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
       createDocumentAttachment({
-        localUri: 'test-dir/chat-attachments/report.pdf',
+        localUri: 'file:///test-dir/chat-attachments/report.pdf',
         fileName: 'report.pdf',
         mimeType: 'application/pdf',
         sizeBytes: 2048,
       }),
     );
 
-    expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith('test-dir/chat-attachments/report.pdf', {
+    expect(FileSystem.readAsStringAsync).toHaveBeenCalledWith('file:///test-dir/chat-attachments/report.pdf', {
       encoding: FileSystem.EncodingType.Base64,
     });
     expect(result).toEqual(expect.objectContaining({
@@ -228,7 +374,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
 
     const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
       createDocumentAttachment({
-        localUri: 'test-dir/chat-attachments/inline-image.pdf',
+        localUri: 'file:///test-dir/chat-attachments/inline-image.pdf',
         fileName: 'inline-image.pdf',
         mimeType: 'application/pdf',
         sizeBytes: 2048,
@@ -239,6 +385,8 @@ describe('ChatAttachmentProcessorRegistry', () => {
       runtimeInput: 'document_text',
       processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION,
       text: 'Visible before image\nVisible after image',
+      contentHash: `sha256:${'a'.repeat(64)}`,
+      contentSha256: 'a'.repeat(64),
       pageCount: 1,
       isScanned: false,
     }));
@@ -251,7 +399,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
     const error = await expectProcessorError(
       chatAttachmentProcessorRegistry.processDocumentTextAttachment(
         createDocumentAttachment({
-          localUri: 'test-dir/chat-attachments/compressed.pdf',
+          localUri: 'file:///test-dir/chat-attachments/compressed.pdf',
           fileName: 'compressed.pdf',
           mimeType: 'application/pdf',
           sizeBytes: 4096,
@@ -259,7 +407,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
       ),
     );
 
-    expect(error.code).toBe('chat_attachment_too_large_for_context');
+    expect(error.code).toBe('chat_attachment_document_resource_limit');
     expect(error.details).toEqual(expect.objectContaining({ reason: 'resource_limit' }));
   });
 
@@ -278,7 +426,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
     const error = await expectProcessorError(
       chatAttachmentProcessorRegistry.processDocumentTextAttachment(
         createDocumentAttachment({
-          localUri: 'test-dir/chat-attachments/scanned.pdf',
+          localUri: 'file:///test-dir/chat-attachments/scanned.pdf',
           fileName: 'scanned.pdf',
           mimeType: 'application/pdf',
           sizeBytes: 2048,
@@ -306,7 +454,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
     const error = await expectProcessorError(
       chatAttachmentProcessorRegistry.processDocumentTextAttachment(
         createDocumentAttachment({
-          localUri: 'test-dir/chat-attachments/missing-content.pdf',
+          localUri: 'file:///test-dir/chat-attachments/missing-content.pdf',
           fileName: 'missing-content.pdf',
           mimeType: 'application/pdf',
           sizeBytes: 2048,
@@ -321,21 +469,373 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(JSON.stringify(error.details)).not.toContain('missing-content.pdf');
   });
 
-  it('rejects unsupported document types without leaking filenames', async () => {
+  it('reports a stable unavailable-native error for supported Office documents without leaking filenames', async () => {
     const error = await expectProcessorError(
       chatAttachmentProcessorRegistry.processDocumentTextAttachment(
         createDocumentAttachment({
-          localUri: 'test-dir/chat-attachments/secret-contract.docx',
+          localUri: 'file:///test-dir/chat-attachments/secret-contract.docx',
           fileName: 'secret-contract.docx',
           mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         }),
       ),
     );
 
-    expect(error.code).toBe('chat_attachment_unsupported_type');
+    expect(error.code).toBe('chat_attachment_native_unavailable');
     expect(error.message).not.toContain('secret-contract.docx');
     expect(JSON.stringify(error.details)).not.toContain('secret-contract.docx');
     expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+  });
+
+  it('routes Office documents through bounded native prepare/select and releases the handle', async () => {
+    const nativeModule = createPocketAnydocNativeModule();
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/report.docx',
+        fileName: 'stored.docx',
+        displayName: 'Original report.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }),
+      { query: 'What is the quarterly total?' },
+    );
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledWith(expect.objectContaining({
+      localUri: 'file:///test-dir/chat-attachments/report.docx',
+      displayName: 'Original report.docx',
+      sourceSizeBytes: 128,
+    }));
+    expect(nativeModule.selectContext).toHaveBeenCalledWith(expect.objectContaining({
+      handle: 'handle-1',
+      query: 'What is the quarterly total?',
+    }));
+    expect(nativeModule.release).toHaveBeenCalledWith('handle-1');
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({
+      processorId: 'pocket-anydoc',
+      canonicalFormat: 'docx',
+      text: 'Quarterly total is 42.',
+      contentHash: `sha256:${'b'.repeat(64)}`,
+      parserVersion: '0.1.7',
+      pageCount: 2,
+      assetCount: 1,
+      warnings: ['assets_skipped', 'context_truncated'],
+    }));
+  });
+
+  it.each([
+    [
+      'a structured extension reported as text/plain',
+      'report.docx',
+      'text/plain',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ],
+    ['a known PDF MIME renamed to .bin', 'renamed.bin', 'application/pdf', 'application/pdf'],
+    [
+      'a known DOCX MIME with a misleading .pdf suffix',
+      'misleading.pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ],
+    [
+      'a generic provider MIME with a controlled DOCX suffix',
+      'generic.docx',
+      'application/octet-stream',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ],
+  ] as const)('routes %s through native content detection', async (
+    _label,
+    fileName,
+    mimeType,
+    declaredMimeType,
+  ) => {
+    const nativeModule = createPocketAnydocNativeModule();
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: `file:///test-dir/chat-attachments/${fileName}`,
+        fileName,
+        mimeType,
+      }),
+    );
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledWith(expect.objectContaining({
+      declaredMimeType,
+    }));
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['document_too_large', 'max_format_source_bytes', 'chat_attachment_document_too_large'],
+    ['resource_limit', 'max_work_units', 'chat_attachment_document_resource_limit'],
+  ] as const)('keeps native %s distinct with only its safe limit kind', async (
+    nativeCode,
+    limit,
+    expectedCode,
+  ) => {
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(async () => ({
+        ok: false,
+        error: {
+          code: nativeCode,
+          limit,
+          message: 'C:\\private\\secret.docx exceeded an internal parser limit',
+          retryable: false,
+        },
+      })),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'file:///test-dir/chat-attachments/secret.docx',
+          fileName: 'secret.docx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+      ),
+    );
+
+    expect(error.code).toBe(expectedCode);
+    expect(error.details).toEqual(expect.objectContaining({ reason: nativeCode, limit }));
+    expect(error.message).not.toContain('secret.docx');
+    expect(JSON.stringify(error.details)).not.toContain('private');
+  });
+
+  it('requests bounded native overview coverage for explicit summaries', async () => {
+    const nativeModule = createPocketAnydocNativeModule();
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/report.docx',
+        fileName: 'report.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }),
+      {
+        query: 'Перескажи весь документ',
+        maxChars: Number.MAX_SAFE_INTEGER,
+        maxChunks: Number.MAX_SAFE_INTEGER,
+      },
+    );
+
+    expect(nativeModule.selectContext).toHaveBeenCalledWith(expect.objectContaining({
+      query: '',
+      maxChars: 64_000,
+      maxChunks: 64,
+    }));
+  });
+
+  it('defers final skipped-assets warnings until the chat session knows which assets were delivered', async () => {
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(async () => ({
+        ok: true,
+        data: {
+          handle: 'asset-handle',
+          canonicalFormat: 'docx',
+          parserId: 'anydoc',
+          parserVersion: '0.1.7',
+          exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+          sourceByteCount: 128,
+          sourceCharCount: 1_000,
+          contentSha256: 'e'.repeat(64),
+          chunkCount: 3,
+          assetCount: 2,
+          warnings: [],
+        },
+      })),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/assets.docx',
+        fileName: 'assets.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }),
+    );
+
+    expect(result.assetCount).toBe(2);
+    expect(result.warnings).not.toContain('assets_skipped');
+  });
+
+  it('retains an opt-in asset lease through selected-chunk materialization and retries release', async () => {
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(async () => ({
+        ok: true,
+        data: {
+          handle: 'leased-handle',
+          canonicalFormat: 'docx',
+          parserId: 'anydoc',
+          parserVersion: '0.1.7',
+          exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+          sourceByteCount: 128,
+          sourceCharCount: 21,
+          contentSha256: 'b'.repeat(64),
+          chunkCount: 1,
+          assetCount: 1,
+          assets: [{
+            id: 7,
+            mediaType: 'image/png',
+            byteLength: 512,
+            sha256: 'c'.repeat(64),
+            width: 32,
+            height: 24,
+          }],
+          warnings: ['assets_skipped'],
+        },
+      })),
+      selectContext: jest.fn(async () => ({
+        ok: true,
+        data: {
+          chunks: [{
+            index: 0,
+            text: '[asset:7 alt="chart"]',
+            kind: 'paragraph',
+            assetIds: [7],
+          }],
+          selectedCharCount: 21,
+          truncated: false,
+          warnings: ['assets_skipped'],
+        },
+      })),
+      release: jest.fn()
+        .mockRejectedValueOnce(new Error('first release failed'))
+        .mockResolvedValueOnce({ ok: true, data: { releasedCount: 1 } }),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    let lease: PocketAnydocAssetLease | undefined;
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/assets.docx',
+        fileName: 'assets.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }),
+      {
+        retainNativeAssetLease: true,
+        onNativeAssetLeaseCreated: (createdLease) => {
+          lease = createdLease;
+        },
+      },
+    );
+
+    expect(result.nativeAssetLease).toBe(lease);
+    expect(nativeModule.release).not.toHaveBeenCalled();
+    await expect(lease?.materializeAsset(7)).resolves.toEqual(expect.objectContaining({
+      assetId: 7,
+      localUri: `file:///data/user/0/com.pocket/cache/pocket-anydoc-assets/${'7'.padStart(32, '0')}.png`,
+    }));
+    await expect(lease?.release()).rejects.toMatchObject({ code: 'native_failed' });
+    await expect(lease?.release()).resolves.toBeUndefined();
+    expect(nativeModule.release).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not run the Base64 PDF fallback after a successful native parse', async () => {
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(async () => ({
+        ok: true,
+        data: {
+          handle: 'pdf-handle',
+          canonicalFormat: 'pdf',
+          parserId: 'anydoc',
+          parserVersion: '0.1.7',
+          exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+          sourceByteCount: 128,
+          sourceCharCount: 22,
+          contentSha256: 'c'.repeat(64),
+          chunkCount: 1,
+          pageCount: 1,
+          assetCount: 0,
+          warnings: [],
+        },
+      })),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/report.pdf',
+        fileName: 'report.pdf',
+        mimeType: 'application/pdf',
+      }),
+    );
+
+    expect(result.processorId).toBe('pocket-anydoc');
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+    expect(nativeModule.release).toHaveBeenCalledWith('pdf-handle');
+  });
+
+  it('maps native content detection rejection instead of trusting a supported extension', async () => {
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(async () => ({
+        ok: false,
+        error: { code: 'unsupported_format', message: 'unsupported', retryable: false },
+      })),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/not-really-office.docx',
+        fileName: 'not-really-office.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      })),
+    );
+
+    expect(error.code).toBe('chat_attachment_unsupported_type');
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+  });
+
+  it('cancels native work on abort and releases a stale successful handle', async () => {
+    let resolvePrepare!: (value: unknown) => void;
+    let markPrepareStarted!: () => void;
+    const prepareStarted = new Promise<void>((resolve) => {
+      markPrepareStarted = resolve;
+    });
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(() => {
+        markPrepareStarted();
+        return new Promise((resolve) => {
+          resolvePrepare = resolve;
+        });
+      }),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const controller = new AbortController();
+    const processing = chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/report.docx',
+        fileName: 'report.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }),
+      { signal: controller.signal, requestId: 'abort-request' },
+    );
+    await prepareStarted;
+
+    controller.abort();
+    expect(nativeModule.cancel).toHaveBeenCalledWith('abort-request');
+    resolvePrepare({
+      ok: true,
+      data: {
+        handle: 'stale-handle',
+        canonicalFormat: 'docx',
+        parserId: 'anydoc',
+        parserVersion: '0.1.7',
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        sourceByteCount: 128,
+        sourceCharCount: 100,
+        contentSha256: 'd'.repeat(64),
+        chunkCount: 1,
+        assetCount: 0,
+        warnings: [],
+      },
+    });
+    const error = await expectProcessorError(processing);
+
+    expect(error.code).toBe('chat_attachment_processing_cancelled');
+    expect(nativeModule.selectContext).not.toHaveBeenCalled();
+    expect(nativeModule.release).toHaveBeenCalledWith('stale-handle');
   });
 
   it('rejects corrupt binary-looking text payloads', async () => {
@@ -357,7 +857,7 @@ describe('ChatAttachmentProcessorRegistry', () => {
     const error = await expectProcessorError(
       chatAttachmentProcessorRegistry.processDocumentTextAttachment(
         createDocumentAttachment({
-          localUri: 'test-dir/chat-attachments/broken.json',
+          localUri: 'file:///test-dir/chat-attachments/broken.json',
           fileName: 'broken.json',
           mimeType: 'application/json',
         }),
@@ -368,6 +868,83 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(error.details).toEqual(expect.objectContaining({
       reason: 'invalid_json',
     }));
+  });
+
+  it.each([
+    ['text', 'empty.txt', 'text/plain'],
+    ['TSV', 'empty.tsv', 'text/tab-separated-values'],
+  ] as const)('maps an empty direct %s document to no-extractable-text', async (
+    _label,
+    fileName,
+    mimeType,
+  ) => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(' \r\n\t ');
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: `file:///test-dir/chat-attachments/${fileName}`,
+          fileName,
+          mimeType,
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_document_no_extractable_text');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'no_extractable_text' }));
+  });
+
+  it('keeps whitespace-only JSON on the stable parse-failed contract', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(' \r\n ');
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'file:///test-dir/chat-attachments/empty.json',
+          fileName: 'empty.json',
+          mimeType: 'application/json',
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_parse_failed');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'invalid_json' }));
+  });
+
+  it('rejects malicious direct documents with excessive structural lines before chunk allocation', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(
+      'a\n'.repeat(MAX_DIRECT_DOCUMENT_STRUCTURAL_LINES + 1),
+    );
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'file:///test-dir/chat-attachments/many-lines.tsv',
+          fileName: 'many-lines.tsv',
+          mimeType: 'text/tab-separated-values',
+        }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_document_resource_limit');
+    expect(error.details).toEqual(expect.objectContaining({
+      reason: 'max_direct_lines',
+      maxLines: MAX_DIRECT_DOCUMENT_STRUCTURAL_LINES,
+    }));
+  });
+
+  it('rejects a direct source replaced between read and identity publication', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue('stable-looking text');
+    (RNFS.hash as jest.Mock)
+      .mockResolvedValueOnce('a'.repeat(64))
+      .mockResolvedValueOnce('b'.repeat(64));
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment()),
+    );
+
+    expect(error.code).toBe('chat_attachment_corrupt');
+    expect(error.details).toEqual(expect.objectContaining({ reason: 'source_changed' }));
   });
 
   it('rejects documents that exceed the configured local processing file limit', async () => {
@@ -384,11 +961,49 @@ describe('ChatAttachmentProcessorRegistry', () => {
       ),
     );
 
-    expect(error.code).toBe('chat_attachment_too_large_for_context');
+    expect(error.code).toBe('chat_attachment_document_too_large');
     expect(error.details).toEqual(expect.objectContaining({
       maxFileBytes: 1024,
       sizeBytes: 4096,
     }));
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['direct text', 'oversized.txt', 'text/plain', MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES],
+    ['CSV', 'oversized.csv', 'text/csv', MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES],
+    ['PDF', 'oversized.pdf', 'application/pdf', MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES],
+    ['RTF', 'oversized.rtf', 'application/rtf', MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES],
+    ['EPUB', 'oversized.epub', 'application/epub+zip', MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES],
+    [
+      'Office',
+      'oversized.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES,
+    ],
+  ] as const)('maps the %s source-byte cap to document-too-large before parsing', async (
+    _label,
+    fileName,
+    mimeType,
+    maxBytes,
+  ) => {
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({
+      exists: true,
+      isDirectory: false,
+      size: maxBytes + 1,
+    });
+    const nativeModule = createPocketAnydocNativeModule();
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    const error = await expectProcessorError(
+      chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({ fileName, mimeType, sizeBytes: maxBytes + 1 }),
+      ),
+    );
+
+    expect(error.code).toBe('chat_attachment_document_too_large');
+    expect(error.details).toEqual(expect.objectContaining({ maxFileBytes: maxBytes }));
+    expect(nativeModule.prepareDocument).not.toHaveBeenCalled();
     expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
   });
 

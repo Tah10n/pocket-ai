@@ -33,7 +33,14 @@ export type ChatDocumentAttachmentDraftErrorReason =
   | 'too_large'
   | 'copy_failed'
   | 'missing'
-  | 'parse_failed';
+  | 'parse_failed'
+  | 'native_unavailable'
+  | 'corrupt'
+  | 'encrypted'
+  | 'no_extractable_text'
+  | 'resource_limit'
+  | 'semantic_spreadsheet'
+  | 'cancelled';
 
 export type ChatMediaAttachmentDraftKind = 'audio';
 
@@ -60,6 +67,7 @@ export interface ChatAttachmentBase {
   localUri: string;
   pathCategory: ChatAttachmentPathCategory;
   fileName: string;
+  displayName?: string;
   mimeType: string;
   sizeBytes: number;
   source: ChatAttachmentSource;
@@ -67,6 +75,7 @@ export interface ChatAttachmentBase {
   errorCode?: string;
   errorMessage?: string;
   derivedFromAttachmentId?: string;
+  derivedFromAssetId?: number;
 }
 
 export interface ChatImageAttachmentMetadata {
@@ -85,9 +94,24 @@ export interface ChatDocumentAttachmentMetadata {
   processorId: string;
   processorVersion: number;
   contentHash?: string;
+  contentSha256?: string;
+  canonicalFormat?: string;
+  parserId?: string;
+  parserVersion?: string;
+  exactAnyDocCommit?: string;
+  sourceByteCount?: number;
+  sourceCharCount?: number;
+  selectedCharCount?: number;
+  selectedChunkCount?: number;
+  chunkCount?: number;
   pageCount?: number;
+  slideCount?: number;
+  sheetCount?: number;
+  assetCount?: number;
   extractedCharCount?: number;
   isScanned?: boolean;
+  truncated?: boolean;
+  warnings?: string[];
 }
 
 export interface ChatVideoAttachmentMetadata {

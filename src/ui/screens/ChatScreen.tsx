@@ -24,7 +24,11 @@ import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
-import { ChatInputBar, markChatInputDraftConsumedError } from '@/components/ui/ChatInputBar';
+import {
+    ChatInputBar,
+    markChatInputDraftConsumedError,
+    markChatInputErrorReported,
+} from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import {
     MODEL_WARMUP_BANNER_RESERVED_HEIGHT,
@@ -66,7 +70,7 @@ import { performanceMonitor } from '../../services/PerformanceMonitor';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
-import { getReportedErrorMessage, toAppError } from '../../services/AppError';
+import { AppError, getErrorMessage, getReportedErrorMessage, toAppError } from '../../services/AppError';
 import {
     getGenerationParametersForModel,
     getSettings,
@@ -167,6 +171,18 @@ function splitAttachmentDraftsById<T extends { id?: string }>(
     });
 
     return { matchedDrafts, remainingDrafts };
+}
+
+export function sanitizeDocumentFailureDisplayName(
+    value: string | null | undefined,
+    fallback: string,
+): string {
+    const normalized = (value ?? '').normalize('NFKC')
+        .replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+/gu, ' ')
+        .replace(/\s+/gu, ' ')
+        .trim();
+    const bounded = Array.from(normalized).slice(0, 160).join('').trimEnd();
+    return bounded || fallback;
 }
 const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
 const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
@@ -687,6 +703,16 @@ function EnabledAndroidQaGenerationEvidenceSurface() {
                             style={styles.androidQaEvidenceMarker}
                         />
                     ))}
+                    {(evidence.preparedGeneration.documentSentinelIds ?? []).map((sentinelId) => (
+                        <View
+                            key={sentinelId}
+                            accessible
+                            accessibilityLabel={`chat-prepared-document-sentinel-${sentinelId}`}
+                            collapsable={false}
+                            testID={`chat-prepared-document-sentinel-${sentinelId}`}
+                            style={styles.androidQaEvidenceMarker}
+                        />
+                    ))}
                 </>
             ) : null}
         </View>
@@ -699,6 +725,7 @@ export const ChatScreen = () => {
         messages,
         messageListRevision,
         isGenerating,
+        isPreparingDocuments,
         shouldOfferSummary,
         truncatedMessageCount,
         appendUserMessage,
@@ -2145,6 +2172,8 @@ export const ChatScreen = () => {
             };
 
             let userMessageAppended = false;
+            let documentFailureAlertCoversSendError = false;
+            const restoredFailedDocumentDraftKeys = new Set<string>();
             setComposerDraft('');
             try {
                 await appendUserMessage(
@@ -2169,6 +2198,37 @@ export const ChatScreen = () => {
                             : null),
                         onUserMessageAppended: () => {
                             userMessageAppended = true;
+                        },
+                        onDocumentAttachmentFailures: (failures) => {
+                            const failedDrafts = failures.map((failure) => failure.draft)
+                                .filter((draft, index, entries) => entries.findIndex((candidate) => (
+                                    candidate === draft || (draft.id && candidate.id === draft.id)
+                                )) === index);
+                            failedDrafts.forEach((draft) => {
+                                restoredFailedDocumentDraftKeys.add(draft.id || draft.localUri || draft.pickerUri);
+                            });
+                            documentFailureAlertCoversSendError = documentDrafts.length > 0
+                                && documentDrafts.every((draft) => restoredFailedDocumentDraftKeys.has(
+                                    draft.id || draft.localUri || draft.pickerUri,
+                                ));
+                            restoreDocumentDraftsForRetry(failedDrafts);
+                            const details = failures.map(({ draft, errorCode }) => {
+                                const displayName = sanitizeDocumentFailureDisplayName(
+                                    draft.displayName ?? draft.fileName,
+                                    t('chat.attachments.attachDocument'),
+                                );
+                                return `${displayName}: ${getErrorMessage(new AppError(errorCode, errorCode), t)}`;
+                            }).join('\n');
+                            Alert.alert(
+                                t('common.actionFailed'),
+                                `${t('chat.attachments.documentPartialFailure')}\n\n${details}`,
+                            );
+                        },
+                        onPreparationCancelled: () => {
+                            setComposerDraft(content);
+                            restoreAttachmentDraftsForRetry(attachmentDrafts);
+                            restoreDocumentDraftsForRetry(documentDrafts);
+                            restoreMediaDraftsForRetry(mediaDrafts);
                         },
                     },
                 );
@@ -2217,10 +2277,13 @@ export const ChatScreen = () => {
                 } else if (attachmentDrafts.length > 0) {
                     restoreAttachmentDraftsForRetry(attachmentDrafts);
                 }
-                if (documentDrafts.length > 0 && missingAttachmentDraftIds) {
+                const retryableDocumentDrafts = documentDrafts.filter((draft) => (
+                    !restoredFailedDocumentDraftKeys.has(draft.id || draft.localUri || draft.pickerUri)
+                ));
+                if (retryableDocumentDrafts.length > 0 && missingAttachmentDraftIds) {
                     if (missingAttachmentDraftIds.size > 0) {
                         const { matchedDrafts, remainingDrafts } = splitAttachmentDraftsById(
-                            documentDrafts,
+                            retryableDocumentDrafts,
                             missingAttachmentDraftIds,
                         );
                         if (matchedDrafts.length > 0) {
@@ -2230,10 +2293,10 @@ export const ChatScreen = () => {
                             restoreDocumentDraftsForRetry(remainingDrafts);
                         }
                     } else {
-                        documentAttachmentDrafts.discardDrafts(documentDrafts, 'missing copied document drafts after failed send');
+                        documentAttachmentDrafts.discardDrafts(retryableDocumentDrafts, 'missing copied document drafts after failed send');
                     }
-                } else if (documentDrafts.length > 0) {
-                    restoreDocumentDraftsForRetry(documentDrafts);
+                } else if (retryableDocumentDrafts.length > 0) {
+                    restoreDocumentDraftsForRetry(retryableDocumentDrafts);
                 }
                 if (mediaDrafts.length > 0 && missingAttachmentDraftIds) {
                     if (missingAttachmentDraftIds.size > 0) {
@@ -2255,7 +2318,9 @@ export const ChatScreen = () => {
                 }
 
                 setComposerDraft(content);
-                throw error;
+                throw documentFailureAlertCoversSendError
+                    ? markChatInputErrorReported(error)
+                    : error;
             }
         } finally {
             sendMessageInFlightRef.current = false;
@@ -2915,7 +2980,7 @@ export const ChatScreen = () => {
                                 sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
-                                isSending={isGenerating}
+                                isSending={isGenerating || isPreparingDocuments}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                                 attachmentDrafts={imageAttachmentDrafts.drafts}
                                 documentAttachmentDrafts={documentAttachmentDrafts.drafts}
@@ -2934,7 +2999,7 @@ export const ChatScreen = () => {
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
                                 audioAttachmentsDisabledReason={audioAttachmentsDisabledReason}
                                 isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
-                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking}
+                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking || isPreparingDocuments}
                                 isAudioAttachmentActionBusy={mediaAttachmentDrafts.isPickingAudio}
                                 attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
@@ -2962,7 +3027,7 @@ export const ChatScreen = () => {
                                 sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
-                                isSending={isGenerating}
+                                isSending={isGenerating || isPreparingDocuments}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                                 attachmentDrafts={imageAttachmentDrafts.drafts}
                                 documentAttachmentDrafts={documentAttachmentDrafts.drafts}
@@ -2981,7 +3046,7 @@ export const ChatScreen = () => {
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
                                 audioAttachmentsDisabledReason={audioAttachmentsDisabledReason}
                                 isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
-                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking}
+                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking || isPreparingDocuments}
                                 isAudioAttachmentActionBusy={mediaAttachmentDrafts.isPickingAudio}
                                 attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}

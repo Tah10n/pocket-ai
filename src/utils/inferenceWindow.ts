@@ -46,7 +46,7 @@ export function estimateLlmMessagesTokens(messages: LlmChatMessage[]) {
   return messages.reduce((total, message) => total + estimateLlmMessageTokens(message), 0);
 }
 
-function resolveBalancedResponseReserveTokens(
+export function resolveBalancedResponseReserveTokens(
   requestedResponseTokens: number,
   totalPromptBudget: number,
 ) {

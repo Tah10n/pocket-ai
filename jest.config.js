@@ -15,5 +15,11 @@ module.exports = {
         '^react$': '<rootDir>/node_modules/react',
         '^react-native$': '<rootDir>/node_modules/react-native',
     },
+    modulePathIgnorePatterns: [
+        '<rootDir>/modules/pocket-anydoc/rust/vendor/',
+        '<rootDir>/modules/pocket-anydoc/rust/target/',
+        '<rootDir>/modules/pocket-anydoc/android/build/',
+        '<rootDir>/modules/pocket-anydoc/ios/generated/',
+    ],
     testPathIgnorePatterns: ['/node_modules/', '/.expo/', '/__tests__/fixtures/'],
 };

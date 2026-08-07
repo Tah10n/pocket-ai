@@ -104,6 +104,26 @@ describe('ChatGenerationService', () => {
     expect(llmEngineService.interruptActiveCompletion).not.toHaveBeenCalled();
   });
 
+  it('runs owned cancellation listeners synchronously and removes unsubscribed listeners', async () => {
+    const work = beginChatGenerationWork('document_native_cancel');
+    const onCancel = jest.fn();
+    work.onCancel(onCancel);
+
+    const stop = stopAllGenerationWork({ blockNewWork: false });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    work.finish();
+    await expect(stop).resolves.toBe('drained');
+
+    const nextWork = beginChatGenerationWork('document_native_unsubscribed');
+    const unsubscribed = jest.fn();
+    const unsubscribe = nextWork.onCancel(unsubscribed);
+    unsubscribe();
+    const nextStop = stopAllGenerationWork({ blockNewWork: false });
+    expect(unsubscribed).not.toHaveBeenCalled();
+    nextWork.finish();
+    await expect(nextStop).resolves.toBe('drained');
+  });
+
   it('drains the native completion path when the registered generation crossed the boundary', async () => {
     registerActiveChatGenerationStop({
       hasNativeCompletion: () => true,

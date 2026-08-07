@@ -27,6 +27,11 @@ export const MAX_CHAT_ATTACHMENTS_BY_KIND: Record<ChatAttachmentKind, number> = 
 
 export const MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 export const MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES = 12 * 1024 * 1024;
+// Outer defensive ceiling for a future/unknown native document format. Known formats below use
+// the tighter mobile parser profile before picker copy and again before native preparation.
+export const MAX_CHAT_ANYDOC_DOCUMENT_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 export const MAX_CHAT_AUDIO_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 const CHAT_ATTACHMENT_KINDS = new Set<ChatAttachmentKind>(['image', 'audio', 'document', 'video']);
@@ -48,24 +53,56 @@ const SUPPORTED_AUDIO_ATTACHMENT_MIME_TYPES = new Set([
 const SUPPORTED_DOCUMENT_ATTACHMENT_MIME_TYPES = new Set([
   'application/json',
   'application/pdf',
+  'application/epub+zip',
+  'application/msword',
+  'application/rtf',
+  'application/vnd.ms-excel',
+  'application/vnd.ms-excel.sheet.binary.macroenabled.12',
+  'application/vnd.ms-excel.sheet.macroenabled.12',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.ms-powerpoint.presentation.macroenabled.12',
+  'application/vnd.ms-powerpoint.slideshow.macroenabled.12',
+  'application/vnd.ms-word.document.macroenabled.12',
+  'application/vnd.oasis.opendocument.presentation',
+  'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.oasis.opendocument.text',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/csv',
   'text/markdown',
   'text/plain',
+  'text/rtf',
   'text/tab-separated-values',
 ]);
 
 const SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES = new Set([
   'application/json',
-  'text/csv',
   'text/markdown',
   'text/plain',
   'text/tab-separated-values',
 ]);
 
+const SUPPORTED_ANYDOC_DOCUMENT_ATTACHMENT_MIME_TYPES = new Set([
+  ...SUPPORTED_DOCUMENT_ATTACHMENT_MIME_TYPES,
+].filter((mimeType) => !SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(mimeType)));
+
 const SUPPORTED_PROCESSABLE_DOCUMENT_ATTACHMENT_MIME_TYPES = new Set([
-  ...SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES,
-  'application/pdf',
+  ...SUPPORTED_DOCUMENT_ATTACHMENT_MIME_TYPES,
 ]);
+const CONTROLLED_GENERIC_DOCUMENT_MIME_TYPES = new Set([
+  'application/octet-stream',
+  'application/zip',
+]);
+
+export const CHAT_DOCUMENT_PICKER_MIME_TYPES = [
+  // Controlled generic provider types: routing still requires a supported extension and the
+  // native parser remains authoritative for office/archive content detection.
+  'application/octet-stream',
+  'application/zip',
+  ...SUPPORTED_DOCUMENT_ATTACHMENT_MIME_TYPES,
+];
 
 const SUPPORTED_VIDEO_ATTACHMENT_MIME_TYPES = new Set([
   'video/mp4',
@@ -83,16 +120,34 @@ const AUDIO_EXTENSION_TO_FORMAT = new Map([
 
 const DOCUMENT_ATTACHMENT_EXTENSIONS = new Set([
   'csv',
+  'doc',
+  'docm',
+  'docx',
+  'epub',
   'json',
   'md',
   'markdown',
+  'odp',
+  'ods',
+  'odt',
   'pdf',
+  'pot',
+  'pps',
+  'ppsm',
+  'ppsx',
+  'ppt',
+  'pptm',
+  'pptx',
+  'rtf',
   'tsv',
   'txt',
+  'xls',
+  'xlsb',
+  'xlsm',
+  'xlsx',
 ]);
 
 const TEXT_DOCUMENT_EXTENSION_TO_MIME_TYPE = new Map([
-  ['csv', 'text/csv'],
   ['json', 'application/json'],
   ['markdown', 'text/markdown'],
   ['md', 'text/markdown'],
@@ -102,7 +157,27 @@ const TEXT_DOCUMENT_EXTENSION_TO_MIME_TYPE = new Map([
 
 const PROCESSABLE_DOCUMENT_EXTENSION_TO_MIME_TYPE = new Map([
   ...TEXT_DOCUMENT_EXTENSION_TO_MIME_TYPE,
+  ['csv', 'text/csv'],
+  ['doc', 'application/msword'],
+  ['docm', 'application/vnd.ms-word.document.macroenabled.12'],
+  ['docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['epub', 'application/epub+zip'],
+  ['odp', 'application/vnd.oasis.opendocument.presentation'],
+  ['ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+  ['odt', 'application/vnd.oasis.opendocument.text'],
   ['pdf', 'application/pdf'],
+  ['pot', 'application/vnd.ms-powerpoint'],
+  ['pps', 'application/vnd.ms-powerpoint'],
+  ['ppsm', 'application/vnd.ms-powerpoint.slideshow.macroenabled.12'],
+  ['ppsx', 'application/vnd.openxmlformats-officedocument.presentationml.slideshow'],
+  ['ppt', 'application/vnd.ms-powerpoint'],
+  ['pptm', 'application/vnd.ms-powerpoint.presentation.macroenabled.12'],
+  ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ['rtf', 'application/rtf'],
+  ['xls', 'application/vnd.ms-excel'],
+  ['xlsb', 'application/vnd.ms-excel.sheet.binary.macroenabled.12'],
+  ['xlsm', 'application/vnd.ms-excel.sheet.macroenabled.12'],
+  ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
 ]);
 
 const VIDEO_ATTACHMENT_EXTENSIONS = new Set([
@@ -119,6 +194,10 @@ const CHAT_ATTACHMENT_SOURCES = new Set<ChatAttachmentSource>([
 
 const EXTENSION_TO_MIME_TYPE = new Map([
   ['csv', 'text/csv'],
+  ['doc', 'application/msword'],
+  ['docm', 'application/vnd.ms-word.document.macroenabled.12'],
+  ['docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['epub', 'application/epub+zip'],
   ['jpg', 'image/jpeg'],
   ['jpeg', 'image/jpeg'],
   ['json', 'application/json'],
@@ -127,13 +206,28 @@ const EXTENSION_TO_MIME_TYPE = new Map([
   ['mov', 'video/quicktime'],
   ['mp3', 'audio/mpeg'],
   ['mp4', 'video/mp4'],
+  ['odp', 'application/vnd.oasis.opendocument.presentation'],
+  ['ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+  ['odt', 'application/vnd.oasis.opendocument.text'],
   ['pdf', 'application/pdf'],
+  ['pot', 'application/vnd.ms-powerpoint'],
+  ['pps', 'application/vnd.ms-powerpoint'],
+  ['ppsm', 'application/vnd.ms-powerpoint.slideshow.macroenabled.12'],
+  ['ppsx', 'application/vnd.openxmlformats-officedocument.presentationml.slideshow'],
+  ['ppt', 'application/vnd.ms-powerpoint'],
+  ['pptm', 'application/vnd.ms-powerpoint.presentation.macroenabled.12'],
+  ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
   ['png', 'image/png'],
+  ['rtf', 'application/rtf'],
   ['tsv', 'text/tab-separated-values'],
   ['txt', 'text/plain'],
   ['wav', 'audio/wav'],
   ['wave', 'audio/wav'],
   ['webm', 'video/webm'],
+  ['xls', 'application/vnd.ms-excel'],
+  ['xlsb', 'application/vnd.ms-excel.sheet.binary.macroenabled.12'],
+  ['xlsm', 'application/vnd.ms-excel.sheet.macroenabled.12'],
+  ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
 ]);
 
 function normalizeToken(value: string | null | undefined): string {
@@ -318,18 +412,92 @@ export function resolveChatTextDocumentMimeType(input: {
   fileName?: string | null;
   localUri?: string | null;
 }): string | null {
-  const normalizedMimeType = normalizeToken(input.mimeType ?? input.mediaType);
-  if (SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizedMimeType)) {
-    return normalizedMimeType;
-  }
-
-  const extension = resolveChatAttachmentExtension(input.fileName)
-    ?? resolveChatAttachmentExtension(input.localUri);
-  return extension ? TEXT_DOCUMENT_EXTENSION_TO_MIME_TYPE.get(extension) ?? null : null;
+  const processableMimeType = resolveChatProcessableDocumentMimeType(input);
+  return processableMimeType && SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(processableMimeType)
+    ? processableMimeType
+    : null;
 }
 
 export function isSupportedChatTextDocumentMimeType(mediaType: string | null | undefined): boolean {
   return SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeToken(mediaType));
+}
+
+function readExactAnyDocCommit(value: unknown): string | undefined {
+  const commit = readNonEmptyString(value);
+  return commit && /^[a-f0-9]{40}$/u.test(commit) ? commit : undefined;
+}
+
+const PERSISTED_DOCUMENT_CANONICAL_FORMATS = new Set([
+  'csv', 'doc', 'docm', 'docx', 'epub', 'json', 'markdown', 'odp', 'ods', 'odt',
+  'pdf', 'pot', 'pps', 'ppsm', 'ppsx', 'ppt', 'pptm', 'pptx', 'rtf', 'tsv', 'txt',
+  'xls', 'xlsb', 'xlsm', 'xlsx',
+]);
+const PERSISTED_DOCUMENT_WARNING_CODES = new Set([
+  'assets_skipped', 'context_truncated', 'format_hint_mismatch', 'hidden_content_unverified',
+  'hidden_rows_skipped', 'partial_content', 'unsupported_assets',
+]);
+const MAX_PERSISTED_DOCUMENT_SOURCE_BYTES = 16 * 1024 * 1024;
+const MAX_PERSISTED_DOCUMENT_SOURCE_CHARS = 1_000_000;
+const MAX_PERSISTED_DOCUMENT_SELECTED_CHARS = 64_000;
+const MAX_PERSISTED_DOCUMENT_CHUNKS = 2_048;
+const MAX_PERSISTED_DOCUMENT_SELECTED_CHUNKS = 64;
+const MAX_PERSISTED_DOCUMENT_STRUCTURAL_COUNT = 2_048;
+const MAX_PERSISTED_DOCUMENT_ASSET_COUNT = 128;
+
+function readBoundedPersistedDocumentString(
+  value: unknown,
+  maxChars: number,
+  pattern?: RegExp,
+): string | undefined {
+  const normalized = readNonEmptyString(value);
+  return normalized && normalized.length <= maxChars && (!pattern || pattern.test(normalized))
+    ? normalized
+    : undefined;
+}
+
+function readBoundedPositiveSafeInteger(value: unknown, maximum: number): number | undefined {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value > 0
+    && value <= maximum
+    ? value
+    : undefined;
+}
+
+function normalizePersistedDocumentWarnings(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const warnings = value.flatMap((entry): string[] => {
+    const warning = readBoundedPersistedDocumentString(entry, 96);
+    return warning && PERSISTED_DOCUMENT_WARNING_CODES.has(warning) ? [warning] : [];
+  });
+  const unique = [...new Set(warnings)].slice(0, 32);
+  return unique.length > 0 ? unique : undefined;
+}
+
+export function isSupportedChatAnydocDocumentMimeType(mediaType: string | null | undefined): boolean {
+  return SUPPORTED_ANYDOC_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeToken(mediaType));
+}
+
+export function resolveChatDocumentMaxBytes(mediaType: string | null | undefined): number {
+  const normalized = normalizeToken(mediaType);
+  if (normalized === 'application/pdf') {
+    return MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES;
+  }
+  if (
+    normalized === 'application/epub+zip'
+    || normalized === 'application/rtf'
+    || normalized === 'text/rtf'
+  ) {
+    return MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES;
+  }
+  if (normalized === 'text/csv' || SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalized)) {
+    return MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES;
+  }
+  return SUPPORTED_ANYDOC_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalized)
+    ? MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES
+    : MAX_CHAT_ANYDOC_DOCUMENT_ATTACHMENT_BYTES;
 }
 
 export function resolveChatProcessableDocumentMimeType(input: {
@@ -338,14 +506,29 @@ export function resolveChatProcessableDocumentMimeType(input: {
   fileName?: string | null;
   localUri?: string | null;
 }): string | null {
-  const normalizedMimeType = normalizeToken(input.mimeType ?? input.mediaType);
-  if (SUPPORTED_PROCESSABLE_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizedMimeType)) {
-    return normalizedMimeType;
-  }
-
   const extension = resolveChatAttachmentExtension(input.fileName)
     ?? resolveChatAttachmentExtension(input.localUri);
-  return extension ? PROCESSABLE_DOCUMENT_EXTENSION_TO_MIME_TYPE.get(extension) ?? null : null;
+  const normalizedMimeType = normalizeToken(input.mimeType ?? input.mediaType);
+  const extensionMimeType = extension
+    ? PROCESSABLE_DOCUMENT_EXTENSION_TO_MIME_TYPE.get(extension) ?? null
+    : null;
+
+  if (CONTROLLED_GENERIC_DOCUMENT_MIME_TYPES.has(normalizedMimeType) || !normalizedMimeType) {
+    return extensionMimeType;
+  }
+  if (isSupportedChatAnydocDocumentMimeType(normalizedMimeType)) {
+    // Native strong-content detection is authoritative for renamed/mislabelled structured files.
+    return normalizedMimeType;
+  }
+  if (isSupportedChatTextDocumentMimeType(normalizedMimeType)) {
+    if (!extension) {
+      return normalizedMimeType;
+    }
+    // Never direct-decode a filename that declares a structured/native extension. Direct text
+    // aliases may still refine one another (for example text/plain + notes.md).
+    return extensionMimeType;
+  }
+  return null;
 }
 
 export function isSupportedChatProcessableDocumentMimeType(mediaType: string | null | undefined): boolean {
@@ -533,6 +716,7 @@ export function normalizePersistedChatAttachment(
     localUri,
     pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
     fileName,
+    ...(readNonEmptyString(value.displayName) ? { displayName: readNonEmptyString(value.displayName) } : null),
     mimeType,
     sizeBytes,
     source,
@@ -540,6 +724,9 @@ export function normalizePersistedChatAttachment(
     ...(readNonEmptyString(value.errorCode) ? { errorCode: readNonEmptyString(value.errorCode) } : null),
     ...(readNonEmptyString(value.errorMessage) ? { errorMessage: readNonEmptyString(value.errorMessage) } : null),
     ...(readNonEmptyString(value.derivedFromAttachmentId) ? { derivedFromAttachmentId: readNonEmptyString(value.derivedFromAttachmentId) } : null),
+    ...(readNonNegativeSafeInteger(value.derivedFromAssetId) !== undefined
+      ? { derivedFromAssetId: readNonNegativeSafeInteger(value.derivedFromAssetId) }
+      : null),
   };
 
   switch (kind) {
@@ -585,24 +772,127 @@ export function normalizePersistedChatAttachment(
     }
     case 'document': {
       const document = isRecord(value.document) ? value.document : {};
-      const processorId = readNonEmptyString(document.processorId);
-      const processorVersion = readPositiveInteger(document.processorVersion);
+      const processorId = readBoundedPersistedDocumentString(
+        document.processorId,
+        64,
+        /^[A-Za-z0-9._:-]+$/u,
+      );
+      const processorVersion = readBoundedPositiveSafeInteger(document.processorVersion, 1_000);
       if (!processorId || processorVersion === undefined) {
         return null;
       }
 
-      const pageCount = readPositiveInteger(document.pageCount);
-      const extractedCharCount = readPositiveInteger(document.extractedCharCount);
+      const pageCount = readBoundedPositiveSafeInteger(
+        document.pageCount,
+        MAX_PERSISTED_DOCUMENT_STRUCTURAL_COUNT,
+      );
+      const slideCount = readBoundedPositiveSafeInteger(
+        document.slideCount,
+        MAX_PERSISTED_DOCUMENT_STRUCTURAL_COUNT,
+      );
+      const sheetCount = readBoundedPositiveSafeInteger(
+        document.sheetCount,
+        MAX_PERSISTED_DOCUMENT_STRUCTURAL_COUNT,
+      );
+      const rawAssetCount = readNonNegativeSafeInteger(document.assetCount);
+      const assetCount = rawAssetCount !== undefined && rawAssetCount <= MAX_PERSISTED_DOCUMENT_ASSET_COUNT
+        ? rawAssetCount
+        : undefined;
+      const sourceByteCount = readBoundedPositiveSafeInteger(
+        document.sourceByteCount,
+        MAX_PERSISTED_DOCUMENT_SOURCE_BYTES,
+      );
+      const sourceCharCount = readBoundedPositiveSafeInteger(
+        document.sourceCharCount,
+        MAX_PERSISTED_DOCUMENT_SOURCE_CHARS,
+      );
+      const rawSelectedCharCount = readBoundedPositiveSafeInteger(
+        document.selectedCharCount,
+        MAX_PERSISTED_DOCUMENT_SELECTED_CHARS,
+      );
+      const selectedCharCount = rawSelectedCharCount !== undefined
+        && (sourceCharCount === undefined || rawSelectedCharCount <= sourceCharCount)
+        ? rawSelectedCharCount
+        : undefined;
+      const rawExtractedCharCount = readBoundedPositiveSafeInteger(
+        document.extractedCharCount,
+        MAX_PERSISTED_DOCUMENT_SELECTED_CHARS,
+      );
+      const extractedCharCount = rawExtractedCharCount !== undefined
+        && (sourceCharCount === undefined || rawExtractedCharCount <= sourceCharCount)
+        ? rawExtractedCharCount
+        : undefined;
+      const chunkCount = readBoundedPositiveSafeInteger(
+        document.chunkCount,
+        MAX_PERSISTED_DOCUMENT_CHUNKS,
+      );
+      const rawSelectedChunkCount = readBoundedPositiveSafeInteger(
+        document.selectedChunkCount,
+        MAX_PERSISTED_DOCUMENT_SELECTED_CHUNKS,
+      );
+      const selectedChunkCount = rawSelectedChunkCount !== undefined
+        && (chunkCount === undefined || rawSelectedChunkCount <= chunkCount)
+        ? rawSelectedChunkCount
+        : undefined;
+      const warnings = normalizePersistedDocumentWarnings(document.warnings);
+      const exactAnyDocCommit = readExactAnyDocCommit(
+        document.exactAnyDocCommit ?? document.anydocCommit,
+      );
+      const rawContentHash = readBoundedPersistedDocumentString(document.contentHash, 128);
+      const rawContentSha256 = readBoundedPersistedDocumentString(
+        document.contentSha256,
+        64,
+        /^[a-f0-9]{64}$/u,
+      );
+      const usesStrictSha256Identity = processorId === 'pocket-anydoc' || processorVersion >= 3;
+      const hasMatchingSha256Identity = rawContentSha256 !== undefined
+        && rawContentHash === `sha256:${rawContentSha256}`;
+      const contentHash = usesStrictSha256Identity
+        ? (hasMatchingSha256Identity ? rawContentHash : undefined)
+        : rawContentHash;
+      const contentSha256 = usesStrictSha256Identity && hasMatchingSha256Identity
+        ? rawContentSha256
+        : undefined;
+      const canonicalFormatValue = readBoundedPersistedDocumentString(document.canonicalFormat, 32);
+      const canonicalFormat = canonicalFormatValue
+        && PERSISTED_DOCUMENT_CANONICAL_FORMATS.has(canonicalFormatValue)
+        ? canonicalFormatValue
+        : undefined;
+      const parserId = readBoundedPersistedDocumentString(
+        document.parserId,
+        64,
+        /^[A-Za-z0-9._:-]+$/u,
+      );
+      const parserVersion = readBoundedPersistedDocumentString(
+        document.parserVersion,
+        64,
+        /^[^\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+$/u,
+      );
       return {
         ...base,
         kind: 'document',
         document: {
           processorId,
           processorVersion,
-          ...(readNonEmptyString(document.contentHash) ? { contentHash: readNonEmptyString(document.contentHash) } : null),
+          ...(contentHash ? { contentHash } : null),
+          ...(contentSha256 ? { contentSha256 } : null),
+          ...(canonicalFormat ? { canonicalFormat } : null),
+          ...(parserId ? { parserId } : null),
+          ...(parserVersion ? { parserVersion } : null),
+          ...(exactAnyDocCommit ? { exactAnyDocCommit } : null),
+          ...(sourceByteCount !== undefined ? { sourceByteCount } : null),
+          ...(sourceCharCount !== undefined ? { sourceCharCount } : null),
+          ...(selectedCharCount !== undefined ? { selectedCharCount } : null),
+          ...(selectedChunkCount !== undefined ? { selectedChunkCount } : null),
+          ...(chunkCount !== undefined ? { chunkCount } : null),
           ...(pageCount !== undefined ? { pageCount } : null),
+          ...(slideCount !== undefined ? { slideCount } : null),
+          ...(sheetCount !== undefined ? { sheetCount } : null),
+          ...(assetCount !== undefined ? { assetCount } : null),
           ...(extractedCharCount !== undefined ? { extractedCharCount } : null),
           ...(typeof document.isScanned === 'boolean' ? { isScanned: document.isScanned } : null),
+          ...(typeof document.truncated === 'boolean' ? { truncated: document.truncated } : null),
+          ...(warnings ? { warnings } : null),
         },
       };
     }
@@ -648,6 +938,8 @@ export function toGenericChatAttachmentFromLegacyImageAttachment(
     mimeType: attachment.mediaType,
     sizeBytes: attachment.size,
     source: attachment.source,
+    derivedFromAttachmentId: attachment.derivedFromAttachmentId,
+    derivedFromAssetId: attachment.derivedFromAssetId,
     createdAt: attachment.createdAt,
     image: {
       width: attachment.width,
@@ -661,7 +953,11 @@ export function toGenericChatAttachmentFromLegacyImageAttachment(
 export function toLegacyChatImageAttachment(
   attachment: ChatAttachment,
 ): ChatImageAttachment | null {
-  if (attachment.kind !== 'image' || attachment.source !== 'photo_library' || attachment.state !== 'ready') {
+  if (
+    attachment.kind !== 'image'
+    || (attachment.source !== 'photo_library' && attachment.source !== 'derived_processor')
+    || attachment.state !== 'ready'
+  ) {
     return null;
   }
 
@@ -696,7 +992,13 @@ export function toLegacyChatImageAttachment(
     size: attachment.sizeBytes,
     ...(attachment.image?.width !== undefined ? { width: attachment.image.width } : null),
     ...(attachment.image?.height !== undefined ? { height: attachment.image.height } : null),
-    source: 'photo_library',
+    source: attachment.source,
+    ...(attachment.derivedFromAttachmentId
+      ? { derivedFromAttachmentId: attachment.derivedFromAttachmentId }
+      : null),
+    ...(attachment.derivedFromAssetId !== undefined
+      ? { derivedFromAssetId: attachment.derivedFromAssetId }
+      : null),
     createdAt: attachment.createdAt,
   };
 }

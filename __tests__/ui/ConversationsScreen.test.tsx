@@ -124,6 +124,7 @@ function createMockChatSession(overrides: Partial<ChatSessionState> = {}): ChatS
     messages: [],
     messageListRevision: 0,
     isGenerating: false,
+    isPreparingDocuments: false,
     shouldOfferSummary: false,
     truncatedMessageCount: 0,
     appendUserMessage: jest.fn(),

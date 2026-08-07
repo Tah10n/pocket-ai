@@ -11,12 +11,11 @@ import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDr
 import type { ChatThread } from '@/types/chat';
 import {
   MAX_CHAT_AUDIO_ATTACHMENT_BYTES,
-  MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES,
-  MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES,
   isSupportedChatDocumentDraftFormat,
   resolveChatAttachmentExtension,
   resolveChatAudioFormatFromMimeType,
   resolveChatAudioFormatFromPath,
+  resolveChatDocumentMaxBytes,
   resolveChatProcessableDocumentMimeType,
 } from '@/utils/chatAttachments';
 import {
@@ -85,11 +84,29 @@ function resolveSupportedExtension(asset: CopyableImageAsset): SupportedChatImag
 }
 
 const TEXT_DOCUMENT_MIME_TYPE_EXTENSION = new Map([
+  ['application/epub+zip', 'epub'],
   ['application/json', 'json'],
+  ['application/msword', 'doc'],
   ['application/pdf', 'pdf'],
+  ['application/rtf', 'rtf'],
+  ['application/vnd.ms-excel', 'xls'],
+  ['application/vnd.ms-excel.sheet.binary.macroenabled.12', 'xlsb'],
+  ['application/vnd.ms-excel.sheet.macroenabled.12', 'xlsm'],
+  ['application/vnd.ms-powerpoint', 'ppt'],
+  ['application/vnd.ms-powerpoint.presentation.macroenabled.12', 'pptm'],
+  ['application/vnd.ms-powerpoint.slideshow.macroenabled.12', 'ppsm'],
+  ['application/vnd.ms-word.document.macroenabled.12', 'docm'],
+  ['application/vnd.oasis.opendocument.presentation', 'odp'],
+  ['application/vnd.oasis.opendocument.spreadsheet', 'ods'],
+  ['application/vnd.oasis.opendocument.text', 'odt'],
+  ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'pptx'],
+  ['application/vnd.openxmlformats-officedocument.presentationml.slideshow', 'ppsx'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
   ['text/csv', 'csv'],
   ['text/markdown', 'md'],
   ['text/plain', 'txt'],
+  ['text/rtf', 'rtf'],
   ['text/tab-separated-values', 'tsv'],
 ]);
 
@@ -120,9 +137,7 @@ function resolveDocumentCopyFormat(asset: CopyableDocumentAsset): { extension: s
 }
 
 function resolveDocumentMaxBytes(mimeType: string): number {
-  return mimeType === 'application/pdf'
-    ? MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES
-    : MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES;
+  return resolveChatDocumentMaxBytes(mimeType);
 }
 
 function resolveAudioCopyFormat(asset: CopyableDocumentAsset): { extension: string; mimeType: string; format: 'wav' | 'mp3' } | null {
@@ -336,7 +351,13 @@ export function materializeAttachmentDraftsForMessage({
       size,
       ...(normalizePositiveInteger(draft.width) ? { width: normalizePositiveInteger(draft.width) } : null),
       ...(normalizePositiveInteger(draft.height) ? { height: normalizePositiveInteger(draft.height) } : null),
-      source: 'photo_library',
+      source: draft.source ?? 'photo_library',
+      ...(draft.derivedFromAttachmentId
+        ? { derivedFromAttachmentId: draft.derivedFromAttachmentId }
+        : null),
+      ...(Number.isSafeInteger(draft.derivedFromAssetId) && draft.derivedFromAssetId! >= 0
+        ? { derivedFromAssetId: draft.derivedFromAssetId }
+        : null),
       createdAt,
     };
   });
@@ -586,6 +607,7 @@ export function materializeDocumentDraftsForProcessing({
     const id = readNonEmptyString(draft.id);
     const localUri = normalizeChatAttachmentLocalUri(draft.localUri);
     const fileName = readNonEmptyString(draft.fileName);
+    const displayName = readNonEmptyString(draft.displayName);
     const sizeBytes = normalizePositiveInteger(draft.sizeBytes);
     const mimeType = resolveChatProcessableDocumentMimeType({
       mimeType: draft.mimeType,
@@ -615,6 +637,7 @@ export function materializeDocumentDraftsForProcessing({
       localUri,
       pathCategory: CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY,
       fileName,
+      ...(displayName ? { displayName } : null),
       mimeType,
       sizeBytes,
       source: 'document_picker',

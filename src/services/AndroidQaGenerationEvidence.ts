@@ -14,7 +14,23 @@ export type AndroidQaPreparedGenerationEvidence = {
   readonly userMessageId: string;
   readonly assistantMessageId: string;
   readonly attachments: readonly AndroidQaPreparedAttachmentEvidence[];
+  /** Fixed synthetic ids only; never retain prompt or document text in QA evidence. */
+  readonly documentSentinelIds?: readonly AndroidQaDocumentSentinelId[];
 };
+
+export type AndroidQaDocumentSentinelId =
+  | 'fixture-book'
+  | 'orchid-742'
+  | 'zebra-end-991';
+
+const ANDROID_QA_DOCUMENT_SENTINELS: readonly {
+  readonly id: AndroidQaDocumentSentinelId;
+  readonly value: string;
+}[] = [
+  { id: 'fixture-book', value: 'Fixture Book' },
+  { id: 'orchid-742', value: 'ORCHID-742' },
+  { id: 'zebra-end-991', value: 'ZEBRA-END-991' },
+];
 
 export type AndroidQaGenerationEvidenceSnapshot = {
   readonly enabled: boolean;
@@ -84,12 +100,23 @@ export function buildAndroidQaPreparedGenerationEvidence({
     });
   }
 
+  const hasDocumentAttachment = [...attachmentsByIdentity.values()]
+    .some((attachment) => attachment.kind === 'document');
+  const documentSentinelIds = hasDocumentAttachment
+    ? ANDROID_QA_DOCUMENT_SENTINELS
+      .filter((sentinel) => preparedMessages.some((message) => (
+        typeof message.content === 'string' && message.content.includes(sentinel.value)
+      )))
+      .map((sentinel) => sentinel.id)
+    : [];
+
   return {
     userMessageId,
     assistantMessageId,
     attachments: [...attachmentsByIdentity.values()].sort((left, right) => (
       left.kind.localeCompare(right.kind) || left.id.localeCompare(right.id)
     )),
+    ...(documentSentinelIds.length > 0 ? { documentSentinelIds } : null),
   };
 }
 

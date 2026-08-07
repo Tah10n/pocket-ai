@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import * as DocumentPicker from 'expo-document-picker';
 import type { ChatDocumentAttachmentDraft } from '@/types/attachments';
 import {
+  CHAT_DOCUMENT_PICKER_MIME_TYPES,
   MAX_CHAT_ATTACHMENTS_BY_KIND,
   getSendableDraftDocumentAttachments,
   validateChatDocumentAttachmentLimit,
@@ -33,15 +34,6 @@ export type UseChatDocumentAttachmentsResult = {
   restoreDraftsForRetry: (drafts: readonly ChatDocumentAttachmentDraft[]) => void;
   discardDrafts: (drafts: readonly ChatDocumentAttachmentDraft[], context?: string) => void;
 };
-
-const DOCUMENT_PICKER_MIME_TYPES = [
-  'application/json',
-  'application/pdf',
-  'text/csv',
-  'text/markdown',
-  'text/plain',
-  'text/tab-separated-values',
-];
 
 function getDraftKey(draft: ChatDocumentAttachmentDraft): string {
   return draft.id ?? draft.localUri ?? draft.pickerUri;
@@ -175,7 +167,7 @@ export function useChatDocumentAttachments({
       }
 
       const result = await DocumentPicker.getDocumentAsync({
-        type: DOCUMENT_PICKER_MIME_TYPES,
+        type: CHAT_DOCUMENT_PICKER_MIME_TYPES,
         multiple: true,
         copyToCacheDirectory: true,
         base64: false,

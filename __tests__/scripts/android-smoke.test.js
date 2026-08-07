@@ -823,10 +823,14 @@ describe('android-smoke target ABI contract', () => {
   const reactNativeLibrary = (abi) => `lib/${abi}/libreactnative.so`;
   const rnLlamaLibrary = (abi) => `lib/${abi}/librnllama.so`;
   const rnLlamaJniLibrary = (abi) => `lib/${abi}/librnllama_jni.so`;
+  const pocketAnydocLibrary = (abi) => `lib/${abi}/libpocket_anydoc.so`;
+  const pocketAnydocJniLibrary = (abi) => `lib/${abi}/libpocket_anydoc_jni.so`;
   const nativeLibraryEntries = (abi) => [
     reactNativeLibrary(abi),
     rnLlamaLibrary(abi),
     rnLlamaJniLibrary(abi),
+    pocketAnydocLibrary(abi),
+    pocketAnydocJniLibrary(abi),
   ];
   const canonicalUniversalAbis = ['arm64-v8a', 'x86_64'];
 
@@ -990,7 +994,12 @@ describe('android-smoke target ABI contract', () => {
     expect(evaluateApkAbiCompatibility({
       targetAbi: 'x86_64',
       deviceAbis: ['x86_64'],
-      zipEntries: [reactNativeLibrary('x86_64'), rnLlamaLibrary('x86_64')],
+      zipEntries: [
+        reactNativeLibrary('x86_64'),
+        rnLlamaLibrary('x86_64'),
+        pocketAnydocLibrary('x86_64'),
+        pocketAnydocJniLibrary('x86_64'),
+      ],
     })).toEqual(expect.objectContaining({
       canReuse: false,
       missingEntries: [rnLlamaJniLibrary('x86_64')],
@@ -1070,7 +1079,7 @@ describe('android-smoke install reuse decisions', () => {
         packageInstalled: true,
         didBuildDebugApk: false,
         installStamp: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           variant: 'debug',
           abi: 'universal',
           buildProvenanceDigest: 'build-1',
@@ -1111,7 +1120,7 @@ describe('android-smoke install reuse decisions', () => {
         packageInstalled: true,
         didBuildDebugApk: false,
         installStamp: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           variant: 'debug',
           abi: 'universal',
           buildProvenanceDigest: 'build-1',
@@ -1143,7 +1152,7 @@ describe('android-smoke install reuse decisions', () => {
       packageInstalled: true,
       didBuildDebugApk: false,
       installStamp: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         variant: 'release',
         abi: 'arm64-v8a',
         buildProvenanceDigest: 'build-1',

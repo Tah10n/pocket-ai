@@ -32,10 +32,20 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Setup pinned Rust
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache AnyDoc Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify (typecheck + lint + tests)
+      - name: Verify (Rust + typecheck + lint + tests)
         run: npm run verify:mobile-change
 
   android-qa:
@@ -75,6 +85,19 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Setup pinned Rust for Android
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Cache AnyDoc Android dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+
+      - name: Install pinned cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
 
       - name: Enable KVM
         run: |

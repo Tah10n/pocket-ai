@@ -63,6 +63,7 @@ describe('Android catalog QA CI configuration', () => {
   const contributing = readAppFile('CONTRIBUTING.md');
   const releaseChecklist = readAppFile('docs', 'release-checklist.md');
   const packageJson = JSON.parse(readAppFile('package.json'));
+  const dependabot = readAppFile('.github', 'dependabot.yml');
 
   it('lets the catalog pack label trigger Android QA and select the catalog pack', () => {
     const selection = extractAndroidQaPackSelection(workflow);
@@ -71,6 +72,14 @@ describe('Android catalog QA CI configuration', () => {
     expect(selection).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-catalog')");
     expect(selection).toContain('pack="catalog"');
     expect(workflow).toContain('--pack "$ANDROID_QA_PACK"');
+  });
+
+  it('keeps the preconditioned document pack out of hosted label routes', () => {
+    const selection = extractAndroidQaPackSelection(workflow);
+
+    expect(workflow).not.toContain('android-pack-documents');
+    expect(selection).not.toContain('pack="documents"');
+    expect(packageJson.scripts['android:scenarios:documents']).toContain('--pack documents');
   });
 
   it('keeps destructive branch regeneration local-only', () => {
@@ -97,6 +106,25 @@ describe('Android catalog QA CI configuration', () => {
     expect(workflow).not.toContain('run: ./gradlew app:assembleRelease');
     expect(workflow).not.toContain('gradle/actions/setup-gradle');
     expect(workflow).toContain('POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"');
+  });
+
+  it('uses the pinned Rust toolchain in existing jobs and tracks Cargo dependencies', () => {
+    const verifyJob = extractWorkflowJob(workflow, 'verify');
+    const androidJob = extractWorkflowJob(workflow, 'android-qa');
+
+    expect(verifyJob).toContain('uses: dtolnay/rust-toolchain@1.94.0');
+    expect(verifyJob).toContain('components: rustfmt, clippy');
+    expect(verifyJob).toContain('run: npm run verify:mobile-change');
+    expect(packageJson.scripts['verify:mobile-change']).toContain('npm run anydoc:verify');
+    expect(packageJson.scripts['anydoc:fmt:check']).toContain('--package pocket-anydoc');
+    expect(packageJson.scripts['anydoc:fmt:check']).not.toContain('--all');
+    expect(androidJob).toContain('uses: dtolnay/rust-toolchain@1.94.0');
+    expect(androidJob).toContain('targets: aarch64-linux-android, x86_64-linux-android');
+    expect(androidJob).toContain('cargo install cargo-ndk --version 4.1.2 --locked');
+    expect(workflow).not.toContain('runs-on: macos');
+    expect(workflow).not.toContain('self-hosted');
+    expect(dependabot).toContain('package-ecosystem: cargo');
+    expect(dependabot).toContain('directory: /modules/pocket-anydoc/rust');
   });
 
   it('keeps hosted diagnostics short-lived and uploads APKs only for an explicit all-pack run', () => {

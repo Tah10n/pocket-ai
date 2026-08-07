@@ -8,6 +8,7 @@ const {
   sanitizeAndroidQaText,
 } = require('../../scripts/android-qa-sanitization');
 const {
+  BUILD_PROVENANCE_SCHEMA_VERSION,
   collectAndroidEffectiveBuildContext,
   collectBuildProvenance,
   collectPrebuildInputState,
@@ -18,6 +19,8 @@ const {
 
 const {
   BRANCH_REGENERATION_SCENARIOS,
+  DOCUMENT_BENCHMARK_SCENARIOS,
+  DOCUMENT_SCENARIOS,
   assertAuthoritativeThoughtClear,
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
@@ -3576,6 +3579,8 @@ describe('android-scenarios pack selection', () => {
         'chat-attachment-prepared-send',
         'storage-cache-clear',
         ...BRANCH_REGENERATION_SCENARIOS,
+        ...DOCUMENT_SCENARIOS,
+        ...DOCUMENT_BENCHMARK_SCENARIOS,
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
@@ -4363,7 +4368,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       dirtyDigest: 'dirty-digest',
     };
     const manifest = {
-      schemaVersion: 2,
+      schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
       variant: 'release',
       abi: 'x86_64',
       embeddedBundle: true,
@@ -4379,13 +4384,13 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     };
     const manifestDigest = hashCanonicalJson(manifest);
     const provenance = {
-      schemaVersion: 2,
+      schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
       serial: 'emulator-5554',
       packageName: 'com.github.tah10n.pocketai',
       variant: 'release',
       abi: 'x86_64',
       build: {
-        schemaVersion: 2,
+        schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
         variant: 'release',
         abi: 'x86_64',
         provenanceDigest: manifestDigest,
@@ -4397,7 +4402,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         },
       },
       install: {
-        schemaVersion: 2,
+        schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
         serial: 'emulator-5554',
         packageName: 'com.github.tah10n.pocketai',
         variant: 'release',

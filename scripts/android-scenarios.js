@@ -26,6 +26,13 @@ const {
   sanitizeAndroidQaText,
 } = require("./android-qa-sanitization");
 const { isCompletePngBuffer } = require("./png-validation");
+const {
+  DOCUMENT_BENCHMARK_CASES,
+  DOCUMENT_QA_SCENARIOS,
+  DOCUMENT_QA_SENTINELS,
+  resolveDocumentQaFixture,
+  validateDocumentQaCorpus,
+} = require("./document-qa-fixtures");
 const DEFAULT_SCENARIO_PACK = "core";
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_RATIO = 0.14;
 const DEFAULT_TAP_SAFE_BOTTOM_INSET_MIN_PX = 220;
@@ -75,6 +82,10 @@ const BRANCH_REGENERATION_SCENARIOS = [
   "branch-regeneration-14-delete-conversation",
   "branch-regeneration-15-clear-history-relaunch",
 ];
+const DOCUMENT_SCENARIOS = DOCUMENT_QA_SCENARIOS.map((scenario) => scenario.id);
+const DOCUMENT_BENCHMARK_SCENARIOS = DOCUMENT_BENCHMARK_CASES.map(
+  (benchmarkCase) => `document-benchmark-${benchmarkCase.id}`
+);
 const SCENARIO_PACK_SCENARIOS = {
   core: CORE_SCENARIOS,
   catalog: CATALOG_SCENARIOS,
@@ -84,6 +95,8 @@ const SCENARIO_PACK_SCENARIOS = {
   "attachments-prepared": PREPARED_ATTACHMENT_SCENARIOS,
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
+  documents: DOCUMENT_SCENARIOS,
+  "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
     "style-screenshots",
@@ -161,6 +174,38 @@ const ATTACH_MENU_LABELS = [
 ];
 const ATTACH_MENU_BUTTON_RESOURCE_ID = "chat-attach-menu-button";
 const ATTACH_IMAGE_BUTTON_RESOURCE_ID = "chat-attach-image-button";
+const ATTACH_DOCUMENT_BUTTON_RESOURCE_ID = "chat-attach-document-button";
+const CHAT_DOCUMENT_BUSY_RESOURCE_ID = "chat-document-attachment-busy-indicator";
+const CHAT_PRIMARY_SEND_RESOURCE_ID = "chat-primary-action-send";
+const CHAT_PRIMARY_STOP_RESOURCE_ID = "chat-primary-action-stop";
+const CHAT_MODEL_SELECTOR_RESOURCE_ID = "chat-header-model-selector";
+const CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID = "chat-model-selector-sheet";
+const DOCUMENT_EVIDENCE_POLICY = "sentinel-only";
+// Keep stale-result QA aligned with the published 30-second native conversion wall limit.
+// The margin covers delivery from the native queue back to the replacement JS/UI context.
+const DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS = 30_000;
+const DOCUMENT_RACE_SETTLEMENT_MARGIN_MS = 5_000;
+const DOCUMENT_RACE_POST_CANCEL_HORIZON_MS =
+  DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS + DOCUMENT_RACE_SETTLEMENT_MARGIN_MS;
+const DOCUMENT_RACE_SENTINEL_POLL_INTERVAL_MS = 1_000;
+const DOCUMENT_QA_REMOTE_DIRECTORY = "/sdcard/Download/PocketAI-Document-QA";
+const DOCUMENT_PICKER_SEARCH_RESOURCE_IDS = ["option_menu_search", "action_search"];
+const DOCUMENT_PICKER_SEARCH_LABELS = ["Search", "Поиск"];
+const DOCUMENT_PICKER_CONFIRM_LABELS = ["Open", "Открыть", "Select", "Выбрать"];
+const DOCUMENT_ERROR_LABELS_BY_CODE = {
+  corrupt_document: [
+    "This document is damaged or does not match its file type.",
+    "Документ повреждён или не соответствует своему типу файла.",
+  ],
+  encrypted_document: [
+    "Password-protected documents cannot be processed.",
+    "Документы, защищённые паролем, нельзя обработать.",
+  ],
+  resource_limit: [
+    "The document is too complex to process safely on this device.",
+    "Документ слишком сложный для безопасной обработки на этом устройстве.",
+  ],
+};
 const MODELS_FILTER_TOGGLE_RESOURCE_ID = "models-filter-toggle";
 const MODELS_FILTER_PANEL_RESOURCE_ID = "models-filter-panel";
 const MODELS_FILTER_CLEAR_RESOURCE_ID = "models-filter-clear";
@@ -527,10 +572,57 @@ const FATAL_LOG_PATTERNS = [
   /ReactNativeJS.*(?:Invariant Violation|ReferenceError|TypeError)/i,
 ];
 let activeQaProvenance = null;
+const DOCUMENT_FAILURE_CODES_BY_STAGE = Object.freeze({
+  "not-applicable": "document_not_applicable",
+  precondition: "document_precondition_failed",
+  runner: "document_runner_failed",
+  scenario: "document_scenario_failed",
+  skip: "document_scenario_skipped",
+});
+const DOCUMENT_FAILURE_STAGES = new Set(Object.keys(DOCUMENT_FAILURE_CODES_BY_STAGE));
+const DOCUMENT_REPORT_IDS = new Set([
+  ...DOCUMENT_SCENARIOS,
+  ...DOCUMENT_BENCHMARK_SCENARIOS,
+  "current-head-provenance",
+  "current-head-provenance-final",
+  "runner-failure",
+]);
+
+function buildDocumentFailureFields(_error, stage) {
+  const failureStage = DOCUMENT_FAILURE_STAGES.has(stage) ? stage : "scenario";
+  return {
+    errorCode: DOCUMENT_FAILURE_CODES_BY_STAGE[failureStage],
+    failureStage,
+  };
+}
+
+function markDocumentScenarioFailureRecorded(error, stage) {
+  const fields = buildDocumentFailureFields(error, stage);
+  const safeError = new Error(fields.errorCode);
+  safeError.code = fields.errorCode;
+  safeError.failureStage = fields.failureStage;
+  return markScenarioFailureRecorded(safeError);
+}
+
+function isDocumentEvidenceInvocation(options = {}) {
+  return options.pack === "documents"
+    || options.pack === "document-benchmark"
+    || DOCUMENT_REPORT_IDS.has(options.scenario);
+}
+
+function describeDocumentScenarioConsoleError(error) {
+  const code = typeof error?.code === "string" ? error.code : "";
+  return Object.values(DOCUMENT_FAILURE_CODES_BY_STAGE).includes(code)
+    ? code
+    : "document_scenario_run_failed";
+}
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error(`[android-scenarios] ${describeAndroidQaError(error, "scenario-run-failed")}`);
+    const description = isDocumentEvidenceInvocation(cliOptions)
+      ? describeDocumentScenarioConsoleError(error)
+      : describeAndroidQaError(error, "scenario-run-failed");
+    console.error(`[android-scenarios] ${description}`);
     process.exit(1);
   });
 }
@@ -544,6 +636,9 @@ async function main() {
   }
 
   const selectedScenarios = selectScenarios(scenarios, cliOptions);
+  const sentinelOnlyRun = selectedScenarios.length > 0 && selectedScenarios.every(
+    (scenario) => scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY
+  );
   const requiresCurrentHeadProvenance = selectedScenarios.some(
     (scenario) => scenario.requiresCurrentHeadProvenance
   );
@@ -565,10 +660,17 @@ async function main() {
       status: "failed",
       failureKind: "precondition",
       durationMs: 0,
-      error: error instanceof Error ? error.message : String(error),
+      ...(sentinelOnlyRun
+        ? {
+            evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+            ...buildDocumentFailureFields(error, "precondition"),
+          }
+        : { error: error instanceof Error ? error.message : String(error) }),
     }];
     writeReport(results);
-    throw markScenarioFailureRecorded(error);
+    throw sentinelOnlyRun
+      ? markDocumentScenarioFailureRecorded(error, "precondition")
+      : markScenarioFailureRecorded(error);
   }
 
   const adbPath = resolveAdbPath();
@@ -630,10 +732,17 @@ async function main() {
           status: "failed",
           failureKind: "precondition",
           durationMs: 0,
-          error: error instanceof Error ? error.message : String(error),
+          ...(sentinelOnlyRun
+            ? {
+                evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+                ...buildDocumentFailureFields(error, "precondition"),
+              }
+            : { error: error instanceof Error ? error.message : String(error) }),
         });
         writeReport(results);
-        throw markScenarioFailureRecorded(error);
+        throw sentinelOnlyRun
+          ? markDocumentScenarioFailureRecorded(error, "precondition")
+          : markScenarioFailureRecorded(error);
       }
 
       for (const scenario of selectedScenarios) {
@@ -680,6 +789,21 @@ async function main() {
           }
 
           if (outcome && outcome.status === "not_applicable") {
+            if (scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY) {
+              await stopAndroidLogcatCollector(logcatCollector);
+              results.push({
+                id: scenario.id,
+                tier: scenario.tier,
+                step: scenario.step,
+                status: "not_applicable",
+                durationMs: Date.now() - startedAt,
+                evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+                ...buildDocumentFailureFields(null, "not-applicable"),
+              });
+              log(`NOT APPLICABLE ${scenario.id}: document_not_applicable`);
+              writeReport(results);
+              continue;
+            }
             const screenshotPath = await captureSettledScenarioScreenshot(
               context,
               path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
@@ -708,14 +832,19 @@ async function main() {
             continue;
           }
 
-          const screenshotPath = await captureSettledScenarioScreenshot(
-            context,
-            scenario.captureFullEvidence
-              ? path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
-              : `${scenario.id}.png`
-          );
+          const sentinelOnlyEvidence = scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY;
+          const screenshotPath = sentinelOnlyEvidence
+            ? null
+            : await captureSettledScenarioScreenshot(
+                context,
+                scenario.captureFullEvidence
+                  ? path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
+                  : `${scenario.id}.png`
+              );
           await stopAndroidLogcatCollector(logcatCollector);
-          const evidence = scenario.captureFullEvidence
+          const evidence = sentinelOnlyEvidence
+            ? { evidencePolicy: DOCUMENT_EVIDENCE_POLICY }
+            : scenario.captureFullEvidence
             ? captureScenarioEvidence({
                 adbPath,
                 serial,
@@ -776,13 +905,17 @@ async function main() {
             status: "failed",
             durationMs: Date.now() - startedAt,
             ...evidence,
-            error: error instanceof Error ? error.message : String(error),
+            ...(scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY
+              ? buildDocumentFailureFields(error, "scenario")
+              : { error: error instanceof Error ? error.message : String(error) }),
             ...(error instanceof ScenarioPreconditionFailureError
               ? { failureKind: "precondition" }
               : {}),
           });
           writeReport(results);
-          throw markScenarioFailureRecorded(error);
+          throw scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY
+            ? markDocumentScenarioFailureRecorded(error, "scenario")
+            : markScenarioFailureRecorded(error);
         } finally {
           context.setStepLogcatCollector(null);
           if (logcatCollector) {
@@ -791,9 +924,9 @@ async function main() {
               cleanupAndroidLogcatCollector(logcatCollector);
               cleanupSucceeded = true;
             } catch (cleanupError) {
-              log(
-                `Could not remove private logcat capture for ${scenario.id}: ${describeAndroidQaError(cleanupError, "logcat-cleanup-failed")}`
-              );
+              log(scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY
+                ? `Could not remove private document QA evidence for ${scenario.id}: document_cleanup_failed`
+                : `Could not remove private logcat capture for ${scenario.id}: ${describeAndroidQaError(cleanupError, "logcat-cleanup-failed")}`);
             } finally {
               if (cleanupSucceeded && activeLogcatCollector === logcatCollector) {
                 activeLogcatCollector = null;
@@ -812,10 +945,17 @@ async function main() {
             status: "failed",
             failureKind: "precondition",
             durationMs: 0,
-            error: error instanceof Error ? error.message : String(error),
+            ...(sentinelOnlyRun
+              ? {
+                  evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+                  ...buildDocumentFailureFields(error, "precondition"),
+                }
+              : { error: error instanceof Error ? error.message : String(error) }),
           });
           writeReport(results);
-          throw markScenarioFailureRecorded(error);
+          throw sentinelOnlyRun
+            ? markDocumentScenarioFailureRecorded(error, "precondition")
+            : markScenarioFailureRecorded(error);
         }
       }
 
@@ -824,6 +964,18 @@ async function main() {
     } catch (error) {
       if (!shouldAppendRunnerFailure(error)) {
         throw error;
+      }
+
+      if (sentinelOnlyRun) {
+        results.push({
+          id: "runner-failure",
+          status: "failed",
+          durationMs: 0,
+          evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+          ...buildDocumentFailureFields(error, "runner"),
+        });
+        writeReport(results);
+        throw markDocumentScenarioFailureRecorded(error, "runner");
       }
 
       try {
@@ -919,6 +1071,9 @@ function captureFailedScenarioEvidence({
   logcatCollector = null,
 }) {
   try {
+    if (scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY) {
+      return { evidencePolicy: DOCUMENT_EVIDENCE_POLICY };
+    }
     if (!scenario.captureFullEvidence) {
       return { screenshotPath: context.captureScreenshot(`${scenario.id}-failed.png`) };
     }
@@ -1550,18 +1705,24 @@ function recordScenarioSkip({
   context,
 }) {
   const durationMs = Date.now() - startedAt;
+  const sentinelOnlyEvidence = scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY;
 
   if (cliOptions.failOnSkip) {
-    const screenshotPath = context.captureScreenshot(`${scenario.id}-skipped.png`);
-    const message = `Scenario ${scenario.id} skipped while --fail-on-skip is enabled: ${reason}`;
+    const screenshotPath = sentinelOnlyEvidence
+      ? null
+      : context.captureScreenshot(`${scenario.id}-skipped.png`);
+    const message = sentinelOnlyEvidence
+      ? "document_skip_forbidden"
+      : `Scenario ${scenario.id} skipped while --fail-on-skip is enabled: ${reason}`;
     results.push({
       id: scenario.id,
       tier: scenario.tier,
       status: "failed",
       durationMs,
-      screenshotPath,
-      error: message,
-      skipReason: reason,
+      ...(screenshotPath ? { screenshotPath } : { evidencePolicy: DOCUMENT_EVIDENCE_POLICY }),
+      ...(sentinelOnlyEvidence
+        ? buildDocumentFailureFields(null, "skip")
+        : { error: message, skipReason: reason }),
     });
     writeReport(results);
     log(`FAIL ${scenario.id}: ${message}`);
@@ -1573,9 +1734,16 @@ function recordScenarioSkip({
     tier: scenario.tier,
     status: "skipped",
     durationMs,
-    reason,
+    ...(sentinelOnlyEvidence
+      ? {
+          evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+          ...buildDocumentFailureFields(null, "skip"),
+        }
+      : { reason }),
   });
-  log(`SKIP ${scenario.id}: ${reason}`);
+  log(sentinelOnlyEvidence
+    ? `SKIP ${scenario.id}: document_scenario_skipped`
+    : `SKIP ${scenario.id}: ${reason}`);
 }
 
 function assertAttachmentPreviewRemovePreconditions({
@@ -2395,8 +2563,672 @@ function buildScenarios() {
         }
       },
     },
+    ...buildDocumentQaScenarios(),
+    ...buildDocumentBenchmarkScenarios(),
     ...buildBranchRegenerationScenarios(),
   ];
+}
+
+function buildDocumentQaScenarios() {
+  validateDocumentQaCorpus();
+  return DOCUMENT_QA_SCENARIOS.map((definition) => ({
+    id: definition.id,
+    tier: "critical",
+    description: describeDocumentScenario(definition),
+    evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+    requiresCurrentHeadProvenance: true,
+    run: async (ctx) => runDocumentQaScenario(ctx, definition),
+  }));
+}
+
+function buildDocumentBenchmarkScenarios() {
+  validateDocumentQaCorpus();
+  return DOCUMENT_BENCHMARK_CASES.map((definition) => ({
+    id: `document-benchmark-${definition.id}`,
+    tier: "critical",
+    description: `Measure the synthetic ${definition.id} document workload on a release build.`,
+    evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+    requiresCurrentHeadProvenance: true,
+    run: async (ctx) => runAndroidDocumentBenchmarkCase(ctx, definition),
+  }));
+}
+
+function describeDocumentScenario(definition) {
+  switch (definition.kind) {
+    case "success":
+      return `Attach and send the synthetic ${definition.fixtureIds.join(", ")} fixture flow.`;
+    case "error":
+      return `Verify the synthetic ${definition.fixtureIds[0]} fixture fails with its privacy-safe error.`;
+    case "stop-race":
+      return "Stop a queued four-document parse before stale context can reach generation.";
+    case "thread-race":
+      return "Switch threads during a queued four-document parse and reject its stale result.";
+    case "model-race":
+      return "Switch models during a queued four-document parse and reject its stale result.";
+    default:
+      throw new Error(`Unsupported document scenario kind: ${definition.kind}.`);
+  }
+}
+
+async function runDocumentQaScenario(ctx, definition) {
+  return withDocumentQaFixtures(ctx, definition.fixtureIds, async (session) => {
+    if (definition.kind === "success") {
+      const iteration = await runDocumentSuccessIteration(ctx, session, {
+        promptSentinel: `PQA-${definition.id.toUpperCase()}`,
+      });
+      return {
+        details: {
+          fixtureIds: [...definition.fixtureIds],
+          sentinelIds: iteration.sentinelIds,
+          performance: omitBenchmarkWarmup(iteration),
+        },
+      };
+    }
+    if (definition.kind === "error") {
+      const iteration = await runDocumentErrorIteration(ctx, session, {
+        promptSentinel: `PQA-${definition.id.toUpperCase()}`,
+      });
+      return {
+        details: {
+          fixtureIds: [...definition.fixtureIds],
+          sentinelIds: [],
+          performance: omitBenchmarkWarmup(iteration),
+        },
+      };
+    }
+    const performance = await runDocumentRaceScenario(ctx, session, definition.kind);
+    return {
+      details: {
+        fixtureIds: [...definition.fixtureIds],
+        sentinelIds: [],
+        performance,
+      },
+    };
+  });
+}
+
+async function runAndroidDocumentBenchmarkCase(ctx, definition) {
+  const iterations = [];
+  const totalIterations = definition.warmupIterations + definition.iterations;
+  for (let index = 0; index < totalIterations; index += 1) {
+    const iteration = await withDocumentQaFixtures(ctx, definition.fixtureIds, async (session) => {
+      const hasExpectedError = session.fixtures.some((entry) => entry.fixture.expectedErrorCode);
+      const result = hasExpectedError
+        ? await runDocumentErrorIteration(ctx, session, {
+            promptSentinel: `PQA-BENCH-${definition.id.toUpperCase()}-${index}`,
+          })
+        : await runDocumentSuccessIteration(ctx, session, {
+            promptSentinel: `PQA-BENCH-${definition.id.toUpperCase()}-${index}`,
+          });
+      return {
+        ...result,
+        iteration: index,
+        warmup: index < definition.warmupIterations,
+      };
+    });
+    iterations.push(iteration);
+  }
+  return {
+    details: {
+      documentBenchmark: {
+        schemaVersion: 1,
+        caseId: definition.id,
+        workload: definition.workload,
+        fixtureIds: [...definition.fixtureIds],
+        iterations,
+      },
+    },
+  };
+}
+
+async function withDocumentQaFixtures(ctx, fixtureIds, operation) {
+  const adbPath = resolveAdbPath();
+  const stagedFixtures = stageDocumentQaFixtures(adbPath, ctx.serial, fixtureIds);
+  let baselineThreadIds = [];
+  let primaryError = null;
+  try {
+    baselineThreadIds = await openFreshDocumentQaChat(ctx);
+    for (let index = 0; index < stagedFixtures.length; index += 1) {
+      await attachStagedDocumentFixture(ctx, stagedFixtures[index], index);
+    }
+    return await operation({ fixtures: stagedFixtures, baselineThreadIds });
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    try {
+      await cleanupDocumentQaThreads(ctx, baselineThreadIds);
+    } catch (cleanupError) {
+      if (!primaryError) {
+        throw new Error("Document QA thread cleanup failed.", { cause: cleanupError });
+      }
+      log("Document QA thread cleanup failed after the scenario failure.");
+    } finally {
+      cleanupStagedDocumentFixtures(adbPath, ctx.serial, stagedFixtures);
+    }
+  }
+}
+
+function stageDocumentQaFixtures(adbPath, serial, fixtureIds) {
+  validateDocumentQaCorpus();
+  const stagedFixtures = [];
+  try {
+    runChecked(adbPath, [
+      "-s", serial, "shell", "mkdir", "-p", DOCUMENT_QA_REMOTE_DIRECTORY,
+    ], { stdio: "ignore" });
+    for (const fixtureId of fixtureIds) {
+      const fixture = resolveDocumentQaFixture(fixtureId);
+      const extension = path.extname(fixture.relativePath).toLowerCase();
+      const remoteName = `pqa-${fixture.id}-${fixture.sha256.slice(0, 8)}${extension}`;
+      const remotePath = `${DOCUMENT_QA_REMOTE_DIRECTORY}/${remoteName}`;
+      runChecked(adbPath, ["-s", serial, "push", fixture.absolutePath, remotePath], {
+        stdio: "ignore",
+        timeout: 30_000,
+      });
+      runCapture(adbPath, [
+        "-s", serial, "shell", "am", "broadcast",
+        "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+        "-d", `file://${remotePath}`,
+      ], { allowFailure: true });
+      stagedFixtures.push({ fixture, remoteName, remotePath });
+    }
+    return stagedFixtures;
+  } catch (error) {
+    cleanupStagedDocumentFixtures(adbPath, serial, stagedFixtures);
+    throw new Error("Failed to stage one synthetic document QA fixture.", { cause: error });
+  }
+}
+
+function cleanupStagedDocumentFixtures(adbPath, serial, stagedFixtures) {
+  for (const staged of stagedFixtures) {
+    runCapture(adbPath, ["-s", serial, "shell", "rm", "-f", staged.remotePath], {
+      allowFailure: true,
+    });
+  }
+  runCapture(adbPath, ["-s", serial, "shell", "rmdir", DOCUMENT_QA_REMOTE_DIRECTORY], {
+    allowFailure: true,
+  });
+}
+
+async function openFreshDocumentQaChat(ctx) {
+  await goToHome(ctx);
+  const adbPath = resolveAdbPath();
+  const baselineThreadIds = readVisibleRecentConversationIds(adbPath, ctx.serial);
+  await waitForModelWarmupToSettleIfPresent(adbPath, ctx.serial);
+  await ctx.tapAnyText(NEW_CHAT_LABELS);
+  await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+  const noModelNode = await findAnyNodeNow(adbPath, ctx.serial, NO_MODEL_STATE_LABELS, {
+    visibleOnly: true,
+  });
+  if (noModelNode) {
+    throw new ScenarioPreconditionFailureError(
+      "Document QA requires a loaded local model before attaching fixtures."
+    );
+  }
+  const menuButton = await waitForResourceId(adbPath, ctx.serial, ATTACH_MENU_BUTTON_RESOURCE_ID, {
+    timeoutMs: 10_000,
+    visibleOnly: true,
+  });
+  tapRequiredNode(adbPath, ctx.serial, menuButton, "document attachment menu");
+  const documentButton = await waitForResourceId(
+    adbPath,
+    ctx.serial,
+    ATTACH_DOCUMENT_BUTTON_RESOURCE_ID,
+    { timeoutMs: 10_000, visibleOnly: true }
+  );
+  if (!documentButton.enabled || !documentButton.clickable) {
+    throw new ScenarioPreconditionFailureError(
+      "Document QA requires the document attachment action to be enabled."
+    );
+  }
+  await ctx.pressBack();
+  await waitForNoResourceId(adbPath, ctx.serial, "chat-attachment-menu-sheet", { timeoutMs: 5_000 });
+  return baselineThreadIds;
+}
+
+async function attachStagedDocumentFixture(ctx, staged, index) {
+  const adbPath = resolveAdbPath();
+  const menuButton = await waitForResourceId(adbPath, ctx.serial, ATTACH_MENU_BUTTON_RESOURCE_ID, {
+    timeoutMs: 10_000,
+    visibleOnly: true,
+  });
+  tapRequiredNode(adbPath, ctx.serial, menuButton, "document attachment menu");
+  const documentButton = await waitForResourceId(
+    adbPath,
+    ctx.serial,
+    ATTACH_DOCUMENT_BUTTON_RESOURCE_ID,
+    { timeoutMs: 10_000, visibleOnly: true }
+  );
+  tapRequiredNode(adbPath, ctx.serial, documentButton, "document attachment action");
+  await selectDocumentPickerFile(adbPath, ctx.serial, staged.remoteName);
+  await waitForResourceId(adbPath, ctx.serial, `chat-document-attachment-chip-${index}`, {
+    timeoutMs: 20_000,
+    visibleOnly: true,
+  });
+  await waitForNoResourceId(adbPath, ctx.serial, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
+    timeoutMs: 20_000,
+  });
+}
+
+async function selectDocumentPickerFile(adbPath, serial, remoteName) {
+  const directFile = await findAnyNodeNow(adbPath, serial, [remoteName], { visibleOnly: true });
+  if (!directFile) {
+    let searchNode = null;
+    for (const resourceId of DOCUMENT_PICKER_SEARCH_RESOURCE_IDS) {
+      searchNode = findResourceIdInSnapshot(createUiSnapshot(adbPath, serial), resourceId, {
+        visibleOnly: true,
+      });
+      if (searchNode) {
+        break;
+      }
+    }
+    if (!searchNode) {
+      const searchMatch = await waitForAnyNode(
+        adbPath,
+        serial,
+        DOCUMENT_PICKER_SEARCH_LABELS,
+        { timeoutMs: 10_000, visibleOnly: true }
+      );
+      searchNode = searchMatch.node;
+    }
+    tapRequiredNode(adbPath, serial, searchNode, "document picker search");
+    clearFocusedTextInput(adbPath, serial);
+    runChecked(adbPath, [
+      "-s", serial, "shell", "input", "text", escapeAdbInputText(remoteName),
+    ], { stdio: "ignore" });
+  }
+
+  const fileMatch = await waitForAnyNode(adbPath, serial, [remoteName], {
+    timeoutMs: 20_000,
+    visibleOnly: true,
+  });
+  tapRequiredNode(adbPath, serial, fileMatch.node, "synthetic document picker result");
+  try {
+    await waitForResourceId(adbPath, serial, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+      timeoutMs: 8_000,
+      visibleOnly: true,
+    });
+  } catch {
+    const confirm = await waitForAnyNode(adbPath, serial, DOCUMENT_PICKER_CONFIRM_LABELS, {
+      timeoutMs: 5_000,
+      visibleOnly: true,
+    });
+    tapRequiredNode(adbPath, serial, confirm.node, "document picker confirmation");
+    await waitForResourceId(adbPath, serial, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
+      timeoutMs: 10_000,
+      visibleOnly: true,
+    });
+  }
+}
+
+async function runDocumentSuccessIteration(ctx, session, { promptSentinel }) {
+  const expectedSentinelIds = [...new Set(
+    session.fixtures.flatMap((entry) => entry.fixture.sentinelIds)
+  )].sort();
+  const measured = await measureAndroidDocumentOperation(ctx, async () => {
+    await sendDocumentPromptImmediately(ctx, promptSentinel);
+    for (const sentinelId of expectedSentinelIds) {
+      await waitForResourceId(
+        resolveAdbPath(),
+        ctx.serial,
+        `chat-prepared-document-sentinel-${sentinelId}`,
+        { timeoutMs: 30_000, visibleOnly: true }
+      );
+    }
+    if (session.fixtures.length === 4) {
+      await waitForPreparedDocumentAttachmentCount(resolveAdbPath(), ctx.serial, 4, {
+        timeoutMs: 10_000,
+      });
+    }
+    return { sentinelIds: expectedSentinelIds };
+  });
+  await stopDocumentGenerationIfActive(ctx);
+  return {
+    outcome: "success",
+    elapsedMs: measured.elapsedMs,
+    peakRssBytes: measured.peakRssBytes,
+    uiProbeCount: measured.uiProbeCount,
+    uiProbeMaxLatencyMs: measured.uiProbeMaxLatencyMs,
+    sentinelIds: measured.value.sentinelIds,
+  };
+}
+
+async function runDocumentErrorIteration(ctx, session, { promptSentinel }) {
+  const expectedCodes = [...new Set(
+    session.fixtures.map((entry) => entry.fixture.expectedErrorCode).filter(Boolean)
+  )];
+  if (expectedCodes.length !== 1) {
+    throw new Error("Document error scenario must route exactly one expected error code.");
+  }
+  const expectedErrorCode = expectedCodes[0];
+  const expectedLabels = DOCUMENT_ERROR_LABELS_BY_CODE[expectedErrorCode];
+  if (!expectedLabels) {
+    throw new Error("Document error scenario has no privacy-safe UI assertion.");
+  }
+  const measured = await measureAndroidDocumentOperation(ctx, async () => {
+    await sendDocumentPromptImmediately(ctx, promptSentinel);
+    await waitForAnyNode(resolveAdbPath(), ctx.serial, expectedLabels, {
+      timeoutMs: 30_000,
+      visibleOnly: true,
+    });
+    return expectedErrorCode;
+  });
+  await dismissDocumentErrorDialogIfPresent(ctx);
+  return {
+    outcome: "expected-error",
+    errorCode: measured.value,
+    elapsedMs: measured.elapsedMs,
+    peakRssBytes: measured.peakRssBytes,
+    uiProbeCount: measured.uiProbeCount,
+    uiProbeMaxLatencyMs: measured.uiProbeMaxLatencyMs,
+    sentinelIds: [],
+  };
+}
+
+async function runDocumentRaceScenario(ctx, session, kind) {
+  const adbPath = resolveAdbPath();
+  const expectedSentinelIds = [...new Set(
+    session.fixtures.flatMap((entry) => entry.fixture.sentinelIds)
+  )].sort();
+  const alternateModelResourceId = kind === "model-race"
+    ? await resolveAlternateModelResourceId(ctx)
+    : null;
+  const measured = await measureAndroidDocumentOperation(ctx, async () => {
+    await sendDocumentPromptImmediately(ctx, `PQA-${kind.toUpperCase()}`);
+    if (kind === "stop-race") {
+      const stopButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_STOP_RESOURCE_ID, {
+        timeoutMs: 3_000,
+        visibleOnly: true,
+      });
+      tapRequiredNode(adbPath, ctx.serial, stopButton, "document parsing stop action");
+      await waitForDocumentCancellationSettlement(adbPath, ctx.serial);
+    } else if (kind === "thread-race") {
+      tapBottomTabImmediately(adbPath, ctx.serial, HOME_TAB_LABELS);
+      await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
+      await ctx.tapAnyText(NEW_CHAT_LABELS, { afterTapDelayMs: 0 });
+      await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+    } else if (kind === "model-race") {
+      const selector = await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_RESOURCE_ID, {
+        timeoutMs: 3_000,
+        visibleOnly: true,
+      });
+      tapRequiredNode(adbPath, ctx.serial, selector, "chat model selector");
+      await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
+        timeoutMs: 5_000,
+        visibleOnly: true,
+      });
+      const alternate = await waitForResourceId(adbPath, ctx.serial, alternateModelResourceId, {
+        timeoutMs: 5_000,
+        visibleOnly: true,
+      });
+      tapRequiredNode(adbPath, ctx.serial, alternate, "alternate loaded model");
+    } else {
+      throw new Error(`Unsupported document race kind: ${kind}.`);
+    }
+    await assertDocumentSentinelsStayAbsent(adbPath, ctx.serial, expectedSentinelIds);
+    return null;
+  });
+  return {
+    outcome: "cancelled",
+    elapsedMs: measured.elapsedMs,
+    peakRssBytes: measured.peakRssBytes,
+    uiProbeCount: measured.uiProbeCount,
+    uiProbeMaxLatencyMs: measured.uiProbeMaxLatencyMs,
+  };
+}
+
+async function sendDocumentPromptImmediately(ctx, promptSentinel) {
+  const adbPath = resolveAdbPath();
+  await ctx.tapAnyText(CHAT_INPUT_LABELS, {
+    allowBottomOverlay: true,
+    timeoutMs: 5_000,
+    afterTapDelayMs: 0,
+  });
+  await inputFocusedTextAndConfirm(adbPath, ctx.serial, promptSentinel, {
+    focusSettleMs: 0,
+  });
+  const sendButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_SEND_RESOURCE_ID, {
+    timeoutMs: 5_000,
+    visibleOnly: true,
+  });
+  if (!sendButton.enabled || !sendButton.clickable) {
+    throw new Error("Document QA send action is not enabled.");
+  }
+  tapRequiredNode(adbPath, ctx.serial, sendButton, "document QA send action");
+}
+
+async function stopDocumentGenerationIfActive(ctx) {
+  const adbPath = resolveAdbPath();
+  const stopButton = findResourceIdInSnapshot(
+    createUiSnapshot(adbPath, ctx.serial),
+    CHAT_PRIMARY_STOP_RESOURCE_ID,
+    { visibleOnly: true }
+  );
+  if (!stopButton) {
+    return;
+  }
+  tapRequiredNode(adbPath, ctx.serial, stopButton, "post-evidence generation stop action");
+  await waitForDocumentCancellationSettlement(adbPath, ctx.serial);
+}
+
+async function waitForDocumentCancellationSettlement(adbPath, serial) {
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    { timeoutMs: 10_000 },
+    (candidate) => {
+      const stopped = findResourceIdInSnapshot(candidate, "chat-stopped-banner", { visibleOnly: true });
+      const sendRestored = findResourceIdInSnapshot(candidate, CHAT_PRIMARY_SEND_RESOURCE_ID, {
+        visibleOnly: true,
+      });
+      const busy = findResourceIdInSnapshot(candidate, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
+        visibleOnly: true,
+      });
+      return stopped || (sendRestored && !busy ? sendRestored : null);
+    }
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(snapshot, "Document cancellation did not settle."));
+  }
+}
+
+async function dismissDocumentErrorDialogIfPresent(ctx) {
+  const adbPath = resolveAdbPath();
+  const button = findResourceIdInSnapshot(
+    createUiSnapshot(adbPath, ctx.serial),
+    ANDROID_DIALOG_POSITIVE_BUTTON_RESOURCE_ID,
+    { visibleOnly: true }
+  );
+  if (button) {
+    tapRequiredNode(adbPath, ctx.serial, button, "document error confirmation");
+    await delay(250);
+  }
+}
+
+async function resolveAlternateModelResourceId(ctx) {
+  const adbPath = resolveAdbPath();
+  const selector = await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_RESOURCE_ID, {
+    timeoutMs: 5_000,
+    visibleOnly: true,
+  });
+  tapRequiredNode(adbPath, ctx.serial, selector, "chat model selector precondition");
+  await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
+    timeoutMs: 5_000,
+    visibleOnly: true,
+  });
+  const candidates = createUiSnapshot(adbPath, ctx.serial).nodes.filter((node) => {
+    const resourceId = normalizeAndroidResourceId(node.resourceId);
+    return resourceId.startsWith("model-option-")
+      && node.clickable
+      && node.enabled
+      && !node.selected
+      && node.bounds;
+  });
+  await ctx.pressBack();
+  await waitForNoResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
+    timeoutMs: 5_000,
+  });
+  if (candidates.length < 1) {
+    throw new ScenarioPreconditionFailureError(
+      "Document model-switch QA requires a second downloaded model visible in the selector."
+    );
+  }
+  return normalizeAndroidResourceId(candidates[0].resourceId);
+}
+
+async function waitForPreparedDocumentAttachmentCount(adbPath, serial, expectedCount, options = {}) {
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidate) => {
+      const documentMarkers = candidate.nodes.filter((node) => {
+        const resourceId = normalizeAndroidResourceId(node.resourceId);
+        return resourceId.startsWith("chat-prepared-attachment-")
+          && resourceId.includes("-document-");
+      });
+      return documentMarkers.length === expectedCount ? { count: documentMarkers.length } : null;
+    }
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      `Expected ${expectedCount} prepared document attachment markers.`
+    ));
+  }
+}
+
+async function assertDocumentSentinelsStayAbsent(adbPath, serial, sentinelIds, options = {}) {
+  const durationMs = options.durationMs ?? DOCUMENT_RACE_POST_CANCEL_HORIZON_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? DOCUMENT_RACE_SENTINEL_POLL_INTERVAL_MS;
+  const now = options.now ?? Date.now;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const wait = options.delayFn ?? delay;
+  const startedAt = now();
+  while (true) {
+    const snapshot = createSnapshot(adbPath, serial);
+    for (const sentinelId of sentinelIds) {
+      if (findResourceIdInSnapshot(
+        snapshot,
+        `chat-prepared-document-sentinel-${sentinelId}`,
+        { visibleOnly: true }
+      )) {
+        throw new Error("A stale document prompt sentinel reached a replacement chat context.");
+      }
+    }
+    const elapsedMs = Math.max(0, now() - startedAt);
+    if (elapsedMs >= durationMs) {
+      return;
+    }
+    await wait(Math.min(pollIntervalMs, durationMs - elapsedMs));
+  }
+}
+
+function tapBottomTabImmediately(adbPath, serial, labels) {
+  const snapshot = createUiSnapshot(adbPath, serial);
+  const match = findBottomTabNodeInSnapshot(snapshot, labels);
+  if (!match?.node) {
+    throw new Error("Document race could not find the requested bottom tab.");
+  }
+  const tapPoint = getBottomTabTapPoint(match.node);
+  runChecked(adbPath, [
+    "-s", serial, "shell", "input", "tap", `${tapPoint.centerX}`, `${tapPoint.centerY}`,
+  ], { stdio: "ignore" });
+}
+
+function tapRequiredNode(adbPath, serial, node, description) {
+  if (!node?.bounds) {
+    throw new Error(`The ${description} has no tap bounds.`);
+  }
+  tapBounds(adbPath, serial, node.bounds);
+}
+
+async function measureAndroidDocumentOperation(ctx, operation) {
+  const sampler = startAndroidDocumentSampler(resolveAdbPath(), ctx.serial);
+  const startedAt = Date.now();
+  try {
+    const value = await operation();
+    const samples = await sampler.stop();
+    if (samples.peakRssBytes <= 0 || samples.uiProbeCount < 1) {
+      throw new Error("Document benchmark could not collect bounded RSS and UI responsiveness evidence.");
+    }
+    return { value, elapsedMs: Date.now() - startedAt, ...samples };
+  } catch (error) {
+    await sampler.stop();
+    throw error;
+  }
+}
+
+function startAndroidDocumentSampler(adbPath, serial) {
+  let active = true;
+  let stopped = false;
+  let peakRssBytes = 0;
+  let uiProbeCount = 0;
+  let uiProbeMaxLatencyMs = 0;
+  const loop = (async () => {
+    while (active) {
+      const rssBytes = readAndroidProcessRssBytes(adbPath, serial);
+      peakRssBytes = Math.max(peakRssBytes, rssBytes || 0);
+      const probeStartedAt = Date.now();
+      try {
+        const snapshot = createUiSnapshot(adbPath, serial);
+        if (snapshot.nodes.length > 0) {
+          uiProbeCount += 1;
+          uiProbeMaxLatencyMs = Math.max(uiProbeMaxLatencyMs, Date.now() - probeStartedAt);
+        }
+      } catch {
+        // A transient probe failure is recorded by the missing-success count, never with UI text.
+      }
+      if (active) {
+        await delay(250);
+      }
+    }
+  })();
+  return {
+    stop: async () => {
+      if (!stopped) {
+        stopped = true;
+        active = false;
+        await loop;
+      }
+      return { peakRssBytes, uiProbeCount, uiProbeMaxLatencyMs };
+    },
+  };
+}
+
+function readAndroidProcessRssBytes(adbPath, serial, run = runCapture) {
+  const output = run(adbPath, [
+    "-s", serial, "shell", "dumpsys", "meminfo", "--local", appPackageName,
+  ], { allowFailure: true, maxBuffer: 2 * 1024 * 1024 });
+  const match = String(output).match(/TOTAL RSS:\s*([\d,]+)\s*(?:K?B)?/iu);
+  if (!match) {
+    return null;
+  }
+  const kibibytes = Number.parseInt(match[1].replace(/,/gu, ""), 10);
+  return Number.isSafeInteger(kibibytes) && kibibytes > 0 ? kibibytes * 1024 : null;
+}
+
+async function cleanupDocumentQaThreads(ctx, baselineThreadIds) {
+  if (!Array.isArray(baselineThreadIds)) {
+    return;
+  }
+  await goToHome(ctx);
+  const adbPath = resolveAdbPath();
+  const baseline = new Set(baselineThreadIds);
+  let createdIds = readVisibleRecentConversationIds(adbPath, ctx.serial)
+    .filter((threadId) => !baseline.has(threadId));
+  if (createdIds.length > 2) {
+    throw new Error("Document QA observed more new conversations than it can safely clean up.");
+  }
+  for (const threadId of createdIds) {
+    await tapConversationDelete(ctx, threadId);
+    await assertRecentConversationAbsent(ctx, threadId);
+  }
+}
+
+function omitBenchmarkWarmup(iteration) {
+  const { warmup: _warmup, iteration: _iteration, ...rest } = iteration;
+  return rest;
 }
 
 function buildBranchRegenerationScenarios() {
@@ -4124,6 +4956,8 @@ function selectScenarios(scenarios, options) {
       ...PREPARED_ATTACHMENT_SEND_SCENARIOS,
       ...STORAGE_SCENARIOS,
       ...BRANCH_REGENERATION_SCENARIOS,
+      ...DOCUMENT_SCENARIOS,
+      ...DOCUMENT_BENCHMARK_SCENARIOS,
     ]);
     return scenarios.filter((scenario) => !explicitStateMutationScenarioIds.has(scenario.id));
   }
@@ -7601,7 +8435,40 @@ function serializeReportResults(results, roots = {}) {
     return value;
   };
 
-  return results.map((result) => serializeValue(result));
+  const serializeDocumentResult = (result) => {
+    const status = ["failed", "not_applicable", "passed", "skipped"].includes(result?.status)
+      ? result.status
+      : "failed";
+    const failureStage = DOCUMENT_FAILURE_STAGES.has(result?.failureStage)
+      ? result.failureStage
+      : status === "skipped"
+      ? "skip"
+      : status === "not_applicable"
+      ? "not-applicable"
+      : "scenario";
+    const expectedFailureCode = DOCUMENT_FAILURE_CODES_BY_STAGE[failureStage];
+    const safeResult = {
+      id: DOCUMENT_REPORT_IDS.has(result?.id) ? result.id : "document-scenario-failure",
+      ...(result?.tier === "critical" ? { tier: "critical" } : {}),
+      status,
+      durationMs: Number.isSafeInteger(result?.durationMs) && result.durationMs >= 0
+        ? result.durationMs
+        : 0,
+      evidencePolicy: DOCUMENT_EVIDENCE_POLICY,
+      ...(result?.failureKind === "precondition" ? { failureKind: "precondition" } : {}),
+      ...(status === "passed" && result?.details ? { details: result.details } : {}),
+      ...(status !== "passed"
+        ? { errorCode: expectedFailureCode, failureStage }
+        : {}),
+    };
+    return serializeValue(safeResult);
+  };
+
+  return results.map((result) => (
+    result?.evidencePolicy === DOCUMENT_EVIDENCE_POLICY
+      ? serializeDocumentResult(result)
+      : serializeValue(result)
+  ));
 }
 
 function toReportRelativePath(filePath, roots) {
@@ -8149,8 +9016,14 @@ function sleepSync(ms) {
 
 module.exports = {
   BRANCH_REGENERATION_SCENARIOS,
+  DOCUMENT_BENCHMARK_SCENARIOS,
+  DOCUMENT_EVIDENCE_POLICY,
+  DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS,
+  DOCUMENT_RACE_POST_CANCEL_HORIZON_MS,
+  DOCUMENT_SCENARIOS,
   areExactGitProvenancesEqual,
   assertAuthoritativeThoughtClear,
+  assertDocumentSentinelsStayAbsent,
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
   buildConversationTopology,
@@ -8163,6 +9036,7 @@ module.exports = {
   cleanupAndroidLogcatCollector,
   configureScenarioBuildEnvironment,
   collectCurrentQaBuildProvenance,
+  buildDocumentFailureFields,
   createBranchRegenerationBaseline,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
@@ -8173,6 +9047,7 @@ module.exports = {
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
   DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
+  describeDocumentScenarioConsoleError,
   dismissTransientSurfaceWithBack,
   findCatalogRiskModelCard,
   findChatResourceWithScroll,
@@ -8206,6 +9081,7 @@ module.exports = {
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
+  readAndroidProcessRssBytes,
   parseUiSnapshot,
   readAndroidLogcatCollector,
   readAndroidLogcatStartEpoch,

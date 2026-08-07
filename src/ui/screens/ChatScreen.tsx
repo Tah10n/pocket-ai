@@ -490,12 +490,13 @@ export function getAndroidKeyboardSpacerHeight({
 export function shouldFloatAndroidComposerOverContent({
     platform,
     surfaceKind,
+    isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
     surfaceKind: 'solid' | 'glass';
-    isKeyboardVisible?: boolean;
+    isKeyboardVisible: boolean;
 }) {
-    return platform === 'android' && surfaceKind === 'glass';
+    return platform === 'android' && surfaceKind === 'glass' && !isKeyboardVisible;
 }
 
 export function getAndroidFloatingComposerBottomOffset({

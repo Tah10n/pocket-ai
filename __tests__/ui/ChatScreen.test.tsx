@@ -2563,7 +2563,7 @@ describe('ChatScreen', () => {
     })).toBe(48);
   });
 
-  it('keeps the Android glass composer floating across keyboard visibility changes', () => {
+  it('returns the Android glass composer to normal flow while the keyboard is visible', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
       surfaceKind: 'glass',
@@ -2578,7 +2578,7 @@ describe('ChatScreen', () => {
       platform: 'android',
       surfaceKind: 'glass',
       isKeyboardVisible: true,
-    })).toBe(true);
+    })).toBe(false);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
       surfaceKind: 'glass',

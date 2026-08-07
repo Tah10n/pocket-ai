@@ -31,6 +31,7 @@ const {
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
+  resolveAndroidQaApplicationId,
   resolveDebugApkReuseDecision,
   runAdbInstall,
   runAndroidGradleBuild,
@@ -862,6 +863,29 @@ describe('android-smoke target ABI contract', () => {
     ]);
     expect(() => buildGradleAssembleArgs(undefined, 'universal'))
       .toThrow(/requires an explicit assemble task/);
+  });
+
+  it('binds isolated phone QA to the repository-owned side-by-side package', () => {
+    const productionPackage = 'com.github.tah10n.pocketai';
+    const isolatedPackage = resolveAndroidQaApplicationId(productionPackage, true);
+
+    expect(parseCliOptions(['--isolated-qa-install'])).toEqual(
+      expect.objectContaining({ isolatedQaInstall: true }),
+    );
+    expect(isolatedPackage).toBe('com.github.tah10n.pocketai.qa');
+    expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
+      applicationId: isolatedPackage,
+    })).toEqual([
+      'app:assembleRelease',
+      '-PreactNativeArchitectures=arm64-v8a',
+      '-PpocketAiApplicationId=com.github.tah10n.pocketai.qa',
+      '--rerun-tasks',
+      '--no-build-cache',
+      '--no-configuration-cache',
+    ]);
+    expect(() => buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
+      applicationId: 'com.example.untrusted',
+    })).toThrow(/repository package or its isolated \.qa package/);
   });
 
   it('cleans generated native intermediates before invoking a fresh provenance build', () => {

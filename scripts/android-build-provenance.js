@@ -1151,10 +1151,15 @@ function assertAndroidBuildOverrideContract(projectRoot, options = {}) {
 function readAndroidAppVersionDefaults(projectRoot) {
   const appConfigPath = path.join(projectRoot, "app.json");
   if (!fs.existsSync(appConfigPath)) {
-    return { versionCode: 1, versionName: "1.0.0" };
+    return {
+      applicationId: "com.github.tah10n.pocketai",
+      versionCode: 1,
+      versionName: "1.0.0",
+    };
   }
   const expo = JSON.parse(fs.readFileSync(appConfigPath, "utf8")).expo || {};
   return {
+    applicationId: expo.android?.package ?? "com.github.tah10n.pocketai",
     versionCode: expo.android?.versionCode ?? 1,
     versionName: expo.version ?? "1.0.0",
   };
@@ -1193,7 +1198,7 @@ function resolveEffectiveBuildValue({
   if (env[gradleEnvironmentKey] != null && `${env[gradleEnvironmentKey]}`.trim()) {
     return { source: "gradle-environment", value: `${env[gradleEnvironmentKey]}`.trim() };
   }
-  if (env[envKey] != null && `${env[envKey]}`.trim()) {
+  if (envKey && env[envKey] != null && `${env[envKey]}`.trim()) {
     return { source: "environment", value: `${env[envKey]}`.trim() };
   }
   if (properties[propertiesKey] != null && `${properties[propertiesKey]}`.trim()) {
@@ -1274,6 +1279,17 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
     propertySources,
     defaultValue: defaults.versionName,
   });
+  const applicationId = resolveEffectiveBuildValue({
+    gradleProperties,
+    systemGradleProperties,
+    gradleKey: "pocketAiApplicationId",
+    env,
+    envKey: null,
+    properties: {},
+    propertiesKey: "unused",
+    propertySources,
+    defaultValue: defaults.applicationId,
+  });
   const signingValues = {
     storeFile: resolveEffectiveBuildValue({
       gradleProperties,
@@ -1344,6 +1360,11 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
 
   return {
     schemaVersion: 1,
+    applicationId: {
+      value: applicationId.value,
+      source: applicationId.source,
+      isolatedQa: applicationId.value === `${defaults.applicationId}.qa`,
+    },
     pluginVersions: {
       agp: env.POCKET_AI_ANDROID_AGP_VERSION || DEFAULT_ANDROID_BUILD_PLUGIN_VERSIONS.agp,
       kotlin: env.POCKET_AI_ANDROID_KOTLIN_VERSION || DEFAULT_ANDROID_BUILD_PLUGIN_VERSIONS.kotlin,

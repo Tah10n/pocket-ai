@@ -7,6 +7,7 @@ const {
   buildGradleAssembleArgs,
   captureOwnedProcessOwnership,
   ensureMetroServer,
+  resolveAndroidQaApplicationId,
   spawnOwnedProcess,
   stopOwnedMetroProcessOrThrow,
   stopOwnedProcessTreeByPid,
@@ -130,7 +131,10 @@ const artifactsRoot = path.join(projectRoot, "artifacts", "android-scenarios");
 const androidRoot = path.join(projectRoot, "android");
 const dumpPathOnDevice = "/sdcard/window_dump.xml";
 const expoConfig = readExpoConfig();
-const appPackageName = expoConfig.packageName;
+const appPackageName = resolveAndroidQaApplicationId(
+  expoConfig.packageName,
+  cliOptions.isolatedQaInstall
+);
 const appSchemeName = expoConfig.scheme;
 const homeLauncherLabel = "Pocket AI";
 const APP_TITLE_LABELS = ["Pocket AI"];
@@ -5785,6 +5789,10 @@ function buildSmokeLaunchArgs(options, resolvedSerial) {
     args.push("--skip-build");
   }
 
+  if (options.isolatedQaInstall) {
+    args.push("--isolated-qa-install");
+  }
+
   if (options.apkVariant) {
     args.push("--apk-variant", options.apkVariant);
   }
@@ -8093,7 +8101,9 @@ function collectCurrentQaBuildProvenance(provenance, currentGit, options = {}) {
     { NODE_ENV: nodeEnv }
   );
   const assembleTask = `app:assemble${variant[0].toUpperCase()}${variant.slice(1)}`;
-  const gradleArgs = buildGradleAssembleArgs(assembleTask, abi);
+  const gradleArgs = buildGradleAssembleArgs(assembleTask, abi, {
+    applicationId: appPackageName,
+  });
   const prebuildInputState = collectPrebuildInputState(projectRoot, {
     variant,
     nodeEnv,
@@ -8524,6 +8534,7 @@ function parseCliOptions(argv) {
     serial: null,
     scenario: null,
     port: null,
+    isolatedQaInstall: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -8551,6 +8562,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--bootstrap-screenshot") {
       options.bootstrapScreenshot = true;
+      continue;
+    }
+
+    if (arg === "--isolated-qa-install") {
+      options.isolatedQaInstall = true;
       continue;
     }
 
@@ -8633,6 +8649,7 @@ function printHelp() {
   console.log("  --fail-on-skip             Treat skipped scenarios as verification failures");
   console.log("  --preserve-running-app     Do not bootstrap or restart the app before scenarios");
   console.log("  --bootstrap-screenshot     Save a smoke bootstrap screenshot before scenarios");
+  console.log("  --isolated-qa-install      Install and target the repository-owned side-by-side .qa package");
   console.log("  --port <number>            Forward a specific Metro port to android-smoke");
   console.log("  --list                     Print available scenarios");
 }

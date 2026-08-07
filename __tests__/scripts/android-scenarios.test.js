@@ -459,6 +459,36 @@ describe('app image picker configuration', () => {
       },
     ]);
   });
+
+  it('release config plugin restricts application id overrides to the isolated QA package', () => {
+    const source = `def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
+android {
+  defaultConfig {
+    applicationId 'com.github.tah10n.pocketai'
+    versionCode 20
+    versionName '1.6.3'
+  }
+  signingConfigs {
+    debug {}
+  }
+  buildTypes {
+    release {
+      signingConfig signingConfigs.debug
+    }
+  }
+}`;
+
+    const result = withAndroidReleaseConfig._internal.applyBuildGradleReleaseConfig(source, {
+      fallbackApplicationId: 'com.github.tah10n.pocketai',
+      fallbackVersionCode: 20,
+      fallbackVersionName: '1.6.3',
+    });
+
+    expect(result).toContain('def pocketAiIsolatedQaApplicationId = "com.github.tah10n.pocketai.qa"');
+    expect(result).toContain('applicationId appApplicationId');
+    expect(result).toContain('appApplicationId in [pocketAiDefaultApplicationId, pocketAiIsolatedQaApplicationId]');
+    expect(result).not.toContain("applicationId 'com.github.tah10n.pocketai'");
+  });
 });
 
 describe('android-scenarios smoke bootstrap args', () => {
@@ -530,6 +560,15 @@ describe('android-scenarios smoke bootstrap args', () => {
         '--serial',
         'emulator-5554',
       ])
+    );
+  });
+
+  it('forwards the isolated QA package flag to the smoke bootstrap', () => {
+    const options = parseCliOptions(['--isolated-qa-install']);
+
+    expect(options).toEqual(expect.objectContaining({ isolatedQaInstall: true }));
+    expect(buildSmokeLaunchArgs(options, 'physical-device')).toEqual(
+      expect.arrayContaining(['--isolated-qa-install', '--serial', 'physical-device']),
     );
   });
 });

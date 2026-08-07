@@ -59,6 +59,18 @@ test device:
 npm run android:scenarios:documents
 ```
 
+When a personal device already has the production package and replacing it would remove
+downloaded models or chats, install the repository-owned side-by-side QA package instead:
+
+```sh
+npm run android:scenarios:documents -- --isolated-qa-install
+```
+
+The flag permits only `com.github.tah10n.pocketai.qa`, records that effective application
+ID in the build/install provenance chain, and leaves `com.github.tah10n.pocketai` and its
+private storage untouched. Remove the isolated package after collecting the report with
+`adb uninstall com.github.tah10n.pocketai.qa`.
+
 This preconditioned pack remains an explicit maintainer/device command. Hosted labels,
 the default hosted pack, and `android-pack-all` deliberately exclude it.
 

@@ -1934,6 +1934,42 @@ describe('Android build provenance routing', () => {
     )).toThrow(/missing required native libraries/);
   });
 
+  it('records the effective isolated QA application id in public build provenance', () => {
+    const projectRoot = createProject();
+    fs.writeFileSync(
+      path.join(projectRoot, 'app.json'),
+      JSON.stringify({ expo: { android: { package: 'com.github.tah10n.pocketai' } } }),
+    );
+
+    try {
+      const production = collectAndroidEffectiveBuildContext(projectRoot, {
+        gradleArgs: ['app:assembleRelease'],
+        variant: 'release',
+      });
+      const isolatedQa = collectAndroidEffectiveBuildContext(projectRoot, {
+        gradleArgs: [
+          'app:assembleRelease',
+          '-PpocketAiApplicationId=com.github.tah10n.pocketai.qa',
+        ],
+        variant: 'release',
+      });
+
+      expect(production.applicationId).toEqual({
+        isolatedQa: false,
+        source: 'default',
+        value: 'com.github.tah10n.pocketai',
+      });
+      expect(isolatedQa.applicationId).toEqual({
+        isolatedQa: true,
+        source: 'gradle-argument',
+        value: 'com.github.tah10n.pocketai.qa',
+      });
+      expect(hashCanonicalJson(isolatedQa)).not.toBe(hashCanonicalJson(production));
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
   it('records exact packaged Pocket AnyDoc library hashes for every Android ABI', () => {
     const projectRoot = createProject();
     const artifactPath = path.join(projectRoot, 'fixture.apk');

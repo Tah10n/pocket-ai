@@ -2872,7 +2872,6 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
   await selectDocumentPickerFile(adbPath, ctx.serial, staged.remoteName);
   await waitForResourceId(adbPath, ctx.serial, `chat-document-attachment-chip-${index}`, {
     timeoutMs: 20_000,
-    visibleOnly: true,
   });
   await waitForNoResourceId(adbPath, ctx.serial, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
     timeoutMs: 20_000,

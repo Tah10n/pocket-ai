@@ -1540,6 +1540,27 @@ describe('android-scenarios UI snapshot matching', () => {
     expect(node?.resourceId).toBe('com.github.tah10n.pocketai:id/chat-list-viewport');
   });
 
+  it('keeps an offscreen fourth document chip observable in a horizontal attachment tray', () => {
+    const attachmentSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-document-attachment-chip-3" bounds="[1120,1900][1440,2050]" />
+      </hierarchy>
+    `);
+
+    expect(findResourceIdInSnapshot(
+      attachmentSnapshot,
+      'chat-document-attachment-chip-3',
+      { visibleOnly: true },
+    )).toBeNull();
+    expect(findResourceIdInSnapshot(
+      attachmentSnapshot,
+      'chat-document-attachment-chip-3',
+    )).toEqual(expect.objectContaining({
+      resourceId: 'chat-document-attachment-chip-3',
+    }));
+  });
+
   it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
     const uniquePrompt = 'Describe prepared image 12345 67890';
     const staleComposerSnapshot = parseUiSnapshot(`

@@ -603,6 +603,7 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "attachment-ready",
   "prompt-focus-start",
   "prompt-confirmed",
+  "keyboard-dismissed",
   "send-tapped",
   "stop-tapped",
   "cancel-settled",
@@ -3088,6 +3089,9 @@ async function sendDocumentPromptImmediately(ctx, promptSentinel) {
     focusSettleMs: 0,
   });
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-confirmed");
+  await ctx.pressBack();
+  await delay(300);
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "keyboard-dismissed");
   const sendButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_SEND_RESOURCE_ID, {
     timeoutMs: 5_000,
     visibleOnly: true,

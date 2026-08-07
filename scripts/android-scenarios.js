@@ -596,6 +596,10 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "home-ready",
   "warmup-ready",
   "chat-ready",
+  "attachment-picker-start",
+  "attachment-picker-selected",
+  "attachment-chip-visible",
+  "attachment-idle",
   "attachment-ready",
   "prompt-focus-start",
   "prompt-confirmed",
@@ -2857,6 +2861,7 @@ async function openFreshDocumentQaChat(ctx) {
 
 async function attachStagedDocumentFixture(ctx, staged, index) {
   const adbPath = resolveAdbPath();
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-picker-start");
   const menuButton = await waitForResourceId(adbPath, ctx.serial, ATTACH_MENU_BUTTON_RESOURCE_ID, {
     timeoutMs: 10_000,
     visibleOnly: true,
@@ -2870,12 +2875,15 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
   );
   tapRequiredNode(adbPath, ctx.serial, documentButton, "document attachment action");
   await selectDocumentPickerFile(adbPath, ctx.serial, staged.remoteName);
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-picker-selected");
   await waitForResourceId(adbPath, ctx.serial, `chat-document-attachment-chip-${index}`, {
     timeoutMs: 20_000,
   });
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-chip-visible");
   await waitForNoResourceId(adbPath, ctx.serial, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
     timeoutMs: 20_000,
   });
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-idle");
 }
 
 async function selectDocumentPickerFile(adbPath, serial, remoteName) {

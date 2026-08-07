@@ -430,6 +430,17 @@ function throwIfDocumentProcessingCancelled(
   }
 }
 
+function recordPocketAnydocQaStage(
+  stage: 'route' | 'prepare' | 'select',
+  code: 'start' | 'ok' | PocketAnydocError['code'],
+): void {
+  if (process.env.EXPO_PUBLIC_ANDROID_QA !== '1') {
+    return;
+  }
+  // Codes and fixed stages only: never put filenames, paths, prompts, or document text in logcat.
+  console.warn(`[PocketAnyDocQa] stage=${stage} code=${code}`);
+}
+
 function toDocumentContextChunks(chunks: readonly PocketAnydocContextChunk[]): DocumentContextChunk[] {
   return chunks.map((chunk) => ({
     index: chunk.index,
@@ -531,28 +542,49 @@ async function processPocketAnydocAttachment(
   options.signal?.addEventListener('abort', cancelOnAbort, { once: true });
   try {
     throwIfDocumentProcessingCancelled(options.signal, attachment);
-    prepared = await preparePocketAnydocDocument({
-      requestId,
-      localUri: processable.localUri,
-      displayName: attachment.displayName ?? attachment.fileName,
-      declaredMimeType: processable.mimeType,
-      sourceSizeBytes,
-    });
+    recordPocketAnydocQaStage('prepare', 'start');
+    try {
+      prepared = await preparePocketAnydocDocument({
+        requestId,
+        localUri: processable.localUri,
+        displayName: attachment.displayName ?? attachment.fileName,
+        declaredMimeType: processable.mimeType,
+        sourceSizeBytes,
+      });
+      recordPocketAnydocQaStage('prepare', 'ok');
+    } catch (error) {
+      recordPocketAnydocQaStage(
+        'prepare',
+        error instanceof PocketAnydocError ? error.code : 'native_failed',
+      );
+      throw error;
+    }
     throwIfDocumentProcessingCancelled(options.signal, attachment);
     const nativeQuery = truncateAtUtf16Boundary(
       resolveNativeDocumentSelectionQuery(options.query ?? ''),
       POCKET_ANYDOC_MAX_QUERY_CHARS,
     );
-    const selection = await selectPocketAnydocContext({
-      requestId,
-      handle: prepared.handle,
-      query: nativeQuery,
-      maxChunks: Math.min(
-        POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
-        normalizePositiveInteger(options.maxChunks, 32),
-      ),
-      maxChars: Math.min(POCKET_ANYDOC_MAX_SELECTION_CHARS, maxChars),
-    });
+    recordPocketAnydocQaStage('select', 'start');
+    let selection: Awaited<ReturnType<typeof selectPocketAnydocContext>>;
+    try {
+      selection = await selectPocketAnydocContext({
+        requestId,
+        handle: prepared.handle,
+        query: nativeQuery,
+        maxChunks: Math.min(
+          POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+          normalizePositiveInteger(options.maxChunks, 32),
+        ),
+        maxChars: Math.min(POCKET_ANYDOC_MAX_SELECTION_CHARS, maxChars),
+      });
+      recordPocketAnydocQaStage('select', 'ok');
+    } catch (error) {
+      recordPocketAnydocQaStage(
+        'select',
+        error instanceof PocketAnydocError ? error.code : 'native_failed',
+      );
+      throw error;
+    }
     throwIfDocumentProcessingCancelled(options.signal, attachment);
     const preparedAssetIds = new Set(prepared.assets?.map((asset) => asset.id) ?? []);
     if (selection.chunks.some((chunk) => (
@@ -768,6 +800,7 @@ export class ChatAttachmentProcessorRegistry {
     throwIfDocumentProcessingCancelled(options.signal, attachment);
     if (isSupportedChatAnydocDocumentMimeType(processable.mimeType)) {
       try {
+        recordPocketAnydocQaStage('route', 'start');
         return await processPocketAnydocAttachment(
           attachment,
           processable,

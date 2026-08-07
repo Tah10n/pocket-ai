@@ -591,6 +591,28 @@ const DOCUMENT_REPORT_IDS = new Set([
   "current-head-provenance-final",
   "runner-failure",
 ]);
+const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
+  "fixtures-staged",
+  "home-ready",
+  "warmup-ready",
+  "chat-ready",
+  "attachment-ready",
+  "prompt-focus-start",
+  "prompt-confirmed",
+  "send-tapped",
+]);
+
+function recordDocumentQaHostCheckpoint(adbPath, serial, stage, options = {}) {
+  if (!DOCUMENT_QA_HOST_CHECKPOINTS.has(stage)) {
+    throw new Error("Unknown document QA host checkpoint.");
+  }
+  const runCommand = options.runCommand ?? runChecked;
+  const writeLog = options.logFn ?? log;
+  runCommand(adbPath, [
+    "-s", serial, "shell", "log", "-t", "PocketAnyDocQaHost", `stage=${stage}`,
+  ], { stdio: "ignore" });
+  writeLog(`Document QA checkpoint: ${stage}.`);
+}
 
 function buildDocumentFailureFields(_error, stage) {
   const failureStage = DOCUMENT_FAILURE_STAGES.has(stage) ? stage : "scenario";
@@ -1494,6 +1516,44 @@ function buildPreparedAttachmentSendPrompt() {
   const timestampSuffix = Date.now().toString(36).slice(-6);
   const randomSuffix = Math.floor(Math.random() * (36 ** 4)).toString(36).padStart(4, "0");
   return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} qa${timestampSuffix}${randomSuffix}`;
+}
+
+function buildDocumentQaPromptSentinel(...parts) {
+  const normalized = parts
+    .map((part) => String(part).trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized || !/^[A-Za-z0-9 ]+$/.test(normalized)) {
+    throw new Error("Document QA prompt parts must contain only ASCII letters, numbers, spaces, hyphens, or underscores.");
+  }
+  return `PQA ${normalized.toUpperCase()}`;
+}
+
+function buildDocumentQaRetrievalPrompt(promptSentinel, sentinelIds) {
+  const normalizedPrompt = String(promptSentinel).trim();
+  if (!/^PQA [A-Z0-9 ]+$/.test(normalizedPrompt)) {
+    throw new Error("Document QA retrieval prompt must start with a constrained PQA sentinel.");
+  }
+  if (!Array.isArray(sentinelIds) || sentinelIds.length === 0) {
+    throw new Error("Document QA retrieval prompt requires at least one known sentinel.");
+  }
+
+  const retrievalTerms = [...new Set(sentinelIds)].sort().map((sentinelId) => {
+    const sentinelValue = DOCUMENT_QA_SENTINELS[sentinelId];
+    if (typeof sentinelValue !== "string") {
+      throw new Error("Document QA retrieval prompt contains an unknown sentinel.");
+    }
+    return sentinelValue.replace(/[-_]+/g, " ").toUpperCase();
+  });
+  const prompt = [normalizedPrompt, ...retrievalTerms]
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  escapeAdbInputText(prompt);
+  return prompt;
 }
 
 function buildTextOnlyFallbackSendPrompt() {
@@ -2618,7 +2678,7 @@ async function runDocumentQaScenario(ctx, definition) {
   return withDocumentQaFixtures(ctx, definition.fixtureIds, async (session) => {
     if (definition.kind === "success") {
       const iteration = await runDocumentSuccessIteration(ctx, session, {
-        promptSentinel: `PQA-${definition.id.toUpperCase()}`,
+        promptSentinel: buildDocumentQaPromptSentinel(definition.id),
       });
       return {
         details: {
@@ -2630,7 +2690,7 @@ async function runDocumentQaScenario(ctx, definition) {
     }
     if (definition.kind === "error") {
       const iteration = await runDocumentErrorIteration(ctx, session, {
-        promptSentinel: `PQA-${definition.id.toUpperCase()}`,
+        promptSentinel: buildDocumentQaPromptSentinel(definition.id),
       });
       return {
         details: {
@@ -2659,10 +2719,10 @@ async function runAndroidDocumentBenchmarkCase(ctx, definition) {
       const hasExpectedError = session.fixtures.some((entry) => entry.fixture.expectedErrorCode);
       const result = hasExpectedError
         ? await runDocumentErrorIteration(ctx, session, {
-            promptSentinel: `PQA-BENCH-${definition.id.toUpperCase()}-${index}`,
+            promptSentinel: buildDocumentQaPromptSentinel("bench", definition.id, index),
           })
         : await runDocumentSuccessIteration(ctx, session, {
-            promptSentinel: `PQA-BENCH-${definition.id.toUpperCase()}-${index}`,
+            promptSentinel: buildDocumentQaPromptSentinel("bench", definition.id, index),
           });
       return {
         ...result,
@@ -2688,12 +2748,15 @@ async function runAndroidDocumentBenchmarkCase(ctx, definition) {
 async function withDocumentQaFixtures(ctx, fixtureIds, operation) {
   const adbPath = resolveAdbPath();
   const stagedFixtures = stageDocumentQaFixtures(adbPath, ctx.serial, fixtureIds);
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "fixtures-staged");
   let baselineThreadIds = [];
   let primaryError = null;
   try {
     baselineThreadIds = await openFreshDocumentQaChat(ctx);
+    recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "chat-ready");
     for (let index = 0; index < stagedFixtures.length; index += 1) {
       await attachStagedDocumentFixture(ctx, stagedFixtures[index], index);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-ready");
     }
     return await operation({ fixtures: stagedFixtures, baselineThreadIds });
   } catch (error) {
@@ -2758,7 +2821,9 @@ async function openFreshDocumentQaChat(ctx) {
   await goToHome(ctx);
   const adbPath = resolveAdbPath();
   const baselineThreadIds = readVisibleRecentConversationIds(adbPath, ctx.serial);
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "home-ready");
   await waitForModelWarmupToSettleIfPresent(adbPath, ctx.serial);
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "warmup-ready");
   await ctx.tapAnyText(NEW_CHAT_LABELS);
   await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
   const noModelNode = await findAnyNodeNow(adbPath, ctx.serial, NO_MODEL_STATE_LABELS, {
@@ -2870,7 +2935,10 @@ async function runDocumentSuccessIteration(ctx, session, { promptSentinel }) {
     session.fixtures.flatMap((entry) => entry.fixture.sentinelIds)
   )].sort();
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
-    await sendDocumentPromptImmediately(ctx, promptSentinel);
+    await sendDocumentPromptImmediately(
+      ctx,
+      buildDocumentQaRetrievalPrompt(promptSentinel, expectedSentinelIds)
+    );
     for (const sentinelId of expectedSentinelIds) {
       await waitForResourceId(
         resolveAdbPath(),
@@ -2938,7 +3006,7 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     ? await resolveAlternateModelResourceId(ctx)
     : null;
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
-    await sendDocumentPromptImmediately(ctx, `PQA-${kind.toUpperCase()}`);
+    await sendDocumentPromptImmediately(ctx, buildDocumentQaPromptSentinel(kind));
     if (kind === "stop-race") {
       const stopButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_STOP_RESOURCE_ID, {
         timeoutMs: 3_000,
@@ -2983,6 +3051,7 @@ async function runDocumentRaceScenario(ctx, session, kind) {
 
 async function sendDocumentPromptImmediately(ctx, promptSentinel) {
   const adbPath = resolveAdbPath();
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-focus-start");
   await ctx.tapAnyText(CHAT_INPUT_LABELS, {
     allowBottomOverlay: true,
     timeoutMs: 5_000,
@@ -2991,6 +3060,7 @@ async function sendDocumentPromptImmediately(ctx, promptSentinel) {
   await inputFocusedTextAndConfirm(adbPath, ctx.serial, promptSentinel, {
     focusSettleMs: 0,
   });
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-confirmed");
   const sendButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_SEND_RESOURCE_ID, {
     timeoutMs: 5_000,
     visibleOnly: true,
@@ -2999,6 +3069,7 @@ async function sendDocumentPromptImmediately(ctx, promptSentinel) {
     throw new Error("Document QA send action is not enabled.");
   }
   tapRequiredNode(adbPath, ctx.serial, sendButton, "document QA send action");
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "send-tapped");
 }
 
 async function stopDocumentGenerationIfActive(ctx) {
@@ -9045,6 +9116,8 @@ module.exports = {
   buildAppRouteDeepLinkArgs,
   buildConversationTopology,
   buildScenarios,
+  buildDocumentQaPromptSentinel,
+  buildDocumentQaRetrievalPrompt,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
@@ -9099,6 +9172,7 @@ module.exports = {
   selectScenarios,
   parseCliOptions,
   readAndroidProcessRssBytes,
+  recordDocumentQaHostCheckpoint,
   parseUiSnapshot,
   readAndroidLogcatCollector,
   readAndroidLogcatStartEpoch,

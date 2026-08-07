@@ -138,6 +138,14 @@ if (!/private func requiredBoundedInteger\([^)]*\) throws -> Int \{\s*guard\s+le
 }
 requireText(kotlin, 'val number = value as? Number', 'Android numeric type validation');
 requireText(kotlin, 'chat-attachments', 'Android private attachment root');
+requireText(
+  kotlin,
+  'validatePrivateAttachment(request["localUri"]).identity',
+  'Android source identity post-read verification',
+);
+if (kotlin.includes('validatePrivateAttachment(source.file.path).identity')) {
+  fail('Android source identity post-read verification must not feed a canonical alias back through the raw-root guard.');
+}
 requireText(swift, 'chat-attachments', 'iOS private attachment root');
 
 const podspec = read('ios/PocketAnyDoc.podspec');

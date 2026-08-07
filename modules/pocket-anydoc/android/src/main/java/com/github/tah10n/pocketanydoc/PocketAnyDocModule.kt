@@ -6,6 +6,7 @@ import android.content.res.Configuration
 import android.net.Uri
 import android.system.Os
 import android.system.OsConstants
+import android.util.Log
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
@@ -48,6 +49,8 @@ internal object PocketAnyDocJni {
 }
 
 private const val MODULE_NAME = "PocketAnydoc"
+private const val QA_APPLICATION_ID = "com.github.tah10n.pocketai.qa"
+private const val QA_LOG_TAG = "PocketAnyDocQa"
 private const val ATTACHMENT_DIRECTORY = "chat-attachments"
 private const val MAX_REQUEST_BYTES = 64 * 1024
 private const val MAX_RESPONSE_BYTES = 1024 * 1024
@@ -286,9 +289,9 @@ public class PocketAnyDocModule : Module() {
           HeavyOperation.SELECT_CONTEXT -> selectContextOnWorker(request, requestId, submittedGeneration)
           HeavyOperation.MATERIALIZE_ASSET -> materializeAssetOnWorker(request, requestId, submittedGeneration)
         }
-        promise.resolve(result)
+        promise.resolve(recordQaResult(operation, result))
       } catch (error: Throwable) {
-        promise.resolve(requestFailure(error))
+        promise.resolve(recordQaResult(operation, requestFailure(error)))
       } finally {
         cleanupRequest(requestId)
       }
@@ -326,7 +329,10 @@ public class PocketAnyDocModule : Module() {
     currentInvalidationEnvelope(requestId, submittedGeneration)?.let { return it }
     val response = decodeEnvelope(callWithEngine(true) { pointer -> PocketAnyDocJni.prepare(pointer, encode(payload)) })
 
-    val currentIdentity = runCatching { validatePrivateAttachment(source.file.path).identity }.getOrNull()
+    // Re-validate the original app-private URI. On Android, canonicalization may rewrite the
+    // filesDir alias (for example /data/user/0 to /data/data); feeding that canonical path back
+    // through the raw-root guard would fail closed even when the same file is still present.
+    val currentIdentity = runCatching { validatePrivateAttachment(request["localUri"]).identity }.getOrNull()
     if (currentIdentity != source.identity) {
       releaseReturnedHandle(response, "source_changed")
       return errorEnvelope("source_changed", "The source file changed while it was being parsed.", true)
@@ -995,6 +1001,23 @@ public class PocketAnyDocModule : Module() {
   private fun requestFailure(error: Throwable): Map<String, Any?> = when (error) {
     is RequestException -> errorEnvelope(error.code, error.message, false)
     else -> errorEnvelope("native_bridge_failed", "The native document bridge failed.", true)
+  }
+
+  private fun recordQaResult(
+    operation: HeavyOperation,
+    response: Map<String, Any?>,
+  ): Map<String, Any?> {
+    val context = retainedApplicationContext ?: appContext.reactContext?.applicationContext
+    if (context?.packageName != QA_APPLICATION_ID) return response
+    if (response["ok"] == true) {
+      Log.i(QA_LOG_TAG, "stage=${operation.name.lowercase()} code=ok")
+      return response
+    }
+    val error = response["error"] as? Map<*, *> ?: return response
+    val code = error["code"] as? String ?: return response
+    if (code.length > 64 || !SAFE_ID.matches(code)) return response
+    Log.w(QA_LOG_TAG, "stage=${operation.name.lowercase()} code=$code")
+    return response
   }
 
   private fun bridgeFailure(error: Throwable): Map<String, Any?> = requestFailure(error)

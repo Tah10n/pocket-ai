@@ -25,6 +25,8 @@ const {
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
   buildConversationTopology,
+  buildDocumentQaPromptSentinel,
+  buildDocumentQaRetrievalPrompt,
   buildScenarios,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
@@ -76,6 +78,7 @@ const {
   prepareCatalogForVariantPickerSmokeScenario,
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
+  recordDocumentQaHostCheckpoint,
   resolveBranchRegenerationReplacement,
   resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidPackageUid,
@@ -1339,6 +1342,55 @@ describe('android-scenarios npm defaults', () => {
     expect(escapeAdbInputText('Describe prepared image')).toBe('Describe%sprepared%simage');
     expect(escapeAdbInputText('Describe prepared image 123')).toBe('Describe%sprepared%simage%s123');
     expect(() => escapeAdbInputText('Describe: prepared image')).toThrow(/ASCII letters/);
+  });
+
+  it('builds every document QA prompt in the constrained ADB input alphabet', () => {
+    const scenarioPrompt = buildDocumentQaPromptSentinel('document-docx-send');
+    const benchmarkPrompt = buildDocumentQaPromptSentinel('bench', 'four-documents', 2);
+
+    expect(scenarioPrompt).toBe('PQA DOCUMENT DOCX SEND');
+    expect(benchmarkPrompt).toBe('PQA BENCH FOUR DOCUMENTS 2');
+    expect(escapeAdbInputText(scenarioPrompt)).toBe('PQA%sDOCUMENT%sDOCX%sSEND');
+    expect(escapeAdbInputText(benchmarkPrompt)).toBe('PQA%sBENCH%sFOUR%sDOCUMENTS%s2');
+    expect(() => buildDocumentQaPromptSentinel('document:docx')).toThrow(/Document QA prompt parts/);
+  });
+
+  it('adds the expected synthetic retrieval terms to document success prompts', () => {
+    const prompt = buildDocumentQaRetrievalPrompt(
+      buildDocumentQaPromptSentinel('document-docx-send'),
+      ['zebra-end-991', 'orchid-742', 'orchid-742']
+    );
+
+    expect(prompt).toBe('PQA DOCUMENT DOCX SEND ORCHID 742 ZEBRA END 991');
+    expect(escapeAdbInputText(prompt)).toBe(
+      'PQA%sDOCUMENT%sDOCX%sSEND%sORCHID%s742%sZEBRA%sEND%s991'
+    );
+    expect(() => buildDocumentQaRetrievalPrompt('not-pqa', ['orchid-742'])).toThrow(
+      /constrained PQA sentinel/
+    );
+    expect(() => buildDocumentQaRetrievalPrompt('PQA DOCUMENT', ['unknown'])).toThrow(
+      /unknown sentinel/
+    );
+  });
+
+  it('records only allowlisted document QA host checkpoints without private values', () => {
+    const runCommand = jest.fn();
+    const logFn = jest.fn();
+
+    recordDocumentQaHostCheckpoint('adb', 'device-1', 'prompt-confirmed', { runCommand, logFn });
+
+    expect(runCommand).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'log', '-t', 'PocketAnyDocQaHost', 'stage=prompt-confirmed'],
+      { stdio: 'ignore' }
+    );
+    expect(logFn).toHaveBeenCalledWith('Document QA checkpoint: prompt-confirmed.');
+    expect(() => recordDocumentQaHostCheckpoint(
+      'adb',
+      'device-1',
+      'prompt=/private/path.docx',
+      { runCommand, logFn }
+    )).toThrow(/Unknown document QA host checkpoint/);
   });
 
   it('skips bootstrap launch when preserving a prepared running app', () => {

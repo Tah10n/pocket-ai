@@ -598,7 +598,7 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "chat-ready",
   "attachment-picker-start",
   "attachment-picker-selected",
-  "attachment-chip-visible",
+  "attachment-count-confirmed",
   "attachment-idle",
   "attachment-ready",
   "prompt-focus-start",
@@ -2876,10 +2876,11 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
   tapRequiredNode(adbPath, ctx.serial, documentButton, "document attachment action");
   await selectDocumentPickerFile(adbPath, ctx.serial, staged.remoteName);
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-picker-selected");
-  await waitForResourceId(adbPath, ctx.serial, `chat-document-attachment-chip-${index}`, {
+  await waitForResourceId(adbPath, ctx.serial, `chat-qa-document-draft-count-${index + 1}`, {
     timeoutMs: 20_000,
+    visibleOnly: true,
   });
-  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-chip-visible");
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-count-confirmed");
   await waitForNoResourceId(adbPath, ctx.serial, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
     timeoutMs: 20_000,
   });

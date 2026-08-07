@@ -633,14 +633,22 @@ export function handleAndroidBackNavigation({
     return true;
 }
 
-function AndroidQaGenerationEvidenceSurface() {
+function AndroidQaGenerationEvidenceSurface({
+    documentDraftCount,
+}: {
+    documentDraftCount: number;
+}) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
     }
-    return <EnabledAndroidQaGenerationEvidenceSurface />;
+    return <EnabledAndroidQaGenerationEvidenceSurface documentDraftCount={documentDraftCount} />;
 }
 
-function EnabledAndroidQaGenerationEvidenceSurface() {
+function EnabledAndroidQaGenerationEvidenceSurface({
+    documentDraftCount,
+}: {
+    documentDraftCount: number;
+}) {
     const evidence = useSyncExternalStore(
         subscribeAndroidQaGenerationEvidence,
         getAndroidQaGenerationEvidenceSnapshot,
@@ -649,6 +657,13 @@ function EnabledAndroidQaGenerationEvidenceSurface() {
 
     return (
         <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
+            <View
+                accessible
+                accessibilityLabel={`chat-qa-document-draft-count-${documentDraftCount}`}
+                collapsable={false}
+                testID={`chat-qa-document-draft-count-${documentDraftCount}`}
+                style={styles.androidQaEvidenceMarker}
+            />
             <View style={styles.androidQaEvidenceActions}>
                 <Button
                     size="xs"
@@ -2820,7 +2835,9 @@ export const ChatScreen = () => {
                         </Box>
                     ) : null}
 
-                    <AndroidQaGenerationEvidenceSurface />
+                    <AndroidQaGenerationEvidenceSurface
+                        documentDraftCount={documentAttachmentDrafts.drafts.length}
+                    />
 
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>
                         {hasMessages ? (

@@ -668,6 +668,14 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 <Button
                     size="xs"
                     action="secondary"
+                    testID="chat-qa-arm-during-document-preparation"
+                    onPress={() => armAndroidQaGenerationGate('during-document-preparation')}
+                >
+                    <ButtonText>QA document</ButtonText>
+                </Button>
+                <Button
+                    size="xs"
+                    action="secondary"
                     testID="chat-qa-arm-before-first-output"
                     onPress={() => armAndroidQaGenerationGate('before-first-output')}
                 >

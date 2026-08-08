@@ -2,6 +2,7 @@ import type { LlmChatMessage } from '../types/chat';
 import type { ChatAttachmentKind } from '../types/attachments';
 
 export type AndroidQaGenerationGatePhase =
+  | 'during-document-preparation'
   | 'before-first-output'
   | 'after-first-durable-output';
 
@@ -202,6 +203,10 @@ function activateArmedGate(
 export function shouldHoldAndroidQaGenerationBeforeFirstOutput(operationId: string): boolean {
   return activateArmedGate('before-first-output', operationId)
     || isAndroidQaGenerationHeld(operationId);
+}
+
+export function activateAndroidQaDocumentPreparationGate(operationId: string): boolean {
+  return activateArmedGate('during-document-preparation', operationId);
 }
 
 export function activateAndroidQaGenerationAfterFirstDurableOutput(operationId: string): boolean {

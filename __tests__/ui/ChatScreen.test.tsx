@@ -1133,6 +1133,7 @@ describe('ChatScreen', () => {
 
     expect(getByTestId('chat-qa-generation-evidence')).toBeTruthy();
     expect(getByTestId('chat-qa-document-draft-count-0')).toBeTruthy();
+    expect(getByTestId('chat-qa-arm-during-document-preparation')).toBeTruthy();
     fireEvent.press(getByTestId('chat-qa-arm-before-first-output'));
     expect(getByTestId('chat-qa-generation-armed-before-first-output')).toBeTruthy();
 

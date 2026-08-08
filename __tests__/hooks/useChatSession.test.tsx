@@ -1953,6 +1953,50 @@ describe('useChatSession', () => {
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
   });
 
+  it('uses the Android QA gate to hold document preparation until cancellation is wired', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'document-qa-gate-1',
+      pickerUri: 'content://documents/document-qa-gate-1.txt',
+      localUri: 'test-dir/chat-attachments/document-qa-gate-1.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'document-qa-gate-1.txt',
+      displayName: 'QA gate.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    (FileSystem.readAsStringAsync as jest.Mock).mockClear();
+    expect(armAndroidQaGenerationGate('during-document-preparation')).toBe(true);
+    let sendPromise: Promise<void> | undefined;
+
+    act(() => {
+      sendPromise = getSession()?.appendUserMessage('', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    await waitFor(() => {
+      expect(getAndroidQaGenerationEvidenceSnapshot().activeGate).toEqual(expect.objectContaining({
+        phase: 'during-document-preparation',
+      }));
+    });
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      await sendPromise;
+    });
+
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate).toBeNull();
+    expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
+    expect(useChatStore.getState()).toEqual(expect.objectContaining({
+      activeThreadId: null,
+      threads: {},
+    }));
+  });
+
   it('cancels native preparation synchronously and releases a handle that succeeds stale', async () => {
     const getSession = renderHookHarness();
     const prepareResult = createDeferred<unknown>();

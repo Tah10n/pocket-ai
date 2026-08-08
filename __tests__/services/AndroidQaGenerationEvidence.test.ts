@@ -1,4 +1,5 @@
 import {
+  activateAndroidQaDocumentPreparationGate,
   activateAndroidQaGenerationAfterFirstDurableOutput,
   armAndroidQaGenerationGate,
   beginAndroidQaGeneration,
@@ -128,6 +129,27 @@ describe('AndroidQaGenerationEvidence', () => {
     expect(serialized).not.toContain('audio.mp3');
     expect(serialized).not.toContain('latest secret prompt');
     expect(serialized).not.toContain('contentParts');
+  });
+
+  it('holds document preparation only after its explicit QA gate is armed', async () => {
+    expect(activateAndroidQaDocumentPreparationGate('document-1')).toBe(false);
+    expect(armAndroidQaGenerationGate('during-document-preparation')).toBe(true);
+    expect(activateAndroidQaDocumentPreparationGate('document-1')).toBe(true);
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate).toEqual({
+      phase: 'during-document-preparation',
+      operationId: 'document-1',
+    });
+
+    let released = false;
+    const pendingRelease = waitForAndroidQaGenerationGateRelease('document-1').then(() => {
+      released = true;
+    });
+    await Promise.resolve();
+    expect(released).toBe(false);
+
+    releaseAndroidQaGenerationGate('document-1');
+    await pendingRelease;
+    expect(released).toBe(true);
   });
 
   it('records only fixed sentinel ids from prepared document text content parts', () => {

@@ -112,6 +112,7 @@ import {
 } from '../utils/chatAttachments';
 import { buildLlmInferenceMessagesSignature } from '../utils/llmInferenceMessageSignature';
 import {
+  activateAndroidQaDocumentPreparationGate,
   activateAndroidQaGenerationAfterFirstDurableOutput,
   beginAndroidQaGeneration,
   buildAndroidQaPreparedGenerationEvidence,
@@ -3571,6 +3572,7 @@ export const useChatSession = () => {
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(targetModelId);
     const generationWork = beginChatGenerationWork('append_user_message');
+    const documentPreparationQaOperationId = createChatId('message');
     const documentAbortController = new AbortController();
     documentPreparationAbortControllersRef.current.add(documentAbortController);
     const unsubscribeDocumentCancellation = generationWork.onCancel(() => {
@@ -3615,6 +3617,12 @@ export const useChatSession = () => {
       }
       if (documentAttachmentDrafts.length > 0) {
         setIsPreparingDocuments(true);
+        if (activateAndroidQaDocumentPreparationGate(documentPreparationQaOperationId)) {
+          await generationWork.waitFor(
+            waitForAndroidQaGenerationGateRelease(documentPreparationQaOperationId),
+          );
+          generationWork.assertCurrent();
+        }
       }
       let processedDocumentAttachments = await generationWork.waitFor(
         processDocumentAttachmentDraftsForInference(
@@ -3955,6 +3963,7 @@ export const useChatSession = () => {
       }
       throw error;
     } finally {
+      releaseAndroidQaGenerationGate(documentPreparationQaOperationId);
       unsubscribeDocumentCancellation();
       documentPreparationAbortControllersRef.current.delete(documentAbortController);
       if (ownedMaterializedDocumentImageDrafts.length > 0) {

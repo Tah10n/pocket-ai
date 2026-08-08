@@ -184,6 +184,11 @@ const CHAT_PRIMARY_SEND_RESOURCE_ID = "chat-primary-action-send";
 const CHAT_PRIMARY_STOP_RESOURCE_ID = "chat-primary-action-stop";
 const CHAT_MODEL_SELECTOR_RESOURCE_ID = "chat-header-model-selector";
 const CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID = "chat-model-selector-sheet";
+const CHAT_QA_ARM_DOCUMENT_PREPARATION_RESOURCE_ID = "chat-qa-arm-during-document-preparation";
+const CHAT_QA_DOCUMENT_PREPARATION_ARMED_RESOURCE_ID =
+  "chat-qa-generation-armed-during-document-preparation";
+const CHAT_QA_DOCUMENT_PREPARATION_GATE_PREFIX =
+  "chat-qa-generation-gate-during-document-preparation-";
 const DOCUMENT_EVIDENCE_POLICY = "sentinel-only";
 // Keep stale-result QA aligned with the published 30-second native conversion wall limit.
 // The margin covers delivery from the native queue back to the replacement JS/UI context.
@@ -602,6 +607,8 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "attachment-count-confirmed",
   "attachment-idle",
   "attachment-ready",
+  "document-gate-armed",
+  "document-gate-active",
   "prompt-focus-start",
   "prompt-confirmed",
   "keyboard-dismissed",
@@ -3029,10 +3036,14 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     ? resolveBottomTabTapPoint(adbPath, ctx.serial, HOME_TAB_LABELS)
     : null;
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
+    await armDocumentPreparationQaGate(ctx);
+    recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "document-gate-armed");
     const sendActionBounds = await sendDocumentPromptImmediately(
       ctx,
       buildDocumentQaPromptSentinel(kind)
     );
+    await waitForActiveDocumentPreparationQaGate(adbPath, ctx.serial);
+    recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "document-gate-active");
     if (kind === "stop-race") {
       // Reuse the primary action bounds immediately. Waiting for a full uiautomator dump can
       // take longer than these synthetic documents need to parse on a release-mode phone,
@@ -3079,6 +3090,42 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     uiProbeCount: measured.uiProbeCount,
     uiProbeMaxLatencyMs: measured.uiProbeMaxLatencyMs,
   };
+}
+
+async function armDocumentPreparationQaGate(ctx) {
+  const adbPath = resolveAdbPath();
+  const armAction = await waitForResourceId(
+    adbPath,
+    ctx.serial,
+    CHAT_QA_ARM_DOCUMENT_PREPARATION_RESOURCE_ID,
+    { timeoutMs: 5_000, visibleOnly: true }
+  );
+  tapRequiredNode(adbPath, ctx.serial, armAction, "document preparation QA gate action");
+  await waitForResourceId(
+    adbPath,
+    ctx.serial,
+    CHAT_QA_DOCUMENT_PREPARATION_ARMED_RESOURCE_ID,
+    { timeoutMs: 5_000, visibleOnly: true }
+  );
+}
+
+async function waitForActiveDocumentPreparationQaGate(adbPath, serial) {
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    { timeoutMs: 10_000 },
+    (candidate) => findResourcePrefixNodesInSnapshot(
+      candidate,
+      CHAT_QA_DOCUMENT_PREPARATION_GATE_PREFIX,
+      { visibleOnly: true }
+    )[0] ?? null
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      "Document preparation QA gate did not activate."
+    ));
+  }
 }
 
 async function sendDocumentPromptImmediately(ctx, promptSentinel) {

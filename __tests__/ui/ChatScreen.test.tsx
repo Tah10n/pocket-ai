@@ -3084,6 +3084,81 @@ describe('ChatScreen', () => {
     expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
   });
 
+  it('stops document preparation before loading a newly selected model', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'model-switch-document',
+      pickerUri: 'content://documents/model-switch.txt',
+      localUri: 'test-dir/chat-attachments/model-switch.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'model-switch.txt',
+      displayName: 'Model Switch.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredAppend = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+    let appendPromise!: Promise<void>;
+    await act(async () => {
+      appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+      await Promise.resolve();
+    });
+
+    fireEvent.press(getByTestId('model-selector-button'));
+    await act(async () => {
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockStop).toHaveBeenCalledTimes(1);
+      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q8', undefined);
+    });
+    expect(mockStop.mock.invocationCallOrder[0]).toBeLessThan(
+      mockLoadModel.mock.invocationCallOrder[0],
+    );
+
+    await act(async () => {
+      deferredAppend.resolve();
+      await appendPromise;
+    });
+  });
+
   it('lets an explicit model selection recover a legacy thread without model evidence', async () => {
     registry.saveModels([
       {

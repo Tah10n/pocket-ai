@@ -1523,6 +1523,10 @@ export const ChatScreen = () => {
         }
 
         setModelSelectorOpen(false);
+        if (documentPreparationInFlightRef.current) {
+            await stopGeneration();
+            documentPreparationInFlightRef.current = false;
+        }
 
         const attemptLoadSelectedModel = async (options?: LoadModelOptions): Promise<void> => {
             const result = await executeThreadModelLoad({
@@ -1568,6 +1572,7 @@ export const ChatScreen = () => {
         executeThreadModelLoad,
         isGenerating,
         showAlertForError,
+        stopGeneration,
         t,
     ]);
 

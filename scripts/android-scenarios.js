@@ -192,6 +192,7 @@ const DOCUMENT_RACE_SETTLEMENT_MARGIN_MS = 5_000;
 const DOCUMENT_RACE_POST_CANCEL_HORIZON_MS =
   DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS + DOCUMENT_RACE_SETTLEMENT_MARGIN_MS;
 const DOCUMENT_RACE_SENTINEL_POLL_INTERVAL_MS = 1_000;
+const DOCUMENT_THREAD_SWITCH_DRAIN_SETTLE_MS = 5_500;
 const DOCUMENT_QA_REMOTE_DIRECTORY = "/sdcard/Download/PocketAI-Document-QA";
 const DOCUMENT_PICKER_SEARCH_RESOURCE_IDS = ["option_menu_search", "action_search"];
 const DOCUMENT_PICKER_SEARCH_LABELS = ["Search", "Поиск"];
@@ -3045,6 +3046,9 @@ async function runDocumentRaceScenario(ctx, session, kind) {
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "thread-switch-tapped");
       await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "thread-home-ready");
+      // New Chat correctly fails closed while cancelled preparation still owns the engine.
+      // Wait through the shared 5 s generation-work drain barrier before opening the replacement.
+      await delay(DOCUMENT_THREAD_SWITCH_DRAIN_SETTLE_MS);
       await ctx.tapAnyText(NEW_CHAT_LABELS, { afterTapDelayMs: 0 });
       await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "replacement-chat-ready");

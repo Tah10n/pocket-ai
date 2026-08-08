@@ -3219,15 +3219,25 @@ async function assertDocumentSentinelsStayAbsent(adbPath, serial, sentinelIds, o
   const now = options.now ?? Date.now;
   const createSnapshot = options.createSnapshot ?? createUiSnapshot;
   const wait = options.delayFn ?? delay;
+  const reportFailure = options.reportFailure ?? ((reason) => {
+    log(`Document QA stale-window failure: ${reason}.`);
+  });
   const startedAt = now();
   while (true) {
-    const snapshot = createSnapshot(adbPath, serial);
+    let snapshot;
+    try {
+      snapshot = createSnapshot(adbPath, serial);
+    } catch (error) {
+      reportFailure('ui_hierarchy_unavailable');
+      throw error;
+    }
     for (const sentinelId of sentinelIds) {
       if (findResourceIdInSnapshot(
         snapshot,
         `chat-prepared-document-sentinel-${sentinelId}`,
         { visibleOnly: true }
       )) {
+        reportFailure('stale_sentinel_detected');
         throw new Error("A stale document prompt sentinel reached a replacement chat context.");
       }
     }

@@ -21,6 +21,7 @@ const {
   BRANCH_REGENERATION_SCENARIOS,
   DOCUMENT_BENCHMARK_SCENARIOS,
   DOCUMENT_SCENARIOS,
+  assertDocumentSentinelsStayAbsent,
   assertAuthoritativeThoughtClear,
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
@@ -1391,6 +1392,36 @@ describe('android-scenarios npm defaults', () => {
       'prompt=/private/path.docx',
       { runCommand, logFn }
     )).toThrow(/Unknown document QA host checkpoint/);
+  });
+
+  it('classifies a document stale-window hierarchy failure without private UI data', async () => {
+    const reportFailure = jest.fn();
+
+    await expect(assertDocumentSentinelsStayAbsent('adb', 'device-1', ['orchid-742'], {
+      createSnapshot: () => {
+        throw new Error('private hierarchy details');
+      },
+      reportFailure,
+    })).rejects.toThrow('private hierarchy details');
+
+    expect(reportFailure).toHaveBeenCalledWith('ui_hierarchy_unavailable');
+  });
+
+  it('classifies a stale document sentinel without logging its id', async () => {
+    const reportFailure = jest.fn();
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="chat-prepared-document-sentinel-orchid-742" bounds="[1,1][2,2]" />
+      </hierarchy>
+    `);
+
+    await expect(assertDocumentSentinelsStayAbsent('adb', 'device-1', ['orchid-742'], {
+      createSnapshot: () => snapshot,
+      reportFailure,
+    })).rejects.toThrow(/stale document prompt sentinel/i);
+
+    expect(reportFailure).toHaveBeenCalledWith('stale_sentinel_detected');
+    expect(JSON.stringify(reportFailure.mock.calls)).not.toContain('orchid-742');
   });
 
   it('skips bootstrap launch when preserving a prepared running app', () => {

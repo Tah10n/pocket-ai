@@ -221,6 +221,7 @@ function canSendRetainedAttachment(
 }
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
+type AndroidKeyboardMetrics = { height: number; topY: number };
 
 function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): string {
     return VISION_READINESS_TRANSLATION_KEYS[status];
@@ -485,6 +486,18 @@ export function getAndroidKeyboardSpacerHeight({
     }
 
     return Math.max(viewportCompensation, currentSpacerHeight);
+}
+
+export function isAndroidKeyboardMeasurementCurrent({
+    isKeyboardVisible,
+    activeMetrics,
+    measuredMetrics,
+}: {
+    isKeyboardVisible: boolean;
+    activeMetrics: AndroidKeyboardMetrics | null;
+    measuredMetrics: AndroidKeyboardMetrics;
+}) {
+    return isKeyboardVisible && activeMetrics === measuredMetrics;
 }
 
 export function shouldFloatAndroidComposerOverContent({
@@ -802,7 +815,7 @@ export const ChatScreen = () => {
     const forcedFollowPassesRef = useRef(0);
     const baseWindowHeightRef = useRef(Dimensions.get('window').height);
     const isKeyboardVisibleRef = useRef(false);
-    const androidKeyboardMetricsRef = useRef<{ height: number; topY: number } | null>(null);
+    const androidKeyboardMetricsRef = useRef<AndroidKeyboardMetrics | null>(null);
     const androidKeyboardInsetRef = useRef(0);
     const composerContainerRef = useRef<View | null>(null);
     const warmupContentBlurTargetRef = useRef<View | null>(null);
@@ -954,6 +967,7 @@ export const ChatScreen = () => {
         disabledReason: documentAttachmentsDisabledReason,
         ownerKey: documentAttachmentOwnerKey,
     });
+    const openDocumentAttachmentPicker = documentAttachmentDrafts.attachDocuments;
     const mediaAttachmentOwnerKey = [
         activeThread?.id ?? 'new-thread',
         displayedChatActiveModelId ?? 'no-displayed-model',
@@ -2006,6 +2020,24 @@ export const ChatScreen = () => {
         androidKeyboardInsetRef.current = androidKeyboardInset;
     }, [androidKeyboardInset]);
 
+    const resetAndroidKeyboardState = useCallback(() => {
+        if (Platform.OS !== 'android') {
+            return;
+        }
+
+        if (keyboardMeasureFrameRef.current !== null) {
+            cancelAnimationFrame(keyboardMeasureFrameRef.current);
+            keyboardMeasureFrameRef.current = null;
+        }
+
+        isKeyboardVisibleRef.current = false;
+        androidKeyboardMetricsRef.current = null;
+        androidKeyboardInsetRef.current = 0;
+        setIsAndroidKeyboardVisible(false);
+        setAndroidKeyboardInsetValue(0);
+        baseWindowHeightRef.current = Dimensions.get('window').height;
+    }, [setAndroidKeyboardInsetValue]);
+
     const updateAndroidKeyboardInsetFromLayout = useCallback(() => {
         if (Platform.OS !== 'android') {
             return;
@@ -2040,6 +2072,14 @@ export const ChatScreen = () => {
             keyboardMeasureFrameRef.current = null;
 
             composerContainer.measure((_x, _y, _width, height, _pageX, pageY) => {
+                if (!isAndroidKeyboardMeasurementCurrent({
+                    isKeyboardVisible: isKeyboardVisibleRef.current,
+                    activeMetrics: androidKeyboardMetricsRef.current,
+                    measuredMetrics: keyboardMetrics,
+                })) {
+                    return;
+                }
+
                 setAndroidKeyboardInsetValue(getAndroidKeyboardSpacerHeight({
                     viewportCompensation,
                     currentSpacerHeight: androidKeyboardInsetRef.current,
@@ -2061,6 +2101,23 @@ export const ChatScreen = () => {
             updateAndroidKeyboardInsetFromLayout();
         }
     }, [updateAndroidKeyboardInsetFromLayout]);
+
+    const handleAttachDocuments = useCallback(async () => {
+        if (Platform.OS !== 'android') {
+            await openDocumentAttachmentPicker();
+            return;
+        }
+
+        Keyboard.dismiss();
+        resetAndroidKeyboardState();
+        try {
+            await openDocumentAttachmentPicker();
+        } finally {
+            // The external picker can pause the activity without delivering keyboardDidHide,
+            // and a late keyboard frame event can otherwise restore the stale inset on return.
+            resetAndroidKeyboardState();
+        }
+    }, [openDocumentAttachmentPicker, resetAndroidKeyboardState]);
 
     const handleListContentSizeChange = () => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
@@ -2619,11 +2676,7 @@ export const ChatScreen = () => {
         });
 
         const keyboardHideSubscription = Keyboard.addListener('keyboardDidHide', () => {
-            isKeyboardVisibleRef.current = false;
-            setIsAndroidKeyboardVisible(false);
-            androidKeyboardMetricsRef.current = null;
-            setAndroidKeyboardInsetValue(0);
-            baseWindowHeightRef.current = Dimensions.get('window').height;
+            resetAndroidKeyboardState();
         });
 
         return () => {
@@ -2637,7 +2690,7 @@ export const ChatScreen = () => {
             keyboardFrameSubscription.remove();
             keyboardHideSubscription.remove();
         };
-    }, [setAndroidKeyboardInsetValue, updateAndroidKeyboardInsetFromLayout]);
+    }, [resetAndroidKeyboardState, updateAndroidKeyboardInsetFromLayout]);
 
     useEffect(() => {
         return () => {
@@ -3028,7 +3081,7 @@ export const ChatScreen = () => {
                                 documentAttachmentDrafts={documentAttachmentDrafts.drafts}
                                 mediaAttachmentDrafts={mediaAttachmentDrafts.drafts}
                                 onAttachImages={imageAttachmentDrafts.attachImages}
-                                onAttachDocuments={documentAttachmentDrafts.attachDocuments}
+                                onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
@@ -3075,7 +3128,7 @@ export const ChatScreen = () => {
                                 documentAttachmentDrafts={documentAttachmentDrafts.drafts}
                                 mediaAttachmentDrafts={mediaAttachmentDrafts.drafts}
                                 onAttachImages={imageAttachmentDrafts.attachImages}
-                                onAttachDocuments={documentAttachmentDrafts.attachDocuments}
+                                onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}

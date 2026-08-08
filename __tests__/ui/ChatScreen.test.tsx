@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert, Platform } from 'react-native';
+import { Alert, Keyboard, Platform } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { getThreadActiveModelId } from '../../src/types/chat';
 import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
@@ -675,6 +675,7 @@ const {
   getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
+  isAndroidKeyboardMeasurementCurrent,
   resolveFallbackMultimodalReadiness,
   shouldRenderAndroidKeyboardSpacer,
   shouldFloatAndroidComposerOverContent,
@@ -2511,6 +2512,59 @@ describe('ChatScreen', () => {
     }
   });
 
+  it('clears stale Android keyboard spacing when the document picker returns without a hide event', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    const keyboardListeners = new Map<string, Array<(event: any) => void>>();
+    const addKeyboardListenerSpy = jest.spyOn(Keyboard, 'addListener').mockImplementation((eventName, listener) => {
+      keyboardListeners.set(eventName, [
+        ...(keyboardListeners.get(eventName) ?? []),
+        listener as (event: any) => void,
+      ]);
+      return { remove: jest.fn() } as any;
+    });
+    const dismissKeyboardSpy = jest.spyOn(Keyboard, 'dismiss').mockImplementation(() => undefined);
+
+    try {
+      mockEngineState = {
+        activeModelId: 'author/model-q4',
+        loadProgress: 0.5,
+        status: 'initializing',
+      };
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      const hiddenKeyboardBannerBottom = getByTestId('model-warmup-banner-container').props.style.bottom;
+      const emitKeyboardShow = () => keyboardListeners.get('keyboardDidShow')?.forEach((listener) => {
+        listener({
+          endCoordinates: {
+            height: 320,
+            screenY: 2080,
+          },
+        });
+      });
+
+      act(emitKeyboardShow);
+      expect(getByTestId('model-warmup-banner-container').props.style.bottom)
+        .toBeGreaterThan(hiddenKeyboardBannerBottom);
+
+      mockAttachDocuments.mockImplementationOnce(async () => {
+        // Android can deliver a late frame/show event while the external picker is opening,
+        // then omit keyboardDidHide while the React Native activity is paused.
+        emitKeyboardShow();
+      });
+
+      await act(async () => {
+        await lastChatInputBarProps.onAttachDocuments();
+      });
+
+      expect(dismissKeyboardSpy).toHaveBeenCalledTimes(1);
+      expect(mockAttachDocuments).toHaveBeenCalledTimes(1);
+      expect(getByTestId('model-warmup-banner-container').props.style.bottom)
+        .toBe(hiddenKeyboardBannerBottom);
+    } finally {
+      dismissKeyboardSpy.mockRestore();
+      addKeyboardListenerSpy.mockRestore();
+    }
+  });
+
   it('compensates only the portion of the Android keyboard that still overlaps the resized viewport', () => {
     expect(getAndroidKeyboardOverlapCompensation({
       baseWindowHeight: 2400,
@@ -2565,6 +2619,26 @@ describe('ChatScreen', () => {
       keyboardTopY: 2140,
       gap: 12,
     })).toBe(48);
+  });
+
+  it('rejects an Android keyboard measurement after hide or a newer frame event', () => {
+    const measuredMetrics = { height: 320, topY: 2080 };
+
+    expect(isAndroidKeyboardMeasurementCurrent({
+      isKeyboardVisible: true,
+      activeMetrics: measuredMetrics,
+      measuredMetrics,
+    })).toBe(true);
+    expect(isAndroidKeyboardMeasurementCurrent({
+      isKeyboardVisible: false,
+      activeMetrics: measuredMetrics,
+      measuredMetrics,
+    })).toBe(false);
+    expect(isAndroidKeyboardMeasurementCurrent({
+      isKeyboardVisible: true,
+      activeMetrics: { ...measuredMetrics },
+      measuredMetrics,
+    })).toBe(false);
   });
 
   it('returns the Android glass composer to normal flow while the keyboard is visible', () => {

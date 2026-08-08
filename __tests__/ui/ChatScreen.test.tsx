@@ -599,6 +599,7 @@ jest.mock('../../src/hooks/useChatSession', () => ({
     messages: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.messages ?? [],
     messageListRevision: require('../../src/store/chatStore').useChatStore.getState().streamingRevision,
     isGenerating: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.status === 'generating',
+    isPreparingDocuments: false,
     shouldOfferSummary: Boolean(
       require('../../src/store/chatStore').useChatStore
         .getState()
@@ -931,7 +932,8 @@ describe('ChatScreen', () => {
     mockAppendUserMessage.mockReset();
     mockAppendUserMessage.mockResolvedValue(undefined);
     mockDeleteMessage.mockClear();
-    mockStop.mockClear();
+    mockStop.mockReset();
+    mockStop.mockResolvedValue(undefined);
     mockCreateSummaryPlaceholder.mockClear();
     mockAttachImages.mockReset();
     mockAttachImages.mockResolvedValue(undefined);
@@ -3720,6 +3722,133 @@ describe('ChatScreen', () => {
     expect(mockRouterNavigate).not.toHaveBeenCalled();
   });
 
+  it('stops in-flight document preparation when the chat screen loses focus', async () => {
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'blur-document',
+      pickerUri: 'content://documents/blur.txt',
+      localUri: 'test-dir/chat-attachments/blur.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'blur.txt',
+      displayName: 'Blur.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredAppend = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+
+    try {
+      const { rerender } = render(React.createElement(ChatScreen));
+      let appendPromise!: Promise<void>;
+      await act(async () => {
+        appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+        await Promise.resolve();
+      });
+      expect(mockAppendUserMessage).toHaveBeenCalledWith(
+        'Use this document',
+        expect.objectContaining({ documentAttachmentDrafts: [documentDraft] }),
+      );
+
+      act(() => {
+        navigation.__setIsFocused(false);
+      });
+      rerender(React.createElement(ChatScreen));
+
+      await waitFor(() => {
+        expect(mockStop).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        deferredAppend.resolve();
+        await appendPromise;
+      });
+    } finally {
+      navigation.__setIsFocused(true);
+    }
+  });
+
+  it('keeps an appended document response running when the chat screen loses focus', async () => {
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'appended-blur-document',
+      pickerUri: 'content://documents/appended-blur.txt',
+      localUri: 'test-dir/chat-attachments/appended-blur.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'appended-blur.txt',
+      displayName: 'Appended Blur.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredCompletion = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+      await deferredCompletion.promise;
+    });
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+
+    try {
+      const { rerender } = render(React.createElement(ChatScreen));
+      let appendPromise!: Promise<void>;
+      await act(async () => {
+        appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+        await Promise.resolve();
+      });
+
+      act(() => {
+        navigation.__setIsFocused(false);
+      });
+      rerender(React.createElement(ChatScreen));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockStop).not.toHaveBeenCalled();
+      await act(async () => {
+        deferredCompletion.resolve();
+        await appendPromise;
+      });
+    } finally {
+      navigation.__setIsFocused(true);
+    }
+  });
+
   it('clears a pending model selection when the chat screen loses focus', async () => {
     registry.saveModels([
       {
@@ -3777,6 +3906,7 @@ describe('ChatScreen', () => {
       expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe(
         'author/model-q4',
       );
+      expect(mockStop).not.toHaveBeenCalled();
     } finally {
       navigation.__setIsFocused(true);
     }

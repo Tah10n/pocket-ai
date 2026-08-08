@@ -807,6 +807,7 @@ export const ChatScreen = () => {
     const sendMessageInFlightRef = useRef(false);
     const modelSelectionRequestIdRef = useRef(0);
     const isScreenActiveRef = useRef(true);
+    const documentPreparationInFlightRef = useRef(false);
     const previousActiveThreadIdRef = useRef(activeThread?.id ?? null);
     const autoModelLoadTargetKeyRef = useRef<string | null>(null);
     const hasActiveModel = Boolean(engineState.activeModelId);
@@ -2154,6 +2155,7 @@ export const ChatScreen = () => {
             const hasSendableAttachmentDrafts = attachmentDrafts.length > 0;
             const hasSendableDocumentAttachmentDrafts = documentDrafts.length > 0;
             const hasSendableMediaAttachmentDrafts = mediaDrafts.length > 0;
+            documentPreparationInFlightRef.current = hasSendableDocumentAttachmentDrafts;
             const restoreAttachmentDraftsForRetry = (draftsToRestore: readonly AttachmentDraft[]) => {
                 if (draftsToRestore.length === 0) {
                     return;
@@ -2214,6 +2216,7 @@ export const ChatScreen = () => {
                             : null),
                         onUserMessageAppended: () => {
                             userMessageAppended = true;
+                            documentPreparationInFlightRef.current = false;
                         },
                         onDocumentAttachmentFailures: (failures) => {
                             const failedDrafts = failures.map((failure) => failure.draft)
@@ -2339,6 +2342,7 @@ export const ChatScreen = () => {
                     : error;
             }
         } finally {
+            documentPreparationInFlightRef.current = false;
             sendMessageInFlightRef.current = false;
         }
     };
@@ -2430,8 +2434,15 @@ export const ChatScreen = () => {
                 autoModelLoadTargetKeyRef.current = null;
                 performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
                 setPendingModelSelection(null);
+                if (documentPreparationInFlightRef.current) {
+                    // A tab or route transition must invalidate document preparation before its
+                    // late native result can be attached to whichever conversation becomes active.
+                    void stopGeneration().catch(() => {
+                        performanceMonitor.incrementCounter('chat.documentPreparation.blurStopFailed');
+                    });
+                }
             };
-        }, []),
+        }, [stopGeneration]),
     );
 
     useEffect(() => {

@@ -196,10 +196,23 @@ The branch-regeneration pack is the strongest current-head Android check:
 npm run android:scenarios:branch-regeneration -- --serial <device-serial> --fail-on-skip
 ```
 
-This pack is intentionally local-only and is not dispatched by GitHub Actions. Use
-`--emulator` instead of `--serial` for an emulator. Do not add `--skip-build` or
-`--preserve-running-app`: this pack requires a current-input, provenance-verified release APK
-whose JavaScript bundle is embedded in the APK.
+For document routing, parsing, session reuse, cleanup, or `PocketAnydoc` changes, run the
+purpose-built all-format release pack as well:
+
+```bash
+npm run android:scenarios:documents -- --serial <device-serial>
+```
+
+It applies the same fail-closed build/install provenance policy and additionally proves every
+supported document extension plus one-prepare/two-selection session reuse. Use
+`--isolated-qa-install` when the installed production package or its data must be preserved;
+see [Document QA and Benchmarks](./document-qa-benchmarks.md) for exact preconditions and
+cleanup rules.
+
+The branch-regeneration pack is intentionally local-only and is not dispatched by GitHub
+Actions. Use `--emulator` instead of `--serial` for an emulator. Do not add `--skip-build`
+or `--preserve-running-app`: branch regeneration requires a current-input,
+provenance-verified release APK whose JavaScript bundle is embedded in the APK.
 
 The runner creates separate build and install records, then binds the scenario report to:
 

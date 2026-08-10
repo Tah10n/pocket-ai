@@ -84,7 +84,7 @@ node ./scripts/android-scenarios.js --skip-build --scenario hf-catalog-hardening
 node ./scripts/android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization or state behavior, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. The explicit state-mutating cache check is `npm run android:scenarios:storage -- --skip-build`; it is intentionally excluded from `all`. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
+`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization or state behavior, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. The explicit state-mutating cache check is `npm run android:scenarios:storage -- --skip-build`; it is intentionally excluded from `all`. The preconditioned all-format document gate is `npm run android:scenarios:documents`; it is also excluded from `all` and hosted label dispatch. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
 
 For a final current-source Android matrix, use fail-closed packs so an unmet precondition is
 reported as a failure instead of a silent pass:
@@ -95,6 +95,21 @@ npm run android:scenarios:storage -- --fail-on-skip
 npm run android:scenarios:attachments -- --fail-on-skip
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
 ```
+
+If the release changes document routing, parsing, context selection, session reuse, cleanup,
+or the `PocketAnydoc` module, also run the preconditioned release pack on a physical device:
+
+```bash
+npm run android:scenarios:documents
+```
+
+The final report must contain 20 passed scenarios with no failure or skip, cover every
+extension in the checked-in supported-format manifest, and bind the installed APK SHA-256 to
+the current source provenance. Its `document-session-follow-up` result must record exactly
+one successful native prepare and two successful context selections, with no other native
+outcome or duplicate persisted attachment. Use an isolated QA install when production signing
+or user data must be preserved. See [Document QA and Benchmarks](./document-qa-benchmarks.md)
+for preconditions, safe installation options, evidence policy, and cleanup rules.
 
 The branch-regeneration command already selects a release APK and requires current-head
 build/install provenance. Do not add `--skip-build` or `--preserve-running-app` to that
@@ -345,15 +360,21 @@ part of the production app surface.
 - On macOS or EAS, run `npm run verify:documents:ios`, then a clean prebuild, pod install,
   simulator build, and device archive. Confirm the XCFramework has device and simulator
   slices and no duplicate-symbol or architecture-link failure.
-- Attach synthetic DOCX, PPTX, XLSX, EPUB, CSV, and text-PDF fixtures. Verify structure,
-  slide and sheet labels, percentages, cancellation, four-document order/fairness,
-  partial failure, relaunch restoration, and deterministic cleanup.
+- Run `npm run android:scenarios:documents` for the complete 26-extension matrix. Manual
+  spot checks may use synthetic DOCX, PPTX, XLSX, EPUB, CSV, and text-PDF fixtures; verify
+  structure, slide and sheet labels, percentages, cancellation, four-document order/fairness,
+  partial failure, bounded relaunch fallback, and deterministic cleanup.
 - Verify malformed, encrypted, scanned/textless, wrong-extension, and work-limit fixtures
   return localized stable errors without paths or content in logs.
 - Inspect a question-specific request and a whole-document summary request. Confirm selected
   context uses BEGIN/END document boundaries, reports truncation, preserves the current
   question/system prompt, and does not transfer a full multi-megabyte conversion over the
   JS bridge.
+- Ask a second question without attaching the document again. Confirm the device evidence
+  records one native prepare and two successful selections, no duplicate persisted document
+  attachment, and no second file parse. After relaunch, confirm ordinary follow-up behavior
+  is limited to the bounded encrypted context from the initial turn rather than claiming that
+  the full process-local index survived.
 
 - Load a known image-capable model with its matching projector and confirm the composer exposes image attachment only after runtime vision support is ready.
 - Select an image through the system picker, confirm preview and remove both work, then send it and verify the local model returns a grounded response.

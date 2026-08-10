@@ -1,6 +1,6 @@
 # Multimodal Attachment Architecture
 
-Last updated: 2026-07-16
+Last updated: 2026-08-10
 
 Pocket AI's multimodal attachment pipeline is designed to keep user files local while passing
 supported media to the on-device `llama.rn` runtime. The current product surface uses one shared
@@ -130,6 +130,15 @@ instead of being silently dropped.
 Extracted document text is not written into diagnostics or exported error reports. Prompt-window
 logic can truncate or omit bounded extracted text according to context budget, but it must not
 silently drop the attachment and send only the user's typed text.
+
+After a successful attachment turn, the parsed source can remain in a bounded, process-local
+session cache for follow-up questions. A follow-up reranks that retained source without reopening
+or reparsing the attachment; the newly selected chunks and any rematerialized derived images are
+transient inference input and are not duplicated in chat history. The initial turn keeps only its
+bounded selected context in encrypted private history as a restart or eviction fallback. LRU
+eviction, memory pressure, attachment or conversation deletion, private-storage reset, and process
+exit release the cached source. This cache is not a durable full-document index; see
+[`document-processing.md`](./document-processing.md) for exact limits and cleanup semantics.
 
 ## Video Attachments
 

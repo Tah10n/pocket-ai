@@ -10,8 +10,8 @@ extracted text, and embedded images are not uploaded to a parsing service.
 ## Supported formats
 
 The lightweight direct-text processor remains the primary path for `.txt`, `.md`,
-`.json`, and `.tsv`. It avoids starting the native parser for formats that only need a
-bounded local decode.
+`.markdown`, `.json`, and `.tsv`. It avoids starting the native parser for formats that
+only need a bounded local decode.
 
 The native processor handles:
 

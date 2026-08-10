@@ -1,6 +1,6 @@
 # Runtime Performance Architecture
 
-Last updated: 2026-07-28
+Last updated: 2026-08-10
 
 ## Purpose
 
@@ -18,8 +18,9 @@ invalidation, or diagnostics privacy.
 - Streaming token callbacks do not traverse or serialize the durable chat history.
 - Historical message arrays and message objects keep their reference identity while the
   active assistant output changes.
-- Attachment preparation is request-scoped, cancellable, and reused by token counting and
-  completion.
+- Each inference request owns one cancellable prepared attachment payload reused by token
+  counting and completion. Successfully parsed document sources may outlive that request only
+  through the bounded process-local session cache used for follow-up reranking.
 - Exact prompt-token results are reused only when the loaded context and every formatting
   input have the same identity.
 - Streaming progress is stored separately from the durable thread as bounded operation,
@@ -47,6 +48,7 @@ invalidation, or diagnostics privacy.
 |---|---|---|
 | Prompt-window display | [`useTruncationTracking.ts`](../src/hooks/useTruncationTracking.ts) | Reuse the last idle result while a thread is generating |
 | Inference request preparation | [`useChatSession.ts`](../src/hooks/useChatSession.ts) | Resolve attachments and final messages once per request |
+| Document follow-up context | [`DocumentSessionContextCache.ts`](../src/services/DocumentSessionContextCache.ts) | Process-local global LRU with explicit ownership, bounded admission, and retryable release |
 | Exact prompt counts | [`ExactPromptTokenCache.ts`](../src/services/ExactPromptTokenCache.ts) | Bounded LRU keyed by context and formatting identity |
 | Cross-turn prompt state | [`PromptStateCachePolicy.ts`](../src/services/PromptStateCachePolicy.ts) | Explicit fail-closed llama.rn parameters; no implicit native default |
 | Transient assistant output | [`chatStore.ts`](../src/store/chatStore.ts) | Keep durable history stable during token patches |
@@ -151,6 +153,27 @@ The prompt preparation trace is split into:
 - `chat.prompt.finalize`
 
 Metadata contains counts and outcomes, not prompt text, attachment paths, or file contents.
+
+### Process-local document context
+
+A successful document attachment turn transfers ownership of its parsed source to
+`DocumentSessionContextCache`. Later questions in the same conversation can run a fresh,
+question-aware selection over that source without reopening or reparsing the app-owned file.
+Cached documents and newly attached documents share one fair prompt budget, and follow-up chunks
+remain transient rather than being copied into each new chat message.
+
+The global cache admits at most four document sources. Direct-text sources also share a
+1,000,000-character JavaScript-heap ceiling, while native handles remain subject to the native
+four-handle / 16 MiB limit. Large direct-text reranks yield to the React Native event loop at
+bounded checkpoints so cancellation and input can be observed before the full source is rescored.
+
+LRU eviction, branch reconciliation after a committed replacement, retention pruning, thread or
+history deletion, private-storage blocking/reset, memory warnings, failures or cancellation before
+ownership transfer, and process teardown release the affected owned sources. A failed native
+release stays in a bounded pending-release queue and continues consuming capacity until a later
+cleanup or admission operation retries it.
+After process restart or eviction, ordinary follow-ups have only the bounded encrypted context from
+the initial attachment turn; the app does not persist a full-document session index.
 
 ### Exact prompt-token cache
 
@@ -402,6 +425,7 @@ characters instead of wall-clock thresholds.
 |---|---|---|
 | Truncation display | The inference window could be built before the generating-state fast return | 100 patches in a 1,000-message thread add 0 `getThreadInferenceWindow` calls; terminal state adds 1 |
 | Attachment preparation | Token counting and final completion could resolve the same retained history repeatedly or use a newly missing file | Stable retained history is checked once; only the latest attachment receives one final TOCTOU recheck, and deletion before completion prevents the native call |
+| Document follow-ups | Every question could reopen and reparse the same document or persist duplicate selected chunks | `document-session-follow-up` requires exactly 1 native prepare, 2 successful selections, and no duplicate persisted document attachment |
 | Prompt tokenization | Identical work in a later generation could call the native tokenizer again | Concurrent and settled identical keys produce 1 native count; every context/format/media identity change is a miss |
 | Prompt state lifecycle | Ordinary turns, regeneration, chat changes, model changes, or media changes could clear too much or reuse incompatible input | Two ordinary turns and regeneration call native completion without `clearCache`; chat B contains no chat A payload; a model switch releases and replaces the context; image A, image B, and text-only requests carry distinct media payloads |
 | Streaming state | Every patch replaced the thread/messages path | 100 patches retain the durable thread, messages array, presentation array, and all 1,000 historical objects |

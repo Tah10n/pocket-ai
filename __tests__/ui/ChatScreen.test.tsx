@@ -143,6 +143,7 @@ let lastModelParametersSheetProps: any = null;
 let lastErrorReportSheetProps: any = null;
 let lastChatHeaderProps: any = null;
 let lastChatInputBarProps: any = null;
+let mockIsStoppingGeneration = false;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
@@ -599,6 +600,7 @@ jest.mock('../../src/hooks/useChatSession', () => ({
     messages: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.messages ?? [],
     messageListRevision: require('../../src/store/chatStore').useChatStore.getState().streamingRevision,
     isGenerating: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.status === 'generating',
+    isStoppingGeneration: mockIsStoppingGeneration,
     isPreparingDocuments: false,
     shouldOfferSummary: Boolean(
       require('../../src/store/chatStore').useChatStore
@@ -999,6 +1001,7 @@ describe('ChatScreen', () => {
     lastErrorReportSheetProps = null;
     lastChatHeaderProps = null;
     lastChatInputBarProps = null;
+    mockIsStoppingGeneration = false;
     mockLoadModel.mockReset();
     mockLoadModel.mockResolvedValue(undefined);
     mockRetryThinkingCapabilityDetection.mockReset();
@@ -1087,6 +1090,7 @@ describe('ChatScreen', () => {
         },
       },
       activeThreadId: 'thread-1',
+      newThreadRevision: 0,
     });
   });
 
@@ -2028,12 +2032,23 @@ describe('ChatScreen', () => {
       restoreDraftsForRetry: mockRestoreDocumentDrafts,
       discardDrafts: mockDiscardDocumentDrafts,
     }));
+    useChatStore.setState({ activeThreadId: null });
     mockConsumeDocumentDrafts.mockReturnValueOnce([successfulDraft, failedDraft]);
     mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
-      options?.onDocumentAttachmentFailures?.([{
-        draft: failedDraft,
-        errorCode: 'chat_attachment_corrupt',
-      }]);
+      const getActiveThreadSpy = jest.spyOn(useChatStore.getState(), 'getActiveThread')
+        .mockReturnValue({
+          id: 'committed-document-thread',
+          modelId: 'author/model-q4',
+          activeModelId: 'author/model-q4',
+        } as any);
+      try {
+        options?.onDocumentAttachmentFailures?.([{
+          draft: failedDraft,
+          errorCode: 'chat_attachment_corrupt',
+        }]);
+      } finally {
+        getActiveThreadSpy.mockRestore();
+      }
       options?.onUserMessageAppended?.({ id: 'message-appended' });
     });
 
@@ -2043,9 +2058,15 @@ describe('ChatScreen', () => {
     });
 
     expect(mockRestoreDocumentDrafts).toHaveBeenCalledTimes(1);
-    expect(mockRestoreDocumentDrafts).toHaveBeenCalledWith([failedDraft]);
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledWith(
+      [failedDraft],
+      { preserveOwnerKey: 'committed-document-thread|author/model-q4' },
+    );
     expect(mockRestoreDocumentDrafts).not.toHaveBeenCalledWith(expect.arrayContaining([successfulDraft]));
     expect(mockDiscardDocumentDrafts).not.toHaveBeenCalled();
+    expect(mockUseChatDocumentAttachments).toHaveBeenCalledWith(expect.objectContaining({
+      preserveFailedDraftsOnNewThreadCommit: true,
+    }));
     const alertMessage = String(alertSpy.mock.calls.at(-1)?.[1] ?? '');
     const failureDetail = alertMessage.split('\n\n').at(-1) ?? '';
     expect(failureDetail).not.toMatch(/[\r\n\u0007\u202e]/u);
@@ -2108,6 +2129,37 @@ describe('ChatScreen', () => {
       'common.actionFailed',
       expect.stringContaining('All failed.txt'),
     );
+  });
+
+  it('rotates uncommitted attachment owners and clears retry text for an explicit new chat', async () => {
+    useChatStore.setState({
+      activeThreadId: null,
+      newThreadRevision: 7,
+    });
+    mockAppendUserMessage.mockRejectedValueOnce(new Error('send failed'));
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(mockUseChatDocumentAttachments).toHaveBeenLastCalledWith(expect.objectContaining({
+      ownerKey: 'new-thread:7|author/model-q4',
+    }));
+    await act(async () => {
+      fireEvent.press(getByTestId('send-button'));
+    });
+    await waitFor(() => {
+      expect(lastChatInputBarProps.draft).toBe('Edited from test');
+    });
+
+    act(() => {
+      useChatStore.getState().beginNewThread();
+    });
+
+    await waitFor(() => {
+      expect(mockUseChatDocumentAttachments).toHaveBeenLastCalledWith(expect.objectContaining({
+        ownerKey: 'new-thread:8|author/model-q4',
+      }));
+      expect(lastChatInputBarProps.draft).toBe('');
+    });
   });
 
   it('discards consumed copied drafts when their copied file is missing before append', async () => {
@@ -4853,6 +4905,23 @@ describe('ChatScreen', () => {
     expect(queryByText('chat.statusGenerating')).toBeNull();
     fireEvent.press(getByTestId('stop-button'));
     expect(mockStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the composer disabled while a stopped native completion is settling', () => {
+    mockIsStoppingGeneration = true;
+
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      disabled: true,
+      isSending: false,
+    }));
+    expect(lastChatHeaderProps).toEqual(expect.objectContaining({
+      canStartNewChat: false,
+      canOpenPresetSelector: false,
+      canOpenModelSelector: false,
+      canOpenModelControls: false,
+    }));
   });
 
   it('keeps header actions visible but disabled while a response is generating', async () => {

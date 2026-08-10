@@ -37,8 +37,9 @@ import {
   matchesConversationSearch,
 } from '../../utils/conversations';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { getReportedErrorMessage } from '../../services/AppError';
+import { getPrivacySafeErrorLogDetails, getReportedErrorMessage } from '../../services/AppError';
 import { notificationService } from '../../services/NotificationService';
+import { documentSessionContextCache } from '../../services/DocumentSessionContextCache';
 import { useChatStore } from '../../store/chatStore';
 import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
@@ -208,7 +209,14 @@ export function ConversationsScreen() {
     updateSettings({ chatRetentionDays: days });
     const cleanupResult = useChatStore.getState().pruneExpiredThreads(days);
     setRetentionExpanded(false);
-    void notificationService.dismissInferenceNotificationsForThreads(cleanupResult.threadIds);
+    void Promise.all([
+      documentSessionContextCache.clearThreads(cleanupResult.threadIds),
+      notificationService.dismissInferenceNotificationsForThreads(cleanupResult.threadIds),
+    ]).catch((error) => {
+      console.warn('[ConversationsScreen] Failed to finish retention cleanup', {
+        ...getPrivacySafeErrorLogDetails(error),
+      });
+    });
 
     if (cleanupResult.count > 0) {
       Alert.alert(

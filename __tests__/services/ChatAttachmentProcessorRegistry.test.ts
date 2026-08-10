@@ -19,6 +19,7 @@ import {
   type PocketAnydocAssetLease,
 } from '../../src/services/ChatAttachmentProcessorRegistry';
 import { AppError } from '../../src/services/AppError';
+import { documentSessionContextCache } from '../../src/services/DocumentSessionContextCache';
 import type { ChatAttachment } from '../../src/types/attachments';
 import {
   MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES,
@@ -166,7 +167,8 @@ function createPocketAnydocNativeModule(
 }
 
 describe('ChatAttachmentProcessorRegistry', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await documentSessionContextCache.clearAll();
     jest.clearAllMocks();
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({
       exists: true,
@@ -177,8 +179,9 @@ describe('ChatAttachmentProcessorRegistry', () => {
     __setPocketAnydocNativeModuleForTests(undefined);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     __setPocketAnydocNativeModuleForTests(undefined);
+    await documentSessionContextCache.clearAll();
   });
 
   it('processes app-owned text documents into bounded text content parts', async () => {
@@ -249,6 +252,27 @@ describe('ChatAttachmentProcessorRegistry', () => {
     }));
     expect(buildDocumentAttachmentTextPart(result).text)
       .toContain(`Selected context: ${firstParagraph.length} of ${`${firstParagraph}\n\n${secondParagraph}`.length} characters (truncated)`);
+  });
+
+  it('does not count direct-text prose overlap as additional extracted source characters', async () => {
+    const source = 'alpha '.repeat(1_500).trim();
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(source);
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment(),
+      { maxChars: 12_000 },
+    );
+
+    expect(result.chunks.length).toBeGreaterThan(1);
+    expect(result.text.length).toBeGreaterThan(source.length);
+    expect(result.extractedCharCount).toBe(source.length);
+    expect(result.sourceCharCount).toBe(source.length);
+    expect(withProcessedDocumentAttachmentMetadata(createDocumentAttachment(), result).document)
+      .toEqual(expect.objectContaining({
+        selectedCharCount: source.length,
+        extractedCharCount: source.length,
+        sourceCharCount: source.length,
+      }));
   });
 
   it('retains a late relevant whole chunk instead of truncating selected chunks in source order', async () => {
@@ -731,6 +755,120 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(nativeModule.release).toHaveBeenCalledTimes(2);
   });
 
+  it('retains one native parse for query-specific context selection during the app session', async () => {
+    const nativeModule = createPocketAnydocNativeModule({
+      selectContext: jest.fn(async ({ query }) => {
+        const text = query.includes('follow-up')
+          ? 'Context selected for the follow-up question.'
+          : 'Context selected for the initial question.';
+        return {
+          ok: true,
+          data: {
+            chunks: [{ index: query.includes('follow-up') ? 2 : 0, text, kind: 'paragraph' }],
+            selectedCharCount: text.length,
+            truncated: true,
+            warnings: ['context_truncated'],
+          },
+        };
+      }),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment({
+        localUri: 'file:///test-dir/chat-attachments/session.docx',
+        fileName: 'session.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }),
+      {
+        query: 'initial question',
+        retainSessionContextSource: true,
+      },
+    );
+    const source = result.sessionContextSource;
+
+    expect(source?.kind).toBe('native');
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+    expect(nativeModule.release).not.toHaveBeenCalled();
+    await expect(source?.selectContext({
+      query: 'follow-up question',
+      maxChars: 64_000,
+      maxChunks: 64,
+    })).resolves.toEqual(expect.objectContaining({
+      text: 'Context selected for the follow-up question.',
+      chunks: [expect.objectContaining({ index: 2 })],
+    }));
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+    expect(nativeModule.selectContext).toHaveBeenCalledTimes(2);
+
+    await source?.release();
+    await source?.release();
+    expect(nativeModule.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('reranks direct-text chunks from bounded session memory without reading the file again', async () => {
+    const alpha = `alpha ${'background '.repeat(220)}`.trim();
+    const beta = `beta ${'evidence '.repeat(240)}`.trim();
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(`${alpha}\n\n${beta}`);
+
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment(),
+      {
+        query: 'alpha',
+        maxChars: 2_500,
+        retainSessionContextSource: true,
+      },
+    );
+    expect(result.text).toContain('alpha');
+    expect(result.text).not.toContain('beta');
+
+    const followUp = await result.sessionContextSource?.selectContext({
+      query: 'beta evidence',
+      maxChars: 2_500,
+      maxChunks: 64,
+    });
+    expect(followUp?.text).toContain('beta');
+    expect(followUp?.text).not.toContain('alpha');
+    expect(FileSystem.readAsStringAsync).toHaveBeenCalledTimes(1);
+
+    await result.sessionContextSource?.release();
+    await expect(result.sessionContextSource?.selectContext({
+      query: 'beta',
+      maxChars: 2_500,
+      maxChunks: 64,
+    })).rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
+  });
+
+  it('lets an abort macrotask interrupt a large direct-text session rerank', async () => {
+    const paragraphs = Array.from(
+      { length: 160 },
+      (_, index) => `Section ${index}\n${`searchable-${index} background `.repeat(110)}`,
+    );
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(paragraphs.join('\n\n'));
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+      createDocumentAttachment(),
+      {
+        query: 'searchable-0',
+        maxChars: 4_000,
+        retainSessionContextSource: true,
+      },
+    );
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 0);
+
+    try {
+      await expect(result.sessionContextSource?.selectContext({
+        query: 'searchable-159',
+        maxChars: 4_000,
+        maxChunks: 64,
+        signal: controller.signal,
+      })).rejects.toMatchObject({ code: 'chat_attachment_processing_cancelled' });
+    } finally {
+      clearTimeout(abortTimer);
+      await result.sessionContextSource?.release();
+    }
+  });
+
   it('does not run the Base64 PDF fallback after a successful native parse', async () => {
     const nativeModule = createPocketAnydocNativeModule({
       prepareDocument: jest.fn(async () => ({
@@ -764,6 +902,32 @@ describe('ChatAttachmentProcessorRegistry', () => {
     expect(result.processorId).toBe('pocket-anydoc');
     expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
     expect(nativeModule.release).toHaveBeenCalledWith('pdf-handle');
+  });
+
+  it('keeps ownership of an unretained native handle until a failed release can be retried', async () => {
+    const nativeModule = createPocketAnydocNativeModule();
+    (nativeModule.release as jest.Mock).mockRejectedValueOnce(new Error('transient release failure'));
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(chatAttachmentProcessorRegistry.processDocumentTextAttachment(
+        createDocumentAttachment({
+          localUri: 'file:///test-dir/chat-attachments/retry-release.docx',
+          fileName: 'retry-release.docx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+      )).resolves.toEqual(expect.objectContaining({ processorId: 'pocket-anydoc' }));
+
+      expect(nativeModule.release).toHaveBeenCalledTimes(1);
+      expect(documentSessionContextCache.getStats().pendingReleaseCount).toBe(1);
+
+      await documentSessionContextCache.retryPendingReleases();
+
+      expect(nativeModule.release).toHaveBeenCalledTimes(2);
+      expect(documentSessionContextCache.getStats().pendingReleaseCount).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('maps native content detection rejection instead of trusting a supported extension', async () => {

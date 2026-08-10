@@ -1,6 +1,6 @@
 # Local Document Processing
 
-Last updated: 2026-08-07
+Last updated: 2026-08-10
 
 Pocket AI processes supported document attachments entirely on the device. Structured
 documents are copied into app-owned storage, parsed by the local `PocketAnyDoc` Expo
@@ -58,15 +58,39 @@ The conversion flow is:
 6. `DocumentContextService` distributes a fair budget across all successful documents,
    adds source boundaries and an untrusted-data instruction, and uses the active model's
    exact tokenizer to remove whole chunks until the prompt fits.
-7. The native handle and derived temporary assets are released after success, failure,
-   cancellation, memory pressure, or teardown. Bounded selected context may be retained as
-   `contentParts` only in the encrypted private chat history. It is never written to
-   unencrypted storage, native temporary files, or logs; regeneration can safely reparse
-   the original attachment.
+7. After a successful attachment turn, the complete parsed source remains available only
+   through a process-local session cache. A follow-up question runs a new relevance
+   selection against that source without reopening or reparsing the attachment. Native
+   formats retain the opaque handle; direct-text formats retain their bounded structural
+   chunks in JavaScript memory. The cache is global-LRU bounded to four documents;
+   direct-text sources have an additional shared 1,000,000-character JS-heap ceiling,
+   while the native four-handle / 16 MiB ceiling remains authoritative.
+8. Cached sources and documents newly attached to a later question share one fair global
+   selection and exact prompt budget. The new document is persisted once; reranked chunks
+   from older documents remain transient. Editing a user question or regenerating the last
+   answer performs the same session selection for every document still present on that
+   branch.
+9. Follow-up document chunks are transient prompt input: old persisted document parts and
+   derived images are removed from that inference request, and the new selection is not
+   copied into the new chat message. The initial attachment turn still keeps its bounded
+   selected `contentParts` and derived images in encrypted private history as an app-restart
+   or eviction fallback. Full parsed text is never persisted by the session cache.
+10. A handle is released on LRU eviction, branch commit, retention pruning, thread deletion,
+   history clearing, private-storage blocking/reset, a system memory warning, processing
+   failure/cancellation, or process teardown. A failed release remains owned in a bounded
+   pending-release queue and is retried
+   by the next cache cleanup/admission operation; it continues to consume capacity until the
+   release succeeds. Branch replacement does not evict tail handles until the terminal write
+   commits, so an empty stopped/error result can restore the previous durable branch safely.
+   When a multi-document preparation reaches native cache pressure, the oldest session handle
+   is released and preparation is retried once per available slot; chunks already selected for
+   the current send remain valid.
 
 Filesystem existence checks may run with bounded concurrency, but native Office/EPUB/PDF
 conversion is globally serialized. Request IDs and chat/model generation revisions prevent
-a late result from being attached to a different message.
+a late result from being attached to a different message. Large direct-text session reranks
+yield to the React Native event loop at bounded chunk checkpoints, allowing cancellation and
+input events to be observed before the complete retained source has been rescored.
 
 ## Structural context
 
@@ -146,7 +170,9 @@ When the active model has verified vision support, only assets linked to selecte
 are materialized into app-private temporary files. Existing user image attachments consume
 the shared four-image input limit first. Derived assets are selected deterministically,
 passed through the same local image validation lifecycle, and removed on release,
-cancellation, failure, or reconciliation. Without vision readiness or a remaining slot,
+cancellation, failure, or reconciliation. Assets rematerialized for a cached follow-up or
+regeneration are prompt-only temporary inputs and are discarded after that completion instead
+of being duplicated in chat history. Without vision readiness or a remaining slot,
 the text placeholder remains and warning metadata states that the image was skipped; the
 prompt never claims that the image was analyzed.
 
@@ -175,9 +201,10 @@ artifacts may contain processor versions, format, counts, timings, limits, and e
 but not full paths, source text, prompts, or image bytes.
 
 The original app-owned attachment remains governed by the existing chat attachment
-lifecycle. Native caches and derived asset files are temporary. Startup reconciliation
-removes unreferenced generated files, while regeneration after an app restart safely
-reparses the original attachment.
+lifecycle. Session caches, native handles, and derived asset files are temporary. Startup
+reconciliation removes unreferenced generated files. After an app restart or LRU eviction,
+ordinary follow-ups use the bounded encrypted context from the original attachment turn;
+editing/regenerating that attachment turn can safely reparse the original app-owned file.
 
 ## Known limitations
 
@@ -187,6 +214,8 @@ reparses the original attachment.
 - Embedded media other than validated raster images remains represented by a placeholder.
 - Context selection can be incomplete when a document is larger than the active model's
   available prompt budget; the message metadata and prompt both mark this condition.
+- Session retrieval lasts only for the current app process and may end earlier after memory
+  pressure or LRU eviction. It does not create a durable full-document index.
 
 ## Updating anydoc
 

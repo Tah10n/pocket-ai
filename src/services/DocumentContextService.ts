@@ -19,6 +19,9 @@ export interface DocumentContextChunk {
   slideNumber?: number;
   sheetName?: string;
   assetIds?: readonly number[];
+  /** UTF-16 range in the normalized source text, used to de-duplicate prose overlap. */
+  sourceStart?: number;
+  sourceEnd?: number;
 }
 
 export interface DocumentContextInput {
@@ -66,6 +69,16 @@ export interface SelectDocumentContextOptions {
    * tokenizer-specific overhead protected by the caller's existing prompt-window contract.
    */
   countPromptTokens?: (contentParts: readonly LlmTextContentPart[]) => Promise<number>;
+  /**
+   * Direct-text session reranking can inspect thousands of chunks. Callers on the UI runtime may
+   * opt into macrotask checkpoints so abort/input events are handled before the full pass ends.
+   */
+  cooperativeScheduling?: {
+    yieldControl: () => Promise<void>;
+    throwIfCancelled?: () => void;
+    yieldEveryChunks?: number;
+    minimumYieldIntervalMs?: number;
+  };
 }
 
 export interface RebuildDocumentContextSelectionOptions {
@@ -149,6 +162,95 @@ function normalizePositiveInteger(value: number | undefined, fallback: number): 
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
+type CooperativeCheckpoint = () => Promise<void> | null;
+
+function createCooperativeCheckpoint(
+  scheduling: SelectDocumentContextOptions['cooperativeScheduling'],
+): CooperativeCheckpoint | undefined {
+  if (!scheduling) {
+    return undefined;
+  }
+  const yieldEveryChunks = normalizePositiveInteger(scheduling.yieldEveryChunks, 16);
+  const minimumYieldIntervalMs = typeof scheduling.minimumYieldIntervalMs === 'number'
+    && Number.isFinite(scheduling.minimumYieldIntervalMs)
+    && scheduling.minimumYieldIntervalMs >= 0
+    ? scheduling.minimumYieldIntervalMs
+    : 8;
+  let chunksSinceYield = 0;
+  let hasYielded = false;
+  let lastYieldCompletedAt = Date.now();
+  return () => {
+    scheduling.throwIfCancelled?.();
+    chunksSinceYield += 1;
+    if (chunksSinceYield < yieldEveryChunks) {
+      return null;
+    }
+    chunksSinceYield = 0;
+    if (hasYielded && Date.now() - lastYieldCompletedAt < minimumYieldIntervalMs) {
+      return null;
+    }
+    return scheduling.yieldControl().then(() => {
+      hasYielded = true;
+      lastYieldCompletedAt = Date.now();
+      scheduling.throwIfCancelled?.();
+    });
+  };
+}
+
+function normalizeDocumentChunk(
+  chunk: DocumentContextChunk,
+  seenChunkIndexes: Set<number>,
+): DocumentContextChunk | null {
+  const text = normalizeText(chunk.text);
+  if (!Number.isSafeInteger(chunk.index) || chunk.index < 0 || !text || seenChunkIndexes.has(chunk.index)) {
+    return null;
+  }
+  seenChunkIndexes.add(chunk.index);
+  const hasValidSourceRange = Number.isSafeInteger(chunk.sourceStart)
+    && Number.isSafeInteger(chunk.sourceEnd)
+    && (chunk.sourceStart ?? -1) >= 0
+    && (chunk.sourceEnd ?? -1) > (chunk.sourceStart ?? -1)
+    && (chunk.sourceEnd ?? 0) - (chunk.sourceStart ?? 0) === text.length;
+  const {
+    sourceStart: _sourceStart,
+    sourceEnd: _sourceEnd,
+    ...chunkWithoutSourceRange
+  } = chunk;
+  return {
+    ...chunkWithoutSourceRange,
+    index: chunk.index,
+    text,
+    ...(chunk.heading
+      ? { heading: normalizeBoundarySafeLabel(chunk.heading, 512, '') || undefined }
+      : null),
+    ...(chunk.sheetName
+      ? { sheetName: normalizeBoundarySafeLabel(chunk.sheetName, 256, '') || undefined }
+      : null),
+    ...(hasValidSourceRange
+      ? { sourceStart: chunk.sourceStart, sourceEnd: chunk.sourceEnd }
+      : null),
+  };
+}
+
+function finalizeNormalizedDocument(
+  document: DocumentContextInput,
+  attachmentId: string,
+  chunks: DocumentContextChunk[],
+): DocumentContextInput | null {
+  if (chunks.length === 0) {
+    return null;
+  }
+  chunks.sort((left, right) => left.index - right.index);
+  return {
+    ...document,
+    attachmentId,
+    displayName: normalizeBoundarySafeLabel(document.displayName, MAX_DISPLAY_NAME_CHARS, 'Document'),
+    canonicalFormat: normalizeBoundarySafeLabel(document.canonicalFormat, MAX_FORMAT_CHARS, 'unknown'),
+    chunks,
+    warnings: normalizeWarnings(document.warnings),
+  };
+}
+
 function normalizeDocumentInputs(documents: readonly DocumentContextInput[]): DocumentContextInput[] {
   const seenAttachmentIds = new Set<string>();
   return documents.flatMap((document) => {
@@ -158,36 +260,89 @@ function normalizeDocumentInputs(documents: readonly DocumentContextInput[]): Do
     }
     const seenChunkIndexes = new Set<number>();
     const chunks = document.chunks.flatMap((chunk): DocumentContextChunk[] => {
-      const text = normalizeText(chunk.text);
-      if (!Number.isSafeInteger(chunk.index) || chunk.index < 0 || !text || seenChunkIndexes.has(chunk.index)) {
-        return [];
-      }
-      seenChunkIndexes.add(chunk.index);
-      return [{
-        ...chunk,
-        index: chunk.index,
-        text,
-        ...(chunk.heading
-          ? { heading: normalizeBoundarySafeLabel(chunk.heading, 512, '') || undefined }
-          : null),
-        ...(chunk.sheetName
-          ? { sheetName: normalizeBoundarySafeLabel(chunk.sheetName, 256, '') || undefined }
-          : null),
-      }];
-    }).sort((left, right) => left.index - right.index);
-    if (chunks.length === 0) {
+      const normalized = normalizeDocumentChunk(chunk, seenChunkIndexes);
+      return normalized ? [normalized] : [];
+    });
+    const normalizedDocument = finalizeNormalizedDocument(document, attachmentId, chunks);
+    if (!normalizedDocument) {
       return [];
     }
     seenAttachmentIds.add(attachmentId);
-    return [{
-      ...document,
-      attachmentId,
-      displayName: normalizeBoundarySafeLabel(document.displayName, MAX_DISPLAY_NAME_CHARS, 'Document'),
-      canonicalFormat: normalizeBoundarySafeLabel(document.canonicalFormat, MAX_FORMAT_CHARS, 'unknown'),
-      chunks,
-      warnings: normalizeWarnings(document.warnings),
-    }];
+    return [normalizedDocument];
   });
+}
+
+async function normalizeDocumentInputsCooperatively(
+  documents: readonly DocumentContextInput[],
+  checkpoint: CooperativeCheckpoint,
+): Promise<DocumentContextInput[]> {
+  const normalizedDocuments: DocumentContextInput[] = [];
+  const seenAttachmentIds = new Set<string>();
+  for (const document of documents) {
+    const attachmentId = normalizeBoundarySafeLabel(document.attachmentId, 128, '');
+    if (!attachmentId || seenAttachmentIds.has(attachmentId)) {
+      continue;
+    }
+    const chunks: DocumentContextChunk[] = [];
+    const seenChunkIndexes = new Set<number>();
+    for (const chunk of document.chunks) {
+      const normalized = normalizeDocumentChunk(chunk, seenChunkIndexes);
+      if (normalized) {
+        chunks.push(normalized);
+      }
+      const pendingYield = checkpoint();
+      if (pendingYield) {
+        await pendingYield;
+      }
+    }
+    const normalizedDocument = finalizeNormalizedDocument(document, attachmentId, chunks);
+    if (normalizedDocument) {
+      seenAttachmentIds.add(attachmentId);
+      normalizedDocuments.push(normalizedDocument);
+    }
+  }
+  return normalizedDocuments;
+}
+
+function countSelectedSourceChars(chunks: readonly DocumentContextChunk[]): number {
+  const ranges: { start: number; end: number }[] = [];
+  let untrackedChars = 0;
+  chunks.forEach((chunk) => {
+    if (
+      Number.isSafeInteger(chunk.sourceStart)
+      && Number.isSafeInteger(chunk.sourceEnd)
+      && (chunk.sourceStart ?? -1) >= 0
+      && (chunk.sourceEnd ?? -1) > (chunk.sourceStart ?? -1)
+    ) {
+      ranges.push({ start: chunk.sourceStart!, end: chunk.sourceEnd! });
+    } else {
+      untrackedChars += chunk.text.length;
+    }
+  });
+
+  ranges.sort((left, right) => left.start - right.start || left.end - right.end);
+  let rangeChars = 0;
+  let activeStart = -1;
+  let activeEnd = -1;
+  ranges.forEach(({ start, end }) => {
+    if (activeStart < 0) {
+      activeStart = start;
+      activeEnd = end;
+      return;
+    }
+    if (start <= activeEnd) {
+      activeEnd = Math.max(activeEnd, end);
+      return;
+    }
+    rangeChars += activeEnd - activeStart;
+    activeStart = start;
+    activeEnd = end;
+  });
+  if (activeStart >= 0) {
+    rangeChars += activeEnd - activeStart;
+  }
+
+  return untrackedChars + rangeChars;
 }
 
 function buildUniformCoverageIndexes(chunkCount: number): number[] {
@@ -246,12 +401,23 @@ export function resolveNativeDocumentSelectionQuery(question: string): string {
     : question;
 }
 
-function buildRankedChunks(question: string, documents: readonly DocumentContextInput[]): RankedChunk[][] {
+async function buildRankedChunks(
+  question: string,
+  documents: readonly DocumentContextInput[],
+  checkpoint?: CooperativeCheckpoint,
+): Promise<RankedChunk[][]> {
   const queryTokens = [...new Set(normalizeTokenText(question))];
   const useSummaryCoverage = queryTokens.length === 0 || isSummaryIntent(question, queryTokens);
-  const allChunks = documents.flatMap((document, documentIndex) => (
-    document.chunks.map((chunk) => ({ documentIndex, chunk, tokens: normalizeTokenText(chunk.text) }))
-  ));
+  const allChunks: { documentIndex: number; chunk: DocumentContextChunk; tokens: string[] }[] = [];
+  for (let documentIndex = 0; documentIndex < documents.length; documentIndex += 1) {
+    for (const chunk of documents[documentIndex].chunks) {
+      allChunks.push({ documentIndex, chunk, tokens: normalizeTokenText(chunk.text) });
+      const pendingYield = checkpoint?.();
+      if (pendingYield) {
+        await pendingYield;
+      }
+    }
+  }
   const averageLength = Math.max(
     1,
     allChunks.reduce((sum, entry) => sum + entry.tokens.length, 0) / Math.max(1, allChunks.length),
@@ -263,6 +429,10 @@ function buildRankedChunks(question: string, documents: readonly DocumentContext
       if (uniqueTerms.has(term)) {
         documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
       }
+    }
+    const pendingYield = checkpoint?.();
+    if (pendingYield) {
+      await pendingYield;
     }
   }
   const rankedByDocument = documents.map(() => [] as RankedChunk[]);
@@ -291,6 +461,10 @@ function buildRankedChunks(question: string, documents: readonly DocumentContext
       chunk: entry.chunk,
       score,
     });
+    const pendingYield = checkpoint?.();
+    if (pendingYield) {
+      await pendingYield;
+    }
   }
   rankedByDocument.forEach((ranked) => {
     const useCoverage = useSummaryCoverage || ranked.every((entry) => entry.score === 0);
@@ -387,7 +561,7 @@ function buildSelection(
       continue;
     }
     const chunks = ranked.map((entry) => entry.chunk);
-    const documentSelectedChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
+    const documentSelectedChars = countSelectedSourceChars(chunks);
     const truncated = document.truncated === true || chunks.length < document.chunks.length;
     const warnings = normalizeWarnings([
       ...(document.warnings ?? []),
@@ -493,11 +667,16 @@ function buildChunkRemovalOrder(selected: readonly RankedChunk[]): RankedChunk[]
 export async function selectDocumentContext(
   options: SelectDocumentContextOptions,
 ): Promise<DocumentContextSelection> {
-  const documents = normalizeDocumentInputs(options.documents);
+  const checkpoint = createCooperativeCheckpoint(options.cooperativeScheduling);
+  options.cooperativeScheduling?.throwIfCancelled?.();
+  const documents = checkpoint
+    ? await normalizeDocumentInputsCooperatively(options.documents, checkpoint)
+    : normalizeDocumentInputs(options.documents);
   const maxChars = normalizePositiveInteger(options.maxChars, 1);
   const maxSourceChars = normalizePositiveInteger(options.maxSourceChars, maxChars);
   const maxChunks = normalizePositiveInteger(options.maxChunks, 1);
-  const rankedByDocument = buildRankedChunks(options.question, documents);
+  const rankedByDocument = await buildRankedChunks(options.question, documents, checkpoint);
+  options.cooperativeScheduling?.throwIfCancelled?.();
   const selected: RankedChunk[] = [];
   const selectedKeys = new Set<string>();
 
@@ -661,9 +840,16 @@ function safeSliceStart(text: string, start: number): number {
     : start;
 }
 
-function splitLongParagraph(text: string, maxChars: number): string[] {
-  const chunks: string[] = [];
+type DirectParagraphChunk = {
+  text: string;
+  sourceStart: number;
+  sourceEnd: number;
+};
+
+function splitLongParagraph(text: string, maxChars: number): DirectParagraphChunk[] {
+  const chunks: DirectParagraphChunk[] = [];
   let remaining = text.trim();
+  let remainingStart = text.indexOf(remaining);
   const maxOverlapChars = Math.min(256, Math.max(32, Math.floor(maxChars * 0.15)));
   while (remaining.length > maxChars) {
     const safeMaximum = safeSliceEnd(remaining, maxChars);
@@ -675,11 +861,18 @@ function splitLongParagraph(text: string, maxChars: number): string[] {
       : whitespaceBreak >= Math.floor(maxChars * 0.5)
         ? whitespaceBreak
         : safeMaximum;
-    const chunk = remaining.slice(0, splitAt).trim();
+    const rawChunk = remaining.slice(0, splitAt);
+    const chunk = rawChunk.trim();
     if (!chunk) {
       break;
     }
-    chunks.push(chunk);
+    const chunkLeadingTrim = rawChunk.length - rawChunk.trimStart().length;
+    const chunkStart = remainingStart + chunkLeadingTrim;
+    chunks.push({
+      text: chunk,
+      sourceStart: chunkStart,
+      sourceEnd: chunkStart + chunk.length,
+    });
     const earliestOverlapStart = safeSliceStart(
       remaining,
       Math.max(0, splitAt - maxOverlapChars),
@@ -688,13 +881,23 @@ function splitLongParagraph(text: string, maxChars: number): string[] {
     const overlapStart = overlapWhitespace >= earliestOverlapStart && overlapWhitespace < splitAt
       ? safeSliceStart(remaining, overlapWhitespace + 1)
       : earliestOverlapStart;
-    const nextRemaining = remaining.slice(overlapStart).trim();
-    remaining = nextRemaining.length > 0 && nextRemaining.length < remaining.length
-      ? nextRemaining
-      : remaining.slice(splitAt).trim();
+    const overlappedRemainder = remaining.slice(overlapStart);
+    const nextRemaining = overlappedRemainder.trim();
+    if (nextRemaining.length > 0 && nextRemaining.length < remaining.length) {
+      remainingStart += overlapStart + (overlappedRemainder.length - overlappedRemainder.trimStart().length);
+      remaining = nextRemaining;
+    } else {
+      const nonOverlappedRemainder = remaining.slice(splitAt);
+      remainingStart += splitAt + (nonOverlappedRemainder.length - nonOverlappedRemainder.trimStart().length);
+      remaining = nonOverlappedRemainder.trim();
+    }
   }
   if (remaining) {
-    chunks.push(remaining);
+    chunks.push({
+      text: remaining,
+      sourceStart: remainingStart,
+      sourceEnd: remainingStart + remaining.length,
+    });
   }
   return chunks;
 }
@@ -797,7 +1000,19 @@ export function chunkDirectDocumentText(
     return chunkDirectTsv(text, maxChars);
   }
   const lines = text.split('\n');
-  const blocks: { kind: DocumentContextChunkKind; text: string; heading?: string }[] = [];
+  const lineStartOffsets: number[] = [];
+  let nextLineStart = 0;
+  lines.forEach((line) => {
+    lineStartOffsets.push(nextLineStart);
+    nextLineStart += line.length + 1;
+  });
+  const blocks: {
+    kind: DocumentContextChunkKind;
+    text: string;
+    heading?: string;
+    sourceStart?: number;
+    sourceEnd?: number;
+  }[] = [];
   const parseMarkdownStructure = canonicalFormat === 'markdown' || canonicalFormat === 'md';
   let activeHeading: string | undefined;
   let index = 0;
@@ -855,6 +1070,7 @@ export function chunkDirectDocumentText(
       });
       continue;
     }
+    const paragraphStart = lineStartOffsets[index];
     const paragraph = [first];
     index += 1;
     while (index < lines.length && lines[index].trim()) {
@@ -870,7 +1086,13 @@ export function chunkDirectDocumentText(
       index += 1;
     }
     splitLongParagraph(paragraph.join('\n'), maxChars).forEach((part) => {
-      blocks.push({ kind: 'paragraph', text: part, heading: activeHeading });
+      blocks.push({
+        kind: 'paragraph',
+        text: part.text,
+        heading: activeHeading,
+        sourceStart: paragraphStart + part.sourceStart,
+        sourceEnd: paragraphStart + part.sourceEnd,
+      });
     });
   }
   return blocks.map((block, blockIndex) => ({
@@ -878,6 +1100,9 @@ export function chunkDirectDocumentText(
     kind: block.kind,
     text: block.text,
     ...(block.heading ? { heading: block.heading } : null),
+    ...('sourceStart' in block && 'sourceEnd' in block
+      ? { sourceStart: block.sourceStart, sourceEnd: block.sourceEnd }
+      : null),
   }));
 }
 

@@ -5,6 +5,7 @@ import { ConversationsScreen } from '../../src/ui/screens/ConversationsScreen';
 import { useChatSession } from '../../src/hooks/useChatSession';
 import { useConversationIndex } from '../../src/hooks/useConversationIndex';
 import { notificationService } from '../../src/services/NotificationService';
+import { documentSessionContextCache } from '../../src/services/DocumentSessionContextCache';
 import { getSettings, updateSettings } from '../../src/services/SettingsStore';
 import { useChatStore } from '../../src/store/chatStore';
 
@@ -13,6 +14,7 @@ const mockRouterReplace = jest.fn();
 const mockRouterBack = jest.fn();
 let pruneExpiredThreadsSpy: jest.SpyInstance | null = null;
 let dismissInferenceNotificationSpy: jest.SpyInstance | null = null;
+let clearDocumentSessionsSpy: jest.SpyInstance | null = null;
 
 jest.mock('expo-router', () => ({
   useRouter: () => ({
@@ -124,6 +126,7 @@ function createMockChatSession(overrides: Partial<ChatSessionState> = {}): ChatS
     messages: [],
     messageListRevision: 0,
     isGenerating: false,
+    isStoppingGeneration: false,
     isPreparingDocuments: false,
     shouldOfferSummary: false,
     truncatedMessageCount: 0,
@@ -156,6 +159,10 @@ describe('ConversationsScreen', () => {
     dismissInferenceNotificationSpy?.mockRestore();
     dismissInferenceNotificationSpy = jest
       .spyOn(notificationService, 'dismissInferenceNotificationForThread')
+      .mockResolvedValue(undefined);
+    clearDocumentSessionsSpy?.mockRestore();
+    clearDocumentSessionsSpy = jest
+      .spyOn(documentSessionContextCache, 'clearThreads')
       .mockResolvedValue(undefined);
     mockGetSettings.mockReturnValue({
       chatRetentionDays: 90,
@@ -249,6 +256,10 @@ describe('ConversationsScreen', () => {
     expect(mockUpdateSettings).toHaveBeenCalledWith({ chatRetentionDays: null });
     expect(pruneExpiredThreadsSpy).toHaveBeenCalledWith(null);
     await waitFor(() => {
+      expect(clearDocumentSessionsSpy).toHaveBeenCalledWith([
+        'thread-expired-1',
+        'thread-expired-2',
+      ]);
       expect(dismissInferenceNotificationSpy).toHaveBeenCalledTimes(2);
     });
     expect(dismissInferenceNotificationSpy).toHaveBeenNthCalledWith(1, 'thread-expired-1');

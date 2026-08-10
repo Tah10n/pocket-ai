@@ -1,11 +1,13 @@
 # Document QA and Benchmarks
 
-Last updated: 2026-08-07
+Last updated: 2026-08-10
 
-Pocket AI's document QA uses only checked-in synthetic fixtures. The corpus covers DOCX,
-PPTX, XLSX, EPUB, and text PDF success paths; corrupt, encrypted, resource-limit, archive
-expansion, and deep-XML failures; stop, thread-switch, and model-switch races; four-document
-context; 100-slide, 40-page, and 20-sheet stress cases; and four sequential documents.
+Pocket AI's document QA uses only checked-in synthetic fixtures. The Android success corpus
+covers every supported extension: TXT, MD, MARKDOWN, JSON, TSV, CSV, DOC, DOCX, DOCM, ODT,
+RTF, PPT, POT, PPS, ODP, PPTX, PPTM, PPSX, PPSM, XLS, XLSB, XLSM, XLSX, ODS, EPUB, and text
+PDF. It also covers corrupt, encrypted, resource-limit, archive-expansion, and deep-XML
+failures; stop, thread-switch, and model-switch races; four-document context; 100-slide,
+40-page, and 20-sheet stress cases; and four sequential documents.
 
 ## Deterministic host checks
 
@@ -75,9 +77,17 @@ This preconditioned pack remains an explicit maintainer/device command. Hosted l
 the default hosted pack, and `android-pack-all` deliberately exclude it.
 
 The device must have one loaded local model. The model-switch race additionally requires
-a second downloaded model. The runner stages only the pinned fixtures, selects them
-through Android DocumentsUI, and removes the exact staged files and QA-created chats when
-the scenario ends.
+a second downloaded model. The runner stages only the pinned fixtures, selects them through
+Android DocumentsUI, and removes the exact staged files and QA-created chats when the
+scenario ends. Formats without a distinct checked-in corpus sample (`.pot`, `.pps`,
+`.pptm`, `.ppsx`, and `.ppsm`) use the corresponding pinned legacy or OOXML presentation
+bytes under the target extension, matching the native corpus alias contract.
+
+The `document-session-follow-up` scenario sends one native document and then a second
+question without attaching it again. It requires exactly one native prepare and two
+context selections, proving that an ordinary follow-up reuses the process-local document
+handle instead of rereading or reparsing the file. The second prepared turn must not carry
+a duplicate persisted document attachment.
 
 Document scenarios use a sentinel-only evidence policy. Reports retain synthetic fixture
 IDs, fixed sentinel IDs, bounded timings, RSS/UI-probe counts, and allowlisted error codes.

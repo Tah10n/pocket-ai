@@ -50,6 +50,10 @@ const SUPPORTED_AUDIO_ATTACHMENT_MIME_TYPES = new Set([
   'audio/x-wav',
 ]);
 
+const DOCUMENT_ATTACHMENT_MIME_TYPE_ALIASES = new Map([
+  ['text/comma-separated-values', 'text/csv'],
+]);
+
 const SUPPORTED_DOCUMENT_ATTACHMENT_MIME_TYPES = new Set([
   'application/json',
   'application/pdf',
@@ -71,6 +75,7 @@ const SUPPORTED_DOCUMENT_ATTACHMENT_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'text/csv',
+  'text/comma-separated-values',
   'text/markdown',
   'text/plain',
   'text/rtf',
@@ -234,6 +239,11 @@ function normalizeToken(value: string | null | undefined): string {
   return value?.trim().toLowerCase() ?? '';
 }
 
+function normalizeDocumentAttachmentMimeType(value: string | null | undefined): string {
+  const normalized = normalizeToken(value);
+  return DOCUMENT_ATTACHMENT_MIME_TYPE_ALIASES.get(normalized) ?? normalized;
+}
+
 function normalizeNonNegativeInteger(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
     return 0;
@@ -343,7 +353,7 @@ export function resolveChatAudioFormatFromPath(value: string | null | undefined)
 }
 
 export function resolveChatAttachmentKindFromMimeType(mediaType: string | null | undefined): ChatAttachmentKind | null {
-  const normalized = normalizeToken(mediaType);
+  const normalized = normalizeDocumentAttachmentMimeType(mediaType);
   if (normalized.length === 0) {
     return null;
   }
@@ -419,7 +429,7 @@ export function resolveChatTextDocumentMimeType(input: {
 }
 
 export function isSupportedChatTextDocumentMimeType(mediaType: string | null | undefined): boolean {
-  return SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeToken(mediaType));
+  return SUPPORTED_TEXT_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeDocumentAttachmentMimeType(mediaType));
 }
 
 function readExactAnyDocCommit(value: unknown): string | undefined {
@@ -477,11 +487,11 @@ function normalizePersistedDocumentWarnings(value: unknown): string[] | undefine
 }
 
 export function isSupportedChatAnydocDocumentMimeType(mediaType: string | null | undefined): boolean {
-  return SUPPORTED_ANYDOC_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeToken(mediaType));
+  return SUPPORTED_ANYDOC_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeDocumentAttachmentMimeType(mediaType));
 }
 
 export function resolveChatDocumentMaxBytes(mediaType: string | null | undefined): number {
-  const normalized = normalizeToken(mediaType);
+  const normalized = normalizeDocumentAttachmentMimeType(mediaType);
   if (normalized === 'application/pdf') {
     return MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES;
   }
@@ -508,7 +518,7 @@ export function resolveChatProcessableDocumentMimeType(input: {
 }): string | null {
   const extension = resolveChatAttachmentExtension(input.fileName)
     ?? resolveChatAttachmentExtension(input.localUri);
-  const normalizedMimeType = normalizeToken(input.mimeType ?? input.mediaType);
+  const normalizedMimeType = normalizeDocumentAttachmentMimeType(input.mimeType ?? input.mediaType);
   const extensionMimeType = extension
     ? PROCESSABLE_DOCUMENT_EXTENSION_TO_MIME_TYPE.get(extension) ?? null
     : null;
@@ -532,7 +542,9 @@ export function resolveChatProcessableDocumentMimeType(input: {
 }
 
 export function isSupportedChatProcessableDocumentMimeType(mediaType: string | null | undefined): boolean {
-  return SUPPORTED_PROCESSABLE_DOCUMENT_ATTACHMENT_MIME_TYPES.has(normalizeToken(mediaType));
+  return SUPPORTED_PROCESSABLE_DOCUMENT_ATTACHMENT_MIME_TYPES.has(
+    normalizeDocumentAttachmentMimeType(mediaType),
+  );
 }
 
 export function isSupportedChatDocumentDraftFormat(

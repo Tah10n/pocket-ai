@@ -1,5 +1,5 @@
 import { AppState, AppStateStatus } from 'react-native';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
 import {
@@ -78,9 +78,14 @@ import {
 import {
   chatAttachmentProcessorRegistry,
   withProcessedDocumentAttachmentMetadata,
+  type ChatDocumentSessionContextSource,
   type ChatDocumentTextProcessorResult,
   type PocketAnydocAssetLease,
 } from '../services/ChatAttachmentProcessorRegistry';
+import {
+  DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES,
+  documentSessionContextCache,
+} from '../services/DocumentSessionContextCache';
 import {
   rebuildDocumentContextSelection,
   selectDocumentContext,
@@ -158,6 +163,13 @@ type MaterializedDocumentImageDraft = {
   documentAttachmentId: string;
   assetId: number;
   draft: AttachmentDraft;
+};
+
+type RegenerationDocumentAttachmentInputs = {
+  documentAttachments: Extract<ChatAttachment, { kind: 'document' }>[];
+  documentDrafts: ChatDocumentAttachmentDraft[];
+  retainedImageAttachments: NonNullable<ChatMessage['attachments']>;
+  retainedOtherAttachments: NonNullable<ChatMessage['attachments']>;
 };
 
 export type DocumentAttachmentProcessingFailure = {
@@ -364,6 +376,7 @@ export type RegenerateUserMessageOptions = {
 const sharedGenerationState: { current: ActiveGenerationState | null } = {
   current: null,
 };
+const nativeCompletionSettlementListeners = new Set<() => void>();
 
 function createPreparedAttachmentResolution(
   readiness: MultimodalReadinessState | undefined,
@@ -688,6 +701,9 @@ async function processDocumentAttachmentDraftsForInference(
   cancellationGate?: AttachmentCancellationGate,
   retainNativeAssetLeases = false,
   onNativeAssetLeaseCreated?: (lease: PocketAnydocAssetLease) => void,
+  retainSessionContextSources = false,
+  onSessionContextSourceCreated?: (source: ChatDocumentSessionContextSource) => void,
+  recoverSessionCachePressure?: () => Promise<boolean>,
 ): Promise<ProcessedDocumentAttachmentDraftsForInference> {
   if (drafts.length === 0) {
     return {
@@ -699,6 +715,13 @@ async function processDocumentAttachmentDraftsForInference(
     };
   }
 
+  if (retainSessionContextSources) {
+    await documentSessionContextCache.reserveForIncomingDocuments(drafts.length);
+    if (cancellationGate?.isCancellationRequested()) {
+      throw cancellationGate.getCancellationError();
+    }
+  }
+
   const processingAttachments = materializeDocumentDraftsForProcessing({
     threadId: 'pending',
     messageId: 'pending',
@@ -708,29 +731,47 @@ async function processDocumentAttachmentDraftsForInference(
     processingAttachments,
     DOCUMENT_PROCESSING_CONCURRENCY,
     async (attachment: Extract<ChatAttachment, { kind: 'document' }>, index) => {
-      try {
-        const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, {
-          query: question,
-          signal,
-          maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
-          maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
-          retainNativeAssetLease: retainNativeAssetLeases,
-          onNativeAssetLeaseCreated,
-        });
-        return { status: 'fulfilled' as const, draft: drafts[index], attachment, result };
-      } catch (error) {
-        if (cancellationGate?.isCancellationRequested()) {
-          throw cancellationGate.getCancellationError();
+      let cachePressureAttempts = 0;
+      while (true) {
+        try {
+          const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, {
+            query: question,
+            signal,
+            maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+            maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+            retainNativeAssetLease: retainNativeAssetLeases,
+            onNativeAssetLeaseCreated,
+            retainSessionContextSource: retainSessionContextSources,
+            onSessionContextSourceCreated,
+          });
+          return { status: 'fulfilled' as const, draft: drafts[index], attachment, result };
+        } catch (error) {
+          if (cancellationGate?.isCancellationRequested()) {
+            throw cancellationGate.getCancellationError();
+          }
+          const appError = toAppError(error, 'chat_attachment_native_failed');
+          if (appError.code === 'chat_attachment_processing_cancelled') {
+            throw cancellationGate?.getCancellationError() ?? appError;
+          }
+          const cacheLimit = appError.details?.limit;
+          const isNativeSessionCachePressure = retainSessionContextSources
+            && appError.code === 'chat_attachment_document_resource_limit'
+            && (cacheLimit === 'max_cache_entries' || cacheLimit === 'max_cache_bytes');
+          if (isNativeSessionCachePressure && cachePressureAttempts < DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES) {
+            const recovered = await documentSessionContextCache.evictLeastRecentlyUsed()
+              || await recoverSessionCachePressure?.()
+              || false;
+            if (recovered) {
+              cachePressureAttempts += 1;
+              continue;
+            }
+          }
+          return {
+            status: 'rejected' as const,
+            draft: drafts[index],
+            error: appError,
+          };
         }
-        const appError = toAppError(error, 'chat_attachment_native_failed');
-        if (appError.code === 'chat_attachment_processing_cancelled') {
-          throw cancellationGate?.getCancellationError() ?? appError;
-        }
-        return {
-          status: 'rejected' as const,
-          draft: drafts[index],
-          error: appError,
-        };
       }
     },
     cancellationGate,
@@ -768,6 +809,129 @@ async function processDocumentAttachmentDraftsForInference(
     candidates,
     selectedContext,
     rejected.map(({ draft, error }) => ({ draft, errorCode: error.code })),
+  );
+}
+
+function toSessionDocumentDraft(
+  attachment: Extract<ChatAttachment, { kind: 'document' }>,
+): ChatDocumentAttachmentDraft {
+  return {
+    id: attachment.id,
+    pickerUri: attachment.localUri,
+    localUri: attachment.localUri,
+    pathCategory: attachment.pathCategory,
+    fileName: attachment.fileName,
+    displayName: attachment.displayName,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    source: 'document_picker',
+    createdAt: attachment.createdAt,
+    copyStatus: 'copied',
+  };
+}
+
+async function selectSessionDocumentContextForInference(
+  threadId: string,
+  question: string,
+  signal?: AbortSignal,
+  cancellationGate?: AttachmentCancellationGate,
+  attachmentIds?: ReadonlySet<string>,
+): Promise<ProcessedDocumentAttachmentDraftsForInference> {
+  const selected = await documentSessionContextCache.selectThreadDocuments(
+    threadId,
+    {
+      query: question,
+      maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+      maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+      signal,
+    },
+    attachmentIds,
+  );
+  if (cancellationGate?.isCancellationRequested()) {
+    throw cancellationGate.getCancellationError();
+  }
+  if (selected.length === 0) {
+    return {
+      attachments: [],
+      contentParts: [],
+      failures: [],
+      candidates: [],
+      selectedCandidates: [],
+    };
+  }
+  const candidates: ProcessedDocumentAttachmentCandidate[] = selected.map(({ attachment, result }) => ({
+    attachment,
+    draft: toSessionDocumentDraft(attachment),
+    result,
+  }));
+  const selectedContext = await selectDocumentContext({
+    question,
+    documents: toDocumentContextInputs(candidates),
+    maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+    maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+  });
+  return applyDocumentContextSelection(candidates, selectedContext, []);
+}
+
+async function combineDocumentContextForInference(
+  question: string,
+  groups: readonly ProcessedDocumentAttachmentDraftsForInference[],
+): Promise<ProcessedDocumentAttachmentDraftsForInference> {
+  const seenAttachmentIds = new Set<string>();
+  const candidates = groups.flatMap((group) => group.candidates.filter(({ attachment }) => {
+    if (seenAttachmentIds.has(attachment.id)) {
+      return false;
+    }
+    seenAttachmentIds.add(attachment.id);
+    return true;
+  }));
+  if (candidates.length === 0) {
+    const allFailedError = groups.find((group) => group.allFailedError)?.allFailedError;
+    return {
+      attachments: [],
+      contentParts: [],
+      failures: groups.flatMap((group) => group.failures),
+      candidates: [],
+      selectedCandidates: [],
+      ...(allFailedError ? { allFailedError } : null),
+    };
+  }
+  const selectedContext = await selectDocumentContext({
+    question,
+    documents: toDocumentContextInputs(candidates),
+    maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+    maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+  });
+  return applyDocumentContextSelection(
+    candidates,
+    selectedContext,
+    groups.flatMap((group) => group.failures),
+  );
+}
+
+function projectDocumentContextSelection(
+  processed: ProcessedDocumentAttachmentDraftsForInference,
+  attachmentIds: ReadonlySet<string>,
+  failureDrafts?: ReadonlySet<ChatDocumentAttachmentDraft>,
+): ProcessedDocumentAttachmentDraftsForInference {
+  const candidates = processed.candidates.filter(({ attachment }) => attachmentIds.has(attachment.id));
+  const selectedCandidates = processed.selectedCandidates.filter(
+    ({ attachment }) => attachmentIds.has(attachment.id),
+  );
+  const selection = rebuildDocumentContextSelection({
+    documents: toDocumentContextInputs(candidates),
+    selectedDocuments: selectedCandidates.map(({ attachment, result }) => ({
+      attachmentId: attachment.id,
+      selectedChunkIndexes: result.chunks.map((chunk) => chunk.index),
+    })),
+  });
+  return applyDocumentContextSelection(
+    candidates,
+    selection,
+    processed.failures.filter((failure) => (
+      (failure.draft.id !== undefined && attachmentIds.has(failure.draft.id))
+      || failureDrafts?.has(failure.draft) === true
+    )),
   );
 }
 
@@ -993,15 +1157,17 @@ async function discardUnselectedDocumentImageDrafts(
 async function releasePocketAnydocAssetLeases(
   leases: Iterable<PocketAnydocAssetLease>,
 ): Promise<void> {
-  await Promise.all(Array.from(leases, async (lease) => {
-    try {
-      await lease.release();
-    } catch (error) {
-      console.warn('[ChatSession] Failed to release a document asset handle', {
-        ...getPrivacySafeErrorLogDetails(error),
-      });
-    }
-  }));
+  await documentSessionContextCache.releaseResources(
+    Array.from(leases, (resource) => ({ resource })),
+  );
+}
+
+async function releaseDocumentSessionContextSources(
+  sources: Iterable<ChatDocumentSessionContextSource>,
+): Promise<void> {
+  await documentSessionContextCache.releaseResources(
+    Array.from(sources, (resource) => ({ resource })),
+  );
 }
 
 function assertActiveMultimodalReadyForAttachmentMediaPaths({
@@ -1051,6 +1217,7 @@ async function settleActiveChatGenerationForStop(
   generation: ActiveGenerationState,
 ): Promise<void> {
   generation.stopRequested = true;
+  notifyNativeCompletionSettlementChanged();
   releaseAndroidQaGenerationGate(generation.messageId);
 
   const settlementResult = generation.commitTerminalState
@@ -1069,6 +1236,7 @@ async function settleActiveChatGenerationForStop(
     && !generation.nativeCompletionStarted
   ) {
     sharedGenerationState.current = null;
+    notifyNativeCompletionSettlementChanged();
   }
 }
 
@@ -1092,7 +1260,16 @@ function isMatchingGeneration(threadId: string, messageId: string) {
 
 function isNativeCompletionSettlingAfterStop() {
   const generation = sharedGenerationState.current;
-  return generation?.stopRequested === true && generation.nativeCompletionStarted;
+  return generation?.stopRequested === true && generation.nativeCompletionStarted === true;
+}
+
+function subscribeNativeCompletionSettlement(listener: () => void): () => void {
+  nativeCompletionSettlementListeners.add(listener);
+  return () => nativeCompletionSettlementListeners.delete(listener);
+}
+
+function notifyNativeCompletionSettlementChanged(): void {
+  nativeCompletionSettlementListeners.forEach((listener) => listener());
 }
 
 export function resolveAssistantStreamPatchInterval({
@@ -1129,6 +1306,7 @@ export function resetSharedGenerationStateForTests() {
 
 export function resetActiveChatGenerationRuntimeForPrivateStorageReset(): void {
   sharedGenerationState.current = null;
+  notifyNativeCompletionSettlementChanged();
 }
 
 function ignorePrivateStorageUnavailableDuringRuntimeStop(error: unknown, scope: string): boolean {
@@ -1149,6 +1327,7 @@ export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promis
 
   if (generation) {
     generation.stopRequested = true;
+    notifyNativeCompletionSettlementChanged();
     releaseAndroidQaGenerationGate(generation.messageId);
 
     const chatState = useChatStore.getState();
@@ -1192,6 +1371,7 @@ export async function stopActiveChatGenerationForPrivateStorageBlocked(): Promis
     && !generation.nativeCompletionStarted
   ) {
     sharedGenerationState.current = null;
+    notifyNativeCompletionSettlementChanged();
   }
 
   if (deferredStateError) {
@@ -1278,6 +1458,18 @@ function isGenericChatAttachment(
   return 'kind' in attachment;
 }
 
+function collectThreadDocumentAttachmentIds(thread: ChatThread | null | undefined): Set<string> {
+  const attachmentIds = new Set<string>();
+  thread?.messages.forEach((message) => {
+    message.attachments?.forEach((attachment) => {
+      if (isGenericChatAttachment(attachment) && attachment.kind === 'document') {
+        attachmentIds.add(attachment.id);
+      }
+    });
+  });
+  return attachmentIds;
+}
+
 function isInferenceAudioAttachment(
   attachment: NonNullable<ChatMessage['attachments']>[number],
 ): attachment is Extract<ChatAttachment, { kind: 'audio' }> {
@@ -1340,6 +1532,89 @@ function resolveLlmContentPartsForResolvedAttachments(
 function omitInputAudioContentParts(message: Pick<ChatMessage, 'contentParts'>): LlmContentPart[] | undefined {
   const retainedContentParts = message.contentParts?.filter((part) => part.type !== 'input_audio') ?? [];
   return retainedContentParts.length > 0 ? retainedContentParts : undefined;
+}
+
+function omitPersistedDocumentInferenceMaterial(
+  message: ChatMessage,
+  replacedAttachmentIds: ReadonlySet<string>,
+): ChatMessage {
+  if (
+    message.role !== 'user'
+    || !message.contentParts?.some((part) => part.type === 'text')
+    || replacedAttachmentIds.size === 0
+  ) {
+    const retainedAttachments = message.attachments?.filter((attachment) => (
+      !attachment.derivedFromAttachmentId
+      || replacedAttachmentIds.has(attachment.derivedFromAttachmentId) === false
+      || (isGenericChatAttachment(attachment) && attachment.kind !== 'image')
+    ));
+    if (retainedAttachments?.length === message.attachments?.length) {
+      return message;
+    }
+    return {
+      ...message,
+      ...(retainedAttachments?.length ? { attachments: retainedAttachments } : { attachments: undefined }),
+    };
+  }
+  const documentAttachments = (message.attachments ?? []).filter(
+    (attachment): attachment is Extract<ChatAttachment, { kind: 'document' }> => (
+      isGenericChatAttachment(attachment) && attachment.kind === 'document'
+    ),
+  );
+  let documentPartIndex = 0;
+  const { contentParts: _contentParts, ...messageWithoutContentParts } = message;
+  const retainedContentParts = message.contentParts.filter((part) => {
+    if (part.type !== 'text') {
+      return true;
+    }
+    const documentAttachment = documentAttachments[documentPartIndex];
+    documentPartIndex += 1;
+    return !documentAttachment || !replacedAttachmentIds.has(documentAttachment.id);
+  });
+  const retainedAttachments = message.attachments?.filter((attachment) => (
+    !attachment.derivedFromAttachmentId
+    || replacedAttachmentIds.has(attachment.derivedFromAttachmentId) === false
+    || (isGenericChatAttachment(attachment) && attachment.kind !== 'image')
+  ));
+  return {
+    ...messageWithoutContentParts,
+    ...(retainedContentParts.length > 0 ? { contentParts: retainedContentParts } : null),
+    ...(retainedAttachments?.length ? { attachments: retainedAttachments } : { attachments: undefined }),
+  };
+}
+
+function applyTransientSessionDocumentContext(
+  thread: ChatThread,
+  latestUserMessageId: string | null,
+  contentParts: readonly LlmTextContentPart[],
+  replacedAttachmentIds: ReadonlySet<string>,
+  transientImageAttachments: NonNullable<ChatMessage['attachments']> = [],
+): ChatThread {
+  return {
+    ...thread,
+    messages: thread.messages.map((message) => {
+      const messageWithoutPersistedDocuments = omitPersistedDocumentInferenceMaterial(
+        message,
+        replacedAttachmentIds,
+      );
+      if (message.id !== latestUserMessageId) {
+        return messageWithoutPersistedDocuments;
+      }
+      const retainedContentParts = messageWithoutPersistedDocuments.contentParts ?? [];
+      return {
+        ...messageWithoutPersistedDocuments,
+        contentParts: [...contentParts, ...retainedContentParts],
+        ...(transientImageAttachments.length > 0
+          ? {
+              attachments: [
+                ...(messageWithoutPersistedDocuments.attachments ?? []),
+                ...transientImageAttachments,
+              ],
+            }
+          : null),
+      };
+    }),
+  };
 }
 
 function shouldRetainAttachmentForInference(
@@ -2116,6 +2391,43 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   };
 }
 
+function getRegenerationDocumentAttachmentInputs(
+  message: ChatMessage,
+): RegenerationDocumentAttachmentInputs {
+  const attachments = message.attachments ?? [];
+  const documentAttachments = attachments.filter((attachment): attachment is Extract<ChatAttachment, { kind: 'document' }> => (
+    isGenericChatAttachment(attachment) && attachment.kind === 'document'
+  ));
+  const documentAttachmentIds = new Set(documentAttachments.map((attachment) => attachment.id));
+  const retainedAttachments = attachments.filter((attachment) => (
+    !documentAttachmentIds.has(attachment.id)
+    && !(
+      attachment.source === 'derived_processor'
+      && attachment.derivedFromAttachmentId !== undefined
+      && documentAttachmentIds.has(attachment.derivedFromAttachmentId)
+    )
+  ));
+
+  return {
+    documentAttachments,
+    documentDrafts: documentAttachments.map((attachment) => ({
+      id: attachment.id,
+      pickerUri: attachment.localUri,
+      localUri: attachment.localUri,
+      pathCategory: attachment.pathCategory,
+      fileName: attachment.fileName,
+      displayName: attachment.displayName,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      source: 'document_picker',
+      createdAt: attachment.createdAt,
+      copyStatus: 'copied',
+    })),
+    retainedImageAttachments: retainedAttachments.filter(isInferenceImageAttachment),
+    retainedOtherAttachments: retainedAttachments.filter((attachment) => !isInferenceImageAttachment(attachment)),
+  };
+}
+
 async function refineDocumentContextWithExactPromptBudget({
   question,
   processed,
@@ -2125,6 +2437,7 @@ async function refineDocumentContextWithExactPromptBudget({
   expectedModelId,
   attachmentResolution,
   generationWork,
+  replacePersistedDocumentAttachmentIds,
 }: {
   question: string;
   processed: ProcessedDocumentAttachmentDraftsForInference;
@@ -2134,6 +2447,7 @@ async function refineDocumentContextWithExactPromptBudget({
   expectedModelId: string;
   attachmentResolution: PreparedAttachmentResolution;
   generationWork: ChatGenerationWorkHandle;
+  replacePersistedDocumentAttachmentIds?: ReadonlySet<string>;
 }): Promise<ProcessedDocumentAttachmentDraftsForInference> {
   if (processed.candidates.length === 0) {
     return processed;
@@ -2178,8 +2492,20 @@ async function refineDocumentContextWithExactPromptBudget({
     ...provisionalUserMessage,
     contentParts: undefined,
   };
+  const documentContextBaseThread = replacePersistedDocumentAttachmentIds
+    ? {
+        ...baseThread,
+        messages: baseThread.messages.map((message) => omitPersistedDocumentInferenceMaterial(
+          message,
+          replacePersistedDocumentAttachmentIds,
+        )),
+      }
+    : baseThread;
   const baseWindow = await buildInferenceWindowWithAccurateTokenCounts(
-    { ...baseThread, messages: [...baseThread.messages, baseUserMessage] },
+    {
+      ...documentContextBaseThread,
+      messages: [...documentContextBaseThread.messages, baseUserMessage],
+    },
     windowOptions,
     (messages) => countResolvedMessages(messages),
     { throwIfCancelled: generationWork.assertCurrent },
@@ -2217,6 +2543,218 @@ async function refineDocumentContextWithExactPromptBudget({
     selectedContext,
     processed.failures,
   );
+}
+
+function throwIfRegeneratedDocumentWasDropped(
+  processed: ProcessedDocumentAttachmentDraftsForInference,
+): void {
+  const failure = processed.failures[0];
+  if (!failure) {
+    return;
+  }
+
+  throw new AppError(
+    failure.errorCode,
+    'A retained document could not be reprocessed for the edited question.',
+  );
+}
+
+async function prepareRegeneratedDocumentInferenceContent({
+  question,
+  documentDrafts,
+  retainedAttachments,
+  baseThread,
+  targetMessage,
+  multimodalReadiness,
+  expectedModelId,
+  attachmentResolution,
+  generationWork,
+  signal,
+  nativeAssetLeases,
+  onDraftMaterialized,
+}: {
+  question: string;
+  documentDrafts: readonly ChatDocumentAttachmentDraft[];
+  retainedAttachments: NonNullable<ChatMessage['attachments']>;
+  baseThread: ChatThread;
+  targetMessage: ChatMessage;
+  multimodalReadiness?: MultimodalReadinessState;
+  expectedModelId: string;
+  attachmentResolution: PreparedAttachmentResolution;
+  generationWork: ChatGenerationWorkHandle;
+  signal: AbortSignal;
+  nativeAssetLeases: Set<PocketAnydocAssetLease>;
+  onDraftMaterialized: (entry: MaterializedDocumentImageDraft) => void;
+}): Promise<{
+  processed: ProcessedDocumentAttachmentDraftsForInference;
+  materializedImages: MaterializedDocumentImageDraft[];
+  multimodalReadiness?: MultimodalReadinessState;
+}> {
+  const retainedImageMediaPaths = getChatImageAttachmentMediaPaths(retainedAttachments);
+  const remainingDocumentImageSlots = Math.max(
+    0,
+    MAX_CHAT_IMAGE_ATTACHMENTS - retainedImageMediaPaths.length,
+  );
+  let effectiveMultimodalReadiness = multimodalReadiness;
+  let retainNativeDocumentAssetLeases = false;
+  if (
+    remainingDocumentImageSlots > 0
+    && isVisionReady(effectiveMultimodalReadiness, expectedModelId)
+  ) {
+    const capabilities = await generationWork.waitFor(getPocketAnydocCapabilities());
+    generationWork.assertCurrent();
+    retainNativeDocumentAssetLeases = capabilities.available && capabilities.supportsAssets;
+  }
+
+  let processed = await generationWork.waitFor(
+    processDocumentAttachmentDraftsForInference(
+      question,
+      documentDrafts,
+      signal,
+      attachmentResolution.cancellationGate,
+      retainNativeDocumentAssetLeases,
+      (lease) => nativeAssetLeases.add(lease),
+    ),
+  );
+  if (processed.allFailedError) {
+    throw processed.allFailedError;
+  }
+  throwIfRegeneratedDocumentWasDropped(processed);
+
+  const provisionalDocumentAttachments = processed.attachments.map((attachment) => ({
+    ...attachment,
+    threadId: baseThread.id,
+    messageId: targetMessage.id,
+  }));
+  const provisionalUserMessage: ChatMessage = {
+    ...targetMessage,
+    content: question || DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER,
+    modelId: expectedModelId,
+    attachments: [...retainedAttachments, ...provisionalDocumentAttachments],
+    contentParts: processed.contentParts,
+  };
+  processed = await generationWork.waitFor(
+    refineDocumentContextWithExactPromptBudget({
+      question,
+      processed,
+      baseThread,
+      provisionalUserMessage,
+      multimodalReadiness: effectiveMultimodalReadiness,
+      expectedModelId,
+      attachmentResolution,
+      generationWork,
+    }),
+  );
+  if (processed.allFailedError) {
+    throw processed.allFailedError;
+  }
+  throwIfRegeneratedDocumentWasDropped(processed);
+
+  let materializedImages: MaterializedDocumentImageDraft[] = [];
+  if (retainNativeDocumentAssetLeases && nativeAssetLeases.size > 0) {
+    materializedImages = await materializeSelectedDocumentImageDrafts({
+      processed,
+      maxAssets: remainingDocumentImageSlots,
+      signal,
+      cancellationGate: attachmentResolution.cancellationGate,
+      onDraftMaterialized,
+    });
+    generationWork.assertCurrent();
+    const textSelectedDocuments = processed;
+    let budgetedImages = [...materializedImages];
+    while (true) {
+      const imageDrafts = budgetedImages.map((entry) => entry.draft);
+      const imageMediaPaths = getDraftImageAttachmentMediaPaths(imageDrafts);
+      if (imageMediaPaths.length > 0) {
+        effectiveMultimodalReadiness = assertActiveMultimodalReadyForAttachmentMediaPaths({
+          mediaPaths: imageMediaPaths,
+          multimodalReadiness: effectiveMultimodalReadiness,
+          expectedModelId,
+          mediaPathOccurrenceCount: retainedImageMediaPaths.length + imageMediaPaths.length,
+        });
+        attachmentResolution.updateReadinessIdentity(
+          effectiveMultimodalReadiness,
+          expectedModelId,
+        );
+      }
+      const provisionalImageAttachments = materializeAttachmentDraftsForMessage({
+        threadId: baseThread.id,
+        messageId: targetMessage.id,
+        drafts: imageDrafts,
+      });
+      try {
+        const mediaBudgetSelection = await generationWork.waitFor(
+          refineDocumentContextWithExactPromptBudget({
+            question,
+            processed: finalizeSelectedDocumentAssetWarnings(
+              textSelectedDocuments,
+              budgetedImages,
+            ),
+            baseThread,
+            provisionalUserMessage: {
+              ...provisionalUserMessage,
+              attachments: [
+                ...retainedAttachments,
+                ...provisionalDocumentAttachments,
+                ...provisionalImageAttachments,
+              ],
+            },
+            multimodalReadiness: effectiveMultimodalReadiness,
+            expectedModelId,
+            attachmentResolution,
+            generationWork,
+          }),
+        );
+        generationWork.assertCurrent();
+        const retainedDocumentIds = new Set(
+          mediaBudgetSelection.selectedCandidates.map(({ attachment }) => attachment.id),
+        );
+        const droppedDocumentForMedia = textSelectedDocuments.selectedCandidates.some(
+          ({ attachment }) => !retainedDocumentIds.has(attachment.id),
+        );
+        if (droppedDocumentForMedia && budgetedImages.length > 0) {
+          const removed = budgetedImages.at(-1)!;
+          await chatAttachmentStorageService.discardDraft(removed.draft);
+          budgetedImages = budgetedImages.slice(0, -1);
+          processed = textSelectedDocuments;
+          continue;
+        }
+        processed = mediaBudgetSelection;
+        break;
+      } catch (error) {
+        throwIfDocumentAssetMaterializationCancelled(
+          signal,
+          attachmentResolution.cancellationGate,
+        );
+        const appError = toAppError(error);
+        if (
+          budgetedImages.length === 0
+          || (
+            appError.code !== 'message_too_long'
+            && appError.code !== 'chat_attachment_too_large_for_context'
+          )
+        ) {
+          throw error;
+        }
+        const removed = budgetedImages.at(-1)!;
+        await chatAttachmentStorageService.discardDraft(removed.draft);
+        budgetedImages = budgetedImages.slice(0, -1);
+        processed = textSelectedDocuments;
+      }
+    }
+    materializedImages = await discardUnselectedDocumentImageDrafts(
+      budgetedImages,
+      collectSelectedDocumentAssetKeys(processed),
+    );
+  }
+
+  throwIfRegeneratedDocumentWasDropped(processed);
+
+  return {
+    processed: finalizeSelectedDocumentAssetWarnings(processed, materializedImages),
+    materializedImages,
+    multimodalReadiness: effectiveMultimodalReadiness,
+  };
 }
 
 function resolveSuccessfulAssistantContent({
@@ -2286,6 +2824,11 @@ export function getThreadTruncationState(thread: ChatThread, options?: Inference
 }
 
 export const useChatSession = () => {
+  const isStoppingGeneration = useSyncExternalStore(
+    subscribeNativeCompletionSettlement,
+    isNativeCompletionSettlingAfterStop,
+    isNativeCompletionSettlingAfterStop,
+  );
   const [isPreparingDocuments, setIsPreparingDocuments] = useState(false);
   const isMountedRef = useRef(true);
   const documentPreparationAbortControllersRef = useRef(new Set<AbortController>());
@@ -2302,6 +2845,7 @@ export const useChatSession = () => {
   const replaceBranchFromUserMessage = useChatStore((state) => state.replaceBranchFromUserMessage);
   const replaceLastAssistantMessage = useChatStore((state) => state.replaceLastAssistantMessage);
   const renameThreadState = useChatStore((state) => state.renameThread);
+  const beginNewThread = useChatStore((state) => state.beginNewThread);
   const setActiveThread = useChatStore((state) => state.setActiveThread);
   const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
 
@@ -2395,6 +2939,7 @@ export const useChatSession = () => {
               nativeCompletionStarted: false,
               commitTerminalState: retryRecoveryCommit,
             };
+            notifyNativeCompletionSettlementChanged();
             console.warn('[ChatSession] Foreground recovery is waiting for private storage', {
               ...getPrivacySafeErrorLogDetails(result.error),
             });
@@ -2417,6 +2962,7 @@ export const useChatSession = () => {
               nativeCompletionStarted: false,
               commitTerminalState: retryThreadStatusCommit,
             };
+            notifyNativeCompletionSettlementChanged();
             console.warn('[ChatSession] Foreground orphan recovery is waiting for private storage', {
               ...getPrivacySafeErrorLogDetails(result.error),
             });
@@ -2441,6 +2987,10 @@ export const useChatSession = () => {
       multimodalReadiness?: MultimodalReadinessState;
       attachmentResolution?: PreparedAttachmentResolution;
       generationWork?: ChatGenerationWorkHandle;
+      transientDocumentContentParts?: readonly LlmTextContentPart[];
+      transientDocumentAttachmentIds?: readonly string[];
+      transientDocumentImageAttachments?: NonNullable<ChatMessage['attachments']>;
+      onTerminalSettlement?: (result: AssistantTurnCommitResult) => void;
     } = {},
   ) => {
     const storedThread = assertThreadModelExecutionInvariant(
@@ -2467,6 +3017,7 @@ export const useChatSession = () => {
       nativeCompletionStarted: false,
     };
     sharedGenerationState.current = generationState;
+    notifyNativeCompletionSettlementChanged();
     let unregisterGenerationStop: () => void = () => undefined;
     const isAndroidQaEvidenceEnabled = isAndroidQaGenerationEvidenceEnabled();
     if (isAndroidQaEvidenceEnabled) {
@@ -2646,6 +3197,7 @@ export const useChatSession = () => {
       }
       if (!canMutateAssistantMessage(options)) {
         terminalSettlement.result = { status: 'stale' };
+        completionOptions.onTerminalSettlement?.(terminalSettlement.result);
         return terminalSettlement.result;
       }
 
@@ -2671,6 +3223,7 @@ export const useChatSession = () => {
         assistantMessageId,
         pendingTerminalFinalization,
       );
+      completionOptions.onTerminalSettlement?.(terminalSettlement.result);
       return terminalSettlement.result;
     };
 
@@ -2793,6 +3346,7 @@ export const useChatSession = () => {
 
         try {
           generationState.stopRequested = true;
+          notifyNativeCompletionSettlementChanged();
           releaseAndroidQaGenerationGate(assistantMessageId);
           const result = finalizeBufferedAssistantTurn(
             { outcome: 'stopped' },
@@ -2834,6 +3388,21 @@ export const useChatSession = () => {
         effectiveMultimodalReadiness,
         activeModelId,
       );
+      if (
+        completionOptions.transientDocumentAttachmentIds?.length
+        && (
+          completionOptions.transientDocumentContentParts
+          || completionOptions.transientDocumentImageAttachments?.length
+        )
+      ) {
+        thread = applyTransientSessionDocumentContext(
+          thread,
+          latestUserMessageId,
+          completionOptions.transientDocumentContentParts ?? [],
+          new Set(completionOptions.transientDocumentAttachmentIds),
+          completionOptions.transientDocumentImageAttachments ?? [],
+        );
+      }
       const windowOptions = resolveThreadInferenceWindowOptions(thread, {
         maxContextTokens: maxContextSize,
         responseReserveTokens: reasoningRuntimeConfig.responseReserveTokens,
@@ -3237,6 +3806,7 @@ export const useChatSession = () => {
         }));
       }
       generationState.nativeCompletionStarted = true;
+      notifyNativeCompletionSettlementChanged();
       const completion = await llmEngineService.chatCompletion({
         messages,
         expectedModelId: modelId,
@@ -3354,6 +3924,7 @@ export const useChatSession = () => {
         await waitForAndroidQaGenerationGateRelease(assistantMessageId);
       }
       generationState.nativeCompletionStarted = false;
+      notifyNativeCompletionSettlementChanged();
 
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
@@ -3405,6 +3976,7 @@ export const useChatSession = () => {
       }
     } catch (error) {
       generationState.nativeCompletionStarted = false;
+      notifyNativeCompletionSettlementChanged();
       endPromptPreparationSpan?.(generationState.stopRequested ? 'cancelled' : 'error');
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
@@ -3465,6 +4037,7 @@ export const useChatSession = () => {
       const shouldRetainRecoveryController = terminalSettlement.result?.status === 'persistence_failed';
       if (wasCurrentGeneration && !shouldRetainRecoveryController) {
         sharedGenerationState.current = null;
+        notifyNativeCompletionSettlementChanged();
       }
 
       unregisterGenerationStop();
@@ -3573,12 +4146,14 @@ export const useChatSession = () => {
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(targetModelId);
     const generationWork = beginChatGenerationWork('append_user_message');
     const documentPreparationQaOperationId = createChatId('message');
+    beginAndroidQaGeneration(documentPreparationQaOperationId);
     const documentAbortController = new AbortController();
     documentPreparationAbortControllersRef.current.add(documentAbortController);
     const unsubscribeDocumentCancellation = generationWork.onCancel(() => {
       documentAbortController.abort();
     });
     const pocketAnydocAssetLeases = new Set<PocketAnydocAssetLease>();
+    const ownedSessionContextSources = new Set<ChatDocumentSessionContextSource>();
     let ownedMaterializedDocumentImageDrafts: MaterializedDocumentImageDraft[] = [];
     attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
     let releaseInteractivePromptPreparation: (() => void) | null = null;
@@ -3605,11 +4180,13 @@ export const useChatSession = () => {
         0,
         MAX_CHAT_IMAGE_ATTACHMENTS - imageAttachmentMediaPaths.length,
       );
+      const cachedDocumentAttachmentIds = collectThreadDocumentAttachmentIds(existingThreadAtStart);
+      const canMaterializeDocumentAssets = remainingDocumentImageSlots > 0
+        && isVisionReady(effectiveMultimodalReadiness, targetModelId);
       let retainNativeDocumentAssetLeases = false;
       if (
         documentAttachmentDrafts.length > 0
-        && remainingDocumentImageSlots > 0
-        && isVisionReady(effectiveMultimodalReadiness, targetModelId)
+        && canMaterializeDocumentAssets
       ) {
         const capabilities = await generationWork.waitFor(getPocketAnydocCapabilities());
         generationWork.assertCurrent();
@@ -3624,21 +4201,77 @@ export const useChatSession = () => {
           generationWork.assertCurrent();
         }
       }
+      const newlyProcessedDocumentAttachments = documentAttachmentDrafts.length > 0
+        ? await generationWork.waitFor(
+            processDocumentAttachmentDraftsForInference(
+              text,
+              documentAttachmentDrafts,
+              documentAbortController.signal,
+              attachmentResolution.cancellationGate,
+              retainNativeDocumentAssetLeases,
+              (lease) => pocketAnydocAssetLeases.add(lease),
+              true,
+              (source) => ownedSessionContextSources.add(source),
+              async () => {
+                const source = [...ownedSessionContextSources].find((candidate) => (
+                  candidate.kind === 'native' && !candidate.isReleased()
+                ));
+                if (!source) {
+                  return false;
+                }
+                ownedSessionContextSources.delete(source);
+                pocketAnydocAssetLeases.delete(source as unknown as PocketAnydocAssetLease);
+                await releaseDocumentSessionContextSources([source]);
+                return source.isReleased();
+              },
+            ),
+          )
+        : await processDocumentAttachmentDraftsForInference(text, []);
+      const newDocumentAttachmentIds = new Set([
+        ...documentAttachmentDrafts.flatMap((draft) => draft.id ? [draft.id] : []),
+        ...newlyProcessedDocumentAttachments.candidates.map(({ attachment }) => attachment.id),
+      ]);
+      const newDocumentFailureDrafts = new Set(documentAttachmentDrafts);
+      newDocumentAttachmentIds.forEach((attachmentId) => cachedDocumentAttachmentIds.delete(attachmentId));
+      const selectedSessionDocumentAttachments = existingThreadAtStart && cachedDocumentAttachmentIds.size > 0
+        ? await generationWork.waitFor(
+            selectSessionDocumentContextForInference(
+              existingThreadAtStart.id,
+              text,
+              documentAbortController.signal,
+              attachmentResolution.cancellationGate,
+              cachedDocumentAttachmentIds,
+            ),
+          )
+        : await processDocumentAttachmentDraftsForInference(text, []);
       let processedDocumentAttachments = await generationWork.waitFor(
-        processDocumentAttachmentDraftsForInference(
+        combineDocumentContextForInference(
           text,
-          documentAttachmentDrafts,
-          documentAbortController.signal,
-          attachmentResolution.cancellationGate,
-          retainNativeDocumentAssetLeases,
-          (lease) => pocketAnydocAssetLeases.add(lease),
+          [newlyProcessedDocumentAttachments, selectedSessionDocumentAttachments],
         ),
       );
+      const usesTransientSessionDocumentContext = selectedSessionDocumentAttachments.candidates.length > 0;
+      const transientSessionDocumentAttachmentIds = new Set(
+        processedDocumentAttachments.candidates.map(({ attachment }) => attachment.id),
+      );
       if (processedDocumentAttachments.allFailedError) {
-        if (processedDocumentAttachments.failures.length > 0) {
-          options.onDocumentAttachmentFailures?.(processedDocumentAttachments.failures);
+        const newDocumentFailures = projectDocumentContextSelection(
+          processedDocumentAttachments,
+          newDocumentAttachmentIds,
+          newDocumentFailureDrafts,
+        ).failures;
+        if (newDocumentFailures.length > 0) {
+          options.onDocumentAttachmentFailures?.(newDocumentFailures);
         }
         throw processedDocumentAttachments.allFailedError;
+      }
+
+      if (canMaterializeDocumentAssets) {
+        processedDocumentAttachments.candidates.forEach(({ result }) => {
+          if (result.nativeAssetLease) {
+            pocketAnydocAssetLeases.add(result.nativeAssetLease);
+          }
+        });
       }
       generationWork.assertCurrent();
       const currentState = useChatStore.getState();
@@ -3664,9 +4297,15 @@ export const useChatSession = () => {
       const userMessageCreatedAt = Date.now();
       const normalizedText = text.trim();
       const provisionalThreadId = existingThreadAtStart?.id ?? 'pending';
-      const provisionalDocumentContentParts = processedDocumentAttachments.contentParts;
+      const provisionalPersistedDocumentSelection = projectDocumentContextSelection(
+        processedDocumentAttachments,
+        newDocumentAttachmentIds,
+        newDocumentFailureDrafts,
+      );
+      const provisionalDocumentContentParts = provisionalPersistedDocumentSelection.contentParts;
       const provisionalUserMessageContent = normalizedText.length > 0
         || provisionalDocumentContentParts.length === 0
+        || documentAttachmentDrafts.length === 0
         ? normalizedText
         : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
       const provisionalMessageAttachments = [
@@ -3675,11 +4314,13 @@ export const useChatSession = () => {
           messageId: userMessageId,
           drafts: attachmentDrafts,
         }),
-        ...processedDocumentAttachments.attachments.map((attachment) => ({
-          ...attachment,
-          threadId: provisionalThreadId,
-          messageId: userMessageId,
-        })),
+        ...(documentAttachmentDrafts.length > 0
+          ? provisionalPersistedDocumentSelection.attachments.map((attachment) => ({
+              ...attachment,
+              threadId: provisionalThreadId,
+              messageId: userMessageId,
+            }))
+          : []),
         ...materializeMediaDraftsForMessage({
           threadId: provisionalThreadId,
           messageId: userMessageId,
@@ -3726,6 +4367,9 @@ export const useChatSession = () => {
           expectedModelId: targetModelId,
           attachmentResolution,
           generationWork,
+          ...(usesTransientSessionDocumentContext
+            ? { replacePersistedDocumentAttachmentIds: transientSessionDocumentAttachmentIds }
+            : null),
         }),
       );
       generationWork.assertCurrent();
@@ -3748,7 +4392,7 @@ export const useChatSession = () => {
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
 
-      if (retainNativeDocumentAssetLeases && pocketAnydocAssetLeases.size > 0) {
+      if (canMaterializeDocumentAssets && pocketAnydocAssetLeases.size > 0) {
         const initiallyMaterializedDocumentImages = await materializeSelectedDocumentImageDrafts({
           processed: processedDocumentAttachments,
           maxAssets: remainingDocumentImageSlots,
@@ -3798,6 +4442,9 @@ export const useChatSession = () => {
                 expectedModelId: targetModelId,
                 attachmentResolution,
                 generationWork,
+                ...(usesTransientSessionDocumentContext
+                  ? { replacePersistedDocumentAttachmentIds: transientSessionDocumentAttachmentIds }
+                  : null),
               }),
             );
             generationWork.assertCurrent();
@@ -3872,17 +4519,39 @@ export const useChatSession = () => {
         );
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      processedDocumentAttachments.candidates.forEach(({ result }) => {
+        const nativeAssetLease = result.nativeAssetLease;
+        if (
+          result.sessionContextSource
+          && nativeAssetLease
+          && (nativeAssetLease as unknown) === result.sessionContextSource
+        ) {
+          pocketAnydocAssetLeases.delete(nativeAssetLease);
+        }
+      });
       await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
       pocketAnydocAssetLeases.clear();
 
-      if (processedDocumentAttachments.failures.length > 0) {
-        options.onDocumentAttachmentFailures?.(processedDocumentAttachments.failures);
-      }
+      const persistedDocumentSelection = projectDocumentContextSelection(
+        processedDocumentAttachments,
+        newDocumentAttachmentIds,
+        newDocumentFailureDrafts,
+      );
       if (processedDocumentAttachments.allFailedError) {
+        if (persistedDocumentSelection.failures.length > 0) {
+          options.onDocumentAttachmentFailures?.(persistedDocumentSelection.failures);
+        }
         throw processedDocumentAttachments.allFailedError;
       }
 
       const documentContentParts = processedDocumentAttachments.contentParts;
+      const persistedDocumentContentParts = persistedDocumentSelection.contentParts;
+      const persistedMaterializedDocumentImages = ownedMaterializedDocumentImageDrafts.filter(
+        (entry) => newDocumentAttachmentIds.has(entry.documentAttachmentId),
+      );
+      const transientMaterializedDocumentImages = ownedMaterializedDocumentImageDrafts.filter(
+        (entry) => !newDocumentAttachmentIds.has(entry.documentAttachmentId),
+      );
 
       const threadId = existingThreadAtStart?.id
         ?? createThread({
@@ -3899,10 +4568,16 @@ export const useChatSession = () => {
         );
       }
 
+      if (persistedDocumentSelection.failures.length > 0) {
+        options.onDocumentAttachmentFailures?.(persistedDocumentSelection.failures);
+      }
+
       const threadForSend = assertThreadModelExecutionInvariant(threadId, targetModelId);
       const threadModelId = getThreadActiveModelId(threadForSend);
 
-      const userMessageContent = normalizedText.length > 0 || documentContentParts.length === 0
+      const userMessageContent = normalizedText.length > 0
+        || persistedDocumentContentParts.length === 0
+        || documentAttachmentDrafts.length === 0
         ? normalizedText
         : DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
       const messageAttachments = [
@@ -3914,13 +4589,15 @@ export const useChatSession = () => {
         ...materializeAttachmentDraftsForMessage({
           threadId,
           messageId: userMessageId,
-          drafts: ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+          drafts: persistedMaterializedDocumentImages.map((entry) => entry.draft),
         }),
-        ...processedDocumentAttachments.attachments.map((attachment) => ({
-          ...attachment,
-          threadId,
-          messageId: userMessageId,
-        })),
+        ...(documentAttachmentDrafts.length > 0
+          ? persistedDocumentSelection.attachments.map((attachment) => ({
+              ...attachment,
+              threadId,
+              messageId: userMessageId,
+            }))
+          : []),
         ...materializeMediaDraftsForMessage({
           threadId,
           messageId: userMessageId,
@@ -3935,7 +4612,9 @@ export const useChatSession = () => {
         state: 'complete',
         kind: 'message',
         modelId: threadModelId,
-        ...(documentContentParts.length > 0 ? { contentParts: documentContentParts } : null),
+        ...(persistedDocumentContentParts.length > 0
+          ? { contentParts: persistedDocumentContentParts }
+          : null),
         ...(messageAttachments.length > 0
           ? { attachments: messageAttachments }
           : null),
@@ -3943,16 +4622,44 @@ export const useChatSession = () => {
 
       appendMessage(threadId, userMessage);
       didAppendUserMessage = true;
-      ownedMaterializedDocumentImageDrafts = [];
+      ownedMaterializedDocumentImageDrafts = transientMaterializedDocumentImages;
+      if (documentAttachmentDrafts.length > 0) {
+        const persistedDocumentById = new Map(messageAttachments.flatMap((attachment) => (
+          isGenericChatAttachment(attachment) && attachment.kind === 'document'
+            ? [[attachment.id, attachment] as const]
+            : []
+        )));
+        for (const { attachment, result } of persistedDocumentSelection.selectedCandidates) {
+          const source = result.sessionContextSource;
+          const persistedAttachment = persistedDocumentById.get(attachment.id);
+          if (!source || !persistedAttachment) {
+            continue;
+          }
+          await documentSessionContextCache.put(threadId, persistedAttachment, result);
+          ownedSessionContextSources.delete(source);
+        }
+      }
       options.onUserMessageAppended?.(userMessage);
 
       const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
+      const transientDocumentImageAttachments = materializeAttachmentDraftsForMessage({
+        threadId,
+        messageId: userMessageId,
+        drafts: transientMaterializedDocumentImages.map((entry) => entry.draft),
+      });
 
       await runAssistantCompletion(threadId, assistantMessageId, {
         expectedModelId: threadModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
         generationWork,
+        ...(usesTransientSessionDocumentContext
+          ? {
+              transientDocumentContentParts: documentContentParts,
+              transientDocumentAttachmentIds: [...transientSessionDocumentAttachmentIds],
+              transientDocumentImageAttachments,
+            }
+          : null),
       });
     } catch (error) {
       if (isChatGenerationCancelledError(error)) {
@@ -3980,6 +4687,8 @@ export const useChatSession = () => {
       }
       await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
       pocketAnydocAssetLeases.clear();
+      await releaseDocumentSessionContextSources(ownedSessionContextSources);
+      ownedSessionContextSources.clear();
       if (isMountedRef.current) {
         setIsPreparingDocuments(false);
       }
@@ -4010,7 +4719,10 @@ export const useChatSession = () => {
       return false;
     }
 
-    const targetMessage = activeThread.messages.find((message) => message.id === messageId);
+    const targetMessageIndex = activeThread.messages.findIndex((message) => message.id === messageId);
+    const targetMessage = targetMessageIndex >= 0
+      ? activeThread.messages[targetMessageIndex]
+      : undefined;
     if (!targetMessage || targetMessage.role !== 'user') {
       throw new Error('The selected message could not be regenerated.');
     }
@@ -4024,19 +4736,56 @@ export const useChatSession = () => {
     assertPrivateStorageWritableForChatMutation();
     const { activeModelId, model } = resolveThreadReasoningRuntimeConfig(activeThread);
     const requestedMultimodalReadiness = options.multimodalReadiness ?? model?.multimodalReadiness;
+    const regenerationDocumentInputs = getRegenerationDocumentAttachmentInputs(targetMessage);
+    const retainedAttachmentsForReadiness = [
+      ...regenerationDocumentInputs.retainedImageAttachments,
+      ...regenerationDocumentInputs.documentAttachments,
+      ...regenerationDocumentInputs.retainedOtherAttachments,
+    ];
     const attachmentResolution = createPreparedAttachmentResolution(
       requestedMultimodalReadiness,
       activeModelId,
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
     const generationWork = beginChatGenerationWork('regenerate_user_message');
+    const documentPreparationQaOperationId = createChatId('message');
+    beginAndroidQaGeneration(documentPreparationQaOperationId);
+    const documentAbortController = new AbortController();
+    documentPreparationAbortControllersRef.current.add(documentAbortController);
+    const unsubscribeDocumentCancellation = generationWork.onCancel(() => {
+      documentAbortController.abort();
+    });
+    const pocketAnydocAssetLeases = new Set<PocketAnydocAssetLease>();
+    let ownedMaterializedDocumentImageDrafts: MaterializedDocumentImageDraft[] = [];
+    let transientRegenerationDocumentImages: MaterializedDocumentImageDraft[] = [];
+    let branchCacheReconciliation: Promise<void> | null = null;
+    const handleBranchTerminalSettlement = (result: AssistantTurnCommitResult) => {
+      if (!isAssistantTurnSettled(result)) {
+        return;
+      }
+      const reconciliation = documentSessionContextCache.retainThreadAttachments(
+        activeThread.id,
+        collectThreadDocumentAttachmentIds(useChatStore.getState().getThread(activeThread.id)),
+      );
+      branchCacheReconciliation = reconciliation;
+      void reconciliation.catch((error) => {
+        console.warn('[ChatSession] Failed to reconcile regenerated document sessions', {
+          ...getPrivacySafeErrorLogDetails(error),
+        });
+      });
+    };
     attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
     let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
       releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
-      const effectiveMultimodalReadiness = await generationWork.waitFor(
+      let effectiveMultimodalReadiness = await generationWork.waitFor(
         assertUserMessageAttachmentsReadyForRegeneration(
-          targetMessage,
+          {
+            ...targetMessage,
+            attachments: retainedAttachmentsForReadiness.length > 0
+              ? retainedAttachmentsForReadiness
+              : undefined,
+          },
           requestedMultimodalReadiness,
           activeModelId,
           attachmentResolution.resolveFile,
@@ -4054,23 +4803,249 @@ export const useChatSession = () => {
         throw new Error('The conversation changed while preparing regeneration. Try again.');
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+
+      let replacementAttachments = targetMessage.attachments;
+      let replacementContentParts = targetMessage.contentParts;
+      let replacementContent = normalizedContent;
+      let regeneratedDocumentSelection: ProcessedDocumentAttachmentDraftsForInference | null = null;
+      const regenerationBaseThread: ChatThread = {
+        ...activeThread,
+        messages: activeThread.messages.slice(0, targetMessageIndex),
+      };
+      if (regenerationDocumentInputs.documentDrafts.length > 0) {
+        setIsPreparingDocuments(true);
+        if (activateAndroidQaDocumentPreparationGate(documentPreparationQaOperationId)) {
+          await generationWork.waitFor(
+            waitForAndroidQaGenerationGateRelease(documentPreparationQaOperationId),
+          );
+          generationWork.assertCurrent();
+        }
+        const retainedAttachments = [
+          ...regenerationDocumentInputs.retainedImageAttachments,
+          ...regenerationDocumentInputs.retainedOtherAttachments,
+        ];
+        const preparedDocuments = await prepareRegeneratedDocumentInferenceContent({
+          question: normalizedContent,
+          documentDrafts: regenerationDocumentInputs.documentDrafts,
+          retainedAttachments,
+          baseThread: regenerationBaseThread,
+          targetMessage,
+          multimodalReadiness: effectiveMultimodalReadiness,
+          expectedModelId: activeModelId,
+          attachmentResolution,
+          generationWork,
+          signal: documentAbortController.signal,
+          nativeAssetLeases: pocketAnydocAssetLeases,
+          onDraftMaterialized: (entry) => {
+            ownedMaterializedDocumentImageDrafts.push(entry);
+          },
+        });
+        generationWork.assertCurrent();
+        effectiveMultimodalReadiness = preparedDocuments.multimodalReadiness;
+        regeneratedDocumentSelection = preparedDocuments.processed;
+        ownedMaterializedDocumentImageDrafts = preparedDocuments.materializedImages;
+        const regeneratedDocumentImages = materializeAttachmentDraftsForMessage({
+          threadId: activeThread.id,
+          messageId: targetMessage.id,
+          drafts: preparedDocuments.materializedImages.map((entry) => entry.draft),
+        });
+        const regeneratedDocuments = preparedDocuments.processed.attachments.map((attachment) => ({
+          ...attachment,
+          threadId: activeThread.id,
+          messageId: targetMessage.id,
+        }));
+        replacementAttachments = [
+          ...regenerationDocumentInputs.retainedImageAttachments,
+          ...regeneratedDocumentImages,
+          ...regeneratedDocuments,
+          ...regenerationDocumentInputs.retainedOtherAttachments,
+        ];
+        replacementContentParts = preparedDocuments.processed.contentParts;
+        replacementContent = normalizedContent || DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER;
+        await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
+        pocketAnydocAssetLeases.clear();
+
+        const stateAfterDocumentPreparation = useChatStore.getState();
+        const threadAfterDocumentPreparation = stateAfterDocumentPreparation.threads[activeThread.id];
+        if (
+          stateAfterDocumentPreparation.activeThreadId !== activeThread.id
+          || threadAfterDocumentPreparation !== activeThread
+          || getThreadActiveModelId(threadAfterDocumentPreparation) !== activeModelId
+        ) {
+          throw new Error('The conversation changed while reprocessing documents. Try again.');
+        }
+        assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      }
+      const cachedRegenerationAttachmentIds = collectThreadDocumentAttachmentIds(regenerationBaseThread);
+      regeneratedDocumentSelection?.candidates.forEach(({ attachment }) => {
+        cachedRegenerationAttachmentIds.delete(attachment.id);
+      });
+      const cachedRegenerationDocuments = cachedRegenerationAttachmentIds.size > 0
+        ? await generationWork.waitFor(
+            selectSessionDocumentContextForInference(
+              activeThread.id,
+              normalizedContent,
+              documentAbortController.signal,
+              attachmentResolution.cancellationGate,
+              cachedRegenerationAttachmentIds,
+            ),
+          )
+        : await processDocumentAttachmentDraftsForInference(normalizedContent, []);
+      const usesTransientSessionDocumentContext = cachedRegenerationDocuments.candidates.length > 0;
+      let transientRegenerationDocuments = cachedRegenerationDocuments;
+      let transientRegenerationAttachmentIds = new Set(
+        cachedRegenerationDocuments.candidates.map(({ attachment }) => attachment.id),
+      );
+      if (usesTransientSessionDocumentContext) {
+        transientRegenerationDocuments = regeneratedDocumentSelection
+          ? await generationWork.waitFor(combineDocumentContextForInference(
+              normalizedContent,
+              [regeneratedDocumentSelection, cachedRegenerationDocuments],
+            ))
+          : cachedRegenerationDocuments;
+        transientRegenerationAttachmentIds = new Set(
+          transientRegenerationDocuments.candidates.map(({ attachment }) => attachment.id),
+        );
+        transientRegenerationDocuments = await generationWork.waitFor(
+          refineDocumentContextWithExactPromptBudget({
+            question: normalizedContent,
+            processed: transientRegenerationDocuments,
+            baseThread: regenerationBaseThread,
+            provisionalUserMessage: {
+              ...targetMessage,
+              content: replacementContent,
+              modelId: activeModelId,
+              attachments: replacementAttachments,
+              contentParts: replacementContentParts,
+            },
+            multimodalReadiness: effectiveMultimodalReadiness,
+            expectedModelId: activeModelId,
+            attachmentResolution,
+            generationWork,
+            replacePersistedDocumentAttachmentIds: transientRegenerationAttachmentIds,
+          }),
+        );
+        generationWork.assertCurrent();
+        if (regeneratedDocumentSelection) {
+          const regeneratedAttachmentIds = new Set(
+            regeneratedDocumentSelection.candidates.map(({ attachment }) => attachment.id),
+          );
+          regeneratedDocumentSelection = projectDocumentContextSelection(
+            transientRegenerationDocuments,
+            regeneratedAttachmentIds,
+          );
+          throwIfRegeneratedDocumentWasDropped(regeneratedDocumentSelection);
+          ownedMaterializedDocumentImageDrafts = await discardUnselectedDocumentImageDrafts(
+            ownedMaterializedDocumentImageDrafts,
+            collectSelectedDocumentAssetKeys(regeneratedDocumentSelection),
+          );
+          const regeneratedDocumentImages = materializeAttachmentDraftsForMessage({
+            threadId: activeThread.id,
+            messageId: targetMessage.id,
+            drafts: ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+          });
+          const regeneratedDocuments = regeneratedDocumentSelection.attachments.map((attachment) => ({
+            ...attachment,
+            threadId: activeThread.id,
+            messageId: targetMessage.id,
+          }));
+          replacementAttachments = [
+            ...regenerationDocumentInputs.retainedImageAttachments,
+            ...regeneratedDocumentImages,
+            ...regeneratedDocuments,
+            ...regenerationDocumentInputs.retainedOtherAttachments,
+          ];
+          replacementContentParts = regeneratedDocumentSelection.contentParts;
+        }
+        const retainedReplacementImagePaths = getChatImageAttachmentMediaPaths(
+          replacementAttachments ?? [],
+        );
+        const remainingDocumentImageSlots = Math.max(
+          0,
+          MAX_CHAT_IMAGE_ATTACHMENTS - retainedReplacementImagePaths.length,
+        );
+        const cachedSelectedDocuments = projectDocumentContextSelection(
+          transientRegenerationDocuments,
+          cachedRegenerationAttachmentIds,
+        );
+        if (
+          remainingDocumentImageSlots > 0
+          && isVisionReady(effectiveMultimodalReadiness, activeModelId)
+          && cachedSelectedDocuments.selectedCandidates.some(({ result }) => result.nativeAssetLease)
+        ) {
+          transientRegenerationDocumentImages = await materializeSelectedDocumentImageDrafts({
+            processed: cachedSelectedDocuments,
+            maxAssets: remainingDocumentImageSlots,
+            signal: documentAbortController.signal,
+            cancellationGate: attachmentResolution.cancellationGate,
+            onDraftMaterialized: (entry) => {
+              ownedMaterializedDocumentImageDrafts.push(entry);
+            },
+          });
+          const materializedImagePaths = getDraftImageAttachmentMediaPaths(
+            transientRegenerationDocumentImages.map((entry) => entry.draft),
+          );
+          if (materializedImagePaths.length > 0) {
+            effectiveMultimodalReadiness = assertActiveMultimodalReadyForAttachmentMediaPaths({
+              mediaPaths: materializedImagePaths,
+              multimodalReadiness: effectiveMultimodalReadiness,
+              expectedModelId: activeModelId,
+              mediaPathOccurrenceCount: retainedReplacementImagePaths.length + materializedImagePaths.length,
+            });
+            attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+          }
+          transientRegenerationDocuments = finalizeSelectedDocumentAssetWarnings(
+            transientRegenerationDocuments,
+            ownedMaterializedDocumentImageDrafts,
+          );
+        }
+      }
+      const stateBeforeBranchReplacement = useChatStore.getState();
+      if (
+        stateBeforeBranchReplacement.activeThreadId !== activeThread.id
+        || stateBeforeBranchReplacement.threads[activeThread.id] !== activeThread
+        || getThreadActiveModelId(activeThread) !== activeModelId
+      ) {
+        throw new Error('The conversation changed while selecting regeneration context. Try again.');
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
       const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
 
       const assistantMessageId = replaceBranchFromUserMessage(
         activeThread.id,
         messageId,
-        normalizedContent,
+        replacementContent,
         branchParamsSnapshot,
+        regenerationDocumentInputs.documentDrafts.length > 0
+          ? {
+              attachments: replacementAttachments?.length ? replacementAttachments : undefined,
+              contentParts: replacementContentParts?.length ? replacementContentParts : undefined,
+            }
+          : undefined,
       );
       if (!assistantMessageId) {
         throw new Error('The selected message could not be regenerated.');
       }
+      ownedMaterializedDocumentImageDrafts = transientRegenerationDocumentImages;
+      const transientDocumentImageAttachments = materializeAttachmentDraftsForMessage({
+        threadId: activeThread.id,
+        messageId: targetMessage.id,
+        drafts: transientRegenerationDocumentImages.map((entry) => entry.draft),
+      });
 
       await runAssistantCompletion(activeThread.id, assistantMessageId, {
         expectedModelId: activeModelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
         generationWork,
+        ...(usesTransientSessionDocumentContext
+          ? {
+              transientDocumentContentParts: transientRegenerationDocuments.contentParts,
+              transientDocumentAttachmentIds: [...transientRegenerationAttachmentIds],
+              transientDocumentImageAttachments,
+            }
+          : null),
+        onTerminalSettlement: handleBranchTerminalSettlement,
       });
 
       return true;
@@ -4080,6 +5055,28 @@ export const useChatSession = () => {
       }
       throw error;
     } finally {
+      if (branchCacheReconciliation) {
+        await branchCacheReconciliation;
+      }
+      releaseAndroidQaGenerationGate(documentPreparationQaOperationId);
+      unsubscribeDocumentCancellation();
+      documentPreparationAbortControllersRef.current.delete(documentAbortController);
+      if (ownedMaterializedDocumentImageDrafts.length > 0) {
+        try {
+          await chatAttachmentStorageService.discardDrafts(
+            ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+          );
+        } catch (error) {
+          console.warn('[ChatSession] Failed to discard regenerated document image drafts', {
+            ...getPrivacySafeErrorLogDetails(error),
+          });
+        }
+      }
+      await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
+      pocketAnydocAssetLeases.clear();
+      if (isMountedRef.current && regenerationDocumentInputs.documentDrafts.length > 0) {
+        setIsPreparingDocuments(false);
+      }
       releaseInteractivePromptPreparation?.();
       generationWork.finish();
     }
@@ -4128,11 +5125,17 @@ export const useChatSession = () => {
     );
     const promptPreparationEngineSnapshot = capturePromptPreparationEngineSnapshot(activeModelId);
     const generationWork = beginChatGenerationWork('regenerate_last_response');
+    const documentAbortController = new AbortController();
+    documentPreparationAbortControllersRef.current.add(documentAbortController);
+    const unsubscribeDocumentCancellation = generationWork.onCancel(() => {
+      documentAbortController.abort();
+    });
+    let ownedMaterializedDocumentImageDrafts: MaterializedDocumentImageDraft[] = [];
     attachmentResolution.setCancellationCheck(generationWork.assertCurrent);
     let releaseInteractivePromptPreparation: (() => void) | null = null;
     try {
       releaseInteractivePromptPreparation = llmEngineService.beginPromptPreparation();
-      const effectiveMultimodalReadiness = await generationWork.waitFor(
+      let effectiveMultimodalReadiness = await generationWork.waitFor(
         assertUserMessageAttachmentsReadyForRegeneration(
           lastUserMessage,
           model?.multimodalReadiness,
@@ -4150,6 +5153,108 @@ export const useChatSession = () => {
         || getThreadActiveModelId(currentThread) !== activeModelId
       ) {
         throw new Error('The conversation changed while preparing regeneration. Try again.');
+      }
+      assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+      const sessionRegenerationThread: ChatThread = {
+        ...activeThread,
+        messages: activeThread.messages.slice(0, lastUserMessageIndex + 1),
+      };
+      const sessionRegenerationAttachmentIds = collectThreadDocumentAttachmentIds(
+        sessionRegenerationThread,
+      );
+      let transientRegenerationDocuments = sessionRegenerationAttachmentIds.size > 0
+        ? await generationWork.waitFor(
+            selectSessionDocumentContextForInference(
+              activeThread.id,
+              lastUserMessage.content,
+              documentAbortController.signal,
+              attachmentResolution.cancellationGate,
+              sessionRegenerationAttachmentIds,
+            ),
+          )
+        : await processDocumentAttachmentDraftsForInference(lastUserMessage.content, []);
+      const usesTransientSessionDocumentContext = transientRegenerationDocuments.candidates.length > 0;
+      const transientRegenerationAttachmentIds = new Set(
+        transientRegenerationDocuments.candidates.map(({ attachment }) => attachment.id),
+      );
+      if (usesTransientSessionDocumentContext) {
+        setIsPreparingDocuments(true);
+        const regenerationBaseThread: ChatThread = {
+          ...activeThread,
+          messages: activeThread.messages.slice(0, lastUserMessageIndex),
+        };
+        transientRegenerationDocuments = await generationWork.waitFor(
+          refineDocumentContextWithExactPromptBudget({
+            question: lastUserMessage.content,
+            processed: transientRegenerationDocuments,
+            baseThread: regenerationBaseThread,
+            provisionalUserMessage: omitPersistedDocumentInferenceMaterial(
+              lastUserMessage,
+              transientRegenerationAttachmentIds,
+            ),
+            multimodalReadiness: effectiveMultimodalReadiness,
+            expectedModelId: activeModelId,
+            attachmentResolution,
+            generationWork,
+            replacePersistedDocumentAttachmentIds: transientRegenerationAttachmentIds,
+          }),
+        );
+        generationWork.assertCurrent();
+        const retainedLastUserMessage = omitPersistedDocumentInferenceMaterial(
+          lastUserMessage,
+          transientRegenerationAttachmentIds,
+        );
+        const retainedImagePaths = getChatImageAttachmentMediaPaths(
+          retainedLastUserMessage.attachments ?? [],
+        );
+        const remainingDocumentImageSlots = Math.max(
+          0,
+          MAX_CHAT_IMAGE_ATTACHMENTS - retainedImagePaths.length,
+        );
+        if (
+          remainingDocumentImageSlots > 0
+          && isVisionReady(effectiveMultimodalReadiness, activeModelId)
+          && transientRegenerationDocuments.selectedCandidates.some(({ result }) => result.nativeAssetLease)
+        ) {
+          ownedMaterializedDocumentImageDrafts = await materializeSelectedDocumentImageDrafts({
+            processed: transientRegenerationDocuments,
+            maxAssets: remainingDocumentImageSlots,
+            signal: documentAbortController.signal,
+            cancellationGate: attachmentResolution.cancellationGate,
+            onDraftMaterialized: (entry) => {
+              ownedMaterializedDocumentImageDrafts.push(entry);
+            },
+          });
+          const materializedImagePaths = getDraftImageAttachmentMediaPaths(
+            ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+          );
+          if (materializedImagePaths.length > 0) {
+            effectiveMultimodalReadiness = assertActiveMultimodalReadyForAttachmentMediaPaths({
+              mediaPaths: materializedImagePaths,
+              multimodalReadiness: effectiveMultimodalReadiness,
+              expectedModelId: activeModelId,
+              mediaPathOccurrenceCount: retainedImagePaths.length + materializedImagePaths.length,
+            });
+            attachmentResolution.updateReadinessIdentity(effectiveMultimodalReadiness, activeModelId);
+          }
+          transientRegenerationDocuments = finalizeSelectedDocumentAssetWarnings(
+            transientRegenerationDocuments,
+            ownedMaterializedDocumentImageDrafts,
+          );
+        }
+      }
+      const transientDocumentImageAttachments = materializeAttachmentDraftsForMessage({
+        threadId: activeThread.id,
+        messageId: lastUserMessage.id,
+        drafts: ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+      });
+      const stateAfterSessionSelection = useChatStore.getState();
+      if (
+        stateAfterSessionSelection.activeThreadId !== activeThread.id
+        || stateAfterSessionSelection.threads[activeThread.id] !== activeThread
+        || getThreadActiveModelId(activeThread) !== activeModelId
+      ) {
+        throw new Error('The conversation changed while selecting regeneration context. Try again.');
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
       const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
@@ -4183,6 +5288,13 @@ export const useChatSession = () => {
           multimodalReadiness: effectiveMultimodalReadiness,
           attachmentResolution,
           generationWork,
+          ...(usesTransientSessionDocumentContext
+            ? {
+                transientDocumentContentParts: transientRegenerationDocuments.contentParts,
+                transientDocumentAttachmentIds: [...transientRegenerationAttachmentIds],
+                transientDocumentImageAttachments,
+              }
+            : null),
         });
 
         return true;
@@ -4203,6 +5315,13 @@ export const useChatSession = () => {
         multimodalReadiness: effectiveMultimodalReadiness,
         attachmentResolution,
         generationWork,
+        ...(usesTransientSessionDocumentContext
+          ? {
+              transientDocumentContentParts: transientRegenerationDocuments.contentParts,
+              transientDocumentAttachmentIds: [...transientRegenerationAttachmentIds],
+              transientDocumentImageAttachments,
+            }
+          : null),
       });
 
       return true;
@@ -4212,6 +5331,22 @@ export const useChatSession = () => {
       }
       throw error;
     } finally {
+      unsubscribeDocumentCancellation();
+      documentPreparationAbortControllersRef.current.delete(documentAbortController);
+      if (ownedMaterializedDocumentImageDrafts.length > 0) {
+        try {
+          await chatAttachmentStorageService.discardDrafts(
+            ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+          );
+        } catch (error) {
+          console.warn('[ChatSession] Failed to discard transient regeneration document images', {
+            ...getPrivacySafeErrorLogDetails(error),
+          });
+        }
+      }
+      if (isMountedRef.current) {
+        setIsPreparingDocuments(false);
+      }
       releaseInteractivePromptPreparation?.();
       generationWork.finish();
     }
@@ -4234,10 +5369,10 @@ export const useChatSession = () => {
       throw new Error('Stop the current response before starting a new chat.');
     }
 
-    if (!setActiveThread(null)) {
+    if (!beginNewThread()) {
       throw new Error('The new conversation could not be opened.');
     }
-  }, [activeThread, setActiveThread]);
+  }, [activeThread, beginNewThread]);
 
   const openThread = useCallback((threadId: string) => {
     const result = activateThreadForNavigation(threadId);
@@ -4275,6 +5410,7 @@ export const useChatSession = () => {
 
     deleteThreadState(threadId);
     if (thread && !useChatStore.getState().getThread(threadId)) {
+      void documentSessionContextCache.clearThread(threadId);
       void notificationService.dismissInferenceNotificationForThread(threadId);
     }
   }, [deleteThreadState]);
@@ -4300,6 +5436,12 @@ export const useChatSession = () => {
     assertPrivateStorageWritableForChatMutation();
 
     const deleted = deleteMessageBranch(activeThread.id, messageId);
+    if (deleted) {
+      void documentSessionContextCache.retainThreadAttachments(
+        activeThread.id,
+        collectThreadDocumentAttachmentIds(useChatStore.getState().getThread(activeThread.id)),
+      );
+    }
     return deleted;
   }, [activeThread, deleteMessageBranch]);
 
@@ -4308,6 +5450,7 @@ export const useChatSession = () => {
     messages: activeThread?.messages ?? [],
     messageListRevision,
     isGenerating: activeThread?.status === 'generating',
+    isStoppingGeneration,
     isPreparingDocuments,
     shouldOfferSummary: truncationState.shouldOfferSummary,
     truncatedMessageCount: truncationState.truncatedMessageIds.length,

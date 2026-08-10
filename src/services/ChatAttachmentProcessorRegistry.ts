@@ -38,6 +38,7 @@ import {
   selectDocumentContext,
   type DocumentContextChunk,
 } from './DocumentContextService';
+import { documentSessionContextCache } from './DocumentSessionContextCache';
 
 export const DOCUMENT_TEXT_PROCESSOR_ID = 'document-text';
 export const DOCUMENT_TEXT_PROCESSOR_VERSION = 3;
@@ -63,6 +64,29 @@ export interface ProcessChatDocumentTextOptions {
   countPromptTokens?: (contentParts: readonly LlmTextContentPart[]) => Promise<number>;
   retainNativeAssetLease?: boolean;
   onNativeAssetLeaseCreated?: (lease: PocketAnydocAssetLease) => void;
+  retainSessionContextSource?: boolean;
+  onSessionContextSourceCreated?: (source: ChatDocumentSessionContextSource) => void;
+}
+
+export interface SelectChatDocumentSessionContextOptions {
+  query: string;
+  maxChars?: number;
+  maxChunks?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Process-local access to the complete parsed document. Implementations must
+ * keep the source bounded and release all native or JS-owned memory explicitly.
+ */
+export interface ChatDocumentSessionContextSource {
+  attachmentId: string;
+  kind: 'memory' | 'native';
+  isReleased: () => boolean;
+  selectContext: (
+    options: SelectChatDocumentSessionContextOptions,
+  ) => Promise<ChatDocumentTextProcessorResult>;
+  release: () => Promise<void>;
 }
 
 export interface PocketAnydocAssetLease {
@@ -101,6 +125,7 @@ export interface ChatDocumentTextProcessorResult {
   assetCount?: number;
   assets?: PocketAnydocAssetDescriptor[];
   nativeAssetLease?: PocketAnydocAssetLease;
+  sessionContextSource?: ChatDocumentSessionContextSource;
   isScanned?: boolean;
   warnings?: string[];
 }
@@ -454,19 +479,136 @@ function toDocumentContextChunks(chunks: readonly PocketAnydocContextChunk[]): D
   }));
 }
 
-function createPocketAnydocAssetLease(
+type PocketAnydocSelectionSnapshot = {
+  chunks: DocumentContextChunk[];
+  text: string;
+  extractedCharCount: number;
+  truncated: boolean;
+  warnings: string[];
+};
+
+type PocketAnydocSessionSource = PocketAnydocAssetLease & ChatDocumentSessionContextSource;
+
+async function selectPreparedPocketAnydocContext(
   attachment: ChatDocumentAttachment,
-  requestId: string,
   prepared: PocketAnydocPreparedDocument,
-): PocketAnydocAssetLease {
+  options: SelectChatDocumentSessionContextOptions,
+  requestId = createPocketAnydocRequestId(attachment.id),
+): Promise<PocketAnydocSelectionSnapshot> {
+  const cancelOnAbort = () => {
+    void cancelPocketAnydocRequest(requestId).catch(() => undefined);
+  };
+  options.signal?.addEventListener('abort', cancelOnAbort, { once: true });
+  try {
+    throwIfDocumentProcessingCancelled(options.signal, attachment);
+    const nativeQuery = truncateAtUtf16Boundary(
+      resolveNativeDocumentSelectionQuery(options.query),
+      POCKET_ANYDOC_MAX_QUERY_CHARS,
+    );
+    recordPocketAnydocQaStage('select', 'start');
+    let selection: Awaited<ReturnType<typeof selectPocketAnydocContext>>;
+    try {
+      selection = await selectPocketAnydocContext({
+        requestId,
+        handle: prepared.handle,
+        query: nativeQuery,
+        maxChunks: Math.min(
+          POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+          normalizePositiveInteger(options.maxChunks, 32),
+        ),
+        maxChars: Math.min(
+          POCKET_ANYDOC_MAX_SELECTION_CHARS,
+          normalizePositiveInteger(options.maxChars, DEFAULT_DOCUMENT_TEXT_MAX_CHARS),
+        ),
+      });
+      recordPocketAnydocQaStage('select', 'ok');
+    } catch (error) {
+      recordPocketAnydocQaStage(
+        'select',
+        error instanceof PocketAnydocError ? error.code : 'native_failed',
+      );
+      throw error;
+    }
+    throwIfDocumentProcessingCancelled(options.signal, attachment);
+    const preparedAssetIds = new Set(prepared.assets?.map((asset) => asset.id) ?? []);
+    if (selection.chunks.some((chunk) => (
+      (chunk.assetIds?.length ?? 0) > 0
+      && chunk.assetIds?.some((assetId) => !preparedAssetIds.has(assetId))
+    ))) {
+      throw new PocketAnydocError(
+        'invalid_native_response',
+        'Pocket AnyDoc returned a chunk with an unknown asset reference.',
+      );
+    }
+    if (selection.chunks.length === 0 || selection.selectedCharCount === 0) {
+      throw new PocketAnydocError('no_extractable_text', 'Pocket AnyDoc returned no text.');
+    }
+    const chunks = toDocumentContextChunks(selection.chunks);
+    return {
+      chunks,
+      text: chunks.map((chunk) => chunk.text).join('\n\n'),
+      extractedCharCount: selection.selectedCharCount,
+      truncated: selection.truncated,
+      warnings: [...new Set([
+        ...prepared.warnings,
+        ...selection.warnings,
+      ])],
+    };
+  } finally {
+    options.signal?.removeEventListener('abort', cancelOnAbort);
+  }
+}
+
+function createPocketAnydocSessionSource(
+  attachment: ChatDocumentAttachment,
+  prepared: PocketAnydocPreparedDocument,
+  initialResult: ChatDocumentTextProcessorResult,
+): PocketAnydocSessionSource {
   const assets = prepared.assets ?? [];
   const assetById = new Map(assets.map((asset) => [asset.id, asset]));
   let released = false;
   let releasePromise: Promise<void> | null = null;
-  return {
+  let source!: PocketAnydocSessionSource;
+  source = {
     attachmentId: attachment.id,
+    kind: 'native',
+    isReleased: () => released || releasePromise !== null,
     assets,
+    selectContext: async (options) => {
+      if (released || releasePromise) {
+        throw mapPocketAnydocError(
+          new PocketAnydocError('invalid_request', 'Pocket AnyDoc document handle was released.'),
+          attachment,
+        );
+      }
+      try {
+        const selection = await selectPreparedPocketAnydocContext(attachment, prepared, options);
+        return {
+          ...initialResult,
+          text: selection.text,
+          chunks: selection.chunks,
+          truncated: selection.truncated,
+          extractedCharCount: selection.extractedCharCount,
+          selectedChunkCount: selection.chunks.length,
+          warnings: selection.warnings,
+          ...(assets.length > 0 ? { nativeAssetLease: source } : null),
+          sessionContextSource: source,
+        };
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
+        }
+        if (error instanceof PocketAnydocError) {
+          throw mapPocketAnydocError(error, attachment);
+        }
+        throw mapPocketAnydocError(
+          new PocketAnydocError('native_failed', 'Pocket AnyDoc failed.', { cause: error }),
+          attachment,
+        );
+      }
+    },
     materializeAsset: async (assetId, signal) => {
+      const requestId = createPocketAnydocRequestId(`${attachment.id}-asset-${assetId}`);
       const cancelOnAbort = () => {
         // `cancelPocketAnydocRequest` calls the native method before its first await, so this
         // listener interrupts native work synchronously even when the caller races away.
@@ -477,7 +619,7 @@ function createPocketAnydocAssetLease(
         if (signal?.aborted) {
           throw new PocketAnydocError('cancelled', 'Pocket AnyDoc asset materialization was cancelled.');
         }
-        if (released) {
+        if (released || releasePromise) {
           throw new PocketAnydocError('invalid_request', 'Pocket AnyDoc asset handle was released.');
         }
         const descriptor = assetById.get(assetId);
@@ -524,6 +666,7 @@ function createPocketAnydocAssetLease(
       }
     },
   };
+  return source;
 }
 
 async function processPocketAnydocAttachment(
@@ -535,7 +678,7 @@ async function processPocketAnydocAttachment(
 ): Promise<ChatDocumentTextProcessorResult> {
   const requestId = options.requestId ?? createPocketAnydocRequestId(attachment.id);
   let prepared: PocketAnydocPreparedDocument | null = null;
-  let retainedAssetLease = false;
+  let retainedPreparedLease = false;
   const cancelOnAbort = () => {
     void cancelPocketAnydocRequest(requestId).catch(() => undefined);
   };
@@ -559,87 +702,67 @@ async function processPocketAnydocAttachment(
       );
       throw error;
     }
-    throwIfDocumentProcessingCancelled(options.signal, attachment);
-    const nativeQuery = truncateAtUtf16Boundary(
-      resolveNativeDocumentSelectionQuery(options.query ?? ''),
-      POCKET_ANYDOC_MAX_QUERY_CHARS,
+    const selection = await selectPreparedPocketAnydocContext(
+      attachment,
+      prepared,
+      {
+        query: options.query ?? '',
+        maxChars,
+        maxChunks: options.maxChunks,
+        signal: options.signal,
+      },
+      requestId,
     );
-    recordPocketAnydocQaStage('select', 'start');
-    let selection: Awaited<ReturnType<typeof selectPocketAnydocContext>>;
-    try {
-      selection = await selectPocketAnydocContext({
-        requestId,
-        handle: prepared.handle,
-        query: nativeQuery,
-        maxChunks: Math.min(
-          POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
-          normalizePositiveInteger(options.maxChunks, 32),
-        ),
-        maxChars: Math.min(POCKET_ANYDOC_MAX_SELECTION_CHARS, maxChars),
-      });
-      recordPocketAnydocQaStage('select', 'ok');
-    } catch (error) {
-      recordPocketAnydocQaStage(
-        'select',
-        error instanceof PocketAnydocError ? error.code : 'native_failed',
-      );
-      throw error;
-    }
-    throwIfDocumentProcessingCancelled(options.signal, attachment);
-    const preparedAssetIds = new Set(prepared.assets?.map((asset) => asset.id) ?? []);
-    if (selection.chunks.some((chunk) => (
-      (chunk.assetIds?.length ?? 0) > 0
-      && chunk.assetIds?.some((assetId) => !preparedAssetIds.has(assetId))
-    ))) {
-      throw new PocketAnydocError(
-        'invalid_native_response',
-        'Pocket AnyDoc returned a chunk with an unknown asset reference.',
-      );
-    }
-    if (selection.chunks.length === 0 || selection.selectedCharCount === 0) {
-      throw new PocketAnydocError('no_extractable_text', 'Pocket AnyDoc returned no text.');
-    }
-    const chunks = toDocumentContextChunks(selection.chunks);
-    const text = chunks.map((chunk) => chunk.text).join('\n\n');
-    const warnings = [...new Set([
-      ...prepared.warnings,
-      ...selection.warnings,
-    ])];
-    const nativeAssetLease = options.retainNativeAssetLease && prepared.assets?.length
-      ? createPocketAnydocAssetLease(attachment, requestId, prepared)
-      : undefined;
-    if (nativeAssetLease) {
-      options.onNativeAssetLeaseCreated?.(nativeAssetLease);
-      retainedAssetLease = true;
-    }
-    return {
+    const initialResult: ChatDocumentTextProcessorResult = {
       attachmentId: attachment.id,
       runtimeInput: 'document_text',
       processorId: POCKET_ANYDOC_PROCESSOR_ID,
       processorVersion: POCKET_ANYDOC_PROCESSOR_VERSION,
       mimeType: processable.mimeType,
       canonicalFormat: prepared.canonicalFormat,
-      text,
-      chunks,
+      text: selection.text,
+      chunks: selection.chunks,
       truncated: selection.truncated,
-      extractedCharCount: selection.selectedCharCount,
-      sourceCharCount: prepared.sourceCharCount ?? selection.selectedCharCount,
+      extractedCharCount: selection.extractedCharCount,
+      sourceCharCount: prepared.sourceCharCount ?? selection.extractedCharCount,
       contentHash: `sha256:${prepared.contentSha256}`,
       contentSha256: prepared.contentSha256,
       parserId: prepared.parserId,
       parserVersion: prepared.parserVersion,
       exactAnyDocCommit: prepared.exactAnyDocCommit,
       sourceByteCount: prepared.sourceByteCount,
-      selectedChunkCount: chunks.length,
+      selectedChunkCount: selection.chunks.length,
       chunkCount: prepared.chunkCount,
       ...(prepared.pageCount === undefined ? null : { pageCount: prepared.pageCount }),
       ...(prepared.slideCount === undefined ? null : { slideCount: prepared.slideCount }),
       ...(prepared.sheetCount === undefined ? null : { sheetCount: prepared.sheetCount }),
       ...(prepared.assetCount === undefined ? null : { assetCount: prepared.assetCount }),
       ...(prepared.assets === undefined ? null : { assets: prepared.assets }),
-      ...(nativeAssetLease === undefined ? null : { nativeAssetLease }),
       isScanned: false,
-      warnings,
+      warnings: selection.warnings,
+    };
+    const shouldRetainPreparedDocument = options.retainSessionContextSource
+      || (options.retainNativeAssetLease && (prepared.assets?.length ?? 0) > 0);
+    if (!shouldRetainPreparedDocument) {
+      return initialResult;
+    }
+
+    const source = createPocketAnydocSessionSource(attachment, prepared, initialResult);
+    const nativeAssetLease = options.retainNativeAssetLease && source.assets.length > 0
+      ? source
+      : undefined;
+    const sessionContextSource = options.retainSessionContextSource ? source : undefined;
+    if (nativeAssetLease) {
+      options.onNativeAssetLeaseCreated?.(nativeAssetLease);
+    }
+    if (sessionContextSource) {
+      options.onSessionContextSourceCreated?.(sessionContextSource);
+    }
+    retainedPreparedLease = true;
+    return {
+      ...initialResult,
+      ...(nativeAssetLease ? { nativeAssetLease } : null),
+      ...(sessionContextSource ? { sessionContextSource } : null),
     };
   } catch (error) {
     if (error instanceof AppError) {
@@ -654,10 +777,97 @@ async function processPocketAnydocAttachment(
     );
   } finally {
     options.signal?.removeEventListener('abort', cancelOnAbort);
-    if (prepared && !retainedAssetLease) {
-      await releasePocketAnydocHandle(prepared.handle).catch(() => undefined);
+    if (prepared && !retainedPreparedLease) {
+      const preparedHandle = prepared.handle;
+      let released = false;
+      const resource = {
+        isReleased: () => released,
+        release: async () => {
+          await releasePocketAnydocHandle(preparedHandle);
+          released = true;
+        },
+      };
+      await documentSessionContextCache.releaseResources([{ resource }]);
     }
   }
+}
+
+function createDirectDocumentSessionContextSource(
+  attachment: ChatDocumentAttachment,
+  initialResult: ChatDocumentTextProcessorResult,
+  allChunks: readonly DocumentContextChunk[],
+): ChatDocumentSessionContextSource {
+  let retainedChunks: readonly DocumentContextChunk[] | null = allChunks;
+  let source!: ChatDocumentSessionContextSource;
+  source = {
+    attachmentId: attachment.id,
+    kind: 'memory',
+    isReleased: () => retainedChunks === null,
+    selectContext: async (options) => {
+      throwIfDocumentProcessingCancelled(options.signal, attachment);
+      const availableChunks = retainedChunks;
+      if (!availableChunks) {
+        throw createAttachmentProcessingError(
+          'chat_attachment_parse_failed',
+          'The session document context has already been released.',
+          { attachment, details: { reason: 'session_context_released' } },
+        );
+      }
+      const maxChars = Math.min(
+        POCKET_ANYDOC_MAX_SELECTION_CHARS,
+        normalizePositiveInteger(options.maxChars, DEFAULT_DOCUMENT_TEXT_MAX_CHARS),
+      );
+      const contextSelection = await selectDocumentContext({
+        question: options.query,
+        documents: [{
+          attachmentId: attachment.id,
+          displayName: attachment.displayName ?? attachment.fileName,
+          canonicalFormat: initialResult.canonicalFormat,
+          chunks: availableChunks,
+          sourceCharCount: initialResult.sourceCharCount,
+        }],
+        maxSourceChars: maxChars,
+        maxChars: maxChars + 2_048,
+        maxChunks: Math.min(
+          POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+          normalizePositiveInteger(options.maxChunks, 32),
+        ),
+        cooperativeScheduling: {
+          // A macrotask checkpoint lets React Native deliver AbortController/input events while a
+          // large direct-text source is being reranked on the JavaScript runtime.
+          yieldControl: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+          throwIfCancelled: () => throwIfDocumentProcessingCancelled(options.signal, attachment),
+          yieldEveryChunks: 16,
+        },
+      });
+      throwIfDocumentProcessingCancelled(options.signal, attachment);
+      const selectedDocument = contextSelection.documents[0];
+      const selectedIndexes = new Set(selectedDocument?.selectedChunkIndexes ?? []);
+      const selectedChunks = availableChunks.filter((chunk) => selectedIndexes.has(chunk.index));
+      if (selectedChunks.length === 0) {
+        throw createAttachmentProcessingError(
+          'chat_attachment_too_large_for_context',
+          'Document has no complete structural chunk that fits the local context limit.',
+          { attachment, details: { maxChars } },
+        );
+      }
+      const selectedText = selectedChunks.map((chunk) => chunk.text).join('\n\n');
+      return {
+        ...initialResult,
+        text: selectedText,
+        chunks: selectedChunks,
+        truncated: contextSelection.truncated || selectedChunks.length < availableChunks.length,
+        extractedCharCount: selectedDocument?.selectedCharCount ?? selectedText.length,
+        selectedChunkCount: selectedChunks.length,
+        warnings: contextSelection.warnings,
+        sessionContextSource: source,
+      };
+    },
+    release: async () => {
+      retainedChunks = null;
+    },
+  };
+  return source;
 }
 
 function formatDocumentTextPart(result: ChatDocumentTextProcessorResult): string {
@@ -940,7 +1150,7 @@ export class ChatAttachmentProcessorRegistry {
       );
     }
     const truncated = contextSelection.truncated || selectedChunks.length < allChunks.length;
-    return {
+    const initialResult: ChatDocumentTextProcessorResult = {
       attachmentId: attachment.id,
       runtimeInput: 'document_text',
       processorId: DOCUMENT_TEXT_PROCESSOR_ID,
@@ -950,7 +1160,7 @@ export class ChatAttachmentProcessorRegistry {
       text: selectedText,
       chunks: selectedChunks,
       truncated,
-      extractedCharCount: selectedText.length,
+      extractedCharCount: contextSelection.documents[0]?.selectedCharCount ?? selectedText.length,
       sourceCharCount: parsedText.length,
       contentHash: `sha256:${contentSha256}`,
       contentSha256,
@@ -963,6 +1173,25 @@ export class ChatAttachmentProcessorRegistry {
         ...contextSelection.warnings,
         ...(truncated ? ['context_truncated'] : []),
       ])],
+    };
+    if (!options.retainSessionContextSource) {
+      return initialResult;
+    }
+
+    const sessionContextSource = createDirectDocumentSessionContextSource(
+      attachment,
+      initialResult,
+      allChunks,
+    );
+    try {
+      options.onSessionContextSourceCreated?.(sessionContextSource);
+    } catch (error) {
+      await sessionContextSource.release();
+      throw error;
+    }
+    return {
+      ...initialResult,
+      sessionContextSource,
     };
   }
 }

@@ -62,6 +62,7 @@ const {
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
+  findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
@@ -964,6 +965,32 @@ describe('android-scenarios focused text clearing', () => {
 
 describe('android-scenarios asynchronous interaction settlement', () => {
   const immediateDelay = jest.fn().mockResolvedValue(undefined);
+
+  it('does not treat the stopped banner as ready until the composer is editable again', () => {
+    const stoppedOnly = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-stopped-banner" enabled="true" bounds="[0,0][1080,200]" />
+        <node resource-id="chat-message-input" clickable="true" enabled="false" bounds="[200,1840][860,1980]" />
+        <node resource-id="chat-primary-action-send" clickable="false" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `);
+    const ready = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-stopped-banner" enabled="true" bounds="[0,0][1080,200]" />
+        <node resource-id="chat-message-input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node resource-id="chat-primary-action-send" clickable="false" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `);
+
+    expect(findSettledDocumentCancellationSendAction(stoppedOnly)).toBeNull();
+    expect(findSettledDocumentCancellationSendAction(ready)).toEqual(expect.objectContaining({
+      resourceId: 'chat-primary-action-send',
+      enabled: false,
+      clickable: false,
+    }));
+  });
 
   function composerSnapshot(text, sendEnabled = false) {
     return parseUiSnapshot(`

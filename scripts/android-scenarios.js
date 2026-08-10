@@ -32,6 +32,7 @@ const {
   DOCUMENT_QA_SCENARIOS,
   DOCUMENT_QA_SENTINELS,
   resolveDocumentQaFixture,
+  resolveDocumentQaStagedExtension,
   validateDocumentQaCorpus,
 } = require("./document-qa-fixtures");
 const DEFAULT_SCENARIO_PACK = "core";
@@ -182,6 +183,7 @@ const ATTACH_DOCUMENT_BUTTON_RESOURCE_ID = "chat-attach-document-button";
 const CHAT_DOCUMENT_BUSY_RESOURCE_ID = "chat-document-attachment-busy-indicator";
 const CHAT_PRIMARY_SEND_RESOURCE_ID = "chat-primary-action-send";
 const CHAT_PRIMARY_STOP_RESOURCE_ID = "chat-primary-action-stop";
+const CHAT_MESSAGE_INPUT_RESOURCE_ID = "chat-message-input";
 const CHAT_MODEL_SELECTOR_RESOURCE_ID = "chat-header-model-selector";
 const CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID = "chat-model-selector-sheet";
 const CHAT_QA_ARM_DOCUMENT_PREPARATION_RESOURCE_ID = "chat-qa-arm-during-document-preparation";
@@ -189,6 +191,8 @@ const CHAT_QA_DOCUMENT_PREPARATION_ARMED_RESOURCE_ID =
   "chat-qa-generation-armed-during-document-preparation";
 const CHAT_QA_DOCUMENT_PREPARATION_GATE_PREFIX =
   "chat-qa-generation-gate-during-document-preparation-";
+const CHAT_PREPARED_GENERATION_PREFIX = "chat-prepared-generation-";
+const CHAT_PREPARED_ATTACHMENT_PREFIX = "chat-prepared-attachment-";
 const DOCUMENT_EVIDENCE_POLICY = "sentinel-only";
 // Keep stale-result QA aligned with the published 30-second native conversion wall limit.
 // The margin covers delivery from the native queue back to the replacement JS/UI context.
@@ -199,9 +203,12 @@ const DOCUMENT_RACE_POST_CANCEL_HORIZON_MS =
 const DOCUMENT_RACE_SENTINEL_POLL_INTERVAL_MS = 1_000;
 const DOCUMENT_THREAD_SWITCH_DRAIN_SETTLE_MS = 5_500;
 const DOCUMENT_QA_REMOTE_DIRECTORY = "/sdcard/Download/PocketAI-Document-QA";
+const DOCUMENT_QA_REMOTE_DIRECTORY_NAME = "PocketAI-Document-QA";
 const DOCUMENT_PICKER_SEARCH_RESOURCE_IDS = ["option_menu_search", "action_search"];
 const DOCUMENT_PICKER_SEARCH_LABELS = ["Search", "Поиск"];
 const DOCUMENT_PICKER_CONFIRM_LABELS = ["Open", "Открыть", "Select", "Выбрать"];
+const DOCUMENT_PICKER_SHOW_ROOTS_LABELS = ["Show roots", "Показать корни"];
+const DOCUMENT_PICKER_DOWNLOAD_LABELS = ["Download", "Downloads", "Загрузки"];
 const DOCUMENT_ERROR_LABELS_BY_CODE = {
   corrupt_document: [
     "This document is damaged or does not match its file type.",
@@ -2685,6 +2692,8 @@ function describeDocumentScenario(definition) {
       return `Attach and send the synthetic ${definition.fixtureIds.join(", ")} fixture flow.`;
     case "error":
       return `Verify the synthetic ${definition.fixtureIds[0]} fixture fails with its privacy-safe error.`;
+    case "session-follow-up":
+      return "Reuse one prepared native document for a second question without attaching or parsing it again.";
     case "stop-race":
       return "Stop a queued four-document parse before stale context can reach generation.";
     case "thread-race":
@@ -2707,6 +2716,22 @@ async function runDocumentQaScenario(ctx, definition) {
           fixtureIds: [...definition.fixtureIds],
           sentinelIds: iteration.sentinelIds,
           performance: omitBenchmarkWarmup(iteration),
+        },
+      };
+    }
+    if (definition.kind === "session-follow-up") {
+      const iteration = await runDocumentSessionFollowUpIteration(ctx, session, {
+        promptSentinel: buildDocumentQaPromptSentinel(definition.id),
+      });
+      return {
+        details: {
+          fixtureIds: [...definition.fixtureIds],
+          sentinelIds: iteration.sentinelIds,
+          nativeSession: iteration.nativeSession,
+          performance: {
+            initial: omitBenchmarkWarmup(iteration.initial),
+            followUp: omitBenchmarkWarmup(iteration.followUp),
+          },
         },
       };
     }
@@ -2786,6 +2811,7 @@ async function withDocumentQaFixtures(ctx, fixtureIds, operation) {
     throw error;
   } finally {
     try {
+      await restoreDocumentQaAppForCleanup(ctx);
       await cleanupDocumentQaThreads(ctx, baselineThreadIds);
     } catch (cleanupError) {
       if (!primaryError) {
@@ -2807,7 +2833,7 @@ function stageDocumentQaFixtures(adbPath, serial, fixtureIds) {
     ], { stdio: "ignore" });
     for (const fixtureId of fixtureIds) {
       const fixture = resolveDocumentQaFixture(fixtureId);
-      const extension = path.extname(fixture.relativePath).toLowerCase();
+      const extension = resolveDocumentQaStagedExtension(fixture);
       const remoteName = `pqa-${fixture.id}-${fixture.sha256.slice(0, 8)}${extension}`;
       const remotePath = `${DOCUMENT_QA_REMOTE_DIRECTORY}/${remoteName}`;
       runChecked(adbPath, ["-s", serial, "push", fixture.absolutePath, remotePath], {
@@ -2906,6 +2932,7 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
 }
 
 async function selectDocumentPickerFile(adbPath, serial, remoteName) {
+  await enterDocumentQaPickerDirectory(adbPath, serial, remoteName);
   const directFile = await findAnyNodeNow(adbPath, serial, [remoteName], { visibleOnly: true });
   if (!directFile) {
     let searchNode = null;
@@ -2929,7 +2956,8 @@ async function selectDocumentPickerFile(adbPath, serial, remoteName) {
     tapRequiredNode(adbPath, serial, searchNode, "document picker search");
     clearFocusedTextInput(adbPath, serial);
     runChecked(adbPath, [
-      "-s", serial, "shell", "input", "text", escapeAdbInputText(remoteName),
+      "-s", serial, "shell", "input", "text",
+      escapeAdbInputText(resolveDocumentQaPickerSearchToken(remoteName)),
     ], { stdio: "ignore" });
   }
 
@@ -2954,6 +2982,133 @@ async function selectDocumentPickerFile(adbPath, serial, remoteName) {
       visibleOnly: true,
     });
   }
+}
+
+async function enterDocumentQaPickerDirectory(adbPath, serial, remoteName, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const wait = options.delayFn ?? delay;
+  const tapNode = options.tapRequiredNode ?? tapRequiredNode;
+  const runCommand = options.runCommand ?? runChecked;
+  const waitForNode = options.waitForAnyNode ?? waitForAnyNode;
+  const waitForTitleNode = options.waitForDocumentPickerTitleNode
+    ?? waitForDocumentPickerTitleNode;
+  const isQaDirectoryOpen = (snapshot) => snapshot.nodes.some((node) => (
+    isResourceId(node, "breadcrumb_text")
+    && node.text === DOCUMENT_QA_REMOTE_DIRECTORY_NAME
+  ));
+  let snapshot = createSnapshot(adbPath, serial);
+  let qaDirectoryOpen = isQaDirectoryOpen(snapshot);
+
+  if (
+    qaDirectoryOpen
+    && findAnyNodeInSnapshot(snapshot, [remoteName], { visibleOnly: true })
+  ) {
+    return;
+  }
+
+  if (findResourceIdInSnapshot(snapshot, "search_src_text", { visibleOnly: true })) {
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"], {
+      stdio: "ignore",
+    });
+    await wait(500);
+    snapshot = createSnapshot(adbPath, serial);
+    qaDirectoryOpen = isQaDirectoryOpen(snapshot);
+    if (
+      qaDirectoryOpen
+      && findAnyNodeInSnapshot(snapshot, [remoteName], { visibleOnly: true })
+    ) {
+      return;
+    }
+  }
+
+  const visibleQaDirectory = qaDirectoryOpen
+    ? null
+    : findAnyNodeInSnapshot(
+        snapshot,
+        [DOCUMENT_QA_REMOTE_DIRECTORY_NAME],
+        { visibleOnly: true }
+      );
+  if (visibleQaDirectory) {
+    tapNode(adbPath, serial, visibleQaDirectory.node, "document QA picker directory");
+  } else {
+    const rootsMatch = await waitForNode(
+      adbPath,
+      serial,
+      DOCUMENT_PICKER_SHOW_ROOTS_LABELS,
+      { timeoutMs: 10_000, visibleOnly: true }
+    );
+    tapNode(adbPath, serial, rootsMatch.node, "document picker roots");
+    const downloadMatch = await waitForTitleNode(
+      adbPath,
+      serial,
+      DOCUMENT_PICKER_DOWNLOAD_LABELS,
+      { timeoutMs: 10_000, visibleOnly: true }
+    );
+    tapNode(adbPath, serial, downloadMatch.node, "document picker Download root");
+    const directoryMatch = await waitForTitleNode(
+      adbPath,
+      serial,
+      [DOCUMENT_QA_REMOTE_DIRECTORY_NAME],
+      { timeoutMs: 10_000, visibleOnly: true }
+    );
+    tapNode(adbPath, serial, directoryMatch.node, "document QA picker directory");
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    if (isQaDirectoryOpen(createSnapshot(adbPath, serial))) {
+      return;
+    }
+    await wait(250);
+  }
+  throw new Error("DocumentsUI did not enter the synthetic document QA directory.");
+}
+
+async function waitForDocumentPickerTitleNode(adbPath, serial, labels, options = {}) {
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const wait = options.delayFn ?? delay;
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const snapshot = createSnapshot(adbPath, serial);
+    const matches = snapshot.nodes.filter((node) => (
+      isResourceId(node, "title")
+      && labels.includes(node.text)
+      && node.enabled !== false
+      && Boolean(node.bounds)
+    ));
+    const node = pickBestNode(matches);
+    if (node) {
+      return { label: node.text, node };
+    }
+    await wait(250);
+  }
+  throw new Error("DocumentsUI did not expose the required navigation item.");
+}
+
+function resolveDocumentQaPickerSearchToken(remoteName) {
+  const match = String(remoteName).match(/-([a-f0-9]{8})\.[a-z0-9]+$/u);
+  if (!match) {
+    throw new Error("Synthetic document picker names must end with a pinned SHA-256 prefix.");
+  }
+  return match[1];
+}
+
+async function restoreDocumentQaAppForCleanup(ctx, options = {}) {
+  const resolveAdb = options.resolveAdbPath ?? resolveAdbPath;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const isForeground = options.isAppForegroundSnapshot ?? isAppForegroundSnapshot;
+  const wait = options.delayFn ?? delay;
+  const maxBackAttempts = options.maxBackAttempts ?? 6;
+  const adbPath = resolveAdb();
+  for (let attempt = 0; attempt < maxBackAttempts; attempt += 1) {
+    if (isForeground(createSnapshot(adbPath, ctx.serial))) {
+      return;
+    }
+    await ctx.pressBack();
+    await wait(350);
+  }
+  await ctx.ensureAppVisible();
 }
 
 async function runDocumentSuccessIteration(ctx, session, { promptSentinel }) {
@@ -2991,6 +3146,167 @@ async function runDocumentSuccessIteration(ctx, session, { promptSentinel }) {
   };
 }
 
+function summarizePocketAnydocSessionQaLog(logcat) {
+  const summary = {
+    prepareStart: 0,
+    prepareOk: 0,
+    prepareOther: 0,
+    selectStart: 0,
+    selectOk: 0,
+    selectOther: 0,
+  };
+  const pattern = /\[PocketAnyDocQa\] stage=(prepare|select) code=([a-z0-9_]+)/gu;
+  for (const match of String(logcat).matchAll(pattern)) {
+    const [, stage, code] = match;
+    const key = `${stage}${code === "start" ? "Start" : code === "ok" ? "Ok" : "Other"}`;
+    summary[key] += 1;
+  }
+  return summary;
+}
+
+function hasExpectedPocketAnydocSessionReuse(summary) {
+  return summary.prepareStart === 1
+    && summary.prepareOk === 1
+    && summary.prepareOther === 0
+    && summary.selectStart === 2
+    && summary.selectOk === 2
+    && summary.selectOther === 0;
+}
+
+function readPocketAnydocSessionQaSummary(adbPath, serial, packageUid, logcatStartEpoch) {
+  const logcat = runCapture(adbPath, [
+    "-s",
+    serial,
+    "logcat",
+    "-b",
+    "all",
+    `--uid=${packageUid}`,
+    "-T",
+    logcatStartEpoch,
+    "-d",
+    "-v",
+    "brief",
+  ]);
+  return summarizePocketAnydocSessionQaLog(logcat);
+}
+
+async function waitForPocketAnydocSessionReuseEvidence(
+  adbPath,
+  serial,
+  packageUid,
+  logcatStartEpoch,
+  options = {}
+) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 250;
+  const readSummary = options.readSummary ?? readPocketAnydocSessionQaSummary;
+  const wait = options.delayFn ?? delay;
+  const startedAt = Date.now();
+  let summary = readSummary(adbPath, serial, packageUid, logcatStartEpoch);
+  while (!hasExpectedPocketAnydocSessionReuse(summary) && Date.now() - startedAt < timeoutMs) {
+    await wait(pollIntervalMs);
+    summary = readSummary(adbPath, serial, packageUid, logcatStartEpoch);
+  }
+  if (!hasExpectedPocketAnydocSessionReuse(summary)) {
+    throw new Error(
+      "Document session reuse evidence did not contain exactly one prepare and two successful selections "
+      + `(prepare=${summary.prepareStart}/${summary.prepareOk}/${summary.prepareOther}, `
+      + `select=${summary.selectStart}/${summary.selectOk}/${summary.selectOther}).`
+    );
+  }
+  return summary;
+}
+
+function readVisiblePreparedGenerationIds(adbPath, serial) {
+  return new Set(
+    findResourcePrefixNodesInSnapshot(
+      createUiSnapshot(adbPath, serial),
+      CHAT_PREPARED_GENERATION_PREFIX,
+      { visibleOnly: true }
+    ).map((node) => normalizeAndroidResourceId(node.resourceId))
+  );
+}
+
+async function waitForNewPreparedGenerationWithoutDocumentAttachment(
+  adbPath,
+  serial,
+  previousGenerationIds,
+  options = {}
+) {
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    options,
+    (candidate) => findResourcePrefixNodesInSnapshot(
+      candidate,
+      CHAT_PREPARED_GENERATION_PREFIX,
+      { visibleOnly: true }
+    ).find((node) => !previousGenerationIds.has(normalizeAndroidResourceId(node.resourceId))) ?? null
+  );
+  if (!match) {
+    throw new Error("The document follow-up did not reach a new prepared generation.");
+  }
+  const duplicatedDocumentAttachment = findResourcePrefixNodesInSnapshot(
+    snapshot,
+    CHAT_PREPARED_ATTACHMENT_PREFIX,
+    { visibleOnly: true }
+  ).some((node) => normalizeAndroidResourceId(node.resourceId).includes("-document-"));
+  if (duplicatedDocumentAttachment) {
+    throw new Error("The document follow-up duplicated a persisted document attachment.");
+  }
+}
+
+async function runDocumentSessionFollowUpIteration(ctx, session, { promptSentinel }) {
+  if (session.fixtures.length !== 1) {
+    throw new Error("Document session follow-up QA requires exactly one fixture.");
+  }
+  const adbPath = resolveAdbPath();
+  const packageUid = resolveAndroidPackageUid(adbPath, ctx.serial, appPackageName);
+  const logcatStartEpoch = readAndroidLogcatStartEpoch(adbPath, ctx.serial);
+  const sentinelIds = [...new Set(session.fixtures[0].fixture.sentinelIds)].sort();
+  const initial = await runDocumentSuccessIteration(ctx, session, { promptSentinel });
+  const previousGenerationIds = readVisiblePreparedGenerationIds(adbPath, ctx.serial);
+  if (previousGenerationIds.size === 0) {
+    throw new Error("The initial document turn did not expose prepared-generation evidence.");
+  }
+
+  const followUp = await measureAndroidDocumentOperation(ctx, async () => {
+    await sendDocumentPromptImmediately(
+      ctx,
+      buildDocumentQaRetrievalPrompt(
+        buildDocumentQaPromptSentinel("session", "followup"),
+        sentinelIds
+      )
+    );
+    await waitForNewPreparedGenerationWithoutDocumentAttachment(
+      adbPath,
+      ctx.serial,
+      previousGenerationIds,
+      { timeoutMs: 30_000 }
+    );
+    return null;
+  });
+  await stopDocumentGenerationIfActive(ctx);
+  const nativeSession = await waitForPocketAnydocSessionReuseEvidence(
+    adbPath,
+    ctx.serial,
+    packageUid,
+    logcatStartEpoch
+  );
+  return {
+    sentinelIds,
+    initial,
+    followUp: {
+      outcome: "success",
+      elapsedMs: followUp.elapsedMs,
+      peakRssBytes: followUp.peakRssBytes,
+      uiProbeCount: followUp.uiProbeCount,
+      uiProbeMaxLatencyMs: followUp.uiProbeMaxLatencyMs,
+    },
+    nativeSession,
+  };
+}
+
 async function runDocumentErrorIteration(ctx, session, { promptSentinel }) {
   const expectedCodes = [...new Set(
     session.fixtures.map((entry) => entry.fixture.expectedErrorCode).filter(Boolean)
@@ -3013,6 +3329,12 @@ async function runDocumentErrorIteration(ctx, session, { promptSentinel }) {
     return expectedErrorCode;
   });
   await dismissDocumentErrorDialogIfPresent(ctx);
+  await waitForResourceId(
+    resolveAdbPath(),
+    ctx.serial,
+    `chat-qa-document-draft-count-${session.fixtures.length}`,
+    { timeoutMs: 10_000, visibleOnly: true }
+  );
   return {
     outcome: "expected-error",
     errorCode: measured.value,
@@ -3173,21 +3495,25 @@ async function waitForDocumentCancellationSettlement(adbPath, serial) {
   const { match, snapshot } = await waitForSnapshotMatch(
     adbPath,
     serial,
-    { timeoutMs: 10_000 },
-    (candidate) => {
-      const stopped = findResourceIdInSnapshot(candidate, "chat-stopped-banner", { visibleOnly: true });
-      const sendRestored = findResourceIdInSnapshot(candidate, CHAT_PRIMARY_SEND_RESOURCE_ID, {
-        visibleOnly: true,
-      });
-      const busy = findResourceIdInSnapshot(candidate, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
-        visibleOnly: true,
-      });
-      return stopped || (sendRestored && !busy ? sendRestored : null);
-    }
+    { timeoutMs: 30_000 },
+    findSettledDocumentCancellationSendAction
   );
   if (!match) {
     throw new Error(withUiSnapshotSummary(snapshot, "Document cancellation did not settle."));
   }
+}
+
+function findSettledDocumentCancellationSendAction(snapshot) {
+  const sendRestored = findResourceIdInSnapshot(snapshot, CHAT_PRIMARY_SEND_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  const inputRestored = findResourceIdInSnapshot(snapshot, CHAT_MESSAGE_INPUT_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  const busy = findResourceIdInSnapshot(snapshot, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
+    visibleOnly: true,
+  });
+  return sendRestored && inputRestored?.enabled && !busy ? sendRestored : null;
 }
 
 async function dismissDocumentErrorDialogIfPresent(ctx) {
@@ -9237,6 +9563,7 @@ module.exports = {
   CLEAR_TEXT_INPUT_FALLBACK_TOTAL_TIMEOUT_MS,
   DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT,
   dumpUiHierarchy,
+  enterDocumentQaPickerDirectory,
   describeDocumentScenarioConsoleError,
   dismissTransientSurfaceWithBack,
   findCatalogRiskModelCard,
@@ -9252,6 +9579,7 @@ module.exports = {
   findPreparedSentMessageContext,
   findPreparedAssistantResponseNode,
   findTextOnlySentMessageNode,
+  findSettledDocumentCancellationSendAction,
   findNodeInSnapshot,
   findResourceIdInSnapshot,
   hasConversationHistoryStartAnchor,
@@ -9272,6 +9600,7 @@ module.exports = {
   selectScenarios,
   parseCliOptions,
   readAndroidProcessRssBytes,
+  summarizePocketAnydocSessionQaLog,
   recordDocumentQaHostCheckpoint,
   parseUiSnapshot,
   readAndroidLogcatCollector,
@@ -9279,10 +9608,12 @@ module.exports = {
   readTransferredMetroOwnership,
   resolveAndroidPackageUid,
   resolveBranchRegenerationReplacement,
+  resolveDocumentQaPickerSearchToken,
   resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
+  restoreDocumentQaAppForCleanup,
   restoreLanguageAfterScenario,
   runCapture,
   runChecked,

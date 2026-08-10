@@ -37,6 +37,7 @@ describe('chatAttachments generic attachment helpers', () => {
       'application/zip',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       'application/epub+zip',
+      'text/comma-separated-values',
     ]));
   });
 
@@ -53,6 +54,7 @@ describe('chatAttachments generic attachment helpers', () => {
     expect(resolveChatAttachmentKindFromMimeType('image/heic')).toBe('image');
     expect(resolveChatAttachmentKindFromMimeType('audio/mpeg')).toBe('audio');
     expect(resolveChatAttachmentKindFromMimeType('application/pdf')).toBe('document');
+    expect(resolveChatAttachmentKindFromMimeType('text/comma-separated-values')).toBe('document');
     expect(resolveChatAttachmentKindFromMimeType('video/mp4')).toBe('video');
     expect(resolveChatAttachmentKindFromMimeType('application/octet-stream')).toBeNull();
 
@@ -160,6 +162,10 @@ describe('chatAttachments generic attachment helpers', () => {
       fileName: 'book.epub',
     })).toBe('application/epub+zip');
     expect(resolveChatProcessableDocumentMimeType({
+      mimeType: 'text/comma-separated-values',
+      fileName: 'table.csv',
+    })).toBe('text/csv');
+    expect(resolveChatProcessableDocumentMimeType({
       mimeType: 'application/octet-stream',
       fileName: 'arbitrary.zip',
     })).toBeNull();
@@ -196,6 +202,8 @@ describe('chatAttachments generic attachment helpers', () => {
 
   it('mirrors the native mobile source-byte profile for every document family', () => {
     expect(resolveChatDocumentMaxBytes('text/csv')).toBe(MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES);
+    expect(resolveChatDocumentMaxBytes('text/comma-separated-values'))
+      .toBe(MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES);
     expect(resolveChatDocumentMaxBytes('application/pdf')).toBe(MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES);
     expect(resolveChatDocumentMaxBytes('application/rtf')).toBe(MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES);
     expect(resolveChatDocumentMaxBytes('application/epub+zip')).toBe(MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES);

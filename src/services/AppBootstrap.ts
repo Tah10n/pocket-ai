@@ -32,6 +32,7 @@ import { isHighConfidenceLikelyOomMemoryFit } from '../utils/modelMemoryFitState
 import { safeJoinModelPath } from '../utils/safeFilePath';
 import { canRecalculateMemoryFitWithoutOptionalMtpDraft } from '../utils/modelSpeculativeDecoding';
 import { notificationService } from './NotificationService';
+import { documentSessionContextCache } from './DocumentSessionContextCache';
 import {
   ChatMessage,
   ChatThread,
@@ -672,6 +673,7 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
       const cleanupResult = useChatStore.getState().pruneExpiredThreads(
         settings.chatRetentionDays,
       );
+      await documentSessionContextCache.clearThreads(cleanupResult.threadIds);
       await notificationService.dismissInferenceNotificationsForThreads(
         cleanupResult.threadIds,
       );

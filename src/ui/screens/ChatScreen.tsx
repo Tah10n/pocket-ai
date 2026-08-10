@@ -762,6 +762,7 @@ export const ChatScreen = () => {
         messages,
         messageListRevision,
         isGenerating,
+        isStoppingGeneration,
         isPreparingDocuments,
         shouldOfferSummary,
         truncatedMessageCount,
@@ -771,6 +772,7 @@ export const ChatScreen = () => {
         regenerateFromUserMessage,
         startNewChat,
     } = useChatSession();
+    const isGenerationBusy = isGenerating || isStoppingGeneration;
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
     const appearance = useScreenAppearance();
@@ -802,6 +804,7 @@ export const ChatScreen = () => {
         originalContent: string;
         attachments: ChatMessage['attachments'];
     } | null>(null);
+    const newThreadRevision = useChatStore((state) => state.newThreadRevision);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
@@ -848,7 +851,9 @@ export const ChatScreen = () => {
     const isCurrentChatModelReady = Boolean(currentChatActiveModelId)
         && isEngineReady
         && engineState.activeModelId === currentChatActiveModelId;
-    const isInputDisabled = !isCurrentChatModelReady || isPendingModelSelectionForCurrentThread;
+    const isInputDisabled = !isCurrentChatModelReady
+        || isPendingModelSelectionForCurrentThread
+        || isStoppingGeneration;
     const statusLabel = activeThread?.status === 'stopped'
         ? t('chat.statusStopped')
         : activeThread?.status === 'error'
@@ -941,8 +946,9 @@ export const ChatScreen = () => {
         && !pendingRegenerateMessage
         && engineState.activeModelId === displayedChatActiveModelId
         && hasReadyVisionSupport;
+    const attachmentThreadOwnerKey = activeThread?.id ?? `new-thread:${newThreadRevision}`;
     const imageAttachmentOwnerKey = [
-        activeThread?.id ?? 'new-thread',
+        attachmentThreadOwnerKey,
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
     const imageAttachmentDrafts = useChatImageAttachments({
@@ -959,17 +965,18 @@ export const ChatScreen = () => {
         && !pendingRegenerateMessage
         && engineState.activeModelId === displayedChatActiveModelId;
     const documentAttachmentOwnerKey = [
-        activeThread?.id ?? 'new-thread',
+        attachmentThreadOwnerKey,
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
     const documentAttachmentDrafts = useChatDocumentAttachments({
         enabled: documentAttachmentsEnabled,
         disabledReason: documentAttachmentsDisabledReason,
         ownerKey: documentAttachmentOwnerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
     });
     const openDocumentAttachmentPicker = documentAttachmentDrafts.attachDocuments;
     const mediaAttachmentOwnerKey = [
-        activeThread?.id ?? 'new-thread',
+        attachmentThreadOwnerKey,
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
     const audioAttachmentReadinessReason = resolveAudioAttachmentReadinessReason({
@@ -1519,7 +1526,7 @@ export const ChatScreen = () => {
     }, [loadModel]);
 
     const handleSelectModelFromHeader = useCallback(async (nextModelId: string) => {
-        if (isGenerating) {
+        if (isGenerationBusy) {
             return;
         }
 
@@ -1592,7 +1599,7 @@ export const ChatScreen = () => {
     }, [
         currentChatActiveModelId,
         executeThreadModelLoad,
-        isGenerating,
+        isGenerationBusy,
         showAlertForError,
         stopGeneration,
         t,
@@ -1674,7 +1681,7 @@ export const ChatScreen = () => {
         },
         applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
         activeModelId: currentChatActiveModelId,
-        canApplyReload: !isGenerating,
+        canApplyReload: !isGenerationBusy,
         modelLabelOverride: modelLabel,
         paramsOverride: paramsSource,
         defaultParamsOverride: defaultParams,
@@ -2231,7 +2238,7 @@ export const ChatScreen = () => {
                     return;
                 }
 
-                const retryThread = imageAttachmentOwnerKey.startsWith('new-thread|')
+                const retryThread = attachmentThreadOwnerKey.startsWith('new-thread:')
                     ? useChatStore.getState().getActiveThread()
                     : null;
                 const retryOwnerKey = retryThread
@@ -2249,7 +2256,18 @@ export const ChatScreen = () => {
                     return;
                 }
 
-                documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+                const retryThread = attachmentThreadOwnerKey.startsWith('new-thread:')
+                    ? useChatStore.getState().getActiveThread()
+                    : null;
+                const retryOwnerKey = retryThread
+                    ? [retryThread.id, getThreadActiveModelId(retryThread)].join('|')
+                    : null;
+
+                if (retryOwnerKey) {
+                    documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore, { preserveOwnerKey: retryOwnerKey });
+                } else {
+                    documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+                }
             };
             const restoreMediaDraftsForRetry = (draftsToRestore: readonly ChatMediaAttachmentDraft[]) => {
                 if (draftsToRestore.length === 0) {
@@ -2532,7 +2550,7 @@ export const ChatScreen = () => {
             !isScreenFocused
             || !activeThreadId
             || !currentChatActiveModelId
-            || isGenerating
+            || isGenerationBusy
             || isPendingModelSelectionForCurrentThread
         ) {
             return;
@@ -2605,7 +2623,7 @@ export const ChatScreen = () => {
         engineState.activeModelId,
         engineState.status,
         executeThreadModelLoad,
-        isGenerating,
+        isGenerationBusy,
         isPendingModelSelectionForCurrentThread,
         isScreenFocused,
         modelRegistryRevision,
@@ -2720,7 +2738,13 @@ export const ChatScreen = () => {
         setPresetSelectorOpen(false);
         setModelSelectorOpen(false);
         closeModelParameters();
-    }, [activeThread?.id, clearForcedScrollTimeouts, closeModelParameters, setShouldFollowLatestMessage]);
+    }, [
+        activeThread?.id,
+        clearForcedScrollTimeouts,
+        closeModelParameters,
+        newThreadRevision,
+        setShouldFollowLatestMessage,
+    ]);
 
     useFocusEffect(
         useCallback(() => {
@@ -2812,7 +2836,7 @@ export const ChatScreen = () => {
                     modelSelectable={hasDownloadedModels}
                     statusLabel={statusLabel}
                     statusTone={statusTone}
-                    canStartNewChat={!isGenerating}
+                    canStartNewChat={!isGenerationBusy}
                     onStartNewChat={() => {
                         try {
                             startNewChat();
@@ -2827,14 +2851,14 @@ export const ChatScreen = () => {
                     onOpenPresetSelector={() => {
                         setPresetSelectorOpen(true);
                     }}
-                    canOpenPresetSelector={!isGenerating}
+                    canOpenPresetSelector={!isGenerationBusy}
                     onOpenModelSelector={hasDownloadedModels
                         ? () => {
                             setModelSelectorOpen(true);
                         }
                         : undefined}
-                    canOpenModelSelector={hasDownloadedModels && !isGenerating}
-                    canOpenModelControls={Boolean(configurableModelId) && !isGenerating && !isModelSelectionPending}
+                    canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
+                    canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
                     onBack={router.canGoBack() ? () => router.back() : undefined}
                 />
 
@@ -3170,7 +3194,7 @@ export const ChatScreen = () => {
                 visible={isModelSelectorOpen}
                 models={downloadedModels}
                 currentModelId={displayedChatActiveModelId}
-                canSelect={!isGenerating}
+                canSelect={!isGenerationBusy}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 onClose={() => setModelSelectorOpen(false)}
                 onSelectModel={(modelId) => {

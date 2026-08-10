@@ -20,6 +20,61 @@ function createDocument(
 }
 
 describe('DocumentContextService', () => {
+  it('cooperatively yields during large reranks and observes cancellation at the checkpoint', async () => {
+    const controller = new AbortController();
+    const yieldControl = jest.fn(async () => {
+      controller.abort();
+    });
+    const chunks = Array.from(
+      { length: 128 },
+      (_, index) => `chunk ${index} with repeated searchable session context`,
+    );
+
+    await expect(selectDocumentContext({
+      question: 'searchable context',
+      documents: [createDocument('large-direct-session', chunks)],
+      maxChars: 64_000,
+      maxChunks: 64,
+      cooperativeScheduling: {
+        yieldControl,
+        yieldEveryChunks: 8,
+        minimumYieldIntervalMs: 0,
+        throwIfCancelled: () => {
+          if (controller.signal.aborted) {
+            throw new Error('selection cancelled');
+          }
+        },
+      },
+    })).rejects.toThrow('selection cancelled');
+
+    expect(yieldControl).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces cooperative checkpoints instead of adding a timer for every chunk batch', async () => {
+    const dateNowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_000);
+    const yieldControl = jest.fn(async () => undefined);
+    try {
+      await selectDocumentContext({
+        question: 'searchable context',
+        documents: [createDocument(
+          'large-fast-session',
+          Array.from({ length: 128 }, (_, index) => `searchable context chunk ${index}`),
+        )],
+        maxChars: 64_000,
+        maxChunks: 64,
+        cooperativeScheduling: {
+          yieldControl,
+          yieldEveryChunks: 8,
+          minimumYieldIntervalMs: 8,
+        },
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    expect(yieldControl).toHaveBeenCalledTimes(1);
+  });
+
   it('selects question-relevant chunks while giving each document a fair first allocation', async () => {
     const selection = await selectDocumentContext({
       question: 'Where is the lunar launch budget?',
@@ -318,11 +373,14 @@ describe('DocumentContextService', () => {
         displayName: 'boundary.txt',
         canonicalFormat: 'txt',
         chunks,
+        sourceCharCount: source.length,
       }],
       maxChars: 1_000,
-      maxChunks: 1,
+      maxChunks: chunks.length,
     });
     expect(selection.contentParts[0]?.text).toContain('-needle-');
+    expect(selection.documents[0]?.selectedCharCount).toBe(source.length);
+    expect(selection.selectedCharCount).toBeLessThanOrEqual(source.length);
   });
 
   it('preserves Markdown ATX/setext headings as structural chunks and section labels', async () => {

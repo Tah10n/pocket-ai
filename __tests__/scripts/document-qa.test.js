@@ -6,7 +6,9 @@ const {
   DOCUMENT_QA_FIXTURES,
   DOCUMENT_QA_PRIVACY,
   DOCUMENT_QA_SCENARIOS,
+  DOCUMENT_QA_SUPPORTED_FILE_EXTENSIONS,
   resolveDocumentQaFixture,
+  resolveDocumentQaStagedExtension,
   validateDocumentQaCorpus,
 } = require('../../scripts/document-qa-fixtures');
 const {
@@ -19,11 +21,15 @@ const {
   buildDocumentFailureFields,
   buildScenarios,
   describeDocumentScenarioConsoleError,
+  enterDocumentQaPickerDirectory,
   parseUiSnapshot,
   parseCliOptions,
   readAndroidProcessRssBytes,
+  resolveDocumentQaPickerSearchToken,
+  restoreDocumentQaAppForCleanup,
   selectScenarios,
   serializeReportResults,
+  summarizePocketAnydocSessionQaLog,
 } = require('../../scripts/android-scenarios');
 const {
   HOST_RESPONSE_TIMEOUT_MS,
@@ -55,8 +61,8 @@ describe('synthetic document Android QA corpus', () => {
 
   it('pins every routed fixture by byte length and SHA-256', () => {
     expect(validateDocumentQaCorpus()).toEqual({
-      fixtureCount: 13,
-      scenarioCount: 12,
+      fixtureCount: 34,
+      scenarioCount: 20,
       benchmarkCount: 14,
     });
     expect(DOCUMENT_QA_FIXTURES.every((fixture) => fixture.privacy === DOCUMENT_QA_PRIVACY)).toBe(true);
@@ -69,8 +75,16 @@ describe('synthetic document Android QA corpus', () => {
   it('covers the required formats, errors, lifecycle races, and four-document route', () => {
     const byId = new Map(DOCUMENT_QA_SCENARIOS.map((scenario) => [scenario.id, scenario]));
     expect([...byId.keys()]).toEqual([
+      'document-direct-text-flow',
+      'document-markdown-alias-send',
+      'document-csv-send',
+      'document-word-family-flow',
       'document-docx-send',
+      'document-session-follow-up',
+      'document-legacy-presentation-flow',
+      'document-ooxml-presentation-flow',
       'document-pptx-send',
+      'document-spreadsheet-family-flow',
       'document-xlsx-send',
       'document-epub-send',
       'document-pdf-send',
@@ -83,9 +97,22 @@ describe('synthetic document Android QA corpus', () => {
       'document-four-flow',
     ]);
     expect(byId.get('document-four-flow').fixtureIds).toHaveLength(4);
+    const coveredExtensions = new Set(
+      DOCUMENT_QA_SCENARIOS
+        .filter((scenario) => scenario.kind === 'success')
+        .flatMap((scenario) => scenario.fixtureIds)
+        .map((fixtureId) => resolveDocumentQaStagedExtension(
+          resolveDocumentQaFixture(fixtureId),
+        ).slice(1)),
+    );
+    expect(coveredExtensions).toEqual(new Set(DOCUMENT_QA_SUPPORTED_FILE_EXTENSIONS));
+    expect(resolveDocumentQaStagedExtension(resolveDocumentQaFixture('typical-pot'))).toBe('.pot');
+    expect(resolveDocumentQaStagedExtension(resolveDocumentQaFixture('typical-pptm'))).toBe('.pptm');
+    expect(resolveDocumentQaStagedExtension(resolveDocumentQaFixture('typical-markdown'))).toBe('.markdown');
     expect(new Set(DOCUMENT_QA_SCENARIOS.map((scenario) => scenario.kind))).toEqual(new Set([
       'success',
       'error',
+      'session-follow-up',
       'stop-race',
       'thread-race',
       'model-race',
@@ -192,6 +219,121 @@ describe('document Android scenario packs', () => {
     expect(JSON.stringify(buildDocumentFailureFields(error, 'scenario'))).not.toContain(privateText);
     expect(describeDocumentScenarioConsoleError(error)).toBe('document_scenario_run_failed');
     expect(describeDocumentScenarioConsoleError(error)).not.toContain(privateText);
+  });
+
+  it('counts only fixed native prepare/select events for session-reuse evidence', () => {
+    const privateNoise = 'ignored prompt /private/document.docx';
+    expect(summarizePocketAnydocSessionQaLog([
+      privateNoise,
+      '[PocketAnyDocQa] stage=prepare code=start',
+      '[PocketAnyDocQa] stage=prepare code=ok',
+      '[PocketAnyDocQa] stage=select code=start',
+      '[PocketAnyDocQa] stage=select code=ok',
+      '[PocketAnyDocQa] stage=select code=start',
+      '[PocketAnyDocQa] stage=select code=ok',
+    ].join('\n'))).toEqual({
+      prepareStart: 1,
+      prepareOk: 1,
+      prepareOther: 0,
+      selectStart: 2,
+      selectOk: 2,
+      selectOther: 0,
+    });
+    expect(summarizePocketAnydocSessionQaLog(
+      '[PocketAnyDocQa] stage=select code=native_failed'
+    ).selectOther).toBe(1);
+  });
+
+  it('searches DocumentsUI with the pinned alphanumeric hash token', () => {
+    expect(resolveDocumentQaPickerSearchToken(
+      'pqa-typical-json-0d3cb2d2.json',
+    )).toBe('0d3cb2d2');
+    expect(resolveDocumentQaPickerSearchToken(
+      'pqa-typical-pptm-5fa33894.pptm',
+    )).toBe('5fa33894');
+    expect(() => resolveDocumentQaPickerSearchToken('unpinned-document.json')).toThrow(
+      'pinned SHA-256 prefix',
+    );
+  });
+
+  it('returns from an external document picker before cleaning QA chats', async () => {
+    const ctx = {
+      serial: 'device-1',
+      pressBack: jest.fn(async () => undefined),
+      ensureAppVisible: jest.fn(async () => undefined),
+    };
+    const options = {
+      resolveAdbPath: () => 'adb',
+      createSnapshot: jest.fn(() => ({ nodes: [] })),
+      delayFn: jest.fn(async () => undefined),
+      isAppForegroundSnapshot: jest.fn()
+        .mockReturnValueOnce(false)
+        .mockReturnValue(true),
+    };
+
+    await restoreDocumentQaAppForCleanup(ctx, options);
+
+    expect(options.createSnapshot).toHaveBeenCalledWith('adb', 'device-1');
+    expect(ctx.pressBack).toHaveBeenCalledTimes(1);
+    expect(ctx.ensureAppVisible).not.toHaveBeenCalled();
+
+    options.isAppForegroundSnapshot.mockReturnValue(true);
+    ctx.pressBack.mockClear();
+    ctx.ensureAppVisible.mockClear();
+    await restoreDocumentQaAppForCleanup(ctx, options);
+    expect(ctx.pressBack).not.toHaveBeenCalled();
+    expect(ctx.ensureAppVisible).not.toHaveBeenCalled();
+  });
+
+  it('enters the isolated QA directory before searching DocumentsUI', async () => {
+    const initialSnapshot = {
+      nodes: [{
+        bounds: { left: 0, top: 0, right: 100, bottom: 40 },
+        contentDesc: '',
+        resourceId: 'com.google.android.documentsui:id/breadcrumb_text',
+        text: 'PocketAI-Document-QA',
+      }],
+      viewportBounds: null,
+    };
+    const directorySnapshot = {
+      nodes: [{
+        bounds: { left: 0, top: 0, right: 100, bottom: 40 },
+        contentDesc: '',
+        resourceId: 'com.google.android.documentsui:id/breadcrumb_text',
+        text: 'PocketAI-Document-QA',
+      }],
+      viewportBounds: null,
+    };
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(initialSnapshot)
+      .mockReturnValue(directorySnapshot);
+    const waitForNode = jest.fn(async (_adb, _serial, labels) => ({
+      node: { bounds: { left: 0, top: 0, right: 10, bottom: 10 } },
+      label: labels[0],
+    }));
+    const waitForTitleNode = jest.fn(async (_adb, _serial, labels) => ({
+      node: { bounds: { left: 0, top: 0, right: 10, bottom: 10 } },
+      label: labels[0],
+    }));
+    const tapNode = jest.fn();
+
+    await enterDocumentQaPickerDirectory('adb', 'device-1', 'pqa-typical-json-0d3cb2d2.json', {
+      createSnapshot,
+      delayFn: jest.fn(async () => undefined),
+      runCommand: jest.fn(),
+      tapRequiredNode: tapNode,
+      waitForAnyNode: waitForNode,
+      waitForDocumentPickerTitleNode: waitForTitleNode,
+    });
+
+    expect(waitForNode.mock.calls.map((call) => call[2])).toEqual([
+      ['Show roots', 'Показать корни'],
+    ]);
+    expect(waitForTitleNode.mock.calls.map((call) => call[2])).toEqual([
+      ['Download', 'Downloads', 'Загрузки'],
+      ['PocketAI-Document-QA'],
+    ]);
+    expect(tapNode).toHaveBeenCalledTimes(3);
   });
 });
 

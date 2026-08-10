@@ -51,7 +51,10 @@ import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import { exactPromptTokenCache } from '../../src/services/ExactPromptTokenCache';
 import { clearChatHistory } from '../../src/services/ChatHistoryService';
 import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationService';
-import { DOCUMENT_TEXT_PROCESSOR_VERSION } from '../../src/services/ChatAttachmentProcessorRegistry';
+import {
+  DOCUMENT_TEXT_PROCESSOR_VERSION,
+  chatAttachmentProcessorRegistry,
+} from '../../src/services/ChatAttachmentProcessorRegistry';
 import { chatAttachmentStorageService } from '../../src/services/ChatAttachmentStorageService';
 import {
   __setPocketAnydocNativeModuleForTests,
@@ -61,9 +64,11 @@ import i18n from '../../src/i18n';
 import {
   armAndroidQaGenerationGate,
   getAndroidQaGenerationEvidenceSnapshot,
+  recordAndroidQaPreparedGenerationEvidence,
   resetAndroidQaGenerationEvidenceForTests,
 } from '../../src/services/AndroidQaGenerationEvidence';
 import { MAX_CHAT_IMAGE_ATTACHMENTS } from '../../src/utils/chatImageAttachments';
+import { documentSessionContextCache } from '../../src/services/DocumentSessionContextCache';
 
 function expectNoStreamingProgressArtifacts(threadId: string): void {
   expect(listChatStreamingProgressStorageKeys(storage).filter(
@@ -300,6 +305,57 @@ describe('useChatSession', () => {
     } as unknown as jest.Mocked<PocketAnydocNativeModule>;
   }
 
+  function createQuerySessionNativeModule(
+    handle = 'query-session-handle',
+  ): jest.Mocked<PocketAnydocNativeModule> {
+    return {
+      getCapabilities: jest.fn(async () => ({
+        ok: true,
+        data: {
+          available: true,
+          formats: ['docx'],
+          maxSourceBytes: 12 * 1024 * 1024,
+          maxSelectionChars: 64_000,
+          maxSelectionChunks: 64,
+          supportsAssets: false,
+          supportsCancellation: true,
+        },
+      })),
+      getVersion: jest.fn(async () => ({ ok: true, data: {} })),
+      prepareDocument: jest.fn(async () => ({
+        ok: true,
+        data: {
+          handle,
+          canonicalFormat: 'docx',
+          parserId: 'anydoc',
+          parserVersion: '0.1.7',
+          exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+          sourceByteCount: 128,
+          sourceCharCount: 256,
+          contentSha256: 'c'.repeat(64),
+          chunkCount: 8,
+          assetCount: 0,
+          warnings: [],
+        },
+      })),
+      selectContext: jest.fn(async ({ query }) => {
+        const text = `SESSION-QUERY-CONTEXT:${query}`;
+        return {
+          ok: true,
+          data: {
+            chunks: [{ index: Math.min(7, query.length % 8), text, kind: 'paragraph' }],
+            selectedCharCount: text.length,
+            truncated: true,
+            warnings: ['context_truncated'],
+          },
+        };
+      }),
+      materializeAsset: jest.fn(async () => ({ ok: false, error: { code: 'invalid_request' } })),
+      cancel: jest.fn(async () => ({ ok: true, data: { cancelledCount: 0 } })),
+      release: jest.fn(async () => ({ ok: true, data: { releasedCount: 1 } })),
+    } as unknown as jest.Mocked<PocketAnydocNativeModule>;
+  }
+
   function createSavedThreadForNavigation(): string {
     return useChatStore.getState().createThread({
       modelId: 'author/model-q4',
@@ -363,6 +419,7 @@ describe('useChatSession', () => {
   }
 
   beforeEach(async () => {
+    await documentSessionContextCache.clearAll();
     jest.clearAllMocks();
     Object.defineProperty(FileSystem, 'documentDirectory', {
       configurable: true,
@@ -378,7 +435,7 @@ describe('useChatSession', () => {
     });
     await backgroundTaskService.stopBackgroundTask();
     flushPendingChatPersistenceWrites('background');
-    useChatStore.setState({ threads: {}, activeThreadId: null });
+    useChatStore.setState({ threads: {}, activeThreadId: null, newThreadRevision: 0 });
     storage.getAllKeys().forEach((key) => storage.remove(key));
     resetSharedGenerationStateForTests();
     __setPocketAnydocNativeModuleForTests(undefined);
@@ -1124,7 +1181,21 @@ describe('useChatSession', () => {
     });
   });
 
-  it('processes heavy native documents one-at-a-time in picker order through release', async () => {
+  it('starts a fresh draft session even when the current chat has not been committed', () => {
+    const getSession = renderHookHarness();
+
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(useChatStore.getState().newThreadRevision).toBe(0);
+
+    act(() => {
+      getSession()?.startNewChat();
+    });
+
+    expect(useChatStore.getState().activeThreadId).toBeNull();
+    expect(useChatStore.getState().newThreadRevision).toBe(1);
+  });
+
+  it('processes heavy native documents one-at-a-time and retains bounded session handles', async () => {
     const getSession = renderHookHarness();
     const firstDraft = createCopiedNativeDocumentDraft('ordered-first', {
       displayName: 'First.docx',
@@ -1213,10 +1284,8 @@ describe('useChatSession', () => {
     expect(events).toEqual([
       'P1:First.docx',
       'S:handle-first',
-      'R:handle-first',
       'P2:Second.docx',
       'S:handle-second',
-      'R:handle-second',
     ]);
     const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
     expect(userMessage?.attachments?.map((attachment) => attachment.id)).toEqual([
@@ -1227,6 +1296,478 @@ describe('useChatSession', () => {
       expect.stringContaining('First native content.'),
       expect.stringContaining('Second native content.'),
     ]);
+    await act(async () => {
+      await getSession()?.appendUserMessage('Compare them again');
+    });
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(2);
+    expect(events.slice(-2)).toEqual(['S:handle-first', 'S:handle-second']);
+    const followUpMessage = useChatStore.getState().getActiveThread()?.messages
+      .filter((message) => message.role === 'user')
+      .at(-1);
+    expect(followUpMessage?.contentParts).toBeUndefined();
+    expect(followUpMessage?.attachments).toBeUndefined();
+    await documentSessionContextCache.clearAll();
+    expect(events.slice(-2)).toEqual(['R:handle-first', 'R:handle-second']);
+  });
+
+  it('reranks a native document for follow-up questions without reparsing or persisting duplicate context', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('session-follow-up', {
+      displayName: 'Session follow-up.docx',
+    });
+    const nativeModule: jest.Mocked<PocketAnydocNativeModule> = {
+      getCapabilities: jest.fn(async () => ({
+        ok: true,
+        data: {
+          available: true,
+          formats: ['docx'],
+          maxSourceBytes: 12 * 1024 * 1024,
+          maxSelectionChars: 64_000,
+          maxSelectionChunks: 64,
+          supportsAssets: false,
+          supportsCancellation: true,
+        },
+      })),
+      getVersion: jest.fn(async () => ({ ok: true, data: {} })),
+      prepareDocument: jest.fn(async () => ({
+        ok: true,
+        data: {
+          handle: 'session-follow-up-handle',
+          canonicalFormat: 'docx',
+          parserId: 'anydoc',
+          parserVersion: '0.1.7',
+          exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+          sourceByteCount: 128,
+          sourceCharCount: 400,
+          contentSha256: 'f'.repeat(64),
+          chunkCount: 2,
+          assetCount: 0,
+          warnings: [],
+        },
+      })),
+      selectContext: jest.fn(async ({ query }) => {
+        const isFollowUp = query.includes('renewal');
+        const text = isFollowUp
+          ? 'RENEWAL-SENTINEL: the renewal date is 2030-05-17.'
+          : 'POLICY-SENTINEL: the initial policy is alpha.';
+        return {
+          ok: true,
+          data: {
+            chunks: [{ index: isFollowUp ? 1 : 0, text, kind: 'paragraph' }],
+            selectedCharCount: text.length,
+            truncated: true,
+            warnings: ['context_truncated'],
+          },
+        };
+      }),
+      materializeAsset: jest.fn(async () => ({ ok: false, error: { code: 'invalid_request' } })),
+      cancel: jest.fn(async () => ({ ok: true, data: { cancelledCount: 0 } })),
+      release: jest.fn(async () => ({ ok: true, data: { releasedCount: 1 } })),
+    } as unknown as jest.Mocked<PocketAnydocNativeModule>;
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('What is the policy?', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+    expect(nativeModule.selectContext).toHaveBeenCalledTimes(1);
+    expect(nativeModule.release).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('What is the renewal date?');
+    });
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+    expect(nativeModule.selectContext).toHaveBeenCalledTimes(2);
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(JSON.stringify(completionMessages)).toContain('RENEWAL-SENTINEL');
+    expect(JSON.stringify(completionMessages)).not.toContain('POLICY-SENTINEL');
+    const thread = useChatStore.getState().getActiveThread();
+    const followUpMessage = thread?.messages.filter((message) => message.role === 'user').at(-1);
+    expect(followUpMessage).toEqual(expect.objectContaining({
+      content: 'What is the renewal date?',
+    }));
+    expect(followUpMessage?.attachments).toBeUndefined();
+    expect(followUpMessage?.contentParts).toBeUndefined();
+    expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+
+    act(() => {
+      getSession()?.deleteThread(thread?.id ?? '');
+    });
+    await waitFor(() => {
+      expect(nativeModule.release).toHaveBeenCalledTimes(1);
+    });
+    expect(documentSessionContextCache.getStats().entryCount).toBe(0);
+  });
+
+  it('globally reranks cached and newly attached documents while persisting only the new document', async () => {
+    const getSession = renderHookHarness();
+    const firstDraft = createCopiedNativeDocumentDraft('session-mixed-first', {
+      displayName: 'First agreement.docx',
+    });
+    const secondDraft = createCopiedNativeDocumentDraft('session-mixed-second', {
+      displayName: 'Second agreement.docx',
+    });
+    const nativeModule: jest.Mocked<PocketAnydocNativeModule> = {
+      getCapabilities: jest.fn(async () => ({
+        ok: true,
+        data: {
+          available: true,
+          formats: ['docx'],
+          maxSourceBytes: 12 * 1024 * 1024,
+          maxSelectionChars: 64_000,
+          maxSelectionChunks: 64,
+          supportsAssets: false,
+          supportsCancellation: true,
+        },
+      })),
+      getVersion: jest.fn(async () => ({ ok: true, data: {} })),
+      prepareDocument: jest.fn(async ({ displayName }) => {
+        const first = displayName.includes('First');
+        return {
+          ok: true,
+          data: {
+            handle: first ? 'mixed-first-handle' : 'mixed-second-handle',
+            canonicalFormat: 'docx',
+            parserId: 'anydoc',
+            parserVersion: '0.1.7',
+            exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+            sourceByteCount: 128,
+            sourceCharCount: 128,
+            contentSha256: (first ? 'a' : 'b').repeat(64),
+            chunkCount: 2,
+            assetCount: 0,
+            warnings: [],
+          },
+        };
+      }),
+      selectContext: jest.fn(async ({ handle, query }) => {
+        const prefix = handle === 'mixed-first-handle' ? 'FIRST' : 'SECOND';
+        const text = `${prefix}-CONTEXT selected for ${query}`;
+        return {
+          ok: true,
+          data: {
+            chunks: [{ index: query.includes('compare') ? 1 : 0, text, kind: 'paragraph' }],
+            selectedCharCount: text.length,
+            truncated: true,
+            warnings: ['context_truncated'],
+          },
+        };
+      }),
+      materializeAsset: jest.fn(async () => ({ ok: false, error: { code: 'invalid_request' } })),
+      cancel: jest.fn(async () => ({ ok: true, data: { cancelledCount: 0 } })),
+      release: jest.fn(async () => ({ ok: true, data: { releasedCount: 1 } })),
+    } as unknown as jest.Mocked<PocketAnydocNativeModule>;
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Summarize the first agreement', {
+        documentAttachmentDrafts: [firstDraft],
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('compare both agreements', {
+        documentAttachmentDrafts: [secondDraft],
+      });
+    });
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(2);
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(JSON.stringify(completionMessages)).toContain('FIRST-CONTEXT selected for compare both agreements');
+    expect(JSON.stringify(completionMessages)).toContain('SECOND-CONTEXT selected for compare both agreements');
+    const userMessages = useChatStore.getState().getActiveThread()?.messages.filter(
+      (message) => message.role === 'user',
+    ) ?? [];
+    const secondMessage = userMessages.at(-1);
+    expect(secondMessage?.attachments?.filter(
+      (attachment) => 'kind' in attachment && attachment.kind === 'document',
+    )).toEqual([expect.objectContaining({ id: secondDraft.id })]);
+    expect(JSON.stringify(secondMessage?.contentParts)).toContain('SECOND-CONTEXT');
+    expect(JSON.stringify(secondMessage?.contentParts)).not.toContain('FIRST-CONTEXT');
+    expect(documentSessionContextCache.getStats().entryCount).toBe(2);
+  });
+
+  it('uses prior session documents when editing an ordinary follow-up message', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('session-edit-follow-up');
+    const nativeModule = createQuerySessionNativeModule('session-edit-follow-up-handle');
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Read the agreement', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('What is the renewal rule?');
+    });
+    const followUpMessage = useChatStore.getState().getActiveThread()?.messages.filter(
+      (message) => message.role === 'user',
+    ).at(-1);
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(
+        followUpMessage?.id ?? '',
+        'What is the cancellation rule?',
+      );
+    });
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+    expect(nativeModule.selectContext).toHaveBeenCalledTimes(3);
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(JSON.stringify(completionMessages)).toContain(
+      'SESSION-QUERY-CONTEXT:What is the cancellation rule?',
+    );
+    const editedMessage = useChatStore.getState().getActiveThread()?.messages.find(
+      (message) => message.id === followUpMessage?.id,
+    );
+    expect(editedMessage).toEqual(expect.objectContaining({
+      content: 'What is the cancellation rule?',
+    }));
+    expect(editedMessage?.contentParts).toBeUndefined();
+    expect(editedMessage?.attachments).toBeUndefined();
+  });
+
+  it('reranks session documents when regenerating the last assistant response', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('session-regenerate-last');
+    const nativeModule = createQuerySessionNativeModule('session-regenerate-last-handle');
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Read the policy', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    await act(async () => {
+      await getSession()?.appendUserMessage('Explain the late fee');
+    });
+    const userMessageCountBefore = useChatStore.getState().getActiveThread()?.messages.filter(
+      (message) => message.role === 'user',
+    ).length;
+
+    await act(async () => {
+      await getSession()?.regenerateLastResponse();
+    });
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+    expect(nativeModule.selectContext).toHaveBeenCalledTimes(3);
+    const completionMessages = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(JSON.stringify(completionMessages)).toContain(
+      'SESSION-QUERY-CONTEXT:Explain the late fee',
+    );
+    const thread = useChatStore.getState().getActiveThread();
+    expect(thread?.messages.filter((message) => message.role === 'user')).toHaveLength(
+      userMessageCountBefore ?? 0,
+    );
+    expect(thread?.messages.filter((message) => message.role === 'user').at(-1)?.contentParts)
+      .toBeUndefined();
+  });
+
+  it('keeps tail document handles when an empty branch regeneration restores the durable branch', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('session-rollback-tail');
+    const nativeModule = createQuerySessionNativeModule('session-rollback-tail-handle');
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Original prompt');
+    });
+    const originalUserMessageId = useChatStore.getState().getActiveThread()?.messages.find(
+      (message) => message.role === 'user',
+    )?.id ?? '';
+    await act(async () => {
+      await getSession()?.appendUserMessage('Tail document prompt', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(async () => ({ text: '' }));
+
+    await act(async () => {
+      await getSession()?.regenerateFromUserMessage(originalUserMessageId, 'Edited original prompt');
+    });
+
+    const restoredThread = useChatStore.getState().getActiveThread();
+    expect(restoredThread?.messages.some((message) => message.attachments?.some((attachment) => (
+      'kind' in attachment && attachment.kind === 'document' && attachment.id === documentDraft.id
+    )))).toBe(true);
+    expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+      entryCount: 1,
+      pendingReleaseCount: 0,
+    }));
+    expect(nativeModule.release).not.toHaveBeenCalled();
+  });
+
+  it('releases a cached session document when its message branch is deleted', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('session-delete-branch');
+    const nativeModule: jest.Mocked<PocketAnydocNativeModule> = {
+      getCapabilities: jest.fn(async () => ({
+        ok: true,
+        data: {
+          available: true,
+          formats: ['docx'],
+          maxSourceBytes: 12 * 1024 * 1024,
+          maxSelectionChars: 64_000,
+          maxSelectionChunks: 64,
+          supportsAssets: false,
+          supportsCancellation: true,
+        },
+      })),
+      getVersion: jest.fn(async () => ({ ok: true, data: {} })),
+      prepareDocument: jest.fn(async () => ({
+        ok: true,
+        data: {
+          handle: 'session-delete-branch-handle',
+          canonicalFormat: 'docx',
+          parserId: 'anydoc',
+          parserVersion: '0.1.7',
+          exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+          sourceByteCount: 128,
+          sourceCharCount: 30,
+          contentSha256: 'e'.repeat(64),
+          chunkCount: 1,
+          assetCount: 0,
+          warnings: [],
+        },
+      })),
+      selectContext: jest.fn(async () => ({
+        ok: true,
+        data: {
+          chunks: [{ index: 0, text: 'Branch-owned document context.', kind: 'paragraph' }],
+          selectedCharCount: 30,
+          truncated: false,
+          warnings: [],
+        },
+      })),
+      materializeAsset: jest.fn(async () => ({ ok: false, error: { code: 'invalid_request' } })),
+      cancel: jest.fn(async () => ({ ok: true, data: { cancelledCount: 0 } })),
+      release: jest.fn(async () => ({ ok: true, data: { releasedCount: 1 } })),
+    } as unknown as jest.Mocked<PocketAnydocNativeModule>;
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Use this document', {
+        documentAttachmentDrafts: [documentDraft],
+      });
+    });
+    const thread = useChatStore.getState().getActiveThread();
+    const documentMessageId = thread?.messages.find((message) => message.role === 'user')?.id;
+    expect(documentMessageId).toBeDefined();
+    expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+    expect(nativeModule.release).not.toHaveBeenCalled();
+
+    let deleted = false;
+    act(() => {
+      deleted = getSession()?.deleteMessage(documentMessageId ?? '') ?? false;
+    });
+
+    expect(deleted).toBe(true);
+    await waitFor(() => {
+      expect(documentSessionContextCache.getStats().entryCount).toBe(0);
+      expect(nativeModule.release).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('releases an older transient session handle and retries native cache pressure without dropping the send', async () => {
+    const getSession = renderHookHarness();
+    const firstDraft = createCopiedNativeDocumentDraft('cache-pressure-first');
+    const secondDraft = createCopiedNativeDocumentDraft('cache-pressure-second');
+    const events: string[] = [];
+    let prepareAttempt = 0;
+    const prepared = (handle: string, digest: string) => ({
+      ok: true,
+      data: {
+        handle,
+        canonicalFormat: 'docx',
+        parserId: 'anydoc',
+        parserVersion: '0.1.7',
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        sourceByteCount: 128,
+        sourceCharCount: 32,
+        contentSha256: digest.repeat(64),
+        chunkCount: 1,
+        assetCount: 0,
+        warnings: [],
+      },
+    });
+    const nativeModule: jest.Mocked<PocketAnydocNativeModule> = {
+      getCapabilities: jest.fn(async () => ({ ok: true, data: { available: true } })),
+      getVersion: jest.fn(async () => ({ ok: true, data: {} })),
+      prepareDocument: jest.fn(async ({ displayName }) => {
+        prepareAttempt += 1;
+        events.push(`prepare:${prepareAttempt}:${displayName}`);
+        if (prepareAttempt === 1) {
+          return prepared('pressure-handle-first', 'a');
+        }
+        if (prepareAttempt === 2) {
+          return {
+            ok: false,
+            error: {
+              code: 'resource_limit',
+              limit: 'max_cache_bytes',
+              message: 'cache full',
+              retryable: false,
+            },
+          };
+        }
+        return prepared('pressure-handle-second', 'b');
+      }),
+      selectContext: jest.fn(async ({ handle }) => {
+        const text = handle === 'pressure-handle-first' ? 'First pressure context.' : 'Second pressure context.';
+        return {
+          ok: true,
+          data: {
+            chunks: [{ index: 0, text, kind: 'paragraph' }],
+            selectedCharCount: text.length,
+            truncated: false,
+            warnings: [],
+          },
+        };
+      }),
+      materializeAsset: jest.fn(async () => ({ ok: false, error: { code: 'invalid_request' } })),
+      cancel: jest.fn(async () => ({ ok: true, data: { cancelledCount: 0 } })),
+      release: jest.fn(async (handle) => {
+        events.push(`release:${handle}`);
+        return { ok: true, data: { releasedCount: 1 } };
+      }),
+    } as unknown as jest.Mocked<PocketAnydocNativeModule>;
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Compare both documents', {
+        documentAttachmentDrafts: [firstDraft, secondDraft],
+      });
+    });
+
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(3);
+    expect(events).toEqual([
+      `prepare:1:${firstDraft.displayName}`,
+      `prepare:2:${secondDraft.displayName}`,
+      'release:pressure-handle-first',
+      `prepare:3:${secondDraft.displayName}`,
+    ]);
+    const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
+    expect(userMessage?.attachments?.filter((attachment) => (
+      'kind' in attachment && attachment.kind === 'document'
+    ))).toHaveLength(2);
+    expect(JSON.stringify(userMessage?.contentParts)).toContain('First pressure context.');
+    expect(JSON.stringify(userMessage?.contentParts)).toContain('Second pressure context.');
+    expect(documentSessionContextCache.getStats().entryCount).toBe(1);
+
+    await act(async () => {
+      await getSession()?.appendUserMessage('Compare both documents once more');
+    });
+    const followUpPrompt = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0]?.messages;
+    expect(JSON.stringify(followUpPrompt)).toContain('First pressure context.');
+    expect(JSON.stringify(followUpPrompt)).toContain('Second pressure context.');
+    expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(3);
+
+    await documentSessionContextCache.clearAll();
+    expect(nativeModule.release).toHaveBeenCalledWith('pressure-handle-second');
   });
 
   it('keeps successful documents and reports stable per-file failures in one send', async () => {
@@ -1243,7 +1784,10 @@ describe('useChatSession', () => {
       }
       return 'Successful document content';
     });
-    const onDocumentAttachmentFailures = jest.fn();
+    let activeThreadIdAtFailure: string | null = null;
+    const onDocumentAttachmentFailures = jest.fn(() => {
+      activeThreadIdAtFailure = useChatStore.getState().activeThreadId;
+    });
 
     await act(async () => {
       await getSession()?.appendUserMessage('Use the readable document', {
@@ -1257,6 +1801,7 @@ describe('useChatSession', () => {
       errorCode: 'chat_attachment_corrupt',
     }]);
     const thread = useChatStore.getState().getActiveThread();
+    expect(activeThreadIdAtFailure).toBe(thread?.id);
     const userMessage = thread?.messages[0];
     expect(userMessage?.attachments).toEqual([
       expect.objectContaining({ id: successfulDraft.id, displayName: 'Successful notes.txt' }),
@@ -1564,7 +2109,7 @@ describe('useChatSession', () => {
 
     expect(nativeModule.materializeAsset).toHaveBeenCalledTimes(MAX_CHAT_IMAGE_ATTACHMENTS);
     expect(nativeModule.materializeAsset.mock.calls.map(([request]) => request.assetId)).toEqual([0, 1, 2, 3]);
-    expect(nativeModule.release).toHaveBeenCalledWith('vision-handle');
+    expect(nativeModule.release).not.toHaveBeenCalled();
     const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
     const derivedImages = userMessage?.attachments?.filter((attachment) => (
       'derivedFromAssetId' in attachment
@@ -1599,6 +2144,76 @@ describe('useChatSession', () => {
         }),
       ]),
     }));
+    await documentSessionContextCache.clearAll();
+    expect(nativeModule.release).toHaveBeenCalledWith('vision-handle');
+  });
+
+  it('materializes cached selected assets transiently for a follow-up without duplicating history', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('session-vision-document');
+    const nativeModule = createDocumentAssetNativeModule(['image/png']);
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    (llmEngineService.getContextSize as jest.Mock).mockReturnValue(8_192);
+    const readiness: MultimodalReadinessState = {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      support: ['vision'],
+      checkedAt: 1,
+    };
+    let copiedAssetIndex = 0;
+    const copyImageSpy = jest.spyOn(chatAttachmentStorageService, 'copyImageAssetToDraft')
+      .mockImplementation(async (asset) => {
+        const index = copiedAssetIndex;
+        copiedAssetIndex += 1;
+        return {
+          id: `session-derived-${index}`,
+          pickerUri: asset.uri,
+          previewUri: `file:///test-dir/chat-attachments/session-derived-${index}.png`,
+          localUri: `file:///test-dir/chat-attachments/session-derived-${index}.png`,
+          pathCategory: 'chat_attachment',
+          fileName: `session-derived-${index}.png`,
+          mediaType: asset.mimeType,
+          size: asset.fileSize,
+          width: asset.width,
+          height: asset.height,
+          copyStatus: 'copied',
+        };
+      });
+    const discardDraftsSpy = jest.spyOn(chatAttachmentStorageService, 'discardDrafts')
+      .mockResolvedValue(undefined);
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Inspect this figure', {
+          documentAttachmentDrafts: [documentDraft],
+          multimodalReadiness: readiness,
+        });
+      });
+      await act(async () => {
+        await getSession()?.appendUserMessage('Inspect the figure again', {
+          multimodalReadiness: readiness,
+        });
+      });
+      expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+      expect(nativeModule.materializeAsset).toHaveBeenCalledTimes(2);
+      const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+      expect(JSON.stringify(completionCall?.messages)).toContain('/test-dir/chat-attachments/session-derived-1.png');
+      expect(JSON.stringify(completionCall?.messages)).not.toContain('/test-dir/chat-attachments/session-derived-0.png');
+      const userMessages = useChatStore.getState().getActiveThread()?.messages.filter(
+        (message) => message.role === 'user',
+      ) ?? [];
+      expect(userMessages[0]?.attachments).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'session-derived-0', derivedFromAttachmentId: documentDraft.id }),
+      ]));
+      expect(userMessages[1]?.attachments).toBeUndefined();
+      expect(userMessages[1]?.contentParts).toBeUndefined();
+      expect(discardDraftsSpy).toHaveBeenCalledWith([
+        expect.objectContaining({ id: 'session-derived-1' }),
+      ]);
+      expect(nativeModule.release).not.toHaveBeenCalled();
+    } finally {
+      copyImageSpy.mockRestore();
+      discardDraftsSpy.mockRestore();
+    }
   });
 
   it('keeps selected GIF/WebP text and marks the unsupported vision assets as skipped', async () => {
@@ -1626,7 +2241,7 @@ describe('useChatSession', () => {
     });
 
     expect(nativeModule.materializeAsset).not.toHaveBeenCalled();
-    expect(nativeModule.release).toHaveBeenCalledWith('asset-warning-handle');
+    expect(nativeModule.release).not.toHaveBeenCalled();
     const userMessage = useChatStore.getState().getActiveThread()?.messages[0];
     expect(userMessage?.attachments).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -1642,6 +2257,8 @@ describe('useChatSession', () => {
       expect.stringContaining('assets_skipped'),
     );
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    await documentSessionContextCache.clearAll();
+    expect(nativeModule.release).toHaveBeenCalledWith('asset-warning-handle');
   });
 
   it('marks selected PNG assets as skipped when the active model is not vision-ready', async () => {
@@ -1969,6 +2586,13 @@ describe('useChatSession', () => {
       copyStatus: 'copied',
     };
     (FileSystem.readAsStringAsync as jest.Mock).mockClear();
+    recordAndroidQaPreparedGenerationEvidence({
+      userMessageId: 'previous-user',
+      assistantMessageId: 'previous-assistant',
+      attachments: [{ id: 'previous-document', kind: 'document' }],
+      documentSentinelIds: ['orchid-742', 'zebra-end-991'],
+    });
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).not.toBeNull();
     expect(armAndroidQaGenerationGate('during-document-preparation')).toBe(true);
     let sendPromise: Promise<void> | undefined;
 
@@ -1982,6 +2606,7 @@ describe('useChatSession', () => {
         phase: 'during-document-preparation',
       }));
     });
+    expect(getAndroidQaGenerationEvidenceSnapshot().preparedGeneration).toBeNull();
     expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -4818,7 +5443,9 @@ describe('useChatSession', () => {
       });
       expect(failingFinalize).toHaveBeenCalledTimes(1);
 
-      resetActiveChatGenerationRuntimeForPrivateStorageReset();
+      act(() => {
+        resetActiveChatGenerationRuntimeForPrivateStorageReset();
+      });
       await act(async () => {
         await stopActiveChatGenerationForPrivateStorageBlocked();
       });
@@ -5070,6 +5697,7 @@ describe('useChatSession', () => {
 
     expect(llmEngineService.interruptActiveCompletion).toHaveBeenCalledTimes(1);
     expect(useChatStore.getState().getActiveThread()?.status).toBe('stopped');
+    expect(getSession()?.isStoppingGeneration).toBe(true);
 
     let sendError: unknown;
     await act(async () => {
@@ -5092,9 +5720,16 @@ describe('useChatSession', () => {
     await act(async () => {
       resolveInterrupt?.();
       await stopPromise;
+    });
+
+    expect(getSession()?.isStoppingGeneration).toBe(true);
+
+    await act(async () => {
       resolveCompletion?.();
       await sendPromise;
     });
+
+    expect(getSession()?.isStoppingGeneration).toBe(false);
   });
 
   it('does not start engine completion when stop is requested during prompt preparation', async () => {
@@ -5837,6 +6472,264 @@ describe('useChatSession', () => {
         ],
       }),
     );
+  });
+
+  it('reprocesses retained documents for an edited question and replaces stale derived context', async () => {
+    const documentDraft = createCopiedDocumentDraft('edited-document');
+    const processSpy = jest.spyOn(
+      chatAttachmentProcessorRegistry,
+      'processDocumentTextAttachment',
+    ).mockImplementation(async (attachment, options = {}) => {
+      const isEditedQuestion = options.query === 'Question B';
+      const selectedText = isEditedQuestion ? 'Context selected for B' : 'Context selected for A';
+      return {
+        attachmentId: attachment.id,
+        runtimeInput: 'document_text',
+        processorId: 'document-text',
+        processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION,
+        mimeType: 'text/plain',
+        canonicalFormat: 'txt',
+        text: selectedText,
+        chunks: [{ index: 0, text: selectedText, kind: 'paragraph' }],
+        truncated: false,
+        extractedCharCount: selectedText.length,
+        sourceCharCount: selectedText.length,
+        contentHash: `sha256:${'a'.repeat(64)}`,
+        contentSha256: 'a'.repeat(64),
+        sourceByteCount: documentDraft.sizeBytes,
+        selectedChunkCount: 1,
+        chunkCount: 1,
+        isScanned: false,
+        warnings: [],
+      };
+    });
+
+    try {
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await getSession()?.appendUserMessage('Question A', {
+          documentAttachmentDrafts: [documentDraft],
+        });
+      });
+      const initialThread = useChatStore.getState().getActiveThread()!;
+      const userMessageId = initialThread.messages[0].id;
+      const staleDerivedUri = 'test-dir/chat-attachments/stale-derived-document-image.png';
+      act(() => {
+        useChatStore.setState((state) => ({
+          threads: {
+            ...state.threads,
+            [initialThread.id]: {
+              ...initialThread,
+              messages: initialThread.messages.map((message) => (
+                message.id === userMessageId
+                  ? {
+                      ...message,
+                      attachments: [
+                        ...(message.attachments ?? []),
+                        {
+                          id: 'stale-derived-document-image',
+                          threadId: initialThread.id,
+                          messageId: userMessageId,
+                          localUri: staleDerivedUri,
+                          pathCategory: 'chat_attachment' as const,
+                          mediaType: 'image/png',
+                          fileName: 'stale-derived-document-image.png',
+                          size: 256,
+                          width: 32,
+                          height: 32,
+                          source: 'derived_processor' as const,
+                          derivedFromAttachmentId: documentDraft.id,
+                          derivedFromAssetId: 0,
+                          createdAt: 1,
+                        },
+                      ],
+                    }
+                  : message
+              )),
+            },
+          },
+        }));
+      });
+      await waitFor(() => {
+        expect(getSession()?.activeThread?.messages[0]?.attachments).toHaveLength(2);
+      });
+      (FileSystem.getInfoAsync as jest.Mock).mockImplementation(async (uri: string) => ({
+        exists: uri !== staleDerivedUri,
+        size: 123_456,
+      }));
+      (llmEngineService.chatCompletion as jest.Mock).mockClear();
+
+      await act(async () => {
+        await getSession()?.regenerateFromUserMessage(userMessageId, 'Question B');
+      });
+
+      const regeneratedUserMessage = useChatStore.getState().getActiveThread()?.messages[0];
+      expect(processSpy.mock.calls.map(([, options]) => options?.query)).toEqual([
+        'Question A',
+        'Question B',
+      ]);
+      expect(regeneratedUserMessage).toEqual(expect.objectContaining({
+        content: 'Question B',
+        attachments: [expect.objectContaining({
+          id: documentDraft.id,
+          kind: 'document',
+        })],
+        contentParts: [expect.objectContaining({
+          text: expect.stringContaining('Context selected for B'),
+        })],
+      }));
+      expect(JSON.stringify(regeneratedUserMessage)).not.toContain('Context selected for A');
+      expect(JSON.stringify(regeneratedUserMessage)).not.toContain(staleDerivedUri);
+      const completionCall = (llmEngineService.chatCompletion as jest.Mock).mock.calls.at(-1)?.[0];
+      expect(JSON.stringify(completionCall?.messages)).toContain('Context selected for B');
+      expect(JSON.stringify(completionCall?.messages)).not.toContain('Context selected for A');
+      expect(FileSystem.getInfoAsync).not.toHaveBeenCalledWith(staleDerivedUri);
+    } finally {
+      processSpy.mockRestore();
+    }
+  });
+
+  it('keeps the original branch when an edited question cannot retain every document', async () => {
+    const firstDraft = createCopiedDocumentDraft('edited-budget-first');
+    const secondDraft = createCopiedDocumentDraft('edited-budget-second');
+    const processSpy = jest.spyOn(
+      chatAttachmentProcessorRegistry,
+      'processDocumentTextAttachment',
+    ).mockImplementation(async (attachment, options = {}) => {
+      const shouldOverflow = options.query === 'Question B' && attachment.id === secondDraft.id;
+      const selectedText = shouldOverflow
+        ? 'x'.repeat(100_000)
+        : `Context for ${attachment.id}`;
+      return {
+        attachmentId: attachment.id,
+        runtimeInput: 'document_text',
+        processorId: 'document-text',
+        processorVersion: DOCUMENT_TEXT_PROCESSOR_VERSION,
+        mimeType: 'text/plain',
+        canonicalFormat: 'txt',
+        text: selectedText,
+        chunks: [{ index: 0, text: selectedText, kind: 'paragraph' }],
+        truncated: false,
+        extractedCharCount: selectedText.length,
+        sourceCharCount: selectedText.length,
+        contentHash: `sha256:${'a'.repeat(64)}`,
+        contentSha256: 'a'.repeat(64),
+        sourceByteCount: attachment.sizeBytes,
+        selectedChunkCount: 1,
+        chunkCount: 1,
+        isScanned: false,
+        warnings: [],
+      };
+    });
+
+    try {
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await getSession()?.appendUserMessage('Question A', {
+          documentAttachmentDrafts: [firstDraft, secondDraft],
+        });
+      });
+      const threadBeforeRegenerate = useChatStore.getState().getActiveThread()!;
+      const userMessageId = threadBeforeRegenerate.messages[0].id;
+      const completionCallsBeforeRegenerate = (llmEngineService.chatCompletion as jest.Mock).mock.calls.length;
+      expect(threadBeforeRegenerate.messages[0].attachments?.filter(
+        (attachment) => 'kind' in attachment && attachment.kind === 'document',
+      )).toHaveLength(2);
+      let thrown: unknown;
+
+      await act(async () => {
+        try {
+          await getSession()?.regenerateFromUserMessage(userMessageId, 'Question B');
+        } catch (error) {
+          thrown = error;
+        }
+      });
+
+      expect(thrown).toEqual(expect.objectContaining({
+        code: 'chat_attachment_too_large_for_context',
+      }));
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(completionCallsBeforeRegenerate);
+      expect(useChatStore.getState().getActiveThread()?.messages)
+        .toEqual(threadBeforeRegenerate.messages);
+    } finally {
+      processSpy.mockRestore();
+    }
+  });
+
+  it('rematerializes selected embedded document images for an edited question', async () => {
+    const getSession = renderHookHarness();
+    const documentDraft = createCopiedNativeDocumentDraft('edited-asset-document');
+    const nativeModule = createDocumentAssetNativeModule(['image/png']);
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const readiness: MultimodalReadinessState = {
+      modelId: 'author/model-q4',
+      status: 'ready',
+      support: ['vision'],
+      checkedAt: 1,
+    };
+    let copyIndex = 0;
+    const copyImageSpy = jest.spyOn(chatAttachmentStorageService, 'copyImageAssetToDraft')
+      .mockImplementation(async (asset) => {
+        const index = copyIndex;
+        copyIndex += 1;
+        return {
+          id: `edited-derived-${index}`,
+          pickerUri: asset.uri,
+          previewUri: `file:///test-dir/chat-attachments/edited-derived-${index}.png`,
+          localUri: `file:///test-dir/chat-attachments/edited-derived-${index}.png`,
+          pathCategory: 'chat_attachment',
+          fileName: `edited-derived-${index}.png`,
+          mediaType: asset.mimeType,
+          size: asset.fileSize,
+          width: asset.width,
+          height: asset.height,
+          copyStatus: 'copied',
+        };
+      });
+
+    try {
+      await act(async () => {
+        await getSession()?.appendUserMessage('Inspect embedded image A', {
+          documentAttachmentDrafts: [documentDraft],
+          multimodalReadiness: readiness,
+        });
+      });
+      const initialUserMessage = useChatStore.getState().getActiveThread()?.messages[0];
+      expect(initialUserMessage?.attachments?.some(
+        (attachment) => attachment.id === 'edited-derived-0',
+      )).toBe(true);
+
+      await act(async () => {
+        await getSession()?.regenerateFromUserMessage(
+          initialUserMessage?.id ?? '',
+          'Inspect embedded image B',
+          { multimodalReadiness: readiness },
+        );
+      });
+
+      const regeneratedUserMessage = useChatStore.getState().getActiveThread()?.messages[0];
+      expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(2);
+      expect(nativeModule.selectContext).toHaveBeenCalledTimes(2);
+      expect(nativeModule.materializeAsset).toHaveBeenCalledTimes(2);
+      expect(copyImageSpy).toHaveBeenCalledTimes(2);
+      expect(regeneratedUserMessage?.attachments?.some(
+        (attachment) => attachment.id === 'edited-derived-0',
+      )).toBe(false);
+      expect(regeneratedUserMessage?.attachments).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: 'edited-derived-1',
+          source: 'derived_processor',
+          derivedFromAttachmentId: documentDraft.id,
+          derivedFromAssetId: 0,
+        }),
+        expect.objectContaining({
+          id: documentDraft.id,
+          kind: 'document',
+        }),
+      ]));
+    } finally {
+      copyImageSpy.mockRestore();
+    }
   });
 
   it('regenerates an image-only user message while preserving media paths', async () => {

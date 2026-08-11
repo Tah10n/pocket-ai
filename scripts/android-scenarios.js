@@ -616,6 +616,8 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "document-gate-armed",
   "document-gate-active",
   "prompt-focus-start",
+  "prompt-focused",
+  "prompt-primer-cleared",
   "prompt-injected",
   "keyboard-dismissed",
   "send-tapped",
@@ -2934,6 +2936,9 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
   if (!promptInput?.bounds) {
     throw new Error("Document QA attachment-ready snapshot has no prompt input bounds.");
   }
+  if (String(promptInput.text ?? "").trim() !== "") {
+    throw new Error("Document QA attachment-ready composer is not empty.");
+  }
   const sendAction = findResourceIdInSnapshot(
     readySnapshot,
     CHAT_PRIMARY_SEND_RESOURCE_ID,
@@ -3250,26 +3255,35 @@ async function inputFocusedTextForImmediateSend(adbPath, serial, value, options 
     throw new Error("Immediate Android text send requires an explicit focused-input tap.");
   }
   const runCommand = options.runCommand ?? runChecked;
-  const clearInput = options.clearInput ?? clearFocusedTextInput;
   const wait = options.delayFn ?? delay;
+  const onProgress = options.onProgress ?? (() => undefined);
 
   await focusInput();
+  onProgress("prompt-focused");
   await wait(options.focusSettleMs ?? 250);
-  clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
-  // Prime Android's focused-input event path, then clear it again. Hosted emulators can drop the
-  // first injected key immediately after focus even though adb reports success.
+  // Prime Android's focused-input event path, then delete exactly that primer. The document QA
+  // composer is asserted empty before focus, so this avoids the select-all/repeated-delete path
+  // that can stall a hosted emulator while still absorbing a dropped first injected key.
   runCommand(adbPath, ["-s", serial, "shell", "input", "text", "X"], {
     timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
   });
   await wait(options.primerSettleMs ?? 100);
-  clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
+  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], {
+    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
+  });
+  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], {
+    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
+  });
+  onProgress("prompt-primer-cleared");
   await wait(options.clearSettleMs ?? 100);
   runCommand(adbPath, ["-s", serial, "shell", "input", "text", escapedValue], {
     timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
   });
+  onProgress("prompt-injected");
   runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"], {
     timeout: ADB_COMMAND_TIMEOUT_MS,
   });
+  onProgress("keyboard-dismissed");
   await wait(options.keyboardDismissSettleMs ?? 500);
 }
 
@@ -3509,13 +3523,15 @@ async function sendDocumentPromptImmediately(ctx, promptSentinel, capturedContro
     if (!input?.bounds || !send?.bounds) {
       throw new Error("Document QA prompt controls have no stable tap bounds.");
     }
+    if (String(input.text ?? "").trim() !== "") {
+      throw new Error("Document QA prompt composer is not empty.");
+    }
     controls = { inputBounds: input.bounds, sendBounds: send.bounds };
   }
   await inputFocusedTextForImmediateSend(adbPath, ctx.serial, promptSentinel, {
     focusInput: () => tapBounds(adbPath, ctx.serial, controls.inputBounds),
+    onProgress: (stage) => recordDocumentQaHostCheckpoint(adbPath, ctx.serial, stage),
   });
-  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-injected");
-  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "keyboard-dismissed");
   tapBounds(adbPath, ctx.serial, controls.sendBounds);
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "send-tapped");
   return controls.sendBounds;

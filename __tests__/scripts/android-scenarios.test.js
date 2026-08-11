@@ -1427,7 +1427,7 @@ describe('android-scenarios npm defaults', () => {
     const prompt = 'Document prompt 123';
     const focusInput = jest.fn().mockResolvedValue(undefined);
     const runCommand = jest.fn();
-    const clearInput = jest.fn();
+    const onProgress = jest.fn();
 
     await inputFocusedTextForImmediateSend('adb', 'device-1', prompt, {
       focusSettleMs: 0,
@@ -1435,13 +1435,12 @@ describe('android-scenarios npm defaults', () => {
       primerSettleMs: 0,
       clearSettleMs: 0,
       runCommand,
-      clearInput,
       delayFn: async () => undefined,
       focusInput,
+      onProgress,
     });
 
     expect(focusInput).toHaveBeenCalledTimes(1);
-    expect(clearInput).toHaveBeenCalledTimes(2);
     expect(runCommand).toHaveBeenNthCalledWith(
       1,
       'adb',
@@ -1451,15 +1450,33 @@ describe('android-scenarios npm defaults', () => {
     expect(runCommand).toHaveBeenNthCalledWith(
       2,
       'adb',
-      ['-s', 'device-1', 'shell', 'input', 'text', escapeAdbInputText(prompt)],
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL'],
       expect.objectContaining({ timeout: 5_000 }),
     );
     expect(runCommand).toHaveBeenNthCalledWith(
       3,
       'adb',
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL'],
+      expect.objectContaining({ timeout: 5_000 }),
+    );
+    expect(runCommand).toHaveBeenNthCalledWith(
+      4,
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'text', escapeAdbInputText(prompt)],
+      expect.objectContaining({ timeout: 5_000 }),
+    );
+    expect(runCommand).toHaveBeenNthCalledWith(
+      5,
+      'adb',
       ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_BACK'],
       expect.objectContaining({ timeout: 15_000 }),
     );
+    expect(onProgress.mock.calls.map(([stage]) => stage)).toEqual([
+      'prompt-focused',
+      'prompt-primer-cleared',
+      'prompt-injected',
+      'keyboard-dismissed',
+    ]);
   });
 
   it('records only allowlisted document QA host checkpoints without private values', () => {

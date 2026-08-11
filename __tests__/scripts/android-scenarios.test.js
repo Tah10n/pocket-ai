@@ -513,6 +513,27 @@ describe('android-scenarios smoke bootstrap args', () => {
       true,
       {},
     )).toThrow(ScenarioPreconditionFailureError);
+
+    const documentEnv = {};
+    expect(configureScenarioBuildEnvironment(
+      { pack: 'documents' },
+      true,
+      documentEnv,
+    )).toEqual({
+      androidQaEvidence: true,
+      apkVariant: 'release',
+    });
+    expect(documentEnv).toEqual({
+      ANDROID_SMOKE_APK_VARIANT: 'release',
+      EXPO_PUBLIC_ANDROID_QA: '1',
+      EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true',
+    });
+    expect(() => configureScenarioBuildEnvironment(
+      { apkVariant: 'debug', pack: 'documents' },
+      true,
+      {},
+    )).toThrow(ScenarioPreconditionFailureError);
   });
 
   it('uses fast smoke reuse flags when skip-build is enabled', () => {
@@ -2501,6 +2522,16 @@ describe('android-scenarios CLI parsing', () => {
         pack: 'all',
       })
     );
+  });
+
+  it('always isolates the document pack from an installed user app', () => {
+    const options = parseCliOptions(['--pack', 'documents']);
+
+    expect(options).toEqual(expect.objectContaining({
+      pack: 'documents',
+      isolatedQaInstall: true,
+    }));
+    expect(buildSmokeLaunchArgs(options, null)).toContain('--isolated-qa-install');
   });
 
   it('does not expose optional scenarios as a named pack', () => {

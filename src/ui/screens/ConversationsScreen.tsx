@@ -89,7 +89,16 @@ export function ConversationsScreen() {
   const canGoBack = router.canGoBack();
   const conversationIndex = useConversationIndex({ enabled: isFocused });
   const activeThreadId = useChatStore((state) => state.activeThreadId);
-  const { deleteThread, openThread, renameThread, startNewChat } = useChatSession();
+  const {
+    deleteThread,
+    isGenerating,
+    isPreparingDocuments,
+    isStoppingGeneration,
+    openThread,
+    renameThread,
+    startNewChat,
+  } = useChatSession();
+  const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
   const [searchQuery, setSearchQuery] = useState('');
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
@@ -261,6 +270,8 @@ export function ConversationsScreen() {
         }}
         accessibilityRole="button"
         accessibilityLabel={t('conversations.retention.title')}
+        accessibilityState={{ disabled: isGenerationBusy }}
+        disabled={isGenerationBusy}
         className="active:opacity-80"
       >
         <Box className="flex-row items-start gap-3">
@@ -309,6 +320,7 @@ export function ConversationsScreen() {
                 }}
                 accessibilityLabel={t(option.labelKey)}
                 accessibilityState={{ selected: isActive }}
+                disabled={isGenerationBusy}
                 variant="inset"
                 padding="compact"
                 className={isActive ? appearance.classNames.selectedInsetCardClassName : ''}
@@ -350,7 +362,9 @@ export function ConversationsScreen() {
             }}
             accessibilityRole="button"
             accessibilityLabel={item.title}
-            className="flex-1 active:opacity-80"
+            accessibilityState={{ disabled: isGenerationBusy }}
+            disabled={isGenerationBusy}
+            className={`flex-1 ${isGenerationBusy ? 'opacity-55' : 'active:opacity-80'}`}
           >
             <Box className="flex-row items-center gap-2">
               <Text
@@ -389,6 +403,7 @@ export function ConversationsScreen() {
                 setEditingTitle(item.title);
               }}
               accessibilityLabel={`${t('conversations.renameLabel')} ${item.title}`}
+              disabled={isGenerationBusy}
               iconName="edit"
             />
 
@@ -398,6 +413,7 @@ export function ConversationsScreen() {
                 handleDeleteConversation(item);
               }}
               accessibilityLabel={`${t('common.delete')} ${item.title}`}
+              disabled={isGenerationBusy}
               iconName="delete-outline"
               size="compact"
               tone="danger"
@@ -407,7 +423,7 @@ export function ConversationsScreen() {
         </Box>
       </ScreenCard>
     );
-  }, [activeThreadId, handleDeleteConversation, handleOpenConversation, t]);
+  }, [activeThreadId, handleDeleteConversation, handleOpenConversation, isGenerationBusy, t]);
 
   return (
     <ScreenRoot>
@@ -419,13 +435,14 @@ export function ConversationsScreen() {
         <HeaderBar
           title={t('conversations.title')}
           subtitle={t('conversations.subtitle')}
-          onBack={handleBack}
+          onBack={isGenerationBusy ? undefined : handleBack}
           backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
           rightAccessory={(
             <ScreenActionPill
               testID="start-new-chat"
               onPress={handleStartNewChat}
               accessibilityLabel={t('conversations.newChat')}
+              disabled={isGenerationBusy}
               tone="primary"
               size="lg"
               className="shrink-0"

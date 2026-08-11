@@ -7,6 +7,7 @@ const readAppFile = (...segments) => fs.readFileSync(path.join(appRoot, ...segme
 
 const packLabelPriority = [
   'android-pack-all',
+  'android-pack-documents',
   'android-pack-native',
   'android-pack-runtime',
   'android-pack-dependency-ui',
@@ -64,6 +65,8 @@ describe('Android catalog QA CI configuration', () => {
   const releaseChecklist = readAppFile('docs', 'release-checklist.md');
   const packageJson = JSON.parse(readAppFile('package.json'));
   const dependabot = readAppFile('.github', 'dependabot.yml');
+  const androidSmoke = readAppFile('scripts', 'android-smoke.js');
+  const androidBuildProvenance = readAppFile('scripts', 'android-build-provenance.js');
 
   it('lets the catalog pack label trigger Android QA and select the catalog pack', () => {
     const selection = extractAndroidQaPackSelection(workflow);
@@ -74,11 +77,20 @@ describe('Android catalog QA CI configuration', () => {
     expect(workflow).toContain('--pack "$ANDROID_QA_PACK"');
   });
 
-  it('keeps the preconditioned document pack out of hosted label routes', () => {
+  it('lets the document label and checkbox run the hosted release document pack', () => {
     const selection = extractAndroidQaPackSelection(workflow);
+    const hostedJob = extractWorkflowJob(workflow, 'android-qa');
 
-    expect(workflow).not.toContain('android-pack-documents');
-    expect(selection).not.toContain('pack="documents"');
+    expect(hostedJob).toContain('timeout-minutes: 90');
+    expect(workflow).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-documents')");
+    expect(workflow).toContain("contains(github.event.pull_request.body, '- [x] Run Android document pack')");
+    expect(selection).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-documents')");
+    expect(selection).toContain('pack="documents"');
+    expect(workflow).toContain('ANDROID_SMOKE_APK_VARIANT: release');
+    expect(androidSmoke).toContain('ANDROID_UNIVERSAL_ABIS');
+    expect(androidBuildProvenance).toContain('libpocket_anydoc.so');
+    expect(androidBuildProvenance).toContain('"arm64-v8a"');
+    expect(androidBuildProvenance).toContain('"x86_64"');
     expect(packageJson.scripts['android:scenarios:documents']).toContain('--pack documents');
   });
 
@@ -127,7 +139,7 @@ describe('Android catalog QA CI configuration', () => {
     expect(dependabot).toContain('directory: /modules/pocket-anydoc/rust');
   });
 
-  it('keeps hosted diagnostics short-lived and uploads APKs only for an explicit all-pack run', () => {
+  it('keeps hosted diagnostics short-lived and uploads APKs for explicit all/document runs', () => {
     const hostedJob = extractWorkflowJob(workflow, 'android-qa');
     const hostedDiagnostics = extractWorkflowStep(hostedJob, 'Upload Android QA diagnostics');
     const hostedApk = extractWorkflowStep(hostedJob, 'Upload Android QA APK');
@@ -141,6 +153,9 @@ describe('Android catalog QA CI configuration', () => {
     expect(hostedApk).toContain('success()');
     expect(hostedApk).toContain(
       "contains(github.event.pull_request.labels.*.name, 'android-pack-all')"
+    );
+    expect(hostedApk).toContain(
+      "contains(github.event.pull_request.labels.*.name, 'android-pack-documents')"
     );
     expect(hostedApk).toContain('name: android-qa-apk');
     expect(hostedApk).toContain('if-no-files-found: error');

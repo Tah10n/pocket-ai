@@ -280,6 +280,11 @@ function createAndroidShippingBuildEnvironment(projectRoot, env = {}, options = 
       "Android shipping builds reject EXPO_PUBLIC_ANDROID_QA=1 because QA generation controls must never be embedded in a distributable artifact."
     );
   }
+  if (effectiveExpoEnvironment.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS === "1") {
+    throw new Error(
+      "Android shipping builds reject EXPO_PUBLIC_ANDROID_QA_DOCUMENTS=1 because the hosted document-model bootstrap must never be embedded in a distributable artifact."
+    );
+  }
   return effectiveExpoEnvironment;
 }
 

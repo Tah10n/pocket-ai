@@ -144,6 +144,7 @@ let lastErrorReportSheetProps: any = null;
 let lastChatHeaderProps: any = null;
 let lastChatInputBarProps: any = null;
 let mockIsStoppingGeneration = false;
+let mockIsPreparingDocuments = false;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
@@ -452,7 +453,7 @@ jest.mock('../../src/components/ui/ChatMessageBubble', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ChatMessageBubble: ({ id, content, canRegenerate, onRegenerate, onDelete }: any) =>
+    ChatMessageBubble: ({ id, content, canDelete, canRegenerate, onRegenerate, onDelete }: any) =>
       mockReact.createElement(
         View,
         null,
@@ -464,7 +465,7 @@ jest.mock('../../src/components/ui/ChatMessageBubble', () => {
               mockReact.createElement(Text, null, 'Regenerate message'),
             )
           : null,
-        onDelete
+        canDelete && onDelete
           ? mockReact.createElement(
               Pressable,
               { testID: `delete-message-${id}`, onPress: () => onDelete(id) },
@@ -482,7 +483,7 @@ jest.mock('@/components/ui/PresetSelectorSheet', () => {
   return {
     PresetSelectorSheet: (props: any) => {
       lastPresetSelectorProps = props;
-      const { visible, onSelectPreset } = props;
+      const { visible, canSelect, onSelectPreset } = props;
       return visible
         ? mockReact.createElement(
             View,
@@ -491,6 +492,7 @@ jest.mock('@/components/ui/PresetSelectorSheet', () => {
               Pressable,
               {
                 testID: 'preset-option-default',
+                disabled: canSelect === false,
                 onPress: () => onSelectPreset(null),
               },
               mockReact.createElement(Text, null, 'Default preset'),
@@ -499,6 +501,7 @@ jest.mock('@/components/ui/PresetSelectorSheet', () => {
               Pressable,
               {
                 testID: 'preset-option-preset-2',
+                disabled: canSelect === false,
                 onPress: () => onSelectPreset('preset-2'),
               },
               mockReact.createElement(Text, null, 'Preset 2'),
@@ -601,7 +604,7 @@ jest.mock('../../src/hooks/useChatSession', () => ({
     messageListRevision: require('../../src/store/chatStore').useChatStore.getState().streamingRevision,
     isGenerating: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.status === 'generating',
     isStoppingGeneration: mockIsStoppingGeneration,
-    isPreparingDocuments: false,
+    isPreparingDocuments: mockIsPreparingDocuments,
     shouldOfferSummary: Boolean(
       require('../../src/store/chatStore').useChatStore
         .getState()
@@ -644,6 +647,16 @@ jest.mock('../../src/hooks/useChatSession', () => ({
     };
   },
 }));
+
+jest.mock('../../src/services/ChatGenerationService', () => {
+  const actual = jest.requireActual('../../src/services/ChatGenerationService');
+  return {
+    ...actual,
+    hasActiveChatGenerationWork: () => (
+      mockIsPreparingDocuments || actual.hasActiveChatGenerationWork()
+    ),
+  };
+});
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -1002,6 +1015,7 @@ describe('ChatScreen', () => {
     lastChatHeaderProps = null;
     lastChatInputBarProps = null;
     mockIsStoppingGeneration = false;
+    mockIsPreparingDocuments = false;
     mockLoadModel.mockReset();
     mockLoadModel.mockResolvedValue(undefined);
     mockRetryThinkingCapabilityDetection.mockReset();
@@ -3211,7 +3225,7 @@ describe('ChatScreen', () => {
     expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
   });
 
-  it('stops document preparation before loading a newly selected model', async () => {
+  it('rejects model switching while deferred document preparation is active', async () => {
     registry.saveModels([
       {
         id: 'author/model-q4',
@@ -3259,30 +3273,38 @@ describe('ChatScreen', () => {
     mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
     mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
 
-    const { getByTestId } = render(React.createElement(ChatScreen));
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    fireEvent.press(getByTestId('model-selector-button'));
+    expect(getByTestId('chat-model-selector-sheet')).toBeTruthy();
     let appendPromise!: Promise<void>;
     await act(async () => {
       appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
       await Promise.resolve();
     });
 
-    fireEvent.press(getByTestId('model-selector-button'));
+    await act(async () => {
+      mockIsPreparingDocuments = true;
+      rerender(React.createElement(ChatScreen));
+    });
+    expect(jest.requireMock('@react-navigation/native').usePreventRemove).toHaveBeenLastCalledWith(
+      true,
+      expect.any(Function),
+    );
+    expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
     await act(async () => {
       fireEvent.press(getByTestId('model-option-author/model-q8'));
       await Promise.resolve();
     });
 
-    await waitFor(() => {
-      expect(mockStop).toHaveBeenCalledTimes(1);
-      expect(mockLoadModel).toHaveBeenCalledWith('author/model-q8', undefined);
-    });
-    expect(mockStop.mock.invocationCallOrder[0]).toBeLessThan(
-      mockLoadModel.mock.invocationCallOrder[0],
-    );
+    expect(mockStop).not.toHaveBeenCalled();
+    expect(mockLoadModel).not.toHaveBeenCalled();
+    expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
 
     await act(async () => {
+      mockIsPreparingDocuments = false;
       deferredAppend.resolve();
       await appendPromise;
+      rerender(React.createElement(ChatScreen));
     });
   });
 
@@ -5124,6 +5146,63 @@ describe('ChatScreen', () => {
         systemPrompt: 'Organize findings clearly.',
       }),
     );
+  });
+
+  it('rejects preset switching and preset navigation while deferred document preparation is active', async () => {
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'preset-switch-document',
+      pickerUri: 'content://documents/preset-switch.txt',
+      localUri: 'test-dir/chat-attachments/preset-switch.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'preset-switch.txt',
+      displayName: 'Preset Switch.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredAppend = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    fireEvent.press(getByTestId('preset-button'));
+    expect(getByTestId('preset-selector')).toBeTruthy();
+
+    let appendPromise!: Promise<void>;
+    await act(async () => {
+      appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+      await Promise.resolve();
+      mockIsPreparingDocuments = true;
+      rerender(React.createElement(ChatScreen));
+    });
+
+    expect(lastPresetSelectorProps.canSelect).toBe(false);
+    act(() => {
+      lastPresetSelectorProps.onSelectPreset('preset-2');
+      lastPresetSelectorProps.onManagePresets();
+    });
+    expect(useChatStore.getState().getActiveThread()?.presetId).toBe('preset-1');
+    expect(mockRouterPush).not.toHaveBeenCalledWith('/presets');
+
+    await act(async () => {
+      mockIsPreparingDocuments = false;
+      deferredAppend.resolve();
+      await appendPromise;
+      rerender(React.createElement(ChatScreen));
+    });
   });
 
   it('passes the current thread preset to the selector instead of the global preset', () => {

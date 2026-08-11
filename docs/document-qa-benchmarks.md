@@ -73,11 +73,14 @@ ID in the build/install provenance chain, and leaves `com.github.tah10n.pocketai
 private storage untouched. Remove the isolated package after collecting the report with
 `adb uninstall com.github.tah10n.pocketai.qa`.
 
-This preconditioned pack remains an explicit maintainer/device command. Hosted labels,
-the default hosted pack, and `android-pack-all` deliberately exclude it.
+PR CI runs this pack only when `android-pack-documents` or the document-pack checkbox is
+selected; the default hosted pack and `android-pack-all` deliberately exclude it. The hosted
+path downloads and verifies one commit-pinned public QA model, and the shipping build rejects
+that bootstrap flag. A local device run must already have one loaded local model.
 
-The device must have one loaded local model. The model-switch race additionally requires
-a second downloaded model. The runner stages only the pinned fixtures, selects them through
+The model-switch and thread-switch races verify that the attempted switch is rejected while
+document preparation owns the chat, then use the explicit Stop action and wait for complete
+settlement. The runner stages only the pinned fixtures, selects them through
 Android DocumentsUI, and removes the exact staged files and QA-created chats when the
 scenario ends. Formats without a distinct checked-in corpus sample (`.pot`, `.pps`,
 `.pptm`, `.ppsx`, and `.ppsm`) use the corresponding pinned legacy or OOXML presentation

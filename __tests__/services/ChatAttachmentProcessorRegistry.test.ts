@@ -532,6 +532,13 @@ describe('ChatAttachmentProcessorRegistry', () => {
       handle: 'handle-1',
       query: 'What is the quarterly total?',
     }));
+    const prepareRequestId = nativeModule.prepareDocument.mock.calls[0]?.[0].requestId;
+    const selectRequestId = nativeModule.selectContext.mock.calls[0]?.[0].requestId;
+    expect(prepareRequestId).toEqual(expect.any(String));
+    expect(selectRequestId).toEqual(expect.any(String));
+    // Android resolves the prepare promise before its worker removes the request id in finally.
+    // A fresh id keeps an immediately-following selection out of that bounded cleanup window.
+    expect(selectRequestId).not.toBe(prepareRequestId);
     expect(nativeModule.release).toHaveBeenCalledWith('handle-1');
     expect(FileSystem.readAsStringAsync).not.toHaveBeenCalled();
     expect(result).toEqual(expect.objectContaining({

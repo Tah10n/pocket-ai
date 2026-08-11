@@ -51,7 +51,7 @@ jobs:
   android-qa:
     name: android (qa)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     needs: verify
     if: >-
       github.event_name == 'pull_request' &&
@@ -59,6 +59,7 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
         contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-documents') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-native') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') ||
@@ -66,6 +67,8 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'android-pack-extended') ||
         contains(github.event.pull_request.body, '- [x] Run Android checks') ||
         contains(github.event.pull_request.body, '- [X] Run Android checks') ||
+        contains(github.event.pull_request.body, '- [x] Run Android document pack') ||
+        contains(github.event.pull_request.body, '- [X] Run Android document pack') ||
         contains(github.event.pull_request.body, '- [x] Run Android scenarios') ||
         contains(github.event.pull_request.body, '- [X] Run Android scenarios')
       )
@@ -112,6 +115,8 @@ jobs:
 
           if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
             pack="all"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-documents') || contains(github.event.pull_request.body, '- [x] Run Android document pack') || contains(github.event.pull_request.body, '- [X] Run Android document pack') }}" == "true" ]]; then
+            pack="documents"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
             pack="native"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then
@@ -142,7 +147,7 @@ jobs:
           disable-linux-hw-accel: false
           disable-animations: true
           emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 4096
           script: npm run android:scenarios -- --emulator --pack "$ANDROID_QA_PACK" --fail-on-skip --bootstrap-screenshot
 
       - name: Upload Android QA diagnostics
@@ -159,7 +164,8 @@ jobs:
       - name: Upload Android QA APK
         if: >-
           success() &&
-          contains(github.event.pull_request.labels.*.name, 'android-pack-all')
+          (contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+           contains(github.event.pull_request.labels.*.name, 'android-pack-documents'))
         uses: actions/upload-artifact@v7
         with:
           name: android-qa-apk

@@ -14,7 +14,7 @@ import {
     View,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useFocusEffect, useIsFocused } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused, usePreventRemove } from '@react-navigation/native';
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
@@ -76,7 +76,6 @@ import {
     getSettings,
     resetGenerationParametersForModel,
     subscribeSettings,
-    updateSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
@@ -91,6 +90,8 @@ import {
     isAndroidQaGenerationEvidenceEnabled,
     subscribeAndroidQaGenerationEvidence,
 } from '../../services/AndroidQaGenerationEvidence';
+import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
+import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -772,7 +773,8 @@ export const ChatScreen = () => {
         regenerateFromUserMessage,
         startNewChat,
     } = useChatSession();
-    const isGenerationBusy = isGenerating || isStoppingGeneration;
+    const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
+    usePreventRemove(isPreparingDocuments, () => undefined);
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
     const appearance = useScreenAppearance();
@@ -853,7 +855,7 @@ export const ChatScreen = () => {
         && engineState.activeModelId === currentChatActiveModelId;
     const isInputDisabled = !isCurrentChatModelReady
         || isPendingModelSelectionForCurrentThread
-        || isStoppingGeneration;
+        || isGenerationBusy;
     const statusLabel = activeThread?.status === 'stopped'
         ? t('chat.statusStopped')
         : activeThread?.status === 'error'
@@ -1237,6 +1239,15 @@ export const ChatScreen = () => {
         | { status: 'stale' }
         | { status: 'failed'; error: unknown }
     > => {
+        if (applySelection && hasActiveChatGenerationWork()) {
+            return {
+                status: 'failed',
+                error: new AppError(
+                    'engine_busy',
+                    'Wait for the current chat work to finish before switching models.',
+                ),
+            };
+        }
         const requestId = modelSelectionRequestIdRef.current + 1;
         modelSelectionRequestIdRef.current = requestId;
         if (applySelection && isScreenActiveRef.current) {
@@ -1393,6 +1404,12 @@ export const ChatScreen = () => {
                 && threadId
                 && expectedThreadModelId !== null
             ) {
+                if (hasActiveChatGenerationWork()) {
+                    return failSelection(new AppError(
+                        'engine_busy',
+                        'Wait for the current chat work to finish before switching models.',
+                    ));
+                }
                 expectedParamsSnapshot = getGenerationParametersForModel(targetModelId);
                 const commitResult = useChatStore.getState().commitThreadModelSelection({
                     threadId,
@@ -1526,7 +1543,7 @@ export const ChatScreen = () => {
     }, [loadModel]);
 
     const handleSelectModelFromHeader = useCallback(async (nextModelId: string) => {
-        if (isGenerationBusy) {
+        if (isGenerationBusy || hasActiveChatGenerationWork()) {
             return;
         }
 
@@ -1552,11 +1569,6 @@ export const ChatScreen = () => {
         }
 
         setModelSelectorOpen(false);
-        if (documentPreparationInFlightRef.current) {
-            await stopGeneration();
-            documentPreparationInFlightRef.current = false;
-        }
-
         const attemptLoadSelectedModel = async (options?: LoadModelOptions): Promise<void> => {
             const result = await executeThreadModelLoad({
                 targetModelId: nextModelId,
@@ -1601,7 +1613,6 @@ export const ChatScreen = () => {
         executeThreadModelLoad,
         isGenerationBusy,
         showAlertForError,
-        stopGeneration,
         t,
     ]);
 
@@ -2753,18 +2764,20 @@ export const ChatScreen = () => {
             }
 
             const subscription = BackHandler.addEventListener('hardwareBackPress', () => (
-                handleAndroidBackNavigation({
-                    canGoBack: router.canGoBack(),
-                    onGoBack: () => {
-                        router.back();
-                    },
-                })
+                isGenerationBusy
+                    ? true
+                    : handleAndroidBackNavigation({
+                        canGoBack: router.canGoBack(),
+                        onGoBack: () => {
+                            router.back();
+                        },
+                    })
             ));
 
             return () => {
                 subscription.remove();
             };
-        }, [router]),
+        }, [isGenerationBusy, router]),
     );
 
     useEffect(() => {
@@ -2801,11 +2814,11 @@ export const ChatScreen = () => {
                 messageState={msg.state}
                 tokensPerSec={msg.tokensPerSec}
                 inferenceMetrics={msg.inferenceMetrics}
-                canDelete={msg.state !== 'streaming'}
+                canDelete={msg.state !== 'streaming' && !isGenerationBusy}
                 canRegenerate={
                     msg.role === 'user'
                     && msg.state === 'complete'
-                    && !isGenerating
+                    && !isGenerationBusy
                     && !isInputDisabled
                 }
                 onDelete={handleDeleteMessage}
@@ -2817,7 +2830,7 @@ export const ChatScreen = () => {
         handleBeginRegenerateFromMessage,
         handleDeleteMessage,
         handleLastMessageLayout,
-        isGenerating,
+        isGenerationBusy,
         isInputDisabled,
         messages.length,
     ]);
@@ -2859,7 +2872,7 @@ export const ChatScreen = () => {
                         : undefined}
                     canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
                     canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
-                    onBack={router.canGoBack() ? () => router.back() : undefined}
+                    onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
                 />
 
                 <Box className="flex-1">
@@ -3216,18 +3229,25 @@ export const ChatScreen = () => {
 
             <PresetSelectorSheet
                 visible={isPresetSelectorOpen}
+                canSelect={!isGenerationBusy}
                 activePresetId={activeThread?.presetId ?? settings.activePresetId}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 onClose={() => setPresetSelectorOpen(false)}
                 onSelectPreset={(presetId: string | null) => {
+                    if (isGenerationBusy || hasActiveChatGenerationWork()) {
+                        return;
+                    }
                     const presetSnapshot = resolvePresetSnapshot(presetId);
-                    updateSettings({ activePresetId: presetId });
+                    selectActiveChatPreset(presetId);
 
                     if (activeThread) {
                         updateThreadPresetSnapshot(activeThread.id, presetId, presetSnapshot);
                     }
                 }}
                 onManagePresets={() => {
+                    if (isGenerationBusy || hasActiveChatGenerationWork()) {
+                        return;
+                    }
                     router.push('/presets');
                 }}
             />

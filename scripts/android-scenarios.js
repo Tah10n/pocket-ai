@@ -201,7 +201,6 @@ const DOCUMENT_RACE_SETTLEMENT_MARGIN_MS = 5_000;
 const DOCUMENT_RACE_POST_CANCEL_HORIZON_MS =
   DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS + DOCUMENT_RACE_SETTLEMENT_MARGIN_MS;
 const DOCUMENT_RACE_SENTINEL_POLL_INTERVAL_MS = 1_000;
-const DOCUMENT_THREAD_SWITCH_DRAIN_SETTLE_MS = 5_500;
 const DOCUMENT_QA_REMOTE_DIRECTORY = "/sdcard/Download/PocketAI-Document-QA";
 const DOCUMENT_QA_REMOTE_DIRECTORY_NAME = "PocketAI-Document-QA";
 const DOCUMENT_PICKER_SEARCH_RESOURCE_IDS = ["option_menu_search", "action_search"];
@@ -623,11 +622,9 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "stop-tapped",
   "cancel-settled",
   "thread-switch-tapped",
-  "thread-home-ready",
-  "replacement-chat-ready",
+  "navigation-blocked",
   "model-selector-tapped",
-  "model-option-tapped",
-  "model-switch-settled",
+  "model-switch-blocked",
   "stale-window-cleared",
 ]);
 
@@ -3351,8 +3348,8 @@ async function runDocumentRaceScenario(ctx, session, kind) {
   const expectedSentinelIds = [...new Set(
     session.fixtures.flatMap((entry) => entry.fixture.sentinelIds)
   )].sort();
-  const alternateModelTarget = kind === "model-race"
-    ? await resolveAlternateModelResourceId(ctx)
+  const modelSelectorTapPoint = kind === "model-race"
+    ? await resolveModelSelectorTapPoint(ctx)
     : null;
   const threadSwitchTapPoint = kind === "thread-race"
     ? resolveBottomTabTapPoint(adbPath, ctx.serial, HOME_TAB_LABELS)
@@ -3377,27 +3374,24 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     } else if (kind === "thread-race") {
       tapBottomTabImmediately(adbPath, ctx.serial, threadSwitchTapPoint);
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "thread-switch-tapped");
-      await ctx.expectAnyText(HOME_SECTION_LABELS, { timeoutMs: HOME_ROUTE_TIMEOUT_MS });
-      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "thread-home-ready");
-      // New Chat correctly fails closed while cancelled preparation still owns the engine.
-      // Wait through the shared 5 s generation-work drain barrier before opening the replacement.
-      await delay(DOCUMENT_THREAD_SWITCH_DRAIN_SETTLE_MS);
-      await ctx.tapAnyText(NEW_CHAT_LABELS, { afterTapDelayMs: 0 });
       await ctx.expectResourceId(CHAT_LIST_VIEWPORT_RESOURCE_ID, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
-      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "replacement-chat-ready");
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "navigation-blocked");
+      tapBounds(adbPath, ctx.serial, sendActionBounds);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "stop-tapped");
+      await waitForDocumentCancellationSettlement(adbPath, ctx.serial);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "cancel-settled");
     } else if (kind === "model-race") {
-      tapBounds(adbPath, ctx.serial, alternateModelTarget.selectorBounds);
+      tapBounds(adbPath, ctx.serial, modelSelectorTapPoint);
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-selector-tapped");
-      // The preflight sheet established stable bounds while no document work was active. Give
-      // the native sheet one short animation window, then select the alternate model without a
-      // post-send hierarchy dump that would let prompt preparation win the race.
       await delay(250);
-      tapBounds(adbPath, ctx.serial, alternateModelTarget.optionBounds);
-      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-option-tapped");
       await waitForNoResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
         timeoutMs: 5_000,
       });
-      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-switch-settled");
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "model-switch-blocked");
+      tapBounds(adbPath, ctx.serial, sendActionBounds);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "stop-tapped");
+      await waitForDocumentCancellationSettlement(adbPath, ctx.serial);
+      recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "cancel-settled");
     } else {
       throw new Error(`Unsupported document race kind: ${kind}.`);
     }
@@ -3529,39 +3523,18 @@ async function dismissDocumentErrorDialogIfPresent(ctx) {
   }
 }
 
-async function resolveAlternateModelResourceId(ctx) {
+async function resolveModelSelectorTapPoint(ctx) {
   const adbPath = resolveAdbPath();
   const selector = await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_RESOURCE_ID, {
     timeoutMs: 5_000,
     visibleOnly: true,
   });
-  tapRequiredNode(adbPath, ctx.serial, selector, "chat model selector precondition");
-  await waitForResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
-    timeoutMs: 5_000,
-    visibleOnly: true,
-  });
-  const candidates = createUiSnapshot(adbPath, ctx.serial).nodes.filter((node) => {
-    const resourceId = normalizeAndroidResourceId(node.resourceId);
-    return resourceId.startsWith("model-option-")
-      && node.clickable
-      && node.enabled
-      && !node.selected
-      && node.bounds;
-  });
-  await ctx.pressBack();
-  await waitForNoResourceId(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_SHEET_RESOURCE_ID, {
-    timeoutMs: 5_000,
-  });
-  if (candidates.length < 1) {
+  if (!selector.bounds) {
     throw new ScenarioPreconditionFailureError(
-      "Document model-switch QA requires a second downloaded model visible in the selector."
+      "Document model-switch QA requires a visible model selector tap target."
     );
   }
-  return {
-    resourceId: normalizeAndroidResourceId(candidates[0].resourceId),
-    selectorBounds: selector.bounds,
-    optionBounds: candidates[0].bounds,
-  };
+  return selector.bounds;
 }
 
 async function waitForPreparedDocumentAttachmentCount(adbPath, serial, expectedCount, options = {}) {
@@ -4221,6 +4194,10 @@ function requireBranchFixtureState(state, step) {
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
+  } else if (options.pack === "documents" && !env.ANDROID_SMOKE_APK_VARIANT) {
+    // The documented document-pack command is self-contained and always exercises
+    // the embedded release bundle plus the universal native-library contract.
+    env.ANDROID_SMOKE_APK_VARIANT = "release";
   }
   const effectiveApkVariant = (env.ANDROID_SMOKE_APK_VARIANT || "debug")
     .trim()
@@ -4232,6 +4209,9 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
+    if (options.pack === "documents") {
+      env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
+    }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
       env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING || "true";
   }
@@ -9118,6 +9098,10 @@ function parseCliOptions(argv) {
     }
 
     throw new Error(`Unknown option: ${arg}`);
+  }
+
+  if (options.pack === "documents") {
+    options.isolatedQaInstall = true;
   }
 
   return options;

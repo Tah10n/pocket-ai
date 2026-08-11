@@ -1892,6 +1892,10 @@ describe('Android build provenance routing', () => {
       )).toThrow(/reject EXPO_PUBLIC_ANDROID_QA=1/);
       expect(() => createAndroidShippingBuildEnvironment(
         projectRoot,
+        { NODE_ENV: 'production', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1' },
+      )).toThrow(/reject EXPO_PUBLIC_ANDROID_QA_DOCUMENTS=1/);
+      expect(() => createAndroidShippingBuildEnvironment(
+        projectRoot,
         { NODE_ENV: 'test' },
       )).toThrow(/require NODE_ENV=production/);
 

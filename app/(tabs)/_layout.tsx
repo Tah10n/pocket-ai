@@ -11,6 +11,7 @@ import { TabBarGlassBackground } from '../../src/components/ui/TabBarGlassBackgr
 import { useTheme } from '../../src/providers/ThemeProvider';
 import { createBottomTabBarStyle } from '../../src/utils/tabBarLayout';
 import { withAlpha } from '../../src/utils/themeTokens';
+import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationService';
 
 export default function TabLayout() {
   const { t } = useTranslation();
@@ -18,6 +19,11 @@ export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const tabBarStyle = createBottomTabBarStyle(colors, insets.bottom, Platform.OS, appearance);
   const isGlassTabBar = appearance.surfaceKind === 'glass';
+  const preventBusyTabNavigation = React.useCallback((event: { preventDefault: () => void }) => {
+    if (hasActiveChatGenerationWork()) {
+      event.preventDefault();
+    }
+  }, []);
   const renderTabIcon = (name: MaterialSymbolName, color: string, focused: boolean) => {
     if (!isGlassTabBar) {
       return <MaterialSymbols size={28} name={name} color={color} />;
@@ -75,6 +81,7 @@ export default function TabLayout() {
       }}>
       <Tabs.Screen
         name="index"
+        listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.home'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('home', color, focused),
@@ -82,6 +89,7 @@ export default function TabLayout() {
       />
       <Tabs.Screen
         name="chat"
+        listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.chat'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('chat', color, focused),
@@ -89,6 +97,7 @@ export default function TabLayout() {
       />
       <Tabs.Screen
         name="models"
+        listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.models'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('hub', color, focused),
@@ -96,6 +105,7 @@ export default function TabLayout() {
       />
       <Tabs.Screen
         name="settings"
+        listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.settings'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('settings', color, focused),

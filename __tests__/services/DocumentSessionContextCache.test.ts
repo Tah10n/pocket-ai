@@ -11,6 +11,21 @@ import {
 
 type ChatDocumentAttachment = Extract<ChatAttachment, { kind: 'document' }>;
 
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 function createAttachment(id: string, threadId = `thread-${id}`): ChatDocumentAttachment {
   return {
     id,
@@ -193,7 +208,7 @@ describe('DocumentSessionContextCache', () => {
         sourceCharCount: result.sourceCharCount,
       }));
 
-      await documentSessionContextCache.retryPendingReleases();
+      await documentSessionContextCache.clearAll();
 
       expect(source.release).toHaveBeenCalledTimes(2);
       expect(source.isReleased()).toBe(true);
@@ -205,6 +220,116 @@ describe('DocumentSessionContextCache', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('invalidates a suspended put when clearThread wins the race', async () => {
+    const attachment = createAttachment('clear-thread-race', 'thread-race');
+    const existing = createResult(attachment);
+    await documentSessionContextCache.put('thread-race', attachment, existing.result);
+
+    const releaseGate = createDeferred();
+    existing.source.release.mockImplementationOnce(async () => {
+      await releaseGate.promise;
+    });
+    const incoming = createResult(attachment);
+    const putPromise = documentSessionContextCache.put('thread-race', attachment, incoming.result);
+    await flushPromises();
+
+    const clearPromise = documentSessionContextCache.clearThread('thread-race');
+    releaseGate.resolve();
+
+    await expect(putPromise).resolves.toBe(false);
+    await expect(clearPromise).resolves.toBeUndefined();
+    expect(incoming.source.release).toHaveBeenCalledTimes(1);
+    expect(documentSessionContextCache.getStats()).toEqual({
+      entryCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+    });
+  });
+
+  it('invalidates a suspended put when clearAll wins the race', async () => {
+    const attachment = createAttachment('clear-all-race', 'thread-race');
+    const existing = createResult(attachment);
+    await documentSessionContextCache.put('thread-race', attachment, existing.result);
+
+    const releaseGate = createDeferred();
+    existing.source.release.mockImplementationOnce(async () => {
+      await releaseGate.promise;
+    });
+    const incoming = createResult(attachment);
+    const putPromise = documentSessionContextCache.put('thread-race', attachment, incoming.result);
+    await flushPromises();
+
+    const clearPromise = documentSessionContextCache.clearAll();
+    releaseGate.resolve();
+
+    await expect(putPromise).resolves.toBe(false);
+    await expect(clearPromise).resolves.toBeUndefined();
+    expect(incoming.source.release).toHaveBeenCalledTimes(1);
+    expect(documentSessionContextCache.getStats()).toEqual({
+      entryCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+    });
+  });
+
+  it('keeps only the newest concurrent replacement for the same key', async () => {
+    const attachment = createAttachment('replacement-race', 'thread-race');
+    const existing = createResult(attachment);
+    await documentSessionContextCache.put('thread-race', attachment, existing.result);
+
+    const releaseGate = createDeferred();
+    existing.source.release.mockImplementationOnce(async () => {
+      await releaseGate.promise;
+    });
+    const first = createResult(attachment);
+    const second = createResult(attachment);
+    const firstPut = documentSessionContextCache.put('thread-race', attachment, first.result);
+    await flushPromises();
+    const secondPut = documentSessionContextCache.put('thread-race', attachment, second.result);
+    await flushPromises();
+
+    releaseGate.resolve();
+    await expect(firstPut).resolves.toBe(false);
+    await expect(secondPut).resolves.toBe(true);
+    expect(first.source.release).toHaveBeenCalledTimes(1);
+    expect(second.source.release).not.toHaveBeenCalled();
+
+    const selected = await documentSessionContextCache.selectThreadDocuments('thread-race', {
+      query: 'newest',
+      maxChars: 64_000,
+      maxChunks: 64,
+    });
+    expect(selected).toEqual([expect.objectContaining({
+      result: expect.objectContaining({ text: 'selected:newest' }),
+    })]);
+    expect(first.source.selectContext).not.toHaveBeenCalled();
+    expect(second.source.selectContext).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains no handle or direct plaintext after thread deletion', async () => {
+    const attachment = createAttachment('delete-resources', 'thread-delete');
+    const { result, source } = createResult(attachment, 512);
+    await documentSessionContextCache.put('thread-delete', attachment, result);
+
+    await documentSessionContextCache.clearThread('thread-delete');
+
+    await expect(documentSessionContextCache.selectThreadDocuments('thread-delete', {
+      query: 'must not survive',
+      maxChars: 64_000,
+      maxChunks: 64,
+    })).resolves.toEqual([]);
+    expect(source.release).toHaveBeenCalledTimes(1);
+    expect(source.selectContext).not.toHaveBeenCalled();
+    expect(documentSessionContextCache.getStats()).toEqual({
+      entryCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+    });
   });
 
   it('clears every retained source for a pruned batch of threads', async () => {

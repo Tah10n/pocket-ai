@@ -18,6 +18,7 @@ import { registry } from '../services/LocalStorageRegistry';
 import {
   __resetChatGenerationServiceForTests,
   beginChatGenerationWork,
+  hasActiveChatGenerationWork,
   isChatGenerationCancelledError,
   registerActiveChatGenerationStop,
   registerChatGenerationFallbackStop,
@@ -4066,6 +4067,13 @@ export const useChatSession = () => {
       throw new Error('A response is already being generated for this thread.');
     }
 
+    if (hasActiveChatGenerationWork()) {
+      throw new AppError(
+        'engine_busy',
+        `Wait for the current chat work to finish stopping before ${actionLabel}.`,
+      );
+    }
+
     const threadModelId = getThreadActiveModelId(thread);
     assertThreadModelExecutionInvariant(thread.id, threadModelId);
 
@@ -4099,6 +4107,12 @@ export const useChatSession = () => {
       // Terminal recovery keeps the engine detached in ERROR, so its
       // restart-required error must win over the generic model-not-loaded one.
       llmEngineService.assertContextRecoveryNotRequired();
+      if (hasActiveChatGenerationWork()) {
+        throw new AppError(
+          'engine_busy',
+          'Wait for the current chat work to finish stopping before sending another message.',
+        );
+      }
       const engineState = llmEngineService.getState();
       if (!targetModelId || engineState.status !== EngineStatus.READY || !engineState.activeModelId) {
         throw new AppError('chat_model_not_loaded', 'Load a model before starting a conversation.');
@@ -5365,8 +5379,11 @@ export const useChatSession = () => {
   }, []);
 
   const startNewChat = useCallback(() => {
-    if (activeThread?.status === 'generating') {
-      throw new Error('Stop the current response before starting a new chat.');
+    if (activeThread?.status === 'generating' || hasActiveChatGenerationWork()) {
+      throw new AppError(
+        'engine_busy',
+        'Wait for the current chat work to finish before starting a new chat.',
+      );
     }
 
     if (!beginNewThread()) {
@@ -5403,7 +5420,16 @@ export const useChatSession = () => {
   const deleteThread = useCallback((threadId: string) => {
     const thread = useChatStore.getState().getThread(threadId);
     if (thread?.status === 'generating') {
-      throw new Error('Stop the current response before deleting this conversation.');
+      throw new AppError(
+        'engine_busy',
+        'Stop the current response before deleting this conversation.',
+      );
+    }
+    if (hasActiveChatGenerationWork()) {
+      throw new AppError(
+        'engine_busy',
+        'Wait for the current chat work to finish before deleting this conversation.',
+      );
     }
 
     assertPrivateStorageWritableForChatMutation();
@@ -5429,8 +5455,11 @@ export const useChatSession = () => {
       return false;
     }
 
-    if (activeThread.status === 'generating') {
-      throw new Error('Stop the current response before editing this conversation.');
+    if (activeThread.status === 'generating' || hasActiveChatGenerationWork()) {
+      throw new AppError(
+        'engine_busy',
+        'Wait for the current chat work to finish before editing this conversation.',
+      );
     }
 
     assertPrivateStorageWritableForChatMutation();

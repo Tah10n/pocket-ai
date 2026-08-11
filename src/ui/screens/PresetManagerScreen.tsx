@@ -12,8 +12,12 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { useTranslation } from 'react-i18next';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
-import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
+import { getSettings, subscribeSettings } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
+import {
+    assertActiveChatPresetMutationAllowed,
+    selectActiveChatPreset,
+} from '../../services/ActiveChatPresetService';
 import { toTestIdSegment } from '../../utils/testIds';
 import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
@@ -93,6 +97,7 @@ export function PresetManagerScreen() {
         }
 
         try {
+            assertActiveChatPresetMutationAllowed();
             let presetIdToActivate = editorState.preset?.id ?? null;
 
             if (editorState.preset) {
@@ -106,7 +111,7 @@ export function PresetManagerScreen() {
                 presetIdToActivate = created.id;
             }
 
-            updateSettings({ activePresetId: presetIdToActivate });
+            selectActiveChatPreset(presetIdToActivate);
             loadPresets();
             closeEditor();
         } catch (e: any) {
@@ -129,12 +134,20 @@ export function PresetManagerScreen() {
                 text: t('common.delete'),
                 style: 'destructive',
                 onPress: () => {
-                    presetManager.deletePreset(preset.id);
-                    if (getSettings().activePresetId === preset.id) {
-                        updateSettings({ activePresetId: null });
+                    try {
+                        assertActiveChatPresetMutationAllowed();
+                        presetManager.deletePreset(preset.id);
+                        if (getSettings().activePresetId === preset.id) {
+                            selectActiveChatPreset(null);
+                        }
+                        loadPresets();
+                        closeEditor();
+                    } catch (e: any) {
+                        Alert.alert(
+                            t('presets.validationErrorTitle'),
+                            getReportedErrorMessage('PresetManagerScreen.handleDelete', e, t),
+                        );
                     }
-                    loadPresets();
-                    closeEditor();
                 },
             },
         ]);

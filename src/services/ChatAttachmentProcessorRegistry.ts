@@ -711,7 +711,6 @@ async function processPocketAnydocAttachment(
         maxChunks: options.maxChunks,
         signal: options.signal,
       },
-      requestId,
     );
     const initialResult: ChatDocumentTextProcessorResult = {
       attachmentId: attachment.id,

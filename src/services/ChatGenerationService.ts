@@ -16,11 +16,12 @@ export interface ChatGenerationWorkHandle {
 
 type ActiveStopRegistration = {
   id: symbol;
+  generation: number;
   hasNativeCompletion: () => boolean;
   stop: () => Promise<void>;
 };
 
-type FallbackStopRegistration = ActiveStopRegistration & {
+type FallbackStopRegistration = Omit<ActiveStopRegistration, 'generation'> & {
   isActive: () => boolean;
 };
 
@@ -29,7 +30,8 @@ let activeStopRegistration: ActiveStopRegistration | null = null;
 let fallbackStopRegistration: FallbackStopRegistration | null = null;
 let stopAllPromise: Promise<ChatGenerationDrainResult> | null = null;
 let admissionBlocked = false;
-const activeWork = new Map<symbol, Promise<void>>();
+const activeWork = new Map<symbol, { generation: number; promise: Promise<void> }>();
+const settlementBlockingWork = new Set<symbol>();
 const cancellationListeners = new Set<() => void>();
 
 export class ChatGenerationCancelledError extends AppError {
@@ -47,8 +49,9 @@ export function isChatGenerationCancelledError(error: unknown): error is ChatGen
 
 export function hasActiveChatGenerationWork(): boolean {
   return (
-    activeWork.size > 0
-    || activeStopRegistration !== null
+    [...activeWork.values()].some((work) => work.generation === cancellationGeneration)
+    || settlementBlockingWork.size > 0
+    || activeStopRegistration?.generation === cancellationGeneration
     || fallbackStopRegistration?.isActive() === true
     || stopAllPromise !== null
     || admissionBlocked
@@ -63,8 +66,8 @@ function invalidateGenerationWork(): void {
 }
 
 export function beginChatGenerationWork(scope: string): ChatGenerationWorkHandle {
-  if (admissionBlocked) {
-    throw new AppError('engine_busy', 'Wait for the current response to finish stopping.');
+  if (hasActiveChatGenerationWork()) {
+    throw new AppError('engine_busy', 'Wait for the current chat work to finish stopping before starting another action.');
   }
 
   const id = Symbol(scope);
@@ -75,7 +78,7 @@ export function beginChatGenerationWork(scope: string): ChatGenerationWorkHandle
   const finishedPromise = new Promise<void>((resolve) => {
     resolveFinished = resolve;
   });
-  activeWork.set(id, finishedPromise);
+  activeWork.set(id, { generation, promise: finishedPromise });
 
   const assertCurrent = () => {
     if (finished || generation !== cancellationGeneration || admissionBlocked) {
@@ -93,6 +96,7 @@ export function beginChatGenerationWork(scope: string): ChatGenerationWorkHandle
       ownedCancellationListeners.forEach((listener) => cancellationListeners.delete(listener));
       ownedCancellationListeners.clear();
       activeWork.delete(id);
+      settlementBlockingWork.delete(id);
       resolveFinished();
     },
     onCancel: (listener: () => void): (() => void) => {
@@ -154,6 +158,7 @@ export function registerActiveChatGenerationStop(
 ): () => void {
   const registration: ActiveStopRegistration = {
     id: Symbol('active-chat-generation'),
+    generation: cancellationGeneration,
     ...registrationInput,
   };
   activeStopRegistration = registration;
@@ -216,9 +221,18 @@ export function stopAllGenerationWork(
     return stopAllPromise;
   }
 
-  const stopRegistration = activeStopRegistration
+  const stopRegistration = (
+    activeStopRegistration?.generation === cancellationGeneration
+      ? activeStopRegistration
+      : null
+  )
     ?? (fallbackStopRegistration?.isActive() ? fallbackStopRegistration : null);
-  const workAtStop = Array.from(activeWork.values());
+  const workAtStopEntries = [...activeWork.entries()]
+    .filter(([, work]) => work.generation === cancellationGeneration);
+  if (!stopRegistration) {
+    workAtStopEntries.forEach(([id]) => settlementBlockingWork.add(id));
+  }
+  const workAtStop = workAtStopEntries.map(([, work]) => work.promise);
   invalidateGenerationWork();
 
   const stopTask = (async (): Promise<ChatGenerationDrainResult> => {
@@ -311,4 +325,5 @@ export function __resetChatGenerationServiceForTests(): void {
   stopAllPromise = null;
   admissionBlocked = false;
   activeWork.clear();
+  settlementBlockingWork.clear();
 }

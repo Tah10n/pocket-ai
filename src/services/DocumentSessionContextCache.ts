@@ -23,6 +23,12 @@ type CachedDocumentContext = {
   lastAccessSequence: number;
 };
 
+type CacheMutationStamp = {
+  globalEpoch: number;
+  threadEpoch: number;
+  keyEpoch: number;
+};
+
 export type SelectedSessionDocumentContext = {
   attachment: ChatDocumentAttachment;
   result: ChatDocumentTextProcessorResult;
@@ -64,6 +70,9 @@ class DocumentSessionContextCache {
    */
   private readonly pendingReleases = new Map<ReleasableDocumentResource, number>();
   private readonly releaseAttempts = new Map<ReleasableDocumentResource, Promise<boolean>>();
+  private readonly threadEpochs = new Map<string, number>();
+  private readonly keyEpochs = new Map<string, number>();
+  private globalEpoch = 0;
   private sequence = 0;
   private sourceCharCount = 0;
 
@@ -96,9 +105,14 @@ class DocumentSessionContextCache {
       return false;
     }
 
-    await this.retryPendingReleases();
-
     const key = createCacheKey(normalizedThreadId, normalizedAttachmentId);
+    const mutationStamp = this.beginPutMutation(key, normalizedThreadId);
+    await this.retryPendingReleases();
+    if (!this.isMutationCurrent(key, normalizedThreadId, mutationStamp)) {
+      await this.releaseResources([{ resource: source, sourceCharCount }]);
+      return false;
+    }
+
     const replaced = this.removeEntry(key);
     const evicted: CachedDocumentContext[] = replaced ? [replaced] : [];
     while (
@@ -113,6 +127,10 @@ class DocumentSessionContextCache {
     }
 
     await this.releaseEntries(evicted.filter((entry) => entry.source !== source));
+    if (!this.isMutationCurrent(key, normalizedThreadId, mutationStamp)) {
+      await this.releaseResources([{ resource: source, sourceCharCount }]);
+      return false;
+    }
     if (
       this.getRetainedResourceCount() >= DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES
       || this.getRetainedSourceCharCount() + sourceCharCount > DOCUMENT_SESSION_CONTEXT_MAX_SOURCE_CHARS
@@ -186,6 +204,7 @@ class DocumentSessionContextCache {
       .sort((left, right) => left.insertedSequence - right.insertedSequence);
     const selected: SelectedSessionDocumentContext[] = [];
     for (const entry of selectedEntries) {
+      const mutationStamp = this.captureMutation(entry.key, entry.threadId);
       if (options.signal?.aborted) {
         throw new AppError(
           'chat_attachment_processing_cancelled',
@@ -194,7 +213,10 @@ class DocumentSessionContextCache {
       }
       try {
         const result = await entry.source.selectContext(options);
-        if (this.entries.get(entry.key) !== entry) {
+        if (
+          this.entries.get(entry.key) !== entry
+          || !this.isMutationCurrent(entry.key, entry.threadId, mutationStamp)
+        ) {
           continue;
         }
         this.sequence += 1;
@@ -224,35 +246,50 @@ class DocumentSessionContextCache {
   }
 
   public async clearThreads(threadIds: Iterable<string>): Promise<void> {
-    await this.retryPendingReleases();
     const normalizedThreadIds = new Set(
       Array.from(threadIds, (threadId) => threadId.trim()).filter(Boolean),
     );
+    normalizedThreadIds.forEach((threadId) => this.invalidateThread(threadId));
     const removed = [...this.entries.values()].filter((entry) => (
       normalizedThreadIds.has(entry.threadId)
     ));
     removed.forEach((entry) => this.removeEntry(entry.key));
-    await this.releaseEntries(removed);
+    await Promise.all([
+      this.retryPendingReleases(),
+      this.releaseEntries(removed),
+    ]);
   }
 
   public async retainThreadAttachments(
     threadId: string,
     attachmentIds: ReadonlySet<string>,
   ): Promise<void> {
-    await this.retryPendingReleases();
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) {
+      return;
+    }
+    this.invalidateThread(normalizedThreadId);
     const removed = [...this.entries.values()].filter((entry) => (
-      entry.threadId === threadId && !attachmentIds.has(entry.attachment.id)
+      entry.threadId === normalizedThreadId && !attachmentIds.has(entry.attachment.id)
     ));
     removed.forEach((entry) => this.removeEntry(entry.key));
-    await this.releaseEntries(removed);
+    await Promise.all([
+      this.retryPendingReleases(),
+      this.releaseEntries(removed),
+    ]);
   }
 
   public async clearAll(): Promise<void> {
-    await this.retryPendingReleases();
+    this.globalEpoch += 1;
+    this.threadEpochs.clear();
+    this.keyEpochs.clear();
     const removed = [...this.entries.values()];
     this.entries.clear();
     this.sourceCharCount = 0;
-    await this.releaseEntries(removed);
+    await Promise.all([
+      this.retryPendingReleases(),
+      this.releaseEntries(removed),
+    ]);
   }
 
   /** Transfer ownership of uncached session sources or asset leases into the retry queue. */
@@ -292,6 +329,54 @@ class DocumentSessionContextCache {
   private getRetainedSourceCharCount(): number {
     return this.sourceCharCount
       + [...this.pendingReleases.values()].reduce((sum, charCount) => sum + charCount, 0);
+  }
+
+  private getThreadEpoch(threadId: string): number {
+    return this.threadEpochs.get(threadId) ?? 0;
+  }
+
+  private getKeyEpoch(key: string): number {
+    return this.keyEpochs.get(key) ?? 0;
+  }
+
+  private captureMutation(key: string, threadId: string): CacheMutationStamp {
+    return {
+      globalEpoch: this.globalEpoch,
+      threadEpoch: this.getThreadEpoch(threadId),
+      keyEpoch: this.getKeyEpoch(key),
+    };
+  }
+
+  private beginPutMutation(key: string, threadId: string): CacheMutationStamp {
+    const keyEpoch = this.getKeyEpoch(key) + 1;
+    this.keyEpochs.set(key, keyEpoch);
+    return {
+      globalEpoch: this.globalEpoch,
+      threadEpoch: this.getThreadEpoch(threadId),
+      keyEpoch,
+    };
+  }
+
+  private isMutationCurrent(
+    key: string,
+    threadId: string,
+    stamp: CacheMutationStamp,
+  ): boolean {
+    return (
+      stamp.globalEpoch === this.globalEpoch
+      && stamp.threadEpoch === this.getThreadEpoch(threadId)
+      && stamp.keyEpoch === this.getKeyEpoch(key)
+    );
+  }
+
+  private invalidateThread(threadId: string): void {
+    this.threadEpochs.set(threadId, this.getThreadEpoch(threadId) + 1);
+    const keyPrefix = `${threadId}\u0000`;
+    [...this.keyEpochs.keys()].forEach((key) => {
+      if (key.startsWith(keyPrefix)) {
+        this.keyEpochs.delete(key);
+      }
+    });
   }
 
   private removeEntry(key: string): CachedDocumentContext | undefined {

@@ -362,6 +362,7 @@ jest.mock('@react-navigation/native', () => {
     return {
         ...actual,
         useIsFocused: () => isFocused,
+        usePreventRemove: jest.fn(),
         useFocusEffect: (effect) => {
             React.useEffect(
                 () => (isFocused ? effect() : undefined),

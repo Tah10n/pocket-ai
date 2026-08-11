@@ -40,6 +40,10 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   deriveThreadTitle,
 } from '../types/chat';
+import {
+  ANDROID_QA_DOCUMENT_MODEL_ID,
+  provisionAndroidQaDocumentModel,
+} from './AndroidQaDocumentModelBootstrap';
 
 function isRuntimeTestEnvironment(): boolean {
   return process.env.NODE_ENV === 'test'
@@ -439,7 +443,10 @@ function resolveBootRestoreTarget(requestedModelId: string): { modelId: string |
   return { modelId: requestedModelId };
 }
 
-function scheduleActiveModelRestore(activeModelId: string): void {
+function scheduleActiveModelRestore(
+  activeModelId: string,
+  options: { allowUnsafeMemoryLoad?: boolean } = {},
+): void {
   scheduleAfterFirstFrame(() => {
     const restoreSpan = performanceMonitor.startSpan('bootstrap.restoreActiveModel', {
       modelId: activeModelId,
@@ -453,7 +460,10 @@ function scheduleActiveModelRestore(activeModelId: string): void {
           return;
         }
 
-        await llmEngineService.load(decision.modelId, { preferLastWorkingProfile: true });
+        await llmEngineService.load(decision.modelId, {
+          preferLastWorkingProfile: true,
+          ...(options.allowUnsafeMemoryLoad ? { allowUnsafeMemoryLoad: true } : {}),
+        });
         restoreSpan.end({ outcome: 'success' });
       } catch (error) {
         const appError = toAppError(error);
@@ -513,6 +523,8 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
       return buildStorageBlockedCriticalResult(hydrationBlockedStorageHealth);
     }
 
+    const provisionedAndroidQaDocumentModel = await provisionAndroidQaDocumentModel();
+
     const settings = getSettings();
 
     try {
@@ -566,7 +578,15 @@ export async function bootstrapAppCritical(): Promise<BootstrapCriticalResult> {
         return { outcome };
       }
 
-      scheduleActiveModelRestore(activeModelId);
+      scheduleActiveModelRestore(activeModelId, {
+        // The document pack runs in a dedicated, shipping-guarded QA build and
+        // provisions one small, hash-pinned public model. Android emulators can
+        // report a transiently conservative free-memory budget during startup;
+        // do not let that heuristic turn a runnable hosted pack into a no-model
+        // precondition skip. Normal app boot keeps the safe default.
+        allowUnsafeMemoryLoad: provisionedAndroidQaDocumentModel
+          && activeModelId === ANDROID_QA_DOCUMENT_MODEL_ID,
+      });
     }
 
     return { outcome };

@@ -8607,6 +8607,7 @@ function collectCurrentQaBuildProvenance(provenance, currentGit, options = {}) {
     git: currentGit,
     buildContext,
     hmacKeyPath: options.hmacKeyPath,
+    toolchains: options.toolchains,
   });
 }
 

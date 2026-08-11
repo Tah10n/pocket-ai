@@ -4550,6 +4550,15 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       }),
       prebuildInputDigest: prebuildInputState.digest,
     };
+    const toolchains = {
+      node: 'v20.20.2',
+      java: 'openjdk version "17.0.16"',
+      gradleWrapper: { distributionType: 'bin', version: '8.14.3' },
+      rustChannel: '1.94.0',
+      rustc: 'rustc 1.94.0 (4a4ef493e 2026-03-02)',
+      cargo: 'cargo 1.94.0 (85eff7c80 2026-01-15)',
+      cargoNdk: 'cargo-ndk 4.1.2',
+    };
     const storedManifest = collectBuildProvenance(appRoot, {
       abi,
       androidRoot: path.join(appRoot, 'android'),
@@ -4559,6 +4568,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       gradleArgs,
       includeBundleInputs: true,
       hmacKeyPath,
+      toolchains,
       variant,
     });
 
@@ -4568,7 +4578,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         abi,
         build: { provenance: storedManifest },
         variant,
-      }, currentGit, { hmacKeyPath });
+      }, currentGit, { hmacKeyPath, toolchains });
       expect(currentManifest.digest).toBe(storedManifest.digest);
     } finally {
       if (previousGradleUserHome == null) {

@@ -81,7 +81,7 @@ describe('Android catalog QA CI configuration', () => {
     const selection = extractAndroidQaPackSelection(workflow);
     const hostedJob = extractWorkflowJob(workflow, 'android-qa');
 
-    expect(hostedJob).toContain('timeout-minutes: 90');
+    expect(hostedJob).toContain('timeout-minutes: 120');
     expect(workflow).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-documents')");
     expect(workflow).toContain("contains(github.event.pull_request.body, '- [x] Run Android document pack')");
     expect(selection).toContain("contains(github.event.pull_request.labels.*.name, 'android-pack-documents')");

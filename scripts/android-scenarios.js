@@ -2936,9 +2936,6 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
   if (!promptInput?.bounds) {
     throw new Error("Document QA attachment-ready snapshot has no prompt input bounds.");
   }
-  if (String(promptInput.text ?? "").trim() !== "") {
-    throw new Error("Document QA attachment-ready composer is not empty.");
-  }
   const sendAction = findResourceIdInSnapshot(
     readySnapshot,
     CHAT_PRIMARY_SEND_RESOURCE_ID,
@@ -3261,9 +3258,11 @@ async function inputFocusedTextForImmediateSend(adbPath, serial, value, options 
   await focusInput();
   onProgress("prompt-focused");
   await wait(options.focusSettleMs ?? 250);
-  // Prime Android's focused-input event path, then delete exactly that primer. The document QA
-  // composer is asserted empty before focus, so this avoids the select-all/repeated-delete path
-  // that can stall a hosted emulator while still absorbing a dropped first injected key.
+  // Prime Android's focused-input event path, then delete exactly that primer. Document QA owns
+  // a fresh composer at attachment-ready/follow-up boundaries, so this avoids the select-all/
+  // repeated-delete path that can stall a hosted emulator while still absorbing a dropped first
+  // injected key. Accessibility may expose placeholder copy as node text, so it is not a reliable
+  // emptiness assertion here.
   runCommand(adbPath, ["-s", serial, "shell", "input", "text", "X"], {
     timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
   });
@@ -3522,9 +3521,6 @@ async function sendDocumentPromptImmediately(ctx, promptSentinel, capturedContro
     });
     if (!input?.bounds || !send?.bounds) {
       throw new Error("Document QA prompt controls have no stable tap bounds.");
-    }
-    if (String(input.text ?? "").trim() !== "") {
-      throw new Error("Document QA prompt composer is not empty.");
     }
     controls = { inputBounds: input.bounds, sendBounds: send.bounds };
   }

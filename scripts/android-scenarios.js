@@ -616,7 +616,7 @@ const DOCUMENT_QA_HOST_CHECKPOINTS = new Set([
   "document-gate-armed",
   "document-gate-active",
   "prompt-focus-start",
-  "prompt-confirmed",
+  "prompt-injected",
   "keyboard-dismissed",
   "send-tapped",
   "stop-tapped",
@@ -1645,20 +1645,11 @@ async function inputFocusedTextAndConfirm(adbPath, serial, value, options = {}) 
   const clearInput = options.clearInput ?? clearFocusedTextInput;
   const createSnapshot = options.createSnapshot ?? createUiSnapshot;
   const wait = options.delayFn ?? delay;
-  const focusInput = options.focusInput;
-  const dismissKeyboardBeforeConfirm = options.dismissKeyboardBeforeConfirm === true;
-  const keyboardDismissSettleMs = options.keyboardDismissSettleMs ?? 500;
   let lastSnapshot = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (focusInput) {
-      await focusInput({ attempt });
-      await wait(focusSettleMs);
-    }
     clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
-    if (!focusInput) {
-      await wait(focusSettleMs);
-    }
+    await wait(focusSettleMs);
     runCommand(adbPath, [
       "-s",
       serial,
@@ -1667,15 +1658,6 @@ async function inputFocusedTextAndConfirm(adbPath, serial, value, options = {}) 
       "text",
       escapedValue,
     ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
-    if (dismissKeyboardBeforeConfirm) {
-      runCommand(
-        adbPath,
-        ["-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"],
-        { timeout: ADB_COMMAND_TIMEOUT_MS }
-      );
-      await wait(keyboardDismissSettleMs);
-    }
-
     const result = await waitForSnapshotMatch(
       adbPath,
       serial,
@@ -2815,12 +2797,12 @@ async function withDocumentQaFixtures(ctx, fixtureIds, operation) {
   try {
     baselineThreadIds = await openFreshDocumentQaChat(ctx);
     recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "chat-ready");
-    let promptInputBounds = null;
+    let promptControls = null;
     for (let index = 0; index < stagedFixtures.length; index += 1) {
-      promptInputBounds = await attachStagedDocumentFixture(ctx, stagedFixtures[index], index);
+      promptControls = await attachStagedDocumentFixture(ctx, stagedFixtures[index], index);
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-ready");
     }
-    return await operation({ fixtures: stagedFixtures, baselineThreadIds, promptInputBounds });
+    return await operation({ fixtures: stagedFixtures, baselineThreadIds, promptControls });
   } catch (error) {
     primaryError = error;
     throw error;
@@ -2952,7 +2934,15 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
   if (!promptInput?.bounds) {
     throw new Error("Document QA attachment-ready snapshot has no prompt input bounds.");
   }
-  return promptInput.bounds;
+  const sendAction = findResourceIdInSnapshot(
+    readySnapshot,
+    CHAT_PRIMARY_SEND_RESOURCE_ID,
+    { visibleOnly: true }
+  );
+  if (!sendAction?.bounds) {
+    throw new Error("Document QA attachment-ready snapshot has no send action bounds.");
+  }
+  return { inputBounds: promptInput.bounds, sendBounds: sendAction.bounds };
 }
 
 async function selectDocumentPickerFile(adbPath, serial, remoteName) {
@@ -3143,7 +3133,7 @@ async function runDocumentSuccessIteration(ctx, session, { promptSentinel }) {
     await sendDocumentPromptImmediately(
       ctx,
       buildDocumentQaRetrievalPrompt(promptSentinel, expectedSentinelIds),
-      session.promptInputBounds
+      session.promptControls
     );
     for (const sentinelId of expectedSentinelIds) {
       await waitForResourceId(
@@ -3252,6 +3242,37 @@ function readVisiblePreparedGenerationIds(adbPath, serial) {
   );
 }
 
+async function inputFocusedTextForImmediateSend(adbPath, serial, value, options = {}) {
+  const normalizedValue = String(value).trim();
+  const escapedValue = escapeAdbInputText(normalizedValue);
+  const focusInput = options.focusInput;
+  if (typeof focusInput !== "function") {
+    throw new Error("Immediate Android text send requires an explicit focused-input tap.");
+  }
+  const runCommand = options.runCommand ?? runChecked;
+  const clearInput = options.clearInput ?? clearFocusedTextInput;
+  const wait = options.delayFn ?? delay;
+
+  await focusInput();
+  await wait(options.focusSettleMs ?? 250);
+  clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
+  // Prime Android's focused-input event path, then clear it again. Hosted emulators can drop the
+  // first injected key immediately after focus even though adb reports success.
+  runCommand(adbPath, ["-s", serial, "shell", "input", "text", "X"], {
+    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
+  });
+  await wait(options.primerSettleMs ?? 100);
+  clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
+  await wait(options.clearSettleMs ?? 100);
+  runCommand(adbPath, ["-s", serial, "shell", "input", "text", escapedValue], {
+    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
+  });
+  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"], {
+    timeout: ADB_COMMAND_TIMEOUT_MS,
+  });
+  await wait(options.keyboardDismissSettleMs ?? 500);
+}
+
 async function waitForNewPreparedGenerationWithoutDocumentAttachment(
   adbPath,
   serial,
@@ -3345,7 +3366,7 @@ async function runDocumentErrorIteration(ctx, session, { promptSentinel }) {
     throw new Error("Document error scenario has no privacy-safe UI assertion.");
   }
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
-    await sendDocumentPromptImmediately(ctx, promptSentinel, session.promptInputBounds);
+    await sendDocumentPromptImmediately(ctx, promptSentinel, session.promptControls);
     await waitForAnyNode(resolveAdbPath(), ctx.serial, expectedLabels, {
       timeoutMs: 30_000,
       visibleOnly: true,
@@ -3388,7 +3409,7 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     const sendActionBounds = await sendDocumentPromptImmediately(
       ctx,
       buildDocumentQaPromptSentinel(kind),
-      session.promptInputBounds
+      session.promptControls
     );
     await waitForActiveDocumentPreparationQaGate(adbPath, ctx.serial);
     recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "document-gate-active");
@@ -3473,34 +3494,31 @@ async function waitForActiveDocumentPreparationQaGate(adbPath, serial) {
   }
 }
 
-async function sendDocumentPromptImmediately(ctx, promptSentinel, capturedInputBounds = null) {
+async function sendDocumentPromptImmediately(ctx, promptSentinel, capturedControls = null) {
   const adbPath = resolveAdbPath();
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-focus-start");
-  const inputBounds = capturedInputBounds ?? (
-    await waitForResourceId(adbPath, ctx.serial, CHAT_MESSAGE_INPUT_RESOURCE_ID, {
-      timeoutMs: 5_000,
+  let controls = capturedControls;
+  if (!controls) {
+    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    const input = findResourceIdInSnapshot(snapshot, CHAT_MESSAGE_INPUT_RESOURCE_ID, {
       visibleOnly: true,
-    })
-  ).bounds;
-  if (!inputBounds) {
-    throw new Error("Document QA prompt input has no tap bounds.");
+    });
+    const send = findResourceIdInSnapshot(snapshot, CHAT_PRIMARY_SEND_RESOURCE_ID, {
+      visibleOnly: true,
+    });
+    if (!input?.bounds || !send?.bounds) {
+      throw new Error("Document QA prompt controls have no stable tap bounds.");
+    }
+    controls = { inputBounds: input.bounds, sendBounds: send.bounds };
   }
-  await inputFocusedTextAndConfirm(adbPath, ctx.serial, promptSentinel, {
-    dismissKeyboardBeforeConfirm: true,
-    focusInput: () => tapBounds(adbPath, ctx.serial, inputBounds),
+  await inputFocusedTextForImmediateSend(adbPath, ctx.serial, promptSentinel, {
+    focusInput: () => tapBounds(adbPath, ctx.serial, controls.inputBounds),
   });
-  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-confirmed");
+  recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-injected");
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "keyboard-dismissed");
-  const sendButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_SEND_RESOURCE_ID, {
-    timeoutMs: 5_000,
-    visibleOnly: true,
-  });
-  if (!sendButton.enabled || !sendButton.clickable) {
-    throw new Error("Document QA send action is not enabled.");
-  }
-  tapRequiredNode(adbPath, ctx.serial, sendButton, "document QA send action");
+  tapBounds(adbPath, ctx.serial, controls.sendBounds);
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "send-tapped");
-  return sendButton.bounds;
+  return controls.sendBounds;
 }
 
 async function stopDocumentGenerationIfActive(ctx) {
@@ -9605,6 +9623,7 @@ module.exports = {
   goToHome,
   goToModelCatalog,
   inputFocusedTextAndConfirm,
+  inputFocusedTextForImmediateSend,
   installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
   findBlockingSystemDialogAction,

@@ -512,6 +512,7 @@ const DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT = 128;
 const ADB_INPUT_TEXT_TIMEOUT_MS = 5_000;
 const ADB_INPUT_TEXT_MAX_ATTEMPTS = 3;
 const ADB_INPUT_TEXT_CONFIRM_TIMEOUT_MS = 5_000;
+const DOCUMENT_PROMPT_KEYEVENT_BATCH_SIZE = 16;
 const ENABLED_ACTION_SETTLE_TIMEOUT_MS = 10_000;
 const TRANSIENT_SURFACE_BACK_MAX_ATTEMPTS = 3;
 const TRANSIENT_SURFACE_BACK_QUIET_DELAY_MS = 5_000;
@@ -1544,6 +1545,27 @@ function buildPreparedAttachmentSendPrompt() {
   const timestampSuffix = Date.now().toString(36).slice(-6);
   const randomSuffix = Math.floor(Math.random() * (36 ** 4)).toString(36).padStart(4, "0");
   return `${PREPARED_ATTACHMENT_SEND_PROMPT_PREFIX} qa${timestampSuffix}${randomSuffix}`;
+}
+
+function buildAdbKeyEventBatches(value, batchSize = DOCUMENT_PROMPT_KEYEVENT_BATCH_SIZE) {
+  const normalized = String(value).trim();
+  if (!/^[A-Za-z0-9 ]+$/.test(normalized)) {
+    throw new Error(`ADB key-event input supports only ASCII letters, numbers, and spaces: ${normalized}`);
+  }
+  const boundedBatchSize = Number.isInteger(batchSize) && batchSize > 0
+    ? batchSize
+    : DOCUMENT_PROMPT_KEYEVENT_BATCH_SIZE;
+  const keyEvents = [...normalized].map((character) => {
+    if (character === " ") {
+      return "KEYCODE_SPACE";
+    }
+    return `KEYCODE_${character.toUpperCase()}`;
+  });
+  const batches = [];
+  for (let index = 0; index < keyEvents.length; index += boundedBatchSize) {
+    batches.push(keyEvents.slice(index, index + boundedBatchSize));
+  }
+  return batches;
 }
 
 function buildDocumentQaPromptSentinel(...parts) {
@@ -3245,8 +3267,7 @@ function readVisiblePreparedGenerationIds(adbPath, serial) {
 }
 
 async function inputFocusedTextForImmediateSend(adbPath, serial, value, options = {}) {
-  const normalizedValue = String(value).trim();
-  const escapedValue = escapeAdbInputText(normalizedValue);
+  const keyEventBatches = buildAdbKeyEventBatches(value);
   const focusInput = options.focusInput;
   if (typeof focusInput !== "function") {
     throw new Error("Immediate Android text send requires an explicit focused-input tap.");
@@ -3258,26 +3279,31 @@ async function inputFocusedTextForImmediateSend(adbPath, serial, value, options 
   await focusInput();
   onProgress("prompt-focused");
   await wait(options.focusSettleMs ?? 250);
-  // Prime Android's focused-input event path, then delete exactly that primer. Document QA owns
-  // a fresh composer at attachment-ready/follow-up boundaries, so this avoids the select-all/
-  // repeated-delete path that can stall a hosted emulator while still absorbing a dropped first
-  // injected key. Accessibility may expose placeholder copy as node text, so it is not a reliable
-  // emptiness assertion here.
-  runCommand(adbPath, ["-s", serial, "shell", "input", "text", "X"], {
-    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
+  // Prime Android's focused-input path with a direct key event, then delete exactly that primer.
+  // Document QA owns a fresh composer at attachment-ready/follow-up boundaries. Direct bounded
+  // key-event batches avoid the hosted emulator's intermittent long `input text` IME stall.
+  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_X"], {
+    timeout: ADB_COMMAND_TIMEOUT_MS,
   });
   await wait(options.primerSettleMs ?? 100);
-  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], {
-    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
-  });
-  runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_DEL"], {
-    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
+  runCommand(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "input",
+    "keyevent",
+    "KEYCODE_DEL",
+    "KEYCODE_DEL",
+  ], {
+    timeout: ADB_COMMAND_TIMEOUT_MS,
   });
   onProgress("prompt-primer-cleared");
   await wait(options.clearSettleMs ?? 100);
-  runCommand(adbPath, ["-s", serial, "shell", "input", "text", escapedValue], {
-    timeout: ADB_INPUT_TEXT_TIMEOUT_MS,
-  });
+  for (const batch of keyEventBatches) {
+    runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", ...batch], {
+      timeout: ADB_COMMAND_TIMEOUT_MS,
+    });
+  }
   onProgress("prompt-injected");
   runCommand(adbPath, ["-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"], {
     timeout: ADB_COMMAND_TIMEOUT_MS,
@@ -9587,6 +9613,7 @@ module.exports = {
   assertDocumentSentinelsStayAbsent,
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
+  buildAdbKeyEventBatches,
   buildConversationTopology,
   buildScenarios,
   buildDocumentQaPromptSentinel,

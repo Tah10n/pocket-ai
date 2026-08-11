@@ -25,6 +25,7 @@ const {
   assertAuthoritativeThoughtClear,
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
+  buildAdbKeyEventBatches,
   buildConversationTopology,
   buildDocumentQaPromptSentinel,
   buildDocumentQaRetrievalPrompt,
@@ -1423,7 +1424,7 @@ describe('android-scenarios npm defaults', () => {
     );
   });
 
-  it('primes and injects a document prompt without a pre-send hierarchy capture', async () => {
+  it('primes and injects a document prompt in bounded key-event batches', async () => {
     const prompt = 'Document prompt 123';
     const focusInput = jest.fn().mockResolvedValue(undefined);
     const runCommand = jest.fn();
@@ -1441,36 +1442,21 @@ describe('android-scenarios npm defaults', () => {
     });
 
     expect(focusInput).toHaveBeenCalledTimes(1);
-    expect(runCommand).toHaveBeenNthCalledWith(
-      1,
-      'adb',
-      ['-s', 'device-1', 'shell', 'input', 'text', 'X'],
-      expect.objectContaining({ timeout: 5_000 }),
-    );
-    expect(runCommand).toHaveBeenNthCalledWith(
-      2,
-      'adb',
-      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL'],
-      expect.objectContaining({ timeout: 5_000 }),
-    );
-    expect(runCommand).toHaveBeenNthCalledWith(
-      3,
-      'adb',
-      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL'],
-      expect.objectContaining({ timeout: 5_000 }),
-    );
-    expect(runCommand).toHaveBeenNthCalledWith(
-      4,
-      'adb',
-      ['-s', 'device-1', 'shell', 'input', 'text', escapeAdbInputText(prompt)],
-      expect.objectContaining({ timeout: 5_000 }),
-    );
-    expect(runCommand).toHaveBeenNthCalledWith(
-      5,
-      'adb',
+    const promptBatches = buildAdbKeyEventBatches(prompt);
+    expect(promptBatches.every((batch) => batch.length <= 16)).toBe(true);
+    expect(promptBatches.flat()).toEqual([
+      'KEYCODE_D', 'KEYCODE_O', 'KEYCODE_C', 'KEYCODE_U', 'KEYCODE_M', 'KEYCODE_E',
+      'KEYCODE_N', 'KEYCODE_T', 'KEYCODE_SPACE', 'KEYCODE_P', 'KEYCODE_R', 'KEYCODE_O',
+      'KEYCODE_M', 'KEYCODE_P', 'KEYCODE_T', 'KEYCODE_SPACE', 'KEYCODE_1', 'KEYCODE_2',
+      'KEYCODE_3',
+    ]);
+    expect(runCommand.mock.calls.map(([, args]) => args)).toEqual([
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_X'],
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL', 'KEYCODE_DEL'],
+      ...promptBatches.map((batch) => ['-s', 'device-1', 'shell', 'input', 'keyevent', ...batch]),
       ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_BACK'],
-      expect.objectContaining({ timeout: 15_000 }),
-    );
+    ]);
+    expect(runCommand.mock.calls.every(([, , options]) => options.timeout === 15_000)).toBe(true);
     expect(onProgress.mock.calls.map(([stage]) => stage)).toEqual([
       'prompt-focused',
       'prompt-primer-cleared',

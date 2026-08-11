@@ -1645,11 +1645,20 @@ async function inputFocusedTextAndConfirm(adbPath, serial, value, options = {}) 
   const clearInput = options.clearInput ?? clearFocusedTextInput;
   const createSnapshot = options.createSnapshot ?? createUiSnapshot;
   const wait = options.delayFn ?? delay;
+  const focusInput = options.focusInput;
+  const dismissKeyboardBeforeConfirm = options.dismissKeyboardBeforeConfirm === true;
+  const keyboardDismissSettleMs = options.keyboardDismissSettleMs ?? 500;
   let lastSnapshot = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (focusInput) {
+      await focusInput({ attempt });
+      await wait(focusSettleMs);
+    }
     clearInput(adbPath, serial, DEFAULT_CLEAR_TEXT_INPUT_MAX_DELETE_COUNT, runCommand);
-    await wait(focusSettleMs);
+    if (!focusInput) {
+      await wait(focusSettleMs);
+    }
     runCommand(adbPath, [
       "-s",
       serial,
@@ -1658,6 +1667,14 @@ async function inputFocusedTextAndConfirm(adbPath, serial, value, options = {}) 
       "text",
       escapedValue,
     ], { timeout: ADB_INPUT_TEXT_TIMEOUT_MS });
+    if (dismissKeyboardBeforeConfirm) {
+      runCommand(
+        adbPath,
+        ["-s", serial, "shell", "input", "keyevent", "KEYCODE_BACK"],
+        { timeout: ADB_COMMAND_TIMEOUT_MS }
+      );
+      await wait(keyboardDismissSettleMs);
+    }
 
     const result = await waitForSnapshotMatch(
       adbPath,
@@ -2798,11 +2815,12 @@ async function withDocumentQaFixtures(ctx, fixtureIds, operation) {
   try {
     baselineThreadIds = await openFreshDocumentQaChat(ctx);
     recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "chat-ready");
+    let promptInputBounds = null;
     for (let index = 0; index < stagedFixtures.length; index += 1) {
-      await attachStagedDocumentFixture(ctx, stagedFixtures[index], index);
+      promptInputBounds = await attachStagedDocumentFixture(ctx, stagedFixtures[index], index);
       recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-ready");
     }
-    return await operation({ fixtures: stagedFixtures, baselineThreadIds });
+    return await operation({ fixtures: stagedFixtures, baselineThreadIds, promptInputBounds });
   } catch (error) {
     primaryError = error;
     throw error;
@@ -2922,10 +2940,19 @@ async function attachStagedDocumentFixture(ctx, staged, index) {
     visibleOnly: true,
   });
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-count-confirmed");
-  await waitForNoResourceId(adbPath, ctx.serial, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
+  const readySnapshot = await waitForNoResourceId(adbPath, ctx.serial, CHAT_DOCUMENT_BUSY_RESOURCE_ID, {
     timeoutMs: 20_000,
   });
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "attachment-idle");
+  const promptInput = findResourceIdInSnapshot(
+    readySnapshot,
+    CHAT_MESSAGE_INPUT_RESOURCE_ID,
+    { visibleOnly: true }
+  );
+  if (!promptInput?.bounds) {
+    throw new Error("Document QA attachment-ready snapshot has no prompt input bounds.");
+  }
+  return promptInput.bounds;
 }
 
 async function selectDocumentPickerFile(adbPath, serial, remoteName) {
@@ -3115,7 +3142,8 @@ async function runDocumentSuccessIteration(ctx, session, { promptSentinel }) {
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
     await sendDocumentPromptImmediately(
       ctx,
-      buildDocumentQaRetrievalPrompt(promptSentinel, expectedSentinelIds)
+      buildDocumentQaRetrievalPrompt(promptSentinel, expectedSentinelIds),
+      session.promptInputBounds
     );
     for (const sentinelId of expectedSentinelIds) {
       await waitForResourceId(
@@ -3317,7 +3345,7 @@ async function runDocumentErrorIteration(ctx, session, { promptSentinel }) {
     throw new Error("Document error scenario has no privacy-safe UI assertion.");
   }
   const measured = await measureAndroidDocumentOperation(ctx, async () => {
-    await sendDocumentPromptImmediately(ctx, promptSentinel);
+    await sendDocumentPromptImmediately(ctx, promptSentinel, session.promptInputBounds);
     await waitForAnyNode(resolveAdbPath(), ctx.serial, expectedLabels, {
       timeoutMs: 30_000,
       visibleOnly: true,
@@ -3359,7 +3387,8 @@ async function runDocumentRaceScenario(ctx, session, kind) {
     recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "document-gate-armed");
     const sendActionBounds = await sendDocumentPromptImmediately(
       ctx,
-      buildDocumentQaPromptSentinel(kind)
+      buildDocumentQaPromptSentinel(kind),
+      session.promptInputBounds
     );
     await waitForActiveDocumentPreparationQaGate(adbPath, ctx.serial);
     recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "document-gate-active");
@@ -3444,20 +3473,23 @@ async function waitForActiveDocumentPreparationQaGate(adbPath, serial) {
   }
 }
 
-async function sendDocumentPromptImmediately(ctx, promptSentinel) {
+async function sendDocumentPromptImmediately(ctx, promptSentinel, capturedInputBounds = null) {
   const adbPath = resolveAdbPath();
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-focus-start");
-  await ctx.tapAnyText(CHAT_INPUT_LABELS, {
-    allowBottomOverlay: true,
-    timeoutMs: 5_000,
-    afterTapDelayMs: 0,
-  });
+  const inputBounds = capturedInputBounds ?? (
+    await waitForResourceId(adbPath, ctx.serial, CHAT_MESSAGE_INPUT_RESOURCE_ID, {
+      timeoutMs: 5_000,
+      visibleOnly: true,
+    })
+  ).bounds;
+  if (!inputBounds) {
+    throw new Error("Document QA prompt input has no tap bounds.");
+  }
   await inputFocusedTextAndConfirm(adbPath, ctx.serial, promptSentinel, {
-    focusSettleMs: 0,
+    dismissKeyboardBeforeConfirm: true,
+    focusInput: () => tapBounds(adbPath, ctx.serial, inputBounds),
   });
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "prompt-confirmed");
-  await ctx.pressBack();
-  await delay(300);
   recordDocumentQaHostCheckpoint(adbPath, ctx.serial, "keyboard-dismissed");
   const sendButton = await waitForResourceId(adbPath, ctx.serial, CHAT_PRIMARY_SEND_RESOURCE_ID, {
     timeoutMs: 5_000,
@@ -6459,7 +6491,7 @@ async function waitForNoResourceId(adbPath, serial, resourceId, options = {}) {
   );
 
   if (match) {
-    return;
+    return snapshot;
   }
 
   throw new Error(

@@ -1422,6 +1422,60 @@ describe('android-scenarios npm defaults', () => {
     );
   });
 
+  it('dismisses the keyboard before every document prompt read-back attempt', async () => {
+    const prompt = 'Document prompt 123';
+    let typedValue = '';
+    let keyboardVisible = false;
+    let inputAttempts = 0;
+    const focusInput = jest.fn(async () => {
+      keyboardVisible = true;
+    });
+    const runCommand = jest.fn((_adbPath, args) => {
+      if (args.includes('text')) {
+        inputAttempts += 1;
+        const decoded = args[args.length - 1].replace(/%s/g, ' ');
+        typedValue = inputAttempts === 1 ? decoded.slice(1) : decoded;
+      }
+      if (args.includes('KEYCODE_BACK')) {
+        keyboardVisible = false;
+      }
+    });
+    const createSnapshot = jest.fn(() => {
+      if (keyboardVisible) {
+        throw new Error('UI hierarchy capture must not run while the keyboard is visible.');
+      }
+      return parseUiSnapshot(`
+        <hierarchy>
+          <node bounds="[0,0][1080,2400]" />
+          <node text="${typedValue}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+          <node content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
+        </hierarchy>
+      `);
+    });
+
+    await inputFocusedTextAndConfirm('adb', 'device-1', prompt, {
+      maxAttempts: 2,
+      confirmTimeoutMs: 0,
+      focusSettleMs: 0,
+      keyboardDismissSettleMs: 0,
+      retryDelayMs: 0,
+      runCommand,
+      clearInput: jest.fn(() => {
+        typedValue = '';
+      }),
+      createSnapshot,
+      delayFn: async () => undefined,
+      dismissKeyboardBeforeConfirm: true,
+      focusInput,
+    });
+
+    expect(focusInput).toHaveBeenCalledTimes(2);
+    expect(inputAttempts).toBe(2);
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+    expect(runCommand.mock.calls.filter(([, args]) => args.includes('KEYCODE_BACK'))).toHaveLength(2);
+    expect(typedValue).toBe(prompt);
+  });
+
   it('records only allowlisted document QA host checkpoints without private values', () => {
     const runCommand = jest.fn();
     const logFn = jest.fn();

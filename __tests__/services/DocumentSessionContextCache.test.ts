@@ -97,10 +97,12 @@ function createResult(
 describe('DocumentSessionContextCache', () => {
   beforeEach(async () => {
     await documentSessionContextCache.clearAll();
+    await documentSessionContextCache.retryPendingReleases();
   });
 
   afterEach(async () => {
     await documentSessionContextCache.clearAll();
+    await documentSessionContextCache.retryPendingReleases();
   });
 
   it('bounds key metadata across 10,000 sequential unique put and clear cycles', async () => {
@@ -257,6 +259,7 @@ describe('DocumentSessionContextCache', () => {
       }));
 
       await documentSessionContextCache.clearAll();
+      await documentSessionContextCache.retryPendingReleases();
 
       expect(source.release).toHaveBeenCalledTimes(2);
       expect(source.isReleased()).toBe(true);
@@ -268,6 +271,123 @@ describe('DocumentSessionContextCache', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('does not let a suspended release block clears or a put for an independent key', async () => {
+    const blockedAttachment = createAttachment('blocked-release', 'thread-blocked-release');
+    const blocked = createResult(blockedAttachment);
+    await documentSessionContextCache.put(
+      'thread-blocked-release',
+      blockedAttachment,
+      blocked.result,
+    );
+
+    const releaseGate = createDeferred();
+    blocked.source.release.mockImplementationOnce(async () => {
+      await releaseGate.promise;
+    });
+    const clearThreadPromise = documentSessionContextCache.clearThread('thread-blocked-release');
+    let clearThreadSettled = false;
+    void clearThreadPromise.then(() => {
+      clearThreadSettled = true;
+    });
+    let independentPutPromise: Promise<boolean> | undefined;
+    let reservePromise: Promise<void> | undefined;
+    let evictPromise: Promise<boolean> | undefined;
+    let finalClearPromise: Promise<void> | undefined;
+
+    try {
+      await flushPromises();
+      expect(clearThreadSettled).toBe(true);
+      expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+        activeMutationLeaseCount: 0,
+        entryCount: 0,
+        keyEpochStateCount: 0,
+        pendingReleaseCount: 1,
+        threadEpochStateCount: 0,
+      }));
+
+      const firstClearAllPromise = documentSessionContextCache.clearAll();
+      let firstClearAllSettled = false;
+      void firstClearAllPromise.then(() => {
+        firstClearAllSettled = true;
+      });
+      await flushPromises();
+      expect(firstClearAllSettled).toBe(true);
+
+      reservePromise = documentSessionContextCache.reserveForIncomingDocuments(1);
+      evictPromise = documentSessionContextCache.evictLeastRecentlyUsed();
+      let reserveSettled = false;
+      let evictResult: boolean | undefined;
+      void reservePromise.then(() => {
+        reserveSettled = true;
+      });
+      void evictPromise.then((result) => {
+        evictResult = result;
+      });
+      await flushPromises();
+
+      expect(reserveSettled).toBe(true);
+      expect(evictResult).toBe(false);
+
+      const independentAttachment = createAttachment('independent', 'thread-independent');
+      const independent = createResult(independentAttachment);
+      independentPutPromise = documentSessionContextCache.put(
+        'thread-independent',
+        independentAttachment,
+        independent.result,
+      );
+      let independentPutResult: boolean | undefined;
+      void independentPutPromise.then((result) => {
+        independentPutResult = result;
+      });
+      await flushPromises();
+
+      expect(independentPutResult).toBe(true);
+      expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+        activeMutationLeaseCount: 0,
+        entryCount: 1,
+        keyEpochStateCount: 1,
+        pendingReleaseCount: 1,
+        threadEpochStateCount: 1,
+      }));
+
+      finalClearPromise = documentSessionContextCache.clearAll();
+      let finalClearSettled = false;
+      void finalClearPromise.then(() => {
+        finalClearSettled = true;
+      });
+      await flushPromises();
+
+      expect(finalClearSettled).toBe(true);
+      expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+        activeMutationLeaseCount: 0,
+        entryCount: 0,
+        keyEpochStateCount: 0,
+        pendingReleaseCount: 1,
+        threadEpochStateCount: 0,
+      }));
+    } finally {
+      releaseGate.resolve();
+      await Promise.all([
+        clearThreadPromise,
+        reservePromise ?? Promise.resolve(),
+        evictPromise ?? Promise.resolve(false),
+        independentPutPromise ?? Promise.resolve(false),
+        finalClearPromise ?? Promise.resolve(),
+      ]);
+      await documentSessionContextCache.retryPendingReleases();
+    }
+
+    expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
+      entryCount: 0,
+      keyEpochStateCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+      threadEpochStateCount: 0,
+    });
   });
 
   it('invalidates a suspended put when clearThread wins the race', async () => {

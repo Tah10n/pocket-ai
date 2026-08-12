@@ -124,7 +124,15 @@ class DocumentSessionContextCache {
     const key = createCacheKey(normalizedThreadId, normalizedAttachmentId);
     const mutationLease = this.beginMutationLease(key, normalizedThreadId, true);
     try {
-      await this.retryPendingReleases();
+      if (
+        this.getRetainedResourceCount() >= DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES
+        || this.getRetainedSourceCharCount() + sourceCharCount
+          > DOCUMENT_SESSION_CONTEXT_MAX_SOURCE_CHARS
+      ) {
+        await this.retryPendingReleases();
+      } else {
+        this.retryPendingReleasesInBackground();
+      }
       if (!this.isMutationCurrent(key, normalizedThreadId, mutationLease.stamp)) {
         await this.releaseResources([{ resource: source, sourceCharCount }]);
         return false;
@@ -143,7 +151,10 @@ class DocumentSessionContextCache {
         evicted.push(oldest);
       }
 
-      await this.releaseEntries(evicted.filter((entry) => entry.source !== source));
+      const evictedToRelease = evicted.filter((entry) => entry.source !== source);
+      if (evictedToRelease.length > 0) {
+        await this.releaseEntries(evictedToRelease);
+      }
       if (!this.isMutationCurrent(key, normalizedThreadId, mutationLease.stamp)) {
         await this.releaseResources([{ resource: source, sourceCharCount }]);
         return false;
@@ -176,11 +187,15 @@ class DocumentSessionContextCache {
 
   /** Free enough globally bounded slots before native preparation starts. */
   public async reserveForIncomingDocuments(count: number): Promise<void> {
-    await this.retryPendingReleases();
     const normalizedCount = Math.min(
       DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES,
       Number.isSafeInteger(count) && count > 0 ? count : 0,
     );
+    if (this.getRetainedResourceCount() + normalizedCount > DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES) {
+      await this.retryPendingReleases();
+    } else {
+      this.retryPendingReleasesInBackground();
+    }
     while (this.getRetainedResourceCount() + normalizedCount > DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES) {
       const oldest = this.removeLeastRecentlyUsedEntry();
       if (!oldest) {
@@ -202,7 +217,7 @@ class DocumentSessionContextCache {
   }
 
   public async evictLeastRecentlyUsed(): Promise<boolean> {
-    await this.retryPendingReleases();
+    this.retryPendingReleasesInBackground();
     const oldest = this.removeLeastRecentlyUsedEntry();
     if (!oldest) {
       return false;
@@ -280,10 +295,8 @@ class DocumentSessionContextCache {
       normalizedThreadIds.has(entry.threadId)
     ));
     removed.forEach((entry) => this.removeEntry(entry.key));
-    await Promise.all([
-      this.retryPendingReleases(),
-      this.releaseEntries(removed),
-    ]);
+    this.retryPendingReleasesInBackground();
+    this.releaseEntriesInBackground(removed);
   }
 
   public async retainThreadAttachments(
@@ -299,10 +312,8 @@ class DocumentSessionContextCache {
       entry.threadId === normalizedThreadId && !attachmentIds.has(entry.attachment.id)
     ));
     removed.forEach((entry) => this.removeEntry(entry.key));
-    await Promise.all([
-      this.retryPendingReleases(),
-      this.releaseEntries(removed),
-    ]);
+    this.retryPendingReleasesInBackground();
+    this.releaseEntriesInBackground(removed);
   }
 
   public async clearAll(): Promise<void> {
@@ -311,10 +322,8 @@ class DocumentSessionContextCache {
     this.entries.clear();
     this.sourceCharCount = 0;
     this.cleanupEpochStates();
-    await Promise.all([
-      this.retryPendingReleases(),
-      this.releaseEntries(removed),
-    ]);
+    this.retryPendingReleasesInBackground();
+    this.releaseEntriesInBackground(removed);
   }
 
   /** Transfer ownership of uncached session sources or asset leases into the retry queue. */
@@ -336,6 +345,10 @@ class DocumentSessionContextCache {
     await Promise.all(
       [...this.pendingReleases.keys()].map((resource) => this.attemptPendingRelease(resource)),
     );
+  }
+
+  private retryPendingReleasesInBackground(): void {
+    void this.retryPendingReleases();
   }
 
   public getStats(): DocumentSessionContextCacheStats {
@@ -504,6 +517,10 @@ class DocumentSessionContextCache {
       resource: entry.source,
       sourceCharCount: entry.sourceCharCount,
     })));
+  }
+
+  private releaseEntriesInBackground(entries: readonly CachedDocumentContext[]): void {
+    void this.releaseEntries(entries);
   }
 
   private async attemptPendingRelease(resource: ReleasableDocumentResource): Promise<boolean> {

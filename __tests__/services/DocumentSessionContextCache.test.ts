@@ -3,6 +3,7 @@ import type {
   ChatDocumentSessionContextSource,
   ChatDocumentTextProcessorResult,
 } from '../../src/services/ChatAttachmentProcessorRegistry';
+import { AppError } from '../../src/services/AppError';
 import {
   DOCUMENT_SESSION_CONTEXT_MAX_ENTRIES,
   DOCUMENT_SESSION_CONTEXT_MAX_SOURCE_CHARS,
@@ -102,6 +103,45 @@ describe('DocumentSessionContextCache', () => {
     await documentSessionContextCache.clearAll();
   });
 
+  it('bounds key metadata across 10,000 sequential unique put and clear cycles', async () => {
+    for (let index = 0; index < 10_000; index += 1) {
+      const attachment = createAttachment(`unique-${index}`, 'thread-reused');
+      const { result } = createResult(attachment);
+      await documentSessionContextCache.put('thread-reused', attachment, result);
+      await documentSessionContextCache.clearThread('thread-reused');
+    }
+
+    expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
+      entryCount: 0,
+      keyEpochStateCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+      threadEpochStateCount: 0,
+    });
+  }, 30_000);
+
+  it('does not retain thread tombstones after many unique threads are cleared', async () => {
+    for (let index = 0; index < 1_000; index += 1) {
+      const threadId = `thread-unique-${index}`;
+      const attachment = createAttachment(`thread-document-${index}`, threadId);
+      const { result } = createResult(attachment);
+      await documentSessionContextCache.put(threadId, attachment, result);
+      await documentSessionContextCache.clearThread(threadId);
+    }
+
+    expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
+      entryCount: 0,
+      keyEpochStateCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+      threadEpochStateCount: 0,
+    });
+  }, 30_000);
+
   it('reuses a process-local source for each new question', async () => {
     const attachment = createAttachment('document', 'thread');
     const { result, source } = createResult(attachment);
@@ -181,7 +221,12 @@ describe('DocumentSessionContextCache', () => {
         maxChunks: 64,
       })).resolves.toEqual([]);
       expect(second.source.release).toHaveBeenCalledTimes(1);
-      expect(documentSessionContextCache.getStats().entryCount).toBe(0);
+      expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+        activeMutationLeaseCount: 0,
+        entryCount: 0,
+        keyEpochStateCount: 0,
+        threadEpochStateCount: 0,
+      }));
       expect(warnSpy).toHaveBeenCalledWith(
         '[DocumentSessionContextCache] Dropped an unavailable session document',
         expect.objectContaining({ errorCode: 'chat_attachment_native_failed' }),
@@ -203,9 +248,12 @@ describe('DocumentSessionContextCache', () => {
       expect(source.release).toHaveBeenCalledTimes(1);
       expect(source.isReleased()).toBe(false);
       expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+        activeMutationLeaseCount: 0,
         entryCount: 0,
+        keyEpochStateCount: 0,
         pendingReleaseCount: 1,
         sourceCharCount: result.sourceCharCount,
+        threadEpochStateCount: 0,
       }));
 
       await documentSessionContextCache.clearAll();
@@ -236,16 +284,25 @@ describe('DocumentSessionContextCache', () => {
     await flushPromises();
 
     const clearPromise = documentSessionContextCache.clearThread('thread-race');
+    expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+      activeMutationLeaseCount: 1,
+      entryCount: 0,
+      keyEpochStateCount: 1,
+      threadEpochStateCount: 1,
+    }));
     releaseGate.resolve();
 
     await expect(putPromise).resolves.toBe(false);
     await expect(clearPromise).resolves.toBeUndefined();
     expect(incoming.source.release).toHaveBeenCalledTimes(1);
     expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
       entryCount: 0,
+      keyEpochStateCount: 0,
       pendingReleaseCount: 0,
       sourceCharCount: 0,
       threadCount: 0,
+      threadEpochStateCount: 0,
     });
   });
 
@@ -263,16 +320,25 @@ describe('DocumentSessionContextCache', () => {
     await flushPromises();
 
     const clearPromise = documentSessionContextCache.clearAll();
+    expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+      activeMutationLeaseCount: 1,
+      entryCount: 0,
+      keyEpochStateCount: 1,
+      threadEpochStateCount: 1,
+    }));
     releaseGate.resolve();
 
     await expect(putPromise).resolves.toBe(false);
     await expect(clearPromise).resolves.toBeUndefined();
     expect(incoming.source.release).toHaveBeenCalledTimes(1);
     expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
       entryCount: 0,
+      keyEpochStateCount: 0,
       pendingReleaseCount: 0,
       sourceCharCount: 0,
       threadCount: 0,
+      threadEpochStateCount: 0,
     });
   });
 
@@ -308,6 +374,95 @@ describe('DocumentSessionContextCache', () => {
     })]);
     expect(first.source.selectContext).not.toHaveBeenCalled();
     expect(second.source.selectContext).toHaveBeenCalledTimes(1);
+    expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+      activeMutationLeaseCount: 0,
+      entryCount: 1,
+      keyEpochStateCount: 1,
+      threadEpochStateCount: 1,
+    }));
+  });
+
+  it('does not return a suspended selection after its thread is cleared', async () => {
+    const attachment = createAttachment('select-clear-race', 'thread-select-race');
+    const entry = createResult(attachment);
+    await documentSessionContextCache.put('thread-select-race', attachment, entry.result);
+
+    const selectGate = createDeferred();
+    entry.source.selectContext.mockImplementationOnce(async ({ query }) => {
+      await selectGate.promise;
+      return {
+        ...entry.result,
+        text: `selected:${query}`,
+        chunks: [{ index: 0, text: `selected:${query}`, kind: 'paragraph' as const }],
+        extractedCharCount: `selected:${query}`.length,
+        selectedChunkCount: 1,
+      };
+    });
+    const selectPromise = documentSessionContextCache.selectThreadDocuments(
+      'thread-select-race',
+      { query: 'stale question', maxChars: 64_000, maxChunks: 64 },
+    );
+    await flushPromises();
+
+    await documentSessionContextCache.clearThread('thread-select-race');
+    expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+      activeMutationLeaseCount: 1,
+      entryCount: 0,
+      keyEpochStateCount: 1,
+      threadEpochStateCount: 1,
+    }));
+    selectGate.resolve();
+
+    await expect(selectPromise).resolves.toEqual([]);
+    expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
+      entryCount: 0,
+      keyEpochStateCount: 0,
+      pendingReleaseCount: 0,
+      sourceCharCount: 0,
+      threadCount: 0,
+      threadEpochStateCount: 0,
+    });
+  });
+
+  it('releases a selection lease when native cancellation rejects', async () => {
+    const attachment = createAttachment('select-cancel-race', 'thread-select-cancel');
+    const entry = createResult(attachment);
+    await documentSessionContextCache.put('thread-select-cancel', attachment, entry.result);
+
+    const selectGate = createDeferred();
+    entry.source.selectContext.mockImplementationOnce(async () => {
+      await selectGate.promise;
+      throw new AppError(
+        'chat_attachment_processing_cancelled',
+        'Document session context selection was cancelled.',
+      );
+    });
+    const controller = new AbortController();
+    const selectPromise = documentSessionContextCache.selectThreadDocuments(
+      'thread-select-cancel',
+      {
+        query: 'cancelled question',
+        maxChars: 64_000,
+        maxChunks: 64,
+        signal: controller.signal,
+      },
+    );
+    await flushPromises();
+
+    controller.abort();
+    selectGate.resolve();
+
+    await expect(selectPromise).rejects.toEqual(expect.objectContaining({
+      code: 'chat_attachment_processing_cancelled',
+    }));
+    expect(entry.source.release).not.toHaveBeenCalled();
+    expect(documentSessionContextCache.getStats()).toEqual(expect.objectContaining({
+      activeMutationLeaseCount: 0,
+      entryCount: 1,
+      keyEpochStateCount: 1,
+      threadEpochStateCount: 1,
+    }));
   });
 
   it('retains no handle or direct plaintext after thread deletion', async () => {
@@ -325,10 +480,13 @@ describe('DocumentSessionContextCache', () => {
     expect(source.release).toHaveBeenCalledTimes(1);
     expect(source.selectContext).not.toHaveBeenCalled();
     expect(documentSessionContextCache.getStats()).toEqual({
+      activeMutationLeaseCount: 0,
       entryCount: 0,
+      keyEpochStateCount: 0,
       pendingReleaseCount: 0,
       sourceCharCount: 0,
       threadCount: 0,
+      threadEpochStateCount: 0,
     });
   });
 

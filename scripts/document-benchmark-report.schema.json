@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Tah10n/pocket-ai/blob/main/scripts/document-benchmark-report.schema.json",
+  "title": "Pocket AI document benchmark report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "target",
+    "buildType",
+    "privacy",
+    "environment",
+    "libraries",
+    "cases",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "target": { "enum": ["host", "android-device"] },
+    "buildType": { "const": "release" },
+    "privacy": { "const": "synthetic-only" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "arch", "sourceRevision", "artifactBytes", "artifactSha256"],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "arch": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "sourceRevision": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40}$" },
+        "artifactBytes": { "type": "integer", "minimum": 1 },
+        "artifactSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "deviceModel": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "androidApi": { "type": "integer", "minimum": 24 },
+        "appVersion": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "libraries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["abi", "library", "sizeBytes", "sha256"],
+        "properties": {
+          "abi": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+          "library": { "type": "string", "pattern": "^(?:libpocket_anydoc(?:_jni)?\\.(?:so|a|dylib)|pocket-anydoc-host-bench(?:\\.exe)?)$" },
+          "sizeBytes": { "type": "integer", "minimum": 1 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "workload", "fixtureIds", "iterations"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+          "workload": { "enum": ["typical", "stress", "sequential", "malicious"] },
+          "fixtureIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+          },
+          "iterations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "iteration",
+                "warmup",
+                "outcome",
+                "elapsedMs",
+                "peakRssBytes",
+                "uiProbeCount",
+                "uiProbeMaxLatencyMs",
+                "sentinelIds"
+              ],
+              "properties": {
+                "iteration": { "type": "integer", "minimum": 0 },
+                "warmup": { "type": "boolean" },
+                "outcome": { "enum": ["success", "expected-error"] },
+                "errorCode": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "elapsedMs": { "type": "integer", "minimum": 0 },
+                "peakRssBytes": { "type": "integer", "minimum": 1 },
+                "uiProbeCount": { "type": "integer", "minimum": 0 },
+                "uiProbeMaxLatencyMs": { "type": "integer", "minimum": 0 },
+                "sentinelIds": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+                  "uniqueItems": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measuredIterationCount", "maxElapsedMs", "maxPeakRssBytes", "libraryBytes"],
+      "properties": {
+        "measuredIterationCount": { "type": "integer", "minimum": 1 },
+        "maxElapsedMs": { "type": "integer", "minimum": 0 },
+        "maxPeakRssBytes": { "type": "integer", "minimum": 1 },
+        "libraryBytes": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

@@ -1,6 +1,17 @@
 version: 2
 
 updates:
+  - package-ecosystem: cargo
+    directory: /modules/pocket-anydoc/rust
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/Budapest
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+
   - package-ecosystem: npm
     directory: /
     schedule:

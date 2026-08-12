@@ -22,6 +22,7 @@ interface Conversation extends ConversationIndexItem {
 }
 
 interface RecentConversationsListProps {
+  disabled?: boolean;
   onDeleteConversation?: (conversation: ConversationIndexItem) => void;
   onOpenConversation?: (conversation: ConversationIndexItem) => void;
   onViewAllConversations?: () => void;
@@ -31,6 +32,7 @@ interface RecentConversationsListProps {
 const DEFAULT_MAX_VISIBLE_CONVERSATIONS = 5;
 
 export const RecentConversationsList = ({
+  disabled = false,
   onDeleteConversation,
   onOpenConversation,
   onViewAllConversations,
@@ -58,7 +60,9 @@ export const RecentConversationsList = ({
         }}
         accessibilityRole="button"
         accessibilityLabel={conv.title}
-        className="flex-1 flex-row items-center gap-3 p-3 active:opacity-70"
+        accessibilityState={{ disabled }}
+        disabled={disabled}
+        className={`flex-1 flex-row items-center gap-3 p-3 ${disabled ? 'opacity-55' : 'active:opacity-70'}`}
       >
         <ScreenIconTile iconName={conv.icon} tone="accent" iconSize="sm" className="shrink-0" iconClassName="text-primary-500" />
 
@@ -85,6 +89,7 @@ export const RecentConversationsList = ({
             onDeleteConversation?.(conv);
           }}
           accessibilityLabel={`${t('common.delete')} ${conv.title}`}
+          disabled={disabled}
           iconName="delete-outline"
           size="compact"
           tone="danger"
@@ -95,7 +100,7 @@ export const RecentConversationsList = ({
         </Box>
       </Box>
     </ScreenCard>
-  ), [onDeleteConversation, onOpenConversation, t]);
+  ), [disabled, onDeleteConversation, onOpenConversation, t]);
 
   return (
     <ScreenStack gap="compact">
@@ -108,6 +113,7 @@ export const RecentConversationsList = ({
             testID="manage-conversations-button"
             onPress={onViewAllConversations}
             accessibilityLabel={t('common.manage')}
+            disabled={disabled}
             size="sm"
             className="self-start"
           >

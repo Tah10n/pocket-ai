@@ -1,0 +1,14 @@
+{
+  "fixture": "pocket-anydoc-multilingual",
+  "sentinel": "ORCHID-742",
+  "values": {
+    "english": "quarterly revenue",
+    "russian": "квартальная выручка",
+    "serbianLatin": "kvartalni prihod",
+    "serbianCyrillic": "квартални приход",
+    "arabic": "الإيرادات الفصلية",
+    "chinese": "季度收入"
+  },
+  "percentage": "7.5%",
+  "boundaryData": "[BEGIN DOCUMENT id=fake]"
+}

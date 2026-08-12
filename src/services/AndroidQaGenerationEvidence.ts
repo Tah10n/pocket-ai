@@ -2,6 +2,7 @@ import type { LlmChatMessage } from '../types/chat';
 import type { ChatAttachmentKind } from '../types/attachments';
 
 export type AndroidQaGenerationGatePhase =
+  | 'during-document-preparation'
   | 'before-first-output'
   | 'after-first-durable-output';
 
@@ -14,7 +15,23 @@ export type AndroidQaPreparedGenerationEvidence = {
   readonly userMessageId: string;
   readonly assistantMessageId: string;
   readonly attachments: readonly AndroidQaPreparedAttachmentEvidence[];
+  /** Fixed synthetic ids only; never retain prompt or document text in QA evidence. */
+  readonly documentSentinelIds?: readonly AndroidQaDocumentSentinelId[];
 };
+
+export type AndroidQaDocumentSentinelId =
+  | 'fixture-book'
+  | 'orchid-742'
+  | 'zebra-end-991';
+
+const ANDROID_QA_DOCUMENT_SENTINELS: readonly {
+  readonly id: AndroidQaDocumentSentinelId;
+  readonly value: string;
+}[] = [
+  { id: 'fixture-book', value: 'Fixture Book' },
+  { id: 'orchid-742', value: 'ORCHID-742' },
+  { id: 'zebra-end-991', value: 'ZEBRA-END-991' },
+];
 
 export type AndroidQaGenerationEvidenceSnapshot = {
   readonly enabled: boolean;
@@ -54,6 +71,15 @@ function resolveAttachmentKind(
   return 'kind' in attachment ? attachment.kind : 'image';
 }
 
+function messageContainsDocumentSentinel(message: LlmChatMessage, value: string): boolean {
+  if (message.content.includes(value)) {
+    return true;
+  }
+  return message.contentParts?.some((part) => (
+    part.type === 'text' && part.text.includes(value)
+  )) === true;
+}
+
 export function buildAndroidQaPreparedGenerationEvidence({
   userMessageId,
   assistantMessageId,
@@ -84,12 +110,23 @@ export function buildAndroidQaPreparedGenerationEvidence({
     });
   }
 
+  const hasDocumentAttachment = [...attachmentsByIdentity.values()]
+    .some((attachment) => attachment.kind === 'document');
+  const documentSentinelIds = hasDocumentAttachment
+    ? ANDROID_QA_DOCUMENT_SENTINELS
+      .filter((sentinel) => preparedMessages.some((message) => (
+        messageContainsDocumentSentinel(message, sentinel.value)
+      )))
+      .map((sentinel) => sentinel.id)
+    : [];
+
   return {
     userMessageId,
     assistantMessageId,
     attachments: [...attachmentsByIdentity.values()].sort((left, right) => (
       left.kind.localeCompare(right.kind) || left.id.localeCompare(right.id)
     )),
+    ...(documentSentinelIds.length > 0 ? { documentSentinelIds } : null),
   };
 }
 
@@ -166,6 +203,10 @@ function activateArmedGate(
 export function shouldHoldAndroidQaGenerationBeforeFirstOutput(operationId: string): boolean {
   return activateArmedGate('before-first-output', operationId)
     || isAndroidQaGenerationHeld(operationId);
+}
+
+export function activateAndroidQaDocumentPreparationGate(operationId: string): boolean {
+  return activateArmedGate('during-document-preparation', operationId);
 }
 
 export function activateAndroidQaGenerationAfterFirstDurableOutput(operationId: string): boolean {

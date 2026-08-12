@@ -32,16 +32,26 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Setup pinned Rust
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache AnyDoc Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify (typecheck + lint + tests)
+      - name: Verify (Rust + typecheck + lint + tests)
         run: npm run verify:mobile-change
 
   android-qa:
     name: android (qa)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     needs: verify
     if: >-
       github.event_name == 'pull_request' &&
@@ -49,6 +59,7 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
         contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+        contains(github.event.pull_request.labels.*.name, 'android-pack-documents') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-native') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') ||
         contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') ||
@@ -56,6 +67,8 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'android-pack-extended') ||
         contains(github.event.pull_request.body, '- [x] Run Android checks') ||
         contains(github.event.pull_request.body, '- [X] Run Android checks') ||
+        contains(github.event.pull_request.body, '- [x] Run Android document pack') ||
+        contains(github.event.pull_request.body, '- [X] Run Android document pack') ||
         contains(github.event.pull_request.body, '- [x] Run Android scenarios') ||
         contains(github.event.pull_request.body, '- [X] Run Android scenarios')
       )
@@ -76,6 +89,19 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      - name: Setup pinned Rust for Android
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Cache AnyDoc Android dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+
+      - name: Install pinned cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -89,6 +115,8 @@ jobs:
 
           if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
             pack="all"
+          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-documents') || contains(github.event.pull_request.body, '- [x] Run Android document pack') || contains(github.event.pull_request.body, '- [X] Run Android document pack') }}" == "true" ]]; then
+            pack="documents"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
             pack="native"
           elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then
@@ -119,7 +147,7 @@ jobs:
           disable-linux-hw-accel: false
           disable-animations: true
           emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 4096
           script: npm run android:scenarios -- --emulator --pack "$ANDROID_QA_PACK" --fail-on-skip --bootstrap-screenshot
 
       - name: Upload Android QA diagnostics
@@ -136,7 +164,8 @@ jobs:
       - name: Upload Android QA APK
         if: >-
           success() &&
-          contains(github.event.pull_request.labels.*.name, 'android-pack-all')
+          (contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+           contains(github.event.pull_request.labels.*.name, 'android-pack-documents'))
         uses: actions/upload-artifact@v7
         with:
           name: android-qa-apk

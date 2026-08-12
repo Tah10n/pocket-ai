@@ -1,0 +1,48 @@
+# Keep source-oriented fixture metadata deterministic across platforms.
+modules/pocket-anydoc/rust/fixtures/**/*.csv text eol=lf
+modules/pocket-anydoc/rust/fixtures/**/*.json text eol=lf
+modules/pocket-anydoc/rust/fixtures/**/*.md text eol=lf
+modules/pocket-anydoc/rust/fixtures/**/*.markdown text eol=lf
+modules/pocket-anydoc/rust/fixtures/**/*.ps1 text eol=lf
+modules/pocket-anydoc/rust/fixtures/**/*.tsv text eol=lf
+modules/pocket-anydoc/rust/fixtures/**/*.txt text eol=lf
+
+# Office, document, archive, and media fixtures are byte-exact test inputs.
+# `binary` expands to -diff -merge -text and prevents checkout EOL conversion.
+modules/pocket-anydoc/rust/fixtures/**/*.7z binary
+modules/pocket-anydoc/rust/fixtures/**/*.bmp binary
+modules/pocket-anydoc/rust/fixtures/**/*.bz2 binary
+modules/pocket-anydoc/rust/fixtures/**/*.doc binary
+modules/pocket-anydoc/rust/fixtures/**/*.docm binary
+modules/pocket-anydoc/rust/fixtures/**/*.docx binary
+modules/pocket-anydoc/rust/fixtures/**/*.epub binary
+modules/pocket-anydoc/rust/fixtures/**/*.gif binary
+modules/pocket-anydoc/rust/fixtures/**/*.gz binary
+modules/pocket-anydoc/rust/fixtures/**/*.jpeg binary
+modules/pocket-anydoc/rust/fixtures/**/*.jpg binary
+modules/pocket-anydoc/rust/fixtures/**/*.odp binary
+modules/pocket-anydoc/rust/fixtures/**/*.ods binary
+modules/pocket-anydoc/rust/fixtures/**/*.odt binary
+modules/pocket-anydoc/rust/fixtures/**/*.pdf binary
+modules/pocket-anydoc/rust/fixtures/**/*.png binary
+modules/pocket-anydoc/rust/fixtures/**/*.pot binary
+modules/pocket-anydoc/rust/fixtures/**/*.potm binary
+modules/pocket-anydoc/rust/fixtures/**/*.potx binary
+modules/pocket-anydoc/rust/fixtures/**/*.pps binary
+modules/pocket-anydoc/rust/fixtures/**/*.ppsm binary
+modules/pocket-anydoc/rust/fixtures/**/*.ppsx binary
+modules/pocket-anydoc/rust/fixtures/**/*.ppt binary
+modules/pocket-anydoc/rust/fixtures/**/*.pptm binary
+modules/pocket-anydoc/rust/fixtures/**/*.pptx binary
+modules/pocket-anydoc/rust/fixtures/**/*.rar binary
+modules/pocket-anydoc/rust/fixtures/**/*.rtf binary
+modules/pocket-anydoc/rust/fixtures/**/*.tar binary
+modules/pocket-anydoc/rust/fixtures/**/*.tif binary
+modules/pocket-anydoc/rust/fixtures/**/*.tiff binary
+modules/pocket-anydoc/rust/fixtures/**/*.webp binary
+modules/pocket-anydoc/rust/fixtures/**/*.xls binary
+modules/pocket-anydoc/rust/fixtures/**/*.xlsb binary
+modules/pocket-anydoc/rust/fixtures/**/*.xlsm binary
+modules/pocket-anydoc/rust/fixtures/**/*.xlsx binary
+modules/pocket-anydoc/rust/fixtures/**/*.xz binary
+modules/pocket-anydoc/rust/fixtures/**/*.zip binary

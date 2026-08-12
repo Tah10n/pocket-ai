@@ -21,6 +21,7 @@ import { resetChatStoreForPrivateStorageReset } from '../store/chatStore';
 import { resetDownloadStoreForPrivateStorageReset } from '../store/downloadStore';
 import { resetModelsStoreForPrivateStorageReset } from '../store/modelsStore';
 import { chatAttachmentStorageService } from './ChatAttachmentStorageService';
+import { documentSessionContextCache } from './DocumentSessionContextCache';
 
 export function invalidatePrivateStorageRuntimeHandles(): void {
   invalidateAppStorageForPrivateReset();
@@ -44,6 +45,7 @@ export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
     stopModelDownloadManagerForPrivateStorageBlocked(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);
+  await documentSessionContextCache.clearAll();
 }
 
 export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): Promise<PrivateStorageHealthSnapshot> {
@@ -51,6 +53,7 @@ export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): 
     resetModelDownloadManagerForPrivateStorageReset(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);
+  await documentSessionContextCache.clearAll();
   await registry.preserveExistingModelFilesForPrivateStorageReset();
   invalidatePrivateStorageRuntimeHandles();
 

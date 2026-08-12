@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import * as DocumentPicker from 'expo-document-picker';
 import type { ChatDocumentAttachmentDraft } from '@/types/attachments';
 import {
+  CHAT_DOCUMENT_PICKER_MIME_TYPES,
   MAX_CHAT_ATTACHMENTS_BY_KIND,
   getSendableDraftDocumentAttachments,
   validateChatDocumentAttachmentLimit,
@@ -19,6 +20,11 @@ export type UseChatDocumentAttachmentsOptions = {
   enabled: boolean;
   disabledReason?: string;
   ownerKey?: string | null;
+  preserveFailedDraftsOnNewThreadCommit?: boolean;
+};
+
+export type RestoreDocumentDraftsForRetryOptions = {
+  preserveOwnerKey?: string | null;
 };
 
 export type UseChatDocumentAttachmentsResult = {
@@ -30,18 +36,12 @@ export type UseChatDocumentAttachmentsResult = {
   clearDrafts: () => void;
   clearFailedDrafts: () => void;
   consumeDraftsForSend: () => ChatDocumentAttachmentDraft[];
-  restoreDraftsForRetry: (drafts: readonly ChatDocumentAttachmentDraft[]) => void;
+  restoreDraftsForRetry: (
+    drafts: readonly ChatDocumentAttachmentDraft[],
+    options?: RestoreDocumentDraftsForRetryOptions,
+  ) => void;
   discardDrafts: (drafts: readonly ChatDocumentAttachmentDraft[], context?: string) => void;
 };
-
-const DOCUMENT_PICKER_MIME_TYPES = [
-  'application/json',
-  'application/pdf',
-  'text/csv',
-  'text/markdown',
-  'text/plain',
-  'text/tab-separated-values',
-];
 
 function getDraftKey(draft: ChatDocumentAttachmentDraft): string {
   return draft.id ?? draft.localUri ?? draft.pickerUri;
@@ -73,10 +73,66 @@ function hasSameDraftReferences(
   return left.length === right.length && left.every((draft, index) => draft === right[index]);
 }
 
+function splitOwnerKey(ownerKey: string): { threadKey: string; modelKey: string } {
+  const separatorIndex = ownerKey.indexOf('|');
+  if (separatorIndex < 0) {
+    return { threadKey: ownerKey, modelKey: '' };
+  }
+
+  return {
+    threadKey: ownerKey.slice(0, separatorIndex),
+    modelKey: ownerKey.slice(separatorIndex + 1),
+  };
+}
+
+function isNewThreadOwnerThreadKey(threadKey: string): boolean {
+  return threadKey === 'new-thread' || /^new-thread:\d+$/u.test(threadKey);
+}
+
+function shouldPreserveDraftsForNewThreadCommit({
+  drafts,
+  enabled,
+  expectedNextOwnerKey,
+  nextOwnerKey,
+  preservedDraftKeys,
+  preserveFailedDraftsOnNewThreadCommit,
+  previousOwnerKey,
+}: {
+  drafts: readonly ChatDocumentAttachmentDraft[];
+  enabled: boolean;
+  expectedNextOwnerKey: string | null;
+  nextOwnerKey: string;
+  preservedDraftKeys: ReadonlySet<string>;
+  preserveFailedDraftsOnNewThreadCommit: boolean;
+  previousOwnerKey: string;
+}): boolean {
+  if (!preserveFailedDraftsOnNewThreadCommit || !enabled || drafts.length === 0) {
+    return false;
+  }
+
+  const previous = splitOwnerKey(previousOwnerKey);
+  const next = splitOwnerKey(nextOwnerKey);
+  if (
+    !isNewThreadOwnerThreadKey(previous.threadKey)
+    || isNewThreadOwnerThreadKey(next.threadKey)
+    || previous.modelKey !== next.modelKey
+    || expectedNextOwnerKey === null
+    || nextOwnerKey !== expectedNextOwnerKey
+  ) {
+    return false;
+  }
+
+  return drafts.every((draft) => (
+    draft.copyStatus === 'failed'
+    || preservedDraftKeys.has(getDraftKey(draft))
+  ));
+}
+
 export function useChatDocumentAttachments({
   enabled,
   disabledReason,
   ownerKey = null,
+  preserveFailedDraftsOnNewThreadCommit = false,
 }: UseChatDocumentAttachmentsOptions): UseChatDocumentAttachmentsResult {
   const { t } = useTranslation();
   const normalizedOwnerKey = ownerKey ?? 'default';
@@ -98,6 +154,8 @@ export function useChatDocumentAttachments({
   const pickingLockRef = useRef(false);
   const ownerKeyRef = useRef(normalizedOwnerKey);
   const ownerGenerationRef = useRef(0);
+  const retryDraftKeysForNewThreadCommitRef = useRef<Set<string>>(new Set());
+  const retryDraftOwnerKeyForNewThreadCommitRef = useRef<string | null>(null);
   const remainingSlots = Math.max(0, MAX_CHAT_ATTACHMENTS_BY_KIND.document - drafts.length);
 
   if (ownerKeyRef.current !== normalizedOwnerKey) {
@@ -175,7 +233,7 @@ export function useChatDocumentAttachments({
       }
 
       const result = await DocumentPicker.getDocumentAsync({
-        type: DOCUMENT_PICKER_MIME_TYPES,
+        type: CHAT_DOCUMENT_PICKER_MIME_TYPES,
         multiple: true,
         copyToCacheDirectory: true,
         base64: false,
@@ -315,6 +373,8 @@ export function useChatDocumentAttachments({
 
   const clearDrafts = useCallback(() => {
     ownerGenerationRef.current += 1;
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
     discardOwnedDraftsQuietly(ownedDraftsRef.current, 'document drafts');
     draftsRef.current = [];
     if (mountedRef.current) {
@@ -337,6 +397,12 @@ export function useChatDocumentAttachments({
 
     ownerGenerationRef.current += 1;
     discardOwnedDraftsQuietly(failedDrafts, 'failed document drafts after successful send');
+    failedDrafts.forEach((draft) => {
+      retryDraftKeysForNewThreadCommitRef.current.delete(getDraftKey(draft));
+    });
+    if (retryDraftKeysForNewThreadCommitRef.current.size === 0) {
+      retryDraftOwnerKeyForNewThreadCommitRef.current = null;
+    }
     draftsRef.current = draftsRef.current.filter((draft) => draft.copyStatus !== 'failed');
     setDraftState({
       drafts: draftsRef.current,
@@ -351,6 +417,12 @@ export function useChatDocumentAttachments({
     }
 
     ownerGenerationRef.current += 1;
+    draftsToConsume.forEach((draft) => {
+      retryDraftKeysForNewThreadCommitRef.current.delete(getDraftKey(draft));
+    });
+    if (retryDraftKeysForNewThreadCommitRef.current.size === 0) {
+      retryDraftOwnerKeyForNewThreadCommitRef.current = null;
+    }
     releaseOwnedDrafts(draftsToConsume);
     const draftsToConsumeQueue = [...draftsToConsume];
     draftsRef.current = draftsRef.current.filter((draft) => {
@@ -372,7 +444,10 @@ export function useChatDocumentAttachments({
     return draftsToConsume;
   }, [releaseOwnedDrafts]);
 
-  const restoreDraftsForRetry = useCallback((draftsToRestore: readonly ChatDocumentAttachmentDraft[]) => {
+  const restoreDraftsForRetry = useCallback((
+    draftsToRestore: readonly ChatDocumentAttachmentDraft[],
+    options: RestoreDocumentDraftsForRetryOptions = {},
+  ) => {
     if (draftsToRestore.length === 0 || !mountedRef.current) {
       return;
     }
@@ -395,12 +470,25 @@ export function useChatDocumentAttachments({
       ownedDraftsRef.current = [...ownedDraftsRef.current, ...restoredOwnedDrafts];
     }
 
+    const owner = splitOwnerKey(ownerKeyRef.current);
+    if (
+      preserveFailedDraftsOnNewThreadCommit
+      && isNewThreadOwnerThreadKey(owner.threadKey)
+      && restoredDrafts.length > 0
+      && options.preserveOwnerKey
+    ) {
+      retryDraftOwnerKeyForNewThreadCommitRef.current = options.preserveOwnerKey;
+      nextDrafts.forEach((draft) => {
+        retryDraftKeysForNewThreadCommitRef.current.add(getDraftKey(draft));
+      });
+    }
+
     draftsRef.current = nextDrafts;
     setDraftState({
       drafts: nextDrafts,
       ownerKey: ownerKeyRef.current,
     });
-  }, []);
+  }, [preserveFailedDraftsOnNewThreadCommit]);
 
   const discardDrafts = useCallback((draftsToDiscard: readonly ChatDocumentAttachmentDraft[], context = 'document drafts') => {
     discardDraftsQuietly(draftsToDiscard, context);
@@ -419,10 +507,39 @@ export function useChatDocumentAttachments({
       return;
     }
 
+    if (shouldPreserveDraftsForNewThreadCommit({
+      drafts: draftState.drafts,
+      enabled,
+      expectedNextOwnerKey: retryDraftOwnerKeyForNewThreadCommitRef.current,
+      nextOwnerKey: normalizedOwnerKey,
+      preservedDraftKeys: retryDraftKeysForNewThreadCommitRef.current,
+      preserveFailedDraftsOnNewThreadCommit,
+      previousOwnerKey: draftState.ownerKey,
+    })) {
+      retryDraftKeysForNewThreadCommitRef.current.clear();
+      retryDraftOwnerKeyForNewThreadCommitRef.current = null;
+      draftsRef.current = draftState.drafts;
+      ownedDraftsRef.current = draftState.drafts;
+      setDraftState((current) => (
+        current === draftState || (
+          current.ownerKey === draftState.ownerKey
+          && hasSameDraftReferences(current.drafts, draftState.drafts)
+        )
+          ? {
+            drafts: draftState.drafts,
+            ownerKey: normalizedOwnerKey,
+          }
+          : current
+      ));
+      return;
+    }
+
     discardDraftsQuietly(
       releaseOwnedDrafts(draftState.drafts),
       enabled ? 'document drafts from previous owner' : 'document drafts while disabled',
     );
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
     setDraftState((current) => (
       current === draftState || (
         current.ownerKey === draftState.ownerKey
@@ -434,7 +551,7 @@ export function useChatDocumentAttachments({
         }
         : current
     ));
-  }, [draftState, enabled, normalizedOwnerKey, releaseOwnedDrafts]);
+  }, [draftState, enabled, normalizedOwnerKey, preserveFailedDraftsOnNewThreadCommit, releaseOwnedDrafts]);
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -443,6 +560,8 @@ export function useChatDocumentAttachments({
     discardDraftsQuietly(ownedDraftsRef.current, 'document drafts during cleanup');
     ownedDraftsRef.current = [];
     draftsRef.current = [];
+    retryDraftKeysForNewThreadCommitRef.current.clear();
+    retryDraftOwnerKeyForNewThreadCommitRef.current = null;
   }, []);
 
   return useMemo(() => ({

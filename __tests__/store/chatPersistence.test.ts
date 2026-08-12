@@ -1757,6 +1757,203 @@ describe('chatPersistence', () => {
     expect(JSON.stringify(attachments)).not.toContain('orphan-derived-frame');
   });
 
+  it('round-trips bounded document-derived images only while their document linkage is valid', () => {
+    const threadId = 'thread-document-assets';
+    const messageId = 'user-document-assets';
+    const documentId = 'document-with-assets';
+    const documentAttachment: ChatAttachment = {
+      id: documentId,
+      kind: 'document',
+      state: 'ready',
+      threadId,
+      messageId,
+      localUri: `test-dir/chat-attachments/${threadId}/source.docx`,
+      pathCategory: 'chat_attachment',
+      fileName: 'source.docx',
+      displayName: 'Source.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      sizeBytes: 4_096,
+      source: 'document_picker',
+      createdAt: 1,
+      document: {
+        processorId: 'pocket-anydoc',
+        processorVersion: 1,
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+      },
+    };
+    const documentImages: ChatAttachment[] = [0, 1, 2].map((assetId) => ({
+      id: `document-asset-${assetId}`,
+      kind: 'image',
+      state: 'ready',
+      threadId,
+      messageId,
+      localUri: `test-dir/chat-attachments/${threadId}/document-asset-${assetId}.png`,
+      pathCategory: 'chat_attachment',
+      fileName: `document-asset-${assetId}.png`,
+      mimeType: 'image/png',
+      sizeBytes: 512,
+      source: 'derived_processor',
+      derivedFromAttachmentId: documentId,
+      derivedFromAssetId: assetId,
+      createdAt: 1,
+      image: { width: 32, height: 24 },
+    }));
+    const orphanImage: ChatAttachment = {
+      ...documentImages[0],
+      id: 'orphan-document-asset',
+      localUri: `test-dir/chat-attachments/${threadId}/orphan-document-asset.png`,
+      fileName: 'orphan-document-asset.png',
+      derivedFromAttachmentId: 'missing-document',
+    };
+    const malformedImage: ChatAttachment = {
+      ...documentImages[0],
+      id: 'malformed-document-asset',
+      localUri: `test-dir/chat-attachments/${threadId}/malformed-document-asset.png`,
+      fileName: 'malformed-document-asset.png',
+      derivedFromAssetId: -1,
+    };
+    const userImages = [copiedImageAttachment, secondCopiedImageAttachment].map((attachment, index) => ({
+      ...attachment,
+      id: `user-image-${index}`,
+      threadId,
+      messageId,
+      localUri: `test-dir/chat-attachments/${threadId}/user-image-${index}.jpg`,
+      fileName: `user-image-${index}.jpg`,
+    }));
+    const thread: ChatThread = {
+      ...buildThread(threadId),
+      messages: [{
+        id: messageId,
+        role: 'user',
+        content: 'Use the document and its selected images.',
+        createdAt: 1,
+        state: 'complete',
+        // The document intentionally follows its derived images: linkage validation must use the
+        // sanitized same-message set rather than relying on encounter order.
+        attachments: [
+          ...userImages,
+          ...documentImages,
+          orphanImage,
+          malformedImage,
+          documentAttachment,
+        ],
+      }],
+      status: 'idle',
+    };
+
+    writeChatThreadRecord(storage, thread, 11);
+    const record = parseChatThreadRecord(
+      storage.getString(getChatThreadStorageKey(threadId)),
+      threadId,
+    );
+    expect(record.ok).toBe(true);
+    if (!record.ok) {
+      throw new Error('Expected document asset thread record to parse');
+    }
+    const attachments = record.value.thread.messages[0]?.attachments ?? [];
+    const retainedInferenceImages = attachments.filter((attachment) => (
+      !('kind' in attachment) || attachment.kind === 'image'
+    ));
+    const retainedDocumentImages = retainedInferenceImages.filter((attachment) => (
+      attachment.source === 'derived_processor'
+    ));
+
+    expect(retainedInferenceImages).toHaveLength(MAX_CHAT_IMAGE_ATTACHMENTS);
+    expect(retainedDocumentImages.map((attachment) => attachment.id)).toEqual([
+      'document-asset-0',
+      'document-asset-1',
+    ]);
+    expect(retainedDocumentImages.map((attachment) => attachment.localUri)).toEqual([
+      `test-dir/chat-attachments/${threadId}/document-asset-0.png`,
+      `test-dir/chat-attachments/${threadId}/document-asset-1.png`,
+    ]);
+    expect(attachments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: documentId, kind: 'document' }),
+    ]));
+    expect(JSON.stringify(attachments)).not.toContain('document-asset-2');
+    expect(JSON.stringify(attachments)).not.toContain('orphan-document-asset');
+    expect(JSON.stringify(attachments)).not.toContain('malformed-document-asset');
+  });
+
+  it('bounds and sanitizes untrusted v3 document metadata without rejecting the attachment', () => {
+    const threadId = 'thread-corrupt-document-metadata';
+    const messageId = 'user-corrupt-document-metadata';
+    const documentAttachment: ChatAttachment = {
+      id: 'corrupt-metadata-document',
+      kind: 'document',
+      state: 'ready',
+      threadId,
+      messageId,
+      localUri: `test-dir/chat-attachments/${threadId}/source.docx`,
+      pathCategory: 'chat_attachment',
+      fileName: 'source.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      sizeBytes: 4_096,
+      source: 'document_picker',
+      createdAt: 1,
+      document: {
+        processorId: 'pocket-anydoc',
+        processorVersion: 1,
+        contentHash: 'x'.repeat(1_000),
+        contentSha256: 'A'.repeat(64),
+        canonicalFormat: 'future-format',
+        parserId: 'p'.repeat(1_000),
+        parserVersion: 'v'.repeat(1_000),
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        sourceByteCount: (16 * 1024 * 1024) + 1,
+        sourceCharCount: 100,
+        selectedCharCount: 101,
+        extractedCharCount: 101,
+        chunkCount: 2,
+        selectedChunkCount: 3,
+        pageCount: 2_049,
+        slideCount: Number.MAX_SAFE_INTEGER + 1,
+        sheetCount: 2_049,
+        assetCount: 129,
+        warnings: ['context_truncated', 'unknown_warning', 'x'.repeat(1_000)],
+      },
+    };
+    const thread: ChatThread = {
+      ...buildThread(threadId),
+      messages: [{
+        id: messageId,
+        role: 'user',
+        content: 'Use the document.',
+        createdAt: 1,
+        state: 'complete',
+        attachments: [documentAttachment],
+      }],
+      status: 'idle',
+    };
+
+    const sanitized = sanitizeChatThreadForPersistence(thread).messages[0]
+      .attachments?.[0] as Extract<ChatAttachment, { kind: 'document' }>;
+
+    expect(sanitized.document).toEqual(expect.objectContaining({
+      processorId: 'pocket-anydoc',
+      processorVersion: 1,
+      exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+      sourceCharCount: 100,
+      chunkCount: 2,
+      warnings: ['context_truncated'],
+    }));
+    expect(sanitized.document).not.toEqual(expect.objectContaining({
+      contentHash: expect.anything(),
+      contentSha256: expect.anything(),
+      canonicalFormat: expect.anything(),
+      parserId: expect.anything(),
+      parserVersion: expect.anything(),
+      sourceByteCount: expect.anything(),
+      selectedCharCount: expect.anything(),
+      extractedCharCount: expect.anything(),
+      selectedChunkCount: expect.anything(),
+      pageCount: expect.anything(),
+      slideCount: expect.anything(),
+      sheetCount: expect.anything(),
+      assetCount: expect.anything(),
+    }));
+  });
+
   it('omits empty assistant progress placeholders from durable thread records', () => {
     const thread: ChatThread = {
       ...buildThread('thread-empty-placeholder'),

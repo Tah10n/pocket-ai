@@ -70,6 +70,7 @@ import {
   materializeChatBranchReplacementThread,
   validateChatBranchReplacementPlan,
   type ChatBranchBaseIdentity,
+  type ChatBranchReplacementInferenceContent,
   type ChatBranchReplacementProgress,
   type ChatBranchReplacementPlan,
 } from './chatBranchReplacement';
@@ -185,6 +186,7 @@ export interface PruneExpiredThreadsResult {
 interface ChatStoreState {
   threads: Record<string, ChatThread>;
   activeThreadId: string | null;
+  newThreadRevision: number;
   streamingRevision: number;
   inferenceRevision: number;
   createThread: (input: CreateThreadInput) => string;
@@ -194,6 +196,7 @@ interface ChatStoreState {
     now?: number,
   ) => PruneExpiredThreadsResult;
   clearAllThreads: () => number;
+  beginNewThread: () => boolean;
   setActiveThread: (threadId: string | null) => boolean;
   commitThreadActivation: (input: {
     threadId: string;
@@ -238,6 +241,7 @@ interface ChatStoreState {
     messageId: string,
     nextUserContent: string,
     paramsSnapshot?: GenerationParamsSnapshot,
+    inferenceContent?: ChatBranchReplacementInferenceContent,
   ) => string | null;
   finalizeThreadStatus: (threadId: string, status: ChatThreadStatus) => void;
   setThreadSummary: (threadId: string, summary: ChatSummary | undefined) => void;
@@ -2766,6 +2770,7 @@ export const useChatStore = create<ChatStoreState>()(
       return {
         threads: {},
         activeThreadId: null,
+        newThreadRevision: 0,
         streamingRevision: 0,
         inferenceRevision: 0,
 
@@ -2933,6 +2938,18 @@ export const useChatStore = create<ChatStoreState>()(
         }));
 
         return threadCount;
+        },
+
+        beginNewThread: () => {
+          let didBeginNewThread = false;
+          setWhenPrivateStorageWritable((state) => {
+            didBeginNewThread = true;
+            return {
+              activeThreadId: null,
+              newThreadRevision: state.newThreadRevision + 1,
+            };
+          });
+          return didBeginNewThread;
         },
 
         setActiveThread: (threadId) => {
@@ -3287,6 +3304,7 @@ export const useChatStore = create<ChatStoreState>()(
         ) {
           return { status: 'stale' };
         }
+        let restoredBranchAttachmentCandidates: string[] = [];
         try {
           assertPrivateStorageWritable();
           if (!ensureTransientAssistantRuntime(existingThread, messageId)) {
@@ -3331,6 +3349,11 @@ export const useChatStore = create<ChatStoreState>()(
                 && finalization.outcome === 'success'
                 && !hasRecoverableOutput
               );
+              if (runtime.mode.kind === 'replace_branch' && shouldRestoreReplacement) {
+                restoredBranchAttachmentCandidates = [
+                  ...collectReferencedChatAttachmentLocalUrisFromThread(runtime.presentationThread),
+                ];
+              }
               const durablePersistedAt = runtime.mode.kind === 'replace_branch'
                 ? runtime.mode.baseThreadIdentity.durablePersistedAt
                 : latestDurableThreadIdentityById.get(threadId)?.persistedAt ?? 0;
@@ -3436,6 +3459,14 @@ export const useChatStore = create<ChatStoreState>()(
           }
           if (!didFinalize) {
             return { status: 'stale' };
+          }
+          if (restoredBranchAttachmentCandidates.length > 0) {
+            scheduleUnreferencedChatAttachmentCleanup({
+              candidateLocalUris: restoredBranchAttachmentCandidates,
+              referencedLocalUris: collectReferencedChatAttachmentLocalUrisFromThreads(
+                get().threads,
+              ),
+            });
           }
           return {
             status: didRestoreReplacementWithoutDurableMutation
@@ -3662,7 +3693,13 @@ export const useChatStore = create<ChatStoreState>()(
         return nextMessageId;
       },
 
-      replaceBranchFromUserMessage: (threadId, messageId, nextUserContent, paramsSnapshot) => {
+      replaceBranchFromUserMessage: (
+        threadId,
+        messageId,
+        nextUserContent,
+        paramsSnapshot,
+        inferenceContent,
+      ) => {
         const thread = get().threads[threadId];
         if (!thread || getTransientAssistantRuntime(thread) !== null) {
           return null;
@@ -3688,6 +3725,7 @@ export const useChatStore = create<ChatStoreState>()(
           targetUserMessageId: messageId,
           nextUserContent,
           paramsSnapshot,
+          inferenceContent,
           createMessageId: () => createChatId('message'),
         });
         if (!replacementPlan) {
@@ -3888,6 +3926,7 @@ export function flushChatStreamingProgressForAndroidQa(
 
 export function resetChatStoreForPrivateStorageReset(): void {
   const nextInferenceRevision = useChatStore.getState().inferenceRevision + 1;
+  const nextNewThreadRevision = useChatStore.getState().newThreadRevision + 1;
   resetUnreferencedAttachmentCleanupState();
   chatPersistenceScheduler.cancelAllPendingWrites();
   transientAssistantRuntimes.clear();
@@ -3895,6 +3934,7 @@ export function resetChatStoreForPrivateStorageReset(): void {
   useChatStore.setState({
     threads: {},
     activeThreadId: null,
+    newThreadRevision: nextNewThreadRevision,
     streamingRevision: 0,
     inferenceRevision: nextInferenceRevision,
   });

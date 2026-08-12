@@ -73,7 +73,7 @@ export interface MultimodalReadinessState {
 
 export type ChatImageAttachmentPathCategory = typeof CHAT_IMAGE_ATTACHMENT_PATH_CATEGORY;
 
-export type ChatImageAttachmentSource = 'photo_library';
+export type ChatImageAttachmentSource = 'photo_library' | 'derived_processor';
 
 export interface ChatImageAttachment {
   id: string;
@@ -89,6 +89,8 @@ export interface ChatImageAttachment {
   width?: number;
   height?: number;
   source: ChatImageAttachmentSource;
+  derivedFromAttachmentId?: string;
+  derivedFromAssetId?: number;
   createdAt: number;
 }
 
@@ -107,6 +109,9 @@ export interface AttachmentDraft {
   size?: number;
   width?: number;
   height?: number;
+  source?: ChatImageAttachmentSource;
+  derivedFromAttachmentId?: string;
+  derivedFromAssetId?: number;
   copyStatus: AttachmentDraftCopyStatus;
   errorReason?: string;
 }

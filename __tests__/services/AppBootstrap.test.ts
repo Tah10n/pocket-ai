@@ -104,6 +104,14 @@ jest.mock('../../src/services/NotificationService', () => ({
   },
 }));
 
+const mockClearDocumentSessionThreads = jest.fn();
+
+jest.mock('../../src/services/DocumentSessionContextCache', () => ({
+  documentSessionContextCache: {
+    clearThreads: (...args: unknown[]) => mockClearDocumentSessionThreads(...args),
+  },
+}));
+
 const mockMergeImportedThreads = jest.fn();
 const mockPruneExpiredThreads = jest.fn();
 
@@ -184,6 +192,8 @@ describe('AppBootstrap', () => {
     mockPruneExpiredThreads.mockReturnValue({ count: 0, threadIds: [] });
     mockDismissInferenceNotificationsForThreads.mockReset();
     mockDismissInferenceNotificationsForThreads.mockResolvedValue(undefined);
+    mockClearDocumentSessionThreads.mockReset();
+    mockClearDocumentSessionThreads.mockResolvedValue(undefined);
 
     (llmEngineService.getState as jest.Mock).mockReturnValue({
       status: EngineStatus.IDLE,
@@ -798,6 +808,10 @@ describe('AppBootstrap', () => {
     ]);
     expect(clearLegacyChatHistory).toHaveBeenCalled();
     expect(mockPruneExpiredThreads).toHaveBeenCalledWith(90);
+    expect(mockClearDocumentSessionThreads).toHaveBeenCalledWith([
+      'expired-thread-1',
+      'expired-thread-2',
+    ]);
     expect(mockDismissInferenceNotificationsForThreads).toHaveBeenCalledWith([
       'expired-thread-1',
       'expired-thread-2',

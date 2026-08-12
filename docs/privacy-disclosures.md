@@ -34,6 +34,18 @@ When a user adds an attachment to a chat:
 - Raw attachment files are local app-managed files. This document does not claim those attachment bytes are separately encrypted beyond the device and platform storage protections in use.
 - The app attempts to clean up attachments when the related draft is discarded, the related message or chat history is deleted, or the user resets private app storage. Cleanup failures are logged without exposing raw file paths.
 - Image inference uses the local model on the device when the active model and projector support vision. Audio inference uses the local model only when runtime audio support is confirmed. Document text extraction runs locally.
+- Office, OpenDocument, RTF, EPUB, CSV, and text-based PDF processing runs inside the
+  app's native Rust module. Documents are not sent to Firecrawl or another parsing,
+  OCR, analytics, or telemetry service. External links and images referenced by a
+  document are not fetched.
+- The document cache is memory-bounded and limited to the current app session. It can
+  retain up to four parsed document sources so follow-up questions can select new relevant
+  chunks without reparsing. Full parsed text is not persisted by this cache. The initial
+  attachment turn keeps only bounded selected prompt context and processor metadata in
+  encrypted private chat history; later session selections are transient prompt input and
+  are not copied into each follow-up message. Cache entries are released on eviction,
+  deletion, private-storage reset/blocking, memory warning, or process exit. Temporary
+  derived assets remain app-managed and are removed when released or reconciled.
 - Video attachment processing is disabled. The app does not accept new video attachments, sample video frames, claim direct-video understanding, or extract video audio tracks.
 - Backup behavior follows the app's platform configuration: Android release builds disable OS auto-backup, and iOS release builds exclude downloaded model files and local chat attachments from device and iCloud backups.
 

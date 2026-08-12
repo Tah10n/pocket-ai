@@ -14,7 +14,7 @@ import {
     View,
 } from 'react-native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import { useFocusEffect, useIsFocused } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused, usePreventRemove } from '@react-navigation/native';
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
@@ -24,7 +24,11 @@ import { ChatStatusBanner } from '@/components/ui/ChatStatusBanner';
 import { ChatMessageBubble } from '@/components/ui/ChatMessageBubble';
 import { ChatSystemEventRow } from '@/components/ui/ChatSystemEventRow';
 import { ChatModelSelectorSheet } from '@/components/ui/ChatModelSelectorSheet';
-import { ChatInputBar, markChatInputDraftConsumedError } from '@/components/ui/ChatInputBar';
+import {
+    ChatInputBar,
+    markChatInputDraftConsumedError,
+    markChatInputErrorReported,
+} from '@/components/ui/ChatInputBar';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
 import {
     MODEL_WARMUP_BANNER_RESERVED_HEIGHT,
@@ -66,13 +70,12 @@ import { performanceMonitor } from '../../services/PerformanceMonitor';
 import { registry } from '../../services/LocalStorageRegistry';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
-import { getReportedErrorMessage, toAppError } from '../../services/AppError';
+import { AppError, getErrorMessage, getReportedErrorMessage, toAppError } from '../../services/AppError';
 import {
     getGenerationParametersForModel,
     getSettings,
     resetGenerationParametersForModel,
     subscribeSettings,
-    updateSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
 import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
@@ -87,6 +90,8 @@ import {
     isAndroidQaGenerationEvidenceEnabled,
     subscribeAndroidQaGenerationEvidence,
 } from '../../services/AndroidQaGenerationEvidence';
+import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
+import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -168,6 +173,18 @@ function splitAttachmentDraftsById<T extends { id?: string }>(
 
     return { matchedDrafts, remainingDrafts };
 }
+
+export function sanitizeDocumentFailureDisplayName(
+    value: string | null | undefined,
+    fallback: string,
+): string {
+    const normalized = (value ?? '').normalize('NFKC')
+        .replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]+/gu, ' ')
+        .replace(/\s+/gu, ' ')
+        .trim();
+    const bounded = Array.from(normalized).slice(0, 160).join('').trimEnd();
+    return bounded || fallback;
+}
 const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
 const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
 const DOCUMENT_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.documentEditingDisabled';
@@ -205,6 +222,7 @@ function canSendRetainedAttachment(
 }
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
+type AndroidKeyboardMetrics = { height: number; topY: number };
 
 function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): string {
     return VISION_READINESS_TRANSLATION_KEYS[status];
@@ -471,15 +489,28 @@ export function getAndroidKeyboardSpacerHeight({
     return Math.max(viewportCompensation, currentSpacerHeight);
 }
 
+export function isAndroidKeyboardMeasurementCurrent({
+    isKeyboardVisible,
+    activeMetrics,
+    measuredMetrics,
+}: {
+    isKeyboardVisible: boolean;
+    activeMetrics: AndroidKeyboardMetrics | null;
+    measuredMetrics: AndroidKeyboardMetrics;
+}) {
+    return isKeyboardVisible && activeMetrics === measuredMetrics;
+}
+
 export function shouldFloatAndroidComposerOverContent({
     platform,
     surfaceKind,
+    isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
     surfaceKind: 'solid' | 'glass';
-    isKeyboardVisible?: boolean;
+    isKeyboardVisible: boolean;
 }) {
-    return platform === 'android' && surfaceKind === 'glass';
+    return platform === 'android' && surfaceKind === 'glass' && !isKeyboardVisible;
 }
 
 export function getAndroidFloatingComposerBottomOffset({
@@ -616,14 +647,22 @@ export function handleAndroidBackNavigation({
     return true;
 }
 
-function AndroidQaGenerationEvidenceSurface() {
+function AndroidQaGenerationEvidenceSurface({
+    documentDraftCount,
+}: {
+    documentDraftCount: number;
+}) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
     }
-    return <EnabledAndroidQaGenerationEvidenceSurface />;
+    return <EnabledAndroidQaGenerationEvidenceSurface documentDraftCount={documentDraftCount} />;
 }
 
-function EnabledAndroidQaGenerationEvidenceSurface() {
+function EnabledAndroidQaGenerationEvidenceSurface({
+    documentDraftCount,
+}: {
+    documentDraftCount: number;
+}) {
     const evidence = useSyncExternalStore(
         subscribeAndroidQaGenerationEvidence,
         getAndroidQaGenerationEvidenceSnapshot,
@@ -632,7 +671,22 @@ function EnabledAndroidQaGenerationEvidenceSurface() {
 
     return (
         <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
+            <View
+                accessible
+                accessibilityLabel={`chat-qa-document-draft-count-${documentDraftCount}`}
+                collapsable={false}
+                testID={`chat-qa-document-draft-count-${documentDraftCount}`}
+                style={styles.androidQaEvidenceMarker}
+            />
             <View style={styles.androidQaEvidenceActions}>
+                <Button
+                    size="xs"
+                    action="secondary"
+                    testID="chat-qa-arm-during-document-preparation"
+                    onPress={() => armAndroidQaGenerationGate('during-document-preparation')}
+                >
+                    <ButtonText>QA document</ButtonText>
+                </Button>
                 <Button
                     size="xs"
                     action="secondary"
@@ -687,6 +741,16 @@ function EnabledAndroidQaGenerationEvidenceSurface() {
                             style={styles.androidQaEvidenceMarker}
                         />
                     ))}
+                    {(evidence.preparedGeneration.documentSentinelIds ?? []).map((sentinelId) => (
+                        <View
+                            key={sentinelId}
+                            accessible
+                            accessibilityLabel={`chat-prepared-document-sentinel-${sentinelId}`}
+                            collapsable={false}
+                            testID={`chat-prepared-document-sentinel-${sentinelId}`}
+                            style={styles.androidQaEvidenceMarker}
+                        />
+                    ))}
                 </>
             ) : null}
         </View>
@@ -699,6 +763,8 @@ export const ChatScreen = () => {
         messages,
         messageListRevision,
         isGenerating,
+        isStoppingGeneration,
+        isPreparingDocuments,
         shouldOfferSummary,
         truncatedMessageCount,
         appendUserMessage,
@@ -707,6 +773,8 @@ export const ChatScreen = () => {
         regenerateFromUserMessage,
         startNewChat,
     } = useChatSession();
+    const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
+    usePreventRemove(isPreparingDocuments, () => undefined);
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
     const appearance = useScreenAppearance();
@@ -738,6 +806,7 @@ export const ChatScreen = () => {
         originalContent: string;
         attachments: ChatMessage['attachments'];
     } | null>(null);
+    const newThreadRevision = useChatStore((state) => state.newThreadRevision);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
@@ -751,7 +820,7 @@ export const ChatScreen = () => {
     const forcedFollowPassesRef = useRef(0);
     const baseWindowHeightRef = useRef(Dimensions.get('window').height);
     const isKeyboardVisibleRef = useRef(false);
-    const androidKeyboardMetricsRef = useRef<{ height: number; topY: number } | null>(null);
+    const androidKeyboardMetricsRef = useRef<AndroidKeyboardMetrics | null>(null);
     const androidKeyboardInsetRef = useRef(0);
     const composerContainerRef = useRef<View | null>(null);
     const warmupContentBlurTargetRef = useRef<View | null>(null);
@@ -764,6 +833,7 @@ export const ChatScreen = () => {
     const sendMessageInFlightRef = useRef(false);
     const modelSelectionRequestIdRef = useRef(0);
     const isScreenActiveRef = useRef(true);
+    const documentPreparationInFlightRef = useRef(false);
     const previousActiveThreadIdRef = useRef(activeThread?.id ?? null);
     const autoModelLoadTargetKeyRef = useRef<string | null>(null);
     const hasActiveModel = Boolean(engineState.activeModelId);
@@ -783,7 +853,9 @@ export const ChatScreen = () => {
     const isCurrentChatModelReady = Boolean(currentChatActiveModelId)
         && isEngineReady
         && engineState.activeModelId === currentChatActiveModelId;
-    const isInputDisabled = !isCurrentChatModelReady || isPendingModelSelectionForCurrentThread;
+    const isInputDisabled = !isCurrentChatModelReady
+        || isPendingModelSelectionForCurrentThread
+        || isGenerationBusy;
     const statusLabel = activeThread?.status === 'stopped'
         ? t('chat.statusStopped')
         : activeThread?.status === 'error'
@@ -876,8 +948,9 @@ export const ChatScreen = () => {
         && !pendingRegenerateMessage
         && engineState.activeModelId === displayedChatActiveModelId
         && hasReadyVisionSupport;
+    const attachmentThreadOwnerKey = activeThread?.id ?? `new-thread:${newThreadRevision}`;
     const imageAttachmentOwnerKey = [
-        activeThread?.id ?? 'new-thread',
+        attachmentThreadOwnerKey,
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
     const imageAttachmentDrafts = useChatImageAttachments({
@@ -894,16 +967,18 @@ export const ChatScreen = () => {
         && !pendingRegenerateMessage
         && engineState.activeModelId === displayedChatActiveModelId;
     const documentAttachmentOwnerKey = [
-        activeThread?.id ?? 'new-thread',
+        attachmentThreadOwnerKey,
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
     const documentAttachmentDrafts = useChatDocumentAttachments({
         enabled: documentAttachmentsEnabled,
         disabledReason: documentAttachmentsDisabledReason,
         ownerKey: documentAttachmentOwnerKey,
+        preserveFailedDraftsOnNewThreadCommit: true,
     });
+    const openDocumentAttachmentPicker = documentAttachmentDrafts.attachDocuments;
     const mediaAttachmentOwnerKey = [
-        activeThread?.id ?? 'new-thread',
+        attachmentThreadOwnerKey,
         displayedChatActiveModelId ?? 'no-displayed-model',
     ].join('|');
     const audioAttachmentReadinessReason = resolveAudioAttachmentReadinessReason({
@@ -1164,6 +1239,15 @@ export const ChatScreen = () => {
         | { status: 'stale' }
         | { status: 'failed'; error: unknown }
     > => {
+        if (applySelection && hasActiveChatGenerationWork()) {
+            return {
+                status: 'failed',
+                error: new AppError(
+                    'engine_busy',
+                    'Wait for the current chat work to finish before switching models.',
+                ),
+            };
+        }
         const requestId = modelSelectionRequestIdRef.current + 1;
         modelSelectionRequestIdRef.current = requestId;
         if (applySelection && isScreenActiveRef.current) {
@@ -1320,6 +1404,12 @@ export const ChatScreen = () => {
                 && threadId
                 && expectedThreadModelId !== null
             ) {
+                if (hasActiveChatGenerationWork()) {
+                    return failSelection(new AppError(
+                        'engine_busy',
+                        'Wait for the current chat work to finish before switching models.',
+                    ));
+                }
                 expectedParamsSnapshot = getGenerationParametersForModel(targetModelId);
                 const commitResult = useChatStore.getState().commitThreadModelSelection({
                     threadId,
@@ -1453,7 +1543,7 @@ export const ChatScreen = () => {
     }, [loadModel]);
 
     const handleSelectModelFromHeader = useCallback(async (nextModelId: string) => {
-        if (isGenerating) {
+        if (isGenerationBusy || hasActiveChatGenerationWork()) {
             return;
         }
 
@@ -1479,7 +1569,6 @@ export const ChatScreen = () => {
         }
 
         setModelSelectorOpen(false);
-
         const attemptLoadSelectedModel = async (options?: LoadModelOptions): Promise<void> => {
             const result = await executeThreadModelLoad({
                 targetModelId: nextModelId,
@@ -1522,7 +1611,7 @@ export const ChatScreen = () => {
     }, [
         currentChatActiveModelId,
         executeThreadModelLoad,
-        isGenerating,
+        isGenerationBusy,
         showAlertForError,
         t,
     ]);
@@ -1603,7 +1692,7 @@ export const ChatScreen = () => {
         },
         applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
         activeModelId: currentChatActiveModelId,
-        canApplyReload: !isGenerating,
+        canApplyReload: !isGenerationBusy,
         modelLabelOverride: modelLabel,
         paramsOverride: paramsSource,
         defaultParamsOverride: defaultParams,
@@ -1949,6 +2038,24 @@ export const ChatScreen = () => {
         androidKeyboardInsetRef.current = androidKeyboardInset;
     }, [androidKeyboardInset]);
 
+    const resetAndroidKeyboardState = useCallback(() => {
+        if (Platform.OS !== 'android') {
+            return;
+        }
+
+        if (keyboardMeasureFrameRef.current !== null) {
+            cancelAnimationFrame(keyboardMeasureFrameRef.current);
+            keyboardMeasureFrameRef.current = null;
+        }
+
+        isKeyboardVisibleRef.current = false;
+        androidKeyboardMetricsRef.current = null;
+        androidKeyboardInsetRef.current = 0;
+        setIsAndroidKeyboardVisible(false);
+        setAndroidKeyboardInsetValue(0);
+        baseWindowHeightRef.current = Dimensions.get('window').height;
+    }, [setAndroidKeyboardInsetValue]);
+
     const updateAndroidKeyboardInsetFromLayout = useCallback(() => {
         if (Platform.OS !== 'android') {
             return;
@@ -1983,6 +2090,14 @@ export const ChatScreen = () => {
             keyboardMeasureFrameRef.current = null;
 
             composerContainer.measure((_x, _y, _width, height, _pageX, pageY) => {
+                if (!isAndroidKeyboardMeasurementCurrent({
+                    isKeyboardVisible: isKeyboardVisibleRef.current,
+                    activeMetrics: androidKeyboardMetricsRef.current,
+                    measuredMetrics: keyboardMetrics,
+                })) {
+                    return;
+                }
+
                 setAndroidKeyboardInsetValue(getAndroidKeyboardSpacerHeight({
                     viewportCompensation,
                     currentSpacerHeight: androidKeyboardInsetRef.current,
@@ -2004,6 +2119,23 @@ export const ChatScreen = () => {
             updateAndroidKeyboardInsetFromLayout();
         }
     }, [updateAndroidKeyboardInsetFromLayout]);
+
+    const handleAttachDocuments = useCallback(async () => {
+        if (Platform.OS !== 'android') {
+            await openDocumentAttachmentPicker();
+            return;
+        }
+
+        Keyboard.dismiss();
+        resetAndroidKeyboardState();
+        try {
+            await openDocumentAttachmentPicker();
+        } finally {
+            // The external picker can pause the activity without delivering keyboardDidHide,
+            // and a late keyboard frame event can otherwise restore the stale inset on return.
+            resetAndroidKeyboardState();
+        }
+    }, [openDocumentAttachmentPicker, resetAndroidKeyboardState]);
 
     const handleListContentSizeChange = () => {
         const hasForcedFollowPass = forcedFollowPassesRef.current > 0;
@@ -2111,12 +2243,13 @@ export const ChatScreen = () => {
             const hasSendableAttachmentDrafts = attachmentDrafts.length > 0;
             const hasSendableDocumentAttachmentDrafts = documentDrafts.length > 0;
             const hasSendableMediaAttachmentDrafts = mediaDrafts.length > 0;
+            documentPreparationInFlightRef.current = hasSendableDocumentAttachmentDrafts;
             const restoreAttachmentDraftsForRetry = (draftsToRestore: readonly AttachmentDraft[]) => {
                 if (draftsToRestore.length === 0) {
                     return;
                 }
 
-                const retryThread = imageAttachmentOwnerKey.startsWith('new-thread|')
+                const retryThread = attachmentThreadOwnerKey.startsWith('new-thread:')
                     ? useChatStore.getState().getActiveThread()
                     : null;
                 const retryOwnerKey = retryThread
@@ -2134,7 +2267,18 @@ export const ChatScreen = () => {
                     return;
                 }
 
-                documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+                const retryThread = attachmentThreadOwnerKey.startsWith('new-thread:')
+                    ? useChatStore.getState().getActiveThread()
+                    : null;
+                const retryOwnerKey = retryThread
+                    ? [retryThread.id, getThreadActiveModelId(retryThread)].join('|')
+                    : null;
+
+                if (retryOwnerKey) {
+                    documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore, { preserveOwnerKey: retryOwnerKey });
+                } else {
+                    documentAttachmentDrafts.restoreDraftsForRetry(draftsToRestore);
+                }
             };
             const restoreMediaDraftsForRetry = (draftsToRestore: readonly ChatMediaAttachmentDraft[]) => {
                 if (draftsToRestore.length === 0) {
@@ -2145,6 +2289,8 @@ export const ChatScreen = () => {
             };
 
             let userMessageAppended = false;
+            let documentFailureAlertCoversSendError = false;
+            const restoredFailedDocumentDraftKeys = new Set<string>();
             setComposerDraft('');
             try {
                 await appendUserMessage(
@@ -2169,6 +2315,38 @@ export const ChatScreen = () => {
                             : null),
                         onUserMessageAppended: () => {
                             userMessageAppended = true;
+                            documentPreparationInFlightRef.current = false;
+                        },
+                        onDocumentAttachmentFailures: (failures) => {
+                            const failedDrafts = failures.map((failure) => failure.draft)
+                                .filter((draft, index, entries) => entries.findIndex((candidate) => (
+                                    candidate === draft || (draft.id && candidate.id === draft.id)
+                                )) === index);
+                            failedDrafts.forEach((draft) => {
+                                restoredFailedDocumentDraftKeys.add(draft.id || draft.localUri || draft.pickerUri);
+                            });
+                            documentFailureAlertCoversSendError = documentDrafts.length > 0
+                                && documentDrafts.every((draft) => restoredFailedDocumentDraftKeys.has(
+                                    draft.id || draft.localUri || draft.pickerUri,
+                                ));
+                            restoreDocumentDraftsForRetry(failedDrafts);
+                            const details = failures.map(({ draft, errorCode }) => {
+                                const displayName = sanitizeDocumentFailureDisplayName(
+                                    draft.displayName ?? draft.fileName,
+                                    t('chat.attachments.attachDocument'),
+                                );
+                                return `${displayName}: ${getErrorMessage(new AppError(errorCode, errorCode), t)}`;
+                            }).join('\n');
+                            Alert.alert(
+                                t('common.actionFailed'),
+                                `${t('chat.attachments.documentPartialFailure')}\n\n${details}`,
+                            );
+                        },
+                        onPreparationCancelled: () => {
+                            setComposerDraft(content);
+                            restoreAttachmentDraftsForRetry(attachmentDrafts);
+                            restoreDocumentDraftsForRetry(documentDrafts);
+                            restoreMediaDraftsForRetry(mediaDrafts);
                         },
                     },
                 );
@@ -2217,10 +2395,13 @@ export const ChatScreen = () => {
                 } else if (attachmentDrafts.length > 0) {
                     restoreAttachmentDraftsForRetry(attachmentDrafts);
                 }
-                if (documentDrafts.length > 0 && missingAttachmentDraftIds) {
+                const retryableDocumentDrafts = documentDrafts.filter((draft) => (
+                    !restoredFailedDocumentDraftKeys.has(draft.id || draft.localUri || draft.pickerUri)
+                ));
+                if (retryableDocumentDrafts.length > 0 && missingAttachmentDraftIds) {
                     if (missingAttachmentDraftIds.size > 0) {
                         const { matchedDrafts, remainingDrafts } = splitAttachmentDraftsById(
-                            documentDrafts,
+                            retryableDocumentDrafts,
                             missingAttachmentDraftIds,
                         );
                         if (matchedDrafts.length > 0) {
@@ -2230,10 +2411,10 @@ export const ChatScreen = () => {
                             restoreDocumentDraftsForRetry(remainingDrafts);
                         }
                     } else {
-                        documentAttachmentDrafts.discardDrafts(documentDrafts, 'missing copied document drafts after failed send');
+                        documentAttachmentDrafts.discardDrafts(retryableDocumentDrafts, 'missing copied document drafts after failed send');
                     }
-                } else if (documentDrafts.length > 0) {
-                    restoreDocumentDraftsForRetry(documentDrafts);
+                } else if (retryableDocumentDrafts.length > 0) {
+                    restoreDocumentDraftsForRetry(retryableDocumentDrafts);
                 }
                 if (mediaDrafts.length > 0 && missingAttachmentDraftIds) {
                     if (missingAttachmentDraftIds.size > 0) {
@@ -2255,9 +2436,12 @@ export const ChatScreen = () => {
                 }
 
                 setComposerDraft(content);
-                throw error;
+                throw documentFailureAlertCoversSendError
+                    ? markChatInputErrorReported(error)
+                    : error;
             }
         } finally {
+            documentPreparationInFlightRef.current = false;
             sendMessageInFlightRef.current = false;
         }
     };
@@ -2349,8 +2533,15 @@ export const ChatScreen = () => {
                 autoModelLoadTargetKeyRef.current = null;
                 performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
                 setPendingModelSelection(null);
+                if (documentPreparationInFlightRef.current) {
+                    // A tab or route transition must invalidate document preparation before its
+                    // late native result can be attached to whichever conversation becomes active.
+                    void stopGeneration().catch(() => {
+                        performanceMonitor.incrementCounter('chat.documentPreparation.blurStopFailed');
+                    });
+                }
             };
-        }, []),
+        }, [stopGeneration]),
     );
 
     useEffect(() => {
@@ -2370,7 +2561,7 @@ export const ChatScreen = () => {
             !isScreenFocused
             || !activeThreadId
             || !currentChatActiveModelId
-            || isGenerating
+            || isGenerationBusy
             || isPendingModelSelectionForCurrentThread
         ) {
             return;
@@ -2443,7 +2634,7 @@ export const ChatScreen = () => {
         engineState.activeModelId,
         engineState.status,
         executeThreadModelLoad,
-        isGenerating,
+        isGenerationBusy,
         isPendingModelSelectionForCurrentThread,
         isScreenFocused,
         modelRegistryRevision,
@@ -2514,11 +2705,7 @@ export const ChatScreen = () => {
         });
 
         const keyboardHideSubscription = Keyboard.addListener('keyboardDidHide', () => {
-            isKeyboardVisibleRef.current = false;
-            setIsAndroidKeyboardVisible(false);
-            androidKeyboardMetricsRef.current = null;
-            setAndroidKeyboardInsetValue(0);
-            baseWindowHeightRef.current = Dimensions.get('window').height;
+            resetAndroidKeyboardState();
         });
 
         return () => {
@@ -2532,7 +2719,7 @@ export const ChatScreen = () => {
             keyboardFrameSubscription.remove();
             keyboardHideSubscription.remove();
         };
-    }, [setAndroidKeyboardInsetValue, updateAndroidKeyboardInsetFromLayout]);
+    }, [resetAndroidKeyboardState, updateAndroidKeyboardInsetFromLayout]);
 
     useEffect(() => {
         return () => {
@@ -2562,7 +2749,13 @@ export const ChatScreen = () => {
         setPresetSelectorOpen(false);
         setModelSelectorOpen(false);
         closeModelParameters();
-    }, [activeThread?.id, clearForcedScrollTimeouts, closeModelParameters, setShouldFollowLatestMessage]);
+    }, [
+        activeThread?.id,
+        clearForcedScrollTimeouts,
+        closeModelParameters,
+        newThreadRevision,
+        setShouldFollowLatestMessage,
+    ]);
 
     useFocusEffect(
         useCallback(() => {
@@ -2571,18 +2764,20 @@ export const ChatScreen = () => {
             }
 
             const subscription = BackHandler.addEventListener('hardwareBackPress', () => (
-                handleAndroidBackNavigation({
-                    canGoBack: router.canGoBack(),
-                    onGoBack: () => {
-                        router.back();
-                    },
-                })
+                isGenerationBusy
+                    ? true
+                    : handleAndroidBackNavigation({
+                        canGoBack: router.canGoBack(),
+                        onGoBack: () => {
+                            router.back();
+                        },
+                    })
             ));
 
             return () => {
                 subscription.remove();
             };
-        }, [router]),
+        }, [isGenerationBusy, router]),
     );
 
     useEffect(() => {
@@ -2619,11 +2814,11 @@ export const ChatScreen = () => {
                 messageState={msg.state}
                 tokensPerSec={msg.tokensPerSec}
                 inferenceMetrics={msg.inferenceMetrics}
-                canDelete={msg.state !== 'streaming'}
+                canDelete={msg.state !== 'streaming' && !isGenerationBusy}
                 canRegenerate={
                     msg.role === 'user'
                     && msg.state === 'complete'
-                    && !isGenerating
+                    && !isGenerationBusy
                     && !isInputDisabled
                 }
                 onDelete={handleDeleteMessage}
@@ -2635,7 +2830,7 @@ export const ChatScreen = () => {
         handleBeginRegenerateFromMessage,
         handleDeleteMessage,
         handleLastMessageLayout,
-        isGenerating,
+        isGenerationBusy,
         isInputDisabled,
         messages.length,
     ]);
@@ -2654,7 +2849,7 @@ export const ChatScreen = () => {
                     modelSelectable={hasDownloadedModels}
                     statusLabel={statusLabel}
                     statusTone={statusTone}
-                    canStartNewChat={!isGenerating}
+                    canStartNewChat={!isGenerationBusy}
                     onStartNewChat={() => {
                         try {
                             startNewChat();
@@ -2669,15 +2864,15 @@ export const ChatScreen = () => {
                     onOpenPresetSelector={() => {
                         setPresetSelectorOpen(true);
                     }}
-                    canOpenPresetSelector={!isGenerating}
+                    canOpenPresetSelector={!isGenerationBusy}
                     onOpenModelSelector={hasDownloadedModels
                         ? () => {
                             setModelSelectorOpen(true);
                         }
                         : undefined}
-                    canOpenModelSelector={hasDownloadedModels && !isGenerating}
-                    canOpenModelControls={Boolean(configurableModelId) && !isGenerating && !isModelSelectionPending}
-                    onBack={router.canGoBack() ? () => router.back() : undefined}
+                    canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
+                    canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
+                    onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
                 />
 
                 <Box className="flex-1">
@@ -2754,7 +2949,9 @@ export const ChatScreen = () => {
                         </Box>
                     ) : null}
 
-                    <AndroidQaGenerationEvidenceSurface />
+                    <AndroidQaGenerationEvidenceSurface
+                        documentDraftCount={documentAttachmentDrafts.drafts.length}
+                    />
 
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>
                         {hasMessages ? (
@@ -2915,13 +3112,13 @@ export const ChatScreen = () => {
                                 sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
-                                isSending={isGenerating}
+                                isSending={isGenerating || isPreparingDocuments}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                                 attachmentDrafts={imageAttachmentDrafts.drafts}
                                 documentAttachmentDrafts={documentAttachmentDrafts.drafts}
                                 mediaAttachmentDrafts={mediaAttachmentDrafts.drafts}
                                 onAttachImages={imageAttachmentDrafts.attachImages}
-                                onAttachDocuments={documentAttachmentDrafts.attachDocuments}
+                                onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
@@ -2934,7 +3131,7 @@ export const ChatScreen = () => {
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
                                 audioAttachmentsDisabledReason={audioAttachmentsDisabledReason}
                                 isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
-                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking}
+                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking || isPreparingDocuments}
                                 isAudioAttachmentActionBusy={mediaAttachmentDrafts.isPickingAudio}
                                 attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
@@ -2962,13 +3159,13 @@ export const ChatScreen = () => {
                                 sendDisabled={retainedRegenerateAttachmentsSendBlocked}
                                 onStopGeneration={stopGeneration}
                                 disabled={isInputDisabled}
-                                isSending={isGenerating}
+                                isSending={isGenerating || isPreparingDocuments}
                                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                                 attachmentDrafts={imageAttachmentDrafts.drafts}
                                 documentAttachmentDrafts={documentAttachmentDrafts.drafts}
                                 mediaAttachmentDrafts={mediaAttachmentDrafts.drafts}
                                 onAttachImages={imageAttachmentDrafts.attachImages}
-                                onAttachDocuments={documentAttachmentDrafts.attachDocuments}
+                                onAttachDocuments={handleAttachDocuments}
                                 onAttachAudio={mediaAttachmentDrafts.attachAudio}
                                 onRemoveAttachmentDraft={imageAttachmentDrafts.removeDraft}
                                 onRemoveDocumentAttachmentDraft={documentAttachmentDrafts.removeDraft}
@@ -2981,7 +3178,7 @@ export const ChatScreen = () => {
                                 documentAttachmentsDisabledReason={documentAttachmentsDisabledReason}
                                 audioAttachmentsDisabledReason={audioAttachmentsDisabledReason}
                                 isImageAttachmentActionBusy={imageAttachmentDrafts.isPicking}
-                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking}
+                                isDocumentAttachmentActionBusy={documentAttachmentDrafts.isPicking || isPreparingDocuments}
                                 isAudioAttachmentActionBusy={mediaAttachmentDrafts.isPickingAudio}
                                 attachmentsTray={retainedRegenerateAttachmentsTray}
                                 modeLabel={pendingRegenerateMessage ? t('chat.editEarlierMessage') : undefined}
@@ -3010,7 +3207,7 @@ export const ChatScreen = () => {
                 visible={isModelSelectorOpen}
                 models={downloadedModels}
                 currentModelId={displayedChatActiveModelId}
-                canSelect={!isGenerating}
+                canSelect={!isGenerationBusy}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 onClose={() => setModelSelectorOpen(false)}
                 onSelectModel={(modelId) => {
@@ -3032,18 +3229,25 @@ export const ChatScreen = () => {
 
             <PresetSelectorSheet
                 visible={isPresetSelectorOpen}
+                canSelect={!isGenerationBusy}
                 activePresetId={activeThread?.presetId ?? settings.activePresetId}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 onClose={() => setPresetSelectorOpen(false)}
                 onSelectPreset={(presetId: string | null) => {
+                    if (isGenerationBusy || hasActiveChatGenerationWork()) {
+                        return;
+                    }
                     const presetSnapshot = resolvePresetSnapshot(presetId);
-                    updateSettings({ activePresetId: presetId });
+                    selectActiveChatPreset(presetId);
 
                     if (activeThread) {
                         updateThreadPresetSnapshot(activeThread.id, presetId, presetSnapshot);
                     }
                 }}
                 onManagePresets={() => {
+                    if (isGenerationBusy || hasActiveChatGenerationWork()) {
+                        return;
+                    }
                     router.push('/presets');
                 }}
             />

@@ -2,6 +2,8 @@ import React from 'react';
 import { render } from '@testing-library/react-native';
 
 const mockTabsProps = jest.fn();
+const mockTabScreenProps = jest.fn();
+const mockHasActiveChatGenerationWork = jest.fn(() => false);
 let mockThemeContext: any;
 
 jest.mock('expo-router', () => {
@@ -12,7 +14,10 @@ jest.mock('expo-router', () => {
 
     return mockReact.createElement(View, { testID: 'tabs' }, children);
   };
-  Tabs.Screen = ({ name }: any) => mockReact.createElement(View, { testID: `tab-${name}` });
+  Tabs.Screen = (props: any) => {
+    mockTabScreenProps(props);
+    return mockReact.createElement(View, { testID: `tab-${props.name}` });
+  };
 
   return { Tabs };
 });
@@ -61,6 +66,10 @@ jest.mock('../../src/providers/ThemeProvider', () => ({
   useTheme: () => mockThemeContext,
 }));
 
+jest.mock('../../src/services/ChatGenerationService', () => ({
+  hasActiveChatGenerationWork: () => mockHasActiveChatGenerationWork(),
+}));
+
 const TabLayout = require('../../app/(tabs)/_layout').default;
 
 function getLatestScreenOptions() {
@@ -70,6 +79,8 @@ function getLatestScreenOptions() {
 describe('TabLayout', () => {
   beforeEach(() => {
     mockTabsProps.mockClear();
+    mockTabScreenProps.mockClear();
+    mockHasActiveChatGenerationWork.mockReturnValue(false);
     const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
     mockThemeContext = {
       appearance: getThemeAppearance('default', 'light'),
@@ -100,5 +111,18 @@ describe('TabLayout', () => {
 
     expect(screenOptions.tabBarStyle.backgroundColor).toBe('transparent');
     expect(tabBarBackground.key).toBe('glass-light');
+  });
+
+  it('prevents every tab transition while chat work is active', () => {
+    mockHasActiveChatGenerationWork.mockReturnValue(true);
+    render(<TabLayout />);
+    const preventDefault = jest.fn();
+
+    for (const [{ listeners }] of mockTabScreenProps.mock.calls) {
+      listeners.tabPress({ preventDefault });
+    }
+
+    expect(mockTabScreenProps).toHaveBeenCalledTimes(4);
+    expect(preventDefault).toHaveBeenCalledTimes(4);
   });
 });

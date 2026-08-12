@@ -8,6 +8,7 @@ const {
   sanitizeAndroidQaText,
 } = require('../../scripts/android-qa-sanitization');
 const {
+  BUILD_PROVENANCE_SCHEMA_VERSION,
   collectAndroidEffectiveBuildContext,
   collectBuildProvenance,
   collectPrebuildInputState,
@@ -18,10 +19,16 @@ const {
 
 const {
   BRANCH_REGENERATION_SCENARIOS,
+  DOCUMENT_BENCHMARK_SCENARIOS,
+  DOCUMENT_SCENARIOS,
+  assertDocumentSentinelsStayAbsent,
   assertAuthoritativeThoughtClear,
   assertPreparedAttachmentGenerationEvidence,
   buildAppRouteDeepLinkArgs,
+  buildAdbKeyEventBatches,
   buildConversationTopology,
+  buildDocumentQaPromptSentinel,
+  buildDocumentQaRetrievalPrompt,
   buildScenarios,
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
@@ -56,6 +63,7 @@ const {
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
+  findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
@@ -64,6 +72,7 @@ const {
   goToHome,
   goToModelCatalog,
   inputFocusedTextAndConfirm,
+  inputFocusedTextForImmediateSend,
   installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
   openFirstVisibleVariantPicker,
@@ -73,6 +82,7 @@ const {
   prepareCatalogForVariantPickerSmokeScenario,
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
+  recordDocumentQaHostCheckpoint,
   resolveBranchRegenerationReplacement,
   resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidPackageUid,
@@ -456,6 +466,36 @@ describe('app image picker configuration', () => {
       },
     ]);
   });
+
+  it('release config plugin restricts application id overrides to the isolated QA package', () => {
+    const source = `def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
+android {
+  defaultConfig {
+    applicationId 'com.github.tah10n.pocketai'
+    versionCode 20
+    versionName '1.6.3'
+  }
+  signingConfigs {
+    debug {}
+  }
+  buildTypes {
+    release {
+      signingConfig signingConfigs.debug
+    }
+  }
+}`;
+
+    const result = withAndroidReleaseConfig._internal.applyBuildGradleReleaseConfig(source, {
+      fallbackApplicationId: 'com.github.tah10n.pocketai',
+      fallbackVersionCode: 20,
+      fallbackVersionName: '1.6.3',
+    });
+
+    expect(result).toContain('def pocketAiIsolatedQaApplicationId = "com.github.tah10n.pocketai.qa"');
+    expect(result).toContain('applicationId appApplicationId');
+    expect(result).toContain('appApplicationId in [pocketAiDefaultApplicationId, pocketAiIsolatedQaApplicationId]');
+    expect(result).not.toContain("applicationId 'com.github.tah10n.pocketai'");
+  });
 });
 
 describe('android-scenarios smoke bootstrap args', () => {
@@ -472,6 +512,27 @@ describe('android-scenarios smoke bootstrap args', () => {
     });
     expect(() => configureScenarioBuildEnvironment(
       { apkVariant: 'debug' },
+      true,
+      {},
+    )).toThrow(ScenarioPreconditionFailureError);
+
+    const documentEnv = {};
+    expect(configureScenarioBuildEnvironment(
+      { pack: 'documents' },
+      true,
+      documentEnv,
+    )).toEqual({
+      androidQaEvidence: true,
+      apkVariant: 'release',
+    });
+    expect(documentEnv).toEqual({
+      ANDROID_SMOKE_APK_VARIANT: 'release',
+      EXPO_PUBLIC_ANDROID_QA: '1',
+      EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true',
+    });
+    expect(() => configureScenarioBuildEnvironment(
+      { apkVariant: 'debug', pack: 'documents' },
       true,
       {},
     )).toThrow(ScenarioPreconditionFailureError);
@@ -527,6 +588,15 @@ describe('android-scenarios smoke bootstrap args', () => {
         '--serial',
         'emulator-5554',
       ])
+    );
+  });
+
+  it('forwards the isolated QA package flag to the smoke bootstrap', () => {
+    const options = parseCliOptions(['--isolated-qa-install']);
+
+    expect(options).toEqual(expect.objectContaining({ isolatedQaInstall: true }));
+    expect(buildSmokeLaunchArgs(options, 'physical-device')).toEqual(
+      expect.arrayContaining(['--isolated-qa-install', '--serial', 'physical-device']),
     );
   });
 });
@@ -919,6 +989,32 @@ describe('android-scenarios focused text clearing', () => {
 describe('android-scenarios asynchronous interaction settlement', () => {
   const immediateDelay = jest.fn().mockResolvedValue(undefined);
 
+  it('does not treat the stopped banner as ready until the composer is editable again', () => {
+    const stoppedOnly = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-stopped-banner" enabled="true" bounds="[0,0][1080,200]" />
+        <node resource-id="chat-message-input" clickable="true" enabled="false" bounds="[200,1840][860,1980]" />
+        <node resource-id="chat-primary-action-send" clickable="false" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `);
+    const ready = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-stopped-banner" enabled="true" bounds="[0,0][1080,200]" />
+        <node resource-id="chat-message-input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
+        <node resource-id="chat-primary-action-send" clickable="false" enabled="false" bounds="[900,1840][1040,1980]" />
+      </hierarchy>
+    `);
+
+    expect(findSettledDocumentCancellationSendAction(stoppedOnly)).toBeNull();
+    expect(findSettledDocumentCancellationSendAction(ready)).toEqual(expect.objectContaining({
+      resourceId: 'chat-primary-action-send',
+      enabled: false,
+      clickable: false,
+    }));
+  });
+
   function composerSnapshot(text, sendEnabled = false) {
     return parseUiSnapshot(`
       <hierarchy>
@@ -1299,6 +1395,126 @@ describe('android-scenarios npm defaults', () => {
     expect(() => escapeAdbInputText('Describe: prepared image')).toThrow(/ASCII letters/);
   });
 
+  it('builds every document QA prompt in the constrained ADB input alphabet', () => {
+    const scenarioPrompt = buildDocumentQaPromptSentinel('document-docx-send');
+    const benchmarkPrompt = buildDocumentQaPromptSentinel('bench', 'four-documents', 2);
+
+    expect(scenarioPrompt).toBe('PQA DOCUMENT DOCX SEND');
+    expect(benchmarkPrompt).toBe('PQA BENCH FOUR DOCUMENTS 2');
+    expect(escapeAdbInputText(scenarioPrompt)).toBe('PQA%sDOCUMENT%sDOCX%sSEND');
+    expect(escapeAdbInputText(benchmarkPrompt)).toBe('PQA%sBENCH%sFOUR%sDOCUMENTS%s2');
+    expect(() => buildDocumentQaPromptSentinel('document:docx')).toThrow(/Document QA prompt parts/);
+  });
+
+  it('adds the expected synthetic retrieval terms to document success prompts', () => {
+    const prompt = buildDocumentQaRetrievalPrompt(
+      buildDocumentQaPromptSentinel('document-docx-send'),
+      ['zebra-end-991', 'orchid-742', 'orchid-742']
+    );
+
+    expect(prompt).toBe('PQA DOCUMENT DOCX SEND ORCHID 742 ZEBRA END 991');
+    expect(escapeAdbInputText(prompt)).toBe(
+      'PQA%sDOCUMENT%sDOCX%sSEND%sORCHID%s742%sZEBRA%sEND%s991'
+    );
+    expect(() => buildDocumentQaRetrievalPrompt('not-pqa', ['orchid-742'])).toThrow(
+      /constrained PQA sentinel/
+    );
+    expect(() => buildDocumentQaRetrievalPrompt('PQA DOCUMENT', ['unknown'])).toThrow(
+      /unknown sentinel/
+    );
+  });
+
+  it('primes and injects a document prompt in bounded key-event batches', async () => {
+    const prompt = 'Document prompt 123';
+    const focusInput = jest.fn().mockResolvedValue(undefined);
+    const runCommand = jest.fn();
+    const onProgress = jest.fn();
+
+    await inputFocusedTextForImmediateSend('adb', 'device-1', prompt, {
+      focusSettleMs: 0,
+      keyboardDismissSettleMs: 0,
+      primerSettleMs: 0,
+      clearSettleMs: 0,
+      runCommand,
+      delayFn: async () => undefined,
+      focusInput,
+      onProgress,
+    });
+
+    expect(focusInput).toHaveBeenCalledTimes(1);
+    const promptBatches = buildAdbKeyEventBatches(prompt);
+    expect(promptBatches.every((batch) => batch.length <= 16)).toBe(true);
+    expect(promptBatches.flat()).toEqual([
+      'KEYCODE_D', 'KEYCODE_O', 'KEYCODE_C', 'KEYCODE_U', 'KEYCODE_M', 'KEYCODE_E',
+      'KEYCODE_N', 'KEYCODE_T', 'KEYCODE_SPACE', 'KEYCODE_P', 'KEYCODE_R', 'KEYCODE_O',
+      'KEYCODE_M', 'KEYCODE_P', 'KEYCODE_T', 'KEYCODE_SPACE', 'KEYCODE_1', 'KEYCODE_2',
+      'KEYCODE_3',
+    ]);
+    expect(runCommand.mock.calls.map(([, args]) => args)).toEqual([
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_X'],
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_DEL', 'KEYCODE_DEL'],
+      ...promptBatches.map((batch) => ['-s', 'device-1', 'shell', 'input', 'keyevent', ...batch]),
+      ['-s', 'device-1', 'shell', 'input', 'keyevent', 'KEYCODE_BACK'],
+    ]);
+    expect(runCommand.mock.calls.every(([, , options]) => options.timeout === 15_000)).toBe(true);
+    expect(onProgress.mock.calls.map(([stage]) => stage)).toEqual([
+      'prompt-focused',
+      'prompt-primer-cleared',
+      'prompt-injected',
+      'keyboard-dismissed',
+    ]);
+  });
+
+  it('records only allowlisted document QA host checkpoints without private values', () => {
+    const runCommand = jest.fn();
+    const logFn = jest.fn();
+
+    recordDocumentQaHostCheckpoint('adb', 'device-1', 'prompt-injected', { runCommand, logFn });
+
+    expect(runCommand).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'log', '-p', 'i', '-t', 'PocketAnyDocQaHost', 'stage=prompt-injected'],
+      { stdio: 'ignore' }
+    );
+    expect(logFn).toHaveBeenCalledWith('Document QA checkpoint: prompt-injected.');
+    expect(() => recordDocumentQaHostCheckpoint(
+      'adb',
+      'device-1',
+      'prompt=/private/path.docx',
+      { runCommand, logFn }
+    )).toThrow(/Unknown document QA host checkpoint/);
+  });
+
+  it('classifies a document stale-window hierarchy failure without private UI data', async () => {
+    const reportFailure = jest.fn();
+
+    await expect(assertDocumentSentinelsStayAbsent('adb', 'device-1', ['orchid-742'], {
+      createSnapshot: () => {
+        throw new Error('private hierarchy details');
+      },
+      reportFailure,
+    })).rejects.toThrow('private hierarchy details');
+
+    expect(reportFailure).toHaveBeenCalledWith('ui_hierarchy_unavailable');
+  });
+
+  it('classifies a stale document sentinel without logging its id', async () => {
+    const reportFailure = jest.fn();
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="chat-prepared-document-sentinel-orchid-742" bounds="[1,1][2,2]" />
+      </hierarchy>
+    `);
+
+    await expect(assertDocumentSentinelsStayAbsent('adb', 'device-1', ['orchid-742'], {
+      createSnapshot: () => snapshot,
+      reportFailure,
+    })).rejects.toThrow(/stale document prompt sentinel/i);
+
+    expect(reportFailure).toHaveBeenCalledWith('stale_sentinel_detected');
+    expect(JSON.stringify(reportFailure.mock.calls)).not.toContain('orchid-742');
+  });
+
   it('skips bootstrap launch when preserving a prepared running app', () => {
     const resolveSerial = jest.fn(() => 'emulator-5554');
 
@@ -1338,6 +1554,25 @@ describe('android-scenarios UI snapshot matching', () => {
       })
     );
     expect(match.node.text).toBe('Home');
+  });
+
+  it('matches a document error phrase inside the combined Android alert body', () => {
+    const errorPhrase = 'This document is damaged or does not match its file type.';
+    const alertSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" bounds="[0,0][1080,2400]" />
+        <node text="Some documents could not be processed. Review the failed files before sending.&#10;&#10;pqa-invalid.docx: ${errorPhrase}" resource-id="android:id/message" bounds="[80,600][1000,1200]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(alertSnapshot, [errorPhrase], { visibleOnly: true })).toBeNull();
+    expect(findAnyNodeInSnapshot(alertSnapshot, [errorPhrase], {
+      visibleOnly: true,
+      matchMode: 'fragment',
+    })).toEqual(expect.objectContaining({
+      label: errorPhrase,
+      node: expect.objectContaining({ resourceId: 'android:id/message' }),
+    }));
   });
 
   it('accepts a node from the final timeout-boundary snapshot', async () => {
@@ -1425,6 +1660,27 @@ describe('android-scenarios UI snapshot matching', () => {
     });
 
     expect(node?.resourceId).toBe('com.github.tah10n.pocketai:id/chat-list-viewport');
+  });
+
+  it('keeps an offscreen fourth document chip observable in a horizontal attachment tray', () => {
+    const attachmentSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-document-attachment-chip-3" bounds="[1120,1900][1440,2050]" />
+      </hierarchy>
+    `);
+
+    expect(findResourceIdInSnapshot(
+      attachmentSnapshot,
+      'chat-document-attachment-chip-3',
+      { visibleOnly: true },
+    )).toBeNull();
+    expect(findResourceIdInSnapshot(
+      attachmentSnapshot,
+      'chat-document-attachment-chip-3',
+    )).toEqual(expect.objectContaining({
+      resourceId: 'chat-document-attachment-chip-3',
+    }));
   });
 
   it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
@@ -2309,6 +2565,16 @@ describe('android-scenarios CLI parsing', () => {
         pack: 'all',
       })
     );
+  });
+
+  it('always isolates the document pack from an installed user app', () => {
+    const options = parseCliOptions(['--pack', 'documents']);
+
+    expect(options).toEqual(expect.objectContaining({
+      pack: 'documents',
+      isolatedQaInstall: true,
+    }));
+    expect(buildSmokeLaunchArgs(options, null)).toContain('--isolated-qa-install');
   });
 
   it('does not expose optional scenarios as a named pack', () => {
@@ -3576,6 +3842,8 @@ describe('android-scenarios pack selection', () => {
         'chat-attachment-prepared-send',
         'storage-cache-clear',
         ...BRANCH_REGENERATION_SCENARIOS,
+        ...DOCUMENT_SCENARIOS,
+        ...DOCUMENT_BENCHMARK_SCENARIOS,
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
@@ -4325,6 +4593,15 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       }),
       prebuildInputDigest: prebuildInputState.digest,
     };
+    const toolchains = {
+      node: 'v20.20.2',
+      java: 'openjdk version "17.0.16"',
+      gradleWrapper: { distributionType: 'bin', version: '8.14.3' },
+      rustChannel: '1.94.0',
+      rustc: 'rustc 1.94.0 (4a4ef493e 2026-03-02)',
+      cargo: 'cargo 1.94.0 (85eff7c80 2026-01-15)',
+      cargoNdk: 'cargo-ndk 4.1.2',
+    };
     const storedManifest = collectBuildProvenance(appRoot, {
       abi,
       androidRoot: path.join(appRoot, 'android'),
@@ -4334,6 +4611,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       gradleArgs,
       includeBundleInputs: true,
       hmacKeyPath,
+      toolchains,
       variant,
     });
 
@@ -4343,7 +4621,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         abi,
         build: { provenance: storedManifest },
         variant,
-      }, currentGit, { hmacKeyPath });
+      }, currentGit, { hmacKeyPath, toolchains });
       expect(currentManifest.digest).toBe(storedManifest.digest);
     } finally {
       if (previousGradleUserHome == null) {
@@ -4363,7 +4641,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       dirtyDigest: 'dirty-digest',
     };
     const manifest = {
-      schemaVersion: 2,
+      schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
       variant: 'release',
       abi: 'x86_64',
       embeddedBundle: true,
@@ -4379,13 +4657,13 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
     };
     const manifestDigest = hashCanonicalJson(manifest);
     const provenance = {
-      schemaVersion: 2,
+      schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
       serial: 'emulator-5554',
       packageName: 'com.github.tah10n.pocketai',
       variant: 'release',
       abi: 'x86_64',
       build: {
-        schemaVersion: 2,
+        schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
         variant: 'release',
         abi: 'x86_64',
         provenanceDigest: manifestDigest,
@@ -4397,7 +4675,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         },
       },
       install: {
-        schemaVersion: 2,
+        schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
         serial: 'emulator-5554',
         packageName: 'com.github.tah10n.pocketai',
         variant: 'release',

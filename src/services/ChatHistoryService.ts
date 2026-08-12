@@ -4,6 +4,7 @@ import { stopAllGenerationWork } from './ChatGenerationService';
 import { notificationService } from './NotificationService';
 import { performanceMonitor } from './PerformanceMonitor';
 import { clearLegacyChatHistory } from './SettingsStore';
+import { documentSessionContextCache } from './DocumentSessionContextCache';
 
 function getChatHistoryPostcondition() {
   const state = useChatStore.getState();
@@ -49,6 +50,7 @@ export async function clearChatHistory(): Promise<number> {
       );
     }
 
+    await documentSessionContextCache.clearAll();
     const removedLegacyEntries = clearLegacyChatHistory();
     removedThreadIds.forEach((threadId) => {
       void notificationService.dismissInferenceNotificationForThread(threadId);

@@ -1,5 +1,6 @@
 import { AppState, NativeEventSubscription } from 'react-native';
 import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
+import { documentSessionContextCache } from './DocumentSessionContextCache';
 
 export type ThermalState = 'nominal' | 'fair' | 'serious' | 'critical';
 
@@ -83,6 +84,7 @@ class HardwareListenerService {
 
     private handleMemoryWarning = () => {
         console.warn('[HardwareListener] System memory warning received!');
+        void documentSessionContextCache.clearAll();
         this.updateStatus({ isLowMemory: true });
         // We no longer use setTimeout to reset. 
         // The consumer (e.g. LLMEngineService) should handle unloading 

@@ -1,0 +1,6 @@
+Pocket AnyDoc plain-text sentinel: ORCHID-742.
+Русский: ОРХИДЕЯ-742.
+Srpski latinica: ORHIDEJA-742.
+Српски ћирилица: ОРХИДЕЈА-742.
+العربية: أوركيد-742.
+中文：兰花-742。

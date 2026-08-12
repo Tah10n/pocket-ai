@@ -1,4 +1,5 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -7,6 +8,7 @@ const {
   ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI,
   ANDROID_UNIVERSAL_ABIS,
   BUILD_PROVENANCE_SCHEMA_VERSION,
+  POCKET_ANYDOC_UPSTREAM_COMMIT,
   assertAndroidReleaseArtifactCreated,
   assertAndroidBuildOverrideContract,
   buildAndroidCleanPrebuildArgs,
@@ -16,6 +18,8 @@ const {
   collectBuildProvenance,
   collectContentHashEntries,
   collectPrebuildInputState,
+  collectPocketAnyDocProvenance,
+  collectToolchainVersions,
   cleanAndroidNativeBuildIntermediates,
   createAndroidShippingBuildEnvironment,
   createIsolatedAndroidBuildEnvironment,
@@ -24,6 +28,7 @@ const {
   formatAndroidGradleCommandForLog,
   hashCanonicalJson,
   inspectAndroidArtifactNativeEntries,
+  inspectAndroidArtifactNativeLibraries,
   isExcludedAndroidBuildInput,
   parseGradleProjectProperties,
   parseGradleSystemProperties,
@@ -32,6 +37,7 @@ const {
   prepareAndroidReleaseArtifactOutput,
   readGradleWrapperVersion,
   readJavaVersion,
+  readPinnedRustToolchainChannel,
   redactCommandArgsForLog,
   resolveAndroidGradleWrapperInvocation,
   resolveAndroidReleaseTaskContract,
@@ -56,6 +62,50 @@ function createProject() {
     'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip\n',
   );
   return projectRoot;
+}
+
+function createStoredZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+  for (const [name, value, entryOptions = {}] of entries) {
+    const nameBuffer = Buffer.from(name, 'utf8');
+    const localNameBuffer = Buffer.from(entryOptions.localName || name, 'utf8');
+    const contents = Buffer.from(value);
+    const flags = entryOptions.flags || 0;
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(flags, 6);
+    localHeader.writeUInt16LE(0, 8);
+    localHeader.writeUInt32LE(0, 10);
+    localHeader.writeUInt32LE(contents.length, 18);
+    localHeader.writeUInt32LE(contents.length, 22);
+    localHeader.writeUInt16LE(localNameBuffer.length, 26);
+    localParts.push(localHeader, localNameBuffer, contents);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(flags, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt32LE(0, 12);
+    centralHeader.writeUInt32LE(contents.length, 20);
+    centralHeader.writeUInt32LE(contents.length, 24);
+    centralHeader.writeUInt16LE(nameBuffer.length, 28);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, nameBuffer);
+    localOffset += localHeader.length + localNameBuffer.length + contents.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDirectory.length, 12);
+  eocd.writeUInt32LE(localOffset, 16);
+  return Buffer.concat([...localParts, centralDirectory, eocd]);
 }
 
 const toolchains = {
@@ -352,6 +402,163 @@ describe('Android build content provenance', () => {
         git,
       });
       expect(changedTypeScriptConfig.digest).not.toBe(release.digest);
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('binds the exact AnyDoc upstream manifest, lockfile, toolchain, and module sources', () => {
+    const projectRoot = createProject();
+    const rustRoot = path.join(projectRoot, 'modules', 'pocket-anydoc', 'rust');
+    fs.mkdirSync(path.join(rustRoot, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(rustRoot, 'target', 'release'), { recursive: true });
+    fs.writeFileSync(path.join(rustRoot, 'Cargo.lock'), '# locked\n');
+    fs.writeFileSync(
+      path.join(rustRoot, 'rust-toolchain.toml'),
+      '[toolchain]\nchannel = "1.94.0"\n',
+    );
+    fs.writeFileSync(path.join(rustRoot, 'src', 'lib.rs'), 'pub fn version() {}\n');
+    fs.writeFileSync(path.join(rustRoot, 'target', 'release', 'libpocket_anydoc.so'), 'generated');
+    fs.writeFileSync(
+      path.join(rustRoot, 'UPSTREAM.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        repository: 'https://github.com/firecrawl/anydoc',
+        version: '0.1.7',
+        exactCommit: POCKET_ANYDOC_UPSTREAM_COMMIT,
+        patchRevision: 'pocket-ai-mobile-v1',
+      }),
+    );
+
+    try {
+      const first = collectBuildProvenance(projectRoot, {
+        variant: 'release',
+        abi: 'universal',
+        toolchains,
+        git,
+      });
+      expect(first.pocketAnyDoc).toEqual(expect.objectContaining({
+        exactCommit: POCKET_ANYDOC_UPSTREAM_COMMIT,
+        patchRevision: 'pocket-ai-mobile-v1',
+        androidTargets: ['aarch64-linux-android', 'x86_64-linux-android'],
+      }));
+      expect(first.entries.some((entry) => entry.path === 'modules/pocket-anydoc/rust/src/lib.rs'))
+        .toBe(true);
+      expect(first.entries.some((entry) => entry.path.includes('/target/'))).toBe(false);
+      expect(collectPocketAnyDocProvenance(projectRoot).cargoLockSha256)
+        .toMatch(/^[a-f0-9]{64}$/u);
+
+      fs.writeFileSync(path.join(rustRoot, 'src', 'lib.rs'), 'pub fn version() { panic!() }\n');
+      const changed = collectBuildProvenance(projectRoot, {
+        variant: 'release',
+        abi: 'universal',
+        toolchains,
+        git,
+      });
+      expect(changed.digest).not.toBe(first.digest);
+
+      fs.writeFileSync(
+        path.join(rustRoot, 'UPSTREAM.json'),
+        JSON.stringify({
+          repository: 'https://github.com/firecrawl/anydoc',
+          version: '0.1.7',
+          exactCommit: '0000000000000000000000000000000000000000',
+          patchRevision: 'unreviewed',
+        }),
+      );
+      expect(() => collectPocketAnyDocProvenance(projectRoot))
+        .toThrow(/must pin reviewed upstream commit/);
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('collects Rust provenance only through the exact pinned toolchain and cargo-ndk version', () => {
+    const projectRoot = createProject();
+    const rustRoot = path.join(projectRoot, 'modules', 'pocket-anydoc', 'rust');
+    fs.mkdirSync(rustRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(rustRoot, 'rust-toolchain.toml'),
+      '[toolchain]\nchannel = "1.94.0"\nprofile = "minimal"\n',
+    );
+    const calls = [];
+    const fakeSpawnSync = (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'rustc' && args.join(' ') === '+1.94.0 --version') {
+        return { status: 0, stdout: 'rustc 1.94.0 (fixture)\n', stderr: '' };
+      }
+      if (command === 'cargo' && args.join(' ') === '+1.94.0 --version') {
+        return { status: 0, stdout: 'cargo 1.94.0 (fixture)\n', stderr: '' };
+      }
+      if (command === 'cargo' && args.join(' ') === 'ndk --version') {
+        return { status: 0, stdout: 'cargo-ndk 4.1.2\n', stderr: '' };
+      }
+      return { status: 0, stdout: 'rustc 1.93.0 (default-fixture)\n', stderr: '' };
+    };
+
+    try {
+      expect(readPinnedRustToolchainChannel(projectRoot)).toBe('1.94.0');
+      expect(collectToolchainVersions(projectRoot, {
+        javaVersion: 'openjdk version "17.0.14"',
+        gradleWrapper: { distributionType: 'bin', version: '8.14.3' },
+        nodeVersion: 'v24.0.0',
+        spawnSync: fakeSpawnSync,
+      })).toEqual(expect.objectContaining({
+        cargo: 'cargo 1.94.0 (fixture)',
+        cargoNdk: 'cargo-ndk 4.1.2',
+        rustChannel: '1.94.0',
+        rustc: 'rustc 1.94.0 (fixture)',
+      }));
+      expect(calls).toEqual([
+        ['rustc', '+1.94.0', '--version'],
+        ['cargo', '+1.94.0', '--version'],
+        ['cargo', 'ndk', '--version'],
+      ]);
+      expect(calls).not.toContainEqual(['rustc', '--version']);
+      expect(calls).not.toContainEqual(['cargo', '--version']);
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects floating, duplicate, or mismatched Rust provenance without leaking workspace paths', () => {
+    const projectRoot = createProject();
+    const rustRoot = path.join(projectRoot, 'modules', 'pocket-anydoc', 'rust');
+    fs.mkdirSync(rustRoot, { recursive: true });
+    const toolchainPath = path.join(rustRoot, 'rust-toolchain.toml');
+
+    try {
+      fs.writeFileSync(toolchainPath, '[toolchain]\nchannel = "stable"\n');
+      expect(() => readPinnedRustToolchainChannel(projectRoot))
+        .toThrow(/must pin an exact stable channel/);
+
+      fs.writeFileSync(
+        toolchainPath,
+        '[toolchain]\nchannel = "1.94.0"\nchannel = "1.93.0"\n',
+      );
+      expect(() => readPinnedRustToolchainChannel(projectRoot))
+        .toThrow(/more than one channel/);
+
+      fs.writeFileSync(toolchainPath, '[toolchain]\nchannel = "1.94.0"\n');
+      expect(() => collectToolchainVersions(projectRoot, {
+        cargoNdkVersion: 'cargo-ndk 4.1.2',
+        cargoVersion: 'cargo 1.94.0 (fixture)',
+        gradleWrapper: { distributionType: 'bin', version: '8.14.3' },
+        javaVersion: 'openjdk version "17.0.14"',
+        nodeVersion: 'v24.0.0',
+        rustcVersion: 'rustc 1.93.0 (default-fixture)',
+      })).toThrow(/rustc version does not match/);
+      expect(() => collectToolchainVersions(projectRoot, {
+        cargoNdkVersion: 'cargo-ndk 4.1.1',
+        cargoVersion: 'cargo 1.94.0 (fixture)',
+        gradleWrapper: { distributionType: 'bin', version: '8.14.3' },
+        javaVersion: 'openjdk version "17.0.14"',
+        nodeVersion: 'v24.0.0',
+        rustcVersion: 'rustc 1.94.0 (fixture)',
+      })).toThrow(/requires cargo-ndk 4\.1\.2/);
+    } catch (error) {
+      expect(String(error)).not.toContain(projectRoot);
+      throw error;
     } finally {
       fs.rmSync(projectRoot, { force: true, recursive: true });
     }
@@ -1685,6 +1892,10 @@ describe('Android build provenance routing', () => {
       )).toThrow(/reject EXPO_PUBLIC_ANDROID_QA=1/);
       expect(() => createAndroidShippingBuildEnvironment(
         projectRoot,
+        { NODE_ENV: 'production', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1' },
+      )).toThrow(/reject EXPO_PUBLIC_ANDROID_QA_DOCUMENTS=1/);
+      expect(() => createAndroidShippingBuildEnvironment(
+        projectRoot,
         { NODE_ENV: 'test' },
       )).toThrow(/require NODE_ENV=production/);
 
@@ -1724,7 +1935,126 @@ describe('Android build provenance routing', () => {
     expect(() => inspectAndroidArtifactNativeEntries(
       entriesFor('lib/').filter((entry) => entry !== 'lib/x86_64/librnllama_jni.so'),
       'apk',
-    )).toThrow(/missing required React Native or llama\.rn libraries/);
+    )).toThrow(/missing required native libraries/);
+  });
+
+  it('records the effective isolated QA application id in public build provenance', () => {
+    const projectRoot = createProject();
+    fs.writeFileSync(
+      path.join(projectRoot, 'app.json'),
+      JSON.stringify({ expo: { android: { package: 'com.github.tah10n.pocketai' } } }),
+    );
+
+    try {
+      const production = collectAndroidEffectiveBuildContext(projectRoot, {
+        gradleArgs: ['app:assembleRelease'],
+        variant: 'release',
+      });
+      const isolatedQa = collectAndroidEffectiveBuildContext(projectRoot, {
+        gradleArgs: [
+          'app:assembleRelease',
+          '-PpocketAiApplicationId=com.github.tah10n.pocketai.qa',
+        ],
+        variant: 'release',
+      });
+
+      expect(production.applicationId).toEqual({
+        isolatedQa: false,
+        source: 'default',
+        value: 'com.github.tah10n.pocketai',
+      });
+      expect(isolatedQa.applicationId).toEqual({
+        isolatedQa: true,
+        source: 'gradle-argument',
+        value: 'com.github.tah10n.pocketai.qa',
+      });
+      expect(hashCanonicalJson(isolatedQa)).not.toBe(hashCanonicalJson(production));
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('records exact packaged Pocket AnyDoc library hashes for every Android ABI', () => {
+    const projectRoot = createProject();
+    const artifactPath = path.join(projectRoot, 'fixture.apk');
+    const entries = ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
+      ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI[abi].map((library) => {
+        const contents = library === 'libpocket_anydoc.so'
+          ? `pocket-anydoc-${abi}`
+          : `${library}-${abi}`;
+        return [`lib/${abi}/${library}`, contents];
+      })
+    ));
+    fs.writeFileSync(artifactPath, createStoredZip(entries));
+
+    try {
+      const inspection = inspectAndroidArtifactNativeLibraries(artifactPath, 'apk');
+      expect(inspection.nativeLibraryFingerprints).toEqual(
+        ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
+          ['libpocket_anydoc.so', 'libpocket_anydoc_jni.so'].map((library) => {
+            const contents = Buffer.from(
+              library === 'libpocket_anydoc.so'
+                ? `pocket-anydoc-${abi}`
+                : `${library}-${abi}`,
+            );
+            return {
+              abi,
+              library,
+              size: contents.length,
+              sha256: crypto.createHash('sha256').update(contents).digest('hex'),
+            };
+          })
+        )),
+      );
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects ambiguous native ZIP names, duplicate normalized names, and unsafe flags', () => {
+    const projectRoot = createProject();
+    const requiredEntries = ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
+      ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI[abi].map((library) => [
+        `lib/${abi}/${library}`,
+        `${library}-${abi}`,
+      ])
+    ));
+    const expectedName = 'lib/arm64-v8a/libpocket_anydoc.so';
+    const mismatchPath = path.join(projectRoot, 'mismatched-local-name.apk');
+    const duplicatePath = path.join(projectRoot, 'duplicate-normalized-name.apk');
+    const unsafeFlagsPath = path.join(projectRoot, 'unsafe-flags.apk');
+
+    fs.writeFileSync(mismatchPath, createStoredZip(requiredEntries.map((entry) => (
+      entry[0] === expectedName
+        ? [...entry, { localName: 'lib/arm64-v8a/libpocket_anydog.so' }]
+        : entry
+    ))));
+    fs.writeFileSync(duplicatePath, createStoredZip([
+      ...requiredEntries,
+      ['lib\\arm64-v8a\\libpocket_anydoc.so', 'ambiguous-duplicate'],
+    ]));
+    fs.writeFileSync(unsafeFlagsPath, createStoredZip(requiredEntries.map((entry) => (
+      entry[0] === expectedName ? [...entry, { flags: 0x0001 }] : entry
+    ))));
+
+    try {
+      for (const [artifactPath, expectedMessage] of [
+        [mismatchPath, /mismatched native ZIP entry names/],
+        [duplicatePath, /duplicate normalized ZIP entry names/],
+        [unsafeFlagsPath, /unsafe native ZIP flags/],
+      ]) {
+        let failure = null;
+        try {
+          inspectAndroidArtifactNativeLibraries(artifactPath, 'apk');
+        } catch (error) {
+          failure = error;
+        }
+        expect(String(failure)).toMatch(expectedMessage);
+        expect(String(failure)).not.toContain(projectRoot);
+      }
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
   });
 
   it('guards the EAS production profile and wires the public ABI contract', () => {

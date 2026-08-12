@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/firecrawl/anydoc",
+  "version": "0.1.7",
+  "exactCommit": "4a45addbd607e8b59f0c263bca26aab228e10370",
+  "patchRevision": "pocket-mobile-3",
+  "patches": [
+    "anydoc-mobile-resource-profile",
+    "anydoc-runtime-cancellation-deadline-work-checkpoints",
+    "anydoc-package-archive-xml-binary-expansion-guards",
+    "anydoc-epub-part-cache-and-repeat-guard",
+    "anydoc-presentation-slide-boundaries",
+    "anydoc-structured-image-linkage",
+    "anydoc-markdown-structure-and-escaping-hardening",
+    "anydoc-spreadsheet-semantic-and-resource-sentinels",
+    "anydoc-encrypted-ooxml-container-probe",
+    "pdf-inspector-mobile-cmap-embedding",
+    "pdf-inspector-page-operator-runtime-checkpoints",
+    "pdf-inspector-bounded-stream-normalization",
+    "pdf-inspector-library-only-release-logging",
+    "calamine-display-format-semantics",
+    "calamine-mobile-cell-merge-repeat-span-limits",
+    "lopdf-0.42-security-fix",
+    "lopdf-bounded-stream-decompression"
+  ],
+  "license": "MIT",
+  "components": {
+    "anydoc": {
+      "version": "0.1.7",
+      "repository": "https://github.com/firecrawl/anydoc",
+      "exactCommit": "4a45addbd607e8b59f0c263bca26aab228e10370",
+      "license": "MIT",
+      "licenseFile": "vendor/anydoc/LICENSE"
+    },
+    "pdfInspector": {
+      "version": "0.1.7",
+      "repository": "https://github.com/firecrawl/pdf-inspector",
+      "exactCommit": "1c32e4bd691bde83778ffef235019c8feac0c0c5",
+      "license": "MIT",
+      "licenseFile": "vendor/pdf-inspector/LICENSE"
+    },
+    "calamine": {
+      "version": "0.36.1",
+      "repository": "https://github.com/tafia/calamine",
+      "exactCommit": "0a24c2a9f1e38c0932c1299e633270dc730db505",
+      "cratesIoChecksum": "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3",
+      "license": "MIT",
+      "licenseFile": "vendor/calamine/LICENSE-MIT.md"
+    },
+    "lopdf": {
+      "version": "0.42.0",
+      "repository": "https://github.com/J-F-Liu/lopdf",
+      "exactCommit": "b68476c2a067f3b5158de60cd8ebce69f72068c8",
+      "cratesIoChecksum": "25aab26d99567469098e64a02f42679f8965c6401263eefa31d8f2dcc37a221c",
+      "license": "MIT",
+      "licenseFile": "vendor/lopdf/LICENSE"
+    }
+  },
+  "pdfInspector": {
+    "version": "0.1.7",
+    "repository": "https://github.com/firecrawl/pdf-inspector",
+    "exactCommit": "1c32e4bd691bde83778ffef235019c8feac0c0c5"
+  },
+  "lopdfSecurityResolution": {
+    "vulnerablePriorLine": "<=0.41",
+    "reviewedVersion": "0.42.0",
+    "exactCommit": "b68476c2a067f3b5158de60cd8ebce69f72068c8",
+    "mechanism": "official pdf-inspector fix commit plus complete vendored lopdf 0.42.0 with a local 2 MiB decoder boundary"
+  },
+  "pocketWrapper": {
+    "upstreamPatch": false,
+    "architecture": "native structural selection with explicit-release fail-closed handles",
+    "sourceDirectories": ["src", "../include"],
+    "controls": [
+      "private-root-source-path-and-stat-identity-verification",
+      "source-and-format-size-preflight-with-sha256-postcheck",
+      "serialized-conversion-and-cooperative-runtime-budget",
+      "bounded-json-c-abi-with-panic-and-buffer-ownership-containment",
+      "whole-structural-chunks-with-prose-only-overlap",
+      "unicode-relevance-and-deterministic-overview-selection",
+      "xlsx-display-reconstruction-hidden-content-and-date1904-policy",
+      "canonical-image-magic-dimension-hash-and-pixel-validation",
+      "selected-chunk-asset-linkage-and-private-atomic-materialization",
+      "explicit-release-fail-closed-handle-leases"
+    ]
+  }
+}

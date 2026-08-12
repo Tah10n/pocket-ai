@@ -63,6 +63,10 @@ function splitOwnerKey(ownerKey: string): { threadKey: string; modelKey: string 
   };
 }
 
+function isNewThreadOwnerThreadKey(threadKey: string): boolean {
+  return threadKey === 'new-thread' || /^new-thread:\d+$/u.test(threadKey);
+}
+
 function shouldPreserveDraftsForNewThreadCommit({
   drafts,
   enabled,
@@ -86,8 +90,8 @@ function shouldPreserveDraftsForNewThreadCommit({
 
   const previous = splitOwnerKey(previousOwnerKey);
   const next = splitOwnerKey(nextOwnerKey);
-  const isNewThreadCommit = previous.threadKey === 'new-thread'
-    && next.threadKey !== 'new-thread'
+  const isNewThreadCommit = isNewThreadOwnerThreadKey(previous.threadKey)
+    && !isNewThreadOwnerThreadKey(next.threadKey)
     && previous.modelKey === next.modelKey;
 
   if (!isNewThreadCommit) {
@@ -592,7 +596,7 @@ export function useChatImageAttachments({
     const owner = splitOwnerKey(ownerKeyRef.current);
     if (
       preserveFailedDraftsOnNewThreadCommit
-      && owner.threadKey === 'new-thread'
+      && isNewThreadOwnerThreadKey(owner.threadKey)
       && restoredDrafts.length > 0
       && options.preserveOwnerKey
     ) {

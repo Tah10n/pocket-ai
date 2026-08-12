@@ -16,9 +16,13 @@ function escapeGroovyDoubleQuotedString(value) {
 }
 
 function createReleaseConfigBlock({
+  defaultApplicationId,
   defaultVersionCode,
   defaultVersionName,
 }) {
+  const safeApplicationId = defaultApplicationId
+    ? escapeGroovyDoubleQuotedString(defaultApplicationId)
+    : 'com.github.tah10n.pocketai';
   const safeVersionCode = Number.isInteger(defaultVersionCode) && defaultVersionCode > 0 ? defaultVersionCode : 1;
   const safeVersionName = defaultVersionName ? escapeGroovyDoubleQuotedString(defaultVersionName) : '1.0.0';
 
@@ -76,9 +80,17 @@ def resolveBooleanValue = { gradleKey, envKey, defaultValue ->
     return defaultValue
 }
 
+def pocketAiDefaultApplicationId = "${safeApplicationId}"
+def pocketAiIsolatedQaApplicationId = "${safeApplicationId}.qa"
 def pocketAiDefaultVersionCode = ${safeVersionCode}
 def pocketAiDefaultVersionName = "${safeVersionName}"
 
+def appApplicationId = (findProperty("pocketAiApplicationId") ?: pocketAiDefaultApplicationId).toString().trim()
+if (!(appApplicationId in [pocketAiDefaultApplicationId, pocketAiIsolatedQaApplicationId])) {
+    throw new GradleException(
+        "Pocket AI applicationId override must be the repository package or its isolated .qa package."
+    )
+}
 def appVersionCodeValue = (findProperty("pocketAiVersionCode") ?: System.getenv("POCKET_AI_VERSION_CODE") ?: pocketAiDefaultVersionCode).toString()
 def appVersionNameValue = (findProperty("pocketAiVersionName") ?: System.getenv("POCKET_AI_VERSION_NAME") ?: pocketAiDefaultVersionName).toString()
 def appVersionCode = appVersionCodeValue.toInteger()
@@ -140,7 +152,13 @@ const DEFAULT_RELEASE_SIGNING_BLOCK = `            // Caution! In production, yo
             signingConfig signingConfigs.debug
 `;
 
-function parseBuildGradleDefaults(buildGradle, { fallbackVersionCode, fallbackVersionName }) {
+function parseBuildGradleDefaults(buildGradle, {
+  fallbackApplicationId,
+  fallbackVersionCode,
+  fallbackVersionName,
+}) {
+  const applicationIdMatch = buildGradle.match(/\bapplicationId\s+["']([^"']+)["']/);
+  const parsedApplicationId = applicationIdMatch ? applicationIdMatch[1] : undefined;
   const versionCodeMatch = buildGradle.match(/\bversionCode\s+(\d+)\b/);
   const parsedVersionCode = versionCodeMatch ? Number.parseInt(versionCodeMatch[1], 10) : undefined;
 
@@ -148,6 +166,8 @@ function parseBuildGradleDefaults(buildGradle, { fallbackVersionCode, fallbackVe
   const parsedVersionName = versionNameMatch ? versionNameMatch[1] : undefined;
 
   return {
+    defaultApplicationId:
+      parsedApplicationId || fallbackApplicationId || 'com.github.tah10n.pocketai',
     defaultVersionCode:
       Number.isInteger(parsedVersionCode) && parsedVersionCode > 0
         ? parsedVersionCode
@@ -208,6 +228,10 @@ function applyBuildGradleReleaseConfig(buildGradle, configDefaults) {
 
   contents = contents.replace(/\bversionCode\s+\d+\b/, 'versionCode appVersionCode');
   contents = contents.replace(/\bversionName\s+["'][^"']+["']/, 'versionName appVersionNameValue');
+  contents = contents.replace(
+    /\bapplicationId\s+["'][^"']+["']/,
+    'applicationId appApplicationId'
+  );
 
   const hasGeneratedReleaseSigning = contents.includes(`@generated begin ${RELEASE_SIGNING_TAG} -`);
   const hasReleaseSigningConfig =
@@ -294,6 +318,7 @@ function applyAndroidManifestReleaseConfig(nextConfig) {
 
 function withAndroidReleaseConfig(config) {
   const configDefaults = {
+    fallbackApplicationId: config.android?.package,
     fallbackVersionCode: config.android?.versionCode,
     fallbackVersionName: config.version,
   };
@@ -313,6 +338,7 @@ function withAndroidReleaseConfig(config) {
 
 module.exports = withAndroidReleaseConfig;
 module.exports._internal = {
+  applyBuildGradleReleaseConfig,
   applyAndroidManifestReleaseConfig,
   BLOCKED_PERMISSIONS,
   LEGACY_GALLERY_READ_PERMISSION,

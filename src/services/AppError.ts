@@ -35,7 +35,15 @@ export type AppErrorCode =
   | 'chat_attachment_parse_failed'
   | 'chat_attachment_too_large_for_context'
   | 'chat_attachment_document_encrypted'
-  | 'chat_attachment_document_no_extractable_text';
+  | 'chat_attachment_document_no_extractable_text'
+  | 'chat_attachment_document_too_large'
+  | 'chat_attachment_document_resource_limit'
+  | 'chat_attachment_document_semantic_spreadsheet'
+  | 'chat_attachment_native_unavailable'
+  | 'chat_attachment_native_failed'
+  | 'chat_attachment_processing_cancelled'
+  | 'chat_attachment_assets_skipped'
+  | 'chat_attachment_context_truncated';
 
 const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   engine_not_ready: 'common.errors.engineNotReady',
@@ -65,6 +73,20 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   chat_attachment_limit_exceeded: 'common.errors.chatAttachmentLimitExceeded',
   chat_attachment_missing: 'common.errors.chatAttachmentMissing',
   chat_attachment_not_ready: 'common.errors.chatAttachmentNotReady',
+  chat_attachment_unsupported_type: 'common.errors.chatAttachmentUnsupportedType',
+  chat_attachment_corrupt: 'common.errors.chatAttachmentCorrupt',
+  chat_attachment_parse_failed: 'common.errors.chatAttachmentParseFailed',
+  chat_attachment_too_large_for_context: 'common.errors.chatAttachmentTooLargeForContext',
+  chat_attachment_document_encrypted: 'common.errors.chatAttachmentDocumentEncrypted',
+  chat_attachment_document_no_extractable_text: 'common.errors.chatAttachmentDocumentNoExtractableText',
+  chat_attachment_document_too_large: 'common.errors.chatAttachmentDocumentTooLarge',
+  chat_attachment_document_resource_limit: 'common.errors.chatAttachmentDocumentResourceLimit',
+  chat_attachment_document_semantic_spreadsheet: 'common.errors.chatAttachmentDocumentSemanticSpreadsheet',
+  chat_attachment_native_unavailable: 'common.errors.chatAttachmentNativeUnavailable',
+  chat_attachment_native_failed: 'common.errors.chatAttachmentNativeFailed',
+  chat_attachment_processing_cancelled: 'common.errors.chatAttachmentProcessingCancelled',
+  chat_attachment_assets_skipped: 'common.errors.chatAttachmentAssetsSkipped',
+  chat_attachment_context_truncated: 'common.errors.chatAttachmentContextTruncated',
 };
 
 const ERROR_PATTERNS: { pattern: RegExp; code: AppErrorCode }[] = [
@@ -156,6 +178,14 @@ const SAFE_APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
   'chat_attachment_too_large_for_context',
   'chat_attachment_document_encrypted',
   'chat_attachment_document_no_extractable_text',
+  'chat_attachment_document_too_large',
+  'chat_attachment_document_resource_limit',
+  'chat_attachment_document_semantic_spreadsheet',
+  'chat_attachment_native_unavailable',
+  'chat_attachment_native_failed',
+  'chat_attachment_processing_cancelled',
+  'chat_attachment_assets_skipped',
+  'chat_attachment_context_truncated',
 ]);
 
 const SAFE_PRIVACY_REPORT_CATEGORIES = new Set([

@@ -22,8 +22,9 @@ Link the issue this pull request addresses, if one exists.
 
 - [ ] Run Android checks
 - [ ] Run Android scenarios
+- [ ] Run Android document pack (release APK, synthetic fixtures, and arm64-v8a/x86_64 `libpocket_anydoc.so`)
 
-Optional Android QA pack labels (CI priority when multiple labels are present): `android-pack-all`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
+Optional Android QA pack labels (CI priority when multiple labels are present): `android-pack-all`, `android-pack-documents`, `android-pack-native`, `android-pack-runtime`, `android-pack-dependency-ui`, `android-pack-catalog`, then `android-pack-extended`.
 
 The destructive branch-regeneration pack is intentionally local-only. When it is relevant, record the exact `npm run android:scenarios:branch-regeneration -- --fail-on-skip` command, device, provenance, and per-step result in this PR; do not represent a hosted Android job as equivalent coverage.
 

@@ -26,7 +26,15 @@ let hasMarkedFirstUsableScreen = false;
 export const HomeScreen = () => {
   const { t } = useTranslation();
   const router = useRouter();
-  const { deleteThread, openThread, startNewChat } = useChatSession();
+  const {
+    deleteThread,
+    isGenerating,
+    isPreparingDocuments,
+    isStoppingGeneration,
+    openThread,
+    startNewChat,
+  } = useChatSession();
+  const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
   const { state: engineState } = useLLMEngine();
   const appearance = useScreenAppearance();
   const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
@@ -139,12 +147,13 @@ export const HomeScreen = () => {
           showsVerticalScrollIndicator={false}
         >
           <ScreenStack className="pt-3" gap="loose">
-            <ActiveModelCard onSwapModel={handleOpenModelPicker} />
+            <ActiveModelCard disabled={isGenerationBusy} onSwapModel={handleOpenModelPicker} />
 
             <ScreenActionPill
               onPress={handleStartNewChat}
               accessibilityRole="button"
               accessibilityLabel={t('home.newChat')}
+              disabled={isGenerationBusy}
               tone="primary"
               size="lg"
               className="w-full gap-3"
@@ -154,6 +163,7 @@ export const HomeScreen = () => {
             </ScreenActionPill>
 
             <RecentConversationsList
+              disabled={isGenerationBusy}
               onOpenConversation={handleOpenConversation}
               onDeleteConversation={handleDeleteConversation}
               onViewAllConversations={() => router.push('/conversations')}

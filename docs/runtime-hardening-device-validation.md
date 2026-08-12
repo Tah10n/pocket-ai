@@ -1,11 +1,12 @@
 # Runtime Hardening Device Validation
 
-Last updated: 2026-07-28
+Last updated: 2026-08-10
 
 ## Purpose
 
 Use this runbook when a change affects llama.rn, model/context lifecycle, prompt state
-caching, chat model selection, branch regeneration, multimodal prompt identity, memory
+caching, chat model selection, branch regeneration, document-session ownership or
+cancellation, multimodal prompt identity, memory
 pressure, or notification routing.
 
 Unit tests and a successful native build are required, but they do not prove device
@@ -58,6 +59,10 @@ npm run android:scenarios:storage -- --fail-on-skip
 npm run android:scenarios:attachments -- --fail-on-skip
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
 ```
+
+For document routing, parsing, selection, session-cache ownership, or cleanup changes, also
+run `npm run android:scenarios:documents` and apply the acceptance criteria in
+[Document QA and Benchmarks](./document-qa-benchmarks.md).
 
 The branch-regeneration pack is destructive and requires a disposable, prepared release
 fixture. Follow the stricter preconditions in the

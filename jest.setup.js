@@ -246,7 +246,7 @@ jest.mock('nativewind', () => {
 jest.mock('react-native-fs', () => ({
     DocumentDirectoryPath: '/mock/path',
     downloadFile: jest.fn(),
-    hash: jest.fn(),
+    hash: jest.fn().mockResolvedValue('a'.repeat(64)),
     unlink: jest.fn(),
     stopDownload: jest.fn(),
     getFSInfo: jest.fn().mockResolvedValue({ freeSpace: 10 * 1024 * 1024 * 1024, totalSpace: 100 * 1024 * 1024 * 1024 }),
@@ -362,6 +362,7 @@ jest.mock('@react-navigation/native', () => {
     return {
         ...actual,
         useIsFocused: () => isFocused,
+        usePreventRemove: jest.fn(),
         useFocusEffect: (effect) => {
             React.useEffect(
                 () => (isFocused ? effect() : undefined),

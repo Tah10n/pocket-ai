@@ -12,10 +12,11 @@ import { getThemeActionContentClassName } from '@/utils/themeTokens';
 import { useTranslation } from 'react-i18next';
 
 interface ActiveModelCardProps {
+  disabled?: boolean;
   onSwapModel?: () => void;
 }
 
-export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
+export const ActiveModelCard = ({ disabled = false, onSwapModel }: ActiveModelCardProps) => {
   const { t } = useTranslation();
   const appearance = useScreenAppearance();
   const neutralToneClassNames = appearance.classNames.toneClassNameByTone.neutral;
@@ -96,7 +97,7 @@ export const ActiveModelCard = ({ onSwapModel }: ActiveModelCardProps) => {
             </Box>
           </Box>
 
-          <ScreenActionPill onPress={onSwapModel} tone="primary" size="sm" className="shrink-0">
+          <ScreenActionPill disabled={disabled} onPress={onSwapModel} tone="primary" size="sm" className="shrink-0">
             <Text className={composeTextRole('action', primaryActionContentClassName)}>{ctaLabel}</Text>
           </ScreenActionPill>
         </Box>

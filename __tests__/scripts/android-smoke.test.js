@@ -31,6 +31,7 @@ const {
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
+  resolveAndroidQaApplicationId,
   resolveDebugApkReuseDecision,
   runAdbInstall,
   runAndroidGradleBuild,
@@ -823,10 +824,14 @@ describe('android-smoke target ABI contract', () => {
   const reactNativeLibrary = (abi) => `lib/${abi}/libreactnative.so`;
   const rnLlamaLibrary = (abi) => `lib/${abi}/librnllama.so`;
   const rnLlamaJniLibrary = (abi) => `lib/${abi}/librnllama_jni.so`;
+  const pocketAnydocLibrary = (abi) => `lib/${abi}/libpocket_anydoc.so`;
+  const pocketAnydocJniLibrary = (abi) => `lib/${abi}/libpocket_anydoc_jni.so`;
   const nativeLibraryEntries = (abi) => [
     reactNativeLibrary(abi),
     rnLlamaLibrary(abi),
     rnLlamaJniLibrary(abi),
+    pocketAnydocLibrary(abi),
+    pocketAnydocJniLibrary(abi),
   ];
   const canonicalUniversalAbis = ['arm64-v8a', 'x86_64'];
 
@@ -858,6 +863,29 @@ describe('android-smoke target ABI contract', () => {
     ]);
     expect(() => buildGradleAssembleArgs(undefined, 'universal'))
       .toThrow(/requires an explicit assemble task/);
+  });
+
+  it('binds isolated phone QA to the repository-owned side-by-side package', () => {
+    const productionPackage = 'com.github.tah10n.pocketai';
+    const isolatedPackage = resolveAndroidQaApplicationId(productionPackage, true);
+
+    expect(parseCliOptions(['--isolated-qa-install'])).toEqual(
+      expect.objectContaining({ isolatedQaInstall: true }),
+    );
+    expect(isolatedPackage).toBe('com.github.tah10n.pocketai.qa');
+    expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
+      applicationId: isolatedPackage,
+    })).toEqual([
+      'app:assembleRelease',
+      '-PreactNativeArchitectures=arm64-v8a',
+      '-PpocketAiApplicationId=com.github.tah10n.pocketai.qa',
+      '--rerun-tasks',
+      '--no-build-cache',
+      '--no-configuration-cache',
+    ]);
+    expect(() => buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
+      applicationId: 'com.example.untrusted',
+    })).toThrow(/repository package or its isolated \.qa package/);
   });
 
   it('cleans generated native intermediates before invoking a fresh provenance build', () => {
@@ -990,7 +1018,12 @@ describe('android-smoke target ABI contract', () => {
     expect(evaluateApkAbiCompatibility({
       targetAbi: 'x86_64',
       deviceAbis: ['x86_64'],
-      zipEntries: [reactNativeLibrary('x86_64'), rnLlamaLibrary('x86_64')],
+      zipEntries: [
+        reactNativeLibrary('x86_64'),
+        rnLlamaLibrary('x86_64'),
+        pocketAnydocLibrary('x86_64'),
+        pocketAnydocJniLibrary('x86_64'),
+      ],
     })).toEqual(expect.objectContaining({
       canReuse: false,
       missingEntries: [rnLlamaJniLibrary('x86_64')],
@@ -1070,7 +1103,7 @@ describe('android-smoke install reuse decisions', () => {
         packageInstalled: true,
         didBuildDebugApk: false,
         installStamp: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           variant: 'debug',
           abi: 'universal',
           buildProvenanceDigest: 'build-1',
@@ -1111,7 +1144,7 @@ describe('android-smoke install reuse decisions', () => {
         packageInstalled: true,
         didBuildDebugApk: false,
         installStamp: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           variant: 'debug',
           abi: 'universal',
           buildProvenanceDigest: 'build-1',
@@ -1143,7 +1176,7 @@ describe('android-smoke install reuse decisions', () => {
       packageInstalled: true,
       didBuildDebugApk: false,
       installStamp: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         variant: 'release',
         abi: 'arm64-v8a',
         buildProvenanceDigest: 'build-1',

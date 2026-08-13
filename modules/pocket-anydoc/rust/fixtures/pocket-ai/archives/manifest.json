@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "file": "epub-repeated-itemref-64.epub",
+      "bytes": 1161,
+      "sha256": "8278e23fcc378e9b85a4abaf9bdb64705dcb82070c967ea76316ea1604343941",
+      "expected": "resource_limit:max_epub_repeated_itemrefs"
+    }
+  ]
+}

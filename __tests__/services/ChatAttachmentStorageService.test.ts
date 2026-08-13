@@ -23,7 +23,9 @@ import {
   MAX_CHAT_IMAGE_ATTACHMENT_SIDE_PIXELS,
 } from '../../src/utils/chatImageAttachments';
 import {
+  MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES,
   MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES,
+  MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES,
   MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES,
 } from '../../src/utils/chatAttachments';
 
@@ -184,14 +186,74 @@ describe('ChatAttachmentStorageService', () => {
     }));
   });
 
+  it('accepts controlled generic provider MIME only when the filename has a supported document extension', async () => {
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 1024 });
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/report',
+      name: 'report.docx',
+      size: 1024,
+      mimeType: 'application/octet-stream',
+    })).resolves.toEqual(expect.objectContaining({
+      displayName: 'report.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      copyStatus: 'copied',
+    }));
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/archive',
+      name: 'archive.zip',
+      size: 1024,
+      mimeType: 'application/octet-stream',
+    })).rejects.toThrow('unsupported');
+  });
+
+  it('preserves known native MIME hints across unknown or misleading filename extensions', async () => {
+    (FileSystem.getInfoAsync as jest.Mock)
+      .mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 1024 })
+      .mockResolvedValueOnce({ exists: false })
+      .mockResolvedValueOnce({ exists: true, size: 1024 });
+    const service = new ChatAttachmentStorageService({
+      now: () => 123,
+      random: () => 0.456,
+    });
+
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/renamed-pdf',
+      name: 'renamed.bin',
+      size: 1024,
+      mimeType: 'application/pdf',
+    })).resolves.toEqual(expect.objectContaining({
+      displayName: 'renamed.bin',
+      fileName: expect.stringMatching(/\.pdf$/u),
+      mimeType: 'application/pdf',
+    }));
+    await expect(service.copyDocumentAssetToDraft({
+      uri: 'content://documents/misleading-office',
+      name: 'misleading.pdf',
+      size: 1024,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    })).resolves.toEqual(expect.objectContaining({
+      displayName: 'misleading.pdf',
+      fileName: expect.stringMatching(/\.docx$/u),
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }));
+  });
+
   it('rejects unsupported and oversized picked documents before copying into storage', async () => {
     const service = new ChatAttachmentStorageService();
 
     await expect(service.copyDocumentAssetToDraft({
-      uri: 'content://documents/contract.docx',
-      name: 'contract.docx',
+      uri: 'content://documents/archive.zip',
+      name: 'archive.zip',
       size: 120,
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      mimeType: 'application/zip',
     })).rejects.toThrow('unsupported');
 
     await expect(service.copyDocumentAssetToDraft({
@@ -207,6 +269,35 @@ describe('ChatAttachmentStorageService', () => {
       size: MAX_CHAT_PDF_DOCUMENT_ATTACHMENT_BYTES + 1,
       mimeType: 'application/pdf',
     })).rejects.toThrow('size limits');
+
+    for (const asset of [
+      {
+        uri: 'content://documents/large.csv',
+        name: 'large.csv',
+        size: MAX_CHAT_TEXT_DOCUMENT_ATTACHMENT_BYTES + 1,
+        mimeType: 'text/csv',
+      },
+      {
+        uri: 'content://documents/large.rtf',
+        name: 'large.rtf',
+        size: MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES + 1,
+        mimeType: 'application/rtf',
+      },
+      {
+        uri: 'content://documents/large.epub',
+        name: 'large.epub',
+        size: MAX_CHAT_RTF_EPUB_DOCUMENT_ATTACHMENT_BYTES + 1,
+        mimeType: 'application/epub+zip',
+      },
+      {
+        uri: 'content://documents/large.docx',
+        name: 'large.docx',
+        size: MAX_CHAT_OFFICE_DOCUMENT_ATTACHMENT_BYTES + 1,
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      },
+    ]) {
+      await expect(service.copyDocumentAssetToDraft(asset)).rejects.toThrow('size limits');
+    }
 
     expect(FileSystem.copyAsync).not.toHaveBeenCalled();
   });

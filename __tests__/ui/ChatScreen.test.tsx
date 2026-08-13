@@ -1,8 +1,9 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert, Platform } from 'react-native';
+import { Alert, Keyboard, Platform } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { getThreadActiveModelId } from '../../src/types/chat';
+import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -129,11 +130,21 @@ const mockConsumeAttachmentDrafts = jest.fn();
 const mockRestoreAttachmentDrafts = jest.fn();
 const mockDiscardAttachmentDrafts = jest.fn();
 const mockUseChatImageAttachments = jest.fn();
+const mockAttachDocuments = jest.fn();
+const mockRemoveDocumentAttachmentDraft = jest.fn();
+const mockClearDocumentDrafts = jest.fn();
+const mockClearFailedDocumentDrafts = jest.fn();
+const mockConsumeDocumentDrafts = jest.fn();
+const mockRestoreDocumentDrafts = jest.fn();
+const mockDiscardDocumentDrafts = jest.fn();
+const mockUseChatDocumentAttachments = jest.fn();
 let lastPresetSelectorProps: any = null;
 let lastModelParametersSheetProps: any = null;
 let lastErrorReportSheetProps: any = null;
 let lastChatHeaderProps: any = null;
 let lastChatInputBarProps: any = null;
+let mockIsStoppingGeneration = false;
+let mockIsPreparingDocuments = false;
 const mockStartNewChat = jest.fn(() => {
   require('../../src/store/chatStore').useChatStore.getState().setActiveThread(null);
 });
@@ -201,6 +212,10 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
 
 jest.mock('../../src/hooks/useChatImageAttachments', () => ({
   useChatImageAttachments: (options: any) => mockUseChatImageAttachments(options),
+}));
+
+jest.mock('../../src/hooks/useChatDocumentAttachments', () => ({
+  useChatDocumentAttachments: (options: any) => mockUseChatDocumentAttachments(options),
 }));
 
 jest.mock('../../src/services/LLMEngineService', () => ({
@@ -372,12 +387,19 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
 
 jest.mock('../../src/components/ui/ChatInputBar', () => {
   const mockReact = require('react');
-  const { Pressable, Text, View } = require('react-native');
+  const { Alert: MockAlert, Pressable, Text, View } = require('react-native');
+  const reportedErrors = new WeakSet<object>();
 
   return {
     markChatInputDraftConsumedError: (error: unknown) => {
       if (error && typeof error === 'object') {
         (error as { chatInputDraftConsumed?: true }).chatInputDraftConsumed = true;
+      }
+      return error;
+    },
+    markChatInputErrorReported: (error: unknown) => {
+      if (error && typeof error === 'object') {
+        reportedErrors.add(error);
       }
       return error;
     },
@@ -400,7 +422,18 @@ jest.mock('../../src/components/ui/ChatInputBar', () => {
         attachmentsTray ?? null,
         mockReact.createElement(
           Pressable,
-          { testID: 'send-button', onPress: () => onSendMessage('Edited from test') },
+          {
+            testID: 'send-button',
+            onPress: async () => {
+              try {
+                await onSendMessage('Edited from test');
+              } catch (error) {
+                if (!error || typeof error !== 'object' || !reportedErrors.has(error)) {
+                  MockAlert.alert('chat.sendErrorTitle', 'generic send error');
+                }
+              }
+            },
+          },
           mockReact.createElement(Text, null, 'Send'),
         ),
         isSending
@@ -420,7 +453,7 @@ jest.mock('../../src/components/ui/ChatMessageBubble', () => {
   const { Pressable, Text, View } = require('react-native');
 
   return {
-    ChatMessageBubble: ({ id, content, canRegenerate, onRegenerate, onDelete }: any) =>
+    ChatMessageBubble: ({ id, content, canDelete, canRegenerate, onRegenerate, onDelete }: any) =>
       mockReact.createElement(
         View,
         null,
@@ -432,7 +465,7 @@ jest.mock('../../src/components/ui/ChatMessageBubble', () => {
               mockReact.createElement(Text, null, 'Regenerate message'),
             )
           : null,
-        onDelete
+        canDelete && onDelete
           ? mockReact.createElement(
               Pressable,
               { testID: `delete-message-${id}`, onPress: () => onDelete(id) },
@@ -450,7 +483,7 @@ jest.mock('@/components/ui/PresetSelectorSheet', () => {
   return {
     PresetSelectorSheet: (props: any) => {
       lastPresetSelectorProps = props;
-      const { visible, onSelectPreset } = props;
+      const { visible, canSelect, onSelectPreset } = props;
       return visible
         ? mockReact.createElement(
             View,
@@ -459,6 +492,7 @@ jest.mock('@/components/ui/PresetSelectorSheet', () => {
               Pressable,
               {
                 testID: 'preset-option-default',
+                disabled: canSelect === false,
                 onPress: () => onSelectPreset(null),
               },
               mockReact.createElement(Text, null, 'Default preset'),
@@ -467,6 +501,7 @@ jest.mock('@/components/ui/PresetSelectorSheet', () => {
               Pressable,
               {
                 testID: 'preset-option-preset-2',
+                disabled: canSelect === false,
                 onPress: () => onSelectPreset('preset-2'),
               },
               mockReact.createElement(Text, null, 'Preset 2'),
@@ -568,6 +603,8 @@ jest.mock('../../src/hooks/useChatSession', () => ({
     messages: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.messages ?? [],
     messageListRevision: require('../../src/store/chatStore').useChatStore.getState().streamingRevision,
     isGenerating: require('../../src/store/chatStore').useChatStore.getState().getActiveThread()?.status === 'generating',
+    isStoppingGeneration: mockIsStoppingGeneration,
+    isPreparingDocuments: mockIsPreparingDocuments,
     shouldOfferSummary: Boolean(
       require('../../src/store/chatStore').useChatStore
         .getState()
@@ -611,6 +648,16 @@ jest.mock('../../src/hooks/useChatSession', () => ({
   },
 }));
 
+jest.mock('../../src/services/ChatGenerationService', () => {
+  const actual = jest.requireActual('../../src/services/ChatGenerationService');
+  return {
+    ...actual,
+    hasActiveChatGenerationWork: () => (
+      mockIsPreparingDocuments || actual.hasActiveChatGenerationWork()
+    ),
+  };
+});
+
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
     getCurrentStatus: () => ({
@@ -643,6 +690,7 @@ const {
   getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
+  isAndroidKeyboardMeasurementCurrent,
   resolveFallbackMultimodalReadiness,
   shouldRenderAndroidKeyboardSpacer,
   shouldFloatAndroidComposerOverContent,
@@ -900,7 +948,8 @@ describe('ChatScreen', () => {
     mockAppendUserMessage.mockReset();
     mockAppendUserMessage.mockResolvedValue(undefined);
     mockDeleteMessage.mockClear();
-    mockStop.mockClear();
+    mockStop.mockReset();
+    mockStop.mockResolvedValue(undefined);
     mockCreateSummaryPlaceholder.mockClear();
     mockAttachImages.mockReset();
     mockAttachImages.mockResolvedValue(undefined);
@@ -926,6 +975,28 @@ describe('ChatScreen', () => {
       restoreDraftsForRetry: mockRestoreAttachmentDrafts,
       discardDrafts: mockDiscardAttachmentDrafts,
     }));
+    mockAttachDocuments.mockReset();
+    mockAttachDocuments.mockResolvedValue(undefined);
+    mockRemoveDocumentAttachmentDraft.mockClear();
+    mockClearDocumentDrafts.mockClear();
+    mockClearFailedDocumentDrafts.mockClear();
+    mockConsumeDocumentDrafts.mockReset();
+    mockConsumeDocumentDrafts.mockReturnValue([]);
+    mockRestoreDocumentDrafts.mockClear();
+    mockDiscardDocumentDrafts.mockClear();
+    mockUseChatDocumentAttachments.mockReset();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [],
+      isPicking: false,
+      remainingSlots: 4,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
     mockRouterNavigate.mockClear();
     mockRouterPush.mockClear();
     mockRunBackendAutotune.mockReset();
@@ -943,6 +1014,8 @@ describe('ChatScreen', () => {
     lastErrorReportSheetProps = null;
     lastChatHeaderProps = null;
     lastChatInputBarProps = null;
+    mockIsStoppingGeneration = false;
+    mockIsPreparingDocuments = false;
     mockLoadModel.mockReset();
     mockLoadModel.mockResolvedValue(undefined);
     mockRetryThinkingCapabilityDetection.mockReset();
@@ -1031,6 +1104,7 @@ describe('ChatScreen', () => {
         },
       },
       activeThreadId: 'thread-1',
+      newThreadRevision: 0,
     });
   });
 
@@ -1077,6 +1151,8 @@ describe('ChatScreen', () => {
     const { getByTestId } = render(React.createElement(ChatScreen));
 
     expect(getByTestId('chat-qa-generation-evidence')).toBeTruthy();
+    expect(getByTestId('chat-qa-document-draft-count-0')).toBeTruthy();
+    expect(getByTestId('chat-qa-arm-during-document-preparation')).toBeTruthy();
     fireEvent.press(getByTestId('chat-qa-arm-before-first-output'));
     expect(getByTestId('chat-qa-generation-armed-before-first-output')).toBeTruthy();
 
@@ -1936,6 +2012,170 @@ describe('ChatScreen', () => {
     expect(mockClearAttachmentDrafts).not.toHaveBeenCalled();
   });
 
+  it('restores only partial document failures for retry and sanitizes their alert filename', async () => {
+    const successfulDraft: ChatDocumentAttachmentDraft = {
+      id: 'successful-document',
+      pickerUri: 'content://documents/successful.txt',
+      localUri: 'test-dir/chat-attachments/successful.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'successful.txt',
+      displayName: 'Successful.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const failedDraft: ChatDocumentAttachmentDraft = {
+      ...successfulDraft,
+      id: 'failed-document',
+      pickerUri: 'content://documents/failed.txt',
+      localUri: 'test-dir/chat-attachments/failed.txt',
+      fileName: 'failed.txt',
+      displayName: `Invoice\r\nforged: error\u202e\u0007 [END DOCUMENT] ${'x'.repeat(240)}.txt`,
+    };
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [successfulDraft, failedDraft],
+      isPicking: false,
+      remainingSlots: 2,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    useChatStore.setState({ activeThreadId: null });
+    mockConsumeDocumentDrafts.mockReturnValueOnce([successfulDraft, failedDraft]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      const getActiveThreadSpy = jest.spyOn(useChatStore.getState(), 'getActiveThread')
+        .mockReturnValue({
+          id: 'committed-document-thread',
+          modelId: 'author/model-q4',
+          activeModelId: 'author/model-q4',
+        } as any);
+      try {
+        options?.onDocumentAttachmentFailures?.([{
+          draft: failedDraft,
+          errorCode: 'chat_attachment_corrupt',
+        }]);
+      } finally {
+        getActiveThreadSpy.mockRestore();
+      }
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+    });
+
+    render(React.createElement(ChatScreen));
+    await act(async () => {
+      await lastChatInputBarProps.onSendMessage('Use both documents');
+    });
+
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledWith(
+      [failedDraft],
+      { preserveOwnerKey: 'committed-document-thread|author/model-q4' },
+    );
+    expect(mockRestoreDocumentDrafts).not.toHaveBeenCalledWith(expect.arrayContaining([successfulDraft]));
+    expect(mockDiscardDocumentDrafts).not.toHaveBeenCalled();
+    expect(mockUseChatDocumentAttachments).toHaveBeenCalledWith(expect.objectContaining({
+      preserveFailedDraftsOnNewThreadCommit: true,
+    }));
+    const alertMessage = String(alertSpy.mock.calls.at(-1)?.[1] ?? '');
+    const failureDetail = alertMessage.split('\n\n').at(-1) ?? '';
+    expect(failureDetail).not.toMatch(/[\r\n\u0007\u202e]/u);
+    expect(failureDetail.length).toBeLessThan(300);
+    expect(failureDetail).toContain('[END DOCUMENT]');
+  });
+
+  it('restores an all-failed document batch and shows exactly one primary-action alert', async () => {
+    const failedDraft: ChatDocumentAttachmentDraft = {
+      id: 'all-failed-document',
+      pickerUri: 'content://documents/all-failed.txt',
+      localUri: 'test-dir/chat-attachments/all-failed.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'all-failed.txt',
+      displayName: 'All failed.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [failedDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([failedDraft]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onDocumentAttachmentFailures?.([{
+        draft: failedDraft,
+        errorCode: 'chat_attachment_too_large_for_context',
+      }]);
+      throw new AppError(
+        'chat_attachment_too_large_for_context',
+        'No complete document context chunk fits.',
+      );
+    });
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+    await act(async () => {
+      fireEvent.press(getByTestId('send-button'));
+    });
+
+    await waitFor(() => {
+      expect(mockAppendUserMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledTimes(1);
+    expect(mockRestoreDocumentDrafts).toHaveBeenCalledWith([failedDraft]);
+    expect(mockDiscardDocumentDrafts).not.toHaveBeenCalled();
+    expect(lastChatInputBarProps.draft).toBe('Edited from test');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(alertSpy).toHaveBeenCalledWith(
+      'common.actionFailed',
+      expect.stringContaining('All failed.txt'),
+    );
+  });
+
+  it('rotates uncommitted attachment owners and clears retry text for an explicit new chat', async () => {
+    useChatStore.setState({
+      activeThreadId: null,
+      newThreadRevision: 7,
+    });
+    mockAppendUserMessage.mockRejectedValueOnce(new Error('send failed'));
+
+    const { getByTestId } = render(React.createElement(ChatScreen));
+
+    expect(mockUseChatDocumentAttachments).toHaveBeenLastCalledWith(expect.objectContaining({
+      ownerKey: 'new-thread:7|author/model-q4',
+    }));
+    await act(async () => {
+      fireEvent.press(getByTestId('send-button'));
+    });
+    await waitFor(() => {
+      expect(lastChatInputBarProps.draft).toBe('Edited from test');
+    });
+
+    act(() => {
+      useChatStore.getState().beginNewThread();
+    });
+
+    await waitFor(() => {
+      expect(mockUseChatDocumentAttachments).toHaveBeenLastCalledWith(expect.objectContaining({
+        ownerKey: 'new-thread:8|author/model-q4',
+      }));
+      expect(lastChatInputBarProps.draft).toBe('');
+    });
+  });
+
   it('discards consumed copied drafts when their copied file is missing before append', async () => {
     registry.saveModels([
       createReadyVisionModel(),
@@ -2338,6 +2578,59 @@ describe('ChatScreen', () => {
     }
   });
 
+  it('clears stale Android keyboard spacing when the document picker returns without a hide event', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+    const keyboardListeners = new Map<string, Array<(event: any) => void>>();
+    const addKeyboardListenerSpy = jest.spyOn(Keyboard, 'addListener').mockImplementation((eventName, listener) => {
+      keyboardListeners.set(eventName, [
+        ...(keyboardListeners.get(eventName) ?? []),
+        listener as (event: any) => void,
+      ]);
+      return { remove: jest.fn() } as any;
+    });
+    const dismissKeyboardSpy = jest.spyOn(Keyboard, 'dismiss').mockImplementation(() => undefined);
+
+    try {
+      mockEngineState = {
+        activeModelId: 'author/model-q4',
+        loadProgress: 0.5,
+        status: 'initializing',
+      };
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      const hiddenKeyboardBannerBottom = getByTestId('model-warmup-banner-container').props.style.bottom;
+      const emitKeyboardShow = () => keyboardListeners.get('keyboardDidShow')?.forEach((listener) => {
+        listener({
+          endCoordinates: {
+            height: 320,
+            screenY: 2080,
+          },
+        });
+      });
+
+      act(emitKeyboardShow);
+      expect(getByTestId('model-warmup-banner-container').props.style.bottom)
+        .toBeGreaterThan(hiddenKeyboardBannerBottom);
+
+      mockAttachDocuments.mockImplementationOnce(async () => {
+        // Android can deliver a late frame/show event while the external picker is opening,
+        // then omit keyboardDidHide while the React Native activity is paused.
+        emitKeyboardShow();
+      });
+
+      await act(async () => {
+        await lastChatInputBarProps.onAttachDocuments();
+      });
+
+      expect(dismissKeyboardSpy).toHaveBeenCalledTimes(1);
+      expect(mockAttachDocuments).toHaveBeenCalledTimes(1);
+      expect(getByTestId('model-warmup-banner-container').props.style.bottom)
+        .toBe(hiddenKeyboardBannerBottom);
+    } finally {
+      dismissKeyboardSpy.mockRestore();
+      addKeyboardListenerSpy.mockRestore();
+    }
+  });
+
   it('compensates only the portion of the Android keyboard that still overlaps the resized viewport', () => {
     expect(getAndroidKeyboardOverlapCompensation({
       baseWindowHeight: 2400,
@@ -2394,7 +2687,27 @@ describe('ChatScreen', () => {
     })).toBe(48);
   });
 
-  it('keeps the Android glass composer floating across keyboard visibility changes', () => {
+  it('rejects an Android keyboard measurement after hide or a newer frame event', () => {
+    const measuredMetrics = { height: 320, topY: 2080 };
+
+    expect(isAndroidKeyboardMeasurementCurrent({
+      isKeyboardVisible: true,
+      activeMetrics: measuredMetrics,
+      measuredMetrics,
+    })).toBe(true);
+    expect(isAndroidKeyboardMeasurementCurrent({
+      isKeyboardVisible: false,
+      activeMetrics: measuredMetrics,
+      measuredMetrics,
+    })).toBe(false);
+    expect(isAndroidKeyboardMeasurementCurrent({
+      isKeyboardVisible: true,
+      activeMetrics: { ...measuredMetrics },
+      measuredMetrics,
+    })).toBe(false);
+  });
+
+  it('returns the Android glass composer to normal flow while the keyboard is visible', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
       surfaceKind: 'glass',
@@ -2409,7 +2722,7 @@ describe('ChatScreen', () => {
       platform: 'android',
       surfaceKind: 'glass',
       isKeyboardVisible: true,
-    })).toBe(true);
+    })).toBe(false);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
       surfaceKind: 'glass',
@@ -2910,6 +3223,89 @@ describe('ChatScreen', () => {
 
     expect(queryByTestId('chat-model-selector-sheet')).toBeNull();
     expect(lastChatHeaderProps.modelLabel).toBe('model-q8');
+  });
+
+  it('rejects model switching while deferred document preparation is active', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Model Q4',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+      {
+        id: 'author/model-q8',
+        name: 'Model Q8',
+        author: 'Test',
+        size: 1024,
+        localPath: 'model-q8.gguf',
+        lifecycleStatus: 'downloaded',
+      },
+    ]);
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'model-switch-document',
+      pickerUri: 'content://documents/model-switch.txt',
+      localUri: 'test-dir/chat-attachments/model-switch.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'model-switch.txt',
+      displayName: 'Model Switch.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredAppend = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
+
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    fireEvent.press(getByTestId('model-selector-button'));
+    expect(getByTestId('chat-model-selector-sheet')).toBeTruthy();
+    let appendPromise!: Promise<void>;
+    await act(async () => {
+      appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      mockIsPreparingDocuments = true;
+      rerender(React.createElement(ChatScreen));
+    });
+    expect(jest.requireMock('@react-navigation/native').usePreventRemove).toHaveBeenLastCalledWith(
+      true,
+      expect.any(Function),
+    );
+    expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
+    await act(async () => {
+      fireEvent.press(getByTestId('model-option-author/model-q8'));
+      await Promise.resolve();
+    });
+
+    expect(mockStop).not.toHaveBeenCalled();
+    expect(mockLoadModel).not.toHaveBeenCalled();
+    expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
+
+    await act(async () => {
+      mockIsPreparingDocuments = false;
+      deferredAppend.resolve();
+      await appendPromise;
+      rerender(React.createElement(ChatScreen));
+    });
   });
 
   it('lets an explicit model selection recover a legacy thread without model evidence', async () => {
@@ -3550,6 +3946,133 @@ describe('ChatScreen', () => {
     expect(mockRouterNavigate).not.toHaveBeenCalled();
   });
 
+  it('stops in-flight document preparation when the chat screen loses focus', async () => {
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'blur-document',
+      pickerUri: 'content://documents/blur.txt',
+      localUri: 'test-dir/chat-attachments/blur.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'blur.txt',
+      displayName: 'Blur.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredAppend = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+
+    try {
+      const { rerender } = render(React.createElement(ChatScreen));
+      let appendPromise!: Promise<void>;
+      await act(async () => {
+        appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+        await Promise.resolve();
+      });
+      expect(mockAppendUserMessage).toHaveBeenCalledWith(
+        'Use this document',
+        expect.objectContaining({ documentAttachmentDrafts: [documentDraft] }),
+      );
+
+      act(() => {
+        navigation.__setIsFocused(false);
+      });
+      rerender(React.createElement(ChatScreen));
+
+      await waitFor(() => {
+        expect(mockStop).toHaveBeenCalledTimes(1);
+      });
+
+      await act(async () => {
+        deferredAppend.resolve();
+        await appendPromise;
+      });
+    } finally {
+      navigation.__setIsFocused(true);
+    }
+  });
+
+  it('keeps an appended document response running when the chat screen loses focus', async () => {
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'appended-blur-document',
+      pickerUri: 'content://documents/appended-blur.txt',
+      localUri: 'test-dir/chat-attachments/appended-blur.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'appended-blur.txt',
+      displayName: 'Appended Blur.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredCompletion = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockImplementationOnce(async (_content, options) => {
+      options?.onUserMessageAppended?.({ id: 'message-appended' });
+      await deferredCompletion.promise;
+    });
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+
+    try {
+      const { rerender } = render(React.createElement(ChatScreen));
+      let appendPromise!: Promise<void>;
+      await act(async () => {
+        appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+        await Promise.resolve();
+      });
+
+      act(() => {
+        navigation.__setIsFocused(false);
+      });
+      rerender(React.createElement(ChatScreen));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(mockStop).not.toHaveBeenCalled();
+      await act(async () => {
+        deferredCompletion.resolve();
+        await appendPromise;
+      });
+    } finally {
+      navigation.__setIsFocused(true);
+    }
+  });
+
   it('clears a pending model selection when the chat screen loses focus', async () => {
     registry.saveModels([
       {
@@ -3607,6 +4130,7 @@ describe('ChatScreen', () => {
       expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe(
         'author/model-q4',
       );
+      expect(mockStop).not.toHaveBeenCalled();
     } finally {
       navigation.__setIsFocused(true);
     }
@@ -4405,6 +4929,23 @@ describe('ChatScreen', () => {
     expect(mockStop).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the composer disabled while a stopped native completion is settling', () => {
+    mockIsStoppingGeneration = true;
+
+    render(React.createElement(ChatScreen));
+
+    expect(lastChatInputBarProps).toEqual(expect.objectContaining({
+      disabled: true,
+      isSending: false,
+    }));
+    expect(lastChatHeaderProps).toEqual(expect.objectContaining({
+      canStartNewChat: false,
+      canOpenPresetSelector: false,
+      canOpenModelSelector: false,
+      canOpenModelControls: false,
+    }));
+  });
+
   it('keeps header actions visible but disabled while a response is generating', async () => {
     useChatStore.setState({
       threads: {
@@ -4605,6 +5146,63 @@ describe('ChatScreen', () => {
         systemPrompt: 'Organize findings clearly.',
       }),
     );
+  });
+
+  it('rejects preset switching and preset navigation while deferred document preparation is active', async () => {
+    const documentDraft: ChatDocumentAttachmentDraft = {
+      id: 'preset-switch-document',
+      pickerUri: 'content://documents/preset-switch.txt',
+      localUri: 'test-dir/chat-attachments/preset-switch.txt',
+      pathCategory: 'chat_attachment',
+      fileName: 'preset-switch.txt',
+      displayName: 'Preset Switch.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 128,
+      source: 'document_picker',
+      createdAt: 1,
+      copyStatus: 'copied',
+    };
+    const deferredAppend = createDeferred<void>();
+    mockUseChatDocumentAttachments.mockImplementation(() => ({
+      drafts: [documentDraft],
+      isPicking: false,
+      remainingSlots: 3,
+      attachDocuments: mockAttachDocuments,
+      removeDraft: mockRemoveDocumentAttachmentDraft,
+      clearDrafts: mockClearDocumentDrafts,
+      clearFailedDrafts: mockClearFailedDocumentDrafts,
+      consumeDraftsForSend: mockConsumeDocumentDrafts,
+      restoreDraftsForRetry: mockRestoreDocumentDrafts,
+      discardDrafts: mockDiscardDocumentDrafts,
+    }));
+    mockConsumeDocumentDrafts.mockReturnValueOnce([documentDraft]);
+    mockAppendUserMessage.mockReturnValueOnce(deferredAppend.promise);
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    fireEvent.press(getByTestId('preset-button'));
+    expect(getByTestId('preset-selector')).toBeTruthy();
+
+    let appendPromise!: Promise<void>;
+    await act(async () => {
+      appendPromise = lastChatInputBarProps.onSendMessage('Use this document');
+      await Promise.resolve();
+      mockIsPreparingDocuments = true;
+      rerender(React.createElement(ChatScreen));
+    });
+
+    expect(lastPresetSelectorProps.canSelect).toBe(false);
+    act(() => {
+      lastPresetSelectorProps.onSelectPreset('preset-2');
+      lastPresetSelectorProps.onManagePresets();
+    });
+    expect(useChatStore.getState().getActiveThread()?.presetId).toBe('preset-1');
+    expect(mockRouterPush).not.toHaveBeenCalledWith('/presets');
+
+    await act(async () => {
+      mockIsPreparingDocuments = false;
+      deferredAppend.resolve();
+      await appendPromise;
+      rerender(React.createElement(ChatScreen));
+    });
   });
 
   it('passes the current thread preset to the selector instead of the global preset', () => {

@@ -1,0 +1,29 @@
+{
+  "name": "pocket-anydoc",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Pocket AI local Expo module for bounded on-device document parsing.",
+  "license": "MIT",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "react-native": "./index.ts",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "react-native": "./index.ts",
+      "default": "./index.ts"
+    }
+  },
+  "scripts": {
+    "anydoc:setup": "node ./scripts/setup.mjs",
+    "anydoc:build:android": "node ./scripts/build-android.mjs",
+    "anydoc:build:ios": "node ./scripts/build-ios.mjs",
+    "eas-build-pre-install": "node ./scripts/eas-build-pre-install.mjs",
+    "verify": "node ./scripts/verify-scaffold.mjs"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

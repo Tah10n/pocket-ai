@@ -1,0 +1,238 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.github.tah10n.pocketanydoc'
+version = '0.0.1'
+
+def moduleRootDir = projectDir.parentFile
+def generatedNativeRoot = file("${buildDir}/generated/pocketAnyDoc")
+def generatedJniLibs = file("${generatedNativeRoot}/jniLibs")
+def rustBuildScript = file("${moduleRootDir}/scripts/build-android.mjs")
+def supportedAbis = ['arm64-v8a', 'x86_64']
+def rustLibraryName = 'libpocket_anydoc.so'
+def packagedLibraryNames = [rustLibraryName, 'libpocket_anydoc_jni.so']
+
+android {
+  namespace 'com.github.tah10n.pocketanydoc'
+  ndkVersion '27.1.12297006'
+
+  defaultConfig {
+    minSdk 24
+    versionName '0.0.1'
+
+    ndk {
+      abiFilters 'arm64-v8a', 'x86_64'
+    }
+
+    externalNativeBuild {
+      cmake {
+        arguments "-DPOCKET_ANYDOC_JNI_LIBS_DIR=${generatedJniLibs.absolutePath.replace('\\', '/')}",
+          '-DANDROID_STL=c++_static'
+        cppFlags '-std=c++17', '-fexceptions', '-frtti'
+      }
+    }
+  }
+
+  sourceSets {
+    main {
+      manifest.srcFile 'src/main/AndroidManifest.xml'
+      jniLibs.srcDirs generatedJniLibs
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path 'src/main/cpp/CMakeLists.txt'
+      version '3.22.1'
+    }
+  }
+
+  buildTypes {
+    release {
+      ndk {
+        debugSymbolLevel 'NONE'
+      }
+    }
+  }
+
+  packaging {
+    jniLibs {
+      useLegacyPackaging false
+      excludes += [
+        '**/armeabi/**',
+        '**/armeabi-v7a/**',
+        '**/mips/**',
+        '**/mips64/**',
+        '**/x86/**'
+      ]
+    }
+  }
+}
+
+def buildPocketAnyDocRust = tasks.register('buildPocketAnyDocRust', Exec) {
+  group = 'pocket anydoc'
+  description = 'Builds pinned Rust artifacts for arm64-v8a and x86_64.'
+  workingDir moduleRootDir
+
+  inputs.files(fileTree(moduleRootDir) {
+    include 'rust/rust-toolchain.toml'
+    include 'include/**'
+    include 'rust/Cargo.toml'
+    include 'rust/Cargo.lock'
+    include 'rust/build.rs'
+    include 'rust/src/**'
+    include 'rust/vendor/**'
+    include 'rust/UPSTREAM.md'
+    include 'scripts/build-android.mjs'
+    include 'scripts/build-utils.mjs'
+    exclude '**/target/**'
+    exclude '**/build/**'
+    exclude '**/generated/**'
+  })
+  outputs.files(supportedAbis.collect { abi -> file("${generatedJniLibs}/${abi}/${rustLibraryName}") })
+  outputs.file(file("${generatedNativeRoot}/fingerprint.json"))
+  // Always enter the deterministic wrapper so toolchain/NDK version changes
+  // participate in its content fingerprint even when Gradle file inputs match.
+  outputs.upToDateWhen { false }
+
+  doFirst {
+    def nodeBinary = providers.environmentVariable('NODE_BINARY').getOrElse('node')
+    commandLine nodeBinary, rustBuildScript.absolutePath
+    environment 'ANDROID_NDK_HOME', android.ndkDirectory.absolutePath
+  }
+}
+
+def verifyPocketAnyDocNativeArtifacts = tasks.register('verifyPocketAnyDocNativeArtifacts') {
+  group = 'verification'
+  dependsOn buildPocketAnyDocRust
+  doLast {
+    def presentAbis = generatedJniLibs.listFiles()
+      ?.findAll { it.directory }
+      ?.collect { it.name }
+      ?.sort() ?: []
+    if (presentAbis != supportedAbis.sort()) {
+      throw new GradleException("PocketAnyDoc generated ABI set is invalid: ${presentAbis}")
+    }
+    supportedAbis.each { abi ->
+      def abiDirectory = file("${generatedJniLibs}/${abi}")
+      def files = abiDirectory.listFiles()?.findAll { it.file }?.collect { it.name }?.sort() ?: []
+      if (files != [rustLibraryName]) {
+        throw new GradleException("PocketAnyDoc ${abi} artifacts are invalid: ${files}")
+      }
+    }
+  }
+}
+
+def verifyPocketAnyDocReleaseArtifacts = tasks.register('verifyPocketAnyDocReleaseArtifacts') {
+  group = 'verification'
+  description = 'Requires stripped, 16 KiB-compatible Rust and JNI libraries for every supported release ABI.'
+  doLast {
+    def stripTask = tasks.findByName('stripReleaseDebugSymbols')
+    if (stripTask == null) {
+      throw new GradleException('Android release symbol stripping task was not created.')
+    }
+
+    def sharedLibraries = stripTask.outputs.files.asFileTree.matching {
+      include '**/*.so'
+    }.files
+    def pocketLibraries = sharedLibraries.findAll { file -> packagedLibraryNames.contains(file.name) }
+    def packagedAbis = pocketLibraries.collect { file -> file.parentFile.name }.unique().sort()
+    if (packagedAbis != supportedAbis.sort()) {
+      throw new GradleException("PocketAnyDoc packaged release ABI set is invalid: ${packagedAbis}")
+    }
+
+    def prebuiltRoot = file("${android.ndkDirectory}/toolchains/llvm/prebuilt")
+    def prebuiltHosts = prebuiltRoot.listFiles()?.findAll { it.directory } ?: []
+    if (prebuiltHosts.size() != 1) {
+      throw new GradleException("Expected one NDK host toolchain, found ${prebuiltHosts.size()}.")
+    }
+    def executableSuffix = System.getProperty('os.name').toLowerCase().contains('windows') ? '.exe' : ''
+    def readElf = new File(prebuiltHosts.first(), "bin/llvm-readelf${executableSuffix}")
+    if (!readElf.file) {
+      throw new GradleException('Pinned NDK llvm-readelf was not found.')
+    }
+
+    supportedAbis.each { abi ->
+      packagedLibraryNames.each { libraryName ->
+        def matches = pocketLibraries.findAll { file -> file.parentFile.name == abi && file.name == libraryName }
+        if (matches.size() != 1) {
+          throw new GradleException("Expected one stripped ${abi}/${libraryName}, found ${matches.size()}.")
+        }
+        def library = matches.first()
+        def programHeaders = new ByteArrayOutputStream()
+        exec {
+          commandLine readElf.absolutePath, '-lW', library.absolutePath
+          standardOutput = programHeaders
+        }
+        def loadAlignments = programHeaders.toString('UTF-8').readLines()
+          .findAll { line -> line.trim().startsWith('LOAD ') }
+          .collect { line -> Long.decode(line.trim().split(/\s+/).last()) }
+        if (loadAlignments.empty || loadAlignments.any { alignment -> alignment < 16384L }) {
+          throw new GradleException("${abi}/${libraryName} is not 16 KiB page aligned.")
+        }
+
+        def dynamic = new ByteArrayOutputStream()
+        exec {
+          commandLine readElf.absolutePath, '-dW', library.absolutePath
+          standardOutput = dynamic
+        }
+        def dynamicLines = dynamic.toString('UTF-8').readLines()
+        def neededLibraries = dynamicLines
+          .findAll { line -> line.contains('(NEEDED)') }
+          .collect { line -> (line =~ /\[([^\]]+)\]/)[0][1] }
+        if (neededLibraries.any { dependency ->
+          dependency.contains('/') || dependency.contains('\\') || dependency.contains(':')
+        }) {
+          throw new GradleException("${abi}/${libraryName} contains a path-qualified DT_NEEDED entry.")
+        }
+        if (libraryName == rustLibraryName) {
+          def sonames = dynamicLines
+            .findAll { line -> line.contains('(SONAME)') }
+            .collect { line -> (line =~ /\[([^\]]+)\]/)[0][1] }
+          if (sonames != [rustLibraryName]) {
+            throw new GradleException("${abi}/${libraryName} has an invalid SONAME.")
+          }
+        } else if (neededLibraries.count(rustLibraryName) != 1) {
+          throw new GradleException("${abi}/${libraryName} must depend on ${rustLibraryName} exactly once.")
+        }
+
+        def sections = new ByteArrayOutputStream()
+        exec {
+          commandLine readElf.absolutePath, '-SW', library.absolutePath
+          standardOutput = sections
+        }
+        def sectionText = sections.toString('UTF-8')
+        def hasDebugSections = sectionText =~ /\.(?:debug|zdebug)_/
+        def hasSymbolMetadata = sectionText =~ /(?:^|\s)\.(?:symtab|strtab|gnu_debugdata|gnu_debuglink)(?:\s|$)/
+        if (hasDebugSections || hasSymbolMetadata) {
+          throw new GradleException("${abi}/${libraryName} still contains release symbol or debug metadata.")
+        }
+      }
+    }
+  }
+}
+
+afterEvaluate {
+  def stripRelease = tasks.findByName('stripReleaseDebugSymbols')
+  if (stripRelease == null) {
+    throw new GradleException('PocketAnyDoc requires the Android release symbol stripping task.')
+  }
+  verifyPocketAnyDocReleaseArtifacts.configure {
+    dependsOn stripRelease
+  }
+  ['assembleRelease', 'bundleReleaseAar'].each { taskName ->
+    tasks.findByName(taskName)?.dependsOn verifyPocketAnyDocReleaseArtifacts
+  }
+}
+
+tasks.configureEach { task ->
+  if (task.name == 'preBuild' || task.name.startsWith('configureCMake') || task.name.startsWith('buildCMake')) {
+    task.dependsOn verifyPocketAnyDocNativeArtifacts
+  }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+}

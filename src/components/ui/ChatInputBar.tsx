@@ -62,6 +62,7 @@ interface ChatInputBarProps {
 }
 
 const CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY = 'chatInputDraftConsumed';
+const reportedChatInputErrors = new WeakSet<object>();
 
 type ChatInputDraftConsumedError = Error & {
     [CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY]?: true;
@@ -84,6 +85,21 @@ export function isChatInputDraftConsumedError(error: unknown): boolean {
         && typeof error === 'object'
         && (error as ChatInputDraftConsumedError)[CHAT_INPUT_DRAFT_CONSUMED_ERROR_KEY] === true,
     );
+}
+
+export function markChatInputErrorReported(error: unknown): unknown {
+    if (error && typeof error === 'object') {
+        reportedChatInputErrors.add(error);
+        return error;
+    }
+
+    const wrapped = new Error(typeof error === 'string' ? error : 'Message send failed after its error was reported.');
+    reportedChatInputErrors.add(wrapped);
+    return wrapped;
+}
+
+export function isChatInputErrorReported(error: unknown): boolean {
+    return Boolean(error && typeof error === 'object' && reportedChatInputErrors.has(error));
 }
 
 export function getPrimaryActionGlassStyle(primaryStrong: string, mode: ResolvedThemeMode) {
@@ -444,10 +460,12 @@ export const ChatInputBar = ({
 
             await handleSend();
         } catch (error: any) {
-            Alert.alert(
-                t('chat.sendErrorTitle'),
-                getReportedErrorMessage('ChatInputBar.handlePrimaryAction', error, t),
-            );
+            if (!isChatInputErrorReported(error)) {
+                Alert.alert(
+                    t('chat.sendErrorTitle'),
+                    getReportedErrorMessage('ChatInputBar.handlePrimaryAction', error, t),
+                );
+            }
         }
     };
 

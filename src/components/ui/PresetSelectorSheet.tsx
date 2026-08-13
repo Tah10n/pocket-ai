@@ -8,6 +8,7 @@ import { presetManager, SystemPromptPreset } from '../../services/PresetManager'
 
 interface PresetSelectorSheetProps {
   visible: boolean;
+  canSelect?: boolean;
   activePresetId: string | null;
   androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   onClose: () => void;
@@ -17,6 +18,7 @@ interface PresetSelectorSheetProps {
 
 export function PresetSelectorSheet({
   visible,
+  canSelect = true,
   activePresetId,
   androidContentBlurTargetRef,
   onClose,
@@ -38,6 +40,7 @@ export function PresetSelectorSheet({
       title: t('common.default'),
       description: t('chat.presetSelector.defaultDescription'),
       selected: activePresetId == null,
+      disabled: !canSelect,
       testID: 'preset-option-default',
       onPress: () => {
         onClose();
@@ -49,6 +52,7 @@ export function PresetSelectorSheet({
       title: preset.name,
       description: preset.systemPrompt,
       selected: preset.id === activePresetId,
+      disabled: !canSelect,
       testID: `preset-option-${preset.id}`,
       onPress: () => {
         onClose();
@@ -69,6 +73,7 @@ export function PresetSelectorSheet({
         <Button
           action="secondary"
           size="sm"
+          disabled={!canSelect}
           onPress={() => {
             onClose();
             onManagePresets();

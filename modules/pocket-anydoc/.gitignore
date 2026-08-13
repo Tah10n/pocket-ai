@@ -1,0 +1,10 @@
+# Rust build products
+/rust/target/
+
+# Generated Apple static libraries and XCFramework
+/ios/generated/
+
+# Gradle, CMake, and generated Android JNI outputs
+/android/.gradle/
+/android/.cxx/
+/android/build/

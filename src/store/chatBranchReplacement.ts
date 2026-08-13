@@ -257,6 +257,11 @@ export interface ChatBranchReplacementPlan {
   clearSummary: true;
 }
 
+export interface ChatBranchReplacementInferenceContent {
+  attachments: ChatMessage['attachments'];
+  contentParts: ChatMessage['contentParts'];
+}
+
 export interface ChatBranchReplacementProgress {
   targetUserMessageId: string;
   targetUserCreatedAt: number;
@@ -272,6 +277,7 @@ function createReplacementUserMessage(
   target: ChatMessage,
   content: string,
   activeModelId: string,
+  inferenceContent?: ChatBranchReplacementInferenceContent,
 ): ChatMessage {
   return {
     id: target.id,
@@ -281,8 +287,8 @@ function createReplacementUserMessage(
     createdAt: target.createdAt,
     state: 'complete',
     modelId: activeModelId,
-    attachments: target.attachments,
-    contentParts: target.contentParts,
+    attachments: inferenceContent ? inferenceContent.attachments : target.attachments,
+    contentParts: inferenceContent ? inferenceContent.contentParts : target.contentParts,
   };
 }
 
@@ -326,12 +332,14 @@ export function buildChatBranchReplacementPlan({
   targetUserMessageId,
   nextUserContent,
   paramsSnapshot = thread.paramsSnapshot,
+  inferenceContent,
   createMessageId,
 }: {
   thread: ChatThread;
   targetUserMessageId: string;
   nextUserContent: string;
   paramsSnapshot?: GenerationParamsSnapshot;
+  inferenceContent?: ChatBranchReplacementInferenceContent;
   createMessageId: () => string;
 }): ChatBranchReplacementPlan | null {
   const targetIndex = thread.messages.findIndex((message) => message.id === targetUserMessageId);
@@ -341,15 +349,20 @@ export function buildChatBranchReplacementPlan({
   }
 
   const content = nextUserContent.trim();
-  if (
-    content.length > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH
-    || (!content && (target.attachments?.length ?? 0) === 0)
-  ) {
+  if (content.length > MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH) {
     return null;
   }
 
   const activeModelId = getThreadActiveModelId(thread);
-  const replacementUserMessage = createReplacementUserMessage(target, content, activeModelId);
+  const replacementUserMessage = createReplacementUserMessage(
+    target,
+    content,
+    activeModelId,
+    inferenceContent,
+  );
+  if (!content && (replacementUserMessage.attachments?.length ?? 0) === 0) {
+    return null;
+  }
   if (!isChatBranchReplacementUserMessageWithinProgressBounds(replacementUserMessage)) {
     return null;
   }

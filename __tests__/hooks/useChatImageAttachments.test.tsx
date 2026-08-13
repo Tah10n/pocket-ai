@@ -1062,7 +1062,7 @@ describe('useChatImageAttachments', () => {
       return null;
     };
 
-    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+    const { rerender } = render(<Harness ownerKey="new-thread:1|model-vision" />);
 
     expect(latestHook?.drafts).toEqual([failedDraft]);
 
@@ -1108,7 +1108,7 @@ describe('useChatImageAttachments', () => {
     };
     let consumedDrafts: typeof copiedDraft[] = [];
 
-    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+    const { rerender } = render(<Harness ownerKey="new-thread:1|model-vision" />);
 
     await act(async () => {
       consumedDrafts = latestHook?.consumeDraftsForSend() as typeof copiedDraft[];
@@ -1129,7 +1129,7 @@ describe('useChatImageAttachments', () => {
     expect(chatAttachmentStorageService.discardDraft).not.toHaveBeenCalled();
   });
 
-  it('does not preserve restored retry drafts when switching to an unrelated same-model thread', async () => {
+  it('does not preserve restored retry drafts when an uncommitted new chat is explicitly restarted', async () => {
     const copiedDraft = {
       id: 'draft-copied-unrelated-thread-retry',
       pickerUri: 'ph://library-image-copied',
@@ -1163,7 +1163,7 @@ describe('useChatImageAttachments', () => {
     };
     let consumedDrafts: typeof copiedDraft[] = [];
 
-    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+    const { rerender } = render(<Harness ownerKey="new-thread:1|model-vision" />);
 
     await act(async () => {
       consumedDrafts = latestHook?.consumeDraftsForSend() as typeof copiedDraft[];
@@ -1171,7 +1171,7 @@ describe('useChatImageAttachments', () => {
       await Promise.resolve();
     });
 
-    rerender(<Harness ownerKey="existing-thread|model-vision" />);
+    rerender(<Harness ownerKey="new-thread:2|model-vision" />);
 
     await waitFor(() => {
       expect(latestHook?.drafts).toHaveLength(0);
@@ -1200,7 +1200,7 @@ describe('useChatImageAttachments', () => {
       return null;
     };
 
-    const { rerender } = render(<Harness ownerKey="new-thread|model-vision" />);
+    const { rerender } = render(<Harness ownerKey="new-thread:1|model-vision" />);
 
     expect(latestHook?.drafts).toEqual([failedDraft]);
 

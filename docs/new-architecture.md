@@ -1,6 +1,6 @@
 # React Native New Architecture
 
-Last updated: 2026-04-23
+Last updated: 2026-08-07
 
 ## Overview
 
@@ -20,6 +20,7 @@ The most sensitive areas are:
 
 - local storage setup through MMKV
 - JSI-heavy inference through `llama.rn`
+- serialized local document parsing through the `PocketAnydoc` Expo module
 - React Navigation and screen layout behavior under Fabric
 
 ## Current native-project layout
@@ -72,6 +73,19 @@ When debugging iOS-specific native issues after generating the project, verify:
 - This is the core local-inference integration.
 - It relies heavily on native threads and JSI bindings.
 - If model loading, context creation, or generation starts failing after a React Native upgrade, verify `llama.rn` compatibility before assuming the app logic is at fault.
+
+### `PocketAnydoc`
+
+- Tracked source lives under `modules/pocket-anydoc/`; generated `android/` and `ios/`
+  projects remain disposable CNG output.
+- Expo Autolinking registers the Kotlin and Swift module. Do not inject it manually into
+  `MainApplication`, the Xcode project, or a Podfile.
+- TypeScript calls a bounded Expo Modules API. Kotlin and Swift serialize heavy work and
+  bridge to one panic-contained Rust C ABI; source document bytes and unbounded Markdown
+  never cross the JS bridge.
+- Android packages Rust and JNI libraries for `arm64-v8a` and `x86_64`. iOS links a static
+  XCFramework built before CocoaPods. After any module, Rust, header, NDK, or Xcode change,
+  rerun the platform-specific `anydoc:build:*` command or a clean prebuild.
 
 ### `react-native-reanimated` and `react-native-screens`
 

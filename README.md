@@ -72,6 +72,10 @@
 
 - Persistent on-device chat history, encrypted at rest
 - Capability-gated chat attachments for images, audio, and local documents
+- Fully local document questions and summaries for plain text, Markdown, JSON, TSV/CSV,
+  Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, and text-based PDF files
+- Follow-up document questions can reuse bounded parsed context while it remains in the
+  current app session, without uploading or reparsing the source file
 - In-chat model switching keeps one conversation thread while recording when the active model changes
 - Per-message model metadata keeps edits, regeneration, and history restoration aligned with the model that produced each turn
 - System prompt presets for different assistant behaviors
@@ -104,6 +108,7 @@
 | State | [Zustand](https://zustand.docs.pmnd.rs/) |
 | Storage | [MMKV](https://github.com/mrousavy/react-native-mmkv) |
 | Inference | [llama.rn](https://github.com/mybigday/llama.rn) |
+| Document processing | Pinned Rust [AnyDoc](https://github.com/firecrawl/anydoc) core through a local Expo module |
 
 ## Getting started
 
@@ -153,15 +158,22 @@ npm run android:scenarios:storage -- --skip-build
 
 This check clears rebuildable app cache data and is intentionally not part of the default or `all` scenario packs.
 
-For current-source Android validation, run the fail-closed runtime and attachment packs. The
+For current-source Android validation, run the fail-closed packs relevant to the change.
+Document changes additionally require the preconditioned all-format release pack. The
 branch-regeneration pack builds and installs a provenance-verified release APK and then runs
 an ordered, destructive recovery matrix:
 
 ```bash
 npm run android:scenarios:runtime -- --fail-on-skip
 npm run android:scenarios:attachments -- --fail-on-skip
+npm run android:scenarios:documents
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
 ```
+
+The document pack uses checked-in synthetic fixtures, requires a loaded local model, and
+verifies exact source/build/install provenance. See
+[Document QA and Benchmarks](docs/document-qa-benchmarks.md) for its safe isolated-install
+option, complete format matrix, session-reuse proof, and evidence policy.
 
 The branch pack requires a prepared disposable conversation fixture and clears chat history
 at the end. It is intentionally local-only and is not dispatched by GitHub Actions. Use
@@ -192,6 +204,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Changelog](CHANGELOG.md) | Release history |
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
+| [Document Processing](docs/document-processing.md) | Offline formats, session-only retrieval, native architecture, limits, and maintenance |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
 | [Android Build Guide](docs/android-build.md) | Deterministic Android release builds, signing, provenance, and current-head QA |

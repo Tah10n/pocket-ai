@@ -2,10 +2,13 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 const { spawnSync } = require("child_process");
 const { getEnvFiles, parseEnvFiles } = require("@expo/env");
 
-const BUILD_PROVENANCE_SCHEMA_VERSION = 2;
+const BUILD_PROVENANCE_SCHEMA_VERSION = 3;
+const POCKET_ANYDOC_UPSTREAM_COMMIT =
+  "4a45addbd607e8b59f0c263bca26aab228e10370";
 const BASE_BUILD_INPUTS = [
   "app.json",
   "app.config.js",
@@ -15,6 +18,7 @@ const BASE_BUILD_INPUTS = [
   "npm-shrinkwrap.json",
   "patches",
   "plugins",
+  "modules",
   "android",
 ];
 const PREBUILD_INPUTS = [
@@ -27,6 +31,7 @@ const PREBUILD_INPUTS = [
   "npm-shrinkwrap.json",
   "patches",
   "plugins",
+  "modules",
 ];
 const EMBEDDED_BUNDLE_INPUTS = [
   "app",
@@ -56,13 +61,21 @@ const ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI = Object.freeze({
     "libreactnative.so",
     "librnllama.so",
     "librnllama_jni.so",
+    "libpocket_anydoc.so",
+    "libpocket_anydoc_jni.so",
   ]),
   x86_64: Object.freeze([
     "libreactnative.so",
     "librnllama.so",
     "librnllama_jni.so",
+    "libpocket_anydoc.so",
+    "libpocket_anydoc_jni.so",
   ]),
 });
+const POCKET_ANYDOC_ANDROID_LIBRARIES = Object.freeze([
+  "libpocket_anydoc.so",
+  "libpocket_anydoc_jni.so",
+]);
 const ANDROID_PROVENANCE_GRADLE_EXECUTION_ARGS = Object.freeze([
   "--rerun-tasks",
   "--no-build-cache",
@@ -265,6 +278,11 @@ function createAndroidShippingBuildEnvironment(projectRoot, env = {}, options = 
   if (effectiveExpoEnvironment.EXPO_PUBLIC_ANDROID_QA === "1") {
     throw new Error(
       "Android shipping builds reject EXPO_PUBLIC_ANDROID_QA=1 because QA generation controls must never be embedded in a distributable artifact."
+    );
+  }
+  if (effectiveExpoEnvironment.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS === "1") {
+    throw new Error(
+      "Android shipping builds reject EXPO_PUBLIC_ANDROID_QA_DOCUMENTS=1 because the hosted document-model bootstrap must never be embedded in a distributable artifact."
     );
   }
   return effectiveExpoEnvironment;
@@ -1138,10 +1156,15 @@ function assertAndroidBuildOverrideContract(projectRoot, options = {}) {
 function readAndroidAppVersionDefaults(projectRoot) {
   const appConfigPath = path.join(projectRoot, "app.json");
   if (!fs.existsSync(appConfigPath)) {
-    return { versionCode: 1, versionName: "1.0.0" };
+    return {
+      applicationId: "com.github.tah10n.pocketai",
+      versionCode: 1,
+      versionName: "1.0.0",
+    };
   }
   const expo = JSON.parse(fs.readFileSync(appConfigPath, "utf8")).expo || {};
   return {
+    applicationId: expo.android?.package ?? "com.github.tah10n.pocketai",
     versionCode: expo.android?.versionCode ?? 1,
     versionName: expo.version ?? "1.0.0",
   };
@@ -1180,7 +1203,7 @@ function resolveEffectiveBuildValue({
   if (env[gradleEnvironmentKey] != null && `${env[gradleEnvironmentKey]}`.trim()) {
     return { source: "gradle-environment", value: `${env[gradleEnvironmentKey]}`.trim() };
   }
-  if (env[envKey] != null && `${env[envKey]}`.trim()) {
+  if (envKey && env[envKey] != null && `${env[envKey]}`.trim()) {
     return { source: "environment", value: `${env[envKey]}`.trim() };
   }
   if (properties[propertiesKey] != null && `${properties[propertiesKey]}`.trim()) {
@@ -1261,6 +1284,17 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
     propertySources,
     defaultValue: defaults.versionName,
   });
+  const applicationId = resolveEffectiveBuildValue({
+    gradleProperties,
+    systemGradleProperties,
+    gradleKey: "pocketAiApplicationId",
+    env,
+    envKey: null,
+    properties: {},
+    propertiesKey: "unused",
+    propertySources,
+    defaultValue: defaults.applicationId,
+  });
   const signingValues = {
     storeFile: resolveEffectiveBuildValue({
       gradleProperties,
@@ -1331,6 +1365,11 @@ function collectAndroidEffectiveBuildContext(projectRoot, options = {}) {
 
   return {
     schemaVersion: 1,
+    applicationId: {
+      value: applicationId.value,
+      source: applicationId.source,
+      isolatedQa: applicationId.value === `${defaults.applicationId}.qa`,
+    },
     pluginVersions: {
       agp: env.POCKET_AI_ANDROID_AGP_VERSION || DEFAULT_ANDROID_BUILD_PLUGIN_VERSIONS.agp,
       kotlin: env.POCKET_AI_ANDROID_KOTLIN_VERSION || DEFAULT_ANDROID_BUILD_PLUGIN_VERSIONS.kotlin,
@@ -1488,6 +1527,21 @@ function isExcludedAndroidBuildInput(relativePath) {
   }
 
   const segments = normalized.split("/");
+  if (segments[0] === "modules" && segments[1] === "pocket-anydoc") {
+    const moduleRelative = segments.slice(2).join("/");
+    return moduleRelative === "node_modules"
+      || moduleRelative.startsWith("node_modules/")
+      || moduleRelative === "rust/target"
+      || moduleRelative.startsWith("rust/target/")
+      || moduleRelative === "android/build"
+      || moduleRelative.startsWith("android/build/")
+      || moduleRelative === "android/.cxx"
+      || moduleRelative.startsWith("android/.cxx/")
+      || moduleRelative === "android/src/main/jniLibs"
+      || moduleRelative.startsWith("android/src/main/jniLibs/")
+      || moduleRelative === "ios/generated"
+      || moduleRelative.startsWith("ios/generated/");
+  }
   if (segments[0] !== "android") {
     return false;
   }
@@ -1702,17 +1756,161 @@ function readJavaVersion(options = {}) {
   return versionLine;
 }
 
+function readToolVersion(command, args, label, options = {}) {
+  const run = options.spawnSync || spawnSync;
+  const result = run(command, args, {
+    encoding: "utf8",
+    env: options.env || process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) {
+    throw new Error(
+      `Could not resolve ${label} for Android provenance: ${result.error.code || "spawn failure"}`
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `Could not resolve ${label} for Android provenance: command exited with status ${result.status ?? "unknown"}`
+    );
+  }
+  const version = `${result.stdout || ""}\n${result.stderr || ""}`
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!version) {
+    throw new Error(`Could not resolve ${label} for Android provenance: empty output`);
+  }
+  return version;
+}
+
+function collectPocketAnyDocProvenance(projectRoot) {
+  const rustRoot = path.join(projectRoot, "modules", "pocket-anydoc", "rust");
+  if (!fs.existsSync(rustRoot)) {
+    return null;
+  }
+  const upstreamManifestPath = path.join(rustRoot, "UPSTREAM.json");
+  const cargoLockPath = path.join(rustRoot, "Cargo.lock");
+  const toolchainPath = path.join(rustRoot, "rust-toolchain.toml");
+  for (const requiredPath of [upstreamManifestPath, cargoLockPath, toolchainPath]) {
+    if (!fs.existsSync(requiredPath) || !fs.statSync(requiredPath).isFile()) {
+      throw new Error(
+        `Pocket AnyDoc provenance is incomplete: missing ${normalizePath(path.relative(projectRoot, requiredPath))}.`
+      );
+    }
+  }
+
+  let upstream;
+  try {
+    upstream = JSON.parse(fs.readFileSync(upstreamManifestPath, "utf8"));
+  } catch {
+    throw new Error("Pocket AnyDoc UPSTREAM.json must be valid JSON.");
+  }
+  if (upstream.exactCommit !== POCKET_ANYDOC_UPSTREAM_COMMIT) {
+    throw new Error(
+      `Pocket AnyDoc must pin reviewed upstream commit ${POCKET_ANYDOC_UPSTREAM_COMMIT}.`
+    );
+  }
+  if (typeof upstream.patchRevision !== "string" || !upstream.patchRevision.trim()) {
+    throw new Error("Pocket AnyDoc UPSTREAM.json must declare a non-empty patchRevision.");
+  }
+
+  return {
+    repository: upstream.repository,
+    version: upstream.version,
+    exactCommit: upstream.exactCommit,
+    patchRevision: upstream.patchRevision,
+    upstreamManifestSha256: sha256File(upstreamManifestPath),
+    cargoLockSha256: sha256File(cargoLockPath),
+    rustToolchainSha256: sha256File(toolchainPath),
+    androidTargets: ["aarch64-linux-android", "x86_64-linux-android"],
+  };
+}
+
+function readPinnedRustToolchainChannel(projectRoot) {
+  const toolchainPath = path.join(
+    projectRoot,
+    "modules",
+    "pocket-anydoc",
+    "rust",
+    "rust-toolchain.toml"
+  );
+  let contents;
+  try {
+    contents = fs.readFileSync(toolchainPath, "utf8");
+  } catch {
+    throw new Error("Could not resolve the pinned Pocket AnyDoc Rust toolchain for Android provenance.");
+  }
+  let inToolchainSection = false;
+  let channel = null;
+  for (const rawLine of contents.split(/\r?\n/u)) {
+    const line = rawLine.replace(/\s+#.*$/u, "").trim();
+    if (!line) {
+      continue;
+    }
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/u);
+    if (sectionMatch) {
+      inToolchainSection = sectionMatch[1].trim() === "toolchain";
+      continue;
+    }
+    if (!inToolchainSection) {
+      continue;
+    }
+    const channelMatch = line.match(/^channel\s*=\s*"([^"]+)"$/u);
+    if (channelMatch) {
+      if (channel !== null) {
+        throw new Error("Pocket AnyDoc Rust toolchain declares more than one channel.");
+      }
+      channel = channelMatch[1].trim();
+    }
+  }
+  if (!channel || !/^\d+\.\d+\.\d+$/u.test(channel)) {
+    throw new Error("Pocket AnyDoc Rust toolchain must pin an exact stable channel.");
+  }
+  return channel;
+}
+
+function assertPinnedRustToolVersion(version, tool, channel) {
+  const escapedTool = tool.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const match = String(version).match(new RegExp(`^${escapedTool}\\s+(\\d+\\.\\d+\\.\\d+)(?:\\s|$)`, "u"));
+  if (!match || match[1] !== channel) {
+    throw new Error(`Android provenance ${tool} version does not match the pinned Rust toolchain.`);
+  }
+}
+
+function assertCargoNdkVersion(version) {
+  const match = String(version).match(/^cargo-ndk\s+(\d+\.\d+\.\d+)(?:\s|$)/u);
+  if (!match || match[1] !== "4.1.2") {
+    throw new Error("Android provenance requires cargo-ndk 4.1.2.");
+  }
+}
+
 function collectToolchainVersions(projectRoot, options = {}) {
   const androidRoot = options.androidRoot || path.join(projectRoot, "android");
+  const rustChannel = readPinnedRustToolchainChannel(projectRoot);
+  const rustc = options.rustcVersion
+    || readToolVersion("rustc", [`+${rustChannel}`, "--version"], "rustc version", options);
+  const cargo = options.cargoVersion
+    || readToolVersion("cargo", [`+${rustChannel}`, "--version"], "Cargo version", options);
+  const cargoNdk = options.cargoNdkVersion
+    || readToolVersion("cargo", ["ndk", "--version"], "cargo-ndk version", options);
+  assertPinnedRustToolVersion(rustc, "rustc", rustChannel);
+  assertPinnedRustToolVersion(cargo, "cargo", rustChannel);
+  assertCargoNdkVersion(cargoNdk);
   return {
     node: options.nodeVersion || process.version,
     java: options.javaVersion || readJavaVersion(options),
     gradleWrapper: options.gradleWrapper || readGradleWrapperVersion(androidRoot),
+    rustChannel,
+    rustc,
+    cargo,
+    cargoNdk,
   };
 }
 
 function collectPrebuildInputState(projectRoot, options = {}) {
-  const entries = collectContentHashEntries(projectRoot, PREBUILD_INPUTS);
+  const entries = collectContentHashEntries(projectRoot, PREBUILD_INPUTS, {
+    exclude: isExcludedAndroidBuildInput,
+  });
   const context = {
     variant: options.variant || "debug",
     nodeEnv: options.nodeEnv || process.env.NODE_ENV || null,
@@ -1765,6 +1963,7 @@ function collectBuildProvenance(projectRoot, options = {}) {
     embeddedBundle: includeBundleInputs,
     buildContext,
     toolchains: options.toolchains || collectToolchainVersions(projectRoot, options),
+    pocketAnyDoc: collectPocketAnyDocProvenance(projectRoot),
     git: options.git || collectGitProvenance(projectRoot, options),
     entries,
   };
@@ -1786,7 +1985,7 @@ function createFileContentFingerprint(filePath, projectRoot = path.dirname(fileP
   };
 }
 
-function listZipEntries(zipFilePath) {
+function readZipArchive(zipFilePath) {
   const zipBuffer = fs.readFileSync(zipFilePath);
   const eocdSignature = 0x06054b50;
   const centralDirectoryHeaderSignature = 0x02014b50;
@@ -1838,13 +2037,97 @@ function listZipEntries(zipFilePath) {
     if (fileNameEnd > directoryEnd || nextOffset > directoryEnd) {
       throw new Error(`Android artifact ${path.basename(zipFilePath)} has an invalid ZIP entry length.`);
     }
-    entries.push(zipBuffer.toString("utf8", fileNameOffset, fileNameEnd));
+    const compressedSize = zipBuffer.readUInt32LE(offset + 20);
+    const uncompressedSize = zipBuffer.readUInt32LE(offset + 24);
+    const localHeaderOffset = zipBuffer.readUInt32LE(offset + 42);
+    if (
+      compressedSize === 0xffffffff
+      || uncompressedSize === 0xffffffff
+      || localHeaderOffset === 0xffffffff
+    ) {
+      throw new Error(`Android artifact ${path.basename(zipFilePath)} uses unsupported ZIP64 entries.`);
+    }
+    const nameBytes = Buffer.from(zipBuffer.subarray(fileNameOffset, fileNameEnd));
+    entries.push({
+      name: nameBytes.toString("utf8"),
+      nameBytes,
+      flags: zipBuffer.readUInt16LE(offset + 8),
+      compressionMethod: zipBuffer.readUInt16LE(offset + 10),
+      compressedSize,
+      uncompressedSize,
+      localHeaderOffset,
+    });
     offset = nextOffset;
   }
   if (offset !== directoryEnd || entries.length !== expectedEntryCount) {
     throw new Error(`Android artifact ${path.basename(zipFilePath)} has inconsistent ZIP metadata.`);
   }
-  return entries;
+  return { entries, zipBuffer };
+}
+
+function listZipEntries(zipFilePath) {
+  return readZipArchive(zipFilePath).entries.map((entry) => entry.name);
+}
+
+function readZipEntryBuffer(zipBuffer, entry, artifactPath) {
+  const localFileHeaderSignature = 0x04034b50;
+  const allowedNativeEntryFlags = 0x080e;
+  const offset = entry.localHeaderOffset;
+  if (
+    offset < 0
+    || offset + 30 > zipBuffer.length
+    || zipBuffer.readUInt32LE(offset) !== localFileHeaderSignature
+  ) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} has an invalid ZIP local header.`);
+  }
+  if ((entry.flags & ~allowedNativeEntryFlags) !== 0) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} contains unsafe native ZIP flags.`);
+  }
+  const localFlags = zipBuffer.readUInt16LE(offset + 6);
+  const localCompressionMethod = zipBuffer.readUInt16LE(offset + 8);
+  if (localFlags !== entry.flags || localCompressionMethod !== entry.compressionMethod) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} has inconsistent native ZIP headers.`);
+  }
+  if (entry.compressionMethod !== 8 && (entry.flags & 0x0006) !== 0) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} contains invalid native ZIP compression flags.`);
+  }
+  const fileNameLength = zipBuffer.readUInt16LE(offset + 26);
+  const extraFieldLength = zipBuffer.readUInt16LE(offset + 28);
+  const fileNameOffset = offset + 30;
+  const fileNameEnd = fileNameOffset + fileNameLength;
+  if (fileNameEnd < fileNameOffset || fileNameEnd > zipBuffer.length) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} has invalid native entry bounds.`);
+  }
+  const localNameBytes = zipBuffer.subarray(fileNameOffset, fileNameEnd);
+  if (!Buffer.isBuffer(entry.nameBytes) || !localNameBytes.equals(entry.nameBytes)) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} has mismatched native ZIP entry names.`);
+  }
+  const dataOffset = offset + 30 + fileNameLength + extraFieldLength;
+  const dataEnd = dataOffset + entry.compressedSize;
+  if (dataOffset < offset || dataEnd < dataOffset || dataEnd > zipBuffer.length) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} has invalid native entry bounds.`);
+  }
+  const compressed = zipBuffer.subarray(dataOffset, dataEnd);
+  let contents;
+  if (entry.compressionMethod === 0) {
+    contents = compressed;
+  } else if (entry.compressionMethod === 8) {
+    try {
+      contents = zlib.inflateRawSync(compressed, {
+        maxOutputLength: entry.uncompressedSize,
+      });
+    } catch {
+      throw new Error(`Android artifact ${path.basename(artifactPath)} has an invalid deflated native entry.`);
+    }
+  } else {
+    throw new Error(
+      `Android artifact ${path.basename(artifactPath)} uses unsupported native entry compression ${entry.compressionMethod}.`
+    );
+  }
+  if (contents.length !== entry.uncompressedSize) {
+    throw new Error(`Android artifact ${path.basename(artifactPath)} has an inconsistent native entry size.`);
+  }
+  return contents;
 }
 
 function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
@@ -1853,9 +2136,24 @@ function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
     throw new Error(`Unsupported Android native artifact type: ${artifactType}.`);
   }
   const libraryPrefix = normalizedArtifactType === "aab" ? "base/lib/" : "lib/";
-  const normalizedEntries = new Set(
-    (zipEntries || []).map((entry) => normalizePath(entry))
-  );
+  const normalizedEntryList = (zipEntries || []).map((entry) => normalizePath(entry));
+  for (const entry of normalizedEntryList) {
+    const segments = entry.split("/");
+    if (
+      entry.includes("\0")
+      || entry.startsWith("/")
+      || /^[a-zA-Z]:\//u.test(entry)
+      || segments.some((segment) => segment === "." || segment === "..")
+    ) {
+      throw new Error(`Android ${normalizedArtifactType.toUpperCase()} contains an unsafe ZIP entry name.`);
+    }
+  }
+  const normalizedEntries = new Set(normalizedEntryList);
+  if (normalizedEntries.size !== normalizedEntryList.length) {
+    throw new Error(
+      `Android ${normalizedArtifactType.toUpperCase()} contains duplicate normalized ZIP entry names.`
+    );
+  }
   const packagedAbis = [...normalizedEntries]
     .filter((entry) => entry.startsWith(libraryPrefix))
     .map((entry) => entry.slice(libraryPrefix.length).split("/")[0])
@@ -1876,7 +2174,7 @@ function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
   ));
   if (missingEntries.length > 0) {
     throw new Error(
-      `Android ${normalizedArtifactType.toUpperCase()} is missing required React Native or llama.rn libraries: ${missingEntries.join(", ")}.`
+      `Android ${normalizedArtifactType.toUpperCase()} is missing required native libraries: ${missingEntries.join(", ")}.`
     );
   }
   return {
@@ -1886,7 +2184,35 @@ function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
 }
 
 function inspectAndroidArtifactNativeLibraries(artifactPath, artifactType) {
-  return inspectAndroidArtifactNativeEntries(listZipEntries(artifactPath), artifactType);
+  const archive = readZipArchive(artifactPath);
+  const inspection = inspectAndroidArtifactNativeEntries(
+    archive.entries.map((entry) => entry.name),
+    artifactType
+  );
+  const normalizedArtifactType = `${artifactType}`.trim().toLowerCase();
+  const libraryPrefix = normalizedArtifactType === "aab" ? "base/lib/" : "lib/";
+  const nativeLibraryFingerprints = ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
+    POCKET_ANYDOC_ANDROID_LIBRARIES.map((library) => {
+      const expectedName = `${libraryPrefix}${abi}/${library}`;
+      const entry = archive.entries.find(
+        (candidate) => normalizePath(candidate.name) === expectedName
+      );
+      if (!entry) {
+        throw new Error(`Android artifact is missing required native library ${expectedName}.`);
+      }
+      const contents = readZipEntryBuffer(archive.zipBuffer, entry, artifactPath);
+      return {
+        abi,
+        library,
+        size: contents.length,
+        sha256: sha256Buffer(contents),
+      };
+    })
+  ));
+  return {
+    ...inspection,
+    nativeLibraryFingerprints,
+  };
 }
 
 function sanitizeForFileName(value) {
@@ -2013,6 +2339,7 @@ module.exports = {
   BASE_BUILD_INPUTS,
   BUILD_PROVENANCE_SCHEMA_VERSION,
   EMBEDDED_BUNDLE_INPUTS,
+  POCKET_ANYDOC_UPSTREAM_COMMIT,
   PREBUILD_INPUTS,
   assertAndroidReleaseArtifactCreated,
   assertAndroidBuildOverrideContract,
@@ -2024,6 +2351,7 @@ module.exports = {
   collectAndroidPrivateBuildReuseDigest,
   collectContentHashEntries,
   collectGitProvenance,
+  collectPocketAnyDocProvenance,
   collectPrebuildInputState,
   collectToolchainVersions,
   cleanAndroidNativeBuildIntermediates,
@@ -2046,6 +2374,7 @@ module.exports = {
   prepareAndroidReleaseArtifactOutput,
   readGradleWrapperVersion,
   readJavaVersion,
+  readPinnedRustToolchainChannel,
   redactCommandArgsForLog,
   resolveAndroidReleaseTaskContract,
   resolveAndroidGradleWrapperInvocation,

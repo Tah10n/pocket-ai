@@ -1,0 +1,16 @@
+{
+  "platforms": [
+    "apple",
+    "android"
+  ],
+  "apple": {
+    "modules": [
+      "PocketAnyDocModule"
+    ]
+  },
+  "android": {
+    "modules": [
+      "com.github.tah10n.pocketanydoc.PocketAnyDocModule"
+    ]
+  }
+}

@@ -79,11 +79,11 @@ describe('ChatGenerationService', () => {
   it('invalidates pre-native work immediately and shares one concurrent stop', async () => {
     const stopDeferred = createDeferred<void>();
     const stopHandler = jest.fn(() => stopDeferred.promise);
+    const work = beginChatGenerationWork('test_pre_native');
     registerActiveChatGenerationStop({
       hasNativeCompletion: () => false,
       stop: stopHandler,
     });
-    const work = beginChatGenerationWork('test_pre_native');
     const blockedPreparation = work.waitFor(new Promise<void>(() => {}));
 
     const firstStop = stopAllGenerationWork();
@@ -102,6 +102,98 @@ describe('ChatGenerationService', () => {
     expect(llmEngineService.cancelActiveContextOperations).toHaveBeenCalledTimes(1);
     expect(llmEngineService.stopCompletion).toHaveBeenCalledTimes(1);
     expect(llmEngineService.interruptActiveCompletion).not.toHaveBeenCalled();
+  });
+
+  it('rejects a second mutation while pre-native chat work is active', () => {
+    const work = beginChatGenerationWork('document_prepare');
+    let error: unknown;
+
+    try {
+      beginChatGenerationWork('regenerate_history_branch');
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toEqual(expect.objectContaining({ code: 'engine_busy' }));
+    expect(hasActiveChatGenerationWork()).toBe(true);
+
+    work.finish();
+    expect(hasActiveChatGenerationWork()).toBe(false);
+  });
+
+  it('keeps cancelled pre-native work blocked until its owner fully settles', async () => {
+    jest.useFakeTimers();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const work = beginChatGenerationWork('document_prepare_release');
+      const stop = stopAllGenerationWork();
+
+      await jest.advanceTimersByTimeAsync(5_000);
+      await expect(stop).resolves.toBe('timed_out');
+      expect(hasActiveChatGenerationWork()).toBe(true);
+      expect(() => beginChatGenerationWork('new_chat')).toThrow(
+        'Wait for the current chat work to finish stopping before starting another action.',
+      );
+
+      work.finish();
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not let a stale native stop registration bypass a new prepare settlement', async () => {
+    jest.useFakeTimers();
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const oldWork = beginChatGenerationWork('old_native_generation');
+      const oldStop = jest.fn().mockResolvedValue(undefined);
+      registerActiveChatGenerationStop({
+        hasNativeCompletion: () => true,
+        stop: oldStop,
+      });
+
+      await expect(stopAllGenerationWork({ blockNewWork: false })).resolves.toBe('drained');
+      expect(oldStop).toHaveBeenCalledTimes(1);
+
+      const newPreparation = beginChatGenerationWork('new_document_prepare');
+      const newStop = stopAllGenerationWork({ blockNewWork: false });
+      await jest.advanceTimersByTimeAsync(5_000);
+
+      await expect(newStop).resolves.toBe('timed_out');
+      expect(oldStop).toHaveBeenCalledTimes(1);
+      expect(hasActiveChatGenerationWork()).toBe(true);
+      expect(() => beginChatGenerationWork('new_chat')).toThrow(
+        'Wait for the current chat work to finish stopping before starting another action.',
+      );
+
+      newPreparation.finish();
+      oldWork.finish();
+      expect(hasActiveChatGenerationWork()).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('runs owned cancellation listeners synchronously and removes unsubscribed listeners', async () => {
+    const work = beginChatGenerationWork('document_native_cancel');
+    const onCancel = jest.fn();
+    work.onCancel(onCancel);
+
+    const stop = stopAllGenerationWork({ blockNewWork: false });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    work.finish();
+    await expect(stop).resolves.toBe('drained');
+
+    const nextWork = beginChatGenerationWork('document_native_unsubscribed');
+    const unsubscribed = jest.fn();
+    const unsubscribe = nextWork.onCancel(unsubscribed);
+    unsubscribe();
+    const nextStop = stopAllGenerationWork({ blockNewWork: false });
+    expect(unsubscribed).not.toHaveBeenCalled();
+    nextWork.finish();
+    await expect(nextStop).resolves.toBe('drained');
   });
 
   it('drains the native completion path when the registered generation crossed the boundary', async () => {

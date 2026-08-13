@@ -1,4 +1,5 @@
 import {
+  activateAndroidQaDocumentPreparationGate,
   activateAndroidQaGenerationAfterFirstDurableOutput,
   armAndroidQaGenerationGate,
   beginAndroidQaGeneration,
@@ -12,6 +13,7 @@ import {
   shouldHoldAndroidQaGenerationBeforeFirstOutput,
   waitForAndroidQaGenerationGateRelease,
 } from '../../src/services/AndroidQaGenerationEvidence';
+import type { LlmChatMessage } from '../../src/types/chat';
 
 describe('AndroidQaGenerationEvidence', () => {
   beforeEach(() => {
@@ -127,6 +129,60 @@ describe('AndroidQaGenerationEvidence', () => {
     expect(serialized).not.toContain('audio.mp3');
     expect(serialized).not.toContain('latest secret prompt');
     expect(serialized).not.toContain('contentParts');
+  });
+
+  it('holds document preparation only after its explicit QA gate is armed', async () => {
+    expect(activateAndroidQaDocumentPreparationGate('document-1')).toBe(false);
+    expect(armAndroidQaGenerationGate('during-document-preparation')).toBe(true);
+    expect(activateAndroidQaDocumentPreparationGate('document-1')).toBe(true);
+    expect(getAndroidQaGenerationEvidenceSnapshot().activeGate).toEqual({
+      phase: 'during-document-preparation',
+      operationId: 'document-1',
+    });
+
+    let released = false;
+    const pendingRelease = waitForAndroidQaGenerationGateRelease('document-1').then(() => {
+      released = true;
+    });
+    await Promise.resolve();
+    expect(released).toBe(false);
+
+    releaseAndroidQaGenerationGate('document-1');
+    await pendingRelease;
+    expect(released).toBe(true);
+  });
+
+  it('records only fixed sentinel ids from prepared document text content parts', () => {
+    const documentAttachment = {
+      id: 'document-1',
+      kind: 'document',
+    } as NonNullable<LlmChatMessage['attachments']>[number];
+    const evidence = buildAndroidQaPreparedGenerationEvidence({
+      userMessageId: 'user-document',
+      assistantMessageId: 'assistant-document',
+      preparedMessages: [{
+        role: 'user',
+        content: 'neutral user question',
+        contentParts: [{
+          type: 'text',
+          text: 'private prefix ORCHID-742 private middle ZEBRA-END-991 private suffix',
+        }],
+        attachments: [documentAttachment],
+      }],
+    });
+
+    expect(evidence).toEqual({
+      userMessageId: 'user-document',
+      assistantMessageId: 'assistant-document',
+      attachments: [{ id: 'document-1', kind: 'document' }],
+      documentSentinelIds: ['orchid-742', 'zebra-end-991'],
+    });
+    const serialized = JSON.stringify(evidence);
+    expect(serialized).not.toContain('private prefix');
+    expect(serialized).not.toContain('private middle');
+    expect(serialized).not.toContain('private suffix');
+    expect(serialized).not.toContain('ORCHID-742');
+    expect(serialized).not.toContain('ZEBRA-END-991');
   });
 
   it('clears stale prepared evidence when the next generation begins', () => {

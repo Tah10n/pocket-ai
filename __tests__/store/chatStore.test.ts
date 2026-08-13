@@ -431,7 +431,7 @@ describe('chatStore', () => {
     __resetUnreferencedAttachmentCleanupForTests();
     (FileSystem.deleteAsync as jest.Mock).mockResolvedValue(undefined);
     flushPendingChatPersistenceWrites('background');
-    useChatStore.setState({ threads: {}, activeThreadId: null });
+    useChatStore.setState({ threads: {}, activeThreadId: null, newThreadRevision: 0 });
     storage.getAllKeys().forEach((key) => storage.remove(key));
   });
 
@@ -2191,6 +2191,58 @@ describe('chatStore', () => {
         modelId: 'author/model-q4',
       }),
     ]);
+  });
+
+  it('uses explicitly rebuilt attachments and content parts for a branch replacement', () => {
+    const threadId = useChatStore.getState().createThread({
+      modelId: 'author/model-q4',
+      presetId: null,
+      presetSnapshot: {
+        id: null,
+        name: 'Default',
+        systemPrompt: 'You are helpful.',
+      },
+      paramsSnapshot: {
+        temperature: 0.7,
+        topP: 0.9,
+        maxTokens: 1024,
+        seed: null,
+      },
+    });
+    useChatStore.getState().appendMessage(threadId, {
+      id: 'user-rebuilt-content',
+      role: 'user',
+      content: 'Old question',
+      createdAt: 1,
+      state: 'complete',
+      attachments: [{
+        ...copiedImageAttachment,
+        threadId,
+        messageId: 'user-rebuilt-content',
+      }],
+      contentParts: [{ type: 'text', text: 'Old derived context' }],
+    });
+
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      threadId,
+      'user-rebuilt-content',
+      'New question',
+      undefined,
+      {
+        attachments: undefined,
+        contentParts: [{ type: 'text', text: 'New derived context' }],
+      },
+    );
+
+    expect(assistantId).toBeTruthy();
+    expect(useChatStore.getState().getThread(threadId)?.messages[0]).toEqual(
+      expect.objectContaining({
+        id: 'user-rebuilt-content',
+        content: 'New question',
+        attachments: undefined,
+        contentParts: [{ type: 'text', text: 'New derived context' }],
+      }),
+    );
   });
 
   it('trims edited user branch content and rejects empty branch edits inside the store', () => {
@@ -4742,6 +4794,68 @@ describe('chatStore', () => {
       idempotent: true,
     });
     expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(retainedAttachment.localUri, expect.anything());
+  });
+
+  it('cleans newly prepared branch attachments when regeneration restores the durable branch', async () => {
+    const oldAttachment = buildStoredAttachment(
+      'thread-restored-prepared-cleanup',
+      'user-1',
+      'old-durable.jpg',
+    );
+    const preparedAttachment = buildStoredAttachment(
+      'thread-restored-prepared-cleanup',
+      'user-1',
+      'new-prepared.jpg',
+    );
+    const thread: ChatThread = {
+      ...buildThread('thread-restored-prepared-cleanup', 10),
+      messages: [{
+        id: 'user-1',
+        role: 'user',
+        content: 'Original prompt',
+        createdAt: 10,
+        state: 'complete',
+        attachments: [oldAttachment],
+      }, {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Durable answer',
+        createdAt: 11,
+        state: 'complete',
+      }],
+    };
+    seedPersistedChatThread(thread, 100);
+
+    const assistantId = useChatStore.getState().replaceBranchFromUserMessage(
+      thread.id,
+      'user-1',
+      'Edited prompt',
+      undefined,
+      {
+        attachments: [preparedAttachment],
+        contentParts: undefined,
+      },
+    );
+    expect(assistantId).toBeTruthy();
+    expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments)
+      .toEqual([preparedAttachment]);
+
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, assistantId!, {
+      outcome: 'error',
+      errorCode: 'generation_failed',
+      errorMessage: 'Failed before output',
+    })).toEqual({ status: 'restored_without_write' });
+    await flushAttachmentCleanup();
+
+    expect(useChatStore.getState().getThread(thread.id)?.messages[0]?.attachments)
+      .toEqual([oldAttachment]);
+    expect(FileSystem.deleteAsync).toHaveBeenCalledWith(preparedAttachment.localUri, {
+      idempotent: true,
+    });
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(
+      oldAttachment.localUri,
+      expect.anything(),
+    );
   });
 
   it('recomputes activeModelId from the surviving history when deleting an older branch after multiple switches', () => {

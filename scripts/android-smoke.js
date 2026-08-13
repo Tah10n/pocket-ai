@@ -139,7 +139,6 @@ function startAndroidSmokeMain(runMain = main) {
 }
 
 async function main() {
-  assertSmokeBuildOverrideContract();
   const requestedSerial = cliOptions.serial || process.env.ANDROID_SERIAL || null;
   const requestedAvd = cliOptions.avd || process.env.ANDROID_AVD || null;
   const forceEmulator =
@@ -153,12 +152,16 @@ async function main() {
 
   const tools = resolveAndroidTools();
   const appConfig = readExpoConfig();
-  const appPackage = appConfig.packageName;
+  const appPackage = resolveAndroidQaApplicationId(
+    appConfig.packageName,
+    cliOptions.isolatedQaInstall
+  );
   const appScheme = appConfig.scheme || "app";
 
   if (!appPackage) {
     throw new Error("Could not resolve expo.android.package from app.json.");
   }
+  assertSmokeBuildOverrideContract(null, { applicationId: appPackage });
 
   log("Starting adb server...");
   runChecked(tools.adb, ["start-server"], { stdio: "ignore" });
@@ -197,7 +200,10 @@ async function main() {
   const wantsSkipBuild = cliOptions.skipBuild || process.env.ANDROID_SKIP_BUILD === "1";
   let didBuildAndroidApk = false;
   const verifiedPrebuildInputState = ensureAndroidNativeProject();
-  const buildInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+  const buildInputState = collectNativeBuildInputState(
+    verifiedPrebuildInputState.digest,
+    appPackage
+  );
   const buildReuse = resolveBuildReuseState(tools.adb, device.serial, buildInputState);
   if (buildReuse.canReuse) {
     const abiLabel = buildReuse.reuseDecision.matchedAbi
@@ -212,9 +218,12 @@ async function main() {
       ? `Requested --skip-build, but the existing ${apkVariant} APK cannot be reused`
       : `Building a fresh Android ${apkVariant} APK`;
     log(`${prefix} (${buildReuse.reason}).`);
-    buildAndroidApk();
+    buildAndroidApk(appPackage);
     didBuildAndroidApk = true;
-    const postBuildInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+    const postBuildInputState = collectNativeBuildInputState(
+      verifiedPrebuildInputState.digest,
+      appPackage
+    );
     if (postBuildInputState.digest !== buildInputState.digest) {
       throw new Error(
         "Android build inputs changed while Gradle was running; refusing to stamp an ambiguous APK. Retry from a stable worktree."
@@ -236,7 +245,10 @@ async function main() {
     );
   }
 
-  const readyInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+  const readyInputState = collectNativeBuildInputState(
+    verifiedPrebuildInputState.digest,
+    appPackage
+  );
   if (readyInputState.digest !== buildInputState.digest) {
     throw new Error(
       "Android inputs changed after APK selection; refusing to install an artifact with ambiguous provenance."
@@ -273,7 +285,10 @@ async function main() {
       didBuildDebugApk: didBuildAndroidApk,
       buildInputState,
     });
-    const installedInputState = collectNativeBuildInputState(verifiedPrebuildInputState.digest);
+    const installedInputState = collectNativeBuildInputState(
+      verifiedPrebuildInputState.digest,
+      appPackage
+    );
     if (installedInputState.digest !== buildInputState.digest) {
       throw new Error(
         "Android inputs changed during install; refusing to publish stale QA provenance."
@@ -470,7 +485,7 @@ function readExpoConfig() {
   };
 }
 
-function collectNativeBuildInputState(verifiedPrebuildInputDigest = null) {
+function collectNativeBuildInputState(verifiedPrebuildInputDigest = null, applicationId = null) {
   const currentPrebuildInputState = collectPrebuildInputState(projectRoot, {
     variant: apkVariant,
     nodeEnv: androidBuildNodeEnv,
@@ -485,7 +500,9 @@ function collectNativeBuildInputState(verifiedPrebuildInputDigest = null) {
     );
   }
   const assembleTask = `app:assemble${apkVariant[0].toUpperCase()}${apkVariant.slice(1)}`;
-  const gradleArgs = buildGradleAssembleArgs(assembleTask, buildTargetAbi);
+  const gradleArgs = buildGradleAssembleArgs(assembleTask, buildTargetAbi, {
+    applicationId,
+  });
   assertSmokeBuildOverrideContract(gradleArgs);
   return collectBuildProvenance(projectRoot, {
     variant: apkVariant,
@@ -2009,7 +2026,7 @@ async function isPortFree(port) {
   });
 }
 
-function buildAndroidApk() {
+function buildAndroidApk(applicationId = null) {
   ensureAndroidNativeProject();
   ensureGradleWrapperExecutable();
   const removedNativeIntermediateCount = cleanAndroidNativeBuildIntermediates(projectRoot);
@@ -2021,8 +2038,10 @@ function buildAndroidApk() {
   log(`Building Android ${apkVariant} APK...`);
 
   const assembleTask = `app:assemble${apkVariant[0].toUpperCase()}${apkVariant.slice(1)}`;
-  const gradleArgs = buildGradleAssembleArgs(assembleTask, buildTargetAbi);
-  assertSmokeBuildOverrideContract(gradleArgs);
+  const gradleArgs = buildGradleAssembleArgs(assembleTask, buildTargetAbi, {
+    applicationId,
+  });
+  assertSmokeBuildOverrideContract(gradleArgs, { applicationId });
   runAndroidGradleBuild(gradleArgs);
 }
 
@@ -2995,6 +3014,7 @@ function parseCliOptions(argv) {
     clearMetroCache: false,
     autoTarget: false,
     transferMetroOwnership: null,
+    isolatedQaInstall: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -3022,6 +3042,11 @@ function parseCliOptions(argv) {
 
     if (arg === "--clear-metro-cache") {
       options.clearMetroCache = true;
+      continue;
+    }
+
+    if (arg === "--isolated-qa-install") {
+      options.isolatedQaInstall = true;
       continue;
     }
 
@@ -3112,6 +3137,7 @@ function printHelp() {
   console.log("  --skip-build               Reuse the existing APK");
   console.log("  --keep-metro-foreground    Keep an owned Metro attached until Ctrl+C");
   console.log("  --clear-metro-cache        Start a fresh Metro and reset its disk cache");
+  console.log("  --isolated-qa-install      Install the repository-owned side-by-side .qa package");
   console.log("  --transfer-metro-ownership <path> Internal: hand an owned Metro PID to a parent runner");
   console.log("  --apk-variant <variant>    Install debug or release APK (default: debug)");
   console.log("  --target-abi <abi>         Build and verify universal, arm64-v8a, or x86_64");
@@ -3147,7 +3173,15 @@ function parseTargetAbi(value) {
   return normalized;
 }
 
-function buildGradleAssembleArgs(assembleTask, targetAbi = "universal") {
+function resolveAndroidQaApplicationId(defaultApplicationId, isolatedQaInstall = false) {
+  const normalizedDefault = `${defaultApplicationId || ""}`.trim();
+  if (!normalizedDefault) {
+    return null;
+  }
+  return isolatedQaInstall ? `${normalizedDefault}.qa` : normalizedDefault;
+}
+
+function buildGradleAssembleArgs(assembleTask, targetAbi = "universal", options = {}) {
   const normalizedAssembleTask = `${assembleTask || ""}`.trim();
   if (!normalizedAssembleTask) {
     throw new Error("Android Gradle provenance requires an explicit assemble task.");
@@ -3156,6 +3190,19 @@ function buildGradleAssembleArgs(assembleTask, targetAbi = "universal") {
   const buildArgs = normalizedTargetAbi === "universal"
     ? [normalizedAssembleTask]
     : [normalizedAssembleTask, `-PreactNativeArchitectures=${normalizedTargetAbi}`];
+  const defaultApplicationId = readExpoConfig().packageName;
+  const requestedApplicationId = `${options.applicationId || defaultApplicationId || ""}`.trim();
+  const isolatedQaApplicationId = `${defaultApplicationId}.qa`;
+  if (
+    !requestedApplicationId
+    || !defaultApplicationId
+    || ![defaultApplicationId, isolatedQaApplicationId].includes(requestedApplicationId)
+  ) {
+    throw new Error("Android QA applicationId must be the repository package or its isolated .qa package.");
+  }
+  if (requestedApplicationId !== defaultApplicationId) {
+    buildArgs.push(`-PpocketAiApplicationId=${requestedApplicationId}`);
+  }
   return withAndroidProvenanceGradleExecutionArgs(buildArgs);
 }
 
@@ -3164,7 +3211,8 @@ function assertSmokeBuildOverrideContract(gradleArgs = null, options = {}) {
   const resolvedVariant = options.variant || apkVariant;
   const resolvedGradleArgs = gradleArgs || buildGradleAssembleArgs(
     `app:assemble${resolvedVariant[0].toUpperCase()}${resolvedVariant.slice(1)}`,
-    resolvedAbi
+    resolvedAbi,
+    { applicationId: options.applicationId }
   );
   assertAndroidBuildOverrideContract(options.projectRoot || projectRoot, {
     ...options,
@@ -3240,6 +3288,7 @@ module.exports = {
   readWindowsProcessTreeIdentities,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
+  resolveAndroidQaApplicationId,
   resolveDebugApkReuseDecision,
   runAdbInstall,
   runAndroidGradleBuild,

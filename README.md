@@ -220,11 +220,11 @@ Auto-generated from open GitHub issues labeled `roadmap:*`.
 <!-- ROADMAP:START -->
 ### Now
 
-- [\[Feature\]: Chat UI — document attachments (picker, preview, remove)](https://github.com/Tah10n/pocket-ai/issues/43) (#43)
+- _No items_
 
 ### Next
 
-- [\[Feature\]: Show capability icons on model cards (text / vision / reasoning)](https://github.com/Tah10n/pocket-ai/issues/28) (#28)
+- _No items_
 
 ### Later
 

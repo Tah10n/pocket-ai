@@ -7,6 +7,7 @@ mod engine;
 mod error;
 #[allow(unsafe_code)]
 mod ffi;
+mod hash;
 mod limits;
 mod materialize;
 mod preflight;

@@ -3,8 +3,8 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::hash::sha256_hex;
 use anydoc::Format;
-use sha2::{Digest, Sha256};
 
 use crate::error::CoreError;
 use crate::limits::EffectiveLimits;
@@ -116,7 +116,7 @@ pub(crate) fn read_and_validate(
         cancelled,
         limits.work_units,
     )?;
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = sha256_hex(&bytes);
     Ok(PreparedSource {
         bytes,
         sha256,
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn sha256_is_stable() {
         assert_eq!(
-            format!("{:x}", Sha256::digest(b"abc")),
+            sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }

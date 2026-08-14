@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 
+use crate::hash::sha256_hex;
 use anydoc::Format;
 use anydoc::model::{self, Block, CellSlot};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::error::CoreError;
 use crate::limits::{
@@ -302,7 +302,7 @@ impl<'a> ChunkBuilder<'a> {
             let media_type = asset.media_type.trim().to_ascii_lowercase();
             match validate_asset(&media_type, &asset.bytes) {
                 Some((width, height)) => {
-                    let sha256 = format!("{:x}", Sha256::digest(&asset.bytes));
+                    let sha256 = sha256_hex(&asset.bytes);
                     if let Some(existing) = self
                         .assets
                         .iter()

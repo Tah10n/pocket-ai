@@ -213,6 +213,15 @@ fn make_buffer(mut bytes: Vec<u8>) -> PocketAnyDocBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static FFI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_ffi_tests() -> MutexGuard<'static, ()> {
+        FFI_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn copy(buffer: &PocketAnyDocBuffer) -> Vec<u8> {
         // SAFETY: tests inspect a live buffer before returning its ownership.
@@ -221,6 +230,7 @@ mod tests {
 
     #[test]
     fn allocation_and_free_are_balanced() {
+        let _guard = lock_ffi_tests();
         let before = OUTSTANDING_BUFFERS.load(Ordering::Relaxed);
         for _ in 0..128 {
             let buffer = pocket_anydoc_version();
@@ -233,6 +243,7 @@ mod tests {
 
     #[test]
     fn panic_is_contained_in_error_envelope() {
+        let _guard = lock_ffi_tests();
         let buffer = ffi_entry(|| -> Result<Value, CoreError> { panic!("contained test panic") });
         let value: Value = serde_json::from_slice(&copy(&buffer)).unwrap();
         assert_eq!(value["ok"], false);
@@ -242,6 +253,7 @@ mod tests {
 
     #[test]
     fn oversized_request_is_rejected_without_reading_pointer() {
+        let _guard = lock_ffi_tests();
         let engine = pocket_anydoc_engine_new();
         let buffer = pocket_anydoc_cancel(engine, ptr::dangling(), MAX_REQUEST_JSON_BYTES + 1);
         let value: Value = serde_json::from_slice(&copy(&buffer)).unwrap();

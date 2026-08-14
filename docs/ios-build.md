@@ -9,7 +9,7 @@ For general development setup, see the main [README](../README.md).
 - macOS with Xcode installed (latest stable recommended)
 - An [Apple Developer](https://developer.apple.com/) account enrolled in the Apple Developer Program
 - CocoaPods (`sudo gem install cocoapods` or via Homebrew)
-- Rust through `rustup`; the repository pins Rust 1.94.0 and the device, Apple Silicon
+- Rust through `rustup`; the repository pins Rust 1.97.1 and the device, Apple Silicon
   simulator, and Intel simulator targets used by the local document module
 
 Build the deterministic static XCFramework before CocoaPods evaluates the local pod:

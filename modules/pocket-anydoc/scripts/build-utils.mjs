@@ -117,7 +117,7 @@ export function readPinnedToolchain() {
   const source = readFileSync(RUST_TOOLCHAIN_FILE, 'utf8');
   const match = source.match(/^\s*channel\s*=\s*["']([^"']+)["']/mu);
   if (!match || !/^1\.\d+\.\d+(?:-[A-Za-z0-9._-]+)?$/u.test(match[1])) {
-    fail('rust-toolchain.toml must pin an exact stable channel such as 1.94.0.');
+    fail('rust-toolchain.toml must pin an exact stable channel such as 1.97.1.');
   }
   return match[1];
 }

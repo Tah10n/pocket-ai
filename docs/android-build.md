@@ -12,7 +12,7 @@ release flow, see the [Release Checklist](./release-checklist.md).
 - Install a supported JDK and the Android SDK.
 - Set `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or provide `android/local.properties` with
   `sdk.dir=...`.
-- Install Rust through `rustup`. The document module pins Rust 1.94.0, Android NDK
+- Install Rust through `rustup`. The document module pins Rust 1.97.1, Android NDK
   27.1.12297006, Android API 24, and `cargo-ndk` 4.1.2.
 
 Prepare and verify the document toolchain once:

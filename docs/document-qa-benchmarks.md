@@ -36,7 +36,7 @@ npm run anydoc:benchmark:run:host
 The package command runs the equivalent build first:
 
 ```sh
-cargo +1.94.0 build --manifest-path ./modules/pocket-anydoc/rust/Cargo.toml --locked --release --bin pocket-anydoc-host-bench
+cargo +1.97.1 build --manifest-path ./modules/pocket-anydoc/rust/Cargo.toml --locked --release --bin pocket-anydoc-host-bench
 node ./scripts/document-benchmark.js run-host
 ```
 

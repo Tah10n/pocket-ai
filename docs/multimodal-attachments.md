@@ -12,7 +12,7 @@ old persisted video metadata may still be read for chat-history compatibility.
 ## Current Runtime Contract
 
 The app pins `llama.rn` through `package.json` and validates the installed runtime declarations
-before relying on native multimodal behavior. With `llama.rn@0.12.8`, the native chat message
+before relying on native multimodal behavior. With `llama.rn@0.12.9`, the native chat message
 contract accepts:
 
 - plain text message content

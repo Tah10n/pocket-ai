@@ -124,13 +124,13 @@ describe('Android catalog QA CI configuration', () => {
     const verifyJob = extractWorkflowJob(workflow, 'verify');
     const androidJob = extractWorkflowJob(workflow, 'android-qa');
 
-    expect(verifyJob).toContain('uses: dtolnay/rust-toolchain@1.94.0');
+    expect(verifyJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
     expect(verifyJob).toContain('components: rustfmt, clippy');
     expect(verifyJob).toContain('run: npm run verify:mobile-change');
     expect(packageJson.scripts['verify:mobile-change']).toContain('npm run anydoc:verify');
     expect(packageJson.scripts['anydoc:fmt:check']).toContain('--package pocket-anydoc');
     expect(packageJson.scripts['anydoc:fmt:check']).not.toContain('--all');
-    expect(androidJob).toContain('uses: dtolnay/rust-toolchain@1.94.0');
+    expect(androidJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
     expect(androidJob).toContain('targets: aarch64-linux-android, x86_64-linux-android');
     expect(androidJob).toContain('cargo install cargo-ndk --version 4.1.2 --locked');
     expect(workflow).not.toContain('runs-on: macos');

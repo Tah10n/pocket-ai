@@ -148,7 +148,7 @@ fn normalize_prepare_identity(operation: &str, request: &mut Value) -> Result<Op
         }
         digest.update(&block[..read]);
     }
-    if total != declared || format!("{:x}", digest.finalize()) != expected {
+    if total != declared || encode_hex(&digest.finalize()) != expected {
         return Err(());
     }
     object.remove("sourceIdentity");
@@ -239,6 +239,17 @@ mod process_metrics {
     }
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes.iter().copied() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,7 +280,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let source = root.join("pocket-ai/multilingual.csv");
         let bytes = fs::read(&source).unwrap();
-        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let sha = encode_hex(&Sha256::digest(&bytes));
         let engine = PocketAnyDocEngine::new();
         let prepared = execute_operation(
             &engine,

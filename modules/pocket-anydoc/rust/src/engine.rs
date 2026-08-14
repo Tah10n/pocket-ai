@@ -598,8 +598,8 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use crate::chunk::{CachedAssetPayload, ContentChunk};
+    use crate::hash::sha256_hex;
     use lopdf::{Document, Object, Stream, dictionary};
-    use sha2::{Digest, Sha256};
     use std::fs;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
@@ -643,7 +643,7 @@ mod tests {
         document.asset_payloads.push(CachedAssetPayload {
             id: 7,
             media_type: "image/png".to_string(),
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            sha256: sha256_hex(&bytes),
             bytes,
             width: 2,
             height: 3,

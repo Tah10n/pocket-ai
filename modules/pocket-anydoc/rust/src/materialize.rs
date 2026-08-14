@@ -11,8 +11,8 @@ use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
+use crate::hash::sha256_hex;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::chunk::{CachedAssetPayload, validate_asset};
@@ -51,7 +51,7 @@ pub(crate) fn write_asset(
     if payload.bytes.len() > MAX_ASSET_BYTES || width != payload.width || height != payload.height {
         return Err(CoreError::Internal);
     }
-    let sha256 = format!("{:x}", Sha256::digest(&payload.bytes));
+    let sha256 = sha256_hex(&payload.bytes);
     if sha256 != payload.sha256 {
         return Err(CoreError::Internal);
     }
@@ -240,7 +240,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let destination = root.path().join("asset.png");
         let bytes = png();
-        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let sha256 = sha256_hex(&bytes);
         let payload = CachedAssetPayload {
             id: 7,
             media_type: "image/png".to_string(),
@@ -275,7 +275,7 @@ mod tests {
         let payload = CachedAssetPayload {
             id: 1,
             media_type: "image/png".to_string(),
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            sha256: sha256_hex(&bytes),
             bytes,
             width: 2,
             height: 3,

@@ -21,6 +21,7 @@ interface HeaderBarProps {
   showBrand?: boolean;
   brandIconName?: React.ComponentProps<typeof MaterialSymbols>['name'];
   titleLines?: number;
+  testID?: string;
 }
 
 export const HeaderBar = ({
@@ -33,11 +34,12 @@ export const HeaderBar = ({
   showBrand = false,
   brandIconName = 'terminal',
   titleLines = 2,
+  testID,
 }: HeaderBarProps) => {
   const { t } = useTranslation();
   const resolvedBackAccessibilityLabel = backAccessibilityLabel ?? t('chat.headerBackAccessibilityLabel');
   return (
-    <ScreenHeaderShell contentClassName={screenChromeTokens.headerHorizontalPaddingClassName}>
+    <ScreenHeaderShell testID={testID} contentClassName={screenChromeTokens.headerHorizontalPaddingClassName}>
       <Box className={`${screenChromeTokens.headerContentMinHeightClassName} flex-row items-center ${screenChromeTokens.headerContentGapClassName} ${screenChromeTokens.headerContentVerticalPaddingClassName}`}>
         {onBack ? (
           <HeaderBackButton

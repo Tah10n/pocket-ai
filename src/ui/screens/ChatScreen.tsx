@@ -490,6 +490,31 @@ export function getAndroidKeyboardSpacerHeight({
     return Math.max(viewportCompensation, currentSpacerHeight);
 }
 
+export function getAndroidKeyboardTopY({
+    screenHeight,
+    windowHeight = screenHeight,
+    keyboardHeight,
+    reportedScreenY,
+}: {
+    screenHeight: number;
+    windowHeight?: number;
+    keyboardHeight: number;
+    reportedScreenY?: number | null;
+}) {
+    const heightDerivedTopY = Math.max(0, screenHeight - Math.max(0, keyboardHeight));
+    const viewportDerivedTopY = Math.max(0, windowHeight - Math.max(0, keyboardHeight));
+
+    if (typeof reportedScreenY !== 'number' || !Number.isFinite(reportedScreenY) || reportedScreenY <= 0) {
+        return Math.min(heightDerivedTopY, viewportDerivedTopY);
+    }
+
+    // Android keyboard events can exclude IME chrome or system-bar space from
+    // either screenY or height. The earliest plausible edge across the screen and
+    // app viewport is the safe boundary; choosing a later one leaves the composer
+    // partially under the keyboard on affected OEM builds.
+    return Math.min(reportedScreenY, heightDerivedTopY, viewportDerivedTopY);
+}
+
 export function isAndroidKeyboardMeasurementCurrent({
     isKeyboardVisible,
     activeMetrics,
@@ -758,7 +783,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     );
 }
 
-export const ChatScreen = () => {
+const ChatScreenContent = () => {
     const {
         activeThread,
         messages,
@@ -2671,7 +2696,12 @@ export const ChatScreen = () => {
 
             if (keyboardMetrics) {
                 const screenHeight = Dimensions.get('screen').height;
-                keyboardMetrics.topY = Math.max(0, screenHeight - keyboardMetrics.height);
+                keyboardMetrics.topY = getAndroidKeyboardTopY({
+                    screenHeight,
+                    windowHeight: window.height,
+                    keyboardHeight: keyboardMetrics.height,
+                    reportedScreenY: keyboardMetrics.topY,
+                });
             }
 
             updateAndroidKeyboardInsetFromLayout();
@@ -2680,11 +2710,15 @@ export const ChatScreen = () => {
         const updateKeyboardMetrics = (event: KeyboardEvent) => {
             isKeyboardVisibleRef.current = true;
             setIsAndroidKeyboardVisible(true);
+            const keyboardHeight = event.endCoordinates.height;
             androidKeyboardMetricsRef.current = {
-                height: event.endCoordinates.height,
-                topY: event.endCoordinates.screenY > 0
-                    ? event.endCoordinates.screenY
-                    : Math.max(0, Dimensions.get('screen').height - event.endCoordinates.height),
+                height: keyboardHeight,
+                topY: getAndroidKeyboardTopY({
+                    screenHeight: Dimensions.get('screen').height,
+                    windowHeight: Dimensions.get('window').height,
+                    keyboardHeight,
+                    reportedScreenY: event.endCoordinates.screenY,
+                }),
             };
         };
 
@@ -2835,7 +2869,7 @@ export const ChatScreen = () => {
     ]);
 
     return (
-        <ScreenRoot className="w-full max-w-2xl mx-auto">
+        <>
             <ChatHeader
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
                 title={headerTitle}
@@ -3258,9 +3292,15 @@ export const ChatScreen = () => {
                 {...errorReportSheetProps}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
             />
-        </ScreenRoot>
+        </>
     );
 };
+
+export const ChatScreen = () => (
+    <ScreenRoot className="w-full max-w-2xl mx-auto">
+        <ChatScreenContent />
+    </ScreenRoot>
+);
 
 const styles = StyleSheet.create({
     androidQaEvidenceSurface: {

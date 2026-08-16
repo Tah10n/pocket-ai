@@ -2,6 +2,7 @@ import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 
 const mockStackProps = jest.fn();
+const mockStackScreenProps = jest.fn();
 const mockBootstrapAppCritical = jest.fn();
 const mockBootstrapAppBackground = jest.fn();
 const mockScheduleModelCatalogCacheHydration = jest.fn();
@@ -57,7 +58,10 @@ jest.mock('expo-router', () => {
     mockStackProps(props);
     return mockReact.createElement(View, { testID: 'root-stack' }, children);
   };
-  Stack.Screen = ({ name }: any) => mockReact.createElement(View, { testID: `stack-${name}` });
+  Stack.Screen = ({ name, ...props }: any) => {
+    mockStackScreenProps({ name, ...props });
+    return mockReact.createElement(View, { testID: `stack-${name}` });
+  };
   return { Stack };
 });
 
@@ -310,5 +314,21 @@ describe('RootLayout storage recovery gate', () => {
     view.unmount();
 
     expect(mockNotificationDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses only the app-owned header on the modal route', async () => {
+    mockBootstrapAppCritical.mockResolvedValueOnce({ outcome: 'success' });
+
+    const view = render(<RootLayout />);
+    await view.findByTestId('root-stack');
+
+    const modalScreenProps = mockStackScreenProps.mock.calls
+      .map(([props]) => props)
+      .find((props) => props.name === 'modal');
+
+    expect(modalScreenProps?.options).toEqual(expect.objectContaining({
+      headerShown: false,
+      presentation: 'modal',
+    }));
   });
 });

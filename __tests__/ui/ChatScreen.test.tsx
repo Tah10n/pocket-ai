@@ -689,6 +689,7 @@ const {
   getAndroidFloatingComposerBottomOffset,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getAndroidKeyboardTopY,
   getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
@@ -2687,6 +2688,25 @@ describe('ChatScreen', () => {
       keyboardTopY: 2140,
       gap: 12,
     })).toBe(48);
+  });
+
+  it('derives the earliest plausible Android IME top when screenY points at the window bottom', () => {
+    expect(getAndroidKeyboardTopY({
+      screenHeight: 804,
+      windowHeight: 756,
+      keyboardHeight: 255,
+      reportedScreenY: 533,
+    })).toBe(501);
+    expect(getAndroidKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 804,
+    })).toBe(504);
+    expect(getAndroidKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 496,
+    })).toBe(496);
   });
 
   it('rejects an Android keyboard measurement after hide or a newer frame event', () => {

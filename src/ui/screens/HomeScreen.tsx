@@ -23,7 +23,7 @@ import { screenLayoutMetrics } from '../../utils/themeTokens';
 
 let hasMarkedFirstUsableScreen = false;
 
-export const HomeScreen = () => {
+const HomeScreenContent = () => {
   const { t } = useTranslation();
   const router = useRouter();
   const {
@@ -108,8 +108,8 @@ export const HomeScreen = () => {
   };
 
   return (
-    <ScreenRoot>
-      <HeaderBar title="Pocket AI" showBrand />
+    <>
+      <HeaderBar testID="home-header" title="Pocket AI" showBrand />
 
       {bootstrapBackgroundState === 'running' ? (
         <ScreenBanner className="mx-4 mt-2 flex-row items-center gap-2 py-2" tone="neutral" style={floatingBannerTopStyle}>
@@ -169,6 +169,12 @@ export const HomeScreen = () => {
           </ScreenStack>
         </ScrollView>
       </ScreenContent>
-    </ScreenRoot>
+    </>
   );
 };
+
+export const HomeScreen = () => (
+  <ScreenRoot>
+    <HomeScreenContent />
+  </ScreenRoot>
+);

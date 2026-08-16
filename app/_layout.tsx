@@ -459,6 +459,7 @@ function RootNavigator() {
         <Stack.Screen
           name="modal"
           options={{
+            headerShown: false,
             presentation: 'modal',
             title: t('common.more'),
             animation: motion.motionPreset === 'full' ? 'fade' : 'none',

@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import { AccessibilityInfo, Alert, Platform, Text as RNText } from 'react-native';
+import { AccessibilityInfo, Alert, Keyboard, Platform, Text as RNText } from 'react-native';
 import {
   ChatInputBar,
   markChatInputDraftConsumedError,
@@ -157,24 +157,31 @@ describe('ChatInputBar', () => {
 
   it('sends the message when the input submits', async () => {
     const onSendMessage = jest.fn().mockResolvedValue(undefined);
-    const { getByPlaceholderText } = render(
-      <ChatInputBar onSendMessage={onSendMessage} />,
-    );
+    const dismissKeyboardSpy = jest.spyOn(Keyboard, 'dismiss').mockImplementation(() => undefined);
+    try {
+      const { getByPlaceholderText } = render(
+        <ChatInputBar onSendMessage={onSendMessage} />,
+      );
 
-    const input = getByPlaceholderText('chat.inputPlaceholder');
+      const input = getByPlaceholderText('chat.inputPlaceholder');
+      expect(input.props.submitBehavior).toBe('blurAndSubmit');
 
-    fireEvent.changeText(input, 'Hello from enter');
-    fireEvent(input, 'submitEditing', {
-      nativeEvent: {
-        text: 'Hello from enter',
-      },
-    });
+      fireEvent.changeText(input, 'Hello from enter');
+      fireEvent(input, 'submitEditing', {
+        nativeEvent: {
+          text: 'Hello from enter',
+        },
+      });
 
-    await waitFor(() => {
-      expect(onSendMessage).toHaveBeenCalledWith('Hello from enter');
-    });
+      await waitFor(() => {
+        expect(onSendMessage).toHaveBeenCalledWith('Hello from enter');
+      });
 
-    expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
+      expect(dismissKeyboardSpy).toHaveBeenCalledTimes(1);
+      expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
+    } finally {
+      dismissKeyboardSpy.mockRestore();
+    }
   });
 
   it('reports real composer typing and attachment selection as interactive work', () => {

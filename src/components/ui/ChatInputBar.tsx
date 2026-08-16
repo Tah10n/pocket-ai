@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, Platform, ScrollView, StyleSheet } from 'react-native';
+import { AccessibilityInfo, Alert, Image, Keyboard, Platform, ScrollView, StyleSheet } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { ScreenIconButton, ScreenIconTile, ScreenInlineInput, ScreenSurface } from './ScreenShell';
@@ -404,6 +404,7 @@ export const ChatInputBar = ({
 
         submitLockRef.current = true;
         setIsSubmitting(true);
+        Keyboard.dismiss();
         const nextMessage = message.trim();
         setMessage('');
 
@@ -746,7 +747,7 @@ export const ChatInputBar = ({
                 keyboardType="default"
                 returnKeyType="send"
                 enterKeyHint="send"
-                submitBehavior="submit"
+                submitBehavior="blurAndSubmit"
                 textAlignVertical="center"
                 value={message}
                 onChangeText={handleMessageChange}

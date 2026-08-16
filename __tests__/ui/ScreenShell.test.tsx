@@ -231,6 +231,31 @@ describe('ScreenShell semantic material contracts', () => {
     expect(StyleSheet.flatten(screen.getByTestId('content').props.style).paddingBottom).toBeGreaterThan(30);
   });
 
+  it('publishes a measured floating header inset to content inside the screen root', () => {
+    const resolvedTheme = resolveTheme('glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    const screen = render(
+      <ScreenRoot>
+        <ScreenHeaderShell testID="header">header</ScreenHeaderShell>
+        <ScreenContent testID="content">content</ScreenContent>
+      </ScreenRoot>,
+    );
+    let layoutNode: any = screen.getByTestId('header');
+
+    while (layoutNode && typeof layoutNode.props.onLayout !== 'function') {
+      layoutNode = layoutNode.parent;
+    }
+
+    expect(layoutNode).toBeTruthy();
+    fireEvent(layoutNode, 'layout', {
+      nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 124 } },
+    });
+
+    expect(StyleSheet.flatten(screen.getByTestId('content').props.style)).toMatchObject({
+      paddingTop: 124,
+    });
+  });
+
   it('exposes selected state and semantic foregrounds for segmented controls', () => {
     const onChange = jest.fn();
     const screen = render(

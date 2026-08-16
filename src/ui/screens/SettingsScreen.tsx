@@ -237,7 +237,7 @@ function LayeredUsageMeter({
     );
 }
 
-export const SettingsScreen = () => {
+const SettingsScreenContent = () => {
     const { t, i18n } = useTranslation();
     const router = useRouter();
     const isFocused = useIsFocused();
@@ -392,8 +392,9 @@ export const SettingsScreen = () => {
     ];
 
     return (
-        <ScreenRoot>
+        <>
             <HeaderBar
+                testID="settings-header"
                 title={`${t('settings.title')}`}
                 onBack={undefined}
                 backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
@@ -723,6 +724,12 @@ export const SettingsScreen = () => {
                     </ScreenStack>
                 </ScreenContent>
             </ScrollView>
-        </ScreenRoot>
+        </>
     );
 };
+
+export const SettingsScreen = () => (
+    <ScreenRoot>
+        <SettingsScreenContent />
+    </ScreenRoot>
+);

@@ -77,7 +77,7 @@ function formatRetentionLabel(days: number | null, t: (key: string, options?: Re
   return t('conversations.retention.daysShort', { count: days });
 }
 
-export function ConversationsScreen() {
+function ConversationsScreenContent() {
   const { t } = useTranslation();
   const { colors } = useTheme();
   const headerInset = useFloatingHeaderInset();
@@ -422,13 +422,14 @@ export function ConversationsScreen() {
   }, [activeThreadId, handleDeleteConversation, handleOpenConversation, isGenerationBusy, t]);
 
   return (
-    <ScreenRoot>
+    <>
       <ScreenAndroidContentBlurTarget
         blurTargetRef={contentBlurTargetRef}
         style={{ flex: 1 }}
         testID="conversations-content-blur-target"
       >
         <HeaderBar
+          testID="conversations-header"
           title={t('conversations.title')}
           subtitle={t('conversations.subtitle')}
           onBack={isGenerationBusy ? undefined : handleBack}
@@ -576,6 +577,14 @@ export function ConversationsScreen() {
           </ScreenModalOverlay>
         </KeyboardAvoidingView>
       </Modal>
+    </>
+  );
+}
+
+export function ConversationsScreen() {
+  return (
+    <ScreenRoot>
+      <ConversationsScreenContent />
     </ScreenRoot>
   );
 }

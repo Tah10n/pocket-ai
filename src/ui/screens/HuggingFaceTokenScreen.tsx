@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Linking } from 'react-native';
+import { Alert, KeyboardAvoidingView, Linking, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
@@ -95,68 +95,75 @@ export function HuggingFaceTokenScreen() {
         backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
       />
 
-      <ScreenContent className="flex-1 pt-3">
-        <ScrollView
-          className="flex-1"
-          keyboardShouldPersistTaps="handled"
-          contentContainerStyle={{ flexGrow: 1 }}
-        >
-          <ScreenStack className="pb-2" gap="loose">
-            <ScreenCard padding="large">
-              <Text colorRole="primary" className="text-sm font-semibold  ">
-                {hasToken
-                  ? t('settings.huggingFaceTokenConfigured')
-                  : t('settings.huggingFaceTokenMissing')}
-              </Text>
-              <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
-                {t('settings.huggingFaceTokenHelper')}
-              </Text>
-            </ScreenCard>
+      <KeyboardAvoidingView
+        testID="hugging-face-token-keyboard-avoiding-view"
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={{ flex: 1 }}
+      >
+        <ScreenContent className="flex-1 pt-3">
+          <ScrollView
+            className="flex-1"
+            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={{ flexGrow: 1 }}
+          >
+            <ScreenStack className="pb-2" gap="loose">
+              <ScreenCard padding="large">
+                <Text colorRole="primary" className="text-sm font-semibold  ">
+                  {hasToken
+                    ? t('settings.huggingFaceTokenConfigured')
+                    : t('settings.huggingFaceTokenMissing')}
+                </Text>
+                <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
+                  {t('settings.huggingFaceTokenHelper')}
+                </Text>
+              </ScreenCard>
 
-            <ScreenTextField
-              label={t('settings.huggingFaceTokenInputLabel')}
-              size="prominent"
-              value={tokenDraft}
-              onChangeText={setTokenDraft}
-              placeholder={t('settings.huggingFaceTokenInputPlaceholder')}
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-            />
+              <ScreenTextField
+                label={t('settings.huggingFaceTokenInputLabel')}
+                size="prominent"
+                value={tokenDraft}
+                onChangeText={setTokenDraft}
+                placeholder={t('settings.huggingFaceTokenInputPlaceholder')}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+              />
 
-            <ScreenCard tone="accent" padding="large">
-              <Text colorRole="primary" className="text-sm font-semibold  ">
-                {t('settings.huggingFaceTokenEducationTitle')}
-              </Text>
-              <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
-                {t('settings.huggingFaceTokenEducationBody')}
-              </Text>
-              <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
-                {t('settings.huggingFaceTokenRecommendation')}
-              </Text>
-              <Text colorRole="accent" className="mt-4 text-sm  ">
-                {t('settings.huggingFaceTokenGetTokenHelper')}
-              </Text>
-              <Button action="secondary" className="mt-4 self-start" onPress={() => { void handleOpenTokenSettings(); }}>
-                <ButtonText>
-                  {t('settings.huggingFaceTokenGetToken')}
-                </ButtonText>
-              </Button>
-            </ScreenCard>
-          </ScreenStack>
-        </ScrollView>
-      </ScreenContent>
+              <ScreenCard tone="accent" padding="large">
+                <Text colorRole="primary" className="text-sm font-semibold  ">
+                  {t('settings.huggingFaceTokenEducationTitle')}
+                </Text>
+                <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
+                  {t('settings.huggingFaceTokenEducationBody')}
+                </Text>
+                <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
+                  {t('settings.huggingFaceTokenRecommendation')}
+                </Text>
+                <Text colorRole="accent" className="mt-4 text-sm  ">
+                  {t('settings.huggingFaceTokenGetTokenHelper')}
+                </Text>
+                <Button action="secondary" className="mt-4 self-start" onPress={() => { void handleOpenTokenSettings(); }}>
+                  <ButtonText>
+                    {t('settings.huggingFaceTokenGetToken')}
+                  </ButtonText>
+                </Button>
+              </ScreenCard>
+            </ScreenStack>
+          </ScrollView>
+        </ScreenContent>
 
-      <ScreenContent className="pt-4" includeBottomSafeArea>
-        <Box className="flex-row gap-3">
-          <Button className="flex-1" onPress={() => { void handleSave(); }} disabled={busy !== null || tokenDraft.trim().length === 0}>
-            <ButtonText>{busy === 'save' ? t('common.loading') : t('common.save')}</ButtonText>
-          </Button>
-          <Button action="secondary" className="flex-1" onPress={() => { void handleClear(); }} disabled={busy !== null || !hasToken}>
-            <ButtonText>{busy === 'clear' ? t('common.loading') : t('common.clear')}</ButtonText>
-          </Button>
-        </Box>
-      </ScreenContent>
+        <ScreenContent className="pt-4" includeBottomSafeArea>
+          <Box className="flex-row gap-3">
+            <Button className="flex-1" onPress={() => { void handleSave(); }} disabled={busy !== null || tokenDraft.trim().length === 0}>
+              <ButtonText>{busy === 'save' ? t('common.loading') : t('common.save')}</ButtonText>
+            </Button>
+            <Button action="secondary" className="flex-1" onPress={() => { void handleClear(); }} disabled={busy !== null || !hasToken}>
+              <ButtonText>{busy === 'clear' ? t('common.loading') : t('common.clear')}</ButtonText>
+            </Button>
+          </Box>
+        </ScreenContent>
+      </KeyboardAvoidingView>
     </ScreenRoot>
   );
 }

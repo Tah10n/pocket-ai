@@ -299,6 +299,7 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
 
   return {
     ChatHeader: ({
+      androidContentBlurTargetRef,
       title,
       canStartNewChat,
       onStartNewChat,
@@ -314,6 +315,7 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
       canOpenModelControls,
     }: any) => {
       lastChatHeaderProps = {
+        androidContentBlurTargetRef,
         title,
         canStartNewChat,
         onStartNewChat,
@@ -2710,22 +2712,22 @@ describe('ChatScreen', () => {
   it('returns the Android glass composer to normal flow while the keyboard is visible', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
-      surfaceKind: 'glass',
+      composerPresentation: 'capsule',
       isKeyboardVisible: false,
     })).toBe(true);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
-      surfaceKind: 'solid',
+      composerPresentation: 'inline',
       isKeyboardVisible: false,
     })).toBe(false);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
-      surfaceKind: 'glass',
+      composerPresentation: 'capsule',
       isKeyboardVisible: true,
     })).toBe(false);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
-      surfaceKind: 'glass',
+      composerPresentation: 'capsule',
       isKeyboardVisible: false,
     })).toBe(false);
   });
@@ -3139,6 +3141,8 @@ describe('ChatScreen', () => {
 
     expect(lastChatHeaderProps.modelSelectable).toBe(false);
     expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
+    expect(lastChatHeaderProps.androidContentBlurTargetRef)
+      .toBe(lastChatInputBarProps.androidContentBlurTargetRef);
   });
 
   it('opens a downloaded-only model selector from the header badge', () => {

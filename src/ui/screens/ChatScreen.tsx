@@ -38,7 +38,7 @@ import {
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ProgressBar } from '@/components/ui/ProgressBar';
-import { ScreenAndroidContentBlurTarget, ScreenCard, ScreenIconTile, ScreenRoot, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenAndroidContentBlurTarget, ScreenCard, ScreenIconTile, ScreenRoot, ScreenSurface } from '@/components/ui/ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
@@ -83,6 +83,7 @@ import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPol
 import { resolveEffectiveActiveVariantNativeSupport } from '../../utils/modelCapabilities';
 import { isMultimodalReadinessReusableForModel } from '../../utils/multimodalReadiness';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
+import { useTheme } from '../../providers/ThemeProvider';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
 import {
     armAndroidQaGenerationGate,
@@ -503,14 +504,14 @@ export function isAndroidKeyboardMeasurementCurrent({
 
 export function shouldFloatAndroidComposerOverContent({
     platform,
-    surfaceKind,
+    composerPresentation,
     isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
-    surfaceKind: 'solid' | 'glass';
+    composerPresentation: 'inline' | 'capsule';
     isKeyboardVisible: boolean;
 }) {
-    return platform === 'android' && surfaceKind === 'glass' && !isKeyboardVisible;
+    return platform === 'android' && composerPresentation === 'capsule' && !isKeyboardVisible;
 }
 
 export function getAndroidFloatingComposerBottomOffset({
@@ -777,7 +778,8 @@ export const ChatScreen = () => {
     usePreventRemove(isPreparingDocuments, () => undefined);
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
-    const appearance = useScreenAppearance();
+    const theme = useTheme();
+    const appearance = theme.appearance;
     const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
     const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
@@ -873,7 +875,7 @@ export const ChatScreen = () => {
     const isAndroidKeyboardOpen = Platform.OS === 'android' && isAndroidKeyboardVisible;
     const shouldFloatComposerOverContent = shouldFloatAndroidComposerOverContent({
         platform: Platform.OS,
-        surfaceKind: appearance.surfaceKind,
+        composerPresentation: theme.resolvedTheme.components.chat.composerPresentation,
         isKeyboardVisible: isAndroidKeyboardVisible,
     });
     const androidFloatingComposerBottomOffset = getAndroidFloatingComposerBottomOffset({
@@ -2837,44 +2839,45 @@ export const ChatScreen = () => {
 
     return (
         <ScreenRoot className="w-full max-w-2xl mx-auto">
+            <ChatHeader
+                androidContentBlurTargetRef={warmupContentBlurTargetRef}
+                title={headerTitle}
+                presetLabel={activePresetLabel}
+                modelLabel={headerModelLabel}
+                modelSelectable={hasDownloadedModels}
+                statusLabel={statusLabel}
+                statusTone={statusTone}
+                canStartNewChat={!isGenerationBusy}
+                onStartNewChat={() => {
+                    try {
+                        startNewChat();
+                        handleCancelComposerMode();
+                    } catch (error: any) {
+                        showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
+                    }
+                }}
+                onOpenModelControls={() => {
+                    openModelParameters(configurableModelId);
+                }}
+                onOpenPresetSelector={() => {
+                    setPresetSelectorOpen(true);
+                }}
+                canOpenPresetSelector={!isGenerationBusy}
+                onOpenModelSelector={hasDownloadedModels
+                    ? () => {
+                        setModelSelectorOpen(true);
+                    }
+                    : undefined}
+                canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
+                canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
+                onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
+            />
+
             <ScreenAndroidContentBlurTarget
                 blurTargetRef={warmupContentBlurTargetRef}
                 style={styles.warmupContentBlurTarget}
                 testID="chat-warmup-content-blur-target"
             >
-                <ChatHeader
-                    title={headerTitle}
-                    presetLabel={activePresetLabel}
-                    modelLabel={headerModelLabel}
-                    modelSelectable={hasDownloadedModels}
-                    statusLabel={statusLabel}
-                    statusTone={statusTone}
-                    canStartNewChat={!isGenerationBusy}
-                    onStartNewChat={() => {
-                        try {
-                            startNewChat();
-                            handleCancelComposerMode();
-                        } catch (error: any) {
-                            showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
-                        }
-                    }}
-                    onOpenModelControls={() => {
-                        openModelParameters(configurableModelId);
-                    }}
-                    onOpenPresetSelector={() => {
-                        setPresetSelectorOpen(true);
-                    }}
-                    canOpenPresetSelector={!isGenerationBusy}
-                    onOpenModelSelector={hasDownloadedModels
-                        ? () => {
-                            setModelSelectorOpen(true);
-                        }
-                        : undefined}
-                    canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
-                    canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
-                    onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
-                />
-
                 <Box className="flex-1">
                 <Box className="flex-1 px-3 pt-1.5">
                     {shouldShowRecoveryBanner ? (

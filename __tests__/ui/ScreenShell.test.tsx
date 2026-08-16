@@ -614,35 +614,36 @@ describe('ScreenShell', () => {
 
     expect(headerShell).toBeTruthy();
     expect(headerShell.props.className).not.toContain('border-b');
-    expect(headerShell.props.className).toContain('border-transparent');
-    expect(StyleSheet.flatten(headerShell.props.style).borderBottomWidth).toBe(0);
     fireEvent(headerShell, 'layout', { nativeEvent: { layout: { height: 88 } } });
     expect(getByTestId('floating-header-inset').props.children).toBe(88);
     expect(StyleSheet.flatten(getByTestId('floating-content').props.style).paddingTop).toBe(88);
   });
 
-  it('keeps glass header fade continuous without a midpoint divider stop', () => {
+  it('renders glass headers through the semantic material frame without legacy gradients', () => {
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const { resolveTheme } = jest.requireActual('../../src/design-system/themes/resolver');
+    const resolvedTheme = resolveTheme('glass', 'light');
     mockThemeContext = {
       colors: { background: '#fff', headerBlurTint: 'light' },
       resolvedMode: 'light',
       themeId: 'glass',
       appearance: getThemeAppearance('glass', 'light'),
+      resolvedTheme,
     };
 
     const { UNSAFE_getAllByType } = render(
       <ScreenHeaderShell>Header</ScreenHeaderShell>,
     );
 
-    const { View } = require('react-native');
-    const headerFade = UNSAFE_getAllByType(View).find((node: any) =>
-      Array.isArray(node.props.colors)
-      && node.props.colors[0] === 'rgba(255,255,255,0.38)'
-      && node.props.colors[1] === 'rgba(255,255,255,0)',
-    );
+    const { StyleSheet, View } = require('react-native');
+    const materialHeader = UNSAFE_getAllByType(View).find((node: any) => {
+      const style = StyleSheet.flatten(node.props.style);
+      return style?.backgroundColor === resolvedTheme.colors.surfaceOverlay;
+    });
+    const legacyGradient = UNSAFE_getAllByType(View).find((node: any) => Array.isArray(node.props.colors));
 
-    expect(headerFade).toBeTruthy();
-    expect(headerFade?.props.locations).toBeUndefined();
+    expect(materialHeader).toBeTruthy();
+    expect(legacyGradient).toBeUndefined();
   });
 
   it('does not mount native header blur outside the glass theme', () => {

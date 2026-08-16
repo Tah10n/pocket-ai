@@ -33,5 +33,9 @@ export const glassTheme = {
   components: {
     tabBar: { presentation: 'floating' },
     header: { presentation: 'overlay' },
+    chat: {
+      composerPresentation: 'capsule',
+      userBubbleTone: 'primary',
+    },
   },
 } as const satisfies ThemeDefinition<'glass'>;

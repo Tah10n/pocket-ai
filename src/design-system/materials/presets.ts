@@ -17,13 +17,21 @@ import type {
 export interface ContentMaterialFrame {
   readonly fillColor: string;
   readonly rimColor: string;
+  readonly rimWidth?: number;
 }
 
-export interface SolidContentMaterialOverrides {
+export interface SolidThemeMaterialOverrides {
   readonly raised?: ContentMaterialFrame;
   readonly inset?: ContentMaterialFrame;
   readonly list?: ContentMaterialFrame;
+  readonly message?: ContentMaterialFrame;
+  readonly messageThought?: ContentMaterialFrame;
+  readonly messageAttachment?: ContentMaterialFrame;
+  readonly messageError?: ContentMaterialFrame;
+  readonly composerMode?: ContentMaterialFrame;
+  readonly header?: ContentMaterialFrame;
   readonly tones?: Readonly<Partial<Record<Exclude<MaterialTone, 'neutral'>, ContentMaterialFrame>>>;
+  readonly messageTones?: Readonly<Partial<Record<Exclude<MaterialTone, 'neutral'>, ContentMaterialFrame>>>;
 }
 
 const NO_SHADOW: MaterialShadow = {
@@ -53,13 +61,14 @@ function denseRecipe(
   rimColor: string,
   interactionSupport: DenseMaterialRecipe['interactionSupport'] = 'static',
   recipeShadow: MaterialShadow = NO_SHADOW,
+  rimWidth = 1,
 ): DenseMaterialRecipe {
   return {
     renderer,
     fill: paint(fillColor),
     tint: null,
     contrastFilm: null,
-    rim: rim(rimColor),
+    rim: rim(rimColor, 1, rimWidth),
     shadow: recipeShadow,
     interactionSupport,
   };
@@ -105,13 +114,16 @@ function createSemanticContentTones(
   colors: MaterialPalette,
   neutralRecipe: MaterialRecipeDefinition,
   renderer: DenseMaterialRecipe['renderer'],
-  overrides: SolidContentMaterialOverrides['tones'] = {},
+  overrides: SolidThemeMaterialOverrides['tones'] = {},
 ): MaterialToneRecipes {
   const define = (tone: Exclude<MaterialTone, 'neutral'>, fillColor: string, rimColor: string) => denseDefinition(
     denseRecipe(
       renderer,
       overrides[tone]?.fillColor ?? fillColor,
       overrides[tone]?.rimColor ?? rimColor,
+      'static',
+      NO_SHADOW,
+      overrides[tone]?.rimWidth,
     ),
   );
 
@@ -135,25 +147,69 @@ function createSemanticBannerTones(
 
 export function createSolidThemeMaterialRecipes(
   colors: MaterialPalette,
-  contentOverrides: SolidContentMaterialOverrides = {},
+  materialOverrides: SolidThemeMaterialOverrides = {},
 ): ThemeMaterialRecipes {
   const canvas = denseDefinition(denseRecipe('solid', colors.background, colors.background));
   const contentRaised = denseDefinition(denseRecipe(
     'solid',
-    contentOverrides.raised?.fillColor ?? colors.cardBackground,
-    contentOverrides.raised?.rimColor ?? colors.border,
+    materialOverrides.raised?.fillColor ?? colors.cardBackground,
+    materialOverrides.raised?.rimColor ?? colors.border,
   ));
   const contentInset = denseDefinition(denseRecipe(
     'solid',
-    contentOverrides.inset?.fillColor ?? colors.surface,
-    contentOverrides.inset?.rimColor ?? colors.borderSubtle,
+    materialOverrides.inset?.fillColor ?? colors.surface,
+    materialOverrides.inset?.rimColor ?? colors.borderSubtle,
   ));
   const contentList = denseDefinition(denseRecipe(
     'solid',
-    contentOverrides.list?.fillColor ?? colors.surfaceMuted,
-    contentOverrides.list?.rimColor ?? colors.borderSubtle,
+    materialOverrides.list?.fillColor ?? colors.surfaceMuted,
+    materialOverrides.list?.rimColor ?? colors.borderSubtle,
   ));
-  const header = denseDefinition(denseRecipe('solid', colors.surface, colors.border));
+  const contentMessage = denseDefinition(denseRecipe(
+    'solid',
+    materialOverrides.message?.fillColor ?? colors.cardBackground,
+    materialOverrides.message?.rimColor ?? colors.border,
+    'static',
+    NO_SHADOW,
+    materialOverrides.message?.rimWidth,
+  ));
+  const messageThought = denseDefinition(denseRecipe(
+    'solid',
+    materialOverrides.messageThought?.fillColor ?? colors.surface,
+    materialOverrides.messageThought?.rimColor ?? colors.borderSubtle,
+    'static',
+    NO_SHADOW,
+    materialOverrides.messageThought?.rimWidth,
+  ));
+  const messageAttachment = denseDefinition(denseRecipe(
+    'solid',
+    materialOverrides.messageAttachment?.fillColor ?? colors.surface,
+    materialOverrides.messageAttachment?.rimColor ?? colors.borderSubtle,
+    'static',
+    NO_SHADOW,
+    materialOverrides.messageAttachment?.rimWidth,
+  ));
+  const messageError = denseDefinition(denseRecipe(
+    'solid',
+    materialOverrides.messageError?.fillColor ?? colors.dangerSurface,
+    materialOverrides.messageError?.rimColor ?? colors.error,
+    'static',
+    NO_SHADOW,
+    materialOverrides.messageError?.rimWidth,
+  ));
+  const composerMode = denseDefinition(denseRecipe(
+    'solid',
+    materialOverrides.composerMode?.fillColor ?? colors.primarySoft,
+    materialOverrides.composerMode?.rimColor ?? colors.primary,
+    'static',
+    NO_SHADOW,
+    materialOverrides.composerMode?.rimWidth,
+  ));
+  const header = denseDefinition(denseRecipe(
+    'solid',
+    materialOverrides.header?.fillColor ?? colors.surface,
+    materialOverrides.header?.rimColor ?? colors.border,
+  ));
   const tabBar = denseDefinition(denseRecipe('solid', colors.tabBarBackground, colors.tabBarBorder));
   const composer = denseDefinition(denseRecipe('solid', colors.inputBackground, colors.border));
   const sheet = denseDefinition(denseRecipe(
@@ -164,6 +220,17 @@ export function createSolidThemeMaterialRecipes(
     shadow(colors.background, 0.16, 18, -4, 8),
   ));
   const controls = createSemanticControlTones(colors, 'tinted');
+  const selectedControls: MaterialToneRecipes = {
+    ...controls,
+    primary: denseDefinition(denseRecipe(
+      'tinted',
+      colors.primary,
+      colors.primary,
+      'pressable',
+      NO_SHADOW,
+      0,
+    )),
+  };
   const overlayBanner = createSemanticBannerTones(colors, 'tinted');
   const overlayPopover = denseDefinition(denseRecipe(
     'solid',
@@ -177,9 +244,14 @@ export function createSolidThemeMaterialRecipes(
   return {
     canvas: { base: neutral(canvas) },
     content: {
-      raised: createSemanticContentTones(colors, contentRaised, 'solid', contentOverrides.tones),
-      inset: createSemanticContentTones(colors, contentInset, 'solid', contentOverrides.tones),
-      list: createSemanticContentTones(colors, contentList, 'solid', contentOverrides.tones),
+      raised: createSemanticContentTones(colors, contentRaised, 'solid', materialOverrides.tones),
+      inset: createSemanticContentTones(colors, contentInset, 'solid', materialOverrides.tones),
+      list: createSemanticContentTones(colors, contentList, 'solid', materialOverrides.tones),
+      message: createSemanticContentTones(colors, contentMessage, 'solid', materialOverrides.messageTones),
+      messageThought: neutral(messageThought),
+      messageAttachment: neutral(messageAttachment),
+      messageError: neutral(messageError),
+      composerMode: neutral(composerMode),
     },
     chrome: {
       header: neutral(header),
@@ -190,7 +262,7 @@ export function createSolidThemeMaterialRecipes(
     control: {
       inline: controls,
       floating: controls,
-      selected: controls,
+      selected: selectedControls,
     },
     overlay: {
       banner: overlayBanner,
@@ -322,6 +394,46 @@ export function createLiquidThemeMaterialRecipes(
   const contentRaised = denseDefinition(denseRecipe('tinted', colors.cardBackground, colors.borderSubtle));
   const contentInset = denseDefinition(denseRecipe('tinted', colors.surface, colors.borderSubtle));
   const contentList = denseDefinition(denseRecipe('tinted', colors.surfaceMuted, colors.borderSubtle));
+  const contentMessage = denseDefinition(denseRecipe(
+    'tinted',
+    colors.surface,
+    colors.borderSubtle,
+    'static',
+    NO_SHADOW,
+    0,
+  ));
+  const messageThought = denseDefinition(denseRecipe(
+    'tinted',
+    colors.surface,
+    colors.borderSubtle,
+    'static',
+    NO_SHADOW,
+    0,
+  ));
+  const messageAttachment = denseDefinition(denseRecipe(
+    'tinted',
+    colors.surface,
+    colors.borderSubtle,
+    'static',
+    NO_SHADOW,
+    0,
+  ));
+  const messageError = denseDefinition(denseRecipe(
+    'tinted',
+    colors.dangerSurface,
+    colors.error,
+    'static',
+    NO_SHADOW,
+    0,
+  ));
+  const composerMode = denseDefinition(denseRecipe(
+    'tinted',
+    colors.primarySoft,
+    colors.primary,
+    'static',
+    NO_SHADOW,
+    0,
+  ));
   const chrome = (intensity: number) => neutral(effectDefinition(
     colors,
     mode,
@@ -347,6 +459,17 @@ export function createLiquidThemeMaterialRecipes(
       raised: createSemanticContentTones(colors, contentRaised, 'tinted'),
       inset: createSemanticContentTones(colors, contentInset, 'tinted'),
       list: createSemanticContentTones(colors, contentList, 'tinted'),
+      message: createSemanticContentTones(colors, contentMessage, 'tinted', {
+        primary: {
+          fillColor: colors.primarySoft,
+          rimColor: colors.primary,
+          rimWidth: 0,
+        },
+      }),
+      messageThought: neutral(messageThought),
+      messageAttachment: neutral(messageAttachment),
+      messageError: neutral(messageError),
+      composerMode: neutral(composerMode),
     },
     chrome: {
       header: chrome(mode === 'dark' ? 88 : 75),

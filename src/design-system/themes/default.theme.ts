@@ -7,15 +7,15 @@ import {
 } from './legacyTheme';
 import {
   createSolidThemeMaterialRecipes,
-  type SolidContentMaterialOverrides,
+  type SolidThemeMaterialOverrides,
 } from '../materials/presets';
 
 const lightColors = createDefaultThemeColors('light');
 const darkColors = createDefaultThemeColors('dark');
 
-function createDefaultContentMaterialOverrides(
+function createDefaultMaterialOverrides(
   mode: 'light' | 'dark',
-): SolidContentMaterialOverrides {
+): SolidThemeMaterialOverrides {
   const isDark = mode === 'dark';
   const { background, error, info, outline, primary, success, warning } = semanticColorTokens;
 
@@ -27,6 +27,10 @@ function createDefaultContentMaterialOverrides(
   });
 
   return {
+    header: {
+      fillColor: isDark ? withAlpha(background[950], 0.9) : withAlpha(background[0], 0.94),
+      rimColor: isDark ? outline[800] : outline[200],
+    },
     raised: {
       fillColor: isDark ? withAlpha(background[900], 0.6) : background[50],
       rimColor: isDark ? outline[800] : outline[200],
@@ -34,6 +38,35 @@ function createDefaultContentMaterialOverrides(
     inset: {
       fillColor: isDark ? withAlpha(background[950], 0.7) : background[0],
       rimColor: isDark ? outline[700] : outline[200],
+    },
+    message: {
+      fillColor: isDark ? withAlpha(background[900], 0.7) : background[50],
+      rimColor: isDark ? outline[800] : outline[200],
+    },
+    messageThought: {
+      fillColor: withAlpha(isDark ? background[950] : background[0], isDark ? 0.4 : 0.8),
+      rimColor: withAlpha(isDark ? outline[700] : outline[200], isDark ? 0.7 : 0.8),
+    },
+    messageAttachment: {
+      fillColor: 'transparent',
+      rimColor: 'transparent',
+      rimWidth: 0,
+    },
+    messageError: {
+      fillColor: withAlpha(error[500], isDark ? 0.15 : 0.1),
+      rimColor: 'transparent',
+      rimWidth: 0,
+    },
+    composerMode: {
+      fillColor: withAlpha(primary[500], 0.05),
+      rimColor: withAlpha(primary[500], 0.15),
+    },
+    messageTones: {
+      primary: {
+        fillColor: primary[500],
+        rimColor: primary[500],
+        rimWidth: 0,
+      },
     },
     tones: {
       primary: semanticFrame(primary),
@@ -65,7 +98,7 @@ export const defaultTheme = {
       appearance: createDefaultThemeAppearance('light'),
       materials: createSolidThemeMaterialRecipes(
         lightColors,
-        createDefaultContentMaterialOverrides('light'),
+        createDefaultMaterialOverrides('light'),
       ),
     },
     dark: {
@@ -73,12 +106,16 @@ export const defaultTheme = {
       appearance: createDefaultThemeAppearance('dark'),
       materials: createSolidThemeMaterialRecipes(
         darkColors,
-        createDefaultContentMaterialOverrides('dark'),
+        createDefaultMaterialOverrides('dark'),
       ),
     },
   },
   components: {
     tabBar: { presentation: 'attached' },
     header: { presentation: 'attached' },
+    chat: {
+      composerPresentation: 'inline',
+      userBubbleTone: 'primary',
+    },
   },
 } as const satisfies ThemeDefinition<'default'>;

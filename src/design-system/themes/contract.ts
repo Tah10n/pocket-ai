@@ -27,6 +27,10 @@ export interface ThemeComponentPresentation {
   readonly header: {
     readonly presentation: 'attached' | 'overlay';
   };
+  readonly chat: {
+    readonly composerPresentation: 'inline' | 'capsule';
+    readonly userBubbleTone: 'primary';
+  };
 }
 
 export interface ThemeModeDefinition<Id extends string = string> {

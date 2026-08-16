@@ -118,6 +118,29 @@ describe('EffectSurface', () => {
     expect(blurLayer?.props.blurReductionFactor).toBeGreaterThan(1);
   });
 
+  it('uses a ready explicit Android target for sibling composer chrome', () => {
+    const explicitTargetRef = { current: {} } as React.RefObject<View | null>;
+    const environment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectSurface
+          androidBlurTargetRef={explicitTargetRef}
+          material={{ role: 'chrome', variant: 'composer' }}
+        />
+      </MaterialEnvironmentProvider>,
+    );
+    const blurLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      node.props.blurMethod === 'dimezisBlurViewSdk31Plus'
+    ));
+
+    expect(blurLayer?.props.blurTarget).toBe(explicitTargetRef);
+  });
+
   it('fails closed while an Android sample target is pending', () => {
     const target = createTarget(Symbol('pending'));
     const environment = createMaterialEnvironment('android', {

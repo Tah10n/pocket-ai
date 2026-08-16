@@ -3,9 +3,6 @@ import { fireEvent, render, waitFor } from '@testing-library/react-native';
 import { AccessibilityInfo, Alert, Platform, Text as RNText } from 'react-native';
 import {
   ChatInputBar,
-  getGlassComposerCapsuleStyle,
-  getModeBannerGlassStyle,
-  getPrimaryActionGlassStyle,
   markChatInputDraftConsumedError,
   markChatInputErrorReported,
 } from '../../src/components/ui/ChatInputBar';
@@ -15,6 +12,8 @@ import type { AttachmentDraft } from '../../src/types/multimodal';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { getInteractiveWorkRevision } from '../../src/utils/idleTask';
+import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
+import { resolveTheme } from '../../src/design-system/themes/resolver';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -109,6 +108,51 @@ describe('ChatInputBar', () => {
       />,
     );
     expect(getByTestId('chat-primary-action-stop')).toBeTruthy();
+  });
+
+  it('selects composer chrome from theme presentation without changing the default layout', () => {
+    const defaultComposer = render(
+      <StaticThemeProvider themeId="default" resolvedMode="light">
+        <ChatInputBar onSendMessage={jest.fn()} />
+      </StaticThemeProvider>,
+    );
+
+    expect(defaultComposer.queryByTestId('chat-input-bar-capsule')).toBeNull();
+    defaultComposer.unmount();
+
+    const glassComposer = render(
+      <StaticThemeProvider themeId="glass" resolvedMode="light">
+        <ChatInputBar onSendMessage={jest.fn()} />
+      </StaticThemeProvider>,
+    );
+
+    expect(glassComposer.getByTestId('chat-input-bar-capsule')).toBeTruthy();
+    expect(glassComposer.getByTestId('chat-input-bar-row').props.className).toContain('h-full');
+    glassComposer.unmount();
+
+    const resolvedGlassTheme = resolveTheme('glass', 'dark');
+    const darkGlassComposer = render(
+      <StaticThemeProvider themeId="glass" resolvedMode="dark">
+        <ChatInputBar
+          draft="Ready"
+          modeLabel="Regenerate"
+          onSendMessage={jest.fn()}
+        />
+      </StaticThemeProvider>,
+    );
+
+    expect(flattenStyle(darkGlassComposer.getByTestId('chat-input-bar-capsule').props.style)).toMatchObject({
+      backgroundColor: resolvedGlassTheme.colors.surfaceOverlay,
+      borderColor: resolvedGlassTheme.colors.borderSubtle,
+    });
+    expect(flattenStyle(darkGlassComposer.getByTestId('chat-primary-action-send').props.style)).toMatchObject({
+      backgroundColor: resolvedGlassTheme.colors.primarySoft,
+      borderWidth: 1,
+    });
+    expect(flattenStyle(darkGlassComposer.getByTestId('chat-regeneration-mode').props.style)).toMatchObject({
+      backgroundColor: resolvedGlassTheme.colors.primarySoft,
+      borderWidth: 0,
+    });
   });
 
   it('sends the message when the input submits', async () => {
@@ -1256,32 +1300,4 @@ describe('ChatInputBar', () => {
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('Wait for this image');
   });
 
-  it('derives glass primary action colors from the active primary token', () => {
-    expect(getPrimaryActionGlassStyle('#2563eb', 'light')).toEqual({
-      backgroundColor: 'rgba(37, 99, 235, 0.1)',
-      borderWidth: 0,
-    });
-    expect(getPrimaryActionGlassStyle('#38bdf8', 'dark')).toEqual({
-      backgroundColor: 'rgba(56, 189, 248, 0.22)',
-      borderWidth: 0,
-    });
-  });
-
-  it('softens dark glass composer and mode banner shells without changing light-mode fallbacks', () => {
-    expect(getGlassComposerCapsuleStyle('#020617', '#475569', 'light')).toEqual({
-      borderRadius: 999,
-    });
-    expect(getGlassComposerCapsuleStyle('#f7fbff', '#475569', 'dark')).toEqual({
-      backgroundColor: 'rgba(247, 251, 255, 0.1)',
-      borderColor: 'rgba(71, 85, 105, 0.28)',
-      borderRadius: 999,
-      borderWidth: 1,
-    });
-    expect(getModeBannerGlassStyle('#020617', '#60a5fa', 'light')).toBeUndefined();
-    expect(getModeBannerGlassStyle('#f7fbff', '#60a5fa', 'dark')).toEqual({
-      backgroundColor: 'rgba(247, 251, 255, 0.09)',
-      borderColor: 'rgba(96, 165, 250, 0.26)',
-      borderWidth: 1,
-    });
-  });
 });

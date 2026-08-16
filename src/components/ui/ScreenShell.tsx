@@ -8,6 +8,7 @@ import { Box } from '@/components/ui/box';
 import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
 import { PressableSurface as MaterialPressableSurface, Surface as MaterialSurface } from '../../design-system/materials/Surface';
+import { EffectSurface } from '../../design-system/materials/EffectSurface';
 import type { MaterialRequest } from '../../design-system/materials/contract';
 import {
   AndroidBlurBoundaryProvider,
@@ -24,6 +25,7 @@ import { DEFAULT_THEME_ID, buttonLayoutTokens, getThemeActionContentClassName, g
 import { useTheme } from '../../providers/ThemeProvider';
 
 interface ScreenHeaderShellProps {
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
   children: React.ReactNode;
   contentClassName?: string;
   contentStyle?: StyleProp<ViewStyle>;
@@ -31,6 +33,8 @@ interface ScreenHeaderShellProps {
   maxWidthClassName?: string;
   testID?: string;
 }
+
+const SCREEN_HEADER_MATERIAL = { role: 'chrome', variant: 'header' } as const;
 
 interface ScreenContentProps {
   children: React.ReactNode;
@@ -337,21 +341,6 @@ function getExplicitIconColorFromClassName(iconClassName: string | undefined, co
   }
 
   return undefined;
-}
-
-function getGlassHeaderFrameStyle(
-  appearance: ThemeAppearance,
-  _mode: ResolvedThemeMode,
-): ViewStyle | undefined {
-  if (appearance.surfaceKind !== 'glass') {
-    return undefined;
-  }
-
-  return {
-    borderBottomWidth: 0,
-    elevation: 0,
-    shadowOpacity: 0,
-  };
 }
 
 function useResolvedThemeAppearance() {
@@ -713,27 +702,6 @@ function LiquidGlassOptics({
   );
 }
 
-function HeaderFadeBackdrop({ tint }: { tint: 'light' | 'dark' }) {
-  if (Platform.OS === 'android') {
-    return null;
-  }
-
-  const colors: LiquidGlassGradientColors = tint === 'dark'
-    ? ['rgba(125,211,252,0.1)', 'rgba(96,165,250,0.035)', 'rgba(6,11,20,0)']
-    : ['rgba(255,255,255,0.38)', 'rgba(255,255,255,0)'];
-
-  return (
-    <LinearGradient
-      pointerEvents="none"
-      colors={colors}
-      locations={tint === 'dark' ? [0, 0.46, 1] : undefined}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 0, y: 1 }}
-      style={StyleSheet.absoluteFill}
-    />
-  );
-}
-
 const styles = StyleSheet.create({
   screenSceneBlurTarget: {
     flex: 1,
@@ -929,6 +897,7 @@ interface ScreenIconButtonProps extends React.ComponentProps<typeof Pressable> {
   iconClassName?: string;
   className?: string;
   style?: StyleProp<ViewStyle>;
+  material?: Extract<MaterialRequest, { role: 'control' }>;
   tone?: 'neutral' | 'primary' | 'danger';
   accessibilityLabel: string;
 }
@@ -1078,6 +1047,7 @@ interface ScreenChromeBarProps {
 }
 
 export function ScreenHeaderShell({
+  androidBlurTargetRef,
   children,
   contentClassName,
   contentStyle,
@@ -1086,24 +1056,10 @@ export function ScreenHeaderShell({
   testID,
 }: ScreenHeaderShellProps) {
   const insets = useSafeAreaInsets();
-  const { appearance, theme } = useResolvedThemeAppearance();
-  const blurTarget = useResolvedAndroidBlurTarget();
+  const { theme } = useResolvedThemeAppearance();
   const setHeaderInset = React.useContext(ScreenHeaderInsetSetterContext);
-  const { colors } = theme;
-  const isGlass = appearance.surfaceKind === 'glass';
-  const isFloating = floating ?? false;
-  const shouldUseAndroidMatteHeader = isGlass && shouldUseAndroidGlassMatteFallback();
-  const shouldBlurHeader = isGlass
-    && !shouldUseAndroidMatteHeader
-    && (Platform.OS !== 'android' || (!isAndroidBlurFallbackRequired() && Boolean(blurTarget)));
-  const headerClassName = joinClassNames(
-    appearance.classNames.headerShellClassName,
-    isGlass && (isAndroidBlurFallbackRequired() || shouldUseAndroidMatteHeader)
-      ? theme.resolvedMode === 'dark'
-        ? 'bg-background-0/14 dark:bg-background-0/14'
-        : 'bg-background-0/82 dark:bg-background-0/82'
-      : undefined,
-  );
+  const isFloating = floating
+    ?? theme.resolvedTheme.components.header.presentation === 'overlay';
   const handleLayout = React.useCallback((event: LayoutChangeEvent) => {
     if (!isFloating || !setHeaderInset) {
       return;
@@ -1144,41 +1100,23 @@ export function ScreenHeaderShell({
     <Box
       onLayout={isFloating ? handleLayout : undefined}
       className={joinClassNames(
-        'z-10 w-full overflow-hidden',
-        isGlass ? undefined : 'border-b',
+        'z-10 w-full',
         isFloating ? 'absolute left-0 right-0 top-0' : undefined,
-        appearance.classNames.headerBorderClassName,
       )}
-      style={getGlassHeaderFrameStyle(appearance, theme.resolvedMode)}
     >
-      {shouldBlurHeader ? (
-        <BlurView
-          intensity={appearance.effects.headerBlurIntensity}
-          tint={getGlassBlurTint(colors.headerBlurTint)}
-          blurReductionFactor={isGlass ? undefined : 2}
-          {...getAndroidBlurProps(appearance, blurTarget)}
-          className={headerClassName}
-          style={{ paddingTop: insets.top }}
-        >
-          {isGlass ? (
-            <>
-              <HeaderFadeBackdrop tint={colors.headerBlurTint} />
-              <GlassSpecular tint={colors.headerBlurTint} />
-            </>
-          ) : null}
-          {content}
-        </BlurView>
-      ) : (
-        <Box className={headerClassName} style={{ paddingTop: insets.top }}>
-          {isGlass ? (
-            <>
-              <HeaderFadeBackdrop tint={colors.headerBlurTint} />
-              <GlassSpecular tint={colors.headerBlurTint} />
-            </>
-          ) : null}
-          {content}
-        </Box>
-      )}
+      <EffectSurface
+        androidBlurTargetRef={androidBlurTargetRef}
+        material={SCREEN_HEADER_MATERIAL}
+        shape="none"
+        style={{
+          borderLeftWidth: 0,
+          borderRightWidth: 0,
+          borderTopWidth: 0,
+          paddingTop: insets.top,
+        }}
+      >
+        {content}
+      </EffectSurface>
     </Box>
   );
 }
@@ -1597,6 +1535,7 @@ export function ScreenIconButton({
   tone = 'neutral',
   accessibilityLabel,
   disabled,
+  material,
   style,
   ...props
 }: ScreenIconButtonProps) {
@@ -1617,6 +1556,37 @@ export function ScreenIconButton({
   const explicitIconColor = getExplicitIconColorFromClassName(mergedIconClassName, theme.colors);
   const sizeClassName = buttonLayoutTokens.screenIconButtonClassNameBySize[size];
   const glassCornerRadiusStyle = getGlassCornerRadiusStyle(sizeClassName, screenLayoutTokens.iconButtonClassName, toneClassName, className);
+  const icon = (
+    <MaterialSymbols
+      name={iconName}
+      size={iconSize}
+      className={mergedIconClassName}
+      color={explicitIconColor ?? resolvedIconColor}
+    />
+  );
+
+  if (material) {
+    return (
+      <MaterialPressableSurface
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        disabled={disabled}
+        hitSlop={size === 'micro' ? 10 : 8}
+        material={material}
+        shape="full"
+        className={joinClassNames(
+          sizeClassName,
+          screenLayoutTokens.iconButtonClassName,
+          disabled ? 'opacity-55' : 'active:opacity-70',
+          className,
+        )}
+        style={style}
+        {...props}
+      >
+        {icon}
+      </MaterialPressableSurface>
+    );
+  }
 
   return (
     <Pressable
@@ -1639,12 +1609,7 @@ export function ScreenIconButton({
     >
       <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative="tint" cornerRadiusStyle={glassCornerRadiusStyle} />
       <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
-      <MaterialSymbols
-        name={iconName}
-        size={iconSize}
-        className={mergedIconClassName}
-        color={explicitIconColor ?? resolvedIconColor}
-      />
+      {icon}
     </Pressable>
   );
 }

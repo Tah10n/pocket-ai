@@ -11,13 +11,22 @@ import type { ChatMessageState } from '@/types/chat';
 import type { InferenceCompletionTelemetry } from '@/types/models';
 import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
-import { ScreenBadge, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
+import { ScreenBadge, ScreenIconButton, ScreenIconTile } from './ScreenShell';
+import { Surface } from '../../design-system/materials/Surface';
+import { useTheme } from '../../providers/ThemeProvider';
 import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
 import { getAssistantPresentation } from '../../utils/chatPresentation';
 import { getThemeActionContentClassName } from '../../utils/themeTokens';
 import { shouldReduceAndroidQaStreamingMotion } from '../../services/AndroidQaGenerationEvidence';
+
+const ASSISTANT_MESSAGE_MATERIAL = { role: 'content', variant: 'message', tone: 'neutral' } as const;
+const USER_PRIMARY_MESSAGE_MATERIAL = { role: 'content', variant: 'message', tone: 'primary' } as const;
+const USER_MESSAGE_MATERIAL_BY_TONE = { primary: USER_PRIMARY_MESSAGE_MATERIAL } as const;
+const THOUGHT_CONTENT_MATERIAL = { role: 'content', variant: 'messageThought' } as const;
+const ATTACHMENT_CONTENT_MATERIAL = { role: 'content', variant: 'messageAttachment' } as const;
+const ERROR_CONTENT_MATERIAL = { role: 'content', variant: 'messageError' } as const;
 
 export interface ChatMessageBubbleProps {
   id: string;
@@ -199,7 +208,8 @@ const ChatMessageBubbleComponent = ({
   const [attachmentPreviewUris, setAttachmentPreviewUris] = useState<Record<string, string | null>>({});
   const failedAttachmentPreviewUrisRef = useRef<Record<string, Set<string>>>({});
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
+  const theme = useTheme();
+  const appearance = theme.appearance;
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
   const assistantPresentation = isUser
     ? null
@@ -310,9 +320,13 @@ const ChatMessageBubbleComponent = ({
   const metadataRowClassName = isUser ? 'self-end mr-1' : 'self-start ml-1';
   const bubbleAlignmentClassName = isUser ? 'self-end' : 'self-start';
   // Chat bubbles keep asymmetric radii as a deliberate visual affordance between user and assistant turns.
-  const bubbleClassName = isUser
-    ? appearance.classNames.chatUserBubbleClassName
-    : appearance.classNames.chatAssistantBubbleClassName;
+  const bubbleClassName = isUser ? 'px-3.5 py-2' : 'px-3 py-1.5';
+  const bubbleShapeStyle = isUser
+    ? { borderRadius: 24, borderBottomRightRadius: 8 }
+    : { borderRadius: 22, borderBottomLeftRadius: 8 };
+  const bubbleMaterial = isUser
+    ? USER_MESSAGE_MATERIAL_BY_TONE[theme.resolvedTheme.components.chat.userBubbleTone]
+    : ASSISTANT_MESSAGE_MATERIAL;
   const shouldShowThoughtSection = !isUser && hasThought;
   const thoughtLabel = shouldAnimateThought ? t('chat.thinkingTitle') : t('chat.thoughtTitle');
   const thoughtDescription = shouldAnimateThought
@@ -322,9 +336,7 @@ const ChatMessageBubbleComponent = ({
   const hasErrorMessage = !isUser && typeof errorMessage === 'string' && errorMessage.trim().length > 0;
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
-  const thoughtBubbleClassName = appearance.classNames.chatThoughtBubbleClassName;
-  const shouldUseGlassBubble = appearance.surfaceKind === 'glass';
-  const shouldUseAssistantGlass = appearance.surfaceKind === 'glass' && !isUser;
+  const thoughtBubbleClassName = 'min-w-[220px] max-w-full px-3 py-2';
   const userTextClassName = getThemeActionContentClassName(appearance, 'primary');
   const userAttachments = React.useMemo(
     () => (isUser ? attachments ?? [] : []),
@@ -400,19 +412,17 @@ const ChatMessageBubbleComponent = ({
       onLayout={onLayout}
     >
       <Box className={`w-full flex-row ${isUser ? 'items-end justify-end pl-8' : 'items-start justify-start pr-8'}`}>
-        <ScreenSurface
+        <Surface
           testID={`message-bubble-shell-${id}`}
-          tone={isUser ? 'primary' : 'default'}
-          decorative="matte"
-          applyGlassFrame={shouldUseGlassBubble}
-          withControlTint={shouldUseGlassBubble && isUser}
+          material={bubbleMaterial}
+          shape="lg"
           className={`max-w-full min-w-0 flex-shrink ${bubbleAlignmentClassName} ${bubbleClassName}`}
+          style={bubbleShapeStyle}
         >
           {shouldShowThoughtSection ? (
-            <ScreenSurface
-              tone="accent"
-              decorative="matte"
-              withControlTint={shouldUseAssistantGlass}
+            <Surface
+              material={THOUGHT_CONTENT_MATERIAL}
+              shape="lg"
               className={`${assistantBodyContent ? 'mb-1.5 ' : ''}${thoughtBubbleClassName}`}
             >
               <Pressable
@@ -473,7 +483,7 @@ const ChatMessageBubbleComponent = ({
                   )}
                 </Box>
               ) : null}
-            </ScreenSurface>
+            </Surface>
           ) : null}
 
           {isUser ? (
@@ -490,11 +500,11 @@ const ChatMessageBubbleComponent = ({
                     };
                     if (!isImageMessageAttachment(attachment) && 'kind' in attachment) {
                       return (
-                        <ScreenSurface
+                        <Surface
                           key={attachment.id}
                           testID={`message-attachment-${attachment.kind}-${id}-${attachment.id}`}
-                          tone="default"
-                          decorative="matte"
+                          material={ATTACHMENT_CONTENT_MATERIAL}
+                          shape="md"
                           accessible
                           accessibilityRole="summary"
                           accessibilityLabel={t('chat.attachments.messageFileIndexedAccessibilityLabel', {
@@ -513,7 +523,7 @@ const ChatMessageBubbleComponent = ({
                               {getAttachmentLabel(attachment)}
                             </Text>
                           </Box>
-                        </ScreenSurface>
+                        </Surface>
                       );
                     }
 
@@ -530,11 +540,11 @@ const ChatMessageBubbleComponent = ({
                         className="h-[72px] w-[72px] rounded-lg"
                       />
                     ) : (
-                      <ScreenSurface
+                      <Surface
                         key={attachment.id}
                         testID={`message-attachment-unavailable-${id}-${attachment.id}`}
-                        tone="default"
-                        decorative="matte"
+                        material={ATTACHMENT_CONTENT_MATERIAL}
+                        shape="md"
                         accessible
                         accessibilityRole="image"
                         accessibilityLabel={t('chat.attachments.messageUnavailableIndexedAccessibilityLabel', attachmentLabelOptions)}
@@ -545,7 +555,7 @@ const ChatMessageBubbleComponent = ({
                         <Text className="min-w-0 flex-1 text-xs leading-4 text-typography-700 dark:text-typography-200">
                           {t('chat.attachments.unavailable')}
                         </Text>
-                      </ScreenSurface>
+                      </Surface>
                     );
                   })}
                 </Box>
@@ -573,14 +583,18 @@ const ChatMessageBubbleComponent = ({
           ) : null}
 
           {hasErrorMessage ? (
-            <ScreenSurface tone="error" withControlTint className={`mt-2 flex-row items-start gap-2 px-2.5 py-2 ${appearance.classNames.chatInlineErrorClassName}`}>
+            <Surface
+              material={ERROR_CONTENT_MATERIAL}
+              shape="md"
+              className="mt-2 flex-row items-start gap-2 px-2.5 py-2"
+            >
               <MaterialSymbols name="error-outline" size="sm" className="mt-0.5 text-error-600 dark:text-error-300" />
               <Text selectable className="min-w-0 flex-1 text-sm leading-5 text-error-800 dark:text-error-200">
                 {errorMessage}
               </Text>
-            </ScreenSurface>
+            </Surface>
           ) : null}
-        </ScreenSurface>
+        </Surface>
       </Box>
 
       {shouldShowMetadataRow ? (

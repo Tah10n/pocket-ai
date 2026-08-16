@@ -12,7 +12,15 @@ export type MaterialTone =
   | 'error';
 
 export type CanvasMaterialVariant = 'base';
-export type ContentMaterialVariant = 'raised' | 'inset' | 'list';
+export type ContentMaterialVariant =
+  | 'raised'
+  | 'inset'
+  | 'list'
+  | 'message'
+  | 'messageThought'
+  | 'messageAttachment'
+  | 'messageError'
+  | 'composerMode';
 export type ChromeMaterialVariant = 'header' | 'tabBar' | 'composer' | 'sheet';
 export type ControlMaterialVariant = 'inline' | 'floating' | 'selected';
 export type OverlayMaterialVariant = 'banner' | 'popover' | 'scrim';

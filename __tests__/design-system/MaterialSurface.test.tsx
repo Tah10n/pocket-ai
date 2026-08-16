@@ -139,6 +139,111 @@ describe('material Surface primitives', () => {
     });
   });
 
+  it.each(['light', 'dark'] as const)(
+    'preserves dense default-theme message frames in %s mode',
+    (mode) => {
+      mockResolvedTheme = resolveTheme('default', mode);
+      const user = render(
+        <Surface
+          testID="user-message-material"
+          material={{ role: 'content', variant: 'message', tone: 'primary' }}
+          shape="lg"
+        />,
+      );
+      const assistant = render(
+        <Surface
+          testID="assistant-message-material"
+          material={{ role: 'content', variant: 'message' }}
+          shape="lg"
+        />,
+      );
+      const thought = render(
+        <Surface
+          testID="message-thought-material"
+          material={{ role: 'content', variant: 'messageThought' }}
+        />,
+      );
+      const attachment = render(
+        <Surface
+          testID="message-attachment-material"
+          material={{ role: 'content', variant: 'messageAttachment' }}
+        />,
+      );
+      const inlineError = render(
+        <Surface
+          testID="message-error-material"
+          material={{ role: 'content', variant: 'messageError' }}
+        />,
+      );
+
+      expect(StyleSheet.flatten(user.getByTestId('user-message-material').props.style)).toMatchObject({
+        backgroundColor: mockResolvedTheme.colors.primary,
+        borderWidth: 0,
+      });
+      expect(StyleSheet.flatten(assistant.getByTestId('assistant-message-material').props.style)).toMatchObject({
+        backgroundColor: mode === 'dark'
+          ? withAlpha(semanticColorTokens.background[900], 0.7)
+          : semanticColorTokens.background[50],
+        borderColor: mode === 'dark'
+          ? semanticColorTokens.outline[800]
+          : semanticColorTokens.outline[200],
+        borderWidth: 1,
+      });
+      expect(StyleSheet.flatten(thought.getByTestId('message-thought-material').props.style)).toMatchObject({
+        backgroundColor: withAlpha(
+          mode === 'dark' ? semanticColorTokens.background[950] : semanticColorTokens.background[0],
+          mode === 'dark' ? 0.4 : 0.8,
+        ),
+        borderColor: withAlpha(
+          mode === 'dark' ? semanticColorTokens.outline[700] : semanticColorTokens.outline[200],
+          mode === 'dark' ? 0.7 : 0.8,
+        ),
+        borderWidth: 1,
+      });
+      expect(StyleSheet.flatten(attachment.getByTestId('message-attachment-material').props.style)).toMatchObject({
+        backgroundColor: 'transparent',
+        borderColor: 'transparent',
+        borderWidth: 0,
+      });
+      expect(StyleSheet.flatten(inlineError.getByTestId('message-error-material').props.style)).toMatchObject({
+        backgroundColor: withAlpha(semanticColorTokens.error[500], mode === 'dark' ? 0.15 : 0.1),
+        borderColor: 'transparent',
+        borderWidth: 0,
+      });
+    },
+  );
+
+  it.each(['light', 'dark'] as const)(
+    'preserves default-theme composer control frames in %s mode',
+    (mode) => {
+      mockResolvedTheme = resolveTheme('default', mode);
+      const modeBanner = render(
+        <Surface
+          testID="composer-mode-material"
+          material={{ role: 'content', variant: 'composerMode' }}
+        />,
+      );
+      const primaryAction = render(
+        <PressableSurface
+          testID="composer-primary-action-material"
+          material={{ role: 'control', variant: 'selected', tone: 'primary' }}
+          shape="full"
+        />,
+      );
+
+      expect(StyleSheet.flatten(modeBanner.getByTestId('composer-mode-material').props.style)).toMatchObject({
+        backgroundColor: withAlpha(semanticColorTokens.primary[500], 0.05),
+        borderColor: withAlpha(semanticColorTokens.primary[500], 0.15),
+        borderWidth: 1,
+      });
+      expect(StyleSheet.flatten(primaryAction.getByTestId('composer-primary-action-material').props.style)).toMatchObject({
+        backgroundColor: semanticColorTokens.primary[500],
+        borderColor: semanticColorTokens.primary[500],
+        borderWidth: 0,
+      });
+    },
+  );
+
   it('forwards host accessibility and pointer event props', () => {
     const screen = render(
       <Surface

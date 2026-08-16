@@ -10,8 +10,10 @@ import {
   ScreenChip,
   ScreenHeaderShell,
 } from './ScreenShell';
+import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 
 interface ChatHeaderProps {
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   title: string;
   presetLabel?: string;
   modelLabel?: string;
@@ -58,6 +60,7 @@ function HeaderStatus({
 }
 
 export const ChatHeader = ({
+  androidContentBlurTargetRef,
   title,
   presetLabel,
   modelLabel,
@@ -82,7 +85,7 @@ export const ChatHeader = ({
   const shouldShowPills = Boolean(presetLabel || modelLabel);
 
   return (
-    <ScreenHeaderShell>
+    <ScreenHeaderShell androidBlurTargetRef={androidContentBlurTargetRef}>
       <Box className={screenChromeTokens.headerContentVerticalPaddingCompactClassName}>
         <Box className={`flex-row items-start ${screenChromeTokens.headerContentGapClassName} ${screenChromeTokens.headerHorizontalPaddingClassName}`}>
           <HeaderBackButton

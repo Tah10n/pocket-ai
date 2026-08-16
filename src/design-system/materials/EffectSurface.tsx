@@ -4,6 +4,7 @@ import { BlurView } from 'expo-blur';
 import { Box } from '@/components/ui/box';
 import { useTheme } from '../../providers/ThemeProvider';
 import { useResolvedAndroidBlurTarget } from './AndroidBlurTargetContext';
+import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 import { useMaterialEnvironment } from './MaterialEnvironmentProvider';
 import type { MaterialRequest, MaterialShape } from './contract';
 import { resolveMaterialRecipe } from './resolver';
@@ -19,11 +20,13 @@ type EffectMaterialRequest = Extract<MaterialRequest, {
 }>;
 
 export type EffectSurfaceProps = BoxProps & {
+  readonly androidBlurTargetRef?: AndroidBlurTargetRef | null;
   readonly material: EffectMaterialRequest;
   readonly shape?: MaterialShape;
 };
 
 export function EffectSurface({
+  androidBlurTargetRef,
   children,
   material,
   shape = 'md',
@@ -32,7 +35,7 @@ export function EffectSurface({
 }: EffectSurfaceProps) {
   const { resolvedTheme } = useTheme();
   const environment = useMaterialEnvironment();
-  const androidBlurTarget = useResolvedAndroidBlurTarget();
+  const androidBlurTarget = useResolvedAndroidBlurTarget(androidBlurTargetRef);
   const effectiveEnvironment = useMemo(() => ({
     ...environment,
     androidTargetBlurSupported: environment.androidTargetBlurSupported

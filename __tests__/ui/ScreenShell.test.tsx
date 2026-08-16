@@ -60,7 +60,15 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => ({
 }));
 
 jest.mock('../../src/providers/ThemeProvider', () => ({
-  useTheme: () => mockThemeContext,
+  useTheme: () => {
+    const { resolveTheme } = jest.requireActual('../../src/design-system/themes/resolver');
+
+    return {
+      ...mockThemeContext,
+      resolvedTheme: mockThemeContext.resolvedTheme
+        ?? resolveTheme(mockThemeContext.themeId ?? 'default', mockThemeContext.resolvedMode ?? 'light'),
+    };
+  },
 }));
 
 jest.mock('react-native-safe-area-context', () => ({
@@ -389,12 +397,13 @@ describe('ScreenShell', () => {
     expect(blurBackdrop).toBeTruthy();
   });
 
-  it('renders frosted backdrops for glass cards', () => {
+  it('renders glass-theme content cards as dense surfaces without live blur', () => {
     const { StyleSheet } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
+    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
     const appearance = getThemeAppearance('glass', 'light');
+    const colors = getThemeColors('light', 'glass');
     mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
+      colors,
       resolvedMode: 'light',
       themeId: 'glass',
       appearance,
@@ -405,39 +414,26 @@ describe('ScreenShell', () => {
     );
 
     expect(getByTestId('glass-card').props.className).toContain('px-4 py-3');
-    expect(getByTestId('glass-card').props.className).toContain('relative overflow-hidden');
-    expect(getByTestId('glass-card').props.className).toContain('bg-transparent');
+    expect(getByTestId('glass-card').props.className).not.toContain('relative overflow-hidden');
+    expect(getByTestId('glass-card').props.className).not.toContain('bg-transparent');
     expect(StyleSheet.flatten(getByTestId('glass-card').props.style)).toMatchObject({
+      backgroundColor: colors.cardBackground,
+      borderColor: colors.borderSubtle,
       borderRadius: 20,
-      borderWidth: 0,
+      borderWidth: 1,
       elevation: 0,
       shadowOpacity: 0,
     });
-    expect(StyleSheet.flatten(getByTestId('glass-card').props.style).borderColor).toBeUndefined();
 
     const { View } = require('react-native');
-    const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
-      node.props.pointerEvents === 'none'
-      && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-    );
-    expect(blurBackdrop).toBeTruthy();
-    expect(StyleSheet.flatten(blurBackdrop?.props.style)).toMatchObject({
-      borderRadius: 20,
-    });
-
-    const innerRim = UNSAFE_getAllByType(View).find((node: any) =>
-      Array.isArray(node.props.style)
-      && node.props.style.some((entry: any) => entry?.opacity === 0.9),
-    );
-    expect(innerRim?.props.style).toEqual(expect.arrayContaining([
-      expect.objectContaining({ borderRadius: 20 }),
-    ]));
-    expect(StyleSheet.flatten(innerRim?.props.style).borderWidth).toBe(StyleSheet.hairlineWidth);
+    expect(UNSAFE_getAllByType(View).some((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
+    ))).toBe(false);
   });
 
   it('keeps light glass accent cards visually separated from the screen background', () => {
     const { StyleSheet } = require('react-native');
-    const { getThemeAppearance, getThemeColors, withAlpha } = require('../../src/utils/themeTokens');
+    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
     const colors = getThemeColors('light', 'glass');
     mockThemeContext = {
       colors,
@@ -451,8 +447,8 @@ describe('ScreenShell', () => {
     );
 
     expect(StyleSheet.flatten(getByTestId('active-model-glass-card').props.style)).toMatchObject({
-      backgroundColor: withAlpha(colors.primaryStrong, 0.13),
-      borderColor: withAlpha(colors.primaryStrong, 0.42),
+      backgroundColor: colors.primarySoft,
+      borderColor: colors.primary,
       borderRadius: 20,
       borderWidth: 1,
       elevation: 0,
@@ -486,49 +482,34 @@ describe('ScreenShell', () => {
     expect(style.borderColor).toBeUndefined();
   });
 
-  it('keeps dark glass cards contrasty without white feathered stripes', () => {
-    const { Platform, StyleSheet, View } = require('react-native');
+  it('keeps light and dark glass content cards dense without decorative gradients', () => {
+    const { StyleSheet, View } = require('react-native');
     const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
+    const lightColors = getThemeColors('light', 'glass');
+    mockThemeContext = {
+      colors: lightColors,
+      resolvedMode: 'light',
+      themeId: 'glass',
+      appearance: getThemeAppearance('glass', 'light'),
+    };
+    const lightRender = render(<ScreenCard testID="light-glass-card">content</ScreenCard>);
+    expect(getGradientSignature(lightRender.UNSAFE_getAllByType(View))).toHaveLength(0);
+    expect(StyleSheet.flatten(lightRender.getByTestId('light-glass-card').props.style).backgroundColor)
+      .toBe(lightColors.cardBackground);
+    lightRender.unmount();
 
-    try {
-      mockThemeContext = {
-        colors: getThemeColors('light', 'glass'),
-        resolvedMode: 'light',
-        themeId: 'glass',
-        appearance: getThemeAppearance('glass', 'light'),
-      };
-      const lightRender = render(<ScreenCard testID="light-glass-card">content</ScreenCard>);
-      const lightSignature = getGradientSignature(lightRender.UNSAFE_getAllByType(View));
-      lightRender.unmount();
-
-      mockThemeContext = {
-        colors: getThemeColors('dark', 'glass'),
-        resolvedMode: 'dark',
-        themeId: 'glass',
-        appearance: getThemeAppearance('glass', 'dark'),
-      };
-      const darkRender = render(<ScreenCard testID="dark-glass-card">content</ScreenCard>);
-      const darkViews = darkRender.UNSAFE_getAllByType(View);
-      const darkSignature = getGradientSignature(darkViews);
-      const darkContrastLayer = darkViews.find((node: any) =>
-        StyleSheet.flatten(node.props.style)?.backgroundColor === 'rgba(6,11,20,0.48)',
-      );
-
-      expect(darkContrastLayer).toBeTruthy();
-
-      expect(darkSignature).toHaveLength(lightSignature.length);
-      expect(darkSignature.length).toBeGreaterThan(0);
-      for (const darkLayer of darkSignature) {
-        expect(darkLayer.colors.join('|')).not.toContain('rgba(244,247,251');
-        expect(darkLayer.colors.join('|')).not.toContain('rgba(255,255,255');
-      }
-
-      darkRender.unmount();
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
+    const darkColors = getThemeColors('dark', 'glass');
+    mockThemeContext = {
+      colors: darkColors,
+      resolvedMode: 'dark',
+      themeId: 'glass',
+      appearance: getThemeAppearance('glass', 'dark'),
+    };
+    const darkRender = render(<ScreenCard testID="dark-glass-card">content</ScreenCard>);
+    expect(getGradientSignature(darkRender.UNSAFE_getAllByType(View))).toHaveLength(0);
+    expect(StyleSheet.flatten(darkRender.getByTestId('dark-glass-card').props.style).backgroundColor)
+      .toBe(darkColors.cardBackground);
+    darkRender.unmount();
   });
 
   it('does not render glass tint gradients for solid theme controls', () => {
@@ -711,7 +692,7 @@ describe('ScreenShell', () => {
     )).toBe(false);
   });
 
-  it('renders matte glass cards without specular or optical refraction gradients', () => {
+  it('keeps the legacy matte card option dense and effect-free', () => {
     const { Platform, View } = require('react-native');
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
     const originalPlatform = Platform.OS;
@@ -732,18 +713,13 @@ describe('ScreenShell', () => {
         .filter((colors: any) => Array.isArray(colors))
         .map((colors: string[]) => colors.join('|'));
 
-      expect(gradientColors.some((colors: string) => colors.includes('rgba(255,255,255,0.2)'))).toBe(true);
-      expect(gradientColors.some((colors: string) =>
-        colors.includes('rgba(37,99,235')
-        || colors.includes('rgba(14,165,233')
-        || colors.includes('rgba(56,189,248')
-      )).toBe(false);
+      expect(gradientColors).toHaveLength(0);
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
     }
   });
 
-  it('keeps standard glass cards decorative by default', () => {
+  it('keeps the legacy standard card option dense and effect-free', () => {
     const { Platform, View } = require('react-native');
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
     const originalPlatform = Platform.OS;
@@ -764,17 +740,13 @@ describe('ScreenShell', () => {
         .filter((colors: any) => Array.isArray(colors))
         .map((colors: string[]) => colors.join('|'));
 
-      expect(gradientColors.some((colors: string) =>
-        colors.includes('rgba(37,99,235')
-        || colors.includes('rgba(14,165,233')
-        || colors.includes('rgba(56,189,248')
-      )).toBe(true);
+      expect(gradientColors).toHaveLength(0);
     } finally {
       Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
     }
   });
 
-  it('renders frosted backdrops for glass pressable cards', () => {
+  it('renders glass-theme pressable cards as dense surfaces without live blur', () => {
     const { StyleSheet } = require('react-native');
     const { getThemeAppearance } = require('../../src/utils/themeTokens');
     const appearance = getThemeAppearance('glass', 'light');
@@ -789,21 +761,18 @@ describe('ScreenShell', () => {
       <ScreenPressableCard testID="glass-pressable-card" onPress={jest.fn()}>content</ScreenPressableCard>,
     );
 
-    expect(getByTestId('glass-pressable-card').props.className).toContain('relative overflow-hidden');
-    expect(getByTestId('glass-pressable-card').props.className).toContain('bg-transparent');
+    expect(getByTestId('glass-pressable-card').props.className).not.toContain('relative overflow-hidden');
+    expect(getByTestId('glass-pressable-card').props.className).not.toContain('bg-transparent');
     expect(StyleSheet.flatten(getByTestId('glass-pressable-card').props.style)).toMatchObject({
-      borderWidth: 0,
+      borderWidth: 1,
       elevation: 0,
       shadowOpacity: 0,
     });
-    expect(StyleSheet.flatten(getByTestId('glass-pressable-card').props.style).borderColor).toBeUndefined();
 
     const { View } = require('react-native');
-    const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
-      node.props.pointerEvents === 'none'
-      && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-    );
-    expect(blurBackdrop).toBeTruthy();
+    expect(UNSAFE_getAllByType(View).some((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
+    ))).toBe(false);
   });
 
   it('keeps compact glass controls tint-only without nested blur views', () => {

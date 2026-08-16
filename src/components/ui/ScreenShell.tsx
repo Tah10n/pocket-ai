@@ -7,6 +7,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
+import { PressableSurface as MaterialPressableSurface, Surface as MaterialSurface } from '../../design-system/materials/Surface';
+import type { MaterialRequest } from '../../design-system/materials/contract';
 import { GlassSpecular } from './GlassSpecular';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
@@ -118,12 +120,6 @@ function getNextScreenHeaderInset(current: ScreenHeaderInset, next: ScreenHeader
   return current.height === next.height && current.isFloating === next.isFloating
     ? current
     : next;
-}
-
-function getGlassBackdropContainerClassName(appearance: ThemeAppearance) {
-  return appearance.surfaceKind === 'glass'
-    ? 'relative overflow-hidden bg-transparent'
-    : undefined;
 }
 
 function getRoundedTokenParts(token: string) {
@@ -1355,7 +1351,6 @@ export function ScreenStack({
 export function ScreenCard({
   children,
   className,
-  decorative = 'standard',
   style,
   testID,
   variant = 'surface',
@@ -1363,11 +1358,11 @@ export function ScreenCard({
   tone = 'default',
   dashed = false,
 }: ScreenCardProps) {
-  const { appearance, theme } = useResolvedThemeAppearance();
-  const baseClassName = variant === 'inset'
-    ? appearance.classNames.insetCardClassName
-    : appearance.classNames.cardClassName;
-  const glassBackdropClassName = getGlassBackdropContainerClassName(appearance);
+  const material = React.useMemo<MaterialRequest>(() => ({
+    role: 'content',
+    variant: variant === 'inset' ? 'inset' : 'raised',
+    tone: tone === 'default' ? 'neutral' : tone,
+  }), [tone, variant]);
   const paddingClassName = padding === 'none'
     ? undefined
     : padding === 'compact'
@@ -1375,40 +1370,23 @@ export function ScreenCard({
       : padding === 'large'
         ? screenLayoutTokens.cardPaddingLargeClassName
         : screenLayoutTokens.cardPaddingClassName;
-  const toneClassName = tone === 'accent'
-    ? appearance.classNames.toneClassNameByTone.accent.surfaceClassName
-    : tone === 'warning'
-      ? appearance.classNames.toneClassNameByTone.warning.surfaceClassName
-      : tone === 'error'
-        ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
-        : undefined;
-  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
-  const glassFrameStyle = getGlassSurfaceFrameStyle(
-    appearance,
-    theme.resolvedMode,
-    theme.colors,
-    tone,
-    dashed,
-    glassCornerRadiusStyle,
-    tone === 'accent',
-  );
-
   return (
-    <Box
+    <MaterialSurface
       testID={testID}
-      className={joinClassNames(baseClassName, glassBackdropClassName, paddingClassName, dashed && appearance.surfaceKind !== 'glass' ? 'border-dashed' : undefined, toneClassName, className)}
-      style={glassFrameStyle ? [glassFrameStyle, style] : style}
+      material={material}
+      shape={variant === 'inset' ? 'md' : 'lg'}
+      className={joinClassNames(paddingClassName, dashed ? 'border-dashed' : undefined, className)}
+      style={style}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} />
       {children}
-    </Box>
+    </MaterialSurface>
   );
 }
 
 export function ScreenPressableCard({
   children,
   className,
-  decorative = 'standard',
+  decorative: _decorative,
   style,
   testID,
   variant = 'surface',
@@ -1419,11 +1397,11 @@ export function ScreenPressableCard({
   accessibilityRole,
   ...props
 }: ScreenPressableCardProps) {
-  const { appearance, theme } = useResolvedThemeAppearance();
-  const baseClassName = variant === 'inset'
-    ? appearance.classNames.insetCardClassName
-    : appearance.classNames.cardClassName;
-  const glassBackdropClassName = getGlassBackdropContainerClassName(appearance);
+  const material = React.useMemo<MaterialRequest>(() => ({
+    role: 'content',
+    variant: variant === 'inset' ? 'inset' : 'raised',
+    tone: tone === 'default' ? 'neutral' : tone,
+  }), [tone, variant]);
   const paddingClassName = padding === 'none'
     ? undefined
     : padding === 'compact'
@@ -1431,29 +1409,19 @@ export function ScreenPressableCard({
       : padding === 'large'
         ? screenLayoutTokens.cardPaddingLargeClassName
         : screenLayoutTokens.cardPaddingClassName;
-  const toneClassName = tone === 'accent'
-    ? appearance.classNames.toneClassNameByTone.accent.surfaceClassName
-    : tone === 'warning'
-      ? appearance.classNames.toneClassNameByTone.warning.surfaceClassName
-      : tone === 'error'
-        ? appearance.classNames.toneClassNameByTone.error.surfaceClassName
-        : undefined;
-  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(baseClassName, className);
-  const glassFrameStyle = getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, dashed, glassCornerRadiusStyle);
-
   return (
-    <Pressable
+    <MaterialPressableSurface
       testID={testID}
+      material={material}
+      shape={variant === 'inset' ? 'md' : 'lg'}
       accessibilityRole={accessibilityRole ?? 'button'}
       disabled={disabled}
-      className={joinClassNames(baseClassName, glassBackdropClassName, paddingClassName, dashed && appearance.surfaceKind !== 'glass' ? 'border-dashed' : undefined, toneClassName, disabled ? 'opacity-55' : 'active:opacity-80', className)}
-      style={glassFrameStyle ? [glassFrameStyle, style] : style}
+      className={joinClassNames(paddingClassName, dashed ? 'border-dashed' : undefined, disabled ? 'opacity-55' : 'active:opacity-80', className)}
+      style={style}
       {...props}
     >
-      <GlassSurfaceBackdrop appearance={appearance} tint={theme.colors.headerBlurTint} decorative={decorative} cornerRadiusStyle={glassCornerRadiusStyle} />
-      <GlassControlTint appearance={appearance} colors={theme.colors} mode={theme.resolvedMode} tone={tone} />
       {children}
-    </Pressable>
+    </MaterialPressableSurface>
   );
 }
 

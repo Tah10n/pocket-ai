@@ -127,6 +127,7 @@ jest.mock('../../src/providers/ThemeProvider', () => ({
     mode: 'system',
     themeId: 'default',
     resolvedMode: 'light',
+    resolvedTheme: jest.requireActual('../../src/design-system/themes/resolver').resolveTheme('default', 'light'),
     appearance: require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
     setTheme: mockSetTheme,
     setThemeId: mockSetThemeId,

@@ -8,10 +8,23 @@ import type {
   MaterialRendererRecipe,
   MaterialRim,
   MaterialShadow,
+  MaterialTone,
   MaterialToneRecipes,
   NativeLiquidGlassMaterialRecipe,
   ThemeMaterialRecipes,
 } from './contract';
+
+export interface ContentMaterialFrame {
+  readonly fillColor: string;
+  readonly rimColor: string;
+}
+
+export interface SolidContentMaterialOverrides {
+  readonly raised?: ContentMaterialFrame;
+  readonly inset?: ContentMaterialFrame;
+  readonly list?: ContentMaterialFrame;
+  readonly tones?: Readonly<Partial<Record<Exclude<MaterialTone, 'neutral'>, ContentMaterialFrame>>>;
+}
 
 const NO_SHADOW: MaterialShadow = {
   color: '#000000',
@@ -88,6 +101,31 @@ function createSemanticControlTones(
   };
 }
 
+function createSemanticContentTones(
+  colors: MaterialPalette,
+  neutralRecipe: MaterialRecipeDefinition,
+  renderer: DenseMaterialRecipe['renderer'],
+  overrides: SolidContentMaterialOverrides['tones'] = {},
+): MaterialToneRecipes {
+  const define = (tone: Exclude<MaterialTone, 'neutral'>, fillColor: string, rimColor: string) => denseDefinition(
+    denseRecipe(
+      renderer,
+      overrides[tone]?.fillColor ?? fillColor,
+      overrides[tone]?.rimColor ?? rimColor,
+    ),
+  );
+
+  return {
+    neutral: neutralRecipe,
+    primary: define('primary', colors.primarySoft, colors.primary),
+    accent: define('accent', colors.primarySoft, colors.primary),
+    info: define('info', colors.infoSurface, colors.info),
+    success: define('success', colors.successSurface, colors.success),
+    warning: define('warning', colors.warningSurface, colors.warning),
+    error: define('error', colors.dangerSurface, colors.error),
+  };
+}
+
 function createSemanticBannerTones(
   colors: MaterialPalette,
   renderer: DenseMaterialRecipe['renderer'],
@@ -95,11 +133,26 @@ function createSemanticBannerTones(
   return createSemanticControlTones(colors, renderer, 'static');
 }
 
-export function createSolidThemeMaterialRecipes(colors: MaterialPalette): ThemeMaterialRecipes {
+export function createSolidThemeMaterialRecipes(
+  colors: MaterialPalette,
+  contentOverrides: SolidContentMaterialOverrides = {},
+): ThemeMaterialRecipes {
   const canvas = denseDefinition(denseRecipe('solid', colors.background, colors.background));
-  const contentRaised = denseDefinition(denseRecipe('solid', colors.cardBackground, colors.border));
-  const contentInset = denseDefinition(denseRecipe('solid', colors.surface, colors.borderSubtle));
-  const contentList = denseDefinition(denseRecipe('solid', colors.surfaceMuted, colors.borderSubtle));
+  const contentRaised = denseDefinition(denseRecipe(
+    'solid',
+    contentOverrides.raised?.fillColor ?? colors.cardBackground,
+    contentOverrides.raised?.rimColor ?? colors.border,
+  ));
+  const contentInset = denseDefinition(denseRecipe(
+    'solid',
+    contentOverrides.inset?.fillColor ?? colors.surface,
+    contentOverrides.inset?.rimColor ?? colors.borderSubtle,
+  ));
+  const contentList = denseDefinition(denseRecipe(
+    'solid',
+    contentOverrides.list?.fillColor ?? colors.surfaceMuted,
+    contentOverrides.list?.rimColor ?? colors.borderSubtle,
+  ));
   const header = denseDefinition(denseRecipe('solid', colors.surface, colors.border));
   const tabBar = denseDefinition(denseRecipe('solid', colors.tabBarBackground, colors.tabBarBorder));
   const composer = denseDefinition(denseRecipe('solid', colors.inputBackground, colors.border));
@@ -124,9 +177,9 @@ export function createSolidThemeMaterialRecipes(colors: MaterialPalette): ThemeM
   return {
     canvas: { base: neutral(canvas) },
     content: {
-      raised: neutral(contentRaised),
-      inset: neutral(contentInset),
-      list: neutral(contentList),
+      raised: createSemanticContentTones(colors, contentRaised, 'solid', contentOverrides.tones),
+      inset: createSemanticContentTones(colors, contentInset, 'solid', contentOverrides.tones),
+      list: createSemanticContentTones(colors, contentList, 'solid', contentOverrides.tones),
     },
     chrome: {
       header: neutral(header),
@@ -290,9 +343,9 @@ export function createLiquidThemeMaterialRecipes(
   return {
     canvas: { base: neutral(canvas) },
     content: {
-      raised: neutral(contentRaised),
-      inset: neutral(contentInset),
-      list: neutral(contentList),
+      raised: createSemanticContentTones(colors, contentRaised, 'tinted'),
+      inset: createSemanticContentTones(colors, contentInset, 'tinted'),
+      list: createSemanticContentTones(colors, contentList, 'tinted'),
     },
     chrome: {
       header: chrome(mode === 'dark' ? 88 : 75),

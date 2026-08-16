@@ -21,6 +21,7 @@ jest.mock('expo-router', () => ({
 
 jest.mock('../../src/providers/ThemeProvider', () => ({
   useTheme: () => ({
+    resolvedTheme: jest.requireActual('../../src/design-system/themes/resolver').resolveTheme('default', 'light'),
     resolvedMode: 'light',
     colors: {
       background: '#f6f6f8',

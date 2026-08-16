@@ -1,5 +1,7 @@
 export type SurfaceRole = 'canvas' | 'content' | 'chrome' | 'control' | 'overlay';
 
+export type MaterialShape = 'none' | 'sm' | 'md' | 'lg' | 'xl' | 'sheet' | 'full';
+
 export type MaterialTone =
   | 'neutral'
   | 'primary'

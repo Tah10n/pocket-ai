@@ -152,7 +152,10 @@ Normal exceptions are developer-only logs, diagnostics, and intentional test-onl
 The shared visual system resolves from one semantic source of truth:
 
 - `src/utils/theme-contract.json` defines the semantic palette and motion bands.
-- `src/utils/themeTokens.ts` maps that contract into runtime theme colors, visual-theme appearance tokens, and React Navigation colors.
+- `src/design-system/themes/*.theme.ts` define each visual theme, including metadata, preview tokens, light/dark values, and component presentation.
+- `src/design-system/themes/registry.ts` is the ordered source of theme ids and metadata; `ThemeId` is derived from its registered definitions.
+- `src/design-system/themes/resolver.ts` resolves one immutable theme object containing runtime colors, appearance compatibility tokens, component presentation, and React Navigation colors.
+- `src/utils/themeTokens.ts` is a temporary compatibility facade for UI that has not yet migrated to semantic material roles.
 - `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same palette and `themeId` decisions so tab chrome, status bars, and NativeWind surfaces stay aligned.
 
 When you need a tinted surface or accent treatment, prefer semantic theme colors plus `withAlpha(...)` instead of introducing a new raw hex or `rgba(...)` value.
@@ -170,7 +173,7 @@ Color mode and visual style are intentionally separate:
 
 Migration plan for new visual themes:
 
-1. Add the theme id to `themeIds` and define its color overrides and `ThemeAppearance` branch in `src/utils/themeTokens.ts`.
+1. Add a typed `*.theme.ts` definition and register it in `src/design-system/themes/registry.ts`; do not add a parallel id union or options array.
 2. Persist and sanitize the id through `src/services/SettingsStore.ts` before exposing it in Settings.
 3. Route new shared chrome through `appearance.classNames` or `appearance.effects` instead of hard-coded `bg-background-*`, translucent accent surfaces, opacity, blur, shadow, or elevation values.
 4. Keep visual themes layout-compatible with `default`: do not change shared spacing, size, or radius tokens unless the feature explicitly calls for a layout variant.

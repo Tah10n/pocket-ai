@@ -23,12 +23,13 @@ import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
+import { getThemeMetadata, isThemeId } from '../../design-system/themes/registry';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getErrorMessage } from '../../services/AppError';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeId, type ThemeTone } from '../../utils/themeTokens';
+import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeTone } from '../../utils/themeTokens';
 
 function clampPercentage(value: number) {
     if (!Number.isFinite(value)) {
@@ -387,10 +388,17 @@ export const SettingsScreen = () => {
         { key: 'dark', label: t('settings.themeDark'), testID: 'settings-theme-mode-dark' },
     ];
 
-    const visualThemeOptions = [
-        { key: 'default', label: t('settings.themeStyleDefault'), testID: 'settings-theme-style-default' },
-        { key: 'glass', label: t('settings.themeStyleGlass'), testID: 'settings-theme-style-glass' },
-    ];
+    const visualThemeOptions = getThemeMetadata().map((metadata) => ({
+        key: metadata.id,
+        label: t(metadata.labelKey),
+        testID: `settings-theme-style-${metadata.id}`,
+    }));
+
+    const handleVisualThemeChange = (nextThemeId: string) => {
+        if (isThemeId(nextThemeId)) {
+            setThemeId(nextThemeId);
+        }
+    };
 
     return (
         <ScreenRoot>
@@ -622,7 +630,7 @@ export const SettingsScreen = () => {
                                         className="mt-4"
                                         testID="settings-theme-style-control"
                                         activeKey={themeId}
-                                        onChange={(nextThemeId) => setThemeId(nextThemeId as ThemeId)}
+                                        onChange={handleVisualThemeChange}
                                         options={visualThemeOptions}
                                     />
                                 </ScreenCard>

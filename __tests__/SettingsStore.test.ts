@@ -81,6 +81,24 @@ describe('SettingsStore', () => {
     expect(rawSettings.themeId).toBe('default');
   });
 
+  it.each([
+    null,
+    ['glass'],
+    { id: 'glass' },
+    '__proto__',
+  ])('sanitizes non-registry persisted theme value %# and notifies subscribers with the writeback', (themeId) => {
+    getSettingsStorage().set('app_settings', JSON.stringify({ themeId }));
+    const listener = jest.fn();
+    const unsubscribe = subscribeSettings(listener);
+
+    expect(getSettings().themeId).toBe('default');
+    expect(JSON.parse(getSettingsStorage().getString('app_settings') ?? '{}').themeId).toBe('default');
+
+    updateSettings({ themeId: themeId as any });
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ themeId: 'default' }));
+    unsubscribe();
+  });
+
   it('persists advanced inference settings scaffolding without corrupting load params', () => {
     updateSettings({ showAdvancedInferenceControls: true });
     updateModelLoadParametersForModel('author/model-q4', {

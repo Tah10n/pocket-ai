@@ -106,6 +106,8 @@ jest.mock('@react-navigation/native', () => {
   const mockReact = require('react');
 
   return {
+    DefaultTheme: { dark: false, colors: {} },
+    DarkTheme: { dark: true, colors: {} },
     useFocusEffect: (effect: any) => mockReact.useEffect(() => effect(), [effect]),
     useIsFocused: () => true,
   };

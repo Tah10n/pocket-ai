@@ -35,6 +35,7 @@ import { StorageRecoveryScreen, type StorageRecoveryBusyState } from '../src/ui/
 import type { ResolvedThemeMode } from '../src/design-system/themes/legacyTheme';
 import { DEFAULT_THEME_ID } from '../src/design-system/themes/registry';
 import { resolveTheme } from '../src/design-system/themes/resolver';
+import { RuntimeMaterialEnvironmentProvider } from '../src/design-system/materials/MaterialEnvironmentProvider';
 import '../src/i18n';
 import '../global.css';
 
@@ -284,7 +285,9 @@ export default function RootLayout() {
 
   return (
     <CustomThemeProvider>
-      <RootNavigator />
+      <RuntimeMaterialEnvironmentProvider>
+        <RootNavigator />
+      </RuntimeMaterialEnvironmentProvider>
     </CustomThemeProvider>
   );
 }

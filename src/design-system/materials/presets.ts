@@ -321,7 +321,7 @@ function liquidGlassRecipe(
     shadow: glassShadow(colors, mode),
     interactionSupport,
     nativeGlass: {
-      style: interactionSupport === 'native' ? 'clear' : 'regular',
+      style: 'regular',
     },
   };
 }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 import { StyleSheet, View } from 'react-native';
 import {
   AndroidBlurBoundaryProvider,
@@ -7,9 +7,13 @@ import {
   type AndroidBlurBoundary,
   type AndroidBlurSampleTarget,
 } from '../../src/design-system/materials/AndroidBlurTargetContext';
-import { EffectSurface } from '../../src/design-system/materials/EffectSurface';
+import {
+  EffectPressableSurface,
+  EffectSurface,
+} from '../../src/design-system/materials/EffectSurface';
 import { MaterialEnvironmentProvider } from '../../src/design-system/materials/MaterialEnvironmentProvider';
 import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
+import { withMaterialPaintOpacity } from '../../src/design-system/materials/style';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
 
 let mockResolvedTheme = resolveTheme('glass', 'light');
@@ -23,12 +27,33 @@ jest.mock('@/components/ui/box', () => {
   };
 });
 
+jest.mock('@/components/ui/pressable', () => {
+  const mockReact = jest.requireActual('react');
+  const { View: MockView } = jest.requireActual('react-native');
+
+  return {
+    Pressable: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
+  };
+});
+
 jest.mock('expo-blur', () => {
   const mockReact = jest.requireActual('react');
   const { View: MockView } = jest.requireActual('react-native');
 
   return {
     BlurView: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
+  };
+});
+
+jest.mock('expo-glass-effect', () => {
+  const mockReact = jest.requireActual('react');
+  const { View: MockView } = jest.requireActual('react-native');
+
+  return {
+    GlassContainer: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
+    GlassView: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
+    isGlassEffectAPIAvailable: jest.fn(() => false),
+    isLiquidGlassAvailable: jest.fn(() => false),
   };
 });
 
@@ -71,11 +96,42 @@ describe('EffectSurface', () => {
     ))).toBe(false);
   });
 
-  it('uses legacy iOS BlurView while the native Liquid Glass renderer is unavailable', () => {
+  it('renders guarded native Liquid Glass with the resolved app color scheme', () => {
+    mockResolvedTheme = resolveTheme('glass', 'dark');
     const environment = createMaterialEnvironment('ios', {
       blurViewAvailable: true,
       liquidGlassApiAvailable: true,
       liquidGlassComponentAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectSurface material={{ role: 'chrome', variant: 'header' }} />
+      </MaterialEnvironmentProvider>,
+    );
+    const glassLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'glassEffectStyle')
+    ));
+
+    expect(glassLayer?.props.glassEffectStyle).toBe('regular');
+    expect(glassLayer?.props.colorScheme).toBe('dark');
+    expect(glassLayer?.props.isInteractive).toBe(false);
+    expect(glassLayer?.props.tintColor).toBe(withMaterialPaintOpacity(
+      mockResolvedTheme.colors.surface,
+      0.28,
+    ));
+    expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
+    ))).toBe(false);
+  });
+
+  it.each([
+    { liquidGlassApiAvailable: false, liquidGlassComponentAvailable: true },
+    { liquidGlassApiAvailable: true, liquidGlassComponentAvailable: false },
+  ])('uses legacy iOS BlurView when a native Liquid Glass guard is unavailable', (guards) => {
+    const environment = createMaterialEnvironment('ios', {
+      blurViewAvailable: true,
+      ...guards,
       transparencyState: 'allowed',
     });
     const screen = render(
@@ -90,6 +146,97 @@ describe('EffectSurface', () => {
     expect(blurLayer).toBeTruthy();
     expect(blurLayer?.props.blurMethod).toBeUndefined();
     expect(blurLayer?.props.blurTarget).toBeUndefined();
+    expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'glassEffectStyle')
+    ))).toBe(false);
+  });
+
+  it('uses a dense accessibility fallback instead of any live iOS effect', () => {
+    const environment = createMaterialEnvironment('ios', {
+      blurViewAvailable: true,
+      liquidGlassApiAvailable: true,
+      liquidGlassComponentAvailable: true,
+      transparencyState: 'reduced',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectSurface
+          testID="reduced-transparency-surface"
+          material={{ role: 'chrome', variant: 'header' }}
+        />
+      </MaterialEnvironmentProvider>,
+    );
+
+    expect(StyleSheet.flatten(
+      screen.getByTestId('reduced-transparency-surface').props.style,
+    )).toMatchObject({
+      backgroundColor: mockResolvedTheme.colors.surfaceOverlay,
+      borderWidth: 1,
+    });
+    expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
+      || Object.prototype.hasOwnProperty.call(node.props, 'glassEffectStyle')
+    ))).toBe(false);
+  });
+
+  it('enables hit-tested native interaction only on an actual pressable control', () => {
+    const onPress = jest.fn();
+    const environment = createMaterialEnvironment('ios', {
+      blurViewAvailable: true,
+      liquidGlassApiAvailable: true,
+      liquidGlassComponentAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectPressableSurface
+          testID="native-glass-control"
+          material={{ role: 'control', variant: 'floating' }}
+          accessibilityLabel="Native glass action"
+          accessibilityRole="button"
+          onPress={onPress}
+          style={({ pressed }) => ({ opacity: pressed ? 0.8 : 1 })}
+        >
+          control
+        </EffectPressableSurface>
+      </MaterialEnvironmentProvider>,
+    );
+    const glassLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'glassEffectStyle')
+    ));
+
+    expect(glassLayer?.props.glassEffectStyle).toBe('regular');
+    expect(glassLayer?.props.pointerEvents).toBe('auto');
+    expect(glassLayer?.props.isInteractive).toBe(true);
+    const control = screen.getByTestId('native-glass-control');
+    expect(control.props.accessibilityLabel).toBe('Native glass action');
+    expect(control.props.accessibilityRole).toBe('button');
+    expect(StyleSheet.flatten(control.props.style({ pressed: true }))).toMatchObject({
+      borderRadius: 16,
+      opacity: 0.8,
+    });
+    fireEvent.press(control);
+    expect(onPress).toHaveBeenCalledTimes(1);
+
+    screen.rerender(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectPressableSurface
+          disabled
+          testID="native-glass-control"
+          material={{ role: 'control', variant: 'floating' }}
+          onPress={onPress}
+        >
+          control
+        </EffectPressableSurface>
+      </MaterialEnvironmentProvider>,
+    );
+    const disabledGlassLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'glassEffectStyle')
+    ));
+
+    expect(disabledGlassLayer?.props.pointerEvents).toBe('none');
+    expect(disabledGlassLayer?.props.isInteractive).toBe(false);
+    expect(screen.getByTestId('native-glass-control').props.disabled).toBe(true);
   });
 
   it('uses an external Android sample target on SDK 31+', () => {

@@ -147,6 +147,116 @@ describe('material resolver', () => {
     expect(resolveMaterialRecipe(theme.materials, request, missingTargetCapability).renderer).toBe('tinted');
   });
 
+  it.each([
+    ['light', 15, 0.01, null],
+    ['dark', 18, 0.075, 0.18],
+  ] as const)(
+    'keeps the %s glass tab bar ultra-thin while preserving live Android blur',
+    (mode, intensity, tintOpacity, contrastOpacity) => {
+      const theme = resolveTheme('glass', mode);
+      const recipe = resolveMaterialRecipe(
+        theme.materials,
+        { role: 'chrome', variant: 'tabBar' },
+        createMaterialEnvironment('android', {
+          androidSdkVersion: 31,
+          androidTargetBlurSupported: true,
+          transparencyState: 'allowed',
+        }),
+      );
+
+      expect(recipe).toMatchObject({
+        renderer: 'blur',
+        fill: { color: mode === 'dark' ? '#f4f7fb' : '#f8fafc', opacity: 0 },
+        tint: {
+          color: mode === 'dark' ? '#f4f7fb' : '#f8fafc',
+          opacity: tintOpacity,
+        },
+        rim: { opacity: 0, width: 0 },
+        shadow: { opacity: 0, elevation: 0 },
+        blur: {
+          intensity,
+          tint: mode === 'dark' ? 'dark' : 'default',
+          androidBlurReductionDivisor: 1,
+        },
+      });
+      expect(recipe.contrastFilm).toEqual(contrastOpacity === null
+        ? null
+        : { color: '#060b14', opacity: contrastOpacity });
+    },
+  );
+
+  it.each([
+    ['light', { color: '#f8fafc', opacity: 0.24 }, null],
+    ['dark', { color: '#060b14', opacity: 0.24 }, { color: '#f4f7fb', opacity: 0.22 }],
+  ] as const)(
+    'preserves the legacy %s dense tab bar fallback paints',
+    (mode, fill, tint) => {
+      const theme = resolveTheme('glass', mode);
+      const recipe = resolveMaterialRecipe(
+        theme.materials,
+        { role: 'chrome', variant: 'tabBar' },
+        createMaterialEnvironment('android', {
+          androidSdkVersion: 31,
+          androidTargetBlurSupported: false,
+          transparencyState: 'allowed',
+        }),
+      );
+
+      expect(recipe).toMatchObject({
+        renderer: 'tinted',
+        fill,
+        tint,
+        contrastFilm: null,
+        rim: { opacity: 0, width: 0 },
+        shadow: { opacity: 0, elevation: 0 },
+      });
+    },
+  );
+
+  it('uses clear native Liquid Glass for the floating iOS tab bar', () => {
+    const theme = resolveTheme('glass', 'light');
+    const recipe = resolveMaterialRecipe(
+      theme.materials,
+      { role: 'chrome', variant: 'tabBar' },
+      createMaterialEnvironment('ios', {
+        blurViewAvailable: true,
+        liquidGlassApiAvailable: true,
+        liquidGlassComponentAvailable: true,
+        transparencyState: 'allowed',
+      }),
+    );
+
+    expect(recipe).toMatchObject({
+      renderer: 'native-liquid-glass',
+      fill: { opacity: 0 },
+      tint: { opacity: 0.01 },
+      rim: { opacity: 0, width: 0 },
+      nativeGlass: { style: 'clear' },
+    });
+  });
+
+  it.each([
+    ['light', 'systemUltraThinMaterialLight'],
+    ['dark', 'systemUltraThinMaterialDark'],
+  ] as const)('keeps the %s iOS BlurView fallback ultra-thin', (mode, tint) => {
+    const theme = resolveTheme('glass', mode);
+    const recipe = resolveMaterialRecipe(
+      theme.materials,
+      { role: 'chrome', variant: 'tabBar' },
+      createMaterialEnvironment('ios', {
+        blurViewAvailable: true,
+        liquidGlassApiAvailable: false,
+        liquidGlassComponentAvailable: false,
+        transparencyState: 'allowed',
+      }),
+    );
+
+    expect(recipe).toMatchObject({
+      renderer: 'blur',
+      blur: { tint },
+    });
+  });
+
   it('uses dense web recipes and resolves semantic tone overrides without allocation', () => {
     const theme = resolveTheme('glass', 'light');
     const web = createMaterialEnvironment('web', { transparencyState: 'allowed' });

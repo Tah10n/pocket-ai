@@ -113,7 +113,12 @@ export interface BlurMaterialRecipe extends MaterialRendererRecipeBase {
   readonly renderer: 'blur';
   readonly blur: {
     readonly intensity: number;
-    readonly tint: 'light' | 'dark' | 'default';
+    readonly tint:
+      | 'light'
+      | 'dark'
+      | 'default'
+      | 'systemUltraThinMaterialLight'
+      | 'systemUltraThinMaterialDark';
     readonly androidBlurReductionDivisor: number;
   };
 }

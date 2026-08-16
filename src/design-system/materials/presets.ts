@@ -344,6 +344,85 @@ function liquidGlassRecipe(
   };
 }
 
+function tabBarBlurRecipe(
+  mode: MaterialColorMode,
+  platform: 'android' | 'ios',
+): BlurMaterialRecipe {
+  const isDark = mode === 'dark';
+  const matteColor = isDark ? '#f4f7fb' : '#f8fafc';
+
+  return {
+    renderer: 'blur',
+    fill: paint(matteColor, 0),
+    tint: paint(matteColor, isDark ? 0.075 : 0.01),
+    contrastFilm: isDark ? paint('#060b14', 0.18) : null,
+    rim: rim(matteColor, 0, 0),
+    shadow: NO_SHADOW,
+    interactionSupport: 'static',
+    blur: {
+      intensity: isDark ? 18 : 15,
+      tint: platform === 'ios'
+        ? isDark ? 'systemUltraThinMaterialDark' : 'systemUltraThinMaterialLight'
+        : isDark ? 'dark' : 'default',
+      androidBlurReductionDivisor: 1,
+    },
+  };
+}
+
+function tabBarLiquidGlassRecipe(
+  mode: MaterialColorMode,
+): NativeLiquidGlassMaterialRecipe {
+  const isDark = mode === 'dark';
+  const matteColor = isDark ? '#f4f7fb' : '#f8fafc';
+
+  return {
+    renderer: 'native-liquid-glass',
+    fill: paint(matteColor, 0),
+    tint: paint(matteColor, isDark ? 0.075 : 0.01),
+    contrastFilm: isDark ? paint('#060b14', 0.18) : null,
+    rim: rim(matteColor, 0, 0),
+    shadow: NO_SHADOW,
+    interactionSupport: 'static',
+    nativeGlass: {
+      style: 'clear',
+    },
+  };
+}
+
+function tabBarEffectDefinition(
+  colors: MaterialPalette,
+  mode: MaterialColorMode,
+): MaterialRecipeDefinition {
+  const isDark = mode === 'dark';
+  const matteColor = isDark ? '#f4f7fb' : '#f8fafc';
+  const denseFallback: DenseMaterialRecipe = {
+    renderer: 'tinted',
+    fill: isDark ? paint('#060b14', 0.24) : paint(matteColor, 0.24),
+    tint: isDark ? paint(matteColor, 0.22) : null,
+    contrastFilm: null,
+    rim: rim(colors.borderSubtle, 0, 0),
+    shadow: NO_SHADOW,
+    interactionSupport: 'static',
+  };
+  const androidBlur = tabBarBlurRecipe(mode, 'android');
+  const iosBlur = tabBarBlurRecipe(mode, 'ios');
+
+  return {
+    preferredByPlatform: {
+      ios: tabBarLiquidGlassRecipe(mode),
+      android: androidBlur,
+      web: denseFallback,
+    },
+    platformFallbackByPlatform: {
+      ios: iosBlur,
+      android: denseFallback,
+      web: denseFallback,
+    },
+    accessibilityFallback: denseFallback,
+    unsupportedPlatformFallback: denseFallback,
+  };
+}
+
 function effectDefinition(
   colors: MaterialPalette,
   mode: MaterialColorMode,
@@ -491,7 +570,7 @@ export function createLiquidThemeMaterialRecipes(
     },
     chrome: {
       header: chrome(mode === 'dark' ? 88 : 75),
-      tabBar: chrome(mode === 'dark' ? 82 : 72),
+      tabBar: neutral(tabBarEffectDefinition(colors, mode)),
       composer: chrome(mode === 'dark' ? 76 : 66),
       sheet: chrome(mode === 'dark' ? 84 : 72),
     },

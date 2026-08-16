@@ -9,6 +9,12 @@ import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
 import { PressableSurface as MaterialPressableSurface, Surface as MaterialSurface } from '../../design-system/materials/Surface';
 import type { MaterialRequest } from '../../design-system/materials/contract';
+import {
+  AndroidBlurBoundaryProvider,
+  AndroidBlurSampleTargetProvider,
+  useAndroidBlurTargetHandle,
+  useResolvedAndroidBlurTarget,
+} from '../../design-system/materials/AndroidBlurTargetContext';
 import { GlassSpecular } from './GlassSpecular';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import { Text, composeTextRole } from './text';
@@ -84,8 +90,6 @@ interface ScreenPressableCardProps extends React.ComponentProps<typeof Pressable
 export function joinClassNames(...values: (string | undefined | false)[]) {
   return values.filter(Boolean).join(' ');
 }
-
-const GlassBlurTargetContext = React.createContext<React.RefObject<View | null> | null>(null);
 
 type GlassSurfaceDecorative = 'standard' | 'matte' | 'tint';
 type GlassCornerRadiusStyle = Pick<ViewStyle,
@@ -489,12 +493,7 @@ export function GlassSurfaceBackdrop({
   forceNativeAndroidBlur?: boolean;
   androidBlurTargetRef?: AndroidBlurTargetRef | null;
 }) {
-  const contextBlurTarget = React.useContext(GlassBlurTargetContext);
-  const blurTarget = androidBlurTargetRef === undefined ? contextBlurTarget : androidBlurTargetRef;
-  const isInsideOwnAndroidBlurTarget = Platform.OS === 'android'
-    && Boolean(blurTarget)
-    && Boolean(contextBlurTarget)
-    && blurTarget === contextBlurTarget;
+  const blurTarget = useResolvedAndroidBlurTarget(androidBlurTargetRef);
   const isMatte = decorative === 'matte';
   const isTintOnly = decorative === 'tint';
 
@@ -527,7 +526,6 @@ export function GlassSurfaceBackdrop({
       isAndroidBlurFallbackRequired()
       || (!forceNativeAndroidBlur && shouldUseAndroidGlassMatteFallback())
       // Android native blur cannot render inside the same target it is asked to blur.
-      || isInsideOwnAndroidBlurTarget
       || !blurTarget
     )
   ) {
@@ -1089,7 +1087,7 @@ export function ScreenHeaderShell({
 }: ScreenHeaderShellProps) {
   const insets = useSafeAreaInsets();
   const { appearance, theme } = useResolvedThemeAppearance();
-  const blurTarget = React.useContext(GlassBlurTargetContext);
+  const blurTarget = useResolvedAndroidBlurTarget();
   const setHeaderInset = React.useContext(ScreenHeaderInsetSetterContext);
   const { colors } = theme;
   const isGlass = appearance.surfaceKind === 'glass';
@@ -1194,33 +1192,50 @@ export function ScreenRoot({
   const { appearance, theme } = useResolvedThemeAppearance();
   const glassBackgroundBlurTargetRef = React.useRef<View | null>(null);
   const glassSceneBlurTargetRef = React.useRef<View | null>(null);
-  const [headerInset, setHeaderInsetState] = React.useState<ScreenHeaderInset>({ height: 0, isFloating: false });
-  const { colors } = theme;
   const isGlass = appearance.surfaceKind === 'glass';
   const isFocused = useIsFocused();
   const shouldUseAndroidBlurTarget = isGlass && Platform.OS === 'android' && !isAndroidBlurFallbackRequired();
   const shouldRegisterAndroidBlurTarget = shouldUseAndroidBlurTarget && isFocused;
-  const androidGlassBlurTarget = shouldUseAndroidBlurTarget ? glassBackgroundBlurTargetRef : null;
+  const glassBackgroundBlurTarget = useAndroidBlurTargetHandle(
+    glassBackgroundBlurTargetRef,
+    'screen-glass-background',
+    shouldUseAndroidBlurTarget,
+  );
+  const glassSceneBlurTarget = useAndroidBlurTargetHandle(
+    glassSceneBlurTargetRef,
+    'screen-glass-scene',
+    shouldUseAndroidBlurTarget,
+  );
+  const [headerInset, setHeaderInsetState] = React.useState<ScreenHeaderInset>({ height: 0, isFloating: false });
+  const { colors } = theme;
+  const androidBlurSampleTarget = shouldUseAndroidBlurTarget
+    ? glassBackgroundBlurTarget.sample
+    : null;
+  const androidSceneBoundary = shouldUseAndroidBlurTarget
+    ? glassSceneBlurTarget.boundary
+    : null;
   const setHeaderInset = React.useCallback((nextInset: ScreenHeaderInset) => {
     setHeaderInsetState((currentInset) => getNextScreenHeaderInset(currentInset, nextInset));
   }, []);
   const screenContent = (
     <ScreenHeaderInsetSetterContext.Provider value={setHeaderInset}>
       <ScreenHeaderInsetContext.Provider value={headerInset}>
-        <GlassBlurTargetContext.Provider value={androidGlassBlurTarget}>
-          {children}
-        </GlassBlurTargetContext.Provider>
+        <AndroidBlurSampleTargetProvider target={androidBlurSampleTarget}>
+          <AndroidBlurBoundaryProvider boundary={androidSceneBoundary}>
+            {children}
+          </AndroidBlurBoundaryProvider>
+        </AndroidBlurSampleTargetProvider>
       </ScreenHeaderInsetContext.Provider>
     </ScreenHeaderInsetSetterContext.Provider>
   );
 
   React.useEffect(() => {
-    if (!shouldRegisterAndroidBlurTarget) {
+    if (!shouldRegisterAndroidBlurTarget || !glassSceneBlurTarget.sample.ready) {
       return undefined;
     }
 
     return setActiveAndroidBlurTarget(glassSceneBlurTargetRef);
-  }, [shouldRegisterAndroidBlurTarget]);
+  }, [glassSceneBlurTarget.sample.ready, shouldRegisterAndroidBlurTarget]);
 
   return (
     <Box
@@ -1234,6 +1249,7 @@ export function ScreenRoot({
           <BlurTargetView
             testID="screen-glass-blur-target"
             ref={glassBackgroundBlurTargetRef}
+            onLayout={glassBackgroundBlurTarget.markReady}
             pointerEvents="none"
             style={StyleSheet.absoluteFill}
           >
@@ -1242,6 +1258,7 @@ export function ScreenRoot({
           <BlurTargetView
             testID="screen-glass-scene-blur-target"
             ref={glassSceneBlurTargetRef}
+            onLayout={glassSceneBlurTarget.markReady}
             pointerEvents="box-none"
             style={styles.screenSceneBlurTarget}
           >
@@ -1270,18 +1287,26 @@ export function ScreenAndroidContentBlurTarget({
   const shouldUseAndroidBlurTarget = appearance.surfaceKind === 'glass'
     && Platform.OS === 'android'
     && !isAndroidBlurFallbackRequired();
+  const blurTarget = useAndroidBlurTargetHandle(
+    blurTargetRef,
+    'screen-android-content',
+    shouldUseAndroidBlurTarget,
+  );
 
   if (shouldUseAndroidBlurTarget) {
     return (
       <BlurTargetView
         ref={blurTargetRef}
+        onLayout={blurTarget.markReady}
         collapsable={false}
         testID={testID}
         style={style}
       >
-        <GlassBlurTargetContext.Provider value={blurTargetRef}>
-          {children}
-        </GlassBlurTargetContext.Provider>
+        <AndroidBlurSampleTargetProvider target={blurTarget.sample}>
+          <AndroidBlurBoundaryProvider boundary={blurTarget.boundary}>
+            {children}
+          </AndroidBlurBoundaryProvider>
+        </AndroidBlurSampleTargetProvider>
       </BlurTargetView>
     );
   }

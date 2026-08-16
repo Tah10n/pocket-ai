@@ -228,7 +228,8 @@ function blurRecipe(
     blur: {
       intensity,
       tint: colors.headerBlurTint,
-      androidReductionFactor: mode === 'dark' ? 0.72 : 0.68,
+      // Expo interprets this value as a divisor, so values above 1 reduce blur radius.
+      androidBlurReductionDivisor: mode === 'dark' ? 1 / 0.72 : 1 / 0.68,
     },
   };
 }

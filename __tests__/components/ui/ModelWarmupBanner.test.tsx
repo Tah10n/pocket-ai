@@ -1,5 +1,5 @@
 import React from 'react';
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 import { AccessibilityInfo } from 'react-native';
 import { EngineStatus, type EngineState } from '../../../src/types/models';
 
@@ -329,6 +329,9 @@ describe('ModelWarmupBanner', () => {
       );
 
       expect(() => getByTestId('warmup-content-blur-target').findByProps({ testID: 'model-warmup-banner' })).toThrow();
+      fireEvent(getByTestId('warmup-content-blur-target'), 'layout', {
+        nativeEvent: { layout: { height: 200, width: 200, x: 0, y: 0 } },
+      });
 
       const { View } = require('react-native');
       const nativeBlurLayers = UNSAFE_getAllByType(View).filter((node: any) => (

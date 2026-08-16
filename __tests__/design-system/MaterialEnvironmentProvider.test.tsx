@@ -28,8 +28,25 @@ function EnvironmentProbe() {
   );
 }
 
+function AndroidEnvironmentProbe() {
+  const environment = useMaterialEnvironment();
+
+  return (
+    <Text testID="android-material-environment">
+      {[
+        environment.platform,
+        environment.androidSdkVersion ?? 'unknown',
+        environment.blurViewAvailable,
+        environment.androidTargetBlurSupported,
+        environment.transparencyState,
+      ].join(':')}
+    </Text>
+  );
+}
+
 describe('MaterialEnvironmentProvider', () => {
   const originalPlatform = Platform.OS;
+  const originalPlatformVersion = Platform.Version;
   const originalReduceTransparencyQuery = AccessibilityInfo.isReduceTransparencyEnabled;
   const originalAccessibilityListener = AccessibilityInfo.addEventListener;
   const reduceTransparencyQueryMock = jest.fn<Promise<boolean>, []>();
@@ -55,6 +72,10 @@ describe('MaterialEnvironmentProvider', () => {
     Object.defineProperty(Platform, 'OS', {
       configurable: true,
       get: () => originalPlatform,
+    });
+    Object.defineProperty(Platform, 'Version', {
+      configurable: true,
+      get: () => originalPlatformVersion,
     });
     Object.defineProperty(AccessibilityInfo, 'isReduceTransparencyEnabled', {
       configurable: true,
@@ -86,6 +107,36 @@ describe('MaterialEnvironmentProvider', () => {
     );
 
     expect(screen.getByTestId('material-environment').props.children).toBe('ios:allowed:true:true');
+  });
+
+  it.each([
+    { expected: 'android:34:true:true:allowed', version: 34 },
+    { expected: 'android:30:true:false:allowed', version: '30' },
+    { expected: 'android:unknown:true:false:allowed', version: 'preview' },
+    { expected: 'android:unknown:true:false:allowed', version: '31-preview' },
+    { expected: 'android:unknown:true:false:allowed', version: '31.5' },
+    { expected: 'android:unknown:true:false:allowed', version: 31.5 },
+  ])('derives the Android target-blur capability from SDK $version', ({ expected, version }) => {
+    Object.defineProperty(Platform, 'OS', {
+      configurable: true,
+      get: () => 'android',
+    });
+    Object.defineProperty(Platform, 'Version', {
+      configurable: true,
+      get: () => version,
+    });
+
+    const screen = render(
+      <RuntimeMaterialEnvironmentProvider>
+        <AndroidEnvironmentProbe />
+      </RuntimeMaterialEnvironmentProvider>,
+    );
+
+    expect(screen.getByTestId('android-material-environment').props.children).toBe(expected);
+    expect(glassEffectMock.isLiquidGlassAvailable).not.toHaveBeenCalled();
+    expect(glassEffectMock.isGlassEffectAPIAvailable).not.toHaveBeenCalled();
+    expect(reduceTransparencyQueryMock).not.toHaveBeenCalled();
+    expect(accessibilityListenerMock).not.toHaveBeenCalled();
   });
 
   it('fails closed until the iOS transparency query resolves and reacts to later changes', async () => {

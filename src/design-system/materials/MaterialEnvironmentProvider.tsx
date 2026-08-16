@@ -12,6 +12,7 @@ import type {
 import {
   createMaterialEnvironment,
   FAIL_CLOSED_MATERIAL_ENVIRONMENT,
+  parseAndroidSdkVersion,
 } from './environment';
 
 const MaterialEnvironmentContext = createContext<MaterialEnvironment>(
@@ -49,8 +50,21 @@ function safelyCheckAvailability(check: () => boolean): boolean {
 }
 
 function getRuntimeCapabilities(platform: MaterialPlatform) {
+  if (platform === 'android') {
+    const androidSdkVersion = parseAndroidSdkVersion(Platform.Version);
+
+    return {
+      androidSdkVersion,
+      androidTargetBlurSupported: (androidSdkVersion ?? 0) >= 31,
+      blurViewAvailable: true,
+      liquidGlassApiAvailable: false,
+      liquidGlassComponentAvailable: false,
+    } as const;
+  }
+
   if (platform !== 'ios') {
     return {
+      androidTargetBlurSupported: false,
       blurViewAvailable: false,
       liquidGlassApiAvailable: false,
       liquidGlassComponentAvailable: false,
@@ -63,6 +77,7 @@ function getRuntimeCapabilities(platform: MaterialPlatform) {
   const liquidGlassApiAvailable = safelyCheckAvailability(isGlassEffectAPIAvailable);
 
   return {
+    androidTargetBlurSupported: false,
     blurViewAvailable: true,
     liquidGlassApiAvailable,
     liquidGlassComponentAvailable,

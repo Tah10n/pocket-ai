@@ -19,3 +19,18 @@ export function createMaterialEnvironment(
     ...overrides,
   });
 }
+
+export function parseAndroidSdkVersion(version: number | string): number | undefined {
+  const normalizedVersion = typeof version === 'string' ? version.trim() : version;
+  if (typeof normalizedVersion === 'string' && !/^\d+$/.test(normalizedVersion)) {
+    return undefined;
+  }
+
+  const parsedVersion = typeof normalizedVersion === 'string'
+    ? Number(normalizedVersion)
+    : normalizedVersion;
+
+  return Number.isSafeInteger(parsedVersion) && parsedVersion > 0
+    ? parsedVersion
+    : undefined;
+}

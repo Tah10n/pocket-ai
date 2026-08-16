@@ -8,12 +8,14 @@ import { cardPaddingByDensity, radiusTokens } from '../../utils/themeTokens';
 export interface ValueSelectorRowProps {
   label?: string;
   value: string;
+  leading?: React.ReactNode;
   badges?: React.ReactNode;
   onPress?: () => void;
   showChevron?: boolean;
   disabled?: boolean;
   accessibilityLabel?: string;
   accessibilityHint?: string;
+  accessibilityValue?: React.ComponentProps<typeof ScreenPressableSurface>['accessibilityValue'];
   className?: string;
   testID?: string;
 }
@@ -21,12 +23,14 @@ export interface ValueSelectorRowProps {
 export function ValueSelectorRow({
   label,
   value,
+  leading,
   badges,
   onPress,
   showChevron = false,
   disabled = false,
   accessibilityLabel,
   accessibilityHint,
+  accessibilityValue,
   className,
   testID,
 }: ValueSelectorRowProps) {
@@ -39,6 +43,7 @@ export function ValueSelectorRow({
     accessible: hasAccessibilityText ? true : undefined,
     accessibilityLabel,
     accessibilityHint,
+    accessibilityValue,
     accessibilityState,
   };
   const containerClassName = joinClassNames(
@@ -53,6 +58,7 @@ export function ValueSelectorRow({
 
   const content = (
     <>
+      {leading}
       <Box className="min-w-0 flex-1 flex-row items-center justify-between gap-3">
         {hasLabel ? (
           <Text className={composeTextRole('caption', 'shrink-0')}>
@@ -94,6 +100,7 @@ export function ValueSelectorRow({
         accessible={hasAccessibilityText ? true : undefined}
         accessibilityLabel={accessibilityLabel}
         accessibilityHint={accessibilityHint}
+        accessibilityValue={accessibilityValue}
         accessibilityRole="button"
         tone="neutral"
         className={containerClassName}

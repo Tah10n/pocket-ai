@@ -78,6 +78,7 @@ describe('ValueSelectorRow', () => {
         onPress={jest.fn()}
         accessibilityLabel="Selected GGUF file: Q4_K_M - 3.80 GB"
         accessibilityHint="Opens the GGUF file picker."
+        accessibilityValue={{ text: 'Q4_K_M - 3.80 GB' }}
         testID="value-selector-row"
       />,
     );
@@ -86,6 +87,7 @@ describe('ValueSelectorRow', () => {
     expect(row.props.accessible).toBe(true);
     expect(row.props.accessibilityLabel).toBe('Selected GGUF file: Q4_K_M - 3.80 GB');
     expect(row.props.accessibilityHint).toBe('Opens the GGUF file picker.');
+    expect(row.props.accessibilityValue).toEqual({ text: 'Q4_K_M - 3.80 GB' });
   });
 
   it('passes accessibility label and hint to the read-only row', () => {
@@ -116,6 +118,19 @@ describe('ValueSelectorRow', () => {
 
     expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
     expect(screen.getByText('models.ramFitYes')).toBeTruthy();
+  });
+
+  it('renders a custom leading preview before the selected value', () => {
+    const screen = render(
+      <ValueSelectorRow
+        value="Standard"
+        leading={<RNText testID="theme-preview">Preview</RNText>}
+        testID="value-selector-row"
+      />,
+    );
+
+    expect(screen.getByTestId('theme-preview')).toBeTruthy();
+    expect(screen.getByText('Standard')).toBeTruthy();
   });
 
   it('can render the selected value without a visible label', () => {

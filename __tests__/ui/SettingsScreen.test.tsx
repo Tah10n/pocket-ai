@@ -341,6 +341,7 @@ describe('SettingsScreen', () => {
     expect(getByTestId('settings-theme-style-control')).toBeTruthy();
 
     fireEvent.press(getByTestId('settings-theme-mode-dark'));
+    fireEvent.press(getByTestId('settings-theme-style-control'));
     fireEvent.press(getByTestId('settings-theme-style-glass'));
 
     expect(mockSetTheme).toHaveBeenCalledWith('dark');

@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, within } from '@testing-library/react-native';
-import { FlatList, StyleSheet } from 'react-native';
+import { FlatList, StyleSheet, View } from 'react-native';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -177,5 +177,24 @@ describe('ListPickerSheet', () => {
 
     expect(getByTestId('readonly-row')).toBeTruthy();
     expect(queryByText('chevron-right')).toBeNull();
+  });
+
+  it('renders a custom solid leading preview in place of the default icon tile', () => {
+    const { getByTestId, queryByTestId } = render(
+      React.createElement(ListPickerSheetContent, {
+        title: 'Theme',
+        onClose: jest.fn(),
+        items: [{
+          key: 'glass',
+          title: 'Glass',
+          leading: React.createElement(View, { testID: 'solid-theme-preview' }),
+          iconName: 'auto-awesome',
+          testID: 'glass-row',
+        }],
+      }),
+    );
+
+    expect(getByTestId('solid-theme-preview')).toBeTruthy();
+    expect(queryByTestId('glass-row-leading-icon')).toBeNull();
   });
 });

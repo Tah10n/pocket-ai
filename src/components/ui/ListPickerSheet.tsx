@@ -14,6 +14,7 @@ import { screenLayoutMetrics, screenLayoutTokens } from '../../utils/themeTokens
 export interface ListPickerSheetItem {
   key: string;
   title: string;
+  leading?: React.ReactNode;
   description?: string;
   supportingText?: string;
   badges?: ListPickerSheetBadge[];
@@ -87,7 +88,7 @@ function ListPickerRow({
         testID={item.testID ? `${item.testID}-body` : undefined}
         className={joinClassNames('min-w-0 flex-1 flex-row gap-3', rowAlignmentClassName)}
       >
-        {item.iconName ? (
+        {item.leading ?? (item.iconName ? (
           <ScreenIconTile
             iconName={item.iconName}
             tone="neutral"
@@ -96,7 +97,7 @@ function ListPickerRow({
             className={hasSecondaryContent ? 'mt-0.5 h-9 w-9' : 'h-9 w-9 self-center'}
             testID={item.testID ? `${item.testID}-leading-icon` : undefined}
           />
-        ) : null}
+        ) : null)}
         <Box className="min-w-0 flex-1">
           <Text
             numberOfLines={1}

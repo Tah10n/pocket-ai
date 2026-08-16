@@ -23,7 +23,8 @@ import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
-import { getThemeMetadata, isThemeId } from '../../design-system/themes/registry';
+import { ThemeStyleSelector } from '../../design-system/components/ThemeStyleSelector';
+import { getThemeMetadata } from '../../design-system/themes/registry';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getErrorMessage } from '../../services/AppError';
@@ -38,6 +39,8 @@ function clampPercentage(value: number) {
 
     return Math.max(0, Math.min(100, value));
 }
+
+const visualThemeMetadata = getThemeMetadata();
 
 function formatSystemCapacity(value: number) {
     if (!Number.isFinite(value) || value <= 0) {
@@ -388,18 +391,6 @@ export const SettingsScreen = () => {
         { key: 'dark', label: t('settings.themeDark'), testID: 'settings-theme-mode-dark' },
     ];
 
-    const visualThemeOptions = getThemeMetadata().map((metadata) => ({
-        key: metadata.id,
-        label: t(metadata.labelKey),
-        testID: `settings-theme-style-${metadata.id}`,
-    }));
-
-    const handleVisualThemeChange = (nextThemeId: string) => {
-        if (isThemeId(nextThemeId)) {
-            setThemeId(nextThemeId);
-        }
-    };
-
     return (
         <ScreenRoot>
             <HeaderBar
@@ -626,12 +617,10 @@ export const SettingsScreen = () => {
                                         </Box>
                                     </Box>
 
-                                    <ScreenSegmentedControl
-                                        className="mt-4"
-                                        testID="settings-theme-style-control"
-                                        activeKey={themeId}
-                                        onChange={handleVisualThemeChange}
-                                        options={visualThemeOptions}
+                                    <ThemeStyleSelector
+                                        themes={visualThemeMetadata}
+                                        activeThemeId={themeId}
+                                        onChange={setThemeId}
                                     />
                                 </ScreenCard>
 

@@ -8,6 +8,7 @@ import * as Sharing from 'expo-sharing';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { Input, InputField } from '@/components/ui/input';
+import { screenTextFieldGeometryBySize } from '@/components/ui/controlGeometry';
 import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { ScreenCard, ScreenIconButton, ScreenModalOverlay, ScreenSheet, ScreenStack } from '@/components/ui/ScreenShell';
@@ -668,7 +669,7 @@ export function ErrorReportSheet({
                 <Text colorRole="secondary" className="mt-2 text-sm leading-6  ">
                   {t('models.errorReport.additionalInfoMessage')}
                 </Text>
-                <Input className="mt-3">
+                <Input className="mt-3" style={screenTextFieldGeometryBySize.default.style}>
                   <InputField
                     value={additionalInfo}
                     onChangeText={setAdditionalInfo}

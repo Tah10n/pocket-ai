@@ -92,6 +92,7 @@ describe('ThemeStyleSelector', () => {
     );
 
     const trigger = screen.getByTestId('settings-theme-style-control');
+    expect(trigger.props.density).toBe('compact');
     expect(trigger.props.accessibilityValue).toEqual({ text: 'themes.theme-0' });
     expect(screen.getByTestId(
       'settings-theme-style-control-preview',

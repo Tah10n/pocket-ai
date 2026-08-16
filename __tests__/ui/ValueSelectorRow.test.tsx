@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
-import { Pressable, Text as RNText } from 'react-native';
+import { Pressable, StyleSheet, Text as RNText } from 'react-native';
 import { ValueSelectorRow } from '../../src/components/ui/ValueSelectorRow';
 
 jest.mock('../../src/components/ui/box', () => {
@@ -131,6 +131,28 @@ describe('ValueSelectorRow', () => {
 
     expect(screen.getByTestId('theme-preview')).toBeTruthy();
     expect(screen.getByText('Standard')).toBeTruthy();
+  });
+
+  it('keeps compact selector rows on the 44px geometry contract', () => {
+    const screen = render(
+      <ValueSelectorRow
+        density="compact"
+        value="Standard"
+        leading={<RNText style={{ height: 30 }}>Preview</RNText>}
+        onPress={jest.fn()}
+        testID="value-selector-row"
+      />,
+    );
+
+    expect(StyleSheet.flatten(screen.getByTestId('value-selector-row').props.style)).toMatchObject({
+      minHeight: 44,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    });
+    expect(StyleSheet.flatten(screen.getByTestId('value-selector-row').props.style)).toMatchObject({
+      borderRadius: 16,
+      backgroundColor: expect.any(String),
+    });
   });
 
   it('can render the selected value without a visible label', () => {

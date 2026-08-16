@@ -14,6 +14,7 @@ import {
   ScreenRoot,
   ScreenSegmentedControl,
   ScreenSheet,
+  ScreenSurface,
 } from '../../src/components/ui/ScreenShell';
 
 let mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
@@ -237,15 +238,31 @@ describe('ScreenShell semantic material contracts', () => {
         testID="segments"
         activeKey="second"
         onChange={onChange}
-        options={[{ key: 'first', label: 'First' }, { key: 'second', label: 'Second', testID: 'second' }]}
+        options={[
+          { key: 'first', label: 'First', testID: 'first' },
+          { key: 'second', label: 'Second', testID: 'second' },
+        ]}
       />,
     );
 
     expect(screen.getByTestId('segments').props.material).toEqual({ role: 'control', variant: 'inline', tone: 'neutral' });
+    expect(screen.getByTestId('first').props.material).toBeNull();
     expect(screen.getByTestId('second').props.accessibilityState).toEqual({ selected: true, disabled: false });
     expect(screen.getByText('Second').props.colorRole).toBe('onAccent');
     fireEvent.press(screen.getByText('First').parent as any);
     expect(onChange).toHaveBeenCalledWith('first');
+  });
+
+  it('keeps generic screen surfaces transparent until a caller opts into material', () => {
+    const screen = render(
+      <>
+        <ScreenSurface testID="plain">plain</ScreenSurface>
+        <ScreenSurface testID="explicit" material={{ role: 'content', variant: 'inset' }}>explicit</ScreenSurface>
+      </>,
+    );
+
+    expect(screen.getByTestId('plain').props.material).toBeUndefined();
+    expect(screen.getByTestId('explicit').props.material).toEqual({ role: 'content', variant: 'inset' });
   });
 
   it('keeps shared icon controls accessible while materializing their tone', () => {

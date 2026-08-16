@@ -23,7 +23,7 @@ const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
 export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
   const { t } = useTranslation();
   return (
-    <ScreenSurface shape="none" className="gap-2 px-4 py-3">
+    <ScreenSurface material={{ role: 'content', variant: 'inset' }} shape="none" className="gap-2 px-4 py-3">
       <Text colorRole="secondary" className="text-sm font-semibold  ">
         {t('models.sortTitle')}
       </Text>

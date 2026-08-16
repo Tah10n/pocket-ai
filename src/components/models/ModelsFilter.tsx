@@ -216,7 +216,7 @@ export const ModelsFilter = ({
       {openPanel === 'filter' ? (
         <ScreenSurface
           testID="models-filter-panel"
-          tone="neutral"
+          material={{ role: 'content', variant: 'inset', tone: 'neutral' }}
           className="mt-1.5 p-1.5"
         >
           {hasActiveFilters ? (
@@ -265,7 +265,7 @@ export const ModelsFilter = ({
       {openPanel === 'sort' ? (
         <ScreenSurface
           testID="models-sort-panel"
-          tone="neutral"
+          material={{ role: 'content', variant: 'inset', tone: 'neutral' }}
           className="mt-1.5 p-1.5"
         >
           <Box className="gap-1">

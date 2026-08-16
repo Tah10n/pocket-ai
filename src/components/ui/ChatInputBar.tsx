@@ -860,7 +860,8 @@ export const ChatInputBar = ({
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
                                 <ScreenSurface
-                                    tone={isFailed ? 'danger' : 'default'}
+                                    material={{ role: 'content', variant: isFailed ? 'messageError' : 'messageAttachment' }}
+                                    shape="md"
                                     className="relative h-16 w-16 overflow-hidden rounded-2xl p-1"
                                 >
                                     {isFailed ? (
@@ -933,7 +934,8 @@ export const ChatInputBar = ({
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
                                 <ScreenSurface
-                                    tone={isFailed ? 'danger' : 'default'}
+                                    material={{ role: 'content', variant: isFailed ? 'messageError' : 'messageAttachment' }}
+                                    shape="md"
                                     className="relative h-16 w-44 rounded-2xl px-3 py-2"
                                     accessibilityRole="summary"
                                     accessibilityLabel={accessibilityLabel}
@@ -1004,7 +1006,8 @@ export const ChatInputBar = ({
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
                                 <ScreenSurface
-                                    tone={isFailed ? 'danger' : 'default'}
+                                    material={{ role: 'content', variant: isFailed ? 'messageError' : 'messageAttachment' }}
+                                    shape="md"
                                     className="relative h-16 w-44 rounded-2xl px-3 py-2"
                                     accessibilityRole="summary"
                                     accessibilityLabel={accessibilityLabel}

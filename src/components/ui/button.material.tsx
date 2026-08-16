@@ -1,10 +1,17 @@
 import React from 'react';
-import { type PressableProps, type TextProps } from 'react-native';
+import {
+  type PressableProps,
+  type PressableStateCallbackType,
+  type StyleProp,
+  type TextProps,
+  type ViewStyle,
+} from 'react-native';
 import { PressableSurface } from '../../design-system/materials/Surface';
 import type { MaterialRequest, MaterialTone } from '../../design-system/materials/contract';
 import type { SemanticForegroundRole } from '../../design-system/themes/foreground';
 import { buttonLayoutTokens } from '../../utils/themeTokens';
 import { Text, composeTextRole } from './text';
+import { buttonGeometryBySize } from './controlGeometry';
 
 interface ButtonProps extends PressableProps {
   action?: 'primary' | 'secondary' | 'positive' | 'negative' | 'default' | 'softPrimary' | 'softDestructive';
@@ -54,19 +61,25 @@ export function Button({
   className = '',
   children,
   disabled,
+  style,
   ...props
 }: ButtonProps) {
   const material = React.useMemo(() => getButtonMaterial(action), [action]);
   const colorRole = getButtonForegroundRole(action);
+  const geometry = buttonGeometryBySize[size];
+  const resolvedStyle = typeof style === 'function'
+    ? (state: PressableStateCallbackType): StyleProp<ViewStyle> => [geometry.style, style(state)]
+    : [geometry.style, style];
 
   return (
     <ButtonContext.Provider value={{ colorRole, size }}>
       <PressableSurface
         accessibilityRole={props.accessibilityRole ?? 'button'}
         material={material}
-        shape="full"
+        shape={geometry.shape}
         disabled={disabled}
-        className={`${buttonLayoutTokens.sizeClassNameBySize[size]} flex-row items-center justify-center gap-2 active:opacity-85 ${disabled ? 'opacity-55' : ''} ${className}`.trim()}
+        className={`flex-row items-center justify-center gap-2 active:opacity-85 ${disabled ? 'opacity-55' : ''} ${className}`.trim()}
+        style={resolvedStyle}
         {...props}
       >
         {children}

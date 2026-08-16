@@ -33,7 +33,7 @@ export function Input({
     <Surface
       material={material}
       shape={shape}
-      className={`min-h-12 px-4 ${className}`.trim()}
+      className={className}
       {...props}
     />
   );

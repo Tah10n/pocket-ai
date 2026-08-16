@@ -83,6 +83,7 @@ export function ThemeStyleSelector<Id extends string>({
     <>
       <ValueSelectorRow
         testID={testID}
+        density="compact"
         className="mt-4"
         value={selectedLabel}
         leading={selectedTheme ? (

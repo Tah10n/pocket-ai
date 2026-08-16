@@ -14,7 +14,7 @@ import { getMaterialFrameStyle } from './style';
 
 type BoxProps = React.ComponentProps<typeof Box>;
 type BaseMaterialSurfaceProps = {
-  readonly material: MaterialRequest;
+  readonly material: MaterialRequest | null;
   readonly shape?: MaterialShape;
 };
 
@@ -24,12 +24,14 @@ type BasePressableProps = React.ComponentProps<typeof Pressable>;
 export type PressableSurfaceProps = BasePressableProps & BaseMaterialSurfaceProps;
 
 function useDenseMaterialStyle(
-  request: MaterialRequest,
+  request: MaterialRequest | null,
   shape: MaterialShape,
-): ViewStyle {
+): ViewStyle | undefined {
   const { resolvedTheme } = useTheme();
 
   return React.useMemo(() => {
+    if (!request) return undefined;
+
     const recipe = resolveMaterialRecipe(
       resolvedTheme.materials,
       request,

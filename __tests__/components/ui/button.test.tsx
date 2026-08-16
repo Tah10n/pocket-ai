@@ -70,6 +70,26 @@ const actionCases = [
 ] as const;
 
 describe('Button semantic action contrast', () => {
+  it.each([
+    ['xs', 12, 32, 12, 6],
+    ['sm', 16, 36, 12, 8],
+    ['md', 16, 40, 16, 10],
+    ['lg', 28, 44, 20, 12],
+  ] as const)('preserves the %s host geometry contract', (size, borderRadius, minHeight, paddingHorizontal, paddingVertical) => {
+    const screen = render(
+      <Button testID={`${size}-button`} size={size}>
+        <ButtonText>{size}</ButtonText>
+      </Button>,
+    );
+
+    expect(StyleSheet.flatten(screen.getByTestId(`${size}-button`).props.style)).toMatchObject({
+      borderRadius,
+      minHeight,
+      paddingHorizontal,
+      paddingVertical,
+    });
+  });
+
   it.each(['light', 'dark'] as const)('keeps selected actions AA-readable in %s mode', (mode) => {
     mockResolvedTheme = resolveTheme('default', mode);
 

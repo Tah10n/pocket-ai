@@ -1,5 +1,11 @@
 import React from 'react';
-import { StyleSheet, type LayoutChangeEvent, type StyleProp, type View, type ViewStyle } from 'react-native';
+import {
+  StyleSheet,
+  type LayoutChangeEvent,
+  type StyleProp,
+  type View,
+  type ViewStyle,
+} from 'react-native';
 import { BlurTargetView } from 'expo-blur';
 import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -24,6 +30,12 @@ import { setActiveAndroidBlurTarget, type AndroidBlurTargetRef } from '../../uti
 import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
 import { buttonLayoutTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, type ThemeTone } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
+import {
+  screenActionPillGeometryBySize,
+  screenInlineInputGeometryByVariant,
+  screenTextFieldGeometryBySize,
+  segmentedControlGeometry,
+} from './controlGeometry';
 
 interface ScreenHeaderShellProps {
   androidBlurTargetRef?: AndroidBlurTargetRef | null;
@@ -284,6 +296,7 @@ interface ScreenTextFieldProps extends Omit<InputFieldProps, 'className'> {
   inputClassName?: string;
   labelClassName?: string;
   helperTextClassName?: string;
+  fieldTestID?: string;
   size?: 'compact' | 'default' | 'multiline' | 'prominent' | 'prominentMultiline';
 }
 
@@ -779,8 +792,8 @@ export function ScreenActionPill({
   style,
   ...props
 }: ScreenActionPillProps) {
+  const geometry = screenActionPillGeometryBySize[size];
   const baseClassName = joinClassNames(
-    buttonLayoutTokens.screenActionPillClassNameBySize[size],
     'flex-row items-center justify-center',
     tone === 'primary' ? 'gap-2' : 'gap-1.5',
   );
@@ -794,13 +807,13 @@ export function ScreenActionPill({
         variant: tone === 'primary' ? 'selected' : 'inline',
         tone: tone === 'primary' ? 'primary' : 'neutral',
       }}
-      shape="full"
+      shape={geometry.shape}
       className={joinClassNames(
         baseClassName,
         disabled ? 'opacity-55' : 'active:opacity-80',
         className,
       )}
-      style={style}
+      style={[geometry.style, style]}
       {...props}
     >
       {children}
@@ -963,11 +976,11 @@ export function ScreenSurface({
 }: ScreenSurfaceProps) {
   const resolvedMaterial = material === null
     ? null
-    : material ?? {
-      role: withControlTint ? 'control' : 'content',
-      variant: withControlTint ? 'inline' : 'inset',
+    : material ?? (withControlTint ? {
+      role: 'control',
+      variant: 'inline',
       tone: normalizeMaterialTone(tone),
-    } as MaterialRequest;
+    } as MaterialRequest : null);
   const sharedProps = {
     accessible,
     accessibilityHint,
@@ -1162,6 +1175,7 @@ export function ScreenTextField({
   inputClassName,
   labelClassName,
   helperTextClassName,
+  fieldTestID,
   size = 'default',
   multiline,
   placeholderTextColor,
@@ -1170,15 +1184,10 @@ export function ScreenTextField({
 }: ScreenTextFieldProps) {
   const isProminent = size === 'prominent' || size === 'prominentMultiline';
   const isMultiline = size === 'multiline' || size === 'prominentMultiline' || multiline === true;
-  const fieldShellClassName = size === 'compact'
-    ? 'min-h-11 px-3'
-    : size === 'prominent'
-      ? 'min-h-14 justify-center px-4'
-    : isMultiline
-      ? isProminent
-        ? 'min-h-[320px] px-0'
-        : 'min-h-40 px-0'
-      : 'min-h-12 px-4';
+  const geometrySize = isMultiline
+    ? isProminent ? 'prominentMultiline' : 'multiline'
+    : size === 'compact' || size === 'prominent' ? size : 'default';
+  const geometry = screenTextFieldGeometryBySize[geometrySize];
   const inputBaseClassName = isMultiline
     ? isProminent
       ? 'min-h-80 flex-1 px-4 py-4 text-base leading-7'
@@ -1186,7 +1195,6 @@ export function ScreenTextField({
     : isProminent
       ? 'w-full min-h-6 px-0 py-3 text-base leading-6'
       : 'min-h-0 h-full px-0 py-0 text-base';
-  const fieldShape: MaterialShape = isMultiline ? 'xl' : 'md';
 
   return (
     <Box className={containerClassName}>
@@ -1196,9 +1204,11 @@ export function ScreenTextField({
         </Text>
       ) : null}
       <Input
+        testID={fieldTestID}
         material={{ role: 'content', variant: 'inset' }}
-        shape={fieldShape}
-        className={joinClassNames(fieldShellClassName, fieldClassName)}
+        shape={geometry.shape}
+        className={fieldClassName}
+        style={geometry.style}
       >
         <InputField
           {...props}
@@ -1231,9 +1241,7 @@ export function ScreenInlineInput({
   testID,
   ...props
 }: ScreenInlineInputProps) {
-  const fieldShellClassName = variant === 'composer'
-    ? 'flex-row h-10 items-center px-3.5'
-    : 'flex-row h-10 items-center px-3';
+  const geometry = screenInlineInputGeometryByVariant[variant];
   const inputBaseClassName = variant === 'composer'
     ? screenLayoutTokens.composerInlineInputClassName
     : screenLayoutTokens.searchInlineInputClassName;
@@ -1243,9 +1251,9 @@ export function ScreenInlineInput({
     <Input
       testID={containerTestID}
       material={isEmbedded ? null : { role: 'content', variant: 'inset' }}
-      shape={variant === 'composer' ? 'full' : 'md'}
-      className={joinClassNames(fieldShellClassName, className)}
-      style={style}
+      shape={geometry.shape}
+      className={className}
+      style={[geometry.style, style]}
     >
       {leadingAccessory ? <Box className="shrink-0">{leadingAccessory}</Box> : null}
       <Input material={null} className={joinClassNames(screenLayoutTokens.inlineInputShellClassName, leadingAccessory ? 'ml-2' : undefined)}>
@@ -1292,37 +1300,36 @@ export function ScreenSegmentedControl({
       material={{ role: 'control', variant: 'inline', tone: 'neutral' }}
       shape="full"
       className={joinClassNames(
-        'flex-row p-1',
+        'flex-row',
         disabled ? 'opacity-60' : undefined,
         className,
       )}
+      style={segmentedControlGeometry.container}
     >
       {options.map((option) => {
         const isActive = activeKey === option.key;
 
+        const sharedItemProps = {
+          testID: option.testID,
+          onPress: () => {
+            if (!disabled) {
+              onChange(option.key);
+            }
+          },
+          disabled,
+          accessibilityRole: 'tab' as const,
+          accessibilityLabel: option.accessibilityLabel || option.label,
+          accessibilityState: { selected: isActive, disabled },
+          className: itemClassName,
+          style: segmentedControlGeometry.item,
+        };
+
         return (
           <MaterialPressableSurface
             key={option.key}
-            testID={option.testID}
-            onPress={() => {
-              if (!disabled) {
-                onChange(option.key);
-              }
-            }}
-            disabled={disabled}
-            accessibilityRole="tab"
-            accessibilityLabel={option.accessibilityLabel || option.label}
-            accessibilityState={{ selected: isActive, disabled }}
-            material={{
-              role: 'control',
-              variant: isActive ? 'selected' : 'inline',
-              tone: isActive ? 'primary' : 'neutral',
-            }}
+            {...sharedItemProps}
+            material={isActive ? { role: 'control', variant: 'selected', tone: 'primary' } : null}
             shape="full"
-            className={joinClassNames(
-              screenLayoutTokens.segmentedControlItemClassName,
-              itemClassName,
-            )}
           >
             {renderLabel(option, isActive)}
           </MaterialPressableSurface>

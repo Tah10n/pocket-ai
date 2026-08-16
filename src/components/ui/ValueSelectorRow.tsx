@@ -3,9 +3,10 @@ import { Box } from './box';
 import { MaterialSymbols } from './MaterialSymbols';
 import { joinClassNames, ScreenPressableSurface, ScreenSurface } from './ScreenShell';
 import { Text, composeTextRole } from './text';
-import { cardPaddingByDensity, radiusTokens } from '../../utils/themeTokens';
+import { valueSelectorRowGeometryByDensity } from './controlGeometry';
 
 export interface ValueSelectorRowProps {
+  density?: 'default' | 'compact';
   label?: string;
   value: string;
   leading?: React.ReactNode;
@@ -21,6 +22,7 @@ export interface ValueSelectorRowProps {
 }
 
 export function ValueSelectorRow({
+  density = 'default',
   label,
   value,
   leading,
@@ -46,10 +48,7 @@ export function ValueSelectorRow({
     accessibilityState,
   };
   const containerClassName = joinClassNames(
-    // DS-EXCEPTION: keep an explicit 44px min touch target for list rows.
-    'min-h-[44px] flex-row items-center gap-3',
-    radiusTokens.md,
-    cardPaddingByDensity.compact,
+    'flex-row items-center gap-3',
     disabled ? 'opacity-60' : undefined,
     className,
   );
@@ -100,8 +99,10 @@ export function ValueSelectorRow({
         accessibilityHint={accessibilityHint}
         accessibilityValue={accessibilityValue}
         accessibilityRole="button"
-        tone="neutral"
+        material={{ role: 'control', variant: 'inline', tone: 'neutral' }}
+        shape="md"
         className={containerClassName}
+        style={valueSelectorRowGeometryByDensity[density]}
       >
         {content}
       </ScreenPressableSurface>
@@ -112,8 +113,10 @@ export function ValueSelectorRow({
     <ScreenSurface
       {...accessibilityProps}
       testID={testID}
-      tone="neutral"
+      material={{ role: 'control', variant: 'inline', tone: 'neutral' }}
+      shape="md"
       className={containerClassName}
+      style={valueSelectorRowGeometryByDensity[density]}
     >
       {content}
     </ScreenSurface>

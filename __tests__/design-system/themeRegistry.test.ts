@@ -26,6 +26,7 @@ describe('theme registry', () => {
       expect(Object.isFrozen(definition)).toBe(true);
       expect(Object.isFrozen(definition.modes.light.colors)).toBe(true);
       expect(Object.isFrozen(definition.modes.dark.appearance)).toBe(true);
+      expect(Object.isFrozen(definition.modes.light.materials)).toBe(true);
       expect(definition.modes.light).toBeDefined();
       expect(definition.modes.dark).toBeDefined();
       expect(definition.preview).toEqual(expect.objectContaining({
@@ -70,6 +71,7 @@ describe('theme registry', () => {
     expect(Object.isFrozen(resolved)).toBe(true);
     expect(Object.isFrozen(resolved.colors)).toBe(true);
     expect(Object.isFrozen(resolved.appearance.classNames)).toBe(true);
+    expect(Object.isFrozen(resolved.materials)).toBe(true);
     expect(Object.isFrozen(resolved.navigationTheme.colors)).toBe(true);
   });
 

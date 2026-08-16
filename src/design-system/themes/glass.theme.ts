@@ -3,8 +3,10 @@ import {
   createGlassThemeAppearance,
   createGlassThemeColors,
 } from './legacyTheme';
+import { createLiquidThemeMaterialRecipes } from '../materials/presets';
 
 const lightColors = createGlassThemeColors('light');
+const darkColors = createGlassThemeColors('dark');
 
 export const glassTheme = {
   id: 'glass',
@@ -20,10 +22,12 @@ export const glassTheme = {
     light: {
       colors: lightColors,
       appearance: createGlassThemeAppearance('light'),
+      materials: createLiquidThemeMaterialRecipes(lightColors, 'light'),
     },
     dark: {
-      colors: createGlassThemeColors('dark'),
+      colors: darkColors,
       appearance: createGlassThemeAppearance('dark'),
+      materials: createLiquidThemeMaterialRecipes(darkColors, 'dark'),
     },
   },
   components: {

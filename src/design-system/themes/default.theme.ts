@@ -3,8 +3,10 @@ import {
   createDefaultThemeAppearance,
   createDefaultThemeColors,
 } from './legacyTheme';
+import { createSolidThemeMaterialRecipes } from '../materials/presets';
 
 const lightColors = createDefaultThemeColors('light');
+const darkColors = createDefaultThemeColors('dark');
 
 export const defaultTheme = {
   id: 'default',
@@ -20,10 +22,12 @@ export const defaultTheme = {
     light: {
       colors: lightColors,
       appearance: createDefaultThemeAppearance('light'),
+      materials: createSolidThemeMaterialRecipes(lightColors),
     },
     dark: {
-      colors: createDefaultThemeColors('dark'),
+      colors: darkColors,
       appearance: createDefaultThemeAppearance('dark'),
+      materials: createSolidThemeMaterialRecipes(darkColors),
     },
   },
   components: {

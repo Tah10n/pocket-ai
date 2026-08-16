@@ -59,6 +59,7 @@ export function resolveThemeDefinition<Id extends string>(
     metadata,
     colors: modeDefinition.colors,
     appearance: modeDefinition.appearance,
+    materials: modeDefinition.materials,
     components: definition.components,
     navigationTheme: createNavigationTheme(mode, modeDefinition.colors),
   });

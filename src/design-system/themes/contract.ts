@@ -4,6 +4,7 @@ import type {
   ThemeAppearance,
   ThemeColors,
 } from './legacyTheme';
+import type { ThemeMaterialRecipes } from '../materials/contract';
 
 export interface ThemePreviewTokens {
   readonly canvas: string;
@@ -31,6 +32,7 @@ export interface ThemeComponentPresentation {
 export interface ThemeModeDefinition<Id extends string = string> {
   readonly colors: ThemeColors;
   readonly appearance: ThemeAppearance<Id>;
+  readonly materials: ThemeMaterialRecipes;
 }
 
 export interface ThemeDefinition<Id extends string = string> extends ThemeMetadata<Id> {
@@ -44,6 +46,7 @@ export interface ResolvedTheme<Id extends string = string> {
   readonly metadata: ThemeMetadata<Id>;
   readonly colors: ThemeColors;
   readonly appearance: ThemeAppearance<Id>;
+  readonly materials: ThemeMaterialRecipes;
   readonly components: ThemeComponentPresentation;
   readonly navigationTheme: Theme;
 }

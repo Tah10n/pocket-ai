@@ -1,5 +1,3 @@
-import type { ViewStyle } from 'react-native';
-
 type Scale = Record<string, string>;
 
 interface ThemeContract {
@@ -62,76 +60,8 @@ export const motionTokens = themeContract.motion;
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type ResolvedThemeMode = 'light' | 'dark';
 export type ThemeTone = 'neutral' | 'primary' | 'accent' | 'info' | 'success' | 'warning' | 'error';
+export type ThemeProgressTone = 'neutral' | 'primary' | 'success' | 'warning' | 'error';
 
-type ThemeSurfaceKind = 'solid' | 'glass';
-
-export interface ThemeToneClassNames {
-  readonly surfaceClassName: string;
-  readonly iconTileClassName: string;
-  readonly iconClassName: string;
-  readonly textClassName: string;
-  readonly labelClassName: string;
-  readonly valueClassName: string;
-  readonly badgeClassName: string;
-  readonly progressTrackClassName: string;
-  readonly framedProgressTrackClassName: string;
-  readonly progressFillClassName: string;
-  readonly percentPillClassName: string;
-}
-
-interface ThemeAppearanceClassNames {
-  readonly toneClassNameByTone: Readonly<Record<ThemeTone, ThemeToneClassNames>>;
-  readonly headerShellClassName: string;
-  readonly headerBorderClassName: string;
-  readonly dividerClassName: string;
-  readonly surfaceBarClassName: string;
-  readonly cardClassName: string;
-  readonly insetCardClassName: string;
-  readonly selectedInsetCardClassName: string;
-  readonly textFieldClassName: string;
-  readonly compactTextFieldClassName: string;
-  readonly prominentTextFieldClassName: string;
-  readonly multilineTextFieldClassName: string;
-  readonly prominentMultilineTextFieldClassName: string;
-  readonly searchInlineFieldClassName: string;
-  readonly composerInlineFieldClassName: string;
-  readonly segmentedControlClassName: string;
-  readonly segmentedControlActiveItemClassName: string;
-  readonly sheetClassName: string;
-  readonly modalOverlayClassName: string;
-  readonly iconButtonClassName: string;
-  readonly headerActionClassName: string;
-  readonly primaryActionPillClassName: string;
-  readonly softActionPillClassName: string;
-  readonly bottomBarClassName: string;
-  readonly modeBannerClassName: string;
-  readonly floatingBannerClassName: string;
-  readonly inlinePillClassName: string;
-  readonly systemEventPillClassName: string;
-  readonly chatUserBubbleClassName: string;
-  readonly chatAssistantBubbleClassName: string;
-  readonly chatThoughtBubbleClassName: string;
-  readonly chatInlineErrorClassName: string;
-  readonly chatMetadataBadgeClassName: string;
-  readonly heroImageOverlayClassName: string;
-  readonly heroImageScrimClassName: string;
-  readonly thumbnailSurfaceClassName: string;
-  readonly progressShineClassName: string;
-}
-
-interface ThemeAppearanceEffects {
-  readonly headerBlurIntensity: number;
-  readonly surfaceBlurIntensity: number;
-  readonly blurReductionFactor?: number;
-  readonly tabBarStyle: Readonly<Pick<ViewStyle, 'elevation' | 'shadowColor' | 'shadowOffset' | 'shadowOpacity' | 'shadowRadius'>>;
-}
-
-export interface ThemeAppearance<Id extends string = string> {
-  readonly id: Id;
-  readonly surfaceKind: ThemeSurfaceKind;
-  readonly classNames: ThemeAppearanceClassNames;
-  readonly effects: ThemeAppearanceEffects;
-}
 
 export interface ThemeColors {
   readonly background: string;
@@ -143,8 +73,26 @@ export interface ThemeColors {
   readonly textSecondary: string;
   readonly textTertiary: string;
   readonly textInverse: string;
+  readonly textOnPrimary: string;
+  readonly textOnSuccess: string;
+  readonly textOnError: string;
+  readonly textOnSoftAction: string;
+  readonly textToneNeutral: string;
+  readonly textToneAccent: string;
+  readonly textStatusAccent: string;
+  readonly textStatusWarning: string;
+  readonly textInfo: string;
+  readonly textSuccess: string;
+  readonly textWarning: string;
+  readonly textDanger: string;
   readonly icon: string;
   readonly iconMuted: string;
+  readonly iconToneNeutral: string;
+  readonly iconToneAccent: string;
+  readonly iconToneInfo: string;
+  readonly iconToneSuccess: string;
+  readonly iconToneWarning: string;
+  readonly iconToneDanger: string;
   readonly primary: string;
   readonly primaryStrong: string;
   readonly primarySoft: string;
@@ -152,6 +100,7 @@ export interface ThemeColors {
   readonly border: string;
   readonly borderStrong: string;
   readonly borderSubtle: string;
+  readonly divider: string;
   readonly error: string;
   readonly warning: string;
   readonly success: string;
@@ -169,6 +118,12 @@ export interface ThemeColors {
   readonly tabBarInactive: string;
   readonly statusBarStyle: 'light' | 'dark';
   readonly headerBlurTint: 'light' | 'dark';
+  readonly heroImageOverlay: string;
+  readonly heroImageScrim: string;
+  readonly thumbnailBackground: string;
+  readonly thinkingPulseHalo: string;
+  readonly progressTrackByTone: Readonly<Record<ThemeProgressTone, string>>;
+  readonly progressFillByTone: Readonly<Record<ThemeProgressTone, string>>;
 }
 
 export const typographyColors = {
@@ -176,29 +131,6 @@ export const typographyColors = {
   500: getScaleColor(semanticColorTokens.typography, '500'),
 } as const;
 
-export function getThemeToneIconColor(tone: ThemeTone, mode: ResolvedThemeMode) {
-  if (tone === 'neutral') {
-    return getScaleColor(semanticColorTokens.typography, mode === 'dark' ? '200' : '700');
-  }
-
-  if (tone === 'info') {
-    return getScaleColor(semanticColorTokens.info, mode === 'dark' ? '300' : '600');
-  }
-
-  if (tone === 'success') {
-    return getScaleColor(semanticColorTokens.success, mode === 'dark' ? '300' : '600');
-  }
-
-  if (tone === 'warning') {
-    return getScaleColor(semanticColorTokens.warning, mode === 'dark' ? '200' : '700');
-  }
-
-  if (tone === 'error') {
-    return getScaleColor(semanticColorTokens.error, mode === 'dark' ? '300' : '600');
-  }
-
-  return getScaleColor(semanticColorTokens.primary, mode === 'dark' ? '300' : '600');
-}
 
 export const iconSizePx = {
   xs: 14,
@@ -221,17 +153,6 @@ export const radiusTokens = {
   full: 'rounded-full',
 } as const;
 
-export const tailwindRadiusPxByToken: Record<string, number> = {
-  none: 0,
-  sm: 2,
-  DEFAULT: 4,
-  md: 6,
-  lg: 8,
-  xl: 12,
-  '2xl': 16,
-  '3xl': 24,
-  full: 9999,
-};
 
 export const cardPaddingByDensity = {
   compact: 'px-3 py-2.5',
@@ -250,8 +171,6 @@ export const textFieldBySize = {
   md: 'min-h-12 rounded-2xl px-3.5',
   lg: 'min-h-14 rounded-[28px] px-4',
 } as const;
-
-export const listRowSelectedClassName = 'border-primary-500/30 bg-primary-500/10';
 
 export const screenChromeTokens = {
   maxWidthClassName: 'max-w-3xl',
@@ -332,8 +251,8 @@ export const screenLayoutTokens = {
   searchInlineFieldClassName: 'flex-row h-10 rounded-2xl items-center border border-outline-200 bg-background-50 px-3 dark:border-outline-700 dark:bg-background-900/60',
   composerInlineFieldClassName: 'flex-row h-10 items-center rounded-full border border-outline-200 bg-background-50 px-3.5 dark:border-outline-700 dark:bg-background-900/80',
   inlineInputShellClassName: 'min-w-0 flex-1 min-h-0 h-full justify-center border-0 bg-transparent px-0 dark:bg-transparent',
-  searchInlineInputClassName: 'min-h-0 px-0 py-0 text-sm leading-5 text-typography-900 dark:text-typography-100',
-  composerInlineInputClassName: 'min-h-0 h-full px-0 py-0 text-sm text-typography-900 dark:text-typography-0',
+  searchInlineInputClassName: 'min-h-0 px-0 py-0 text-sm leading-5',
+  composerInlineInputClassName: 'min-h-0 h-full px-0 py-0 text-sm',
   segmentedControlClassName: 'flex-row rounded-full border border-outline-200 bg-background-50 p-1 dark:border-outline-700 dark:bg-background-900/70',
   segmentedControlItemClassName: 'min-h-9 flex-1 items-center justify-center rounded-full px-3 py-1.5',
   modalOverlayClassName: 'flex-1 justify-end bg-background-950/45',
@@ -346,8 +265,8 @@ export const screenLayoutTokens = {
   bannerPrimaryClassName: `${radiusTokens.md} border border-primary-200 bg-primary-500/10 px-4 py-3 dark:border-primary-800`,
   bannerWarningClassName: `${radiusTokens.md} border border-warning-300 bg-background-warning px-4 py-3 dark:border-warning-800`,
   bannerErrorClassName: `${radiusTokens.md} border border-error-300 bg-background-error px-4 py-3 dark:border-error-800`,
-  fieldLabelClassName: 'text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
-  sectionLabelClassName: 'px-1 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400',
+  fieldLabelClassName: 'text-xs font-semibold uppercase tracking-wide',
+  sectionLabelClassName: 'px-1 text-xs font-semibold uppercase tracking-wide',
   textFieldClassName: `${textFieldBySize.md} border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
   compactTextFieldClassName: `min-h-11 ${radiusTokens.md} border border-outline-200 bg-background-0 px-3 dark:border-outline-700 dark:bg-background-950/70`,
   prominentTextFieldClassName: `${textFieldBySize.lg} justify-center border border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70`,
@@ -357,315 +276,6 @@ export const screenLayoutTokens = {
   microBadgeClassName: 'rounded-full px-2 py-1',
 } as const;
 
-const solidPrimaryTone: ThemeToneClassNames = {
-  surfaceClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10',
-  iconTileClassName: 'bg-primary-500/10 dark:bg-primary-500/20',
-  iconClassName: 'text-primary-600 dark:text-primary-300',
-  textClassName: 'text-primary-700 dark:text-primary-200',
-  labelClassName: 'text-primary-700 dark:text-primary-200',
-  valueClassName: 'text-typography-900 dark:text-typography-50',
-  badgeClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/15',
-  progressTrackClassName: 'bg-primary-200 dark:bg-typography-800',
-  framedProgressTrackClassName: 'border-primary-500/20 bg-primary-500/10 dark:border-primary-400/25 dark:bg-primary-500/10',
-  progressFillClassName: 'bg-primary-500',
-  percentPillClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
-};
-
-const solidToneClassNameByTone: Record<ThemeTone, ThemeToneClassNames> = {
-  neutral: {
-    surfaceClassName: 'border-outline-200 bg-background-0 dark:border-outline-700 dark:bg-background-950/70',
-    iconTileClassName: 'bg-background-100 dark:bg-background-800',
-    iconClassName: 'text-typography-700 dark:text-typography-200',
-    textClassName: 'text-typography-700 dark:text-typography-200',
-    labelClassName: 'text-typography-600 dark:text-typography-400',
-    valueClassName: 'text-typography-900 dark:text-typography-100',
-    badgeClassName: 'border-outline-200 bg-background-50 dark:border-outline-700 dark:bg-background-900/70',
-    progressTrackClassName: 'bg-background-200 dark:bg-background-800',
-    framedProgressTrackClassName: 'border-outline-200 bg-background-100 dark:border-outline-700 dark:bg-background-900/70',
-    progressFillClassName: 'bg-typography-500 dark:bg-typography-300',
-    percentPillClassName: 'bg-background-100 dark:bg-background-800',
-  },
-  primary: solidPrimaryTone,
-  accent: solidPrimaryTone,
-  info: {
-    surfaceClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/10',
-    iconTileClassName: 'bg-info-500/10 dark:bg-info-500/20',
-    iconClassName: 'text-info-600 dark:text-info-300',
-    textClassName: 'text-info-700 dark:text-info-200',
-    labelClassName: 'text-info-700 dark:text-info-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/15',
-    progressTrackClassName: 'bg-info-200 dark:bg-info-900/50',
-    framedProgressTrackClassName: 'border-info-500/20 bg-info-500/10 dark:border-info-400/25 dark:bg-info-500/10',
-    progressFillClassName: 'bg-info-500',
-    percentPillClassName: 'bg-info-500/10 dark:bg-info-500/15',
-  },
-  success: {
-    surfaceClassName: 'border-success-500/20 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/10',
-    iconTileClassName: 'bg-success-500/10 dark:bg-success-500/20',
-    iconClassName: 'text-success-600 dark:text-success-300',
-    textClassName: 'text-success-700 dark:text-success-200',
-    labelClassName: 'text-success-700 dark:text-success-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'border-success-500/20 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/15',
-    progressTrackClassName: 'bg-success-200 dark:bg-success-900/50',
-    framedProgressTrackClassName: 'border-success-500/25 bg-success-500/10 dark:border-success-400/25 dark:bg-success-500/10',
-    progressFillClassName: 'bg-success-500',
-    percentPillClassName: 'bg-success-500/10 dark:bg-success-500/15',
-  },
-  warning: {
-    surfaceClassName: 'border-warning-300 bg-background-warning dark:border-warning-800 dark:bg-warning-950/35',
-    iconTileClassName: 'bg-warning-100 dark:bg-warning-500/20',
-    iconClassName: 'text-warning-700 dark:text-warning-200',
-    textClassName: 'text-warning-800 dark:text-warning-100',
-    labelClassName: 'text-warning-700 dark:text-warning-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'border-warning-400/30 bg-warning-50 dark:border-warning-600/40 dark:bg-warning-950/60',
-    progressTrackClassName: 'bg-warning-200 dark:bg-warning-900/50',
-    framedProgressTrackClassName: 'border-warning-500/30 bg-background-warning dark:border-warning-700 dark:bg-warning-500/10',
-    progressFillClassName: 'bg-warning-500',
-    percentPillClassName: 'bg-warning-500/10 dark:bg-warning-500/15',
-  },
-  error: {
-    surfaceClassName: 'border-error-500/20 bg-error-500/10 dark:border-error-400/25 dark:bg-error-500/10',
-    iconTileClassName: 'bg-error-500/10 dark:bg-error-500/20',
-    iconClassName: 'text-error-600 dark:text-error-300',
-    textClassName: 'text-error-700 dark:text-error-200',
-    labelClassName: 'text-error-700 dark:text-error-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'border-error-500/20 bg-error-500/10 dark:border-error-400/25 dark:bg-error-500/15',
-    progressTrackClassName: 'bg-error-200 dark:bg-error-900/50',
-    framedProgressTrackClassName: 'border-error-500/25 bg-error-500/10 dark:border-error-400/25 dark:bg-error-500/10',
-    progressFillClassName: 'bg-error-500',
-    percentPillClassName: 'bg-error-500/10 dark:bg-error-500/15',
-  },
-};
-
-const glassPrimaryTone: ThemeToneClassNames = {
-  surfaceClassName: 'bg-primary-500/10 dark:bg-primary-500/10',
-  iconTileClassName: 'bg-primary-500/10 dark:bg-primary-500/10',
-  iconClassName: 'text-primary-600 dark:text-primary-300',
-  textClassName: 'text-primary-700 dark:text-primary-200',
-  labelClassName: 'text-primary-700 dark:text-primary-200',
-  valueClassName: 'text-typography-900 dark:text-typography-50',
-  badgeClassName: 'bg-primary-500/10 dark:bg-primary-500/10',
-  progressTrackClassName: 'bg-primary-500/15 dark:bg-primary-500/15',
-  framedProgressTrackClassName: 'bg-primary-500/10 dark:bg-primary-500/10',
-  progressFillClassName: 'bg-primary-500',
-  percentPillClassName: 'bg-primary-500/10 dark:bg-primary-500/10',
-};
-
-const glassToneClassNameByTone: Record<ThemeTone, ThemeToneClassNames> = {
-  neutral: {
-    surfaceClassName: 'bg-background-50/10 dark:bg-background-0/10',
-    iconTileClassName: 'bg-background-50/5 dark:bg-background-0/5',
-    iconClassName: 'text-typography-700 dark:text-typography-200',
-    textClassName: 'text-typography-700 dark:text-typography-200',
-    labelClassName: 'text-typography-700 dark:text-typography-300',
-    valueClassName: 'text-typography-900 dark:text-typography-100',
-    badgeClassName: 'bg-background-50/10 dark:bg-background-0/10',
-    progressTrackClassName: 'bg-background-200/70 dark:bg-background-0/70',
-    framedProgressTrackClassName: 'bg-background-100/10 dark:bg-background-0/10',
-    progressFillClassName: 'bg-typography-500 dark:bg-typography-300',
-    percentPillClassName: 'bg-background-50/10 dark:bg-background-0/10',
-  },
-  primary: glassPrimaryTone,
-  accent: glassPrimaryTone,
-  info: {
-    surfaceClassName: 'bg-info-500/10 dark:bg-info-500/10',
-    iconTileClassName: 'bg-info-500/10 dark:bg-info-500/10',
-    iconClassName: 'text-info-600 dark:text-info-300',
-    textClassName: 'text-info-700 dark:text-info-200',
-    labelClassName: 'text-info-700 dark:text-info-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'bg-info-500/10 dark:bg-info-500/10',
-    progressTrackClassName: 'bg-info-500/15 dark:bg-info-500/15',
-    framedProgressTrackClassName: 'bg-info-500/10 dark:bg-info-500/10',
-    progressFillClassName: 'bg-info-500',
-    percentPillClassName: 'bg-info-500/10 dark:bg-info-500/10',
-  },
-  success: {
-    surfaceClassName: 'bg-success-500/10 dark:bg-success-500/10',
-    iconTileClassName: 'bg-success-500/10 dark:bg-success-500/10',
-    iconClassName: 'text-success-600 dark:text-success-300',
-    textClassName: 'text-success-700 dark:text-success-200',
-    labelClassName: 'text-success-700 dark:text-success-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'bg-success-500/10 dark:bg-success-500/10',
-    progressTrackClassName: 'bg-success-500/15 dark:bg-success-500/15',
-    framedProgressTrackClassName: 'bg-success-500/10 dark:bg-success-500/10',
-    progressFillClassName: 'bg-success-500',
-    percentPillClassName: 'bg-success-500/10 dark:bg-success-500/10',
-  },
-  warning: {
-    surfaceClassName: 'bg-warning-50/20 dark:bg-warning-500/20',
-    iconTileClassName: 'bg-warning-500/10 dark:bg-warning-500/10',
-    iconClassName: 'text-warning-700 dark:text-warning-200',
-    textClassName: 'text-warning-800 dark:text-warning-100',
-    labelClassName: 'text-warning-700 dark:text-warning-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'bg-warning-50/20 dark:bg-warning-500/20',
-    progressTrackClassName: 'bg-warning-500/15 dark:bg-warning-500/15',
-    framedProgressTrackClassName: 'bg-warning-500/10 dark:bg-warning-500/10',
-    progressFillClassName: 'bg-warning-500',
-    percentPillClassName: 'bg-warning-500/10 dark:bg-warning-500/10',
-  },
-  error: {
-    surfaceClassName: 'bg-error-500/10 dark:bg-error-500/10',
-    iconTileClassName: 'bg-error-500/10 dark:bg-error-500/10',
-    iconClassName: 'text-error-600 dark:text-error-300',
-    textClassName: 'text-error-700 dark:text-error-200',
-    labelClassName: 'text-error-700 dark:text-error-200',
-    valueClassName: 'text-typography-900 dark:text-typography-50',
-    badgeClassName: 'bg-error-500/10 dark:bg-error-500/10',
-    progressTrackClassName: 'bg-error-500/15 dark:bg-error-500/15',
-    framedProgressTrackClassName: 'bg-error-500/10 dark:bg-error-500/10',
-    progressFillClassName: 'bg-error-500',
-    percentPillClassName: 'bg-error-500/10 dark:bg-error-500/10',
-  },
-};
-
-export function createDefaultThemeAppearance(mode: ResolvedThemeMode): ThemeAppearance<'default'> {
-  const isDark = mode === 'dark';
-
-  return {
-    id: 'default',
-    surfaceKind: 'solid',
-    classNames: {
-      toneClassNameByTone: solidToneClassNameByTone,
-      headerShellClassName: isDark ? 'bg-background-950/90' : 'bg-background-0/94',
-      headerBorderClassName: isDark ? 'border-outline-800' : 'border-outline-200',
-      dividerClassName: 'border-outline-200 dark:border-outline-800',
-      surfaceBarClassName: 'border-b border-outline-200 bg-background-0 dark:border-outline-800 dark:bg-background-950',
-      cardClassName: screenLayoutTokens.cardClassName,
-      insetCardClassName: screenLayoutTokens.insetCardClassName,
-      selectedInsetCardClassName: listRowSelectedClassName,
-      textFieldClassName: screenLayoutTokens.textFieldClassName,
-      compactTextFieldClassName: screenLayoutTokens.compactTextFieldClassName,
-      prominentTextFieldClassName: screenLayoutTokens.prominentTextFieldClassName,
-      multilineTextFieldClassName: screenLayoutTokens.multilineTextFieldClassName,
-      prominentMultilineTextFieldClassName: screenLayoutTokens.prominentMultilineTextFieldClassName,
-      searchInlineFieldClassName: screenLayoutTokens.searchInlineFieldClassName,
-      composerInlineFieldClassName: screenLayoutTokens.composerInlineFieldClassName,
-      segmentedControlClassName: screenLayoutTokens.segmentedControlClassName,
-      segmentedControlActiveItemClassName: 'bg-primary-500',
-      sheetClassName: screenLayoutTokens.sheetClassName,
-      modalOverlayClassName: screenLayoutTokens.modalOverlayClassName,
-      iconButtonClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
-      headerActionClassName: 'bg-primary-500/10 dark:bg-primary-500/15',
-      primaryActionPillClassName: screenLayoutTokens.primaryActionPillClassName,
-      softActionPillClassName: screenLayoutTokens.softActionPillClassName,
-      bottomBarClassName: 'border-t border-outline-200 bg-background-0/95 dark:border-outline-800 dark:bg-background-950/95',
-      modeBannerClassName: 'rounded-2xl border border-primary-500/15 bg-primary-500/5 px-3 py-2',
-      floatingBannerClassName: 'rounded-2xl border border-primary-500/20 bg-background-0/95 px-3 py-2.5 dark:border-primary-400/25 dark:bg-background-950/95',
-      inlinePillClassName: 'rounded-full border border-outline-200/80 bg-background-0/80 px-3 py-1.5 dark:border-outline-700 dark:bg-background-950/70',
-      systemEventPillClassName: 'rounded-full bg-background-100 px-3 py-1 dark:bg-background-900/70',
-      chatUserBubbleClassName: 'rounded-[24px] rounded-br-lg bg-primary-500 px-3.5 py-2',
-      chatAssistantBubbleClassName: 'rounded-[22px] rounded-bl-lg border border-outline-200 bg-background-50 px-3 py-1.5 dark:border-outline-800 dark:bg-background-900/70',
-      chatThoughtBubbleClassName: 'min-w-[220px] max-w-full rounded-[20px] border border-outline-200/80 bg-background-0/80 px-3 py-2 dark:border-outline-700/70 dark:bg-background-950/40',
-      chatInlineErrorClassName: 'rounded-2xl bg-error-500/10 dark:bg-error-500/15',
-      chatMetadataBadgeClassName: 'bg-background-100/90 dark:bg-background-800/90',
-      heroImageOverlayClassName: 'bg-primary-500/15',
-      heroImageScrimClassName: 'bg-background-50/60 dark:bg-background-900/70',
-      thumbnailSurfaceClassName: 'rounded-2xl bg-background-200 overflow-hidden dark:bg-background-800',
-      progressShineClassName: 'bg-typography-0/25',
-    },
-    effects: {
-      headerBlurIntensity: isDark ? 72 : 82,
-      surfaceBlurIntensity: 0,
-      blurReductionFactor: undefined,
-      tabBarStyle: {
-        elevation: 0,
-        shadowOpacity: 0,
-      },
-    },
-  };
-}
-
-export function getThemeActionContentClassName(
-  appearance: ThemeAppearance,
-  tone: 'primary' | 'soft' = 'primary',
-) {
-  if (tone !== 'primary') {
-    return 'text-primary-600 dark:text-primary-300';
-  }
-
-  return appearance.surfaceKind === 'glass'
-    ? 'text-primary-700 dark:text-primary-100'
-    : 'text-typography-0';
-}
-
-export function createGlassThemeAppearance(mode: ResolvedThemeMode): ThemeAppearance<'glass'> {
-  const isDark = mode === 'dark';
-  const neutralSurfaceClassName = isDark
-    ? 'bg-background-0/10 dark:bg-background-0/10'
-    : 'bg-background-0/15 dark:bg-background-0/15';
-  const neutralSurfaceStrongClassName = isDark
-    ? 'bg-background-0/14 dark:bg-background-0/14'
-    : 'bg-background-0/15 dark:bg-background-0/15';
-  const primarySurfaceClassName = isDark
-    ? 'bg-primary-500/22 dark:bg-primary-500/22'
-    : 'bg-primary-500/25 dark:bg-primary-500/25';
-  const primaryBannerClassName = isDark
-    ? 'bg-primary-500/16 dark:bg-primary-500/16'
-    : 'bg-primary-500/15 dark:bg-primary-500/15';
-
-  return {
-    id: 'glass',
-    surfaceKind: 'glass',
-    classNames: {
-      toneClassNameByTone: glassToneClassNameByTone,
-      headerShellClassName: neutralSurfaceClassName,
-      headerBorderClassName: 'border-transparent',
-      dividerClassName: 'border-transparent',
-      surfaceBarClassName: neutralSurfaceClassName,
-      cardClassName: `${radiusTokens.lg} ${neutralSurfaceClassName}`,
-      insetCardClassName: `${radiusTokens.md} ${neutralSurfaceClassName}`,
-      selectedInsetCardClassName: primaryBannerClassName,
-      textFieldClassName: `${textFieldBySize.md} ${neutralSurfaceStrongClassName}`,
-      compactTextFieldClassName: `min-h-11 ${radiusTokens.md} ${neutralSurfaceStrongClassName} px-3`,
-      prominentTextFieldClassName: `${textFieldBySize.lg} justify-center ${neutralSurfaceStrongClassName}`,
-      multilineTextFieldClassName: `min-h-40 ${radiusTokens.xl} ${neutralSurfaceStrongClassName}`,
-      prominentMultilineTextFieldClassName: `min-h-[320px] ${radiusTokens.xl} ${neutralSurfaceStrongClassName}`,
-      searchInlineFieldClassName: `flex-row h-10 rounded-2xl items-center ${neutralSurfaceStrongClassName} px-3`,
-      composerInlineFieldClassName: `flex-row h-10 items-center rounded-full ${neutralSurfaceStrongClassName} px-3.5`,
-      segmentedControlClassName: `flex-row rounded-full ${neutralSurfaceClassName} p-1`,
-      segmentedControlActiveItemClassName: primarySurfaceClassName,
-      sheetClassName: `max-h-[88%] ${radiusTokens.sheet} ${neutralSurfaceClassName}`,
-      modalOverlayClassName: 'flex-1 justify-end bg-background-950/35',
-      iconButtonClassName: neutralSurfaceStrongClassName,
-      headerActionClassName: neutralSurfaceStrongClassName,
-      primaryActionPillClassName: `flex-row items-center justify-center gap-2 ${primarySurfaceClassName}`,
-      softActionPillClassName: `flex-row items-center justify-center gap-1.5 ${neutralSurfaceStrongClassName}`,
-      bottomBarClassName: neutralSurfaceClassName,
-      modeBannerClassName: `rounded-2xl ${primaryBannerClassName} px-3 py-2`,
-      floatingBannerClassName: `rounded-2xl ${neutralSurfaceStrongClassName} px-3 py-2.5`,
-      inlinePillClassName: `rounded-full ${neutralSurfaceStrongClassName} px-3 py-1.5`,
-      systemEventPillClassName: `rounded-full ${neutralSurfaceClassName} px-3 py-1`,
-      chatUserBubbleClassName: `rounded-[24px] rounded-br-lg px-3.5 py-2 ${primarySurfaceClassName}`,
-      chatAssistantBubbleClassName: `rounded-[22px] rounded-bl-lg ${neutralSurfaceStrongClassName} px-3 py-1.5`,
-      chatThoughtBubbleClassName: `min-w-[220px] max-w-full rounded-[20px] ${neutralSurfaceClassName} px-3 py-2`,
-      chatInlineErrorClassName: 'rounded-2xl bg-error-500/15 dark:bg-error-500/15',
-      chatMetadataBadgeClassName: isDark ? 'bg-background-0/14 dark:bg-background-0/14' : 'bg-background-100/20 dark:bg-background-100/20',
-      heroImageOverlayClassName: isDark ? 'bg-primary-500/18' : 'bg-primary-500/30',
-      heroImageScrimClassName: isDark ? 'bg-background-950/55' : 'bg-background-50/50',
-      thumbnailSurfaceClassName: `rounded-2xl overflow-hidden ${neutralSurfaceClassName}`,
-      progressShineClassName: isDark ? 'bg-typography-0/30' : 'bg-typography-0/50',
-    },
-    effects: {
-      headerBlurIntensity: isDark ? 88 : 75,
-      surfaceBlurIntensity: isDark ? 82 : 70,
-      blurReductionFactor: 1,
-      tabBarStyle: {
-        elevation: 0,
-        shadowColor: isDark ? semanticColorTokens.background[950] : semanticColorTokens.typography[900],
-        shadowOffset: { width: 0, height: 0 },
-        shadowOpacity: 0,
-        shadowRadius: 0,
-      },
-    },
-  };
-}
 
 function createLegacyThemeColors(mode: ResolvedThemeMode, useGlassOverrides: boolean): ThemeColors {
   const isDark = mode === 'dark';
@@ -684,8 +294,32 @@ function createLegacyThemeColors(mode: ResolvedThemeMode, useGlassOverrides: boo
     textSecondary: isDark ? typography[300] : typography[600],
     textTertiary: isDark ? typography[400] : typography[500],
     textInverse: isDark ? typography[900] : typography[0],
+    textOnPrimary: useGlassOverrides
+      ? (isDark ? primary[100] : primary[700])
+      : typography[0],
+    textOnSuccess: useGlassOverrides
+      ? (isDark ? semanticColorTokens.success[100] : semanticColorTokens.success[700])
+      : typography[0],
+    textOnError: useGlassOverrides
+      ? (isDark ? semanticColorTokens.error[100] : semanticColorTokens.error[700])
+      : typography[0],
+    textOnSoftAction: isDark ? primary[300] : primary[600],
+    textToneNeutral: isDark ? typography[200] : typography[700],
+    textToneAccent: isDark ? primary[200] : primary[700],
+    textStatusAccent: isDark ? primary[300] : primary[600],
+    textStatusWarning: isDark ? semanticColorTokens.warning[200] : semanticColorTokens.warning[700],
+    textInfo: isDark ? semanticColorTokens.info[200] : semanticColorTokens.info[700],
+    textSuccess: isDark ? semanticColorTokens.success[200] : semanticColorTokens.success[700],
+    textWarning: isDark ? semanticColorTokens.warning[100] : semanticColorTokens.warning[800],
+    textDanger: isDark ? semanticColorTokens.error[200] : semanticColorTokens.error[800],
     icon: isDark ? typography[100] : typography[800],
     iconMuted: isDark ? typography[400] : typography[500],
+    iconToneNeutral: isDark ? typography[200] : typography[700],
+    iconToneAccent: isDark ? primary[300] : primary[600],
+    iconToneInfo: isDark ? semanticColorTokens.info[300] : semanticColorTokens.info[600],
+    iconToneSuccess: isDark ? semanticColorTokens.success[300] : semanticColorTokens.success[600],
+    iconToneWarning: isDark ? semanticColorTokens.warning[200] : semanticColorTokens.warning[700],
+    iconToneDanger: isDark ? semanticColorTokens.error[300] : semanticColorTokens.error[600],
     primary: primary[500],
     primaryStrong: isDark ? primary[400] : primary[600],
     primarySoft: withAlpha(isDark ? primary[300] : primary[500], isDark ? 0.24 : 0.12),
@@ -693,6 +327,7 @@ function createLegacyThemeColors(mode: ResolvedThemeMode, useGlassOverrides: boo
     border: isDark ? outline[700] : outline[200],
     borderStrong: isDark ? outline[600] : outline[300],
     borderSubtle: withAlpha(isDark ? outline[700] : outline[200], isDark ? 0.7 : 0.8),
+    divider: isDark ? outline[800] : outline[200],
     error: isDark ? semanticColorTokens.error[400] : semanticColorTokens.error[600],
     warning: isDark ? semanticColorTokens.warning[300] : semanticColorTokens.warning[700],
     success: isDark ? semanticColorTokens.success[400] : semanticColorTokens.success[600],
@@ -710,6 +345,30 @@ function createLegacyThemeColors(mode: ResolvedThemeMode, useGlassOverrides: boo
     tabBarInactive: isDark ? typography[300] : typography[500],
     statusBarStyle: isDark ? 'light' : 'dark',
     headerBlurTint: isDark ? 'dark' : 'light',
+    heroImageOverlay: withAlpha(primary[500], 0.15),
+    heroImageScrim: withAlpha(isDark ? background[900] : background[50], isDark ? 0.7 : 0.6),
+    thumbnailBackground: isDark ? background[800] : background[200],
+    thinkingPulseHalo: withAlpha(primary[500], isDark ? 0.2 : 0.1),
+    progressTrackByTone: {
+      neutral: isDark ? background[800] : background[200],
+      primary: isDark ? typography[800] : primary[200],
+      success: isDark
+        ? withAlpha(semanticColorTokens.success[900], 0.5)
+        : semanticColorTokens.success[200],
+      warning: isDark
+        ? withAlpha(semanticColorTokens.warning[900], 0.5)
+        : semanticColorTokens.warning[200],
+      error: isDark
+        ? withAlpha(semanticColorTokens.error[900], 0.5)
+        : semanticColorTokens.error[200],
+    },
+    progressFillByTone: {
+      neutral: isDark ? typography[300] : typography[500],
+      primary: primary[500],
+      success: semanticColorTokens.success[500],
+      warning: semanticColorTokens.warning[500],
+      error: semanticColorTokens.error[500],
+    },
   };
 
   if (!useGlassOverrides) {
@@ -726,12 +385,24 @@ function createLegacyThemeColors(mode: ResolvedThemeMode, useGlassOverrides: boo
     surfaceElevated: isDark ? withAlpha(background[0], 0.19) : withAlpha(background[50], 0.34),
     surfaceOverlay: isDark ? withAlpha(background[0], 0.23) : withAlpha(background[50], 0.38),
     borderSubtle: withAlpha(isDark ? background[0] : background[50], isDark ? 0.38 : 0.42),
+    divider: 'transparent',
     inputBackground: isDark ? withAlpha(background[0], 0.15) : withAlpha(background[50], 0.26),
     cardBackground: isDark ? withAlpha(background[0], 0.18) : withAlpha(background[50], 0.3),
     overlay: withAlpha(background[950], 0.26),
     tabBarBackground: isDark ? withAlpha(background[0], 0.2) : withAlpha(background[50], 0.38),
     tabBarBorder: isDark ? withAlpha(background[0], 0.4) : withAlpha(background[50], 0.48),
     tabBarInactive: isDark ? typography[200] : typography[600],
+    heroImageOverlay: withAlpha(primary[500], isDark ? 0.18 : 0.3),
+    heroImageScrim: withAlpha(isDark ? background[950] : background[50], isDark ? 0.55 : 0.5),
+    thumbnailBackground: withAlpha(background[0], isDark ? 0.1 : 0.15),
+    thinkingPulseHalo: withAlpha(primary[500], 0.1),
+    progressTrackByTone: {
+      neutral: withAlpha(isDark ? background[0] : background[200], 0.7),
+      primary: withAlpha(primary[500], 0.15),
+      success: withAlpha(semanticColorTokens.success[500], 0.15),
+      warning: withAlpha(semanticColorTokens.warning[500], 0.15),
+      error: withAlpha(semanticColorTokens.error[500], 0.15),
+    },
   };
 }
 

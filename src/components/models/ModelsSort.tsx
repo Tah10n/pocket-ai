@@ -1,12 +1,11 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
-import { Pressable } from '@/components/ui/pressable';
 import { ScrollView } from '@/components/ui/scroll-view';
-import { joinClassNames, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenSurface } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
+import { PressableSurface } from '@/design-system/materials/Surface';
 import { ModelSortField, ModelSortPreference } from '@/store/modelsStore';
-import { getThemeActionContentClassName } from '@/utils/themeTokens';
 
 interface ModelsSortProps {
   sort: ModelSortPreference;
@@ -23,12 +22,9 @@ const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
 
 export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
-  const activeTextClassName = getThemeActionContentClassName(appearance, 'primary');
-
   return (
-    <Box className={`${appearance.classNames.surfaceBarClassName} gap-2 px-4 py-3`}>
-      <Text className="text-sm font-semibold text-typography-700 dark:text-typography-200">
+    <ScreenSurface shape="none" className="gap-2 px-4 py-3">
+      <Text colorRole="secondary" className="text-sm font-semibold  ">
         {t('models.sortTitle')}
       </Text>
 
@@ -44,7 +40,7 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
               && isActive;
 
             return (
-              <Pressable
+              <PressableSurface
                 key={option.field}
                 onPress={() =>
                   onSortChange({
@@ -60,26 +56,26 @@ export const ModelsSort = ({ sort, onSortChange }: ModelsSortProps) => {
                           : 'asc',
                   })
                 }
-                className={joinClassNames(
-                  'rounded-full border px-3 py-2',
-                  isActive
-                    ? appearance.classNames.primaryActionPillClassName
-                    : appearance.classNames.toneClassNameByTone.neutral.badgeClassName,
-                )}
+                material={{
+                  role: 'control',
+                  variant: isActive ? 'selected' : 'inline',
+                  tone: isActive ? 'primary' : 'neutral',
+                }}
+                shape="full"
+                className="px-3 py-2"
               >
                 <Text
-                  className={`text-xs font-semibold ${
-                    isActive ? activeTextClassName : 'text-typography-700 dark:text-typography-200'
-                  }`}
+                  colorRole={isActive ? 'onAccent' : 'primary'}
+                  className="text-xs font-semibold"
                 >
                   {t(option.labelKey)}
                   {showDirection ? ` ${sort.direction === 'asc' ? '↑' : '↓'}` : ''}
                 </Text>
-              </Pressable>
+              </PressableSurface>
             );
           })}
         </Box>
       </ScrollView>
-    </Box>
+    </ScreenSurface>
   );
 };

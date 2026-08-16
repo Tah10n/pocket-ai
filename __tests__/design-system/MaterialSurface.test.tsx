@@ -140,7 +140,7 @@ describe('material Surface primitives', () => {
   });
 
   it.each(['light', 'dark'] as const)(
-    'preserves dense default-theme message frames in %s mode',
+    'keeps dense default-theme message frames contrast-safe in %s mode',
     (mode) => {
       mockResolvedTheme = resolveTheme('default', mode);
       const user = render(
@@ -177,7 +177,7 @@ describe('material Surface primitives', () => {
       );
 
       expect(StyleSheet.flatten(user.getByTestId('user-message-material').props.style)).toMatchObject({
-        backgroundColor: mockResolvedTheme.colors.primary,
+        backgroundColor: semanticColorTokens.primary[600],
         borderWidth: 0,
       });
       expect(StyleSheet.flatten(assistant.getByTestId('assistant-message-material').props.style)).toMatchObject({
@@ -237,8 +237,8 @@ describe('material Surface primitives', () => {
         borderWidth: 1,
       });
       expect(StyleSheet.flatten(primaryAction.getByTestId('composer-primary-action-material').props.style)).toMatchObject({
-        backgroundColor: semanticColorTokens.primary[500],
-        borderColor: semanticColorTokens.primary[500],
+        backgroundColor: semanticColorTokens.primary[600],
+        borderColor: semanticColorTokens.primary[600],
         borderWidth: 0,
       });
     },

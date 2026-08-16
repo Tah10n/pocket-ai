@@ -141,7 +141,7 @@ describe('ChatMessageBubble', () => {
       shadowOpacity: 0,
     });
     expect(StyleSheet.flatten(shell.props.style)?.backgroundColor).toMatch(/^rgba/);
-    expect(text.props.className).toContain('dark:text-primary-100');
+    expect(text.props.colorRole).toBe('onAccent');
   });
 
   it('never mounts a live effect renderer inside a message row', () => {

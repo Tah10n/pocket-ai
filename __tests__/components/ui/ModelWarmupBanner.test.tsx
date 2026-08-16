@@ -79,12 +79,13 @@ function createEngineState(overrides: Partial<EngineState> = {}): EngineState {
 
 describe('ModelWarmupBanner', () => {
   beforeEach(() => {
-    const { DEFAULT_THEME_ID, getThemeAppearance, getThemeColors } = require('../../../src/utils/themeTokens');
+    const { resolveTheme } = require('../../../src/design-system/themes/resolver');
+    const resolvedTheme = resolveTheme('default', 'light');
     mockThemeContext = {
-      appearance: getThemeAppearance(DEFAULT_THEME_ID, 'light'),
-      colors: getThemeColors('light'),
+      colors: resolvedTheme.colors,
       resolvedMode: 'light',
-      themeId: DEFAULT_THEME_ID,
+      resolvedTheme,
+      themeId: 'default',
     };
     mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
     (AccessibilityInfo.announceForAccessibility as jest.Mock).mockClear();
@@ -121,9 +122,10 @@ describe('ModelWarmupBanner', () => {
       expect(screen.getByTestId('model-warmup-progress-track').props.accessibilityRole).toBe('progressbar');
       expect(screen.getByTestId('model-warmup-progress-track').props.accessibilityValue).toEqual({ min: 0, max: 100, now: 42 });
       expect(screen.getByTestId('model-warmup-progress-track').props.className).toContain('h-4');
-      expect(screen.getByTestId('model-warmup-progress-fill').props.className).toContain('bg-primary-500');
-      expect(screen.getByTestId('model-warmup-progress-fill').props.className).not.toContain('bg-warning-500');
-      expect(screen.getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+      expect(screen.getByTestId('model-warmup-progress-fill').props.style).toEqual({
+        width: '42%',
+        backgroundColor: mockThemeContext.colors.progressFillByTone.primary,
+      });
 
       screen.rerender(<ModelWarmupBanner engineState={createEngineState({ loadProgress: 0.7 })} />);
 
@@ -295,37 +297,46 @@ describe('ModelWarmupBanner', () => {
     }
   });
 
-  it('forces native Android glass blur over the loading overlay', () => {
+  it('renders supported Android floating chrome against an explicit content target', () => {
     const { Platform } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../../src/utils/themeTokens');
+    const { resolveTheme } = require('../../../src/design-system/themes/resolver');
+    const { MaterialEnvironmentProvider } = require('../../../src/design-system/materials/MaterialEnvironmentProvider');
+    const { createMaterialEnvironment } = require('../../../src/design-system/materials/environment');
     const originalPlatform = Platform.OS;
     const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
+    const resolvedTheme = resolveTheme('glass', 'light');
     Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
     Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
     mockThemeContext = {
-      appearance,
-      colors: getThemeColors('light', 'glass'),
+      colors: resolvedTheme.colors,
       resolvedMode: 'light',
+      resolvedTheme,
       themeId: 'glass',
     };
     const contentBlurTargetRef = React.createRef<any>();
 
     try {
       const { UNSAFE_getAllByType, getByTestId } = render(
-        <ScreenRoot>
-          <ScreenAndroidContentBlurTarget
-            blurTargetRef={contentBlurTargetRef}
-            testID="warmup-content-blur-target"
-            style={{ flex: 1 }}
-          >
-            <ModelWarmupBanner engineState={createEngineState({ status: EngineStatus.READY })} />
-          </ScreenAndroidContentBlurTarget>
-          <ModelWarmupBanner
-            androidContentBlurTargetRef={contentBlurTargetRef}
-            engineState={createEngineState({ loadProgress: 0.42 })}
-          />
-        </ScreenRoot>,
+        <MaterialEnvironmentProvider environment={createMaterialEnvironment('android', {
+          androidSdkVersion: 34,
+          androidTargetBlurSupported: true,
+          blurViewAvailable: true,
+          transparencyState: 'allowed',
+        })}>
+          <ScreenRoot>
+            <ScreenAndroidContentBlurTarget
+              blurTargetRef={contentBlurTargetRef}
+              testID="warmup-content-blur-target"
+              style={{ flex: 1 }}
+            >
+              <ModelWarmupBanner engineState={createEngineState({ status: EngineStatus.READY })} />
+            </ScreenAndroidContentBlurTarget>
+            <ModelWarmupBanner
+              androidContentBlurTargetRef={contentBlurTargetRef}
+              engineState={createEngineState({ loadProgress: 0.42 })}
+            />
+          </ScreenRoot>
+        </MaterialEnvironmentProvider>,
       );
 
       expect(() => getByTestId('warmup-content-blur-target').findByProps({ testID: 'model-warmup-banner' })).toThrow();
@@ -335,8 +346,7 @@ describe('ModelWarmupBanner', () => {
 
       const { View } = require('react-native');
       const nativeBlurLayers = UNSAFE_getAllByType(View).filter((node: any) => (
-        node.props.intensity === appearance.effects.surfaceBlurIntensity
-        && node.props.blurMethod === 'dimezisBlurViewSdk31Plus'
+        node.props.blurMethod === 'dimezisBlurViewSdk31Plus'
         && node.props.blurTarget === contentBlurTargetRef
       ));
 
@@ -347,18 +357,18 @@ describe('ModelWarmupBanner', () => {
     }
   });
 
-  it('does not force Android native blur without an explicit content target', () => {
+  it('fails closed without a ready Android content target', () => {
     const { Platform } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../../src/utils/themeTokens');
+    const { resolveTheme } = require('../../../src/design-system/themes/resolver');
     const originalPlatform = Platform.OS;
     const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
+    const resolvedTheme = resolveTheme('glass', 'light');
     Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
     Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
     mockThemeContext = {
-      appearance,
-      colors: getThemeColors('light', 'glass'),
+      colors: resolvedTheme.colors,
       resolvedMode: 'light',
+      resolvedTheme,
       themeId: 'glass',
     };
 

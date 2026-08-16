@@ -5,12 +5,96 @@ import {
   isThemeId,
   resolveTheme,
   resolveThemeDefinition,
+  semanticColorTokens,
   themeDefinitions,
   type ThemeDefinition,
+  withAlpha,
 } from '../../src/utils/themeTokens';
 import { deepFreeze } from '../../src/design-system/themes/immutable';
+import { resolveThemeForeground } from '../../src/design-system/themes/foreground';
 
 describe('theme registry', () => {
+  it.each(['default', 'glass'] as const)('keeps %s status foregrounds distinct from paint colors', (themeId) => {
+    expect(resolveTheme(themeId, 'light').colors).toMatchObject({
+      textToneNeutral: semanticColorTokens.typography[700],
+      textToneAccent: semanticColorTokens.primary[700],
+      textStatusAccent: semanticColorTokens.primary[600],
+      textStatusWarning: semanticColorTokens.warning[700],
+      textInfo: semanticColorTokens.info[700],
+      textSuccess: semanticColorTokens.success[700],
+      textWarning: semanticColorTokens.warning[800],
+      textDanger: semanticColorTokens.error[800],
+    });
+    expect(resolveTheme(themeId, 'dark').colors).toMatchObject({
+      textToneNeutral: semanticColorTokens.typography[200],
+      textToneAccent: semanticColorTokens.primary[200],
+      textStatusAccent: semanticColorTokens.primary[300],
+      textStatusWarning: semanticColorTokens.warning[200],
+      textInfo: semanticColorTokens.info[200],
+      textSuccess: semanticColorTokens.success[200],
+      textWarning: semanticColorTokens.warning[100],
+      textDanger: semanticColorTokens.error[200],
+    });
+  });
+
+  it('keeps hero decoration paints owned by each theme and mode', () => {
+    expect(resolveTheme('default', 'light').colors).toMatchObject({
+      heroImageOverlay: withAlpha(semanticColorTokens.primary[500], 0.15),
+      heroImageScrim: withAlpha(semanticColorTokens.background[50], 0.6),
+    });
+    expect(resolveTheme('default', 'dark').colors).toMatchObject({
+      heroImageOverlay: withAlpha(semanticColorTokens.primary[500], 0.15),
+      heroImageScrim: withAlpha(semanticColorTokens.background[900], 0.7),
+    });
+    expect(resolveTheme('glass', 'light').colors).toMatchObject({
+      heroImageOverlay: withAlpha(semanticColorTokens.primary[500], 0.3),
+      heroImageScrim: withAlpha(semanticColorTokens.background[50], 0.5),
+    });
+    expect(resolveTheme('glass', 'dark').colors).toMatchObject({
+      heroImageOverlay: withAlpha(semanticColorTokens.primary[500], 0.18),
+      heroImageScrim: withAlpha(semanticColorTokens.background[950], 0.55),
+    });
+  });
+
+  it('keeps shared dividers visible for default and absent for translucent themes', () => {
+    expect(resolveTheme('default', 'light').colors.divider).toBe(semanticColorTokens.outline[200]);
+    expect(resolveTheme('default', 'dark').colors.divider).toBe(semanticColorTokens.outline[800]);
+    expect(resolveTheme('glass', 'light').colors.divider).toBe('transparent');
+    expect(resolveTheme('glass', 'dark').colors.divider).toBe('transparent');
+  });
+
+  it('keeps thumbnail backgrounds theme-owned', () => {
+    expect(resolveTheme('default', 'light').colors.thumbnailBackground).toBe(semanticColorTokens.background[200]);
+    expect(resolveTheme('default', 'dark').colors.thumbnailBackground).toBe(semanticColorTokens.background[800]);
+    expect(resolveTheme('glass', 'light').colors.thumbnailBackground).toBe(withAlpha(semanticColorTokens.background[0], 0.15));
+    expect(resolveTheme('glass', 'dark').colors.thumbnailBackground).toBe(withAlpha(semanticColorTokens.background[0], 0.1));
+  });
+
+  it('keeps plain progress paints theme-owned across modes', () => {
+    expect(resolveTheme('default', 'light').colors.progressTrackByTone).toMatchObject({
+      neutral: semanticColorTokens.background[200],
+      primary: semanticColorTokens.primary[200],
+    });
+    expect(resolveTheme('default', 'dark').colors).toMatchObject({
+      progressTrackByTone: {
+        neutral: semanticColorTokens.background[800],
+        primary: semanticColorTokens.typography[800],
+      },
+      progressFillByTone: {
+        neutral: semanticColorTokens.typography[300],
+        primary: semanticColorTokens.primary[500],
+      },
+    });
+    expect(resolveTheme('glass', 'light').colors.progressTrackByTone).toMatchObject({
+      neutral: withAlpha(semanticColorTokens.background[200], 0.7),
+      primary: withAlpha(semanticColorTokens.primary[500], 0.15),
+    });
+    expect(resolveTheme('glass', 'dark').colors.progressTrackByTone).toMatchObject({
+      neutral: withAlpha(semanticColorTokens.background[0], 0.7),
+      primary: withAlpha(semanticColorTokens.primary[500], 0.15),
+    });
+  });
+
   it('is the ordered, unique source of visual theme ids and metadata', () => {
     const ids = themeDefinitions.map((definition) => definition.id);
 
@@ -25,7 +109,6 @@ describe('theme registry', () => {
     for (const definition of themeDefinitions) {
       expect(Object.isFrozen(definition)).toBe(true);
       expect(Object.isFrozen(definition.modes.light.colors)).toBe(true);
-      expect(Object.isFrozen(definition.modes.dark.appearance)).toBe(true);
       expect(Object.isFrozen(definition.modes.light.materials)).toBe(true);
       expect(definition.modes.light).toBeDefined();
       expect(definition.modes.dark).toBeDefined();
@@ -59,18 +142,16 @@ describe('theme registry', () => {
     expect(Object.isFrozen(child)).toBe(true);
   });
 
-  it('resolves colors, compatibility appearance and navigation from one definition', () => {
+  it('resolves colors, materials and navigation from one definition', () => {
     const definition = getThemeDefinition('glass');
     const resolved = resolveTheme('glass', 'dark');
 
     expect(resolved.colors).toBe(definition.modes.dark.colors);
-    expect(resolved.appearance).toBe(definition.modes.dark.appearance);
     expect(resolved.navigationTheme.colors.background).toBe(resolved.colors.background);
     expect(resolved.navigationTheme.colors.card).toBe(resolved.colors.surface);
     expect(resolved.metadata.id).toBe(resolved.id);
     expect(Object.isFrozen(resolved)).toBe(true);
     expect(Object.isFrozen(resolved.colors)).toBe(true);
-    expect(Object.isFrozen(resolved.appearance.classNames)).toBe(true);
     expect(Object.isFrozen(resolved.materials)).toBe(true);
     expect(Object.isFrozen(resolved.navigationTheme.colors)).toBe(true);
   });
@@ -88,11 +169,11 @@ describe('theme registry', () => {
       modes: {
         light: {
           ...base.modes.light,
-          appearance: { ...base.modes.light.appearance, id: 'paper' },
+          colors: { ...base.modes.light.colors, text: '#332d24' },
         },
         dark: {
           ...base.modes.dark,
-          appearance: { ...base.modes.dark.appearance, id: 'paper' },
+          colors: { ...base.modes.dark.colors, text: '#f5f0e6' },
         },
       },
     } as const satisfies ThemeDefinition<'paper'>;
@@ -100,7 +181,8 @@ describe('theme registry', () => {
     const resolved = resolveThemeDefinition(paperTheme, 'light');
 
     expect(resolved.id).toBe('paper');
-    expect(resolved.appearance.id).toBe('paper');
+    expect(resolved.colors.text).toBe('#332d24');
+    expect(resolveThemeForeground(resolved.colors, 'primary')).toBe('#332d24');
     expect(resolved.metadata.labelKey).toBe('settings.themeStylePaper');
     expect(resolved.metadata.preview.canvas).toBe('#f5f0e6');
     expect(resolved.navigationTheme.colors.background).toBe(paperTheme.modes.light.colors.background);

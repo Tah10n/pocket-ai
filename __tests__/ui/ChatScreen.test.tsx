@@ -4901,7 +4901,10 @@ describe('ChatScreen', () => {
 
     expect(getByText('chat.warmingUp')).toBeTruthy();
     expect(getByText('42%')).toBeTruthy();
-    expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toMatchObject({
+      width: '42%',
+      backgroundColor: '#1f7aff',
+    });
     expect(queryByTestId('model-warmup-progress-fill')).toBeNull();
   });
 
@@ -5880,7 +5883,10 @@ describe('ChatScreen', () => {
     rerender(React.createElement(ChatScreen));
 
     expect(getByText('chat.warmingUp 42%')).toBeTruthy();
-    expect(getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    expect(getByTestId('model-warmup-progress-fill').props.style).toMatchObject({
+      width: '42%',
+      backgroundColor: '#1f7aff',
+    });
 
     await act(async () => {
       reloadDeferred.resolve();

@@ -1,6 +1,5 @@
 import type { ThemeDefinition } from './contract';
 import {
-  createDefaultThemeAppearance,
   createDefaultThemeColors,
   semanticColorTokens,
   withAlpha,
@@ -63,10 +62,15 @@ function createDefaultMaterialOverrides(
     },
     messageTones: {
       primary: {
-        fillColor: primary[500],
-        rimColor: primary[500],
+        fillColor: primary[600],
+        rimColor: primary[600],
         rimWidth: 0,
       },
+    },
+    selectedControlTones: {
+      primary: { fillColor: primary[600], rimColor: primary[600], rimWidth: 0 },
+      success: { fillColor: success[700], rimColor: success[700], rimWidth: 0 },
+      error: { fillColor: error[600], rimColor: error[600], rimWidth: 0 },
     },
     tones: {
       primary: semanticFrame(primary),
@@ -95,7 +99,6 @@ export const defaultTheme = {
   modes: {
     light: {
       colors: lightColors,
-      appearance: createDefaultThemeAppearance('light'),
       materials: createSolidThemeMaterialRecipes(
         lightColors,
         createDefaultMaterialOverrides('light'),
@@ -103,7 +106,6 @@ export const defaultTheme = {
     },
     dark: {
       colors: darkColors,
-      appearance: createDefaultThemeAppearance('dark'),
       materials: createSolidThemeMaterialRecipes(
         darkColors,
         createDefaultMaterialOverrides('dark'),
@@ -111,6 +113,7 @@ export const defaultTheme = {
     },
   },
   components: {
+    screen: { backgroundDecoration: 'plain' },
     tabBar: { presentation: 'attached' },
     header: { presentation: 'attached' },
     chat: {

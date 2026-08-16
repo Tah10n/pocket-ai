@@ -28,18 +28,20 @@ jest.mock('react-native-safe-area-context', () => ({
 }));
 
 jest.mock('../../src/providers/ThemeProvider', () => {
-  const themeTokens = jest.requireActual('../../src/utils/themeTokens');
   const { resolveTheme } = jest.requireActual('../../src/design-system/themes/resolver');
 
   return {
-    useTheme: () => ({
-      resolvedTheme: resolveTheme('default', 'light'),
-      appearance: themeTokens.getThemeAppearance(themeTokens.DEFAULT_THEME_ID, 'light'),
-      colors: {
+    useTheme: () => {
+      const resolvedTheme = resolveTheme('default', 'light');
+      return {
+        resolvedTheme,
+        colors: {
+          ...resolvedTheme.colors,
         primaryStrong: '#3211d4',
         borderStrong: '#cbd5e1',
-      },
-    }),
+        },
+      };
+    },
   };
 });
 

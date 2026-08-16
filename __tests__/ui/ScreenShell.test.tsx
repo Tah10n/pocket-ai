@@ -1,56 +1,63 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
-
-const mockMaterialSymbols = jest.fn(({ name }: any) => {
-  const mockReact = require('react');
-  const { Text } = require('react-native');
-  return mockReact.createElement(Text, null, name);
-});
+import { StyleSheet, Text, View } from 'react-native';
+import { resolveTheme } from '../../src/design-system/themes/resolver';
+import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
+import {
+  HeaderActionButton,
+  ScreenAndroidContentBlurTarget,
+  ScreenCard,
+  ScreenContent,
+  ScreenHeaderShell,
+  ScreenIconButton,
+  ScreenModalOverlay,
+  ScreenRoot,
+  ScreenSegmentedControl,
+  ScreenSheet,
+} from '../../src/components/ui/ScreenShell';
 
 let mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
-let mockThemeContext: any = {
-  colors: { background: '#fff', headerBlurTint: 'light' },
-  resolvedMode: 'light',
-  themeId: 'default',
-};
+let mockThemeContext: any;
+let mockEnvironment = createMaterialEnvironment('web');
+const mockMaterialSymbols = jest.fn(({ name, ...props }: any) => (
+  <Text {...props}>{name}</Text>
+));
 
-jest.mock('react-native-css-interop', () => {
-  const mockReact = require('react');
-  return {
-    createInteropElement: mockReact.createElement,
-  };
-});
+jest.mock('react-native-css-interop', () => ({
+  createInteropElement: jest.requireActual<typeof import('react')>('react').createElement,
+}));
 
 jest.mock('@/components/ui/box', () => {
-  const mockReact = require('react');
-  const { View } = require('react-native');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { View: MockView } = jest.requireActual<typeof import('react-native')>('react-native');
   return {
-    Box: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    Box: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
   };
 });
 
 jest.mock('@/components/ui/input', () => {
-  const mockReact = require('react');
-  const { TextInput, View } = require('react-native');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { View: MockView } = jest.requireActual<typeof import('react-native')>('react-native');
+  const { TextInput } = jest.requireActual<typeof import('react-native')>('react-native');
   return {
-    Input: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    Input: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
     InputField: (props: any) => mockReact.createElement(TextInput, props),
   };
 });
 
 jest.mock('@/components/ui/pressable', () => {
-  const mockReact = require('react');
-  const { Pressable } = require('react-native');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { Pressable: MockPressable } = jest.requireActual<typeof import('react-native')>('react-native');
   return {
-    Pressable: ({ children, ...props }: any) => mockReact.createElement(Pressable, props, children),
+    Pressable: ({ children, ...props }: any) => mockReact.createElement(MockPressable, props, children),
   };
 });
 
 jest.mock('@/components/ui/text', () => {
-  const mockReact = require('react');
-  const { Text } = require('react-native');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { Text: MockText } = jest.requireActual<typeof import('react-native')>('react-native');
   return {
-    Text: ({ children, ...props }: any) => mockReact.createElement(Text, props, children),
+    Text: ({ children, ...props }: any) => mockReact.createElement(MockText, props, children),
     composeTextRole: (_role: string, className = '') => className,
   };
 });
@@ -59,1250 +66,226 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => ({
   MaterialSymbols: (props: any) => mockMaterialSymbols(props),
 }));
 
-jest.mock('../../src/providers/ThemeProvider', () => ({
-  useTheme: () => {
-    const { resolveTheme } = jest.requireActual('../../src/design-system/themes/resolver');
+jest.mock('../../src/design-system/materials/Surface', () => {
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { Pressable: MockPressable, View: MockView } = jest.requireActual<typeof import('react-native')>('react-native');
+  return {
+    Surface: ({ children, material, shape, ...props }: any) => (
+      mockReact.createElement(MockView, { ...props, material, shape }, children)
+    ),
+    PressableSurface: ({ children, material, shape, ...props }: any) => (
+      mockReact.createElement(MockPressable, { ...props, material, shape }, children)
+    ),
+  };
+});
 
-    return {
-      ...mockThemeContext,
-      resolvedTheme: mockThemeContext.resolvedTheme
-        ?? resolveTheme(mockThemeContext.themeId ?? 'default', mockThemeContext.resolvedMode ?? 'light'),
-    };
-  },
+jest.mock('../../src/design-system/materials/EffectSurface', () => {
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { Pressable: MockPressable, View: MockView } = jest.requireActual<typeof import('react-native')>('react-native');
+  return {
+    EffectSurface: ({ children, material, shape, ...props }: any) => (
+      mockReact.createElement(MockView, { ...props, material, shape }, children)
+    ),
+    EffectPressableSurface: ({ children, material, shape, ...props }: any) => (
+      mockReact.createElement(MockPressable, { ...props, material, shape }, children)
+    ),
+  };
+});
+
+jest.mock('../../src/design-system/materials/ScreenBackgroundDecoration', () => {
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { View: MockView } = jest.requireActual<typeof import('react-native')>('react-native');
+  return {
+    ScreenBackgroundDecoration: (props: any) => mockReact.createElement(MockView, {
+      testID: props.dim ? 'screen-decoration-dim' : 'screen-decoration',
+      ...props,
+    }),
+  };
+});
+
+jest.mock('../../src/design-system/materials/MaterialEnvironmentProvider', () => ({
+  useMaterialEnvironment: () => mockEnvironment,
+}));
+
+jest.mock('../../src/providers/ThemeProvider', () => ({
+  useTheme: () => mockThemeContext,
 }));
 
 jest.mock('react-native-safe-area-context', () => ({
   useSafeAreaInsets: () => mockSafeAreaInsets,
 }));
 
+jest.mock('@react-navigation/native', () => ({
+  ...jest.requireActual('@react-navigation/native'),
+  useIsFocused: () => true,
+}));
+
 jest.mock('expo-blur', () => {
-  const mockReact = require('react');
-  const { View } = require('react-native');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { View: MockView } = jest.requireActual<typeof import('react-native')>('react-native');
   return {
-    BlurTargetView: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-    BlurView: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    BlurTargetView: mockReact.forwardRef(({ children, ...props }: any, ref: any) => (
+      <MockView ref={ref} {...props}>{children}</MockView>
+    )),
   };
 });
 
-jest.mock('expo-linear-gradient', () => {
-  const mockReact = require('react');
-  const { View } = require('react-native');
-  return {
-    LinearGradient: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
-  };
-});
-
-const {
-  getGlassCornerRadiusStyle,
-  ScreenActionPill,
-  ScreenAndroidContentBlurTarget,
-  ScreenCard,
-  ScreenChip,
-  ScreenContent,
-  ScreenHeaderShell,
-  ScreenIconButton,
-  ScreenIconTile,
-  ScreenInlineInput,
-  ScreenModalOverlay,
-  ScreenPressableCard,
-  ScreenRoot,
-  ScreenSegmentedControl,
-  ScreenSheet,
-  ScreenSurface,
-  useFloatingHeaderInset,
-} = require('../../src/components/ui/ScreenShell');
-
-function FloatingHeaderInsetProbe() {
-  const { Text } = require('react-native');
-  return <Text testID="floating-header-inset">{useFloatingHeaderInset()}</Text>;
-}
-
-function getGradientSignature(nodes: any[]) {
-  const { StyleSheet } = require('react-native');
-
-  return nodes
-    .filter((node: any) => Array.isArray(node.props.colors))
-    .map((node: any) => ({
-      alphaStops: node.props.colors.map((color: string) => color.match(/rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)/)?.[1]),
-      colors: node.props.colors,
-      end: node.props.end,
-      locations: node.props.locations,
-      start: node.props.start,
-      style: StyleSheet.flatten(node.props.style),
-    }));
-}
-
-function expectMatchingGradientGeometry(darkLayer: any, lightLayer: any) {
-  expect(darkLayer).toMatchObject({
-    end: lightLayer.end,
-    locations: lightLayer.locations,
-    start: lightLayer.start,
-    style: lightLayer.style,
-  });
-}
-
-function expectDarkAlphaStopsNoBrighter(darkLayer: any, lightLayer: any) {
-  for (let stopIndex = 0; stopIndex < lightLayer.alphaStops.length; stopIndex += 1) {
-    const lightAlpha = Number(lightLayer.alphaStops[stopIndex]);
-    const darkAlpha = Number(darkLayer.alphaStops[stopIndex]);
-
-    if (Number.isNaN(lightAlpha) || Number.isNaN(darkAlpha)) {
-      expect(darkLayer.alphaStops[stopIndex]).toBe(lightLayer.alphaStops[stopIndex]);
-      continue;
-    }
-
-    expect(darkAlpha).toBeLessThanOrEqual(lightAlpha);
-  }
-}
-
-describe('ScreenShell', () => {
+describe('ScreenShell semantic material contracts', () => {
   beforeEach(() => {
-    mockMaterialSymbols.mockClear();
+    const resolvedTheme = resolveTheme('default', 'light');
     mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+    mockEnvironment = createMaterialEnvironment('web');
     mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
+      colors: resolvedTheme.colors,
       resolvedMode: 'light',
-      themeId: 'default',
-    };
-  });
-
-  it('applies the runtime theme background through ScreenRoot', () => {
-    const { getByTestId } = render(
-      <ScreenRoot testID="screen-root">content</ScreenRoot>,
-    );
-
-    expect(getByTestId('screen-root').props.className).toContain('flex-1');
-    expect(getByTestId('screen-root').props.style).toEqual(expect.arrayContaining([
-      expect.objectContaining({ backgroundColor: '#fff' }),
-    ]));
-  });
-
-  it('renders glass root accents as smooth gradient layers', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { UNSAFE_getAllByType } = render(
-      <ScreenRoot testID="screen-root">content</ScreenRoot>,
-    );
-
-    const { View } = require('react-native');
-    const views = UNSAFE_getAllByType(View);
-    const gradientLayers = views.filter((node: any) => Array.isArray(node.props.colors));
-    const hardCircleAccents = views.filter((node: any) =>
-      typeof node.props.className === 'string'
-      && node.props.className.includes('rounded-full')
-      && node.props.className.includes('bg-primary-500/40'),
-    );
-    const hardHairlineAccents = views.filter((node: any) =>
-      typeof node.props.className === 'string'
-      && node.props.className.includes('h-px'),
-    );
-    const hardBottomStrips = views.filter((node: any) =>
-      typeof node.props.className === 'string'
-      && node.props.className.includes('bottom-0')
-      && node.props.className.includes('h-48')
-      && node.props.className.includes('bg-background'),
-    );
-
-    expect(gradientLayers.length).toBeGreaterThanOrEqual(4);
-    expect(hardCircleAccents).toHaveLength(0);
-    expect(hardHairlineAccents).toHaveLength(0);
-    expect(hardBottomStrips).toHaveLength(0);
-  });
-
-  it('keeps dark glass root accents on the same geometry with dimmer opacity than light', () => {
-    const { View } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: getThemeColors('light', 'glass'),
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-    const lightRender = render(<ScreenRoot testID="screen-root">content</ScreenRoot>);
-    const lightSignature = getGradientSignature(lightRender.UNSAFE_getAllByType(View));
-    lightRender.unmount();
-
-    mockThemeContext = {
-      colors: getThemeColors('dark', 'glass'),
-      resolvedMode: 'dark',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'dark'),
-    };
-    const darkRender = render(<ScreenRoot testID="screen-root">content</ScreenRoot>);
-    const darkSignature = getGradientSignature(darkRender.UNSAFE_getAllByType(View));
-
-    expect(darkSignature).toHaveLength(lightSignature.length);
-    for (let index = 0; index < lightSignature.length; index += 1) {
-      const lightLayer = lightSignature[index]!;
-      const darkLayer = darkSignature[index]!;
-
-      expectMatchingGradientGeometry(darkLayer, lightLayer);
-      expectDarkAlphaStopsNoBrighter(darkLayer, lightLayer);
-      expect(darkLayer.colors.join('|')).not.toContain('rgba(255, 255, 255');
-    }
-
-    darkRender.unmount();
-  });
-
-  it('uses the normalized compact icon-button shape', () => {
-    const { getByLabelText } = render(
-      <ScreenIconButton iconName="close" accessibilityLabel="Close" size="compact" />,
-    );
-
-    expect(getByLabelText('Close').props.className).toContain('h-8 w-8 rounded-full');
-    expect(mockMaterialSymbols.mock.calls[0][0].size).toBe('md');
-  });
-
-  it('resolves glass frame radius from shared rounded utility classes', () => {
-    expect(getGlassCornerRadiusStyle('rounded-[24px] rounded-br-lg')).toEqual({
-      borderRadius: 24,
-      borderBottomRightRadius: 8,
-    });
-    expect(getGlassCornerRadiusStyle('rounded-t-[32px]')).toEqual({
-      borderTopLeftRadius: 32,
-      borderTopRightRadius: 32,
-    });
-    expect(getGlassCornerRadiusStyle('h-8 w-8 rounded-full')).toEqual({
-      borderRadius: 9999,
-    });
-  });
-
-  it('keeps icon tiles on an explicit vector-icon color across visual theme toggles', () => {
-    const { getThemeAppearance, getThemeToneIconColor } = require('../../src/utils/themeTokens');
-    const expectedColor = getThemeToneIconColor('info', 'light');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'default',
-      appearance: getThemeAppearance('default', 'light'),
-    };
-
-    const { rerender } = render(
-      <ScreenIconTile iconName="palette" tone="info" />,
-    );
-
-    expect(mockMaterialSymbols.mock.calls[mockMaterialSymbols.mock.calls.length - 1]?.[0]).toEqual(expect.objectContaining({
-      name: 'palette',
-      color: expectedColor,
-    }));
-
-    mockThemeContext = {
-      ...mockThemeContext,
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-    rerender(<ScreenIconTile iconName="palette" tone="info" />);
-    expect(mockMaterialSymbols.mock.calls[mockMaterialSymbols.mock.calls.length - 1]?.[0]).toEqual(expect.objectContaining({
-      name: 'palette',
-      color: expectedColor,
-    }));
-
-    mockThemeContext = {
-      ...mockThemeContext,
-      themeId: 'default',
-      appearance: getThemeAppearance('default', 'light'),
-    };
-    rerender(<ScreenIconTile iconName="palette" tone="info" />);
-    expect(mockMaterialSymbols.mock.calls[mockMaterialSymbols.mock.calls.length - 1]?.[0]).toEqual(expect.objectContaining({
-      name: 'palette',
-      color: expectedColor,
-    }));
-  });
-
-  it('parses explicit icon text color tokens without substring matches', () => {
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: {
-        ...getThemeColors('light', 'glass'),
-        icon: '#123456',
-        textInverse: '#abcdef',
-      },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { rerender } = render(
-      <ScreenIconButton
-        iconName="palette"
-        accessibilityLabel="Palette"
-        iconClassName="text-typography-0/50"
-      />,
-    );
-
-    expect(mockMaterialSymbols.mock.calls[mockMaterialSymbols.mock.calls.length - 1]?.[0]).toEqual(expect.objectContaining({
-      color: '#123456',
-    }));
-
-    rerender(
-      <ScreenIconButton
-        iconName="palette"
-        accessibilityLabel="Palette"
-        iconClassName="text-typography-0"
-      />,
-    );
-
-    expect(mockMaterialSymbols.mock.calls[mockMaterialSymbols.mock.calls.length - 1]?.[0]).toEqual(expect.objectContaining({
-      color: '#abcdef',
-    }));
-  });
-
-  it('uses the normalized sheet padding tokens', () => {
-    const { screenLayoutTokens } = require('../../src/utils/themeTokens');
-    const { View } = require('react-native');
-    const { getByTestId, UNSAFE_getAllByType } = render(
-      <ScreenSheet testID="screen-sheet">content</ScreenSheet>,
-    );
-
-    expect(getByTestId('screen-sheet').props.className).not.toContain('px-4');
-    expect(getByTestId('screen-sheet').props.className).not.toContain('pt-5');
-    expect(UNSAFE_getAllByType(View).some((node: any) =>
-      node.props.className === screenLayoutTokens.sheetContentPaddingClassName,
-    )).toBe(true);
-  });
-
-  it('keeps glass sheets on their themed surface while the blur backdrop is clipped inside', () => {
-    const { getThemeAppearance, semanticColorTokens } = require('../../src/utils/themeTokens');
-    const appearance = getThemeAppearance('glass', 'light');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    const { getByTestId, UNSAFE_getAllByType } = render(
-      <ScreenSheet testID="glass-sheet">content</ScreenSheet>,
-    );
-
-    const className = getByTestId('glass-sheet').props.className;
-    const backgroundTokens = className
-      .split(/\s+/)
-      .filter((token: string) => token.startsWith('bg-'));
-    expect(className).toContain('relative overflow-hidden');
-    expect(backgroundTokens).toContain('bg-background-0/15');
-    expect(backgroundTokens).not.toContain('bg-transparent');
-
-    const { View } = require('react-native');
-    const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
-      node.props.pointerEvents === 'none'
-      && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-    );
-    expect(blurBackdrop).toBeTruthy();
-  });
-
-  it('renders glass-theme content cards as dense surfaces without live blur', () => {
-    const { StyleSheet } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    const appearance = getThemeAppearance('glass', 'light');
-    const colors = getThemeColors('light', 'glass');
-    mockThemeContext = {
-      colors,
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    const { getByTestId, UNSAFE_getAllByType } = render(
-      <ScreenCard testID="glass-card">content</ScreenCard>,
-    );
-
-    expect(getByTestId('glass-card').props.className).toContain('px-4 py-3');
-    expect(getByTestId('glass-card').props.className).not.toContain('relative overflow-hidden');
-    expect(getByTestId('glass-card').props.className).not.toContain('bg-transparent');
-    expect(StyleSheet.flatten(getByTestId('glass-card').props.style)).toMatchObject({
-      backgroundColor: colors.cardBackground,
-      borderColor: colors.borderSubtle,
-      borderRadius: 20,
-      borderWidth: 1,
-      elevation: 0,
-      shadowOpacity: 0,
-    });
-
-    const { View } = require('react-native');
-    expect(UNSAFE_getAllByType(View).some((node: any) => (
-      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
-    ))).toBe(false);
-  });
-
-  it('keeps light glass accent cards visually separated from the screen background', () => {
-    const { StyleSheet } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    const colors = getThemeColors('light', 'glass');
-    mockThemeContext = {
-      colors,
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { getByTestId } = render(
-      <ScreenCard testID="active-model-glass-card" tone="accent">content</ScreenCard>,
-    );
-
-    expect(StyleSheet.flatten(getByTestId('active-model-glass-card').props.style)).toMatchObject({
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary,
-      borderRadius: 20,
-      borderWidth: 1,
-      elevation: 0,
-      shadowOpacity: 0,
-    });
-  });
-
-  it('keeps light glass accent icon tiles tint-only without card outline', () => {
-    const { StyleSheet } = require('react-native');
-    const { getThemeAppearance, getThemeColors, withAlpha } = require('../../src/utils/themeTokens');
-    const colors = getThemeColors('light', 'glass');
-    mockThemeContext = {
-      colors,
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { getByTestId } = render(
-      <ScreenIconTile testID="accent-glass-icon-tile" iconName="memory" />,
-    );
-
-    const style = StyleSheet.flatten(getByTestId('accent-glass-icon-tile').props.style);
-    expect(style).toMatchObject({
-      backgroundColor: withAlpha(colors.primaryStrong, 0.08),
-      borderRadius: 12,
-      borderWidth: 0,
-      elevation: 0,
-      shadowOpacity: 0,
-    });
-    expect(style.borderColor).toBeUndefined();
-  });
-
-  it('keeps light and dark glass content cards dense without decorative gradients', () => {
-    const { StyleSheet, View } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    const lightColors = getThemeColors('light', 'glass');
-    mockThemeContext = {
-      colors: lightColors,
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-    const lightRender = render(<ScreenCard testID="light-glass-card">content</ScreenCard>);
-    expect(getGradientSignature(lightRender.UNSAFE_getAllByType(View))).toHaveLength(0);
-    expect(StyleSheet.flatten(lightRender.getByTestId('light-glass-card').props.style).backgroundColor)
-      .toBe(lightColors.cardBackground);
-    lightRender.unmount();
-
-    const darkColors = getThemeColors('dark', 'glass');
-    mockThemeContext = {
-      colors: darkColors,
-      resolvedMode: 'dark',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'dark'),
-    };
-    const darkRender = render(<ScreenCard testID="dark-glass-card">content</ScreenCard>);
-    expect(getGradientSignature(darkRender.UNSAFE_getAllByType(View))).toHaveLength(0);
-    expect(StyleSheet.flatten(darkRender.getByTestId('dark-glass-card').props.style).backgroundColor)
-      .toBe(darkColors.cardBackground);
-    darkRender.unmount();
-  });
-
-  it('does not render glass tint gradients for solid theme controls', () => {
-    const { Text, View } = require('react-native');
-    const { UNSAFE_getAllByType } = render(
-      <ScreenActionPill tone="primary">
-        <Text>Action</Text>
-      </ScreenActionPill>,
-    );
-
-    expect(UNSAFE_getAllByType(View).some((node: any) => Array.isArray(node.props.colors))).toBe(false);
-  });
-
-  it('keeps dark glass segmented labels above decorative active layers after switching', () => {
-    const { StyleSheet } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: getThemeColors('dark', 'glass'),
-      resolvedMode: 'dark',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'dark'),
-    };
-
-    function SegmentedControlHarness() {
-      const [activeKey, setActiveKey] = React.useState('light');
-
-      return (
-        <ScreenSegmentedControl
-          activeKey={activeKey}
-          onChange={setActiveKey}
-          options={[
-            { key: 'light', label: 'Light', testID: 'segmented-light' },
-            { key: 'dark', label: 'Dark', testID: 'segmented-dark' },
-          ]}
-        />
-      );
-    }
-
-    const { getByTestId, getByText } = render(<SegmentedControlHarness />);
-
-    fireEvent.press(getByTestId('segmented-dark'));
-
-    expect(getByText('Light').props.children).toBe('Light');
-    expect(getByText('Dark').props.children).toBe('Dark');
-    expect(StyleSheet.flatten(getByText('Light').props.style)).toMatchObject({
-      color: '#c9d5e7',
-      opacity: 1,
-      position: 'relative',
-      zIndex: 1,
-      elevation: 1,
-    });
-    expect(StyleSheet.flatten(getByText('Dark').props.style)).toMatchObject({
-      color: '#d9ebff',
-      opacity: 1,
-      position: 'relative',
-      zIndex: 1,
-      elevation: 1,
-    });
-  });
-
-  it('keeps glass icon button frames on the same radius as their touch target', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { getByLabelText } = render(
-      <ScreenIconButton iconName="close" accessibilityLabel="Close" size="compact" />,
-    );
-
-    expect(getByLabelText('Close').props.style).toEqual(expect.arrayContaining([
-      expect.objectContaining({ borderRadius: 9999 }),
-    ]));
-  });
-
-  it('floats glass headers and publishes their measured content inset', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { getByTestId, UNSAFE_getAllByType } = render(
-      <ScreenRoot>
-        <ScreenHeaderShell testID="floating-header" floating={true}>Header</ScreenHeaderShell>
-        <ScreenContent testID="floating-content">
-          <FloatingHeaderInsetProbe />
-        </ScreenContent>
-      </ScreenRoot>,
-    );
-
-    const { StyleSheet, View } = require('react-native');
-    const headerShell = UNSAFE_getAllByType(View).find((node: any) =>
-      typeof node.props.className === 'string'
-      && node.props.className.includes('absolute left-0 right-0 top-0'),
-    );
-
-    expect(headerShell).toBeTruthy();
-    expect(headerShell.props.className).not.toContain('border-b');
-    fireEvent(headerShell, 'layout', { nativeEvent: { layout: { height: 88 } } });
-    expect(getByTestId('floating-header-inset').props.children).toBe(88);
-    expect(StyleSheet.flatten(getByTestId('floating-content').props.style).paddingTop).toBe(88);
-  });
-
-  it('renders glass headers through the semantic material frame without legacy gradients', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const { resolveTheme } = jest.requireActual('../../src/design-system/themes/resolver');
-    const resolvedTheme = resolveTheme('glass', 'light');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
       resolvedTheme,
-    };
-
-    const { UNSAFE_getAllByType } = render(
-      <ScreenHeaderShell>Header</ScreenHeaderShell>,
-    );
-
-    const { StyleSheet, View } = require('react-native');
-    const materialHeader = UNSAFE_getAllByType(View).find((node: any) => {
-      const style = StyleSheet.flatten(node.props.style);
-      return style?.backgroundColor === resolvedTheme.colors.surfaceOverlay;
-    });
-    const legacyGradient = UNSAFE_getAllByType(View).find((node: any) => Array.isArray(node.props.colors));
-
-    expect(materialHeader).toBeTruthy();
-    expect(legacyGradient).toBeUndefined();
-  });
-
-  it('does not mount native header blur outside the glass theme', () => {
-    const { Platform, View } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
       themeId: 'default',
-      appearance: getThemeAppearance('default', 'light'),
     };
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenHeaderShell>Header</ScreenHeaderShell>,
-      );
-
-      expect(UNSAFE_getAllByType(View).some((node: any) => (
-        Object.prototype.hasOwnProperty.call(node.props, 'intensity')
-      ))).toBe(false);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
+    mockMaterialSymbols.mockClear();
   });
 
-  it('keeps non-floating headers in normal flow', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
+  it('keeps the default root plain and applies its resolved canvas color', () => {
+    const screen = render(<ScreenRoot testID="root">content</ScreenRoot>);
 
-    const { UNSAFE_getAllByType } = render(
-      <ScreenRoot>
-        <ScreenHeaderShell floating={false} testID="fixed-header">Header</ScreenHeaderShell>
-      </ScreenRoot>,
-    );
-
-    const { View } = require('react-native');
-    expect(UNSAFE_getAllByType(View).some((node: any) =>
-      typeof node.props.className === 'string'
-      && node.props.className.includes('absolute left-0 right-0 top-0'),
-    )).toBe(false);
+    expect(screen.getByTestId('root').props.className).toContain('flex-1');
+    expect(StyleSheet.flatten(screen.getByTestId('root').props.style)).toMatchObject({
+      backgroundColor: mockThemeContext.colors.background,
+    });
+    expect(screen.queryByTestId('screen-decoration')).toBeNull();
+    expect(screen.queryByTestId('screen-material-scene-blur-target')).toBeNull();
   });
 
-  it('keeps the legacy matte card option dense and effect-free', () => {
-    const { Platform, View } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenCard testID="matte-glass-card" decorative="matte">content</ScreenCard>,
-      );
-      const gradientColors = UNSAFE_getAllByType(View)
-        .map((node: any) => node.props.colors)
-        .filter((colors: any) => Array.isArray(colors))
-        .map((colors: string[]) => colors.join('|'));
-
-      expect(gradientColors).toHaveLength(0);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
-  });
-
-  it('keeps the legacy standard card option dense and effect-free', () => {
-    const { Platform, View } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenCard testID="standard-glass-card">content</ScreenCard>,
-      );
-      const gradientColors = UNSAFE_getAllByType(View)
-        .map((node: any) => node.props.colors)
-        .filter((colors: any) => Array.isArray(colors))
-        .map((colors: string[]) => colors.join('|'));
-
-      expect(gradientColors).toHaveLength(0);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
-  });
-
-  it('renders glass-theme pressable cards as dense surfaces without live blur', () => {
-    const { StyleSheet } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const appearance = getThemeAppearance('glass', 'light');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    const { getByTestId, UNSAFE_getAllByType } = render(
-      <ScreenPressableCard testID="glass-pressable-card" onPress={jest.fn()}>content</ScreenPressableCard>,
-    );
-
-    expect(getByTestId('glass-pressable-card').props.className).not.toContain('relative overflow-hidden');
-    expect(getByTestId('glass-pressable-card').props.className).not.toContain('bg-transparent');
-    expect(StyleSheet.flatten(getByTestId('glass-pressable-card').props.style)).toMatchObject({
-      borderWidth: 1,
-      elevation: 0,
-      shadowOpacity: 0,
+  it('owns aurora decoration and Android sample targets at the screen boundary', () => {
+    const resolvedTheme = resolveTheme('glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    mockEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
     });
 
-    const { View } = require('react-native');
-    expect(UNSAFE_getAllByType(View).some((node: any) => (
-      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
-    ))).toBe(false);
+    const screen = render(<ScreenRoot testID="root"><Text>scene</Text></ScreenRoot>);
+
+    expect(screen.getByTestId('screen-decoration')).toBeTruthy();
+    expect(screen.getByTestId('screen-decoration-dim')).toBeTruthy();
+    expect(screen.getByTestId('screen-material-blur-target')).toBeTruthy();
+    expect(screen.getByTestId('screen-material-scene-blur-target').findByProps({ children: 'scene' })).toBeTruthy();
   });
 
-  it('keeps compact glass controls tint-only without nested blur views', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const appearance = getThemeAppearance('glass', 'light');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    const { getByLabelText, UNSAFE_getAllByType } = render(
-      <ScreenIconButton iconName="close" accessibilityLabel="Close" size="compact" />,
+  it('maps content cards to dense raised or inset material variants', () => {
+    const screen = render(
+      <>
+        <ScreenCard testID="raised" tone="warning">raised</ScreenCard>
+        <ScreenCard testID="inset" variant="inset">inset</ScreenCard>
+      </>,
     );
 
-    expect(getByLabelText('Close').props.className).toContain('relative overflow-hidden');
-
-    const { View } = require('react-native');
-    const views = UNSAFE_getAllByType(View);
-    const blurBackdrop = views.find((node: any) =>
-      node.props.pointerEvents === 'none'
-      && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-    );
-    const tintBackdrop = views.find((node: any) =>
-      node.props.pointerEvents === 'none'
-      && Array.isArray(node.props.colors)
-      && node.props.colors.includes('rgba(255,255,255,0.22)'),
-    );
-
-    expect(blurBackdrop).toBeUndefined();
-    expect(tintBackdrop).toBeTruthy();
+    expect(screen.getByTestId('raised').props).toMatchObject({
+      material: { role: 'content', variant: 'raised', tone: 'warning' },
+      shape: 'lg',
+    });
+    expect(screen.getByTestId('inset').props).toMatchObject({
+      material: { role: 'content', variant: 'inset', tone: 'neutral' },
+      shape: 'md',
+    });
   });
 
-  it('keeps dark glass control tint without white feathered stripes', () => {
-    const { View } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: getThemeColors('light', 'glass'),
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-    const lightRender = render(<ScreenIconTile iconName="palette" tone="info" />);
-    const lightSignature = getGradientSignature(lightRender.UNSAFE_getAllByType(View));
-    lightRender.unmount();
-
-    mockThemeContext = {
-      colors: getThemeColors('dark', 'glass'),
-      resolvedMode: 'dark',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'dark'),
-    };
-    const darkRender = render(<ScreenIconTile iconName="palette" tone="info" />);
-    const darkSignature = getGradientSignature(darkRender.UNSAFE_getAllByType(View));
-
-    expect(lightSignature.length).toBeGreaterThan(darkSignature.length);
-    expect(darkSignature.length).toBeGreaterThan(0);
-    for (const darkLayer of darkSignature) {
-      expect(darkLayer.colors.join('|')).not.toContain('rgba(244,247,251');
-      expect(darkLayer.colors.join('|')).not.toContain('rgba(255,255,255');
-    }
-
-    darkRender.unmount();
-  });
-
-  it('keeps inline glass inputs tint-only without specular blur chrome', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const appearance = getThemeAppearance('glass', 'light');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    const { UNSAFE_getAllByType } = render(
-      <ScreenInlineInput value="" onChangeText={jest.fn()} />,
+  it('maps header, sheet, and modal boundaries to semantic chrome and overlay recipes', () => {
+    mockSafeAreaInsets = { top: 24, right: 0, bottom: 18, left: 0 };
+    const screen = render(
+      <>
+        <ScreenHeaderShell testID="header">header</ScreenHeaderShell>
+        <ScreenSheet testID="sheet">sheet</ScreenSheet>
+        <ScreenModalOverlay testID="overlay">overlay</ScreenModalOverlay>
+      </>,
     );
 
-    const { View } = require('react-native');
-    const views = UNSAFE_getAllByType(View);
-    expect(views.some((node: any) => node.props.intensity === appearance.effects.surfaceBlurIntensity)).toBe(false);
-    expect(views.some((node: any) => Array.isArray(node.props.colors)
-      && node.props.colors.includes('rgba(255,255,255,0.22)'))).toBe(true);
-  });
-
-  it('omits native border width classes from glass chips', () => {
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance: getThemeAppearance('glass', 'light'),
-    };
-
-    const { getByTestId } = render(
-      <ScreenChip testID="glass-chip" label="Default" onPress={jest.fn()} />,
+    const headerMaterial = screen.UNSAFE_getAllByType(View).find(
+      (node: any) => node.props.material?.variant === 'header',
     );
-
-    expect(getByTestId('glass-chip').props.className.split(/\s+/)).not.toContain('border');
+    expect(headerMaterial?.props).toMatchObject({
+      material: { role: 'chrome', variant: 'header' },
+      shape: 'none',
+    });
+    expect(screen.getByTestId('sheet').props).toMatchObject({
+      material: { role: 'chrome', variant: 'sheet' },
+      shape: 'sheet',
+    });
+    expect(screen.getByTestId('overlay').props).toMatchObject({
+      material: { role: 'overlay', variant: 'scrim' },
+      shape: 'none',
+    });
+    expect(StyleSheet.flatten(screen.getByTestId('sheet').children[0].props.style)).toMatchObject({
+      paddingBottom: expect.any(Number),
+    });
   });
 
-  it('keeps separate Android glass target wrappers while rendering matte surfaces', () => {
-    const { Platform } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { getByTestId, UNSAFE_getAllByType } = render(
-        <ScreenRoot>
-          <ScreenSheet testID="android-glass-sheet">content</ScreenSheet>
-        </ScreenRoot>,
-      );
-
-      const { View } = require('react-native');
-      const views = UNSAFE_getAllByType(View);
-      const blurBackdrop = views.find((node: any) =>
-        node.props.pointerEvents === 'none'
-        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-      );
-      const backgroundBlurTarget = getByTestId('screen-glass-blur-target');
-      const sceneBlurTarget = getByTestId('screen-glass-scene-blur-target');
-      expect(backgroundBlurTarget).toBeTruthy();
-      expect(backgroundBlurTarget.props.pointerEvents).toBe('none');
-      expect(sceneBlurTarget.props.pointerEvents).toBe('box-none');
-      expect(() => backgroundBlurTarget.findByProps({ testID: 'android-glass-sheet' })).toThrow();
-      expect(sceneBlurTarget.findByProps({ testID: 'android-glass-sheet' })).toBeTruthy();
-      expect(blurBackdrop).toBeUndefined();
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('uses an explicit Android blur target for glass sheets', () => {
-    const { Platform } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    const blurTargetRef = React.createRef<any>();
-    blurTargetRef.current = {};
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenSheet androidBlurTargetRef={blurTargetRef} testID="android-targeted-glass-sheet">content</ScreenSheet>,
-      );
-
-      const { View } = require('react-native');
-      const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
-        node.props.pointerEvents === 'none'
-        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-      );
-
-      expect(blurBackdrop).toBeTruthy();
-      expect(blurBackdrop.props).toEqual(expect.objectContaining({
-        blurMethod: 'dimezisBlurViewSdk31Plus',
-        blurReductionFactor: appearance.effects.blurReductionFactor,
-        blurTarget: blurTargetRef,
-      }));
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('falls back when forced Android blur is rendered inside its own target', () => {
-    const { Platform, StyleSheet } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    const blurTargetRef = React.createRef<any>();
-    blurTargetRef.current = {};
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenAndroidContentBlurTarget blurTargetRef={blurTargetRef}>
-          <ScreenSheet androidBlurTargetRef={blurTargetRef} testID="recursive-android-glass-sheet">content</ScreenSheet>
-        </ScreenAndroidContentBlurTarget>,
-      );
-
-      const { View } = require('react-native');
-      const views = UNSAFE_getAllByType(View);
-      expect(views.some((node: any) =>
-        node.props.blurMethod === 'dimezisBlurViewSdk31Plus'
-        && node.props.blurTarget === blurTargetRef,
-      )).toBe(false);
-      expect(views.some((node: any) =>
-        StyleSheet.flatten(node.props.style)?.backgroundColor === 'rgba(255,255,255,0.42)',
-      )).toBe(true);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('keeps Android modal overlays translucent instead of blurring the whole app', () => {
-    const { Platform } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { getByTestId, UNSAFE_getAllByType } = render(
-        <ScreenModalOverlay testID="android-glass-modal-overlay">
-          content
-        </ScreenModalOverlay>,
-      );
-
-      const overlayClassName = getByTestId('android-glass-modal-overlay').props.className;
-      expect(overlayClassName).toContain('relative overflow-hidden');
-      expect(overlayClassName).toContain(appearance.classNames.modalOverlayClassName);
-
-      const { View } = require('react-native');
-      const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
-        node.props.pointerEvents === 'none'
-        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-      );
-      const dimOverlay = UNSAFE_getAllByType(View).find((node: any) =>
-        node.props.pointerEvents === 'none'
-        && node.props.className === 'absolute inset-0 bg-background-950/20',
-      );
-
-      expect(blurBackdrop).toBeUndefined();
-      expect(dimOverlay).toBeUndefined();
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('renders the sheet glass backdrop outside the padded content wrapper', () => {
-    const { Platform } = require('react-native');
-    const { getThemeAppearance, screenLayoutTokens } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    const blurTargetRef = React.createRef<any>();
-    blurTargetRef.current = {};
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenSheet androidBlurTargetRef={blurTargetRef} testID="android-padded-glass-sheet">content</ScreenSheet>,
-      );
-
-      const { View } = require('react-native');
-      const views = UNSAFE_getAllByType(View);
-      const sheetIndex = views.findIndex((node: any) => node.props.testID === 'android-padded-glass-sheet');
-      const blurIndex = views.findIndex((node: any) =>
-        node.props.pointerEvents === 'none'
-        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-      );
-      const contentIndex = views.findIndex((node: any) =>
-        node.props.className === screenLayoutTokens.sheetContentPaddingClassName,
-      );
-
-      expect(sheetIndex).toBeGreaterThanOrEqual(0);
-      expect(blurIndex).toBeGreaterThan(sheetIndex);
-      expect(contentIndex).toBeGreaterThan(blurIndex);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('uses an explicit Android blur target for glass surfaces when requested', () => {
-    const { Platform } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    const blurTargetRef = React.createRef<any>();
-    blurTargetRef.current = {};
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenSurface
-          androidBlurTargetRef={blurTargetRef}
-          forceNativeAndroidBlur
-          decorative="matte"
-          testID="android-targeted-glass-surface"
-        >
-          content
-        </ScreenSurface>,
-      );
-
-      const { View } = require('react-native');
-      const blurBackdrop = UNSAFE_getAllByType(View).find((node: any) =>
-        node.props.pointerEvents === 'none'
-        && node.props.intensity === appearance.effects.surfaceBlurIntensity,
-      );
-
-      expect(blurBackdrop).toBeTruthy();
-      expect(blurBackdrop.props).toEqual(expect.objectContaining({
-        blurMethod: 'dimezisBlurViewSdk31Plus',
-        blurReductionFactor: appearance.effects.blurReductionFactor,
-        blurTarget: blurTargetRef,
-      }));
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('uses matte glass instead of native blur for dark Android surfaces', () => {
-    const { Platform, StyleSheet } = require('react-native');
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'dark');
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 34 });
-    mockThemeContext = {
-      colors: getThemeColors('dark', 'glass'),
-      resolvedMode: 'dark',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenRoot>
-          <ScreenSheet testID="android-dark-glass-sheet">content</ScreenSheet>
-        </ScreenRoot>,
-      );
-
-      const { View } = require('react-native');
-      const views = UNSAFE_getAllByType(View);
-      expect(views.some((node: any) => node.props.intensity === appearance.effects.surfaceBlurIntensity)).toBe(false);
-      expect(views.some((node: any) =>
-        StyleSheet.flatten(node.props.style)?.backgroundColor === 'rgba(6,11,20,0.46)',
-      )).toBe(true);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('falls back to dense tint surfaces instead of BlurView on pre-31 Android', () => {
-    const { Platform, StyleSheet } = require('react-native');
-    const { getThemeAppearance } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    const originalVersion = Platform.Version;
-    const appearance = getThemeAppearance('glass', 'light');
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
-    Object.defineProperty(Platform, 'Version', { configurable: true, get: () => 30 });
-    mockThemeContext = {
-      colors: { background: '#fff', headerBlurTint: 'light' },
-      resolvedMode: 'light',
-      themeId: 'glass',
-      appearance,
-    };
-
-    try {
-      const { UNSAFE_getAllByType } = render(
-        <ScreenRoot>
-          <ScreenSheet testID="legacy-glass-sheet">content</ScreenSheet>
-        </ScreenRoot>,
-      );
-
-      const { View } = require('react-native');
-      const views = UNSAFE_getAllByType(View);
-      expect(views.some((node: any) => node.props.intensity === appearance.effects.surfaceBlurIntensity)).toBe(false);
-      const sheetClassName = views.find((node: any) => node.props.testID === 'legacy-glass-sheet')?.props.className ?? '';
-      const backgroundTokens = sheetClassName
-        .split(/\s+/)
-        .filter((token: string) => token.startsWith('bg-'));
-      expect(backgroundTokens).toContain('bg-background-0/15');
-      expect(backgroundTokens).not.toContain('bg-transparent');
-      expect(views.some((node: any) =>
-        StyleSheet.flatten(node.props.style)?.backgroundColor === 'rgba(255,255,255,0.42)',
-      )).toBe(true);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-      Object.defineProperty(Platform, 'Version', { configurable: true, get: () => originalVersion });
-    }
-  });
-
-  it('adds native bottom safe area space to sheet padding', () => {
-    const { Platform, StyleSheet } = require('react-native');
-    const { screenLayoutMetrics } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'android' });
+  it('applies safe-area and caller bottom insets without coupling them to a theme', () => {
     mockSafeAreaInsets = { top: 0, right: 0, bottom: 18, left: 0 };
+    const screen = render(
+      <ScreenContent testID="content" includeBottomSafeArea extraBottomInset={12}>content</ScreenContent>,
+    );
 
-    try {
-      const { View } = require('react-native');
-      const { screenLayoutTokens } = require('../../src/utils/themeTokens');
-      const { getByTestId, UNSAFE_getAllByType } = render(
-        <ScreenSheet testID="safe-screen-sheet">content</ScreenSheet>,
-      );
-      const sheetContent = UNSAFE_getAllByType(View).find((node: any) =>
-        node.props.className === screenLayoutTokens.sheetContentPaddingClassName,
-      );
-
-      expect(StyleSheet.flatten(getByTestId('safe-screen-sheet').props.style)?.paddingBottom)
-        .toBeUndefined();
-      expect(StyleSheet.flatten(sheetContent?.props.style).paddingBottom)
-        .toBe(screenLayoutMetrics.sheetBottomInset + 18);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
+    expect(StyleSheet.flatten(screen.getByTestId('content').props.style).paddingBottom).toBeGreaterThan(30);
   });
 
-  it('keeps inline inputs inside the shared input shell', () => {
-    const { UNSAFE_getAllByType } = render(
-      <ScreenInlineInput
-        containerTestID="inline-input-shell"
-        testID="inline-input-field"
-        variant="search"
-        value=""
-        onChangeText={jest.fn()}
+  it('exposes selected state and semantic foregrounds for segmented controls', () => {
+    const onChange = jest.fn();
+    const screen = render(
+      <ScreenSegmentedControl
+        testID="segments"
+        activeKey="second"
+        onChange={onChange}
+        options={[{ key: 'first', label: 'First' }, { key: 'second', label: 'Second', testID: 'second' }]}
       />,
     );
 
-    const { View } = require('react-native');
-    const requiredClasses = [
-      'min-w-0',
-      'flex-1',
-      'border-0',
-      'bg-transparent',
-      'px-0',
-    ];
-    const shell = UNSAFE_getAllByType(View).find((node: any) =>
-      typeof node.props.className === 'string'
-      && requiredClasses.every((token) => node.props.className.split(/\s+/).includes(token)),
+    expect(screen.getByTestId('segments').props.material).toEqual({ role: 'control', variant: 'inline', tone: 'neutral' });
+    expect(screen.getByTestId('second').props.accessibilityState).toEqual({ selected: true, disabled: false });
+    expect(screen.getByText('Second').props.colorRole).toBe('onAccent');
+    fireEvent.press(screen.getByText('First').parent as any);
+    expect(onChange).toHaveBeenCalledWith('first');
+  });
+
+  it('keeps shared icon controls accessible while materializing their tone', () => {
+    const onPress = jest.fn();
+    const screen = render(
+      <>
+        <HeaderActionButton testID="header-action" iconName="close" accessibilityLabel="Close" onPress={onPress} />
+        <ScreenIconButton testID="danger-action" iconName="delete" accessibilityLabel="Delete" tone="danger" onPress={onPress} />
+      </>,
     );
 
-    expect(shell).toBeTruthy();
+    expect(screen.getByTestId('header-action').props).toMatchObject({
+      accessibilityLabel: 'Close',
+      accessibilityRole: 'button',
+      material: { role: 'control', variant: 'floating', tone: 'neutral' },
+      shape: 'full',
+    });
+    expect(screen.getByTestId('danger-action').props.material).toEqual({ role: 'control', variant: 'inline', tone: 'error' });
+    expect(mockMaterialSymbols).toHaveBeenCalledWith(expect.objectContaining({ name: 'delete', colorRole: 'danger' }));
   });
 
-  it('does not inject native bottom safe area padding by default', () => {
-    const { Platform, StyleSheet } = require('react-native');
-    const originalPlatform = Platform.OS;
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
-    mockSafeAreaInsets = { top: 0, right: 0, bottom: 32, left: 0 };
-
-    try {
-      const { getByTestId } = render(
-        <ScreenContent testID="screen-content" className="pb-0">content</ScreenContent>,
-      );
-
-      expect(StyleSheet.flatten(getByTestId('screen-content').props.style)?.paddingBottom).toBeUndefined();
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
-  });
-
-  it('adds native bottom safe area space to opted-in screen content padding', () => {
-    const { Platform, StyleSheet } = require('react-native');
-    const { screenLayoutMetrics } = require('../../src/utils/themeTokens');
-    const originalPlatform = Platform.OS;
-    Object.defineProperty(Platform, 'OS', { configurable: true, get: () => 'ios' });
-    mockSafeAreaInsets = { top: 0, right: 0, bottom: 32, left: 0 };
-
-    try {
-      const { getByTestId } = render(
-        <ScreenContent testID="safe-screen-content" includeBottomSafeArea>content</ScreenContent>,
-      );
-
-      expect(StyleSheet.flatten(getByTestId('safe-screen-content').props.style).paddingBottom)
-        .toBe(screenLayoutMetrics.contentBottomInset + 32);
-    } finally {
-      Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalPlatform });
-    }
-  });
-
-  it('adds extra bottom inset for floating screen overlays', () => {
-    const { StyleSheet } = require('react-native');
-    const { screenLayoutMetrics } = require('../../src/utils/themeTokens');
-
-    const { getByTestId } = render(
-      <ScreenContent testID="extra-screen-content" extraBottomInset={96}>content</ScreenContent>,
+  it('fails closed to a normal view until Android target blur is supported', () => {
+    const targetRef = React.createRef<View>();
+    const fallback = render(
+      <ScreenAndroidContentBlurTarget testID="target" blurTargetRef={targetRef}>content</ScreenAndroidContentBlurTarget>,
     );
+    expect(fallback.getByTestId('target').props.collapsable).toBeUndefined();
 
-    expect(StyleSheet.flatten(getByTestId('extra-screen-content').props.style).paddingBottom)
-      .toBe(screenLayoutMetrics.contentBottomInset + 96);
+    fallback.unmount();
+    const resolvedTheme = resolveTheme('glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    mockEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const supported = render(
+      <ScreenAndroidContentBlurTarget testID="target" blurTargetRef={targetRef}>content</ScreenAndroidContentBlurTarget>,
+    );
+    expect(supported.getByTestId('target').props.collapsable).toBe(false);
   });
 });

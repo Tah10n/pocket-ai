@@ -64,18 +64,18 @@ export const RecentConversationsList = ({
         disabled={disabled}
         className={`flex-1 flex-row items-center gap-3 p-3 ${disabled ? 'opacity-55' : 'active:opacity-70'}`}
       >
-        <ScreenIconTile iconName={conv.icon} tone="accent" iconSize="sm" className="shrink-0" iconClassName="text-primary-500" />
+        <ScreenIconTile iconName={conv.icon} tone="accent" iconSize="sm" className="shrink-0" />
 
         <Box className="min-w-0 flex-1 overflow-hidden">
-          <Text className={composeTextRole('sectionTitle')} numberOfLines={1}>
+          <Text colorRole="primary" className={composeTextRole('sectionTitle')} numberOfLines={1}>
             {conv.title}
           </Text>
           <Box className="mt-1 flex-row items-center gap-2">
-            <Text className={composeTextRole('caption')}>
+            <Text colorRole="tertiary" className={composeTextRole('caption')}>
               {conv.model}
             </Text>
             <Box className="w-1 h-1 rounded-full bg-outline-400" />
-            <Text className={composeTextRole('caption')}>
+            <Text colorRole="tertiary" className={composeTextRole('caption')}>
               {conv.time}
             </Text>
           </Box>
@@ -96,7 +96,7 @@ export const RecentConversationsList = ({
           className="shrink-0 border-0"
         />
         <Box>
-          <MaterialSymbols name="chevron-right" size="lg" className="text-typography-400" />
+          <MaterialSymbols colorRole="tertiary" name="chevron-right" size="lg" className="" />
         </Box>
       </Box>
     </ScreenCard>
@@ -105,7 +105,7 @@ export const RecentConversationsList = ({
   return (
     <ScreenStack gap="compact">
       <Box className="mb-2 flex-row items-center justify-between gap-3">
-        <Text className={composeTextRole('sectionTitle')}>
+        <Text colorRole="primary" className={composeTextRole('sectionTitle')}>
           {t('home.recentConversations')}
         </Text>
         {canManageConversations ? (
@@ -117,8 +117,8 @@ export const RecentConversationsList = ({
             size="sm"
             className="self-start"
           >
-            <MaterialSymbols name="history" size="sm" className="text-primary-500" />
-            <Text className="text-xs font-semibold uppercase tracking-wide text-primary-500">
+            <MaterialSymbols colorRole="accent" name="history" size="sm" className="" />
+            <Text colorRole="accent" className="text-xs font-semibold uppercase tracking-wide ">
               {t('common.manage')}
             </Text>
           </ScreenActionPill>
@@ -135,11 +135,11 @@ export const RecentConversationsList = ({
             ))}
           </ScreenStack>
         ) : (
-          <ScreenCard dashed padding="compact" decorative="matte">
-            <Text className={composeTextRole('sectionTitle', 'text-sm')}>
+          <ScreenCard dashed padding="compact">
+            <Text colorRole="primary" className={composeTextRole('sectionTitle', 'text-sm')}>
               {t('home.noConversationsTitle')}
             </Text>
-            <Text className={composeTextRole('bodyMuted', 'mt-2')}>
+            <Text colorRole="secondary" className={composeTextRole('bodyMuted', 'mt-2')}>
               {t('home.noConversationsDescription')}
             </Text>
           </ScreenCard>

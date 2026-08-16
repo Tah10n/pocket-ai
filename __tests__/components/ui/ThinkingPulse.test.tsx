@@ -1,16 +1,22 @@
 import React from 'react';
 import { render, waitFor } from '@testing-library/react-native';
+import { resolveTheme } from '../../../src/design-system/themes/resolver';
 
 const mockUseMotionPreferences = jest.fn();
 const mockWithTiming = jest.fn((toValue, config) => ({ toValue, config }));
 const mockWithRepeat = jest.fn((animation, count, reverse) => ({ animation, count, reverse }));
+let mockThemeContext = resolveTheme('default', 'light');
 
 jest.mock('../../../src/hooks/useDeviceMetrics', () => ({
   useMotionPreferences: () => mockUseMotionPreferences(),
 }));
 
+jest.mock('../../../src/providers/ThemeProvider', () => ({
+  useTheme: () => mockThemeContext,
+}));
+
 jest.mock('react-native-reanimated', () => {
-  const { View } = require('react-native');
+  const { View } = jest.requireActual<typeof import('react-native')>('react-native');
 
   return {
     __esModule: true,
@@ -32,11 +38,30 @@ jest.mock('react-native-reanimated', () => {
   };
 });
 
-const { ThinkingPulse } = require('../../../src/components/ui/ThinkingPulse');
+const { ThinkingPulse } = jest.requireActual<typeof import('../../../src/components/ui/ThinkingPulse')>(
+  '../../../src/components/ui/ThinkingPulse',
+);
 
 describe('ThinkingPulse', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockThemeContext = resolveTheme('default', 'light');
+  });
+
+  it.each([
+    ['default', 'light'],
+    ['default', 'dark'],
+    ['glass', 'light'],
+    ['glass', 'dark'],
+  ] as const)('uses the %s %s theme-owned dense halo paint', (themeId, mode) => {
+    mockUseMotionPreferences.mockReturnValue({ motionPreset: 'minimal' });
+    mockThemeContext = resolveTheme(themeId, mode);
+
+    const { getByTestId } = render(<ThinkingPulse />);
+
+    expect(getByTestId('thinking-pulse-halo').props.style).toEqual({
+      backgroundColor: mockThemeContext.colors.thinkingPulseHalo,
+    });
   });
 
   it('does not start the animated loop when motion is minimal', () => {

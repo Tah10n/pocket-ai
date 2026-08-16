@@ -1,9 +1,15 @@
+import React from 'react';
+import { StyleSheet } from 'react-native';
+import { render } from '@testing-library/react-native';
+import { Text, composeTextRole, textRoleClassNames } from '../../../src/components/ui/text';
+import { resolveTheme } from '../../../src/design-system/themes/resolver';
+
 jest.mock('nativewind', () => ({
   cssInterop: (component: unknown) => component,
 }));
 
 jest.mock('react-native-css-interop', () => {
-  const mockReact = require('react');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
   return {
     createInteropElement: mockReact.createElement,
   };
@@ -15,15 +21,12 @@ jest.mock('../../../src/providers/ThemeProvider', () => ({
   useTheme: () => mockUseTheme(),
 }));
 
-import React from 'react';
-import { StyleSheet } from 'react-native';
-import { render } from '@testing-library/react-native';
-import { Text, composeTextRole, textRoleClassNames } from '../../../src/components/ui/text';
-
 beforeEach(() => {
+  const resolvedTheme = resolveTheme('default', 'light');
   mockUseTheme.mockReturnValue({
+    colors: resolvedTheme.colors,
     resolvedMode: 'light',
-    appearance: { surfaceKind: 'solid' },
+    resolvedTheme,
   });
 });
 
@@ -34,112 +37,80 @@ describe('textRoleClassNames', () => {
     expect(composeTextRole('eyebrow')).toContain('uppercase');
   });
 
-  it('keeps dark caption and eyebrow labels visually secondary to body text', () => {
-    expect(textRoleClassNames.bodyMuted).toContain('dark:text-typography-300');
-    expect(textRoleClassNames.caption).toContain('dark:text-typography-400');
-    expect(textRoleClassNames.eyebrow).toContain('dark:text-typography-400');
+  it('keeps typography roles free of palette-specific foreground classes', () => {
+    expect(Object.values(textRoleClassNames).join(' ')).not.toMatch(/text-typography-/);
   });
 });
 
-describe('Text dark glass readability', () => {
-  it('lifts muted typography colors only for the dark glass theme', () => {
+describe('Text semantic foregrounds', () => {
+  it.each(['default', 'glass'] as const)('resolves muted text roles from the %s theme', (themeId) => {
+    const resolvedTheme = resolveTheme(themeId, 'dark');
     mockUseTheme.mockReturnValue({
+      colors: resolvedTheme.colors,
       resolvedMode: 'dark',
-      appearance: { surfaceKind: 'glass' },
+      resolvedTheme,
     });
 
-    const { getByText } = render(
-      React.createElement(
-        Text,
-        { className: 'text-typography-500 dark:text-typography-400' },
-        'Muted copy',
-      ),
-    );
+    const { getByText } = render(React.createElement(
+      Text,
+      { textRole: 'caption', className: 'text-center' },
+      'Muted semantic copy',
+    ));
 
-    expect(StyleSheet.flatten(getByText('Muted copy').props.style)).toMatchObject({
-      color: '#c9d5e7',
+    expect(StyleSheet.flatten(getByText('Muted semantic copy').props.style)).toMatchObject({
+      color: resolvedTheme.colors.textTertiary,
     });
-    expect(getByText('Muted copy').props.className).not.toContain('text-typography-500');
-    expect(getByText('Muted copy').props.className).not.toContain('dark:text-typography-200');
+    expect(getByText('Muted semantic copy').props.className).toContain('text-xs');
+    expect(getByText('Muted semantic copy').props.className).toContain('text-center');
   });
 
-  it('keeps explicit runtime text colors above the dark glass readability lift', () => {
-    mockUseTheme.mockReturnValue({
-      resolvedMode: 'dark',
-      appearance: { surfaceKind: 'glass' },
-    });
+  it('resolves foreground roles from the current theme without rewriting layout classes', () => {
+    const resolvedTheme = resolveTheme('glass', 'dark');
+    mockUseTheme.mockReturnValue({ colors: resolvedTheme.colors, resolvedTheme });
 
-    const { getByText } = render(
-      React.createElement(
-        Text,
-        { className: 'dark:text-typography-400', style: { color: '#ff00aa' } },
-        'Explicit',
-      ),
-    );
+    const { getByText } = render(React.createElement(
+      Text,
+      { className: 'text-center', colorRole: 'onAccent' },
+      'Semantic label',
+    ));
+
+    expect(StyleSheet.flatten(getByText('Semantic label').props.style)).toMatchObject({
+      color: resolvedTheme.colors.textOnPrimary,
+    });
+    expect(getByText('Semantic label').props.className).toBe('text-center');
+  });
+
+  it('keeps explicit runtime styles above semantic foreground defaults', () => {
+    const { getByText } = render(React.createElement(
+      Text,
+      { colorRole: 'onAccent', style: { color: '#ff00aa' } },
+      'Explicit',
+    ));
 
     expect(StyleSheet.flatten(getByText('Explicit').props.style)).toMatchObject({
       color: '#ff00aa',
     });
   });
 
-  it('resolves glass action text colors from the current theme mode', () => {
-    mockUseTheme.mockReturnValue({
-      resolvedMode: 'dark',
-      appearance: { surfaceKind: 'glass' },
-    });
-
-    const renderAction = () => React.createElement(
+  it('updates the semantic color when the resolved theme changes', () => {
+    const lightTheme = resolveTheme('default', 'light');
+    const darkTheme = resolveTheme('glass', 'dark');
+    mockUseTheme.mockReturnValue({ colors: lightTheme.colors, resolvedTheme: lightTheme });
+    const renderLabel = () => React.createElement(
       Text,
-      { className: 'text-primary-700 dark:text-primary-100' },
-      'Mode action',
+      { colorRole: 'softAction' },
+      'Reusable label',
     );
-    const { getByText, rerender } = render(renderAction());
-
-    expect(StyleSheet.flatten(getByText('Mode action').props.style)).toMatchObject({
-      color: '#d9ebff',
-    });
-
-    mockUseTheme.mockReturnValue({
-      resolvedMode: 'light',
-      appearance: { surfaceKind: 'glass' },
-    });
-    rerender(renderAction());
-
-    expect(StyleSheet.flatten(getByText('Mode action').props.style)).toMatchObject({
-      color: '#164fb0',
-    });
-  });
-
-  it('updates glass text color when a reused label switches from active to inactive', () => {
-    mockUseTheme.mockReturnValue({
-      resolvedMode: 'light',
-      appearance: { surfaceKind: 'glass' },
-    });
-
-    const { getByText, rerender } = render(
-      React.createElement(
-        Text,
-        { className: 'text-center text-primary-700 dark:text-primary-100' },
-        'Reusable label',
-      ),
-    );
+    const { getByText, rerender } = render(renderLabel());
 
     expect(StyleSheet.flatten(getByText('Reusable label').props.style)).toMatchObject({
-      color: '#164fb0',
+      color: lightTheme.colors.textOnSoftAction,
     });
-    expect(getByText('Reusable label').props.className).toBe('text-center');
 
-    rerender(
-      React.createElement(
-        Text,
-        { className: 'text-center text-typography-600 dark:text-typography-300' },
-        'Reusable label',
-      ),
-    );
-
+    mockUseTheme.mockReturnValue({ colors: darkTheme.colors, resolvedTheme: darkTheme });
+    rerender(renderLabel());
     expect(StyleSheet.flatten(getByText('Reusable label').props.style)).toMatchObject({
-      color: '#46546a',
+      color: darkTheme.colors.textOnSoftAction,
     });
-    expect(getByText('Reusable label').props.className).toBe('text-center');
   });
 });

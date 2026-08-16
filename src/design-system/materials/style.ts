@@ -13,6 +13,7 @@ const radiusStyleByShape: Readonly<Record<MaterialShape, ViewStyle>> = Object.fr
     borderTopLeftRadius: 32,
     borderTopRightRadius: 32,
   },
+  tabBar: { borderRadius: 34 },
   full: { borderRadius: 9999 },
 });
 

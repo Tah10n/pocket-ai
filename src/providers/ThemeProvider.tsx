@@ -5,7 +5,6 @@ import { getSettings, subscribeSettings, updateSettings } from '../services/Sett
 import type { ResolvedTheme } from '../design-system/themes/contract';
 import type {
     ResolvedThemeMode,
-    ThemeAppearance,
     ThemeColors,
     ThemeMode,
 } from '../design-system/themes/legacyTheme';
@@ -17,7 +16,6 @@ interface ThemeContextValue {
     themeId: ThemeId;
     resolvedMode: ResolvedThemeMode;
     colors: ThemeColors;
-    appearance: ThemeAppearance;
     resolvedTheme: ResolvedTheme<ThemeId>;
     navigationTheme: ResolvedTheme<ThemeId>['navigationTheme'];
     toggleTheme: () => void;
@@ -32,7 +30,6 @@ const ThemeContext = createContext<ThemeContextValue>({
     themeId: DEFAULT_THEME_ID,
     resolvedMode: 'light',
     colors: defaultResolvedTheme.colors,
-    appearance: defaultResolvedTheme.appearance,
     resolvedTheme: defaultResolvedTheme,
     navigationTheme: defaultResolvedTheme.navigationTheme,
     toggleTheme: () => {},
@@ -63,7 +60,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }, [mode, systemScheme]);
 
     const resolvedTheme = useMemo(() => resolveTheme(themeId, resolvedMode), [resolvedMode, themeId]);
-    const { colors, appearance, navigationTheme } = resolvedTheme;
+    const { colors, navigationTheme } = resolvedTheme;
 
     useEffect(() => {
         setColorScheme(mode);
@@ -102,13 +99,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         themeId,
         resolvedMode,
         colors,
-        appearance,
         resolvedTheme,
         navigationTheme,
         toggleTheme,
         setTheme,
         setThemeId,
-    }), [appearance, colors, mode, navigationTheme, resolvedMode, resolvedTheme, setTheme, setThemeId, themeId, toggleTheme]);
+    }), [colors, mode, navigationTheme, resolvedMode, resolvedTheme, setTheme, setThemeId, themeId, toggleTheme]);
 
     return (
         <ThemeContext.Provider value={value}>
@@ -137,7 +133,7 @@ export function StaticThemeProvider({
         () => resolvedThemeOverride ?? resolveTheme(themeId, resolvedMode),
         [resolvedMode, resolvedThemeOverride, themeId],
     );
-    const { colors, appearance, navigationTheme } = resolvedTheme;
+    const { colors, navigationTheme } = resolvedTheme;
     const effectiveResolvedMode = resolvedTheme.mode;
     const effectiveThemeId = resolvedTheme.id;
 
@@ -150,13 +146,12 @@ export function StaticThemeProvider({
         themeId: effectiveThemeId,
         resolvedMode: effectiveResolvedMode,
         colors,
-        appearance,
         resolvedTheme,
         navigationTheme,
         toggleTheme: noopThemeAction,
         setTheme: noopThemeAction,
         setThemeId: noopThemeAction,
-    }), [appearance, colors, effectiveResolvedMode, effectiveThemeId, mode, navigationTheme, resolvedTheme]);
+    }), [colors, effectiveResolvedMode, effectiveThemeId, mode, navigationTheme, resolvedTheme]);
 
     return (
         <ThemeContext.Provider value={value}>

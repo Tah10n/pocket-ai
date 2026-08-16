@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
-import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenRoot, ScreenTextField, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenContent, ScreenIconButton, ScreenPressableCard, ScreenRoot, ScreenTextField } from '@/components/ui/ScreenShell';
 import { HeaderBar } from '@/components/ui/HeaderBar';
 import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
@@ -19,7 +19,6 @@ import {
     selectActiveChatPreset,
 } from '../../services/ActiveChatPresetService';
 import { toTestIdSegment } from '../../utils/testIds';
-import { getThemeActionContentClassName } from '../../utils/themeTokens';
 
 interface EditorState {
     preset: SystemPromptPreset | null;
@@ -35,8 +34,6 @@ export function PresetManagerScreen() {
     const [draftPrompt, setDraftPrompt] = useState('');
 
     const { t } = useTranslation();
-    const appearance = useScreenAppearance();
-    const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
     const insets = useSafeAreaInsets();
 
     useEffect(() => {
@@ -161,18 +158,15 @@ export function PresetManagerScreen() {
                 testID={`preset-card-${toTestIdSegment(item.id)}`}
                 onPress={() => openEditPreset(item)}
                 padding="compact"
-                className={`active:opacity-80 ${
-                    isActive
-                        ? appearance.classNames.selectedInsetCardClassName
-                        : ''
-                }`}
+                tone={isActive ? 'accent' : 'default'}
+                className="active:opacity-80"
             >
                 <Box className="flex-row items-start justify-between gap-3">
                     <Box className="min-w-0 flex-1">
-                        <Text className="text-base font-bold text-typography-900 dark:text-typography-100">
+                        <Text colorRole="primary" className="text-base font-bold  ">
                             {item.name}
                         </Text>
-                        <Text className="mt-1 text-sm text-typography-600 dark:text-typography-400" numberOfLines={3}>
+                        <Text colorRole="tertiary" className="mt-1 text-sm  " numberOfLines={3}>
                             {item.systemPrompt}
                         </Text>
                         <Box className="mt-3 flex-row items-center gap-2">
@@ -184,19 +178,19 @@ export function PresetManagerScreen() {
                         </Box>
                     </Box>
 
-                    <MaterialSymbols name="chevron-right" size="lg" className="text-typography-400" />
+                    <MaterialSymbols colorRole="tertiary" name="chevron-right" size="lg" className="" />
                 </Box>
             </ScreenPressableCard>
         );
-    }, [activePresetId, appearance.classNames.selectedInsetCardClassName, openEditPreset, t]);
+    }, [activePresetId, openEditPreset, t]);
 
     const renderEmptyState = useCallback(() => (
         <Box className="flex-1 justify-center py-6">
             <ScreenCard dashed padding="compact" className="items-center">
-                <Text className="text-center text-base font-semibold text-typography-900 dark:text-typography-100">
+                <Text colorRole="primary" className="text-center text-base font-semibold  ">
                     {t('presets.emptyTitle')}
                 </Text>
-                <Text className="mt-2 text-center text-sm leading-5 text-typography-500 dark:text-typography-400">
+                <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-5  ">
                     {t('presets.emptyDescription')}
                 </Text>
             </ScreenCard>
@@ -218,8 +212,8 @@ export function PresetManagerScreen() {
                         size="lg"
                         testID="preset-manager-add-preset"
                     >
-                        <MaterialSymbols name="add" size="sm" className={primaryActionContentClassName} />
-                        <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>{t('presets.addPreset')}</Text>
+                        <MaterialSymbols name="add" size="sm" colorRole="onAccent" />
+                        <Text colorRole="onAccent" className="text-sm font-semibold">{t('presets.addPreset')}</Text>
                     </ScreenActionPill>
                 )}
             />

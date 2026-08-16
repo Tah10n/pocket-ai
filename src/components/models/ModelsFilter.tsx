@@ -3,10 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { MaterialSymbols, type MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
-import { joinClassNames, ScreenActionPill, ScreenBadge, ScreenPressableSurface, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenActionPill, ScreenBadge, ScreenPressableSurface, ScreenSurface } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { ModelFilterCriteria, ModelSizeRange, ModelSortField, ModelSortPreference } from '@/store/modelsStore';
-import { getThemeActionContentClassName } from '@/utils/themeTokens';
+import { useTheme } from '@/providers/ThemeProvider';
 
 interface ModelsFilterProps {
   filters: ModelFilterCriteria;
@@ -61,8 +61,6 @@ function TriggerButton({
   isOpen,
   onPress,
 }: TriggerButtonProps) {
-  const appearance = useScreenAppearance();
-
   return (
     <ScreenPressableSurface
       testID={testID}
@@ -71,28 +69,25 @@ function TriggerButton({
       withControlTint={isOpen}
       className={joinClassNames(
         'min-w-0 flex-1 flex-row items-center gap-1.5 rounded-2xl border px-2.5 py-2 active:opacity-80',
-        isOpen
-          ? appearance.classNames.toneClassNameByTone.accent.surfaceClassName
-          : appearance.classNames.toneClassNameByTone.neutral.surfaceClassName,
       )}
     >
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
         <MaterialSymbols
           name={iconName}
           size="sm"
-          className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
+          colorRole={isOpen ? 'accent' : 'tertiary'}
         />
 
-        <Text numberOfLines={1} className="min-w-0 flex-1 font-semibold text-sm text-typography-900 dark:text-typography-100">
+        <Text colorRole="primary" numberOfLines={1} className="min-w-0 flex-1 font-semibold text-sm  ">
           {label}
         </Text>
       </Box>
 
       <Box className="ml-1.5 flex-row items-center gap-1.5">
         {summary ? (
-          <Text
+          <Text colorRole="tertiary"
             numberOfLines={1}
-            className="max-w-[84px] text-xs text-typography-500 dark:text-typography-400"
+            className="max-w-[84px] text-xs  "
           >
             {summary}
           </Text>
@@ -105,7 +100,7 @@ function TriggerButton({
         <MaterialSymbols
           name={isOpen ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
           size="sm"
-          className={isOpen ? 'text-primary-500' : 'text-typography-500 dark:text-typography-400'}
+          colorRole={isOpen ? 'accent' : 'tertiary'}
         />
       </Box>
     </ScreenPressableSurface>
@@ -119,40 +114,33 @@ function OptionRow({
   onPress,
   trailingLabel,
 }: OptionRowProps) {
-  const appearance = useScreenAppearance();
-  const activeControlClassName = appearance.surfaceKind === 'glass'
-    ? 'border-primary-500/18 bg-primary-500/8'
-    : 'border-primary-500 bg-primary-500';
-  const activeIconClassName = getThemeActionContentClassName(appearance, 'primary');
-
   return (
     <Pressable
       testID={testID}
       onPress={onPress}
       className={joinClassNames(
         'flex-row items-center justify-between rounded-xl px-3 py-2 active:opacity-80',
-        active ? appearance.classNames.selectedInsetCardClassName : undefined,
       )}
     >
       <Box className="min-w-0 flex-1 flex-row items-center gap-2">
         <ScreenSurface
-          tone={active ? 'accent' : 'neutral'}
-          withControlTint={active}
-          className={`h-5 w-5 items-center justify-center rounded-full border ${
-          active
-            ? activeControlClassName
-            : appearance.classNames.toneClassNameByTone.neutral.iconTileClassName
-        }`}
+          material={{
+            role: 'control',
+            variant: active ? 'selected' : 'inline',
+            tone: active ? 'primary' : 'neutral',
+          }}
+          shape="full"
+          className="h-5 w-5 items-center justify-center"
         >
           {active ? (
-            <MaterialSymbols name="check" size={12} className={activeIconClassName} />
+            <MaterialSymbols name="check" size={12} colorRole="onAccent" />
           ) : null}
         </ScreenSurface>
-        <Text className="shrink text-sm text-typography-800 dark:text-typography-100">{label}</Text>
+        <Text colorRole="primary" className="shrink text-sm  ">{label}</Text>
       </Box>
 
       {trailingLabel ? (
-        <Text className="ml-3 text-2xs font-semibold text-typography-500 dark:text-typography-400">
+        <Text colorRole="tertiary" className="ml-3 text-2xs font-semibold  ">
           {trailingLabel}
         </Text>
       ) : null}
@@ -195,17 +183,13 @@ export const ModelsFilter = ({
   onClear,
 }: ModelsFilterProps) => {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
+  const { colors } = useTheme();
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
   const activeFilterCount = getActiveFilterCount(filters);
   const hasActiveFilters = activeFilterCount > 0;
   const sortSummary = getSortSummary(t, sort);
-  const rootClassName = appearance.surfaceKind === 'glass'
-    ? 'py-1.5'
-    : `${appearance.classNames.surfaceBarClassName} py-1.5`;
-
   return (
-    <Box className={rootClassName}>
+    <Box className="py-1.5">
       <Box className="flex-row gap-1.5">
         <TriggerButton
           testID="models-filter-toggle"
@@ -233,7 +217,7 @@ export const ModelsFilter = ({
         <ScreenSurface
           testID="models-filter-panel"
           tone="neutral"
-          className={`mt-1.5 p-1.5 ${appearance.classNames.insetCardClassName}`}
+          className="mt-1.5 p-1.5"
         >
           {hasActiveFilters ? (
             <Box className="mb-1.5 flex-row justify-end">
@@ -243,7 +227,7 @@ export const ModelsFilter = ({
                 tone="soft"
                 size="sm"
               >
-                <Text className="text-xs font-semibold text-primary-500">{t('common.clear')}</Text>
+                <Text colorRole="accent" className="text-xs font-semibold ">{t('common.clear')}</Text>
               </ScreenActionPill>
             </Box>
           ) : null}
@@ -263,7 +247,7 @@ export const ModelsFilter = ({
               onPress={() => onNoTokenRequiredToggle(!filters.noTokenRequiredOnly)}
             />
 
-            <Box className={`my-1 h-px border-t ${appearance.classNames.dividerClassName}`} />
+            <Box className="my-1 h-px border-t" style={{ borderColor: colors.divider }} />
 
             {SIZE_OPTIONS.map((option) => (
               <OptionRow
@@ -282,7 +266,7 @@ export const ModelsFilter = ({
         <ScreenSurface
           testID="models-sort-panel"
           tone="neutral"
-          className={`mt-1.5 p-1.5 ${appearance.classNames.insetCardClassName}`}
+          className="mt-1.5 p-1.5"
         >
           <Box className="gap-1">
             {SORT_OPTIONS.map((option) => {

@@ -46,7 +46,7 @@ export const HeaderBar = ({
             accessibilityLabel={resolvedBackAccessibilityLabel}
           />
         ) : showBrand ? (
-          <ScreenIconTile iconName={brandIconName} tone="accent" iconSize="xl" className={screenChromeTokens.headerActionClassName} iconClassName="text-primary-500" />
+          <ScreenIconTile iconName={brandIconName} tone="accent" iconSize="xl" className={screenChromeTokens.headerActionClassName} />
         ) : (
           <HeaderActionPlaceholder />
         )}

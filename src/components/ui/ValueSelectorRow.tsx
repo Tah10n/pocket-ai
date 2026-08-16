@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box } from './box';
 import { MaterialSymbols } from './MaterialSymbols';
-import { joinClassNames, ScreenPressableSurface, ScreenSurface, useScreenAppearance } from './ScreenShell';
+import { joinClassNames, ScreenPressableSurface, ScreenSurface } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { cardPaddingByDensity, radiusTokens } from '../../utils/themeTokens';
 
@@ -34,7 +34,6 @@ export function ValueSelectorRow({
   className,
   testID,
 }: ValueSelectorRowProps) {
-  const appearance = useScreenAppearance();
   const isInteractive = typeof onPress === 'function' && !disabled;
   const hasLabel = typeof label === 'string' && label.trim().length > 0;
   const hasAccessibilityText = Boolean(accessibilityLabel || accessibilityHint);
@@ -48,8 +47,7 @@ export function ValueSelectorRow({
   };
   const containerClassName = joinClassNames(
     // DS-EXCEPTION: keep an explicit 44px min touch target for list rows.
-    'min-h-[44px] flex-row items-center gap-3 border',
-    appearance.classNames.toneClassNameByTone.neutral.surfaceClassName,
+    'min-h-[44px] flex-row items-center gap-3',
     radiusTokens.md,
     cardPaddingByDensity.compact,
     disabled ? 'opacity-60' : undefined,
@@ -61,7 +59,7 @@ export function ValueSelectorRow({
       {leading}
       <Box className="min-w-0 flex-1 flex-row items-center justify-between gap-3">
         {hasLabel ? (
-          <Text className={composeTextRole('caption', 'shrink-0')}>
+          <Text colorRole="tertiary" className={composeTextRole('caption', 'shrink-0')}>
             {label}
           </Text>
         ) : null}
@@ -69,7 +67,7 @@ export function ValueSelectorRow({
           'min-w-0 flex-1 flex-row flex-wrap items-center gap-1.5',
           hasLabel ? 'justify-end' : 'justify-start',
         )}>
-          <Text
+          <Text colorRole="primary"
             numberOfLines={1}
             className={composeTextRole('body', joinClassNames(
               'min-w-0 shrink',
@@ -82,10 +80,10 @@ export function ValueSelectorRow({
         </Box>
       </Box>
       {showChevron ? (
-        <MaterialSymbols
+        <MaterialSymbols colorRole="tertiary"
           name="chevron-right"
           size="md"
-          className="text-typography-400"
+          className=""
         />
       ) : null}
     </>

@@ -517,10 +517,10 @@ export function ErrorReportSheet({
       <ScreenCard>
         <Box className="flex-row items-start justify-between gap-3">
           <Box className="min-w-0 flex-1">
-            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+            <Text colorRole="primary" className="text-base font-semibold  ">
               {params.label}
             </Text>
-            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
               {params.description}
             </Text>
           </Box>
@@ -562,10 +562,10 @@ export function ErrorReportSheet({
         >
           <Box className="mb-5 flex-row items-start justify-between gap-4">
             <Box className="min-w-0 flex-1">
-              <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+              <Text colorRole="primary" className="text-lg font-semibold  ">
                 {t('models.errorReport.title')}
               </Text>
-              <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+              <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                 {t('models.errorReport.subtitle')}
               </Text>
             </Box>
@@ -580,19 +580,19 @@ export function ErrorReportSheet({
           <ScrollView showsVerticalScrollIndicator={false}>
             <ScreenStack gap="default" className="pb-2">
               <ScreenCard tone="accent" variant="inset">
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                <Text colorRole="accent" className="text-xs font-semibold uppercase tracking-wider ">
                   {t('models.errorReport.privacyTitle')}
                 </Text>
-                <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                <Text colorRole="secondary" className="mt-2 text-sm leading-6  ">
                   {t('models.errorReport.privacyMessage')}
                 </Text>
               </ScreenCard>
 
               <ScreenCard>
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                <Text colorRole="accent" className="text-xs font-semibold uppercase tracking-wider ">
                   {t('models.errorReport.errorLabel')}
                 </Text>
-                <Text className="mt-2 text-sm leading-6 text-typography-700 dark:text-typography-200">
+                <Text colorRole="secondary" className="mt-2 text-sm leading-6  ">
                   {sanitizedAppError.message}
                 </Text>
               </ScreenCard>
@@ -662,10 +662,10 @@ export function ErrorReportSheet({
               })}
 
               <ScreenCard>
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                <Text colorRole="accent" className="text-xs font-semibold uppercase tracking-wider ">
                   {t('models.errorReport.additionalInfoTitle')}
                 </Text>
-                <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                <Text colorRole="secondary" className="mt-2 text-sm leading-6  ">
                   {t('models.errorReport.additionalInfoMessage')}
                 </Text>
                 <Input className="mt-3">
@@ -682,15 +682,15 @@ export function ErrorReportSheet({
               </ScreenCard>
 
               <ScreenCard variant="inset">
-                <Text className="text-xs font-semibold uppercase tracking-wider text-primary-500">
+                <Text colorRole="accent" className="text-xs font-semibold uppercase tracking-wider ">
                   {t('models.errorReport.previewTitle')}
                 </Text>
-                <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                <Text colorRole="secondary" className="mt-2 text-sm leading-6  ">
                   {t('models.errorReport.previewMessage')}
                 </Text>
-                <Text
+                <Text colorRole="secondary"
                   selectable
-                  className="mt-3 font-mono text-[11px] leading-5 text-typography-700 dark:text-typography-200"
+                  className="mt-3 font-mono text-[11px] leading-5  "
                 >
                   {reportPreviewJson}
                 </Text>

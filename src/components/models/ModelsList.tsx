@@ -788,10 +788,10 @@ export const ModelsList = ({
   const emptyState = useMemo(() => (
     <Box className="flex-1 justify-center py-6">
       <ScreenCard dashed padding="compact" className="items-center">
-        <Text className="text-center text-base font-semibold text-typography-700 dark:text-typography-200">
+        <Text colorRole="secondary" className="text-center text-base font-semibold  ">
           {t('models.noResults', 'No models found')}
         </Text>
-        <Text className="mt-2 text-center text-sm text-typography-500 dark:text-typography-400">
+        <Text colorRole="tertiary" className="mt-2 text-center text-sm  ">
           {hasFilters
             ? t('models.emptyFiltered')
             : t('models.emptySearchHint')}
@@ -812,16 +812,16 @@ export const ModelsList = ({
 
     return (
       <ScreenCard padding="compact" tone="accent">
-        <Text className="text-sm font-semibold text-primary-700 dark:text-primary-300">
+        <Text colorRole="accent" className="text-sm font-semibold  ">
           {t('models.guidedDiscoveryTitle')}
         </Text>
-        <Text className="mt-1 text-sm leading-5 text-primary-700/90 dark:text-primary-200">
+        <Text colorRole="accent" className="mt-1 text-sm leading-5  ">
           {hasTokenConfigured
             ? t('models.guidedDiscoveryWithToken')
             : t('models.guidedDiscoveryWithoutToken')}
         </Text>
         <Button action="secondary" size="sm" className="mt-2 self-start" onPress={showFullCatalog}>
-          <ButtonText className="text-typography-900 dark:text-typography-100">
+          <ButtonText>
             {t('models.showFullCatalog')}
           </ButtonText>
         </Button>
@@ -833,12 +833,12 @@ export const ModelsList = ({
     <Box className="pt-1">
       {loadMoreError ? (
         <ScreenBanner tone="error" className="mb-2.5">
-          <Text className="text-sm text-error-700 dark:text-error-300">{loadMoreError}</Text>
+          <Text colorRole="danger" className="text-sm  ">{loadMoreError}</Text>
         </ScreenBanner>
       ) : null}
 
       {!shouldAutoLoadMore && hasMore && nextCursor ? (
-        <Text className="mb-2 text-xs text-typography-500 dark:text-typography-400">
+        <Text colorRole="tertiary" className="mb-2 text-xs  ">
           {t(
             'models.paginationLocalSortHint',
             'This sort is applied on-device. Newly loaded models may appear earlier in the list.',
@@ -848,7 +848,7 @@ export const ModelsList = ({
 
       {hasMore && nextCursor ? (
         <Button action="secondary" size="sm" onPress={() => handleLoadMore('manual')} disabled={isFetchingMore}>
-          <ButtonText className="text-typography-900 dark:text-typography-100">
+          <ButtonText>
             {isFetchingMore
               ? t('common.loading')
               : loadMoreError
@@ -857,7 +857,7 @@ export const ModelsList = ({
           </ButtonText>
         </Button>
       ) : filteredModels.length > 0 ? (
-        <Text className="text-center text-xs text-typography-400 dark:text-typography-500">
+        <Text colorRole="tertiary" className="text-center text-xs  ">
           {t('models.catalogEnd')}
         </Text>
       ) : null}
@@ -964,10 +964,10 @@ export const ModelsList = ({
 
         {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
           <ScreenCard padding="compact" tone="error">
-            <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+            <Text colorRole="danger" className="text-sm font-semibold  ">
               {t('common.errors.modelLoadFailed')}
             </Text>
-            <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+            <Text colorRole="danger" selectable className="mt-1 text-sm  ">
               {engineState.lastError}
             </Text>
             <Box className="mt-3 flex-row gap-2">
@@ -983,14 +983,14 @@ export const ModelsList = ({
 
         {warningMessage ? (
           <ScreenCard padding="compact" tone="warning">
-            <Text className="text-sm text-warning-700 dark:text-warning-300">{warningMessage}</Text>
+            <Text colorRole="warning" className="text-sm  ">{warningMessage}</Text>
           </ScreenCard>
         ) : null}
 
         {(isCatalogInitializing || (loading && models.length === 0)) ? (
           <Box className="flex-1 items-center justify-center pb-8 pt-6">
             <Spinner size="large" />
-            <Text className="mt-2 text-typography-500">{t('models.searching', 'Searching Hugging Face...')}</Text>
+            <Text colorRole="tertiary" className="mt-2 ">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>
         ) : (
           <FlashList

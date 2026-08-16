@@ -11,14 +11,14 @@ const SafeBottomTabBarHeightContext = BottomTabBarHeightContext
   || React.createContext<number | undefined>(undefined);
 
 export function useTabBarContentInset(): number {
-  const { appearance } = useTheme();
+  const { resolvedTheme } = useTheme();
   const insets = useSafeAreaInsets();
   const tabBarContextHeight = React.useContext(SafeBottomTabBarHeightContext);
-  const isFloating = isFloatingTabBar(appearance);
+  const isFloating = isFloatingTabBar(resolvedTheme.components.tabBar.presentation);
   const nativeBottomInset = getNativeBottomSafeAreaInset(insets.bottom, Platform.OS);
   const tabBarHeight = tabBarContextHeight ?? (
     isFloating
-      ? bottomTabBarMetrics.glassHeight
+      ? bottomTabBarMetrics.floatingHeight
       : bottomTabBarMetrics.height + nativeBottomInset
   );
 

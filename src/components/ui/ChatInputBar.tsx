@@ -3,7 +3,7 @@ import { AccessibilityInfo, Alert, Image, Platform, ScrollView, StyleSheet } fro
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
 import { ScreenIconButton, ScreenIconTile, ScreenInlineInput, ScreenSurface } from './ScreenShell';
-import { getThemeActionContentClassName, screenChromeTokens } from '../../utils/themeTokens';
+import { screenChromeTokens } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '../../services/AppError';
@@ -265,7 +265,6 @@ export const ChatInputBar = ({
     const lastIosAttachmentAnnouncementRef = useRef<string | null>(null);
     const { t } = useTranslation();
     const theme = useTheme();
-    const appearance = theme.appearance;
     const isCapsuleComposer = theme.resolvedTheme.components.chat.composerPresentation === 'capsule';
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
@@ -508,7 +507,7 @@ export const ChatInputBar = ({
             iconName={isSending ? 'stop' : 'arrow-upward'}
             material={primaryActionEnabled ? CHAT_PRIMARY_ACTION_MATERIAL : CHAT_DISABLED_ACTION_MATERIAL}
             tone={primaryActionEnabled ? 'primary' : 'neutral'}
-            iconClassName={primaryActionEnabled ? getThemeActionContentClassName(appearance, 'primary') : 'text-typography-500'}
+            iconColorRole={primaryActionEnabled ? 'onAccent' : 'tertiary'}
         />
     );
     const imageAttachmentHelperText = (() => {
@@ -735,7 +734,7 @@ export const ChatInputBar = ({
             <ScreenInlineInput
                 testID="chat-message-input"
                 variant="composer"
-                applyGlassFrame={!isCapsuleComposer}
+                embedded={isCapsuleComposer}
                 className={disabled
                     ? 'flex-1 opacity-60'
                     : isCapsuleComposer
@@ -788,9 +787,8 @@ export const ChatInputBar = ({
                         size="sm"
                         tone="accent"
                         className="h-6 w-6 border-0 bg-transparent"
-                        iconClassName="text-primary-500"
                     />
-                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold  ">
                         {t('chat.attachments.preparingImage')}
                     </Text>
                 </Box>
@@ -812,9 +810,8 @@ export const ChatInputBar = ({
                         size="sm"
                         tone="accent"
                         className="h-6 w-6 border-0 bg-transparent"
-                        iconClassName="text-primary-500"
                     />
-                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold  ">
                         {t('chat.attachments.preparingDocument')}
                     </Text>
                 </Box>
@@ -835,9 +832,8 @@ export const ChatInputBar = ({
                         size="sm"
                         tone="accent"
                         className="h-6 w-6 border-0 bg-transparent"
-                        iconClassName="text-primary-500"
                     />
-                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold  ">
                         {t('chat.attachments.preparingAudio')}
                     </Text>
                 </Box>
@@ -952,10 +948,10 @@ export const ChatInputBar = ({
                                             className="h-8 w-8"
                                         />
                                         <Box className="min-w-0 flex-1">
-                                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                                            <Text colorRole="primary" numberOfLines={1} className="text-xs font-semibold  ">
                                                 {title}
                                             </Text>
-                                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                                            <Text colorRole="secondary" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                                                 {subtitle}
                                             </Text>
                                         </Box>
@@ -1023,10 +1019,10 @@ export const ChatInputBar = ({
                                             className="h-8 w-8"
                                         />
                                         <Box className="min-w-0 flex-1">
-                                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                                            <Text colorRole="primary" numberOfLines={1} className="text-xs font-semibold  ">
                                                 {title}
                                             </Text>
-                                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                                            <Text colorRole="secondary" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                                                 {subtitle}
                                             </Text>
                                         </Box>
@@ -1058,11 +1054,11 @@ export const ChatInputBar = ({
             ) : null}
 
             {attachmentHelperText ? (
-                <Text
+                <Text colorRole="secondary"
                     testID="chat-image-attachment-readiness-text"
                     accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
                     role="status"
-                    className="text-xs leading-4 text-typography-600 dark:text-typography-300"
+                    className="text-xs leading-4  "
                 >
                     {attachmentHelperText}
                 </Text>
@@ -1085,14 +1081,13 @@ export const ChatInputBar = ({
                         size="sm"
                         iconSize="xs"
                         className="mt-0.5 h-6 w-6"
-                        iconClassName="text-primary-500"
                     />
                     <Box className="min-w-0 flex-1">
-                        <Text numberOfLines={1} className="text-sm font-semibold text-primary-700 dark:text-primary-300">
+                        <Text colorRole="accent" numberOfLines={1} className="text-sm font-semibold  ">
                             {modeLabel}
                         </Text>
                         {modeDescription ? (
-                            <Text numberOfLines={2} className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                            <Text colorRole="accent" numberOfLines={2} className="mt-0.5 text-xs leading-4  ">
                                 {modeDescription}
                             </Text>
                         ) : null}
@@ -1110,7 +1105,6 @@ export const ChatInputBar = ({
                         iconSize="xs"
                         size="micro"
                         className="border-0"
-                        iconClassName="text-primary-500"
                     />
                 ) : null}
             </Box>

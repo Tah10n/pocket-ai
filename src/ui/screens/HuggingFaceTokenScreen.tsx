@@ -103,12 +103,12 @@ export function HuggingFaceTokenScreen() {
         >
           <ScreenStack className="pb-2" gap="loose">
             <ScreenCard padding="large">
-              <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+              <Text colorRole="primary" className="text-sm font-semibold  ">
                 {hasToken
                   ? t('settings.huggingFaceTokenConfigured')
                   : t('settings.huggingFaceTokenMissing')}
               </Text>
-              <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+              <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
                 {t('settings.huggingFaceTokenHelper')}
               </Text>
             </ScreenCard>
@@ -125,20 +125,20 @@ export function HuggingFaceTokenScreen() {
             />
 
             <ScreenCard tone="accent" padding="large">
-              <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+              <Text colorRole="primary" className="text-sm font-semibold  ">
                 {t('settings.huggingFaceTokenEducationTitle')}
               </Text>
-              <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+              <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
                 {t('settings.huggingFaceTokenEducationBody')}
               </Text>
-              <Text className="mt-2 text-sm leading-6 text-typography-500 dark:text-typography-400">
+              <Text colorRole="tertiary" className="mt-2 text-sm leading-6  ">
                 {t('settings.huggingFaceTokenRecommendation')}
               </Text>
-              <Text className="mt-4 text-sm text-primary-700 dark:text-primary-300">
+              <Text colorRole="accent" className="mt-4 text-sm  ">
                 {t('settings.huggingFaceTokenGetTokenHelper')}
               </Text>
               <Button action="secondary" className="mt-4 self-start" onPress={() => { void handleOpenTokenSettings(); }}>
-                <ButtonText className="text-typography-900 dark:text-typography-100">
+                <ButtonText>
                   {t('settings.huggingFaceTokenGetToken')}
                 </ButtonText>
               </Button>

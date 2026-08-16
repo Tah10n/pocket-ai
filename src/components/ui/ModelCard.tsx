@@ -99,14 +99,13 @@ const ModelCardComponent = ({
       : null;
   return (
     <ScreenCard
-      decorative="tint"
       padding="compact"
       tone={isActive ? 'accent' : 'default'}
     >
       <Box className="flex-row items-start justify-between gap-2.5">
         <Box className="min-w-0 flex-1">
           <Box className="flex-row flex-wrap items-start gap-2">
-            <Text numberOfLines={2} className={composeTextRole('sectionTitle', 'flex-1 text-base tracking-tight')}>
+            <Text colorRole="primary" numberOfLines={2} className={composeTextRole('sectionTitle', 'flex-1 text-base tracking-tight')}>
               {model.name}
             </Text>
             {isActive ? (
@@ -115,7 +114,7 @@ const ModelCardComponent = ({
               </ScreenBadge>
             ) : null}
           </Box>
-          <Text numberOfLines={1} className={composeTextRole('caption', 'mt-0.5')}>
+          <Text colorRole="tertiary" numberOfLines={1} className={composeTextRole('caption', 'mt-0.5')}>
             {model.author}
           </Text>
         </Box>

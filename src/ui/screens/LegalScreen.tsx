@@ -14,7 +14,6 @@ type SectionConfig = {
     id: string;
     icon: React.ComponentProps<typeof MaterialSymbols>['name'];
     tone: ThemeTone;
-    iconClassName?: string;
     titleKey: string;
     bodyKey: string;
 };
@@ -38,7 +37,6 @@ export function LegalScreen() {
             id: 'on-device',
             icon: 'computer',
             tone: 'accent',
-            iconClassName: 'text-primary-500',
             titleKey: 'legal.onDeviceTitle',
             bodyKey: 'legal.onDeviceDescription',
         },
@@ -93,13 +91,13 @@ export function LegalScreen() {
                 <ScreenContent className="pt-5" style={{ paddingBottom: insets.bottom + 32 }}>
                     <ScreenStack gap="loose">
                         <ScreenCard tone="accent" className="px-5 py-5">
-                            <Text className="text-xs font-extrabold uppercase tracking-wide text-primary-500">
+                            <Text colorRole="accent" className="text-xs font-extrabold uppercase tracking-wide ">
                                 {t('legal.eyebrow')}
                             </Text>
-                            <Text className="mt-3 text-2xl font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                            <Text colorRole="primary" className="mt-3 text-2xl font-extrabold tracking-tight  ">
                                 {t('legal.introTitle')}
                             </Text>
-                            <Text className="mt-3 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                            <Text colorRole="secondary" className="mt-3 text-sm leading-6  ">
                                 {t('legal.introDescription')}
                             </Text>
                         </ScreenCard>
@@ -108,12 +106,12 @@ export function LegalScreen() {
                             {sections.map((section) => (
                                 <ScreenCard key={section.id} testID={`legal-section-${section.id}`}>
                                     <Box className="flex-row items-start gap-3">
-                                        <ScreenIconTile iconName={section.icon} tone={section.tone} iconSize={20} size="lg" iconClassName={section.iconClassName} />
+                                        <ScreenIconTile iconName={section.icon} tone={section.tone} iconSize={20} size="lg" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t(section.titleKey)}
                                             </Text>
-                                            <Text className="mt-1.5 text-sm leading-6 text-typography-600 dark:text-typography-300">
+                                            <Text colorRole="secondary" className="mt-1.5 text-sm leading-6  ">
                                                 {t(section.bodyKey)}
                                             </Text>
                                         </Box>

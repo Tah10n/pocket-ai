@@ -1,6 +1,5 @@
 import type { ThemeDefinition } from './contract';
 import {
-  createGlassThemeAppearance,
   createGlassThemeColors,
 } from './legacyTheme';
 import { createLiquidThemeMaterialRecipes } from '../materials/presets';
@@ -21,16 +20,15 @@ export const glassTheme = {
   modes: {
     light: {
       colors: lightColors,
-      appearance: createGlassThemeAppearance('light'),
       materials: createLiquidThemeMaterialRecipes(lightColors, 'light'),
     },
     dark: {
       colors: darkColors,
-      appearance: createGlassThemeAppearance('dark'),
       materials: createLiquidThemeMaterialRecipes(darkColors, 'dark'),
     },
   },
   components: {
+    screen: { backgroundDecoration: 'aurora' },
     tabBar: { presentation: 'floating' },
     header: { presentation: 'overlay' },
     chat: {

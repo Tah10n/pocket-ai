@@ -5,7 +5,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useRouter } from 'expo-router';
 import { HeaderBar } from '@/components/ui/HeaderBar';
-import { ScreenActionPill, ScreenBanner, ScreenContent, ScreenRoot, ScreenStack, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenActionPill, ScreenBanner, ScreenContent, ScreenRoot, ScreenStack } from '@/components/ui/ScreenShell';
 import { ActiveModelCard } from '@/components/ui/ActiveModelCard';
 import { RecentConversationsList } from '@/components/ui/RecentConversationsList';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
@@ -19,7 +19,7 @@ import { performanceMonitor } from '@/services/PerformanceMonitor';
 import { getReportedErrorMessage } from '../../services/AppError';
 import { useBootstrapStore } from '@/store/bootstrapStore';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
-import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
+import { screenLayoutMetrics } from '../../utils/themeTokens';
 
 let hasMarkedFirstUsableScreen = false;
 
@@ -36,9 +36,7 @@ export const HomeScreen = () => {
   } = useChatSession();
   const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
   const { state: engineState } = useLLMEngine();
-  const appearance = useScreenAppearance();
   const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
-  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
   const floatingBannerTopStyle = headerInset > 0 ? { marginTop: headerInset + 8 } : undefined;
   useModelRegistryRevision();
   const bootstrapBackgroundState = useBootstrapStore((state) => state.backgroundState);
@@ -116,7 +114,7 @@ export const HomeScreen = () => {
       {bootstrapBackgroundState === 'running' ? (
         <ScreenBanner className="mx-4 mt-2 flex-row items-center gap-2 py-2" tone="neutral" style={floatingBannerTopStyle}>
           <Spinner size="small" />
-          <Text className="text-sm text-typography-600 dark:text-typography-300">
+          <Text colorRole="secondary" className="text-sm  ">
             {t('home.initializing')}
           </Text>
         </ScreenBanner>
@@ -124,14 +122,14 @@ export const HomeScreen = () => {
 
       {bootstrapBackgroundState === 'error' ? (
         <ScreenBanner className="mx-4 mt-2" tone="error" style={floatingBannerTopStyle}>
-          <Text className="text-sm font-semibold text-error-700 dark:text-error-200">
+          <Text colorRole="danger" className="text-sm font-semibold  ">
             {t('home.initializationFailedTitle')}
           </Text>
-          <Text className="mt-1 text-sm text-error-700 dark:text-error-300">
+          <Text colorRole="danger" className="mt-1 text-sm  ">
             {t('home.initializationFailedMessage')}
           </Text>
           {__DEV__ && bootstrapBackgroundError ? (
-            <Text className="mt-2 text-xs text-error-700 dark:text-error-300">{bootstrapBackgroundError}</Text>
+            <Text colorRole="danger" className="mt-2 text-xs  ">{bootstrapBackgroundError}</Text>
           ) : null}
         </ScreenBanner>
       ) : null}
@@ -158,8 +156,8 @@ export const HomeScreen = () => {
               size="lg"
               className="w-full gap-3"
             >
-              <MaterialSymbols name="add-comment" size="xl" className={primaryActionContentClassName} />
-              <Text className={`${primaryActionContentClassName} text-base font-bold`}>{t('home.newChat')}</Text>
+              <MaterialSymbols name="add-comment" size="xl" colorRole="onAccent" />
+              <Text colorRole="onAccent" className="text-base font-bold">{t('home.newChat')}</Text>
             </ScreenActionPill>
 
             <RecentConversationsList

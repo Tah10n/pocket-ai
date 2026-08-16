@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box } from '../ui/box';
 import { type MaterialSymbolsProps } from '../ui/MaterialSymbols';
-import { ScreenCard, ScreenIconTile, ScreenSurface, useScreenAppearance } from '../ui/ScreenShell';
+import { ScreenCard, ScreenIconTile, ScreenSurface } from '../ui/ScreenShell';
 import { Text, composeTextRole } from '../ui/text';
 import { type ModelDetailsTone } from '@/utils/modelDetailsPresentation';
 
@@ -34,21 +34,26 @@ export function DetailValueCard({
   iconName,
   compact = false,
 }: DetailValueCardProps) {
-  const appearance = useScreenAppearance();
-  const toneTokens = appearance.classNames.toneClassNameByTone[tone];
+  const colorRole = tone === 'primary'
+    ? 'accent'
+    : tone === 'error'
+      ? 'danger'
+      : tone === 'neutral'
+        ? 'primary'
+        : tone;
 
   return (
     <ScreenSurface
       tone={tone}
       withControlTint
-      className={`rounded-2xl border px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'} ${toneTokens.surfaceClassName}`}
+      className={`px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'}`}
     >
       <Box className="flex-row items-start justify-between gap-3">
         <Box className="min-w-0 flex-1">
-          <Text className={composeTextRole('eyebrow', toneTokens.labelClassName)}>
+          <Text colorRole={colorRole} className={composeTextRole('eyebrow')}>
             {label}
           </Text>
-          <Text className={composeTextRole(compact ? 'body' : 'sectionTitle', `mt-2 ${toneTokens.valueClassName}`)}>
+          <Text colorRole="primary" className={composeTextRole(compact ? 'body' : 'sectionTitle', 'mt-2')}>
             {value}
           </Text>
         </Box>
@@ -68,7 +73,7 @@ export function SectionHeader({
   return (
     <Box className="mb-4 flex-row items-center gap-3">
       <ScreenIconTile iconName={iconName} tone={tone} size="lg" />
-      <Text className={composeTextRole('sectionTitle')}>
+      <Text colorRole="primary" className={composeTextRole('sectionTitle')}>
         {title}
       </Text>
     </Box>

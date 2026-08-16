@@ -101,3 +101,17 @@ export function resolveMaterialRecipe(
     environment,
   );
 }
+
+export function themeUsesAndroidTargetBlur(materials: ThemeMaterialRecipes): boolean {
+  const effectEligibleRecipes = [
+    ...Object.values(materials.chrome),
+    ...Object.values(materials.control),
+    ...Object.values(materials.overlay),
+  ];
+
+  return effectEligibleRecipes.some((toneRecipes) => Object.values(toneRecipes)
+    .some((definition) => (
+      definition.preferredByPlatform.android.renderer === 'blur'
+      || definition.platformFallbackByPlatform?.android?.renderer === 'blur'
+    )));
+}

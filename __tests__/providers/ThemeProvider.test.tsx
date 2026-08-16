@@ -1,4 +1,6 @@
 import React from 'react';
+// Namespace import is required so tests can replace the platform color-scheme hook.
+// eslint-disable-next-line no-restricted-imports
 import * as ReactNative from 'react-native';
 import { Pressable, Text } from 'react-native';
 import { act, fireEvent, render } from '@testing-library/react-native';
@@ -22,7 +24,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
 }));
 
 function ThemeProbe() {
-  const { mode, themeId, resolvedMode, colors, appearance, resolvedTheme, navigationTheme, setTheme, setThemeId } = useTheme();
+  const { mode, themeId, resolvedMode, colors, resolvedTheme, navigationTheme, setTheme, setThemeId } = useTheme();
 
   return (
     <>
@@ -31,7 +33,7 @@ function ThemeProbe() {
       <Text testID="resolved-mode">{resolvedMode}</Text>
       <Text testID="primary-color">{colors.primary}</Text>
       <Text testID="card-surface">{colors.cardBackground}</Text>
-      <Text testID="surface-kind">{appearance.surfaceKind}</Text>
+      <Text testID="tab-presentation">{resolvedTheme.components.tabBar.presentation}</Text>
       <Text testID="navigation-card">{navigationTheme.colors.card}</Text>
       <Text testID="resolved-theme-id">{resolvedTheme.id}</Text>
       <Text testID="resolved-navigation-card">{resolvedTheme.navigationTheme.colors.card}</Text>
@@ -129,7 +131,7 @@ describe('ThemeProvider', () => {
     expect(getByTestId('theme-mode').props.children).toBe('system');
     expect(getByTestId('theme-id').props.children).toBe('glass');
     expect(getByTestId('resolved-mode').props.children).toBe('light');
-    expect(getByTestId('surface-kind').props.children).toBe('glass');
+    expect(getByTestId('tab-presentation').props.children).toBe('floating');
     expect(getByTestId('card-surface').props.children).toBe('rgba(255, 255, 255, 0.3)');
   });
 
@@ -150,7 +152,7 @@ describe('ThemeProvider', () => {
 
     expect(mockUpdateSettings).toHaveBeenCalledWith({ themeId: 'glass' });
     expect(getByTestId('theme-id').props.children).toBe('glass');
-    expect(getByTestId('surface-kind').props.children).toBe('glass');
+    expect(getByTestId('tab-presentation').props.children).toBe('floating');
   });
 
   it('keeps the storage-recovery provider independent from private settings', () => {

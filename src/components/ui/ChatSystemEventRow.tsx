@@ -1,7 +1,7 @@
 import React, { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
-import { useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenSurface } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { getShortModelLabel } from '@/utils/modelLabel';
 
@@ -28,7 +28,6 @@ export const ChatSystemEventRow = memo(({
   onLayout,
 }: ChatSystemEventRowProps) => {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
   const fromLabel = getShortModelLabel(fromModelId) || t('common.unknown');
   const toLabel = getShortModelLabel(toModelId) || t('common.unknown');
 
@@ -38,11 +37,11 @@ export const ChatSystemEventRow = memo(({
       onLayout={onLayout}
       className="w-full items-center py-2"
     >
-      <Box className={`max-w-full ${appearance.classNames.systemEventPillClassName}`}>
-        <Text className="text-center text-xs font-semibold text-typography-500 dark:text-typography-300">
+      <ScreenSurface material={{ role: 'control', variant: 'inline' }} shape="full" className="max-w-full px-3 py-1">
+        <Text colorRole="tertiary" className="text-center text-xs font-semibold">
           {t('chat.modelSwitchedLine', { from: fromLabel, to: toLabel })}
         </Text>
-      </Box>
+      </ScreenSurface>
     </Box>
   );
 }, arePropsEqual);

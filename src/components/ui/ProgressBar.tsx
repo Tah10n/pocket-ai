@@ -1,9 +1,7 @@
 import React from 'react';
 import { Box } from '@/components/ui/box';
+import { Surface } from '@/design-system/materials/Surface';
 import { useTheme } from '@/providers/ThemeProvider';
-import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
-import { GlassSurfaceBackdrop, getGlassCornerRadiusStyle, getGlassSurfaceFrameStyle } from './ScreenShell';
-import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 
 type ProgressBarSize = 'sm' | 'md' | 'lg';
 type ProgressBarTone = 'neutral' | 'primary' | 'success' | 'warning' | 'error';
@@ -16,8 +14,7 @@ interface ProgressBarProps {
   variant?: ProgressBarVariant;
   className?: string;
   fillClassName?: string;
-  forceNativeAndroidBlur?: boolean;
-  androidBlurTargetRef?: AndroidBlurTargetRef | null;
+  fillTone?: ProgressBarTone;
   testID?: string;
   fillTestID?: string;
 }
@@ -59,61 +56,58 @@ export function ProgressBar({
   variant = 'plain',
   className,
   fillClassName,
-  forceNativeAndroidBlur = false,
-  androidBlurTargetRef,
+  fillTone,
   testID,
   fillTestID,
 }: ProgressBarProps) {
-  const theme = useTheme();
-  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+  const { colors } = useTheme();
   const clampedPercent = clampProgressPercent(valuePercent);
   const isFramed = variant === 'framed';
-  const toneClassNames = appearance.classNames.toneClassNameByTone[tone];
-  const resolvedFillClassName = fillClassName ?? toneClassNames.progressFillClassName;
   const containerRadiusClassName = 'relative w-full overflow-hidden rounded-full';
-  const glassCornerRadiusStyle = getGlassCornerRadiusStyle(
-    containerRadiusClassName,
-    isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
-    className,
+  const progressFill = (
+    <Box
+      testID={fillTestID}
+      className={joinClassNames(
+        'relative overflow-hidden rounded-full',
+        isFramed ? framedFillHeightClassNameBySize[size] : 'h-full',
+        fillClassName,
+      )}
+      style={{
+        width: `${clampedPercent}%`,
+        ...(!fillClassName ? { backgroundColor: colors.progressFillByTone[fillTone ?? tone] } : null),
+      }}
+    />
   );
-  const glassFrameStyle = isFramed
-    ? getGlassSurfaceFrameStyle(appearance, theme.resolvedMode, theme.colors, tone, false, glassCornerRadiusStyle)
-    : undefined;
-  const shouldUseGlassTrackBackdrop = isFramed && appearance.surfaceKind === 'glass';
+  const sharedProps = {
+    testID,
+    accessibilityRole: 'progressbar' as const,
+    accessibilityValue: { min: 0, max: 100, now: clampedPercent },
+    className: joinClassNames(
+      containerRadiusClassName,
+      isFramed ? 'justify-center p-0.5' : undefined,
+      isFramed ? framedTrackHeightClassNameBySize[size] : trackHeightClassNameBySize[size],
+      className,
+    ),
+    style: isFramed ? undefined : { backgroundColor: colors.progressTrackByTone[tone] },
+  };
+
+  if (isFramed) {
+    return (
+      <Surface
+        {...sharedProps}
+        material={{ role: 'control', variant: 'inline', tone }}
+        shape="full"
+      >
+        {progressFill}
+      </Surface>
+    );
+  }
 
   return (
     <Box
-      testID={testID}
-      accessibilityRole="progressbar"
-      accessibilityValue={{ min: 0, max: 100, now: clampedPercent }}
-      className={joinClassNames(
-        containerRadiusClassName,
-        isFramed ? 'border justify-center p-0.5' : undefined,
-        isFramed ? framedTrackHeightClassNameBySize[size] : trackHeightClassNameBySize[size],
-        isFramed ? toneClassNames.framedProgressTrackClassName : toneClassNames.progressTrackClassName,
-        className,
-      )}
-      style={glassFrameStyle}
+      {...sharedProps}
     >
-      {shouldUseGlassTrackBackdrop ? (
-        <GlassSurfaceBackdrop
-          appearance={appearance}
-          tint={theme.colors.headerBlurTint}
-          decorative="matte"
-          cornerRadiusStyle={glassCornerRadiusStyle}
-          forceNativeAndroidBlur={forceNativeAndroidBlur}
-          androidBlurTargetRef={androidBlurTargetRef}
-        />
-      ) : null}
-      <Box
-        testID={fillTestID}
-        className={joinClassNames(
-          'relative overflow-hidden rounded-full',
-          isFramed ? framedFillHeightClassNameBySize[size] : 'h-full',
-          resolvedFillClassName,
-        )}
-        style={{ width: `${clampedPercent}%` }}
-      />
+      {progressFill}
     </Box>
   );
 }

@@ -5,13 +5,20 @@ import { useDownloadStore } from '../../store/downloadStore';
 import { selectModelProjectorLifecycleState, type ModelProjectorLifecycleStatus } from '../../store/modelsStore';
 import { Box } from './box';
 import { ProgressBar } from './ProgressBar';
-import { joinClassNames, ScreenActionPill, ScreenIconButton, ScreenIconTile, ScreenSurface, useScreenAppearance } from './ScreenShell';
-import { getThemeActionContentClassName } from '../../utils/themeTokens';
+import { joinClassNames, ScreenActionPill, ScreenIconButton, ScreenIconTile, ScreenSurface } from './ScreenShell';
+import type { SemanticForegroundRole } from '../../design-system/themes/foreground';
 import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 import { Text } from './text';
 import { getSelectedMtpDraftArtifact } from '../../utils/modelSpeculativeDecoding';
 
 type ModelSpeculativeDraftDownloadStatus = 'queued' | 'downloading' | 'paused' | 'verifying';
+
+function getLifecycleColorRole(tone: 'neutral' | 'primary' | 'accent' | 'info' | 'success' | 'warning' | 'error'): SemanticForegroundRole {
+  if (tone === 'primary' || tone === 'accent') return 'accent';
+  if (tone === 'error') return 'danger';
+  if (tone === 'neutral') return 'primary';
+  return tone;
+}
 
 interface ModelLifecycleActionRowProps {
   model: ModelMetadata;
@@ -41,8 +48,6 @@ function ActionPill({
   testID?: string;
   className?: string;
 }) {
-  const appearance = useScreenAppearance();
-
   return (
     <ScreenActionPill
       testID={testID}
@@ -53,7 +58,8 @@ function ActionPill({
     >
       <Text
         numberOfLines={1}
-        className={`text-center text-sm font-semibold ${getThemeActionContentClassName(appearance, tone)}`}
+        colorRole={tone === 'primary' ? 'onAccent' : 'softAction'}
+        className="text-center text-sm font-semibold"
       >
         {label}
       </Text>
@@ -140,7 +146,6 @@ function ModelDownloadProgressInner({
   className?: string;
 }) {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
   const queuedModel = useDownloadStore((state) => state.queue.find((queuedItem) => queuedItem.id === model.id));
   const displayModel = queuedModel ?? model;
   const lifecycleStatus = displayModel.lifecycleStatus;
@@ -188,8 +193,7 @@ function ModelDownloadProgressInner({
     shouldShowSpeculativeDraftProgress ? speculativeDraftDownloadStatus : undefined,
   );
   const progressTone = progressPresentation.progressTone === 'primary' ? 'accent' : progressPresentation.progressTone;
-  const progressToneClassNames = appearance.classNames.toneClassNameByTone[progressTone];
-  const activeProgressFillClassName = appearance.classNames.toneClassNameByTone.primary.progressFillClassName;
+  const progressColorRole = getLifecycleColorRole(progressTone);
   const isCompact = density === 'compact';
 
   return (
@@ -198,9 +202,8 @@ function ModelDownloadProgressInner({
       tone={progressTone}
       withControlTint
       className={joinClassNames(
-        'rounded-2xl border',
+        'rounded-2xl',
         isCompact ? 'px-2.5 py-2' : 'px-3 py-2.5',
-        progressToneClassNames.surfaceClassName,
         className,
       )}
     >
@@ -213,15 +216,15 @@ function ModelDownloadProgressInner({
             size="sm"
             className={isCompact ? 'h-7 w-7 rounded-full' : 'h-8 w-8 rounded-full'}
           >
-            <MaterialSymbols name={progressPresentation.iconName} size="sm" className={progressToneClassNames.iconClassName} />
+            <MaterialSymbols name={progressPresentation.iconName} size="sm" colorRole={progressColorRole} />
           </ScreenIconTile>
-          <Text numberOfLines={1} className={joinClassNames('min-w-0 flex-1 text-xs font-semibold uppercase tracking-wide', progressToneClassNames.textClassName)}>
+          <Text numberOfLines={1} colorRole={progressColorRole} className="min-w-0 flex-1 text-xs font-semibold uppercase tracking-wide">
             {progressPresentation.label}
           </Text>
         </Box>
 
-        <ScreenSurface tone={progressTone} withControlTint className={joinClassNames('rounded-full', isCompact ? 'px-2 py-0.5' : 'px-2.5 py-1', progressToneClassNames.percentPillClassName)}>
-          <Text className={joinClassNames('text-xs font-bold', progressToneClassNames.textClassName)}>{progressPercent}%</Text>
+        <ScreenSurface material={{ role: 'control', variant: 'inline', tone: progressTone }} shape="full" className={isCompact ? 'px-2 py-0.5' : 'px-2.5 py-1'}>
+          <Text colorRole={progressColorRole} className="text-xs font-bold">{progressPercent}%</Text>
         </ScreenSurface>
       </Box>
       <ProgressBar
@@ -230,8 +233,8 @@ function ModelDownloadProgressInner({
         valuePercent={progressPercent}
         size={isCompact ? 'md' : 'lg'}
         tone={progressPresentation.progressTone}
+        fillTone="primary"
         variant="framed"
-        fillClassName={activeProgressFillClassName}
       />
     </ScreenSurface>
   );
@@ -386,7 +389,6 @@ export function ModelProjectorStatus({
   className?: string;
 }) {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
   const projectorState = selectModelProjectorLifecycleState(model);
 
   if (projectorState.status === 'text_only') {
@@ -394,14 +396,14 @@ export function ModelProjectorStatus({
   }
 
   const presentation = getProjectorStatusPresentation(projectorState.status);
-  const toneClassNames = appearance.classNames.toneClassNameByTone[presentation.tone];
+  const colorRole = getLifecycleColorRole(presentation.tone);
 
   return (
     <ScreenSurface
       testID={`model-projector-status-${model.id}`}
       tone={presentation.tone}
       withControlTint
-      className={joinClassNames('rounded-2xl border px-3 py-2.5', toneClassNames.surfaceClassName, className)}
+      className={joinClassNames('px-3 py-2.5', className)}
     >
       <Box className="flex-row items-start gap-3">
         <ScreenIconTile
@@ -411,13 +413,13 @@ export function ModelProjectorStatus({
           size="sm"
           className="h-8 w-8 rounded-full"
         >
-          <MaterialSymbols name={presentation.iconName} size="sm" className={toneClassNames.iconClassName} />
+          <MaterialSymbols name={presentation.iconName} size="sm" colorRole={colorRole} />
         </ScreenIconTile>
         <Box className="min-w-0 flex-1">
-          <Text className={joinClassNames('text-sm font-semibold', toneClassNames.textClassName)}>
+          <Text colorRole={colorRole} className="text-sm font-semibold">
             {t(presentation.titleKey)}
           </Text>
-          <Text className="mt-1 text-xs leading-5 text-typography-600 dark:text-typography-300">
+          <Text colorRole="secondary" className="mt-1 text-xs leading-5  ">
             {t(presentation.descriptionKey)}
           </Text>
         </Box>

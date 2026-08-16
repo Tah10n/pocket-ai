@@ -1,5 +1,8 @@
 import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
-import { resolveMaterialRecipe } from '../../src/design-system/materials/resolver';
+import {
+  resolveMaterialRecipe,
+  themeUsesAndroidTargetBlur,
+} from '../../src/design-system/materials/resolver';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
 
 const iosNativeEnvironment = createMaterialEnvironment('ios', {
@@ -10,6 +13,46 @@ const iosNativeEnvironment = createMaterialEnvironment('ios', {
 });
 
 describe('material resolver', () => {
+  it('derives Android target ownership from chrome recipes instead of theme identity', () => {
+    expect(themeUsesAndroidTargetBlur(resolveTheme('default', 'light').materials)).toBe(false);
+    expect(themeUsesAndroidTargetBlur(resolveTheme('glass', 'light').materials)).toBe(true);
+  });
+
+  it('discovers future overlay fallback and floating-control target blur recipes', () => {
+    const denseMaterials = resolveTheme('default', 'light').materials;
+    const liquidMaterials = resolveTheme('glass', 'light').materials;
+    const densePopover = denseMaterials.overlay.popover.neutral;
+    const liquidHeader = liquidMaterials.chrome.header.neutral;
+    const overlayFallbackMaterials = {
+      ...denseMaterials,
+      overlay: {
+        ...denseMaterials.overlay,
+        popover: {
+          neutral: {
+            ...densePopover,
+            preferredByPlatform: {
+              ...densePopover.preferredByPlatform,
+              android: liquidHeader.preferredByPlatform.ios,
+            },
+            platformFallbackByPlatform: {
+              android: liquidHeader.preferredByPlatform.android,
+            },
+          },
+        },
+      },
+    };
+    const floatingControlMaterials = {
+      ...denseMaterials,
+      control: {
+        ...denseMaterials.control,
+        floating: liquidMaterials.control.floating,
+      },
+    };
+
+    expect(themeUsesAndroidTargetBlur(overlayFallbackMaterials)).toBe(true);
+    expect(themeUsesAndroidTargetBlur(floatingControlMaterials)).toBe(true);
+  });
+
   it('keeps default-theme roles dense and returns stable recipe references', () => {
     const theme = resolveTheme('default', 'light');
     const requests = [

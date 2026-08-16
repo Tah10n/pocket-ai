@@ -80,7 +80,7 @@ export function PresetSelectorSheet({
           }}
           className="w-full"
         >
-          <MaterialSymbols name="tune" size="md" className="text-typography-700 dark:text-typography-200" />
+          <MaterialSymbols colorRole="secondary" name="tune" size="md" className=" " />
           <ButtonText>{t('chat.presetSelector.manage')}</ButtonText>
         </Button>
       ) : null}

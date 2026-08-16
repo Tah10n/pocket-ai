@@ -32,6 +32,7 @@ export interface SolidThemeMaterialOverrides {
   readonly header?: ContentMaterialFrame;
   readonly tones?: Readonly<Partial<Record<Exclude<MaterialTone, 'neutral'>, ContentMaterialFrame>>>;
   readonly messageTones?: Readonly<Partial<Record<Exclude<MaterialTone, 'neutral'>, ContentMaterialFrame>>>;
+  readonly selectedControlTones?: Readonly<Partial<Record<Exclude<MaterialTone, 'neutral'>, ContentMaterialFrame>>>;
 }
 
 const NO_SHADOW: MaterialShadow = {
@@ -220,15 +221,32 @@ export function createSolidThemeMaterialRecipes(
     shadow(colors.background, 0.16, 18, -4, 8),
   ));
   const controls = createSemanticControlTones(colors, 'tinted');
+  const selectedControlTones = materialOverrides.selectedControlTones ?? {};
   const selectedControls: MaterialToneRecipes = {
     ...controls,
     primary: denseDefinition(denseRecipe(
       'tinted',
-      colors.primary,
-      colors.primary,
+      selectedControlTones.primary?.fillColor ?? colors.primary,
+      selectedControlTones.primary?.rimColor ?? colors.primary,
       'pressable',
       NO_SHADOW,
-      0,
+      selectedControlTones.primary?.rimWidth ?? 0,
+    )),
+    success: denseDefinition(denseRecipe(
+      'tinted',
+      selectedControlTones.success?.fillColor ?? colors.success,
+      selectedControlTones.success?.rimColor ?? colors.success,
+      'pressable',
+      NO_SHADOW,
+      selectedControlTones.success?.rimWidth ?? 0,
+    )),
+    error: denseDefinition(denseRecipe(
+      'tinted',
+      selectedControlTones.error?.fillColor ?? colors.error,
+      selectedControlTones.error?.rimColor ?? colors.error,
+      'pressable',
+      NO_SHADOW,
+      selectedControlTones.error?.rimWidth ?? 0,
     )),
   };
   const overlayBanner = createSemanticBannerTones(colors, 'tinted');

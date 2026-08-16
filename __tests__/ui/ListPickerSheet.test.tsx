@@ -1,6 +1,7 @@
 import React from 'react';
 import { render, within } from '@testing-library/react-native';
 import { FlatList, StyleSheet, View } from 'react-native';
+import { resolveTheme } from '../../src/design-system/themes/resolver';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -89,9 +90,14 @@ describe('ListPickerSheet', () => {
       }),
     );
 
-    expect(getByTestId('selected-row').props.className).toContain('border-primary-500/30 bg-primary-500/10');
+    const theme = resolveTheme('default', 'light');
+    expect(StyleSheet.flatten(getByTestId('selected-row').props.style).backgroundColor).toBe(
+      theme.materials.content.raised.accent?.accessibilityFallback.fill.color,
+    );
     expect(within(getByTestId('selected-row')).getByText('common.active')).toBeTruthy();
-    expect(getByTestId('idle-row').props.className).not.toContain('border-primary-500/30 bg-primary-500/10');
+    expect(StyleSheet.flatten(getByTestId('idle-row').props.style).backgroundColor).toBe(
+      theme.materials.content.raised.neutral.accessibilityFallback.fill.color,
+    );
   });
 
   it('keeps light glass picker lists bounded inside the frosted sheet', () => {
@@ -110,14 +116,17 @@ describe('ListPickerSheet', () => {
       ),
     );
 
-    const sheetClassName = getByTestId('picker-sheet').props.className;
+    const sheetStyle = StyleSheet.flatten(getByTestId('picker-sheet').props.style);
     const pickerListContainerStyle = StyleSheet.flatten(getByTestId('picker-sheet-list-container').props.style);
     const pickerList = UNSAFE_getByType(FlatList);
     const pickerListStyle = StyleSheet.flatten(pickerList.props.style);
     const pickerListContentStyle = StyleSheet.flatten(pickerList.props.contentContainerStyle);
 
-    expect(sheetClassName).toContain('relative overflow-hidden');
-    expect(sheetClassName).toContain('bg-background-0/15');
+    expect(sheetStyle).toMatchObject({
+      backgroundColor: resolveTheme('glass', 'light').materials.chrome.sheet.neutral.accessibilityFallback.fill.color,
+      borderTopLeftRadius: 32,
+      borderTopRightRadius: 32,
+    });
     expect(pickerListContainerStyle).toMatchObject({
       alignSelf: 'stretch',
       backgroundColor: 'transparent',

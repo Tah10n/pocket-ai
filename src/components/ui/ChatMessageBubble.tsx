@@ -18,7 +18,6 @@ import { StreamingCursor } from './StreamingCursor';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { ThinkingPulse } from './ThinkingPulse';
 import { getAssistantPresentation } from '../../utils/chatPresentation';
-import { getThemeActionContentClassName } from '../../utils/themeTokens';
 import { shouldReduceAndroidQaStreamingMotion } from '../../services/AndroidQaGenerationEvidence';
 
 const ASSISTANT_MESSAGE_MATERIAL = { role: 'content', variant: 'message', tone: 'neutral' } as const;
@@ -181,7 +180,6 @@ function IconActionButton({
       size="micro"
       tone={isDestructive ? 'danger' : 'neutral'}
       className="border-0"
-      iconClassName={isDestructive ? 'text-error-500' : 'text-typography-500 dark:text-typography-300'}
     />
   );
 }
@@ -209,7 +207,6 @@ const ChatMessageBubbleComponent = ({
   const failedAttachmentPreviewUrisRef = useRef<Record<string, Set<string>>>({});
   const { t } = useTranslation();
   const theme = useTheme();
-  const appearance = theme.appearance;
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
   const assistantPresentation = isUser
     ? null
@@ -337,7 +334,6 @@ const ChatMessageBubbleComponent = ({
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
   const thoughtBubbleClassName = 'min-w-[220px] max-w-full px-3 py-2';
-  const userTextClassName = getThemeActionContentClassName(appearance, 'primary');
   const userAttachments = React.useMemo(
     () => (isUser ? attachments ?? [] : []),
     [attachments, isUser],
@@ -441,23 +437,23 @@ const ChatMessageBubbleComponent = ({
                     {shouldAnimateThought ? (
                       <ThinkingPulse reduceMotion={reduceAndroidQaStreamingMotion} />
                     ) : (
-                      <MaterialSymbols name="psychology-alt" size="sm" className="text-primary-500" />
+                      <MaterialSymbols colorRole="accent" name="psychology-alt" size="sm" className="" />
                     )}
                   </ScreenIconTile>
 
                   <Box className="min-w-0 flex-1">
-                    <Text className="text-xs font-semibold text-typography-900 dark:text-typography-100">
+                    <Text colorRole="primary" className="text-xs font-semibold  ">
                       {thoughtLabel}
                     </Text>
-                    <Text className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="mt-0.5 text-xs leading-4  ">
                       {thoughtDescription}
                     </Text>
                   </Box>
 
-                  <MaterialSymbols
+                  <MaterialSymbols colorRole="tertiary"
                     name={isThoughtExpanded ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
                     size="sm"
-                    className="text-typography-500 dark:text-typography-400"
+                    className=" "
                   />
                 </Box>
               </Pressable>
@@ -465,11 +461,12 @@ const ChatMessageBubbleComponent = ({
               {isThoughtExpanded ? (
                 <Box
                   testID={`thought-panel-${id}`}
-                  className={`mt-1.5 border-t pt-1.5 ${appearance.classNames.dividerClassName}`}
+                  className="mt-1.5 border-t pt-1.5"
+                  style={{ borderColor: theme.colors.divider }}
                 >
                   {thoughtContent ? (
                     isAssistantStreaming && (hasExplicitThoughtContent || assistantPresentation?.isThoughtStreaming) ? (
-                      <Text className="text-sm leading-6 text-typography-700 dark:text-typography-200">
+                      <Text colorRole="secondary" className="text-sm leading-6  ">
                         {thoughtContent}
                         <StreamingCursor reduceMotion={reduceAndroidQaStreamingMotion} />
                       </Text>
@@ -477,7 +474,7 @@ const ChatMessageBubbleComponent = ({
                       <MarkdownRenderer content={thoughtContent} selectable />
                     )
                   ) : (
-                    <Text className="text-sm leading-6 text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="text-sm leading-6  ">
                       {t('chat.thinkingWaiting')}
                     </Text>
                   )}
@@ -516,10 +513,10 @@ const ChatMessageBubbleComponent = ({
                         >
                           <ScreenIconTile iconName={getAttachmentIconName(attachment)} tone="neutral" size="sm" iconSize="sm" className="h-8 w-8" />
                           <Box className="min-w-0 flex-1">
-                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                            <Text colorRole="primary" numberOfLines={1} className="text-xs font-semibold  ">
                               {attachment.fileName}
                             </Text>
-                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                            <Text colorRole="secondary" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                               {getAttachmentLabel(attachment)}
                             </Text>
                           </Box>
@@ -551,8 +548,8 @@ const ChatMessageBubbleComponent = ({
                         accessibilityState={{ disabled: true }}
                         className="w-36 flex-row items-center gap-1.5 px-2 py-1.5"
                       >
-                        <MaterialSymbols name="broken-image" size="sm" className="text-typography-500 dark:text-typography-300" />
-                        <Text className="min-w-0 flex-1 text-xs leading-4 text-typography-700 dark:text-typography-200">
+                        <MaterialSymbols colorRole="secondary" name="broken-image" size="sm" className=" " />
+                        <Text colorRole="secondary" className="min-w-0 flex-1 text-xs leading-4  ">
                           {t('chat.attachments.unavailable')}
                         </Text>
                       </Surface>
@@ -561,7 +558,7 @@ const ChatMessageBubbleComponent = ({
                 </Box>
               ) : null}
               {content ? (
-                <Text selectable className={`text-base leading-relaxed ${userTextClassName}`}>
+                <Text selectable colorRole="onAccent" className="text-base leading-relaxed">
                   {content}
                 </Text>
               ) : null}
@@ -569,9 +566,9 @@ const ChatMessageBubbleComponent = ({
           ) : shouldShowStreamingPlaceholder ? (
             <StreamingCursor compact reduceMotion={reduceAndroidQaStreamingMotion} />
           ) : isStreaming && assistantBodyContent ? (
-            <Text
+            <Text colorRole="primary"
               testID={`assistant-message-content-${id}`}
-              className="text-base leading-relaxed text-typography-900 dark:text-typography-100"
+              className="text-base leading-relaxed  "
             >
               {assistantBodyContent}
               <StreamingCursor reduceMotion={reduceAndroidQaStreamingMotion} />
@@ -588,8 +585,8 @@ const ChatMessageBubbleComponent = ({
               shape="md"
               className="mt-2 flex-row items-start gap-2 px-2.5 py-2"
             >
-              <MaterialSymbols name="error-outline" size="sm" className="mt-0.5 text-error-600 dark:text-error-300" />
-              <Text selectable className="min-w-0 flex-1 text-sm leading-5 text-error-800 dark:text-error-200">
+              <MaterialSymbols colorRole="danger" name="error-outline" size="sm" className="mt-0.5  " />
+              <Text colorRole="danger" selectable className="min-w-0 flex-1 text-sm leading-5  ">
                 {errorMessage}
               </Text>
             </Surface>
@@ -606,8 +603,7 @@ const ChatMessageBubbleComponent = ({
             <ScreenBadge
               testID={`performance-label-${id}`}
               size="micro"
-              className={appearance.classNames.chatMetadataBadgeClassName}
-              textClassName="text-typography-600 dark:text-typography-300"
+              textColorRole="secondary"
             >
               {displayedTokensPerSecond?.toFixed(1)} t/s
             </ScreenBadge>
@@ -616,8 +612,7 @@ const ChatMessageBubbleComponent = ({
             <ScreenBadge
               testID={`mtp-telemetry-${id}`}
               size="micro"
-              className={appearance.classNames.chatMetadataBadgeClassName}
-              textClassName="text-typography-600 dark:text-typography-300"
+              textColorRole="secondary"
             >
               {mtpTelemetryLabel}
             </ScreenBadge>
@@ -626,8 +621,7 @@ const ChatMessageBubbleComponent = ({
             <ScreenBadge
               testID={`ttft-telemetry-${id}`}
               size="micro"
-              className={appearance.classNames.chatMetadataBadgeClassName}
-              textClassName="text-typography-600 dark:text-typography-300"
+              textColorRole="secondary"
             >
               {t('chat.inferenceMetrics.ttft', {
                 milliseconds: Math.round(inferenceMetrics.timeToFirstTokenMs),

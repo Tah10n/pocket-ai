@@ -27,13 +27,6 @@ export type {
   ThemePreviewTokens,
 } from '../design-system/themes/contract';
 
-export function getThemeAppearance(
-  themeId: ThemeId = DEFAULT_THEME_ID,
-  mode: ResolvedThemeMode = 'light',
-) {
-  return resolveTheme(themeId, mode).appearance;
-}
-
 export function getThemeColors(
   mode: ResolvedThemeMode,
   themeId: ThemeId = DEFAULT_THEME_ID,

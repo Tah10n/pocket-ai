@@ -78,7 +78,7 @@ import {
     subscribeSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
-import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
+import { screenLayoutMetrics } from '../../utils/themeTokens';
 import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
 import { resolveEffectiveActiveVariantNativeSupport } from '../../utils/modelCapabilities';
 import { isMultimodalReadinessReusableForModel } from '../../utils/multimodalReadiness';
@@ -778,9 +778,7 @@ export const ChatScreen = () => {
     usePreventRemove(isPreparingDocuments, () => undefined);
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
-    const theme = useTheme();
-    const appearance = theme.appearance;
-    const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
+    const { resolvedTheme } = useTheme();
     const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
@@ -875,7 +873,7 @@ export const ChatScreen = () => {
     const isAndroidKeyboardOpen = Platform.OS === 'android' && isAndroidKeyboardVisible;
     const shouldFloatComposerOverContent = shouldFloatAndroidComposerOverContent({
         platform: Platform.OS,
-        composerPresentation: theme.resolvedTheme.components.chat.composerPresentation,
+        composerPresentation: resolvedTheme.components.chat.composerPresentation,
         isKeyboardVisible: isAndroidKeyboardVisible,
     });
     const androidFloatingComposerBottomOffset = getAndroidFloatingComposerBottomOffset({
@@ -1032,13 +1030,12 @@ export const ChatScreen = () => {
                     size="sm"
                     iconSize="xs"
                     className="mt-0.5 h-6 w-6"
-                    iconClassName="text-primary-500"
                 />
                 <Box className="min-w-0 flex-1">
-                    <Text className="text-xs font-semibold leading-4 text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold leading-4  ">
                         {t('chat.attachments.retainedForRegenerate', { count: retainedRegenerateAttachments.length })}
                     </Text>
-                    <Text className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                    <Text colorRole="accent" className="mt-0.5 text-xs leading-4  ">
                         {retainedRegenerateAttachmentsSendBlocked
                             ? t('chat.attachments.retainedForRegenerateBlockedDescription', {
                                 reason: t(retainedRegenerateAttachmentsBlockedReason ?? visionAttachmentReadinessReason),
@@ -3003,7 +3000,6 @@ export const ChatScreen = () => {
                                     testID="chat-recovery-card"
                                     tone="warning"
                                     padding="none"
-                                    decorative="matte"
                                     className="items-center px-6 py-8"
                                 >
                                     <ScreenIconTile
@@ -3015,24 +3011,24 @@ export const ChatScreen = () => {
                                     />
 
                                     {hasActiveModel ? (
-                                        <ScreenSurface className={`mt-4 ${appearance.classNames.inlinePillClassName}`}>
-                                            <Text className="text-xs font-semibold uppercase tracking-wide text-typography-600 dark:text-typography-300">
+                                        <ScreenSurface material={{ role: 'control', variant: 'inline' }} shape="full" className="mt-4 px-3 py-1.5">
+                                            <Text colorRole="secondary" className="text-xs font-semibold uppercase tracking-wide">
                                                 {modelLabel}
                                             </Text>
                                         </ScreenSurface>
                                     ) : null}
 
-                                    <Text
-                                        className="mt-5 text-center text-xl font-semibold leading-7 text-typography-900 dark:text-typography-100"
+                                    <Text colorRole="primary"
+                                        className="mt-5 text-center text-xl font-semibold leading-7  "
                                     >
                                         {recoveryTitle}
                                     </Text>
 
                                     {isModelInitializing ? (
-                                        <ScreenSurface tone="accent" withControlTint className={`mt-4 w-full rounded-2xl border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone.accent.surfaceClassName}`}>
+                                        <ScreenSurface tone="accent" withControlTint className="mt-4 w-full px-3 py-2.5">
                                             <Box className="mb-2 flex-row items-center justify-end">
-                                                <ScreenSurface tone="accent" withControlTint className={`rounded-full px-2.5 py-1 ${appearance.classNames.toneClassNameByTone.accent.percentPillClassName}`}>
-                                                    <Text className="text-xs font-bold text-primary-700 dark:text-primary-200">
+                                                <ScreenSurface material={{ role: 'control', variant: 'inline', tone: 'accent' }} shape="full" className="px-2.5 py-1">
+                                                    <Text colorRole="accent" className="text-xs font-bold">
                                                         {warmupProgressPercent}%
                                                     </Text>
                                                 </ScreenSurface>
@@ -3044,13 +3040,12 @@ export const ChatScreen = () => {
                                                 size="lg"
                                                 tone="primary"
                                                 variant="framed"
-                                                fillClassName={appearance.classNames.toneClassNameByTone.primary.progressFillClassName}
                                             />
                                         </ScreenSurface>
                                     ) : null}
 
-                                    <Text
-                                        className="mt-3 text-center text-sm leading-6 text-typography-600 dark:text-typography-300"
+                                    <Text colorRole="secondary"
+                                        className="mt-3 text-center text-sm leading-6  "
                                     >
                                         {recoveryDescription}
                                     </Text>
@@ -3065,13 +3060,13 @@ export const ChatScreen = () => {
                                         <MaterialSymbols
                                             name={hasActiveModel ? 'tune' : 'download'}
                                             size={18}
-                                            className={primaryActionContentClassName}
+                                            colorRole="onAccent"
                                         />
                                         <ButtonText>{resolvedModelRecoveryActionLabel}</ButtonText>
                                     </Button>
 
-                                    <Text
-                                        className="mt-4 text-center text-xs leading-5 text-typography-500 dark:text-typography-300"
+                                    <Text colorRole="secondary"
+                                        className="mt-4 text-center text-xs leading-5  "
                                     >
                                         {activeThread
                                             ? t('chat.emptyExistingThread')
@@ -3081,10 +3076,10 @@ export const ChatScreen = () => {
                             </Box>
                         ) : (
                             <Box className="flex-1 items-center px-6 pt-14 pb-8">
-                                <Text className="text-xl font-semibold text-typography-800 dark:text-typography-100">
+                                <Text colorRole="primary" className="text-xl font-semibold  ">
                                     {t('chat.noMessages')}
                                 </Text>
-                                <Text className="mt-2 text-center text-sm leading-6 text-typography-500 dark:text-typography-400">
+                                <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-6  ">
                                     {activeThread
                                         ? t('chat.emptyExistingThread')
                                         : t('chat.emptyNewThread')}

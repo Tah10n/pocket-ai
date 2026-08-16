@@ -1,7 +1,6 @@
 import type { Theme } from '@react-navigation/native';
 import type {
   ResolvedThemeMode,
-  ThemeAppearance,
   ThemeColors,
 } from './legacyTheme';
 import type { ThemeMaterialRecipes } from '../materials/contract';
@@ -21,6 +20,9 @@ export interface ThemeMetadata<Id extends string = string> {
 }
 
 export interface ThemeComponentPresentation {
+  readonly screen: {
+    readonly backgroundDecoration: 'plain' | 'aurora';
+  };
   readonly tabBar: {
     readonly presentation: 'attached' | 'floating';
   };
@@ -33,14 +35,13 @@ export interface ThemeComponentPresentation {
   };
 }
 
-export interface ThemeModeDefinition<Id extends string = string> {
+export interface ThemeModeDefinition {
   readonly colors: ThemeColors;
-  readonly appearance: ThemeAppearance<Id>;
   readonly materials: ThemeMaterialRecipes;
 }
 
 export interface ThemeDefinition<Id extends string = string> extends ThemeMetadata<Id> {
-  readonly modes: Readonly<Record<ResolvedThemeMode, ThemeModeDefinition<Id>>>;
+  readonly modes: Readonly<Record<ResolvedThemeMode, ThemeModeDefinition>>;
   readonly components: ThemeComponentPresentation;
 }
 
@@ -49,7 +50,6 @@ export interface ResolvedTheme<Id extends string = string> {
   readonly mode: ResolvedThemeMode;
   readonly metadata: ThemeMetadata<Id>;
   readonly colors: ThemeColors;
-  readonly appearance: ThemeAppearance<Id>;
   readonly materials: ThemeMaterialRecipes;
   readonly components: ThemeComponentPresentation;
   readonly navigationTheme: Theme;

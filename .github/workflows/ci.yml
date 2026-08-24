@@ -33,7 +33,7 @@ jobs:
           cache: npm
 
       - name: Setup pinned Rust
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
 
@@ -90,7 +90,7 @@ jobs:
           java-version: 17
 
       - name: Setup pinned Rust for Android
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: aarch64-linux-android, x86_64-linux-android
 

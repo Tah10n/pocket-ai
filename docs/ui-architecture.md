@@ -186,11 +186,12 @@ Materials distinguish dense content from eligible live-effect chrome:
 
 - `src/design-system/materials/contract.ts` defines semantic roles, variants, tones, shapes, recipes, capability inputs, and the resolved renderer result.
 - `Surface` and `PressableSurface` render dense fills, rims, and shadows. Content cards, message rows, attachments, progress tracks, list rows, chips, badges, and text fields stay on this path and never mount live blur.
-- `EffectSurface` and `EffectPressableSurface` are the only live-effect renderers. They resolve the current recipe and environment, then render native Liquid Glass, `BlurView`, or a dense fallback without callers choosing a renderer.
+- `EffectSurface` and `EffectPressableSurface` are the only live-effect renderers. They resolve the current recipe and environment, then render iOS Liquid Glass, the API 33+ Android renderer, `BlurView`, or a dense fallback without callers choosing a renderer.
 - `MaterialEnvironmentProvider` owns platform capabilities and Reduce Transparency. Unknown, reduced, missing, or unsupported capability states fail closed to a dense recipe.
 - iOS native Liquid Glass requires both runtime availability checks and allowed transparency. Actual semantic controls may opt into native interaction; decorative layers remain noninteractive, and disabled controls cannot advertise interaction.
-- Android target blur requires SDK 31 or newer plus a ready registered sample target. Pending, detached, recursive, or ancestor-owned targets fail closed.
-- `ScreenRoot` owns the Android background and scene targets. External floating chrome samples the scene target; descendants cannot sample an ancestor boundary that contains themselves.
+- Android API 33+ uses the local `pocket-liquid-glass` renderer when its native views resolve. The minSdk-safe host contains no API 33 graphics types; `RenderNode`, `RenderEffect`, and `RuntimeShader` are isolated in the guarded API-specific renderer.
+- Android SDK 31–32 retains target-backed `BlurView`; older, pending, detached, reduced-transparency, and runtime-failure states fail closed to the recipe's semantic dense paint.
+- `ScreenRoot` owns one API 33+ scene recording boundary containing the canvas color, background decoration, and routed content. Effect chrome excludes itself during capture; the external tab bar and transparent modal sheets consume the active focused scene.
 - `ScreenBackgroundDecoration` owns optional aurora paint. Material renderers may consume this visual context, but themes do not duplicate decoration trees in routes.
 - Raw `BlurView` and `GlassView` imports are restricted to `EffectSurface`; `BlurTargetView` is restricted to the screen target-ownership boundary.
 
@@ -222,15 +223,15 @@ The renderer resolves capability once from the environment and always fails clos
 
 Reduce Transparency starts as `unknown`, is queried on provider mount, and is updated by the accessibility subscription. Unknown is never treated as permission to mount a translucent renderer. Native glass layers are noninteractive by default; only a real enabled semantic control may request native interaction.
 
-| Android state | Result for an Android blur recipe |
+| Android state | Result for a glass effect recipe |
 | --- | --- |
 | SDK missing, invalid, non-integer, or below 31 | Dense unsupported fallback |
-| SDK 31+, target ref pending or detached | Dense fallback |
-| SDK 31+, ready external sample target | Target-backed Android blur |
-| Target equals the consumer, owns an ancestor containing it, or crosses a blocked nested boundary | Dense fallback |
+| SDK 31–32 with a ready external sample target | Target-backed Android blur |
+| SDK 33+ with native views and a recorded focused scene | Cropped native refraction and blur |
+| Native scene pending, software canvas, or bounded render failure | Recipe-owned semantic fill and rim |
 | Reduce Transparency is `unknown` or `reduced` | Dense accessibility fallback |
 
-`ScreenRoot` registers two ownership domains when any preferred or Android-fallback recipe in the active theme needs target blur: a background target for scene content and a scene target for external floating chrome. Target readiness is reactive, including pending → ready → detached transitions. A header inside the scene target must not sample that same scene target; an external tab bar may. Nested target boundaries accumulate blocked ancestors, so passing a raw matching ref cannot bypass the no-self-blur rule.
+On API 33+, each glass surface records only its bounds expanded by the blur/refraction margin, clamped to the provider. It never performs bitmap readback or creates a full-provider effected layer per surface. Provider attach/switch and window-focus changes reset transient failures; draw retries are bounded before the surface remains on its semantic fallback. On SDK 31–32, the existing target readiness and nested-boundary rules still prevent self/ancestor blur cycles.
 
 #### Performance and testing rules
 
@@ -241,7 +242,7 @@ Every theme or material change should cover:
 1. Registry derivation, persistence sanitization, deep immutability, and a synthetic future-theme resolver case.
 2. Light/dark semantic paint and foreground contrast, including primary/success/error actions and user messages.
 3. iOS native → blur → dense resolution, Reduce Transparency unknown/reduced transitions, and disabled/noninteractive controls.
-4. Android SDK parsing, pending/ready/detached targets, explicit sibling notification, nested boundaries, and self/ancestor blocking.
+4. Android SDK parsing, API 33 class isolation, full-scene ownership, crop bounds, semantic fallback, bounded recovery, target readiness, and self-capture exclusion.
 5. Representative dense content and chat tests proving no live-effect imports or renderers enter hot paths.
 6. Settings selector behavior with enough synthetic entries to force the scalable picker layout.
 

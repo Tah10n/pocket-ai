@@ -9,6 +9,10 @@ import { BlurView } from 'expo-blur';
 import { GlassView } from 'expo-glass-effect';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
+import {
+  AndroidLiquidGlassCaptureExclusion,
+  AndroidLiquidGlassSurface,
+} from './AndroidLiquidGlass';
 import { useTheme } from '../../providers/ThemeProvider';
 import { useResolvedAndroidBlurTarget } from './AndroidBlurTargetContext';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
@@ -40,6 +44,7 @@ function EffectLayers({
   clipStyle,
   effectiveEnvironment,
   interactive,
+  pressed = false,
   mode,
   recipe,
 }: {
@@ -47,11 +52,13 @@ function EffectLayers({
   readonly clipStyle: ViewStyle;
   readonly effectiveEnvironment: MaterialEnvironment;
   readonly interactive: boolean;
+  readonly pressed?: boolean;
   readonly mode: MaterialColorMode;
   readonly recipe: MaterialRendererRecipe;
 }) {
   const hasEffectLayers = recipe.renderer === 'blur'
     || recipe.renderer === 'native-liquid-glass'
+    || recipe.renderer === 'android-liquid-glass'
     || Boolean(recipe.contrastFilm)
     || Boolean(recipe.tint);
 
@@ -59,7 +66,23 @@ function EffectLayers({
     return null;
   }
 
-  const nativeGlassIsInteractive = interactive && recipe.renderer === 'native-liquid-glass';
+  const nativeGlassIsInteractive = interactive && (
+    recipe.renderer === 'native-liquid-glass'
+    || recipe.renderer === 'android-liquid-glass'
+  );
+  const defaultRadius = typeof clipStyle.borderRadius === 'number' ? clipStyle.borderRadius : 0;
+  const cornerRadiusTopLeft = typeof clipStyle.borderTopLeftRadius === 'number'
+    ? clipStyle.borderTopLeftRadius
+    : defaultRadius;
+  const cornerRadiusTopRight = typeof clipStyle.borderTopRightRadius === 'number'
+    ? clipStyle.borderTopRightRadius
+    : defaultRadius;
+  const cornerRadiusBottomRight = typeof clipStyle.borderBottomRightRadius === 'number'
+    ? clipStyle.borderBottomRightRadius
+    : defaultRadius;
+  const cornerRadiusBottomLeft = typeof clipStyle.borderBottomLeftRadius === 'number'
+    ? clipStyle.borderBottomLeftRadius
+    : defaultRadius;
 
   return (
     <Box
@@ -95,6 +118,27 @@ function EffectLayers({
           style={StyleSheet.absoluteFill}
         />
       ) : null}
+      {recipe.renderer === 'android-liquid-glass' ? (
+        <AndroidLiquidGlassSurface
+          pointerEvents="none"
+          cornerRadius={defaultRadius}
+          cornerRadiusTopLeft={cornerRadiusTopLeft}
+          cornerRadiusTopRight={cornerRadiusTopRight}
+          cornerRadiusBottomRight={cornerRadiusBottomRight}
+          cornerRadiusBottomLeft={cornerRadiusBottomLeft}
+          dark={mode === 'dark'}
+          tintColor={recipe.tint?.color}
+          tintOpacity={recipe.tint?.opacity ?? 0}
+          fallbackColor={recipe.androidGlass.fallbackFill.color}
+          fallbackOpacity={recipe.androidGlass.fallbackFill.opacity}
+          fallbackBorderColor={recipe.androidGlass.fallbackRim.color}
+          fallbackBorderOpacity={recipe.androidGlass.fallbackRim.opacity}
+          fallbackBorderWidth={recipe.androidGlass.fallbackRim.width}
+          interactive={nativeGlassIsInteractive}
+          pressed={pressed}
+          style={StyleSheet.absoluteFill}
+        />
+      ) : null}
       {recipe.contrastFilm ? (
         <Box
           pointerEvents="none"
@@ -109,7 +153,9 @@ function EffectLayers({
           ]}
         />
       ) : null}
-      {recipe.tint && recipe.renderer !== 'native-liquid-glass' ? (
+      {recipe.tint
+      && recipe.renderer !== 'native-liquid-glass'
+      && recipe.renderer !== 'android-liquid-glass' ? (
         <Box
           pointerEvents="none"
           style={[
@@ -158,19 +204,33 @@ export function EffectSurface({
     () => getMaterialShapeStyle(shape),
     [shape],
   );
-  return (
-    <Box {...props} style={[frameStyle, style]}>
+  const content = (
+    <>
       <EffectLayers
         androidBlurTarget={androidBlurTarget}
         clipStyle={clipStyle}
         effectiveEnvironment={effectiveEnvironment}
         interactive={false}
+        pressed={false}
         mode={resolvedTheme.mode}
         recipe={recipe}
       />
       {children}
-    </Box>
+    </>
   );
+  if (recipe.renderer === 'android-liquid-glass') {
+    return (
+      <AndroidLiquidGlassCaptureExclusion
+        {...props}
+        collapsable={false}
+        pointerEvents="box-none"
+        style={[frameStyle, style]}
+      >
+        {content}
+      </AndroidLiquidGlassCaptureExclusion>
+    );
+  }
+  return <Box {...props} style={[frameStyle, style]}>{content}</Box>;
 }
 
 type PressableProps = Omit<React.ComponentProps<typeof Pressable>, 'children'>;
@@ -186,9 +246,12 @@ export function EffectPressableSurface({
   androidBlurTargetRef,
   children,
   disabled,
+  className,
   material,
   shape = 'md',
   style,
+  onPressIn,
+  onPressOut,
   ...props
 }: EffectPressableSurfaceProps) {
   const { resolvedTheme } = useTheme();
@@ -211,24 +274,71 @@ export function EffectPressableSurface({
     () => getMaterialShapeStyle(shape),
     [shape],
   );
+  const [isPressed, setIsPressed] = React.useState(false);
+  const handlePressIn = React.useCallback((event: Parameters<NonNullable<typeof onPressIn>>[0]) => {
+    setIsPressed(true);
+    onPressIn?.(event);
+  }, [onPressIn]);
+  const handlePressOut = React.useCallback((event: Parameters<NonNullable<typeof onPressOut>>[0]) => {
+    setIsPressed(false);
+    onPressOut?.(event);
+  }, [onPressOut]);
   const resolvedStyle = typeof style === 'function'
     ? (state: PressableStateCallbackType): StyleProp<ViewStyle> => [frameStyle, style(state)]
     : [frameStyle, style];
-  const nativeGlassIsInteractive = recipe.renderer === 'native-liquid-glass' && !disabled;
+  const nativeGlassIsInteractive = (
+    recipe.renderer === 'native-liquid-glass'
+    || recipe.renderer === 'android-liquid-glass'
+  ) && !disabled;
 
-  return (
-    <Pressable {...props} disabled={disabled} style={resolvedStyle}>
+  const content = (
+    <>
       <EffectLayers
         androidBlurTarget={androidBlurTarget}
         clipStyle={clipStyle}
         effectiveEnvironment={effectiveEnvironment}
         interactive={!disabled}
+        pressed={isPressed}
         mode={resolvedTheme.mode}
         recipe={recipe}
       />
       {nativeGlassIsInteractive ? (
         <Box pointerEvents="none">{children}</Box>
       ) : children}
+    </>
+  );
+  if (recipe.renderer === 'android-liquid-glass') {
+    const exclusionStyle = typeof style === 'function'
+      ? [frameStyle, style({ pressed: isPressed })]
+      : [frameStyle, style];
+    return (
+      <Pressable
+        {...props}
+        disabled={disabled}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+      >
+        <AndroidLiquidGlassCaptureExclusion
+          className={className}
+          collapsable={false}
+          pointerEvents="box-none"
+          style={exclusionStyle}
+        >
+          {content}
+        </AndroidLiquidGlassCaptureExclusion>
+      </Pressable>
+    );
+  }
+  return (
+    <Pressable
+      {...props}
+      className={className}
+      disabled={disabled}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      style={resolvedStyle}
+    >
+      {content}
     </Pressable>
   );
 }

@@ -57,6 +57,20 @@ jest.mock('expo-glass-effect', () => {
   };
 });
 
+jest.mock('../../src/design-system/materials/AndroidLiquidGlass', () => {
+  const mockReact = jest.requireActual('react');
+  const { View: MockView } = jest.requireActual('react-native');
+  return {
+    AndroidLiquidGlassCaptureExclusion: ({ children, ...props }: any) => mockReact.createElement(
+      MockView,
+      { ...props, androidLiquidGlassCaptureExclusion: true },
+      children,
+    ),
+    AndroidLiquidGlassSurface: ({ children, ...props }: any) => mockReact.createElement(MockView, props, children),
+    canUseAndroidLiquidGlass: jest.fn(() => false),
+  };
+});
+
 jest.mock('../../src/providers/ThemeProvider', () => ({
   useTheme: () => ({ resolvedTheme: mockResolvedTheme }),
 }));
@@ -263,6 +277,76 @@ describe('EffectSurface', () => {
 
     expect(blurLayer?.props.blurTarget).toBe(target.sample.targetRef);
     expect(blurLayer?.props.blurReductionFactor).toBeGreaterThan(1);
+  });
+
+  it('passes semantic fallback paint and exact shape to the Android native renderer', () => {
+    const environment = createMaterialEnvironment('android', {
+      androidSdkVersion: 33,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectSurface material={{ role: 'overlay', variant: 'popover', tone: 'warning' }} shape="sheet" />
+      </MaterialEnvironmentProvider>,
+    );
+    const nativeLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'fallbackColor')
+    ));
+    expect(nativeLayer?.props).toMatchObject({
+      cornerRadiusTopLeft: 32,
+      cornerRadiusTopRight: 32,
+      cornerRadiusBottomLeft: 0,
+      cornerRadiusBottomRight: 0,
+      fallbackColor: mockResolvedTheme.colors.warningSurface,
+      fallbackBorderColor: mockResolvedTheme.colors.borderSubtle,
+      fallbackBorderWidth: 1,
+      tintOpacity: 0.34,
+    });
+    const captureBoundary = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      node.props.androidLiquidGlassCaptureExclusion === true
+    ));
+    expect(captureBoundary?.props).toMatchObject({
+      collapsable: false,
+      pointerEvents: 'box-none',
+    });
+    expect(StyleSheet.flatten(captureBoundary?.props.style)).not.toMatchObject({
+      display: 'contents',
+    });
+  });
+
+  it('applies Android pressable layout and state styling exactly once', () => {
+    const environment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectPressableSurface
+          disabled
+          testID="android-glass-control"
+          className="h-12 items-center justify-center opacity-55"
+          material={{ role: 'control', variant: 'floating' }}
+          style={({ pressed }) => ({ opacity: pressed ? 0.4 : 0.55 })}
+        >
+          control
+        </EffectPressableSurface>
+      </MaterialEnvironmentProvider>,
+    );
+    const control = screen.getByTestId('android-glass-control');
+    const captureBoundary = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      node.props.androidLiquidGlassCaptureExclusion === true
+    ));
+
+    expect(control.props.className).toBeUndefined();
+    expect(control.props.style).toBeUndefined();
+    expect(captureBoundary?.props.className).toBe('h-12 items-center justify-center opacity-55');
+    expect(StyleSheet.flatten(captureBoundary?.props.style)).toMatchObject({
+      borderRadius: 16,
+      opacity: 0.55,
+    });
   });
 
   it('uses a ready explicit Android target for sibling composer chrome', () => {

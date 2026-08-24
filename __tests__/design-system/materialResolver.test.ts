@@ -1,6 +1,7 @@
 import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
 import {
   resolveMaterialRecipe,
+  themeUsesAndroidLiquidGlass,
   themeUsesAndroidTargetBlur,
 } from '../../src/design-system/materials/resolver';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
@@ -16,6 +17,37 @@ describe('material resolver', () => {
   it('derives Android target ownership from chrome recipes instead of theme identity', () => {
     expect(themeUsesAndroidTargetBlur(resolveTheme('default', 'light').materials)).toBe(false);
     expect(themeUsesAndroidTargetBlur(resolveTheme('glass', 'light').materials)).toBe(true);
+  });
+
+  it('selects native Android glass only on API 33+ with the native view available', () => {
+    const materials = resolveTheme('glass', 'light').materials;
+    const request = { role: 'chrome' as const, variant: 'composer' as const };
+    expect(themeUsesAndroidLiquidGlass(materials)).toBe(true);
+    expect(resolveMaterialRecipe(materials, request, createMaterialEnvironment('android', {
+      androidSdkVersion: 33,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    })).renderer).toBe('android-liquid-glass');
+    expect(resolveMaterialRecipe(materials, request, createMaterialEnvironment('android', {
+      androidSdkVersion: 32,
+      androidLiquidGlassAvailable: false,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    })).renderer).toBe('blur');
+  });
+
+  it('keeps warning popover fallback semantic when effects are unavailable', () => {
+    const theme = resolveTheme('glass', 'light');
+    const recipe = resolveMaterialRecipe(
+      theme.materials,
+      { role: 'overlay', variant: 'popover', tone: 'warning' },
+      createMaterialEnvironment('android', { androidSdkVersion: 30, transparencyState: 'allowed' }),
+    );
+    expect(recipe).toMatchObject({
+      renderer: 'tinted',
+      fill: { color: theme.colors.warningSurface },
+    });
   });
 
   it('discovers future overlay fallback and floating-control target blur recipes', () => {
@@ -35,7 +67,7 @@ describe('material resolver', () => {
               android: liquidHeader.preferredByPlatform.ios,
             },
             platformFallbackByPlatform: {
-              android: liquidHeader.preferredByPlatform.android,
+              android: liquidHeader.platformFallbackByPlatform?.android,
             },
           },
         },

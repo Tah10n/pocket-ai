@@ -67,6 +67,7 @@ export interface MaterialEnvironment {
   readonly androidSdkVersion?: number;
   readonly blurViewAvailable: boolean;
   readonly androidTargetBlurSupported: boolean;
+  readonly androidLiquidGlassAvailable: boolean;
   readonly liquidGlassComponentAvailable: boolean;
   readonly liquidGlassApiAvailable: boolean;
   readonly transparencyState: TransparencyState;
@@ -130,11 +131,20 @@ export interface NativeLiquidGlassMaterialRecipe extends MaterialRendererRecipeB
   };
 }
 
+export interface AndroidLiquidGlassMaterialRecipe extends MaterialRendererRecipeBase {
+  readonly renderer: 'android-liquid-glass';
+  readonly androidGlass: {
+    readonly fallbackFill: MaterialPaint;
+    readonly fallbackRim: MaterialRim;
+  };
+}
+
 export type DenseMaterialRecipe = SolidMaterialRecipe | TintedMaterialRecipe;
 export type MaterialRendererRecipe =
   | DenseMaterialRecipe
   | BlurMaterialRecipe
-  | NativeLiquidGlassMaterialRecipe;
+  | NativeLiquidGlassMaterialRecipe
+  | AndroidLiquidGlassMaterialRecipe;
 
 export interface MaterialRecipeDefinition {
   readonly preferredByPlatform: Readonly<Record<MaterialPlatform, MaterialRendererRecipe>>;

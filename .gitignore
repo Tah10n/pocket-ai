@@ -49,6 +49,8 @@ app-example
 # generated native folders
 /ios
 /android
+modules/*/android/.gradle/
+modules/*/android/build/
 
 # local properties (SDK path etc.)
 local.properties

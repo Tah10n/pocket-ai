@@ -1,4 +1,5 @@
 import type {
+  AndroidLiquidGlassMaterialRecipe,
   BlurMaterialRecipe,
   DenseMaterialRecipe,
   MaterialColorMode,
@@ -344,6 +345,28 @@ function liquidGlassRecipe(
   };
 }
 
+function androidLiquidGlassRecipe(
+  colors: MaterialPalette,
+  mode: MaterialColorMode,
+  tintColor: string,
+  interactionSupport: MaterialRendererRecipe['interactionSupport'],
+  denseFallback: DenseMaterialRecipe,
+): AndroidLiquidGlassMaterialRecipe {
+  return {
+    renderer: 'android-liquid-glass',
+    fill: paint(colors.surface, 0.1),
+    tint: paint(tintColor, mode === 'dark' ? 0.28 : 0.34),
+    contrastFilm: paint(colors.background, mode === 'dark' ? 0.14 : 0.06),
+    rim: rim(colors.borderSubtle, mode === 'dark' ? 0.66 : 0.76),
+    shadow: glassShadow(colors, mode),
+    interactionSupport,
+    androidGlass: {
+      fallbackFill: denseFallback.fill,
+      fallbackRim: denseFallback.rim,
+    },
+  };
+}
+
 function tabBarBlurRecipe(
   mode: MaterialColorMode,
   platform: 'android' | 'ios',
@@ -389,6 +412,27 @@ function tabBarLiquidGlassRecipe(
   };
 }
 
+function tabBarAndroidLiquidGlassRecipe(
+  mode: MaterialColorMode,
+  denseFallback: DenseMaterialRecipe,
+): AndroidLiquidGlassMaterialRecipe {
+  const isDark = mode === 'dark';
+  const matteColor = isDark ? '#f4f7fb' : '#f8fafc';
+  return {
+    renderer: 'android-liquid-glass',
+    fill: paint(matteColor, 0),
+    tint: paint(matteColor, isDark ? 0.075 : 0.01),
+    contrastFilm: isDark ? paint('#060b14', 0.18) : null,
+    rim: rim(matteColor, 0, 0),
+    shadow: NO_SHADOW,
+    interactionSupport: 'static',
+    androidGlass: {
+      fallbackFill: denseFallback.fill,
+      fallbackRim: denseFallback.rim,
+    },
+  };
+}
+
 function tabBarEffectDefinition(
   colors: MaterialPalette,
   mode: MaterialColorMode,
@@ -410,12 +454,12 @@ function tabBarEffectDefinition(
   return {
     preferredByPlatform: {
       ios: tabBarLiquidGlassRecipe(mode),
-      android: androidBlur,
+      android: tabBarAndroidLiquidGlassRecipe(mode, denseFallback),
       web: denseFallback,
     },
     platformFallbackByPlatform: {
       ios: iosBlur,
-      android: denseFallback,
+      android: androidBlur,
       web: denseFallback,
     },
     accessibilityFallback: denseFallback,
@@ -432,7 +476,9 @@ function effectDefinition(
 ): MaterialRecipeDefinition {
   const denseFallback = denseRecipe(
     'tinted',
-    colors.surfaceOverlay,
+    tintColor === colors.surface || tintColor === colors.surfaceOverlay
+      ? colors.surfaceOverlay
+      : tintColor,
     colors.borderSubtle,
     interactionSupport === 'static' ? 'static' : 'pressable',
     glassShadow(colors, mode),
@@ -442,12 +488,18 @@ function effectDefinition(
   return {
     preferredByPlatform: {
       ios: liquidGlassRecipe(colors, mode, tintColor, interactionSupport),
-      android: legacyBlur,
+      android: androidLiquidGlassRecipe(
+        colors,
+        mode,
+        tintColor,
+        interactionSupport,
+        denseFallback,
+      ),
       web: denseFallback,
     },
     platformFallbackByPlatform: {
       ios: legacyBlur,
-      android: denseFallback,
+      android: legacyBlur,
       web: denseFallback,
     },
     accessibilityFallback: denseFallback,
@@ -541,13 +593,18 @@ export function createLiquidThemeMaterialRecipes(
   const inlineControls = createGlassControlTones(colors, mode, false);
   const floatingControls = createGlassControlTones(colors, mode, true);
   const banner = createSemanticBannerTones(colors, 'tinted');
-  const popover = neutral(effectDefinition(
-    colors,
-    mode,
-    colors.surfaceOverlay,
-    mode === 'dark' ? 78 : 68,
-    'static',
-  ));
+  const popoverDefinition = (tintColor: string) => effectDefinition(
+    colors, mode, tintColor, mode === 'dark' ? 78 : 68, 'static',
+  );
+  const popover: MaterialToneRecipes = {
+    neutral: popoverDefinition(colors.surfaceOverlay),
+    primary: popoverDefinition(colors.primarySoft),
+    accent: popoverDefinition(colors.primarySoft),
+    info: popoverDefinition(colors.infoSurface),
+    success: popoverDefinition(colors.successSurface),
+    warning: popoverDefinition(colors.warningSurface),
+    error: popoverDefinition(colors.dangerSurface),
+  };
   const scrim = denseDefinition(denseRecipe('tinted', colors.overlay, colors.overlay));
 
   return {

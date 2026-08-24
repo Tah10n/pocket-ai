@@ -174,6 +174,28 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.getByTestId('screen-material-scene-blur-target').findByProps({ children: 'scene' })).toBeTruthy();
   });
 
+  it('records the complete Android Liquid Glass scene from the ScreenRoot boundary', () => {
+    const resolvedTheme = resolveTheme('glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    mockEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
+    });
+
+    const screen = render(<ScreenRoot testID="root"><Text>recorded scene content</Text></ScreenRoot>);
+
+    const provider = screen.getByTestId('screen-material-liquid-glass-scene');
+    expect(provider.props.active).toBe(true);
+    expect(provider.findByProps({ children: 'recorded scene content' })).toBeTruthy();
+    expect(provider.findByProps({ testID: 'screen-decoration' })).toBeTruthy();
+    expect(provider.findByProps({ testID: 'screen-decoration-dim' })).toBeTruthy();
+    expect(screen.queryByTestId('screen-material-blur-target')).toBeNull();
+    expect(screen.queryByTestId('screen-material-scene-blur-target')).toBeNull();
+  });
+
   it('maps content cards to dense raised or inset material variants', () => {
     const screen = render(
       <>

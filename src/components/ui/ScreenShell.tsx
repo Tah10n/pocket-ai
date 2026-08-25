@@ -14,11 +14,21 @@ import { Input, InputField, type InputFieldProps } from '@/components/ui/input';
 import { Pressable } from '@/components/ui/pressable';
 import { PressableSurface as MaterialPressableSurface, Surface as MaterialSurface } from '../../design-system/materials/Surface';
 import { EffectPressableSurface, EffectSurface } from '../../design-system/materials/EffectSurface';
-import type { MaterialRequest, MaterialShape, MaterialTone } from '../../design-system/materials/contract';
+import type {
+  MaterialEnvironment,
+  MaterialRequest,
+  MaterialShape,
+  MaterialTone,
+} from '../../design-system/materials/contract';
 import type { SemanticForegroundRole } from '../../design-system/themes/foreground';
 import { useMaterialEnvironment } from '../../design-system/materials/MaterialEnvironmentProvider';
-import { themeUsesAndroidTargetBlur } from '../../design-system/materials/resolver';
+import {
+  themeNeedsAndroidTargetBlur,
+  themeUsesAndroidLiquidGlass,
+} from '../../design-system/materials/resolver';
+import { themeDefinitions } from '../../design-system/themes/registry';
 import { ScreenBackgroundDecoration } from '../../design-system/materials/ScreenBackgroundDecoration';
+import { AndroidLiquidGlassBackdropProvider } from '../../design-system/materials/AndroidLiquidGlass';
 import {
   AndroidBlurBoundaryProvider,
   AndroidBlurSampleTargetProvider,
@@ -159,6 +169,32 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 });
+
+function registeredThemesNeedAndroidTargetBlur(
+  environment: MaterialEnvironment,
+) {
+  return themeDefinitions.some((definition) => (
+    themeNeedsAndroidTargetBlur(definition.modes.light.materials, environment)
+    || themeNeedsAndroidTargetBlur(definition.modes.dark.materials, environment)
+  ));
+}
+
+function shouldMountAndroidBlurBoundary(
+  environment: MaterialEnvironment,
+  currentThemeNeedsAndroidTargetBlur: boolean,
+) {
+  if (environment.platform !== 'android' || !environment.androidTargetBlurSupported) {
+    return false;
+  }
+
+  if ((environment.androidSdkVersion ?? 0) >= 33) {
+    return currentThemeNeedsAndroidTargetBlur;
+  }
+
+  // API 31–32 must keep the boundary type stable across Standard ↔ Glass so
+  // stateful screen children are not remounted when Glass resolves to blur.
+  return registeredThemesNeedAndroidTargetBlur(environment);
+}
 
 function getBadgeSizeClassName(size: 'micro' | 'default') {
   return size === 'micro'
@@ -435,11 +471,23 @@ export function ScreenRoot({
   const materialBackgroundBlurTargetRef = React.useRef<View | null>(null);
   const materialSceneBlurTargetRef = React.useRef<View | null>(null);
   const hasBackgroundDecoration = theme.resolvedTheme.components.screen.backgroundDecoration === 'aurora';
-  const hasAndroidBlurChrome = themeUsesAndroidTargetBlur(theme.resolvedTheme.materials);
+  const needsAndroidBlurChrome = themeNeedsAndroidTargetBlur(
+    theme.resolvedTheme.materials,
+    environment,
+  );
+  const hasAndroidLiquidGlassChrome = themeUsesAndroidLiquidGlass(theme.resolvedTheme.materials);
   const isFocused = useIsFocused();
-  const shouldUseAndroidBlurTarget = environment.platform === 'android'
-    && environment.androidTargetBlurSupported
-    && hasAndroidBlurChrome;
+  const shouldUseAndroidLiquidGlass = environment.platform === 'android'
+    && environment.androidLiquidGlassAvailable
+    && hasAndroidLiquidGlassChrome;
+  const shouldMountAndroidLiquidGlassProvider = environment.platform === 'android'
+    && environment.androidLiquidGlassAvailable;
+  const shouldMountAndroidBlurTargets = shouldMountAndroidBlurBoundary(
+    environment,
+    needsAndroidBlurChrome,
+  );
+  const shouldUseAndroidBlurTarget = shouldMountAndroidBlurTargets
+    && needsAndroidBlurChrome;
   const shouldRegisterAndroidBlurTarget = shouldUseAndroidBlurTarget && isFocused;
   const materialBackgroundBlurTarget = useAndroidBlurTargetHandle(
     materialBackgroundBlurTargetRef,
@@ -482,14 +530,14 @@ export function ScreenRoot({
     return setActiveAndroidBlurTarget(materialSceneBlurTargetRef);
   }, [materialSceneBlurTarget.sample.ready, shouldRegisterAndroidBlurTarget]);
 
-  return (
+  const rootScene = (
     <Box
       testID={testID}
       className={joinClassNames('flex-1', hasBackgroundDecoration ? 'overflow-hidden' : undefined, className)}
       style={[{ backgroundColor: colors.background }, style]}
     >
       {hasBackgroundDecoration ? <ScreenBackgroundDecoration mode={theme.resolvedMode} /> : null}
-      {shouldUseAndroidBlurTarget ? (
+      {shouldMountAndroidBlurTargets ? (
         <>
           <BlurTargetView
             testID="screen-material-blur-target"
@@ -510,16 +558,29 @@ export function ScreenRoot({
             {screenContent}
           </BlurTargetView>
         </>
-      ) : hasBackgroundDecoration ? (
+      ) : (
         <>
-          <ScreenBackgroundDecoration dim mode={theme.resolvedMode} />
+          {hasBackgroundDecoration ? <ScreenBackgroundDecoration dim mode={theme.resolvedMode} /> : null}
           {screenContent}
         </>
-      ) : (
-        screenContent
       )}
     </Box>
   );
+
+  if (shouldMountAndroidLiquidGlassProvider) {
+    return (
+      <AndroidLiquidGlassBackdropProvider
+        testID="screen-material-liquid-glass-scene"
+        active={shouldUseAndroidLiquidGlass && isFocused}
+        collapsable={false}
+        style={styles.screenSceneBlurTarget}
+      >
+        {rootScene}
+      </AndroidLiquidGlassBackdropProvider>
+    );
+  }
+
+  return rootScene;
 }
 
 export function ScreenAndroidContentBlurTarget({
@@ -530,16 +591,23 @@ export function ScreenAndroidContentBlurTarget({
 }: ScreenAndroidContentBlurTargetProps) {
   const theme = useTheme();
   const environment = useMaterialEnvironment();
-  const shouldUseAndroidBlurTarget = environment.platform === 'android'
-    && environment.androidTargetBlurSupported
-    && themeUsesAndroidTargetBlur(theme.resolvedTheme.materials);
+  const needsAndroidBlurTarget = themeNeedsAndroidTargetBlur(
+    theme.resolvedTheme.materials,
+    environment,
+  );
+  const shouldMountAndroidBlurTarget = shouldMountAndroidBlurBoundary(
+    environment,
+    needsAndroidBlurTarget,
+  );
+  const shouldUseAndroidBlurTarget = shouldMountAndroidBlurTarget
+    && needsAndroidBlurTarget;
   const blurTarget = useAndroidBlurTargetHandle(
     blurTargetRef,
     'screen-android-content',
     shouldUseAndroidBlurTarget,
   );
 
-  if (shouldUseAndroidBlurTarget) {
+  if (shouldMountAndroidBlurTarget) {
     return (
       <BlurTargetView
         ref={blurTargetRef}
@@ -548,8 +616,8 @@ export function ScreenAndroidContentBlurTarget({
         testID={testID}
         style={style}
       >
-        <AndroidBlurSampleTargetProvider target={blurTarget.sample}>
-          <AndroidBlurBoundaryProvider boundary={blurTarget.boundary}>
+        <AndroidBlurSampleTargetProvider target={shouldUseAndroidBlurTarget ? blurTarget.sample : null}>
+          <AndroidBlurBoundaryProvider boundary={shouldUseAndroidBlurTarget ? blurTarget.boundary : null}>
             {children}
           </AndroidBlurBoundaryProvider>
         </AndroidBlurSampleTargetProvider>

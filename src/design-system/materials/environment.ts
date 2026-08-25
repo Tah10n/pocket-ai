@@ -4,6 +4,7 @@ export const FAIL_CLOSED_MATERIAL_ENVIRONMENT: MaterialEnvironment = Object.free
   platform: 'web',
   blurViewAvailable: false,
   androidTargetBlurSupported: false,
+  androidLiquidGlassAvailable: false,
   liquidGlassComponentAvailable: false,
   liquidGlassApiAvailable: false,
   transparencyState: 'unknown',

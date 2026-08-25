@@ -1527,16 +1527,25 @@ function isExcludedAndroidBuildInput(relativePath) {
   }
 
   const segments = normalized.split("/");
+  if (segments[0] === "modules" && segments.length >= 4) {
+    const moduleRelative = segments.slice(2).join("/");
+    if (
+      moduleRelative === "android/build"
+      || moduleRelative.startsWith("android/build/")
+      || moduleRelative === "android/.gradle"
+      || moduleRelative.startsWith("android/.gradle/")
+      || moduleRelative === "android/.cxx"
+      || moduleRelative.startsWith("android/.cxx/")
+    ) {
+      return true;
+    }
+  }
   if (segments[0] === "modules" && segments[1] === "pocket-anydoc") {
     const moduleRelative = segments.slice(2).join("/");
     return moduleRelative === "node_modules"
       || moduleRelative.startsWith("node_modules/")
       || moduleRelative === "rust/target"
       || moduleRelative.startsWith("rust/target/")
-      || moduleRelative === "android/build"
-      || moduleRelative.startsWith("android/build/")
-      || moduleRelative === "android/.cxx"
-      || moduleRelative.startsWith("android/.cxx/")
       || moduleRelative === "android/src/main/jniLibs"
       || moduleRelative.startsWith("android/src/main/jniLibs/")
       || moduleRelative === "ios/generated"

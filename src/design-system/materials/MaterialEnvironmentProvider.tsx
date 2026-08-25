@@ -14,6 +14,7 @@ import {
   FAIL_CLOSED_MATERIAL_ENVIRONMENT,
   parseAndroidSdkVersion,
 } from './environment';
+import { canUseAndroidLiquidGlass } from './AndroidLiquidGlass';
 
 const MaterialEnvironmentContext = createContext<MaterialEnvironment>(
   FAIL_CLOSED_MATERIAL_ENVIRONMENT,
@@ -55,6 +56,7 @@ function getRuntimeCapabilities(platform: MaterialPlatform) {
 
     return {
       androidSdkVersion,
+      androidLiquidGlassAvailable: safelyCheckAvailability(canUseAndroidLiquidGlass),
       androidTargetBlurSupported: (androidSdkVersion ?? 0) >= 31,
       blurViewAvailable: true,
       liquidGlassApiAvailable: false,
@@ -65,6 +67,7 @@ function getRuntimeCapabilities(platform: MaterialPlatform) {
   if (platform !== 'ios') {
     return {
       androidTargetBlurSupported: false,
+      androidLiquidGlassAvailable: false,
       blurViewAvailable: false,
       liquidGlassApiAvailable: false,
       liquidGlassComponentAvailable: false,
@@ -78,6 +81,7 @@ function getRuntimeCapabilities(platform: MaterialPlatform) {
 
   return {
     androidTargetBlurSupported: false,
+    androidLiquidGlassAvailable: false,
     blurViewAvailable: true,
     liquidGlassApiAvailable,
     liquidGlassComponentAvailable,

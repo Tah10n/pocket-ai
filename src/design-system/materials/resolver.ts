@@ -34,7 +34,9 @@ function getToneRecipe(
 }
 
 function isEffectRecipe(recipe: MaterialRendererRecipe): boolean {
-  return recipe.renderer === 'blur' || recipe.renderer === 'native-liquid-glass';
+  return recipe.renderer === 'blur'
+    || recipe.renderer === 'native-liquid-glass'
+    || recipe.renderer === 'android-liquid-glass';
 }
 
 function isRecipeSupported(
@@ -49,6 +51,12 @@ function isRecipeSupported(
     return environment.platform === 'ios'
       && environment.liquidGlassComponentAvailable
       && environment.liquidGlassApiAvailable;
+  }
+
+  if (recipe.renderer === 'android-liquid-glass') {
+    return environment.platform === 'android'
+      && (environment.androidSdkVersion ?? 0) >= 33
+      && environment.androidLiquidGlassAvailable;
   }
 
   if (environment.platform === 'ios') {
@@ -102,7 +110,10 @@ export function resolveMaterialRecipe(
   );
 }
 
-export function themeUsesAndroidTargetBlur(materials: ThemeMaterialRecipes): boolean {
+export function themeNeedsAndroidTargetBlur(
+  materials: ThemeMaterialRecipes,
+  environment: MaterialEnvironment,
+): boolean {
   const effectEligibleRecipes = [
     ...Object.values(materials.chrome),
     ...Object.values(materials.control),
@@ -110,8 +121,16 @@ export function themeUsesAndroidTargetBlur(materials: ThemeMaterialRecipes): boo
   ];
 
   return effectEligibleRecipes.some((toneRecipes) => Object.values(toneRecipes)
-    .some((definition) => (
-      definition.preferredByPlatform.android.renderer === 'blur'
-      || definition.platformFallbackByPlatform?.android?.renderer === 'blur'
-    )));
+    .some((definition) => resolveDefinition(definition, environment).renderer === 'blur'));
+}
+
+export function themeUsesAndroidLiquidGlass(materials: ThemeMaterialRecipes): boolean {
+  const effectEligibleRecipes = [
+    ...Object.values(materials.chrome),
+    ...Object.values(materials.control),
+    ...Object.values(materials.overlay),
+  ];
+
+  return effectEligibleRecipes.some((toneRecipes) => Object.values(toneRecipes)
+    .some((definition) => definition.preferredByPlatform.android.renderer === 'android-liquid-glass'));
 }

@@ -53,7 +53,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
       <Box className={`flex-row items-center ${screenChromeTokens.headerContentGapClassName} py-0.5`}>
         <HeaderBackButton onPress={onBack} accessibilityLabel={t('chat.headerBackAccessibilityLabel')} />
         <Box className="min-w-0 flex-1">
-          <Text
+          <Text colorRole="primary"
             numberOfLines={1}
             className={composeTextRole('screenTitle')}
           >
@@ -79,7 +79,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         placeholder={t('models.searchPlaceholder')}
         value={searchQuery}
         onChangeText={onSearchChange}
-        leadingAccessory={<MaterialSymbols name="search" size="sm" className="text-typography-500 dark:text-typography-400" />}
+        leadingAccessory={<MaterialSymbols colorRole="tertiary" name="search" size="sm" className=" " />}
         trailingAccessory={searchQuery.length > 0 ? (
           <ScreenIconButton
             onPress={() => onSearchChange('')}
@@ -87,7 +87,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             iconName="close"
             size="compact"
             className="border-0 bg-transparent dark:bg-transparent"
-            iconClassName="text-typography-400"
+            iconColorRole="tertiary"
           />
         ) : null}
       />

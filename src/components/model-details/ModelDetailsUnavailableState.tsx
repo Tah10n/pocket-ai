@@ -22,10 +22,10 @@ export function ModelDetailsUnavailableState({
       <Box className="flex-row items-start gap-3">
         <ScreenIconTile iconName="warning" tone="warning" iconSize={22} className="h-12 w-12 rounded-[18px]" />
         <Box className="min-w-0 flex-1">
-          <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+<Text colorRole="primary" className="text-base font-semibold  ">
             {title}
           </Text>
-          <Text className="mt-2 text-sm leading-6 text-typography-600 dark:text-typography-300">
+<Text colorRole="secondary" className="mt-2 text-sm leading-6  ">
             {message}
           </Text>
           {openOnHuggingFaceButton ? (

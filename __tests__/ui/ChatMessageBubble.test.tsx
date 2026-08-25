@@ -1,11 +1,13 @@
 import React from 'react';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system/legacy';
 import { ChatMessageBubble } from '../../src/components/ui/ChatMessageBubble';
 import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
 import { copiedImageAttachment, secondCopiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
+import { MaterialEnvironmentProvider } from '../../src/design-system/materials/MaterialEnvironmentProvider';
+import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -118,7 +120,7 @@ describe('ChatMessageBubble', () => {
     expect(queryByTestId('markdown-renderer')).toBeNull();
   });
 
-  it('renders glass user messages as framed translucent primary surfaces', () => {
+  it('renders glass user messages as dense semantic primary surfaces', () => {
     const { getByTestId, getByText } = render(
       <StaticThemeProvider themeId="glass" resolvedMode="dark">
         <ChatMessageBubble id="glass-user" isUser content="Hello glass" />
@@ -127,17 +129,45 @@ describe('ChatMessageBubble', () => {
     const shell = getByTestId('message-bubble-shell-glass-user');
     const text = getByText('Hello glass');
 
-    expect(shell.props.className).toContain('relative overflow-hidden');
-    expect(shell.props.className).toContain('bg-primary-500/22');
+    expect(shell.props.className).not.toContain('relative overflow-hidden');
+    expect(shell.props.className).not.toContain('bg-primary-500/22');
     expect(shell.props.className).not.toContain('bg-primary-500/80');
     expect(shell.props.className).not.toContain('bg-primary-600');
     expect(StyleSheet.flatten(shell.props.style)).toMatchObject({
+      borderBottomRightRadius: 8,
+      borderRadius: 24,
       borderWidth: 0,
       elevation: 0,
       shadowOpacity: 0,
     });
     expect(StyleSheet.flatten(shell.props.style)?.backgroundColor).toMatch(/^rgba/);
-    expect(text.props.className).toContain('dark:text-primary-100');
+    expect(text.props.colorRole).toBe('onAccent');
+  });
+
+  it('never mounts a live effect renderer inside a message row', () => {
+    const environment = createMaterialEnvironment('ios', {
+      blurViewAvailable: true,
+      liquidGlassApiAvailable: true,
+      liquidGlassComponentAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const { UNSAFE_getAllByType } = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <StaticThemeProvider themeId="glass" resolvedMode="light">
+          <ChatMessageBubble
+            id="dense-row"
+            isUser={false}
+            content="Final answer"
+            thoughtContent="Reasoning"
+            tokensPerSec={12}
+          />
+        </StaticThemeProvider>
+      </MaterialEnvironmentProvider>,
+    );
+
+    expect(UNSAFE_getAllByType(View).some((node) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'intensity')
+    ))).toBe(false);
   });
 
   it('renders assistant messages through the markdown renderer when stable', () => {

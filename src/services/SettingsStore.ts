@@ -1,9 +1,9 @@
 import type { MMKV } from 'react-native-mmkv';
 import { assertPrivateStorageWritable, createStorage, PrivateStorageUnavailableError } from './storage';
 import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffort } from '../types/reasoning';
+import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from '../design-system/themes/registry';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
-import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from '../utils/themeTokens';
 
 export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 

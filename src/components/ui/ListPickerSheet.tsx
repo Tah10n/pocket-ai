@@ -4,7 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { Pressable } from '@/components/ui/pressable';
-import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenIconTile, ScreenModalOverlay, ScreenPressableCard, ScreenSheet, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { joinClassNames, ScreenBadge, ScreenCard, ScreenIconButton, ScreenIconTile, ScreenModalOverlay, ScreenPressableCard, ScreenSheet } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { MaterialSymbols, type MaterialSymbolsProps } from './MaterialSymbols';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
@@ -14,6 +14,7 @@ import { screenLayoutMetrics, screenLayoutTokens } from '../../utils/themeTokens
 export interface ListPickerSheetItem {
   key: string;
   title: string;
+  leading?: React.ReactNode;
   description?: string;
   supportingText?: string;
   badges?: ListPickerSheetBadge[];
@@ -67,17 +68,13 @@ function ListPickerRow({
   item: ListPickerSheetItem;
   activeLabel: string;
 }) {
-  const appearance = useScreenAppearance();
   const hasAction = typeof item.onPress === 'function';
   const isInteractive = hasAction && !item.disabled;
   const hasSupportingText = Boolean(item.supportingText);
   const hasBadges = (item.badges?.length ?? 0) > 0;
   const hasSecondaryContent = Boolean(item.description) || hasSupportingText || hasBadges;
   const rowAlignmentClassName = hasSecondaryContent ? 'items-start' : 'items-center';
-  const cardClassName = joinClassNames(
-    item.selected && appearance.classNames.selectedInsetCardClassName,
-    item.disabled && 'opacity-60',
-  );
+  const cardClassName = item.disabled ? 'opacity-60' : undefined;
   const content = (
     <Box
       testID={item.testID ? `${item.testID}-content` : undefined}
@@ -87,7 +84,7 @@ function ListPickerRow({
         testID={item.testID ? `${item.testID}-body` : undefined}
         className={joinClassNames('min-w-0 flex-1 flex-row gap-3', rowAlignmentClassName)}
       >
-        {item.iconName ? (
+        {item.leading ?? (item.iconName ? (
           <ScreenIconTile
             iconName={item.iconName}
             tone="neutral"
@@ -96,33 +93,26 @@ function ListPickerRow({
             className={hasSecondaryContent ? 'mt-0.5 h-9 w-9' : 'h-9 w-9 self-center'}
             testID={item.testID ? `${item.testID}-leading-icon` : undefined}
           />
-        ) : null}
+        ) : null)}
         <Box className="min-w-0 flex-1">
-          <Text
+          <Text colorRole={item.selected ? 'accent' : 'primary'}
             numberOfLines={1}
-            className={joinClassNames(
-              'text-sm font-semibold',
-              item.selected
-                ? 'text-primary-600 dark:text-primary-400'
-                : item.disabled
-                  ? 'text-typography-500 dark:text-typography-500'
-                  : 'text-typography-900 dark:text-typography-100',
-            )}
+            className="text-sm font-semibold"
           >
             {item.title}
           </Text>
           {item.description ? (
-            <Text
+            <Text colorRole="tertiary"
               numberOfLines={hasSupportingText || hasBadges ? 1 : 2}
-              className="mt-1 text-xs text-typography-500 dark:text-typography-400"
+              className="mt-1 text-xs  "
             >
               {item.description}
             </Text>
           ) : null}
           {item.supportingText ? (
-            <Text
+            <Text colorRole="secondary"
               numberOfLines={2}
-              className="mt-2 text-sm text-typography-600 dark:text-typography-300"
+              className="mt-2 text-sm  "
             >
               {item.supportingText}
             </Text>
@@ -150,7 +140,7 @@ function ListPickerRow({
           {activeLabel}
         </ScreenBadge>
       ) : !isInteractive ? null : (
-        <MaterialSymbols name="chevron-right" size="md" className="text-typography-400" />
+        <MaterialSymbols colorRole="tertiary" name="chevron-right" size="md" className="" />
       )}
     </Box>
   );
@@ -159,6 +149,7 @@ function ListPickerRow({
       <ScreenCard
         testID={item.testID}
         padding="compact"
+        tone={item.selected ? 'accent' : 'default'}
         className={cardClassName}
       >
         {content}
@@ -179,6 +170,7 @@ function ListPickerRow({
         disabled: item.disabled === true,
         ...item.accessibilityState,
       }}
+      tone={item.selected ? 'accent' : 'default'}
       padding="compact"
       className={cardClassName}
     >
@@ -233,11 +225,11 @@ export function ListPickerSheetContent({
       <Box className="min-h-0 flex-shrink" style={styles.sheetContent}>
         <Box className="mb-4 flex-row items-center justify-between gap-3">
           <Box className="min-w-0 flex-1">
-            <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+            <Text colorRole="primary" className="text-lg font-semibold  ">
               {title}
             </Text>
             {subtitle ? (
-              <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
+              <Text colorRole="tertiary" className="mt-1 text-sm  ">
                 {subtitle}
               </Text>
             ) : null}
@@ -279,16 +271,16 @@ export function ListPickerSheetContent({
             className="min-h-[220px] flex-1 items-center justify-center px-5 py-8"
           >
             {emptyState.iconName ? (
-              <MaterialSymbols
+              <MaterialSymbols colorRole="tertiary"
                 name={emptyState.iconName}
                 size="2xl"
-                className="text-typography-400 dark:text-typography-500"
+                className=" "
               />
             ) : null}
-            <Text className="mt-3 text-center text-sm font-semibold text-typography-700 dark:text-typography-200">
+            <Text colorRole="secondary" className="mt-3 text-center text-sm font-semibold  ">
               {emptyState.title}
             </Text>
-            <Text className="mt-2 text-center text-sm text-typography-500 dark:text-typography-400">
+            <Text colorRole="tertiary" className="mt-2 text-center text-sm  ">
               {emptyState.description}
             </Text>
             {emptyState.action ? <Box className="mt-4 w-full">{emptyState.action}</Box> : null}

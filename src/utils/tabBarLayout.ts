@@ -1,54 +1,55 @@
 import type { ViewStyle } from 'react-native';
-import type { ThemeAppearance, ThemeColors } from './themeTokens';
+import type { ThemeColors } from './themeTokens';
 import { getNativeBottomSafeAreaInset, type AppPlatform } from './safeArea';
 
 export const bottomTabBarMetrics = {
   height: 74,
-  glassHeight: 76,
+  floatingHeight: 76,
   floatingHorizontalInset: 14,
   floatingBottomGap: 10,
-  glassRadius: 34,
+  floatingRadius: 34,
   paddingTop: 8,
-  glassPaddingTop: 6,
+  floatingPaddingTop: 6,
   paddingBottom: 12,
-  glassPaddingBottom: 10,
+  floatingPaddingBottom: 10,
 } as const;
 
 type TabBarColors = Pick<ThemeColors, 'tabBarBackground' | 'tabBarBorder'>;
 
-export function isFloatingTabBar(appearance?: Pick<ThemeAppearance, 'surfaceKind'>) {
-  return appearance?.surfaceKind === 'glass';
+export type TabBarPresentation = 'attached' | 'floating';
+
+export function isFloatingTabBar(presentation: TabBarPresentation = 'attached') {
+  return presentation === 'floating';
 }
 
 export function createBottomTabBarStyle(
   colors: TabBarColors,
   bottomSafeAreaInset: number,
   platform: AppPlatform,
-  appearance?: Pick<ThemeAppearance, 'id' | 'surfaceKind' | 'effects'>,
+  presentation: TabBarPresentation = 'attached',
 ): ViewStyle {
   const nativeBottomInset = getNativeBottomSafeAreaInset(bottomSafeAreaInset, platform);
-  const isGlass = isFloatingTabBar(appearance);
-  const tabBarHeight = isGlass ? bottomTabBarMetrics.glassHeight : bottomTabBarMetrics.height;
-  const tabBarPaddingTop = isGlass ? bottomTabBarMetrics.glassPaddingTop : bottomTabBarMetrics.paddingTop;
-  const tabBarPaddingBottom = isGlass ? bottomTabBarMetrics.glassPaddingBottom : bottomTabBarMetrics.paddingBottom;
+  const isFloating = isFloatingTabBar(presentation);
+  const tabBarHeight = isFloating ? bottomTabBarMetrics.floatingHeight : bottomTabBarMetrics.height;
+  const tabBarPaddingTop = isFloating ? bottomTabBarMetrics.floatingPaddingTop : bottomTabBarMetrics.paddingTop;
+  const tabBarPaddingBottom = isFloating ? bottomTabBarMetrics.floatingPaddingBottom : bottomTabBarMetrics.paddingBottom;
 
   return {
-    ...(isGlass ? {
+    ...(isFloating ? {
       position: 'absolute',
       left: bottomTabBarMetrics.floatingHorizontalInset,
       right: bottomTabBarMetrics.floatingHorizontalInset,
       bottom: nativeBottomInset + bottomTabBarMetrics.floatingBottomGap,
-      borderRadius: bottomTabBarMetrics.glassRadius,
+      borderRadius: bottomTabBarMetrics.floatingRadius,
       overflow: 'hidden',
     } : {}),
-    height: isGlass ? tabBarHeight : tabBarHeight + nativeBottomInset,
+    height: isFloating ? tabBarHeight : tabBarHeight + nativeBottomInset,
     paddingTop: tabBarPaddingTop,
-    paddingBottom: isGlass ? tabBarPaddingBottom : tabBarPaddingBottom + nativeBottomInset,
-    backgroundColor: isGlass ? 'transparent' : colors.tabBarBackground,
+    paddingBottom: isFloating ? tabBarPaddingBottom : tabBarPaddingBottom + nativeBottomInset,
+    backgroundColor: isFloating ? 'transparent' : colors.tabBarBackground,
     borderTopColor: colors.tabBarBorder,
-    borderTopWidth: isGlass ? 0 : 1,
+    borderTopWidth: isFloating ? 0 : 1,
     elevation: 0,
     shadowOpacity: 0,
-    ...appearance?.effects.tabBarStyle,
   };
 }

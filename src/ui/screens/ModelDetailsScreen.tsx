@@ -99,8 +99,8 @@ export function ModelDetailsScreen() {
 
   const openOnHuggingFaceButton = modelId ? (
     <Button action="softPrimary" onPress={() => { void handleOpenModelPage(modelId); }}>
-      <MaterialSymbols name="open-in-new" size={18} className="text-primary-600 dark:text-primary-300" />
-      <ButtonText className="text-primary-600 dark:text-primary-300">
+      <MaterialSymbols colorRole="accent" name="open-in-new" size={18} className=" " />
+      <ButtonText>
         {t('models.openOnHuggingFace')}
       </ButtonText>
     </Button>
@@ -218,10 +218,10 @@ export function ModelDetailsScreen() {
         {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
           <ScreenContent className="pt-3 pb-0">
             <ScreenCard padding="compact" tone="error">
-              <Text className="text-sm font-semibold text-error-700 dark:text-error-300">
+              <Text colorRole="danger" className="text-sm font-semibold  ">
                 {t('common.errors.modelLoadFailed')}
               </Text>
-              <Text selectable className="mt-1 text-sm text-error-700 dark:text-error-300">
+              <Text colorRole="danger" selectable className="mt-1 text-sm  ">
                 {engineState.lastError}
               </Text>
               <Box className="mt-3 flex-row gap-2">
@@ -246,7 +246,7 @@ export function ModelDetailsScreen() {
             {loading && !displayModel ? (
               <Box className="items-center justify-center pt-16">
                 <Spinner size="large" />
-                <Text className="mt-3 text-typography-500">{t('common.loading')}</Text>
+                <Text colorRole="tertiary" className="mt-3 ">{t('common.loading')}</Text>
               </Box>
             ) : null}
 
@@ -262,7 +262,7 @@ export function ModelDetailsScreen() {
               <>
                 {errorMessage ? (
                   <SectionCard tone="warning">
-                    <Text className="text-sm leading-6 text-warning-700 dark:text-warning-300">{errorMessage}</Text>
+                    <Text colorRole="warning" className="text-sm leading-6  ">{errorMessage}</Text>
                   </SectionCard>
                 ) : null}
 
@@ -369,7 +369,7 @@ export function ModelDetailsScreen() {
                   iconName="description"
                   tone="info"
                 >
-                  <Text className="text-sm leading-7 text-typography-700 dark:text-typography-300">
+                  <Text colorRole="secondary" className="text-sm leading-7  ">
                     {displayModel.description ?? t('models.descriptionUnavailable')}
                   </Text>
                 </SectionCard>
@@ -404,7 +404,7 @@ export function ModelDetailsScreen() {
                           {t('models.mtp.maxDraftTokens', { count: speculativeDecoding.maxDraftTokens })}
                         </ScreenBadge>
                       </Box>
-                      <Text className="text-sm leading-6 text-typography-700 dark:text-typography-300">
+                      <Text colorRole="secondary" className="text-sm leading-6  ">
                         {speculativeDecoding.mode === 'embedded'
                           ? t('models.mtp.embeddedDescription')
                           : isSpeculativeDraftReady
@@ -416,7 +416,7 @@ export function ModelDetailsScreen() {
                                 : t('models.mtp.availableDescription')}
                       </Text>
                       {speculativeDraftArtifact ? (
-                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="text-xs  ">
                           {speculativeDraftArtifact.remoteFileName} · {formatModelFileSize(
                             speculativeDraftArtifact.sizeBytes,
                             t('models.sizeUnknown'),
@@ -430,7 +430,7 @@ export function ModelDetailsScreen() {
                           onPress={() => handleDownload(displayModel, { includeOptionalMtpDraft: true })}
                           testID="model-details-download-mtp-draft"
                         >
-                          <MaterialSymbols name="download" size={18} className="text-primary-600 dark:text-primary-300" />
+                          <MaterialSymbols colorRole="accent" name="download" size={18} className=" " />
                           <ButtonText>
                             {speculativeDraftArtifact?.installState === 'failed'
                               ? t('models.mtp.retryDraft')

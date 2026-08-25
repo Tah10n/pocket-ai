@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert, Linking } from 'react-native';
+import { Alert, KeyboardAvoidingView, Linking, Platform, StyleSheet } from 'react-native';
 import { HuggingFaceTokenScreen } from '../../src/ui/screens/HuggingFaceTokenScreen';
 import { HUGGING_FACE_TOKEN_SETTINGS_URL } from '../../src/services/ModelCatalogService';
 
@@ -147,6 +147,14 @@ describe('HuggingFaceTokenScreen', () => {
 
   afterEach(() => {
     openUrlSpy.mockRestore();
+  });
+
+  it('keeps the token form and footer inside a keyboard-avoiding boundary', () => {
+    const screen = render(<HuggingFaceTokenScreen />);
+    const keyboardBoundary = screen.UNSAFE_getByType(KeyboardAvoidingView);
+
+    expect(keyboardBoundary.props.behavior).toBe(Platform.OS === 'ios' ? 'padding' : 'height');
+    expect(StyleSheet.flatten(keyboardBoundary.props.style)).toMatchObject({ flex: 1 });
   });
 
   it('opens the Hugging Face token settings page from the helper CTA', async () => {

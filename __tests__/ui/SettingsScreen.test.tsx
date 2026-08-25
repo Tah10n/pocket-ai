@@ -106,6 +106,8 @@ jest.mock('@react-navigation/native', () => {
   const mockReact = require('react');
 
   return {
+    DefaultTheme: { dark: false, colors: {} },
+    DarkTheme: { dark: true, colors: {} },
     useFocusEffect: (effect: any) => mockReact.useEffect(() => effect(), [effect]),
     useIsFocused: () => true,
   };
@@ -125,7 +127,7 @@ jest.mock('../../src/providers/ThemeProvider', () => ({
     mode: 'system',
     themeId: 'default',
     resolvedMode: 'light',
-    appearance: require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
+    resolvedTheme: jest.requireActual('../../src/design-system/themes/resolver').resolveTheme('default', 'light'),
     setTheme: mockSetTheme,
     setThemeId: mockSetThemeId,
     colors: {
@@ -339,6 +341,7 @@ describe('SettingsScreen', () => {
     expect(getByTestId('settings-theme-style-control')).toBeTruthy();
 
     fireEvent.press(getByTestId('settings-theme-mode-dark'));
+    fireEvent.press(getByTestId('settings-theme-style-control'));
     fireEvent.press(getByTestId('settings-theme-style-glass'));
 
     expect(mockSetTheme).toHaveBeenCalledWith('dark');

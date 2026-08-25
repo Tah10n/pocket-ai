@@ -62,14 +62,14 @@ function ActionCard({
         <ScreenCard variant="inset" padding="compact" className={busy ? 'opacity-70' : undefined}>
             <Box className="flex-row items-start justify-between gap-3">
                 <Box className="min-w-0 flex-1">
-                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                    <Text colorRole="primary" className="text-base font-semibold  ">
                         {title}
                     </Text>
-                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                         {description}
                     </Text>
                     {meta ? (
-                        <Text className="mt-2 text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="mt-2 text-xs font-semibold uppercase tracking-wide  ">
                             {meta}
                         </Text>
                     ) : null}
@@ -346,10 +346,10 @@ export function StorageManagerScreen() {
                     <ScreenStack gap="default">
                         {hardwareStatus.isLowMemory ? (
                             <ScreenCard tone="warning" padding="compact">
-                                <Text className="text-base font-semibold text-warning-800 dark:text-warning-100">
+                                <Text colorRole="warning" className="text-base font-semibold  ">
                                     {t('storageManager.lowMemoryTitle')}
                                 </Text>
-                                <Text className="mt-2 text-sm leading-5 text-warning-700 dark:text-warning-200">
+                                <Text colorRole="warning" className="mt-2 text-sm leading-5  ">
                                     {t('storageManager.lowMemoryDescription')}
                                 </Text>
                             </ScreenCard>
@@ -357,7 +357,7 @@ export function StorageManagerScreen() {
 
                         <ScreenCard padding="compact">
                             <ScreenSectionLabel>{t('storageManager.actionsTitle')}</ScreenSectionLabel>
-                            <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                            <Text colorRole="secondary" className="mt-2 text-sm leading-5  ">
                                 {t('storageManager.actionsDescription')}
                             </Text>
                             <ScreenStack className="mt-3" gap="compact">
@@ -416,16 +416,16 @@ export function StorageManagerScreen() {
                                     ? t('storageManager.downloadedModelsTitle', { count: downloadedModels.length })
                                     : t('storageManager.downloadedModelsLoadingTitle')}
                             </ScreenSectionLabel>
-                            <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                            <Text colorRole="secondary" className="mt-2 text-sm leading-5  ">
                                 {t('storageManager.downloadedModelsDescription')}
                             </Text>
 
                             <ScreenStack className="mt-3" gap="compact">
                                 {appMetrics === null ? (
                                     <ScreenCard variant="inset" padding="compact" className="items-center">
-                                        <Text
+                                        <Text colorRole="tertiary"
                                             testID="storage-manager-metrics-status"
-                                            className="text-center text-sm leading-5 text-typography-500 dark:text-typography-400"
+                                            className="text-center text-sm leading-5  "
                                         >
                                             {hasMetricsLoadError
                                                 ? t('storageManager.metricsLoadError')
@@ -446,10 +446,10 @@ export function StorageManagerScreen() {
                                     </ScreenCard>
                                 ) : downloadedModels.length === 0 ? (
                                     <ScreenCard variant="inset" padding="compact" className="items-center">
-                                        <Text className="text-center text-base font-semibold text-typography-900 dark:text-typography-100">
+                                        <Text colorRole="primary" className="text-center text-base font-semibold  ">
                                             {t('storageManager.emptyModelsTitle')}
                                         </Text>
-                                        <Text className="mt-2 text-center text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                        <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-5  ">
                                             {t('storageManager.emptyModelsDescription')}
                                         </Text>
                                     </ScreenCard>
@@ -460,10 +460,10 @@ export function StorageManagerScreen() {
                                         <ScreenCard key={model.id} variant="inset" padding="compact">
                                             <Box className="flex-row items-start justify-between gap-3">
                                                 <Box className="min-w-0 flex-1">
-                                                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                                    <Text colorRole="primary" className="text-base font-semibold  ">
                                                         {model.name}
                                                     </Text>
-                                                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                                    <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                         {model.author} • {formatModelFileSize(model.size, t('models.sizeUnknown'))}
                                                     </Text>
                                                     {isActive ? (

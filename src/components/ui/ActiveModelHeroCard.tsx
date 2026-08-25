@@ -5,8 +5,8 @@ import { Box } from '@/components/ui/box';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { MaterialSymbols } from './MaterialSymbols';
 import { ProgressBar } from './ProgressBar';
-import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenSurface, useScreenAppearance } from './ScreenShell';
-import { getThemeActionContentClassName } from '@/utils/themeTokens';
+import { ScreenActionPill, ScreenBadge, ScreenCard, ScreenSurface } from './ScreenShell';
+import { useTheme } from '../../providers/ThemeProvider';
 
 interface ActiveModelHeroCardProps {
   name: string;
@@ -26,10 +26,7 @@ export const ActiveModelHeroCard = ({
   onUnload,
 }: ActiveModelHeroCardProps) => {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
-  const neutralToneClassNames = appearance.classNames.toneClassNameByTone.neutral;
-  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
-  const softActionContentClassName = getThemeActionContentClassName(appearance, 'soft');
+  const { colors } = useTheme();
   const usedPercent = useMemo(() => {
     if (memoryTotalGB <= 0) return 0;
     return Math.min(100, Math.max(0, (memoryUsedGB / memoryTotalGB) * 100));
@@ -41,8 +38,8 @@ export const ActiveModelHeroCard = ({
         source={{ uri: "https://lh3.googleusercontent.com/aida-public/AB6AXuBgeacQzvDee5FRz4IolAFCYeRdjSi5o964zo1nH9_1RSd9jOXPsbeN7v2xGEizVFs5ap4YlxkkTvYwU7gAsmGYx5fdjy-EXVSDSplqL6g442DP_jqpWlBitLu19YImIfHJbZYQpZv3VcFmqTpeZ_4PyHInFynYgjtublbwQyS1CMUs9W381FQ7AEcDpX-74bUZcI2DZBNIMXsm5MVuPa4uPRBjhiiHrtM3aM-1xahPOz-5J7NEKxdVQg4hCDW573lexS2Kb4VbxWDV" }}
         className="h-36 w-full"
       >
-        <Box className={`absolute inset-0 ${appearance.classNames.heroImageOverlayClassName}`} />
-        <Box className={`absolute inset-0 ${appearance.classNames.heroImageScrimClassName}`} />
+        <Box testID="active-model-hero-overlay" className="absolute inset-0" style={{ backgroundColor: colors.heroImageOverlay }} />
+        <Box testID="active-model-hero-scrim" className="absolute inset-0" style={{ backgroundColor: colors.heroImageScrim }} />
         <Box className="flex-1 justify-between p-4">
           <ScreenBadge tone="success" size="micro" className="self-start">
             {t('common.active')}
@@ -50,10 +47,12 @@ export const ActiveModelHeroCard = ({
           <ScreenSurface
             tone="neutral"
             withControlTint
-            className={`self-start flex-row items-center gap-1.5 ${appearance.classNames.inlinePillClassName}`}
+            material={{ role: 'control', variant: 'inline' }}
+            shape="full"
+            className="self-start flex-row items-center gap-1.5 px-3 py-1.5"
           >
-            <MaterialSymbols name="memory" size="sm" className={neutralToneClassNames.iconClassName} />
-            <Text className={composeTextRole('caption', neutralToneClassNames.valueClassName)}>
+            <MaterialSymbols name="memory" size="sm" colorRole="icon" />
+            <Text colorRole="primary" className={composeTextRole('caption')}>
               {t('home.activeModelHeroMemory', { used: memoryUsedGB.toFixed(1) })}
             </Text>
           </ScreenSurface>
@@ -63,7 +62,7 @@ export const ActiveModelHeroCard = ({
       <Box className="gap-4 p-4">
         <Box className="flex-row items-center justify-between">
           <Box className="flex-1 pr-3">
-            <Text className={composeTextRole('screenTitle')} numberOfLines={1}>
+            <Text colorRole="primary" className={composeTextRole('screenTitle')} numberOfLines={1}>
               {name}
             </Text>
             <Box className="mt-2 flex-row items-center gap-2">
@@ -74,10 +73,10 @@ export const ActiveModelHeroCard = ({
             </Box>
           </Box>
           <Box className="items-end">
-            <Text className={composeTextRole('eyebrow')}>
+            <Text colorRole="tertiary" className={composeTextRole('eyebrow')}>
               {t('home.activeModelMemoryOccupancy')}
             </Text>
-            <Text className={composeTextRole('body', `mt-1 font-semibold ${neutralToneClassNames.valueClassName}`)}>
+            <Text colorRole="primary" className={composeTextRole('body', 'mt-1 font-semibold')}>
               {t('home.activeModelHeroMemoryRange', { used: memoryUsedGB.toFixed(1), total: memoryTotalGB.toFixed(0) })}
             </Text>
           </Box>
@@ -92,7 +91,7 @@ export const ActiveModelHeroCard = ({
             size="md"
             className="flex-1"
           >
-            <Text className={composeTextRole('action', primaryActionContentClassName)}>{t('models.chat')}</Text>
+            <Text colorRole="onAccent" className={composeTextRole('action')}>{t('models.chat')}</Text>
           </ScreenActionPill>
           <ScreenActionPill
             onPress={onUnload}
@@ -100,7 +99,7 @@ export const ActiveModelHeroCard = ({
             size="md"
             className="flex-1"
           >
-            <Text className={composeTextRole('action', softActionContentClassName)}>{t('models.unload')}</Text>
+            <Text colorRole="softAction" className={composeTextRole('action')}>{t('models.unload')}</Text>
           </ScreenActionPill>
         </Box>
       </Box>

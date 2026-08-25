@@ -25,7 +25,6 @@ import {
   ScreenSheet,
   ScreenStack,
   useFloatingHeaderInset,
-  useScreenAppearance,
 } from '@/components/ui/ScreenShell';
 import { Text, composeTextRole } from '@/components/ui/text';
 import { useChatSession } from '../../hooks/useChatSession';
@@ -41,7 +40,7 @@ import { getPrivacySafeErrorLogDetails, getReportedErrorMessage } from '../../se
 import { notificationService } from '../../services/NotificationService';
 import { documentSessionContextCache } from '../../services/DocumentSessionContextCache';
 import { useChatStore } from '../../store/chatStore';
-import { getThemeActionContentClassName } from '../../utils/themeTokens';
+import { useTheme } from '../../providers/ThemeProvider';
 
 const CHAT_RETENTION_OPTIONS = [
   {
@@ -78,11 +77,10 @@ function formatRetentionLabel(days: number | null, t: (key: string, options?: Re
   return t('conversations.retention.daysShort', { count: days });
 }
 
-export function ConversationsScreen() {
+function ConversationsScreenContent() {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
+  const { colors } = useTheme();
   const headerInset = useFloatingHeaderInset();
-  const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
   const insets = useSafeAreaInsets();
   const isFocused = useIsFocused();
   const router = useRouter();
@@ -275,11 +273,11 @@ export function ConversationsScreen() {
         className="active:opacity-80"
       >
         <Box className="flex-row items-start gap-3">
-          <ScreenIconTile iconName="history" tone="accent" className="mt-0.5" iconClassName="text-primary-500" />
+          <ScreenIconTile iconName="history" tone="accent" className="mt-0.5" />
 
           <Box className="min-w-0 flex-1">
             <Box className="flex-row items-center justify-between gap-3">
-              <Text className={composeTextRole('sectionTitle')}>
+              <Text colorRole="primary" className={composeTextRole('sectionTitle')}>
                 {t('conversations.retention.title')}
               </Text>
 
@@ -287,15 +285,15 @@ export function ConversationsScreen() {
                 <ScreenBadge tone="accent" size="micro">
                   {formatRetentionLabel(chatRetentionDays, t)}
                 </ScreenBadge>
-                <MaterialSymbols
+                <MaterialSymbols colorRole="tertiary"
                   name={isRetentionExpanded ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
                   size="lg"
-                  className="text-typography-500 dark:text-typography-400"
+                  className=" "
                 />
               </Box>
             </Box>
 
-            <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400">
+            <Text colorRole="tertiary" className="mt-1 text-sm  ">
               {t(activeRetentionOption.descriptionKey)}
             </Text>
           </Box>
@@ -303,8 +301,8 @@ export function ConversationsScreen() {
       </Pressable>
 
       {isRetentionExpanded ? (
-        <Box className={`mt-3 gap-2 border-t pt-3 ${appearance.classNames.dividerClassName}`}>
-          <Text className="text-sm text-typography-500 dark:text-typography-400">
+        <Box className="mt-3 gap-2 border-t pt-3" style={{ borderColor: colors.divider }}>
+          <Text colorRole="tertiary" className="text-sm  ">
             {t('conversations.retention.description')}
           </Text>
 
@@ -323,16 +321,14 @@ export function ConversationsScreen() {
                 disabled={isGenerationBusy}
                 variant="inset"
                 padding="compact"
-                className={isActive ? appearance.classNames.selectedInsetCardClassName : ''}
+                tone={isActive ? 'accent' : 'default'}
               >
                 <Box className="flex-row items-start justify-between gap-3">
                   <Box className="min-w-0 flex-1">
-                    <Text className={`text-sm font-semibold ${isActive
-                      ? 'text-primary-600 dark:text-primary-400'
-                      : 'text-typography-900 dark:text-typography-100'}`}>
+                    <Text colorRole={isActive ? 'accent' : 'primary'} className="text-sm font-semibold">
                       {t(option.labelKey)}
                     </Text>
-                    <Text className="mt-1 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="mt-1 text-xs leading-5  ">
                       {t(option.descriptionKey)}
                     </Text>
                   </Box>
@@ -353,7 +349,7 @@ export function ConversationsScreen() {
     const isActive = activeThreadId === item.id;
 
     return (
-      <ScreenCard decorative="tint" padding="compact">
+      <ScreenCard padding="compact">
         <Box className="flex-row items-start justify-between gap-3">
           <Pressable
             testID={`conversation-row-${item.id}`}
@@ -367,7 +363,7 @@ export function ConversationsScreen() {
             className={`flex-1 ${isGenerationBusy ? 'opacity-55' : 'active:opacity-80'}`}
           >
             <Box className="flex-row items-center gap-2">
-              <Text
+              <Text colorRole="primary"
                 numberOfLines={1}
                 className={composeTextRole('sectionTitle', 'flex-1')}
               >
@@ -380,16 +376,16 @@ export function ConversationsScreen() {
               ) : null}
             </Box>
 
-            <Text className={composeTextRole('caption', 'mt-1.5')}>
+            <Text colorRole="tertiary" className={composeTextRole('caption', 'mt-1.5')}>
               {getConversationModelLabel(item.modelId)} • {t('chat.messageCount', { count: item.messageCount })} • {formatConversationUpdatedAt(item.updatedAt)}
             </Text>
 
             {item.lastMessagePreview ? (
-              <Text numberOfLines={2} className={composeTextRole('body', 'mt-2')}>
+              <Text colorRole="primary" numberOfLines={2} className={composeTextRole('body', 'mt-2')}>
                 {item.lastMessagePreview}
               </Text>
             ) : (
-              <Text className={composeTextRole('bodyMuted', 'mt-2')}>
+              <Text colorRole="secondary" className={composeTextRole('bodyMuted', 'mt-2')}>
                 {t('conversations.noMessagesYet')}
               </Text>
             )}
@@ -426,13 +422,14 @@ export function ConversationsScreen() {
   }, [activeThreadId, handleDeleteConversation, handleOpenConversation, isGenerationBusy, t]);
 
   return (
-    <ScreenRoot>
+    <>
       <ScreenAndroidContentBlurTarget
         blurTargetRef={contentBlurTargetRef}
         style={{ flex: 1 }}
         testID="conversations-content-blur-target"
       >
         <HeaderBar
+          testID="conversations-header"
           title={t('conversations.title')}
           subtitle={t('conversations.subtitle')}
           onBack={isGenerationBusy ? undefined : handleBack}
@@ -447,8 +444,8 @@ export function ConversationsScreen() {
               size="lg"
               className="shrink-0"
             >
-              <MaterialSymbols name="edit-square" size="sm" className={primaryActionContentClassName} />
-              <Text className={`text-sm font-semibold ${primaryActionContentClassName}`}>
+              <MaterialSymbols name="edit-square" size="sm" colorRole="onAccent" />
+              <Text colorRole="onAccent" className="text-sm font-semibold">
                 {t('conversations.newChat')}
               </Text>
             </ScreenActionPill>
@@ -468,7 +465,7 @@ export function ConversationsScreen() {
               placeholder={t('conversations.searchPlaceholder')}
               value={searchQuery}
               onChangeText={setSearchQuery}
-              leadingAccessory={<MaterialSymbols name="search" size="sm" className="text-typography-500 dark:text-typography-400" />}
+              leadingAccessory={<MaterialSymbols colorRole="tertiary" name="search" size="sm" className=" " />}
               trailingAccessory={searchQuery.length > 0 ? (
                 <ScreenIconButton
                   testID="clear-conversation-search"
@@ -479,7 +476,7 @@ export function ConversationsScreen() {
                   iconName="close"
                   size="compact"
                   className="border-0 bg-transparent dark:bg-transparent"
-                  iconClassName="text-typography-400"
+                  iconColorRole="tertiary"
                 />
               ) : null}
             />
@@ -499,21 +496,20 @@ export function ConversationsScreen() {
               </Box>
             ) : (
               <Box className="flex-1 pt-4">
-                <ScreenCard padding="compact" decorative="matte">
+                <ScreenCard padding="compact">
                   <ScreenIconTile
                     iconName={conversationIndex.length === 0 ? 'forum' : 'search'}
                     tone="accent"
                     size="lg"
                     iconSize="xl"
                     className="h-10 w-10 rounded-xl"
-                    iconClassName="text-primary-500"
                   />
 
-                  <Text className={composeTextRole('screenTitle', 'mt-3')}>
+                  <Text colorRole="primary" className={composeTextRole('screenTitle', 'mt-3')}>
                     {conversationIndex.length === 0 ? t('conversations.emptyTitle') : t('conversations.emptySearchTitle')}
                   </Text>
 
-                  <Text className={composeTextRole('bodyMuted', 'mt-2')}>
+                  <Text colorRole="secondary" className={composeTextRole('bodyMuted', 'mt-2')}>
                     {conversationIndex.length === 0
                       ? t('conversations.emptyDescription')
                       : t('conversations.emptySearchDescription')}
@@ -538,10 +534,10 @@ export function ConversationsScreen() {
             <ScreenSheet androidBlurTargetRef={contentBlurTargetRef}>
               <Box className="mb-5 flex-row items-start justify-between gap-4">
                 <Box className="min-w-0 flex-1">
-                  <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+                  <Text colorRole="primary" className="text-lg font-semibold  ">
                     {t('conversations.renameTitle')}
                   </Text>
-                  <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                  <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                     {editingConversation?.title ?? t('conversations.renameLabel')}
                   </Text>
                 </Box>
@@ -581,6 +577,14 @@ export function ConversationsScreen() {
           </ScreenModalOverlay>
         </KeyboardAvoidingView>
       </Modal>
+    </>
+  );
+}
+
+export function ConversationsScreen() {
+  return (
+    <ScreenRoot>
+      <ConversationsScreenContent />
     </ScreenRoot>
   );
 }

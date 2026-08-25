@@ -10,18 +10,17 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 import { useMotionPreferences } from '../../hooks/useDeviceMetrics';
-import { useScreenAppearance } from './ScreenShell';
+import { useTheme } from '../../providers/ThemeProvider';
 
 const AnimatedView = Animated.createAnimatedComponent(View);
 
 export function ThinkingPulse({ reduceMotion = false }: { reduceMotion?: boolean }) {
   const motion = useMotionPreferences();
-  const appearance = useScreenAppearance();
+  const { colors } = useTheme();
   const progress = useSharedValue(0);
   const shouldRenderStatic = reduceMotion || motion.motionPreset === 'minimal';
-  const haloClassName = appearance.surfaceKind === 'glass'
-    ? 'absolute h-8 w-8 rounded-full bg-primary-500/10 dark:bg-primary-500/12'
-    : `absolute h-8 w-8 rounded-full ${appearance.classNames.toneClassNameByTone.accent.iconTileClassName}`;
+  const haloClassName = 'absolute h-8 w-8 rounded-full';
+  const haloPaintStyle = { backgroundColor: colors.thinkingPulseHalo };
 
   useEffect(() => {
     if (shouldRenderStatic) {
@@ -99,7 +98,7 @@ export function ThinkingPulse({ reduceMotion = false }: { reduceMotion?: boolean
   if (shouldRenderStatic) {
     return (
       <View className="relative h-8 w-8 items-center justify-center">
-        <View className={haloClassName} />
+        <View testID="thinking-pulse-halo" className={haloClassName} style={haloPaintStyle} />
         <View className="flex-row items-center justify-center gap-1">
           <View className="h-1.5 w-1.5 rounded-full bg-primary-500" />
           <View className="h-1.5 w-1.5 rounded-full bg-primary-500 opacity-80" />
@@ -112,8 +111,9 @@ export function ThinkingPulse({ reduceMotion = false }: { reduceMotion?: boolean
   return (
     <View className="relative h-8 w-8 items-center justify-center">
       <AnimatedView
+        testID="thinking-pulse-halo"
         className={haloClassName}
-        style={haloStyle}
+        style={[haloPaintStyle, haloStyle]}
       />
 
       <View className="flex-row items-center justify-center gap-1">

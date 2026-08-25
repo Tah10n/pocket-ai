@@ -14,6 +14,7 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { performanceMonitor, type PerformanceEvent } from '@/services/PerformanceMonitor';
 import { buildPerformanceExportJson, buildTraceFilename, dumpTraceToLogcat, getUtf8ByteLength } from '@/services/PerformanceExport';
+import type { SemanticForegroundRole } from '@/design-system/themes/foreground';
 
 const TIMING_GOOD_THRESHOLD_MS = 250;
 const TIMING_WARN_THRESHOLD_MS = 1000;
@@ -64,20 +65,20 @@ function getTimingTone(durationMs: number | undefined): TimingTone {
   return 'bad';
 }
 
-function getTimingToneClassName(tone: TimingTone): string {
+function getTimingToneColorRole(tone: TimingTone): SemanticForegroundRole {
   if (tone === 'good') {
-    return 'text-success-700 dark:text-success-300';
+    return 'success';
   }
 
   if (tone === 'warn') {
-    return 'text-warning-700 dark:text-warning-300';
+    return 'warning';
   }
 
   if (tone === 'bad') {
-    return 'text-error-700 dark:text-error-300';
+    return 'danger';
   }
 
-  return 'text-typography-900 dark:text-typography-100';
+  return 'primary';
 }
 
 function getEventDisplayValue(event: PerformanceEvent): { value: string | null; tone: TimingTone } {
@@ -321,7 +322,7 @@ export function PerformanceScreen() {
         <ScreenContent style={{ paddingTop: 18 }} includeBottomSafeArea>
           <ScreenStack gap="loose">
             <ScreenCard>
-              <Text className="text-sm text-typography-600 dark:text-typography-300">
+              <Text colorRole="secondary" className="text-sm  ">
                 {t('performance.summary', {
                   enabled: snapshot.enabled ? t('performance.enabled') : t('performance.disabled'),
                   events: snapshot.events.length,
@@ -329,10 +330,10 @@ export function PerformanceScreen() {
               </Text>
 
               <Box className="mt-4">
-                <Text className="text-sm font-semibold text-typography-800 dark:text-typography-100">
+                <Text colorRole="primary" className="text-sm font-semibold  ">
                   {t('performance.instrumentationToggleLabel')}
                 </Text>
-                <Text className="mt-1 text-sm text-typography-600 dark:text-typography-300">
+                <Text colorRole="secondary" className="mt-1 text-sm  ">
                   {t('performance.instrumentationToggleDescription')}
                 </Text>
               </Box>
@@ -382,7 +383,7 @@ export function PerformanceScreen() {
               <ScreenStack className="mt-2">
                 {counters.length === 0 ? (
                   <ScreenCard padding="compact">
-                    <Text className="text-sm text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="text-sm  ">
                       {t('performance.emptyCounters')}
                     </Text>
                   </ScreenCard>
@@ -390,8 +391,8 @@ export function PerformanceScreen() {
                   counters.map(([name, value]) => (
                     <ScreenCard key={name} padding="compact">
                       <Box className="flex-row items-center justify-between gap-3">
-                        <Text className="flex-1 text-sm text-typography-700 dark:text-typography-200">{name}</Text>
-                        <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">{value}</Text>
+                        <Text colorRole="secondary" className="flex-1 text-sm  ">{name}</Text>
+                        <Text colorRole="primary" className="text-sm font-semibold  ">{value}</Text>
                       </Box>
                     </ScreenCard>
                   ))
@@ -403,17 +404,17 @@ export function PerformanceScreen() {
               <ScreenSectionLabel>{t('performance.spans')}</ScreenSectionLabel>
               <ScreenStack className="mt-2">
                 <ScreenCard padding="compact" variant="inset">
-                  <Text className="text-xs text-typography-500 dark:text-typography-400">
+                  <Text colorRole="tertiary" className="text-xs  ">
                     {t('performance.timingLegendLabel')}
                   </Text>
                   <Box className="mt-2 flex-row flex-wrap gap-3">
-                    <Text className="text-xs font-semibold text-success-700 dark:text-success-300">
+                    <Text colorRole="success" className="text-xs font-semibold  ">
                       {t('performance.timingLegendGood', { value: goodThresholdLabel })}
                     </Text>
-                    <Text className="text-xs font-semibold text-warning-700 dark:text-warning-300">
+                    <Text colorRole="warning" className="text-xs font-semibold  ">
                       {t('performance.timingLegendWarn', { value: warnThresholdLabel })}
                     </Text>
-                    <Text className="text-xs font-semibold text-error-700 dark:text-error-300">
+                    <Text colorRole="danger" className="text-xs font-semibold  ">
                       {t('performance.timingLegendBad', { value: warnThresholdLabel })}
                     </Text>
                   </Box>
@@ -421,7 +422,7 @@ export function PerformanceScreen() {
 
                 {spanAggregates.length === 0 ? (
                   <ScreenCard padding="compact">
-                    <Text className="text-sm text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="text-sm  ">
                       {t('performance.emptySpans')}
                     </Text>
                   </ScreenCard>
@@ -429,28 +430,29 @@ export function PerformanceScreen() {
                   spanAggregates.map((spanAggregate) => (
                     <ScreenCard key={spanAggregate.name} padding="compact">
                       <Box className="flex-row items-center justify-between gap-3">
-                        <Text className="flex-1 text-sm text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="flex-1 text-sm  ">
                           {spanAggregate.name}
                         </Text>
                         <Box className="flex-row items-baseline gap-1">
-                          <Text className="text-xs text-typography-500 dark:text-typography-400">
+                          <Text colorRole="tertiary" className="text-xs  ">
                             {t('performance.spanMetricP95')}
                           </Text>
                           <Text
-                            className={`text-sm font-semibold ${getTimingToneClassName(getTimingTone(spanAggregate.p95Ms))}`}
+                            colorRole={getTimingToneColorRole(getTimingTone(spanAggregate.p95Ms))}
+                            className="text-sm font-semibold"
                           >
                             {formatDuration(spanAggregate.p95Ms) ?? '-'}
                           </Text>
                         </Box>
                       </Box>
                       <Box className="mt-1 flex-row flex-wrap gap-2">
-                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="text-xs  ">
                           {t('performance.spanMetricCount', { count: spanAggregate.count })}
                         </Text>
-                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="text-xs  ">
                           {t('performance.spanMetricAvg', { value: formatDuration(spanAggregate.avgMs) ?? '-' })}
                         </Text>
-                        <Text className="text-xs text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="text-xs  ">
                           {t('performance.spanMetricMax', { value: formatDuration(spanAggregate.maxMs) ?? '-' })}
                         </Text>
                       </Box>
@@ -465,7 +467,7 @@ export function PerformanceScreen() {
               <ScreenStack className="mt-2">
                 {events.length === 0 ? (
                   <ScreenCard padding="compact">
-                    <Text className="text-sm text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="text-sm  ">
                       {t('performance.emptyEvents')}
                     </Text>
                   </ScreenCard>
@@ -476,15 +478,15 @@ export function PerformanceScreen() {
                     return (
                       <ScreenCard key={`${event.type}-${event.name}-${index}`} padding="compact">
                         <Box className="flex-row items-center justify-between gap-3">
-                          <Text className="flex-1 text-sm text-typography-700 dark:text-typography-200">
+                          <Text colorRole="secondary" className="flex-1 text-sm  ">
                             {event.name}
                           </Text>
                           {value ? (
-                            <Text className={`text-sm font-semibold ${getTimingToneClassName(tone)}`}>
+                            <Text colorRole={getTimingToneColorRole(tone)} className="text-sm font-semibold">
                               {value}
                             </Text>
                           ) : (
-                            <Text className="text-xs text-typography-500 dark:text-typography-400">
+                            <Text colorRole="tertiary" className="text-xs  ">
                               {event.type}
                             </Text>
                           )}

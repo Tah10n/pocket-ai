@@ -131,8 +131,7 @@ describe('ChatHeader', () => {
     expect(getByTestId(`screen-chip-${presetLabel}`).props.className).not.toContain('flex-1');
     expect(getByTestId('chat-header-model-selector').props.className).not.toContain('flex-1');
     expect(getByTestId(`screen-chip-${presetLabel}`).props.textClassName).toBeUndefined();
-    expect(getByTestId('chat-header-model-selector').props.textClassName).not.toContain('flex-initial');
-    expect(getByTestId('chat-header-model-selector').props.textClassName).not.toContain('flex-1');
+    expect(getByTestId('chat-header-model-selector').props.textClassName).toBeUndefined();
   });
 
   it('supports a selectable preview state for the model chip without forcing a tap handler', () => {
@@ -160,14 +159,14 @@ describe('ChatHeader', () => {
 
     expect(getByTestId('chat-header-model-selector').props.tone).toBe('warning');
     expect(getByTestId('chat-header-model-selector').props.leadingIconName).toBe('warning');
-    expect(getByTestId('chat-header-model-selector').props.textClassName).toContain('text-warning-700');
+    expect(getByTestId('chat-header-model-selector').props.textClassName).toBeUndefined();
   });
 
   it.each([
-    ['neutral', 'text-typography-500'],
-    ['accent', 'text-primary-600'],
-    ['warning', 'text-warning-700'],
-  ] as const)('renders %s status styling', (tone, expectedClassName) => {
+    ['neutral', 'tertiary'],
+    ['accent', 'statusAccent'],
+    ['warning', 'statusWarning'],
+  ] as const)('renders %s status styling', (tone, expectedColorRole) => {
     const { getByText } = render(
       <ChatHeader
         title="Hi"
@@ -176,7 +175,7 @@ describe('ChatHeader', () => {
       />,
     );
 
-    expect(getByText('Ready').props.className).toContain(expectedClassName);
+    expect(getByText('Ready').props.colorRole).toBe(expectedColorRole);
   });
 
   it('shows status without pill row when only a status is provided', () => {

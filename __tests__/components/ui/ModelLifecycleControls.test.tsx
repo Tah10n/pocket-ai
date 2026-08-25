@@ -1,9 +1,11 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 import { ModelDownloadProgress, ModelLifecycleActionRow, ModelProjectorStatus } from '../../../src/components/ui/ModelLifecycleControls';
 import { useDownloadStore } from '../../../src/store/downloadStore';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../../src/types/models';
 import type { ProjectorArtifact } from '../../../src/types/multimodal';
+import { resolveTheme } from '../../../src/design-system/themes/resolver';
 
 jest.mock('../../../src/components/ui/box', () => {
   const mockReact = jest.requireActual('react');
@@ -70,14 +72,19 @@ describe('ModelDownloadProgress', () => {
     useDownloadStore.setState({ queue: [buildModel({ downloadProgress: 0.42 })], activeDownloadId: model.id });
 
     const { getByTestId, getByText } = render(<ModelDownloadProgress model={model} />);
+    const theme = resolveTheme('default', 'light');
 
     expect(getByTestId('model-download-progress-org/model').props.className).toContain('rounded-2xl');
-    expect(getByTestId('model-download-progress-org/model').props.className).toContain('bg-primary-500/10');
+    expect(StyleSheet.flatten(getByTestId('model-download-progress-org/model').props.style).backgroundColor).toBe(
+      theme.materials.control.inline.accent?.accessibilityFallback.fill.color,
+    );
     expect(getByText('models.downloading')).toBeTruthy();
     expect(getByText('42%')).toBeTruthy();
     expect(getByTestId('model-download-progress-track-org/model').props.className).toContain('h-4');
-    expect(getByTestId('model-download-progress-fill-org/model').props.className).toContain('bg-primary-500');
-    expect(getByTestId('model-download-progress-fill-org/model').props.style).toEqual({ width: '42%' });
+    expect(getByTestId('model-download-progress-fill-org/model').props.style).toEqual({
+      width: '42%',
+      backgroundColor: theme.colors.progressFillByTone.primary,
+    });
   });
 
   it('uses warning styling for paused progress', () => {
@@ -87,9 +94,13 @@ describe('ModelDownloadProgress', () => {
 
     expect(getByText('models.paused')).toBeTruthy();
     expect(getByText('24%')).toBeTruthy();
-    expect(getByTestId('model-download-progress-org/model').props.className).toContain('bg-background-warning');
-    expect(getByTestId('model-download-progress-fill-org/model').props.className).toContain('bg-primary-500');
-    expect(getByTestId('model-download-progress-fill-org/model').props.className).not.toContain('bg-warning-500');
+    const theme = resolveTheme('default', 'light');
+    expect(StyleSheet.flatten(getByTestId('model-download-progress-org/model').props.style).backgroundColor).toBe(
+      theme.materials.control.inline.warning?.accessibilityFallback.fill.color,
+    );
+    expect(getByTestId('model-download-progress-fill-org/model').props.style).toMatchObject({
+      backgroundColor: theme.colors.progressFillByTone.primary,
+    });
   });
 
   it('renders failed downloads as visible retry state', () => {
@@ -99,7 +110,9 @@ describe('ModelDownloadProgress', () => {
 
     expect(getByText('models.downloadFailed')).toBeTruthy();
     expect(getByText('24%')).toBeTruthy();
-    expect(getByTestId('model-download-progress-org/model').props.className).toContain('bg-error-500/10');
+    expect(StyleSheet.flatten(getByTestId('model-download-progress-org/model').props.style).backgroundColor).toBe(
+      resolveTheme('default', 'light').materials.control.inline.error?.accessibilityFallback.fill.color,
+    );
   });
 
   it.each([
@@ -187,7 +200,10 @@ describe('ModelDownloadProgress', () => {
 
     expect(getByTestId('model-download-progress-org/model').props.className).toContain('px-2.5');
     expect(getByTestId('model-download-progress-track-org/model').props.className).toContain('h-3.5');
-    expect(getByTestId('model-download-progress-fill-org/model').props.style).toEqual({ width: '33%' });
+    expect(getByTestId('model-download-progress-fill-org/model').props.style).toMatchObject({
+      width: '33%',
+      backgroundColor: resolveTheme('default', 'light').colors.progressFillByTone.primary,
+    });
   });
 });
 

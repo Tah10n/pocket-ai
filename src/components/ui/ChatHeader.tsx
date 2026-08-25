@@ -10,8 +10,11 @@ import {
   ScreenChip,
   ScreenHeaderShell,
 } from './ScreenShell';
+import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
+import type { SemanticForegroundRole } from '../../design-system/themes/foreground';
 
 interface ChatHeaderProps {
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   title: string;
   presetLabel?: string;
   modelLabel?: string;
@@ -41,16 +44,16 @@ function HeaderStatus({
     : tone === 'warning'
       ? 'bg-warning-500'
       : 'bg-typography-400 dark:bg-typography-500';
-  const textClassName = tone === 'accent'
-    ? 'text-primary-600 dark:text-primary-300'
+  const textColorRole: SemanticForegroundRole = tone === 'accent'
+    ? 'statusAccent'
     : tone === 'warning'
-      ? 'text-warning-700 dark:text-warning-200'
-      : 'text-typography-500 dark:text-typography-400';
+      ? 'statusWarning'
+      : 'tertiary';
 
   return (
     <Box className="flex-row items-center gap-1">
       <Box className={`h-1.5 w-1.5 rounded-full ${dotClassName}`} />
-      <Text numberOfLines={1} className={`${composeTextRole('caption')} ${textClassName}`}>
+      <Text colorRole={textColorRole} numberOfLines={1} className={composeTextRole('caption')}>
         {label}
       </Text>
     </Box>
@@ -58,6 +61,7 @@ function HeaderStatus({
 }
 
 export const ChatHeader = ({
+  androidContentBlurTargetRef,
   title,
   presetLabel,
   modelLabel,
@@ -76,13 +80,10 @@ export const ChatHeader = ({
 }: ChatHeaderProps) => {
   const { t } = useTranslation();
   const isModelUnavailable = modelLabel === t('chat.modelUnavailable');
-  const modelTextClassName = isModelUnavailable
-    ? 'text-warning-700 dark:text-warning-200'
-    : 'text-typography-500 dark:text-typography-400';
   const shouldShowPills = Boolean(presetLabel || modelLabel);
 
   return (
-    <ScreenHeaderShell>
+    <ScreenHeaderShell androidBlurTargetRef={androidContentBlurTargetRef}>
       <Box className={screenChromeTokens.headerContentVerticalPaddingCompactClassName}>
         <Box className={`flex-row items-start ${screenChromeTokens.headerContentGapClassName} ${screenChromeTokens.headerHorizontalPaddingClassName}`}>
           <HeaderBackButton
@@ -91,7 +92,7 @@ export const ChatHeader = ({
           />
 
           <Box className="min-w-0 flex-1">
-            <Text
+            <Text colorRole="primary"
               testID="chat-header-title"
               numberOfLines={2}
               className={composeTextRole('screenTitle')}
@@ -152,7 +153,6 @@ export const ChatHeader = ({
                     disabled={!canOpenModelSelector}
                     trailingIconName={modelSelectable || Boolean(onOpenModelSelector) ? 'keyboard-arrow-down' : undefined}
                     className="min-w-0"
-                    textClassName={modelTextClassName}
                   />
                 ) : null}
               </Box>

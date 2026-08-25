@@ -2,6 +2,7 @@ import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 
 const mockStackProps = jest.fn();
+const mockStackScreenProps = jest.fn();
 const mockBootstrapAppCritical = jest.fn();
 const mockBootstrapAppBackground = jest.fn();
 const mockScheduleModelCatalogCacheHydration = jest.fn();
@@ -12,6 +13,7 @@ const mockRetryPrivateStorageInitialization = jest.fn();
 const mockNotificationInitialize = jest.fn();
 const mockNotificationDispose = jest.fn();
 const mockStaticThemeResolvedModes = jest.fn();
+const mockRuntimeMaterialProviderMounts = jest.fn();
 const mockUseColorScheme = jest.fn(() => 'light');
 
 const blockedHealth = {
@@ -56,7 +58,10 @@ jest.mock('expo-router', () => {
     mockStackProps(props);
     return mockReact.createElement(View, { testID: 'root-stack' }, children);
   };
-  Stack.Screen = ({ name }: any) => mockReact.createElement(View, { testID: `stack-${name}` });
+  Stack.Screen = ({ name, ...props }: any) => {
+    mockStackScreenProps({ name, ...props });
+    return mockReact.createElement(View, { testID: `stack-${name}` });
+  };
   return { Stack };
 });
 
@@ -104,6 +109,17 @@ jest.mock('../../src/providers/ThemeProvider', () => {
       },
       navigationTheme: {},
     }),
+  };
+});
+
+jest.mock('../../src/design-system/materials/MaterialEnvironmentProvider', () => {
+  const mockReact = jest.requireActual('react');
+  const { View } = jest.requireActual('react-native');
+  return {
+    RuntimeMaterialEnvironmentProvider: ({ children }: any) => {
+      mockRuntimeMaterialProviderMounts();
+      return mockReact.createElement(View, { testID: 'runtime-material-environment' }, children);
+    },
   };
 });
 
@@ -201,7 +217,7 @@ describe('RootLayout storage recovery gate', () => {
   it('renders storage recovery and skips background bootstrap when critical storage is blocked', async () => {
     mockBootstrapAppCritical.mockResolvedValueOnce({ outcome: 'storage_blocked', storageHealth: blockedHealth });
 
-    const { findByTestId } = render(<RootLayout />);
+    const { findByTestId, queryByTestId } = render(<RootLayout />);
 
     expect(await findByTestId('storage-recovery-screen')).toBeTruthy();
     expect(await findByTestId('static-theme-light')).toBeTruthy();
@@ -209,6 +225,8 @@ describe('RootLayout storage recovery gate', () => {
     expect(mockBootstrapAppBackground).not.toHaveBeenCalled();
     expect(mockScheduleModelCatalogCacheHydration).not.toHaveBeenCalled();
     expect(mockNotificationInitialize).not.toHaveBeenCalled();
+    expect(queryByTestId('runtime-material-environment')).toBeNull();
+    expect(mockRuntimeMaterialProviderMounts).not.toHaveBeenCalled();
     expect(useBootstrapStore.getState().criticalOutcome).toBe('storage_blocked');
     expect(useBootstrapStore.getState().criticalStorageHealth).toEqual(expect.objectContaining({
       reason: 'encrypted_open_failed',
@@ -290,9 +308,27 @@ describe('RootLayout storage recovery gate', () => {
     const view = render(<RootLayout />);
     await view.findByTestId('root-stack');
     await waitFor(() => expect(mockNotificationInitialize).toHaveBeenCalledTimes(1));
+    expect(view.getByTestId('runtime-material-environment')).toBeTruthy();
+    expect(mockRuntimeMaterialProviderMounts).toHaveBeenCalledTimes(1);
 
     view.unmount();
 
     expect(mockNotificationDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses only the app-owned header on the modal route', async () => {
+    mockBootstrapAppCritical.mockResolvedValueOnce({ outcome: 'success' });
+
+    const view = render(<RootLayout />);
+    await view.findByTestId('root-stack');
+
+    const modalScreenProps = mockStackScreenProps.mock.calls
+      .map(([props]) => props)
+      .find((props) => props.name === 'modal');
+
+    expect(modalScreenProps?.options).toEqual(expect.objectContaining({
+      headerShown: false,
+      presentation: 'modal',
+    }));
   });
 });

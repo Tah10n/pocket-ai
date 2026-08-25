@@ -1,27 +1,39 @@
 import React from 'react';
 import { StyleSheet, View, TextInput, type TextInputProps, type ViewProps } from 'react-native';
 import { cssInterop } from 'nativewind';
+import { typographyColors } from '../../utils/themeTokens';
+import { Surface } from '../../design-system/materials/Surface';
+import type { MaterialRequest, MaterialShape } from '../../design-system/materials/contract';
 import { useTheme } from '../../providers/ThemeProvider';
-import { DEFAULT_THEME_ID, getThemeAppearance, typographyColors } from '../../utils/themeTokens';
 
 const BaseInput = cssInterop(View, { className: 'style' });
 const BaseInputField = cssInterop(TextInput, { className: 'style' });
 
 export interface InputProps extends ViewProps {
   className?: string;
+  material?: MaterialRequest | null;
+  shape?: MaterialShape;
 }
 
 export interface InputFieldProps extends TextInputProps {
   className?: string;
 }
 
-export function Input({ className = '', ...props }: InputProps) {
-  const theme = useTheme();
-  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
+export function Input({
+  className = '',
+  material = { role: 'content', variant: 'inset' },
+  shape = 'md',
+  ...props
+}: InputProps) {
+  if (material === null) {
+    return <BaseInput className={className} {...props} />;
+  }
 
   return (
-    <BaseInput
-      className={`${appearance.classNames.textFieldClassName} ${appearance.surfaceKind === 'glass' ? 'relative overflow-hidden' : ''} ${className}`.trim()}
+    <Surface
+      material={material}
+      shape={shape}
+      className={className}
       {...props}
     />
   );
@@ -34,13 +46,17 @@ export function InputField({
   style,
   ...props
 }: InputFieldProps) {
+  const { colors } = useTheme();
+
   return (
     <BaseInputField
       allowFontScaling={allowFontScaling}
-      placeholderTextColor={placeholderTextColor ?? typographyColors[400]}
+      placeholderTextColor={placeholderTextColor ?? colors.textTertiary ?? typographyColors[400]}
       underlineColorAndroid="transparent"
-      className={`min-h-11 bg-transparent py-0 text-base text-typography-900 dark:bg-transparent dark:text-typography-100 ${className}`.trim()}
-      style={style ? [styles.transparentField, style] : styles.transparentField}
+      className={`min-h-11 bg-transparent py-0 text-base dark:bg-transparent ${className}`.trim()}
+      style={style
+        ? [styles.transparentField, { color: colors.text }, style]
+        : [styles.transparentField, { color: colors.text }]}
       {...props}
     />
   );

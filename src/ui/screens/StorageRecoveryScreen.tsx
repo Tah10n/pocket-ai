@@ -117,7 +117,7 @@ export function StorageRecoveryScreen({
                                     <ScreenIconTile iconName="lock" tone="error" size="lg" iconSize={24} />
                                     <Box className="min-w-0 flex-1 gap-2">
                                         <Box className="flex-row flex-wrap items-center gap-2">
-                                            <Text textRole="eyebrow" className="text-error-600 dark:text-error-300">
+                                            <Text colorRole="danger" textRole="eyebrow" className=" ">
                                                 {t('storageRecovery.eyebrow')}
                                             </Text>
                                             <ScreenBadge tone="error">{statusLabel}</ScreenBadge>
@@ -137,7 +137,7 @@ export function StorageRecoveryScreen({
                                     className="rounded-lg border border-warning-200 bg-warning-50 p-3 dark:border-warning-700 dark:bg-warning-950"
                                     testID="storage-recovery-health-message"
                                 >
-                                    <Text textRole="bodyMuted" className="text-typography-700 dark:text-typography-200">
+                                    <Text textRole="bodyMuted" className=" ">
                                         {healthMessage}
                                     </Text>
                                 </Box>

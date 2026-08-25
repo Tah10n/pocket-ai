@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Note: This file is maintained automatically by Release Please based on Conventional Commits (PR titles).
 > Avoid editing it manually unless you are bootstrapping or fixing the release history.
 
+## [1.7.0](https://github.com/Tah10n/pocket-ai/compare/v1.6.3...v1.7.0) (2026-08-25)
+
+
+### Features
+
+* **android:** add native liquid glass surfaces ([#163](https://github.com/Tah10n/pocket-ai/issues/163)) ([ecd808a](https://github.com/Tah10n/pocket-ai/commit/ecd808a51ed90b668242773224608a10a280c13a))
+* **documents:** add local processing and session reuse ([#147](https://github.com/Tah10n/pocket-ai/issues/147)) ([95aa9c4](https://github.com/Tah10n/pocket-ai/commit/95aa9c4c355ba51fbb6c670889c3f540b1ed5220))
+* **ui:** make themes extensible and add native liquid glass ([#156](https://github.com/Tah10n/pocket-ai/issues/156)) ([c144e8c](https://github.com/Tah10n/pocket-ai/commit/c144e8c68a1a53c02f585c83a8137223475dfa3b))
+
 ## [1.6.3](https://github.com/Tah10n/pocket-ai/compare/v1.6.2...v1.6.3) (2026-08-06)
 
 

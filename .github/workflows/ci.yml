@@ -156,7 +156,7 @@ jobs:
         with:
           name: android-qa
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 1
           path: |
             artifacts/android-scenarios/**
             artifacts/bootstrap-logcat.txt
@@ -170,6 +170,6 @@ jobs:
         with:
           name: android-qa-apk
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
           path: android/app/build/outputs/apk/release/app-release.apk
 

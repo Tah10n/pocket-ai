@@ -145,7 +145,7 @@ describe('Android catalog QA CI configuration', () => {
     const hostedApk = extractWorkflowStep(hostedJob, 'Upload Android QA APK');
 
     expect(hostedDiagnostics).toContain('if: always()');
-    expect(hostedDiagnostics).toContain('retention-days: 3');
+    expect(hostedDiagnostics).toContain('retention-days: 1');
     expect(hostedDiagnostics).toContain('artifacts/android-scenarios/**');
     expect(hostedDiagnostics).toContain('artifacts/bootstrap-logcat.txt');
     expect(hostedDiagnostics).not.toContain('app-release.apk');
@@ -159,7 +159,7 @@ describe('Android catalog QA CI configuration', () => {
     );
     expect(hostedApk).toContain('name: android-qa-apk');
     expect(hostedApk).toContain('if-no-files-found: error');
-    expect(hostedApk).toContain('retention-days: 3');
+    expect(hostedApk).toContain('retention-days: 1');
     expect(hostedApk).toContain('android/app/build/outputs/apk/release/app-release.apk');
   });
 

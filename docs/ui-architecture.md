@@ -1,6 +1,6 @@
 # UI Architecture & Component Guide
 
-Last updated: 2026-04-29
+Last updated: 2026-08-16
 
 ## Purpose
 
@@ -152,43 +152,127 @@ Normal exceptions are developer-only logs, diagnostics, and intentional test-onl
 The shared visual system resolves from one semantic source of truth:
 
 - `src/utils/theme-contract.json` defines the semantic palette and motion bands.
-- `src/utils/themeTokens.ts` maps that contract into runtime theme colors, visual-theme appearance tokens, and React Navigation colors.
-- `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same palette and `themeId` decisions so tab chrome, status bars, and NativeWind surfaces stay aligned.
+- `src/design-system/themes/*.theme.ts` defines theme metadata, preview tokens, light/dark colors, semantic material recipes, and narrow layout presentation choices.
+- `src/design-system/themes/registry.ts` is the ordered source of theme ids and metadata; `ThemeId` is derived from the registered definitions.
+- `src/design-system/themes/resolver.ts` resolves one deeply immutable object containing colors, materials, component presentation, and React Navigation colors.
+- `src/providers/ThemeProvider.tsx`, `app/_layout.tsx`, and `app/(tabs)/_layout.tsx` consume the same resolved theme.
+- `src/utils/themeTokens.ts` remains a compatibility facade for stable foundation and layout tokens; it is not a visual-theme registry or appearance API.
 
-When you need a tinted surface or accent treatment, prefer semantic theme colors plus `withAlpha(...)` instead of introducing a new raw hex or `rgba(...)` value.
+Shared UI must request semantic roles instead of identifying a theme. Use `Surface` for dense content and controls, `EffectSurface` only for eligible chrome or overlays, and semantic foreground roles on `Text` and `MaterialSymbols`. Raw theme ids, palette literals, blur values, and renderer selection do not belong in generic components.
 
 ### Theme ID Architecture
 
 Color mode and visual style are intentionally separate:
 
-- `theme` remains the persisted light/dark/system mode and is the only value passed to NativeWind color-scheme resolution.
-- `themeId` is the persisted visual-theme identity. It selects the app-level appearance family, currently `default` or `glass`.
-- `ThemeProvider` resolves `{ theme, themeId, resolvedMode }` into `colors`, `appearance`, and `navigationTheme`.
-- `appearance` owns non-palette visual decisions such as shared surface classes, tone-aware icon tiles/badges/banners/progress, dividers, header/surface blur intensity, sheet/card/input translucency, segmented controls, message bubbles, glass highlight chrome, and tab-bar shadow/elevation.
-- Routed screens should start from `ScreenRoot` so the resolved runtime palette owns the page background instead of duplicating route-local `bg-background-*` classes.
-- Reusable tinted UI should use `ScreenCard`, `ScreenPressableCard`, `ScreenIconTile`, `ScreenBanner`, `ScreenBadge`, `ScreenActionPill`, `ProgressBar`, and `ValueSelectorRow` before adding route-local surface classes.
+- `theme` is the persisted light/dark/system mode and the only value passed to NativeWind color-scheme resolution.
+- `themeId` is the persisted visual-theme identity.
+- `ThemeProvider` resolves `{ theme, themeId, resolvedMode }` into one `resolvedTheme`; compatibility fields such as `colors` and `navigationTheme` reference that same result.
+- A theme definition owns semantic recipes and narrow component presentation such as attached versus floating tab chrome, attached versus overlay headers, inline versus capsule composers, and plain versus aurora background decoration.
+- Generic UI must not branch on `themeId` or a global solid/glass discriminator. A future registry theme must flow through text, buttons, cards, tabs, and chat without component edits.
+- Routed screens should start from `ScreenRoot`, which owns the resolved canvas, optional background decoration, floating-header inset, and Android sample-target boundary.
 
-Migration plan for new visual themes:
+Migration plan for a new visual theme:
 
-1. Add the theme id to `themeIds` and define its color overrides and `ThemeAppearance` branch in `src/utils/themeTokens.ts`.
-2. Persist and sanitize the id through `src/services/SettingsStore.ts` before exposing it in Settings.
-3. Route new shared chrome through `appearance.classNames` or `appearance.effects` instead of hard-coded `bg-background-*`, translucent accent surfaces, opacity, blur, shadow, or elevation values.
-4. Keep visual themes layout-compatible with `default`: do not change shared spacing, size, or radius tokens unless the feature explicitly calls for a layout variant.
-5. For glass-like themes, combine translucency with real `BlurView` backdrops, the shared `ScreenRoot` `BlurTargetView`, subtle borders, shadows, non-interactive background accents, and specular highlight chrome instead of only lowering surface opacity.
-6. Keep one-off route styles as documented exceptions only when a primitive cannot express the layout safely; status dots and solid active fills may stay route-local when they are not surfaces.
-7. Add tests for settings migration, provider resolution, layout-token parity, and any newly themed primitive before expanding the theme to more surfaces.
+1. Add a typed `*.theme.ts` definition and register it in `src/design-system/themes/registry.ts`; do not add a parallel id union or options array.
+2. Provide both color modes, semantic material recipes, preview metadata, and the required component presentation values.
+3. Persist and sanitize the id through `src/services/SettingsStore.ts` before exposing it in Settings.
+4. Keep shared layout compatible with `default`; use component presentation only when the layout itself must differ.
+5. Express foreground contrast through semantic color roles and surfaces through material requests. Do not add theme-name conditionals to components.
+6. Add registry/resolver, foreground, Settings, and representative primitive tests before expanding the theme to more screens.
 
-### Glass Surface Architecture
+### Material and Effect Architecture
 
-Glass themes distinguish chrome from inline content:
+Materials distinguish dense content from eligible live-effect chrome:
 
-- Chrome surfaces that float over other content may use `BlurView`: `ScreenHeaderShell`, `ScreenSheet`, floating `ScreenBanner`, `ScreenChromeBar`/chat composer, bottom tab chrome, and header/icon actions.
-- Large inline surfaces such as `ScreenCard` and `ScreenPressableCard` use the shared frosted backdrop plus a light tint and rim border. Smaller inline controls such as `ScreenIconTile`, badges, chips, text fields, segmented controls, and chat bubbles keep denser tinted fills to avoid excessive nested blur in dense lists.
-- Dark glass surfaces should read as liquid glass, not opaque slate: use clean `background-0` translucency, color-safe cyan/blue specular and refraction layers, and a dark contrast film; avoid white feathered stripes or hard dark fills for shared chrome.
-- The native implementation approximates CSS/SVG liquid-glass distortion with layered `BlurView`, translucent tint/contrast films, directional specular gradients, refraction bands, and a real inner rim; Expo/React Native does not provide CSS `backdrop-filter` or SVG `feDisplacementMap` for native views.
-- In `ScreenRoot`, decorative glass accents render as smooth gradient layers behind the scene. Android uses two `BlurTargetView`s: a background-only target for in-screen glass surfaces, and a scene target wrapping the real screen content for external chrome such as the floating tab-bar island. This lets the tab bar sample the screen behind it without making card-level blurs target an ancestor that contains themselves.
-- Android currently renders dense translucent fallback panels for shared glass surfaces; keep `ScreenRoot` blur-target wrappers isolated from inline surfaces unless native blur is explicitly re-enabled.
-- The bottom tab bar renders through `tabBarBackground`. On Android SDK 31+, the floating tab-bar island samples the active screen scene target with `BlurView`, so light and dark glass tab chrome blur the content behind them. While the target is pending or unavailable, it falls back to the dense matte island.
+- `src/design-system/materials/contract.ts` defines semantic roles, variants, tones, shapes, recipes, capability inputs, and the resolved renderer result.
+- `Surface` and `PressableSurface` render dense fills, rims, and shadows. Content cards, message rows, attachments, progress tracks, list rows, chips, badges, and text fields stay on this path and never mount live blur.
+- `EffectSurface` and `EffectPressableSurface` are the only live-effect renderers. They resolve the current recipe and environment, then render iOS Liquid Glass, the API 33+ Android renderer, `BlurView`, or a dense fallback without callers choosing a renderer.
+- `MaterialEnvironmentProvider` owns platform capabilities and Reduce Transparency. Unknown, reduced, missing, or unsupported capability states fail closed to a dense recipe.
+- iOS native Liquid Glass requires both runtime availability checks and allowed transparency. Actual semantic controls may opt into native interaction; decorative layers remain noninteractive, and disabled controls cannot advertise interaction.
+- Android API 33+ uses the local `pocket-liquid-glass` renderer when its native views resolve. The minSdk-safe host contains no API 33 graphics types; `RenderNode`, `RenderEffect`, and `RuntimeShader` are isolated in the guarded API-specific renderer.
+- Android SDK 31–32 retains target-backed `BlurView`; older, pending, detached, reduced-transparency, and runtime-failure states fail closed to the recipe's semantic dense paint.
+- `ScreenRoot` owns one API 33+ scene recording boundary containing the canvas color, background decoration, and routed content. Effect chrome excludes itself during capture; the external tab bar and transparent modal sheets consume the active focused scene.
+- `ScreenBackgroundDecoration` owns optional aurora paint. Material renderers may consume this visual context, but themes do not duplicate decoration trees in routes.
+- Raw `BlurView` and `GlassView` imports are restricted to `EffectSurface`; `BlurTargetView` is restricted to the screen target-ownership boundary.
+
+The bottom tab bar is ordinary semantic chrome. Its layout comes from `components.tabBar.presentation`, while `TabBarMaterialBackground` requests `chrome/tabBar` and lets the resolver choose native glass, Android target blur, legacy blur, or a dense fallback.
+
+#### Role and variant map
+
+| Request | Intended use | Live effect eligible |
+| --- | --- | --- |
+| `canvas/base` | Route canvas behind all content | No |
+| `content/raised`, `content/inset`, `content/list` | Cards, panels, rows, and dense list content | No |
+| `content/message*`, `content/composerMode` | Message bubbles, thought/attachment/error frames, and inline composer state | No |
+| `chrome/header`, `chrome/tabBar`, `chrome/composer`, `chrome/sheet` | Screen-level chrome whose background is outside its sampled content | Yes |
+| `control/inline`, `control/floating`, `control/selected` | Chips, buttons, selectors, and semantic controls | Only an explicitly effect-backed floating control |
+| `overlay/banner`, `overlay/popover`, `overlay/scrim` | Floating status or modal layers | Banner/popover only; scrims stay dense |
+
+Default-theme invariants are part of this contract. `default` keeps the established solid canvas, content density, frames, radii, spacing, and light/dark hierarchy; it must not acquire live effects merely because a generic renderer supports them. Theme-specific differences belong in recipes, foreground colors, decoration paint, or the narrow component-presentation fields. Shared components must not restore hard-coded default palette classes to compensate for a missing semantic token.
+
+#### Capability and fallback matrices
+
+The renderer resolves capability once from the environment and always fails closed:
+
+| iOS state | Result for a native-liquid preferred recipe |
+| --- | --- |
+| Reduce Transparency is `unknown` or `reduced` | Dense accessibility fallback |
+| Transparency allowed, Glass component and runtime API available | Native Liquid Glass |
+| Transparency allowed, native Glass unavailable, `BlurView` available | Recipe-declared iOS blur fallback |
+| Transparency allowed, neither renderer available | Dense unsupported fallback |
+
+Reduce Transparency starts as `unknown`, is queried on provider mount, and is updated by the accessibility subscription. Unknown is never treated as permission to mount a translucent renderer. Native glass layers are noninteractive by default; only a real enabled semantic control may request native interaction.
+
+| Android state | Result for a glass effect recipe |
+| --- | --- |
+| SDK missing, invalid, non-integer, or below 31 | Dense unsupported fallback |
+| SDK 31–32 with a ready external sample target | Target-backed Android blur |
+| SDK 33+ with native views and a recorded focused scene | Cropped native refraction and blur |
+| Native scene pending, software canvas, or bounded render failure | Recipe-owned semantic fill and rim |
+| Reduce Transparency is `unknown` or `reduced` | Dense accessibility fallback |
+
+On API 33+, each glass surface records only its bounds expanded by the blur/refraction margin, clamped to the provider. It never performs bitmap readback or creates a full-provider effected layer per surface. Provider attach/switch and window-focus changes reset transient failures; draw retries are bounded before the surface remains on its semantic fallback. On SDK 31–32, the existing target readiness and nested-boundary rules still prevent self/ancestor blur cycles.
+
+#### Performance and testing rules
+
+Chat bubbles, attachments, thought panels, progress tracks, list rows, thumbnails, and other repeated content must remain dense. They may use theme-owned static paint and existing lightweight animations, but must not add `MaterialEnvironmentProvider` consumers, target subscriptions, `BlurView`, or `GlassView` per item. Effect recipes and target ownership are resolved at screen/chrome boundaries.
+
+Every theme or material change should cover:
+
+1. Registry derivation, persistence sanitization, deep immutability, and a synthetic future-theme resolver case.
+2. Light/dark semantic paint and foreground contrast, including primary/success/error actions and user messages.
+3. iOS native → blur → dense resolution, Reduce Transparency unknown/reduced transitions, and disabled/noninteractive controls.
+4. Android SDK parsing, API 33 class isolation, full-scene ownership, crop bounds, semantic fallback, bounded recovery, target readiness, and self-capture exclusion.
+5. Representative dense content and chat tests proving no live-effect imports or renderers enter hot paths.
+6. Settings selector behavior with enough synthetic entries to force the scalable picker layout.
+
+Visual QA is a separate evidence layer. Review `default` and every added theme in light and dark on Home, Chat, Models, Settings, a routed detail screen, a sheet, and the tab bar. Check selected/disabled controls, long localized copy, message attachments/thought/error states, Reduce Transparency, and Android target-pending fallback. Android screenshots do not prove iOS Liquid Glass; record iOS simulator/device evidence separately.
+
+#### Minimal add-theme shape
+
+```ts
+const lightColors = createMyThemeColors('light');
+const darkColors = createMyThemeColors('dark');
+
+export const paperTheme = {
+  id: 'paper',
+  labelKey: 'settings.themeStylePaper',
+  descriptionKey: 'settings.themeStylePaperDescription',
+  preview: { canvas: lightColors.background, surface: lightColors.surface, accent: lightColors.primary, materialHint: 'solid' },
+  modes: {
+    light: { colors: lightColors, materials: createMyMaterialRecipes(lightColors, 'light') },
+    dark: { colors: darkColors, materials: createMyMaterialRecipes(darkColors, 'dark') },
+  },
+  components: {
+    screen: { backgroundDecoration: 'plain' },
+    tabBar: { presentation: 'attached' },
+    header: { presentation: 'attached' },
+    chat: { composerPresentation: 'inline', userBubbleTone: 'primary' },
+  },
+} as const satisfies ThemeDefinition<'paper'>;
+```
+
+Register the definition once in `themes/registry.ts`; the derived `ThemeId`, Settings metadata, persistence validator, and resolver then include it without parallel unions or component branches. Add both locale keys and all required colors/material variants before registration.
 
 ## Screen Chrome Contract
 

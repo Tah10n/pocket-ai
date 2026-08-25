@@ -2,6 +2,8 @@ import React from 'react';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { cssInterop } from 'nativewind';
 import { iconSizePx, type SemanticIconSize } from '../../utils/themeTokens';
+import { useTheme } from '../../providers/ThemeProvider';
+import { resolveThemeForeground, type SemanticForegroundRole } from '../../design-system/themes/foreground';
 
 export type MaterialSymbolName = React.ComponentProps<typeof MaterialIcons>['name'];
 
@@ -20,13 +22,14 @@ export interface MaterialSymbolsProps {
   size?: number | SemanticIconSize;
   className?: string;
   color?: string;
+  colorRole?: SemanticForegroundRole;
 }
 
 /**
- * Thin wrapper around @expo/vector-icons MaterialIcons that accepts
- * NativeWind className for colour (e.g. "text-primary-500").
+ * Thin wrapper around MaterialIcons with semantic theme-aware foreground roles.
  */
-export function MaterialSymbols({ name, size = 'md', className, color }: MaterialSymbolsProps) {
+export function MaterialSymbols({ name, size = 'md', className, color, colorRole }: MaterialSymbolsProps) {
+  const { colors } = useTheme();
   const resolvedSize = typeof size === 'number'
     ? size
     : iconSizePx[size];
@@ -36,7 +39,7 @@ export function MaterialSymbols({ name, size = 'md', className, color }: Materia
       name={name}
       size={resolvedSize}
       className={className}
-      color={color}
+      color={color ?? (colorRole ? resolveThemeForeground(colors, colorRole) : undefined)}
     />
   );
 }

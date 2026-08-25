@@ -38,7 +38,7 @@ import {
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { MaterialSymbols } from '@/components/ui/MaterialSymbols';
 import { ProgressBar } from '@/components/ui/ProgressBar';
-import { ScreenAndroidContentBlurTarget, ScreenCard, ScreenIconTile, ScreenRoot, ScreenSurface, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenAndroidContentBlurTarget, ScreenCard, ScreenIconTile, ScreenRoot, ScreenSurface } from '@/components/ui/ScreenShell';
 import { useTranslation } from 'react-i18next';
 import { PresetSelectorSheet } from '@/components/ui/PresetSelectorSheet';
 import { resolvePresetSnapshot, useChatSession } from '../../hooks/useChatSession';
@@ -78,11 +78,12 @@ import {
     subscribeSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
-import { getThemeActionContentClassName, screenLayoutMetrics } from '../../utils/themeTokens';
+import { screenLayoutMetrics } from '../../utils/themeTokens';
 import { handleModelLoadMemoryPolicyError } from '../../utils/modelLoadMemoryPolicyPrompt';
 import { resolveEffectiveActiveVariantNativeSupport } from '../../utils/modelCapabilities';
 import { isMultimodalReadinessReusableForModel } from '../../utils/multimodalReadiness';
 import type { LoadModelOptions } from '../../services/LLMEngineService';
+import { useTheme } from '../../providers/ThemeProvider';
 import { getReadinessStatusForProjectorLifecycle, projectorArtifactService } from '../../services/ProjectorArtifactService';
 import {
     armAndroidQaGenerationGate,
@@ -489,6 +490,31 @@ export function getAndroidKeyboardSpacerHeight({
     return Math.max(viewportCompensation, currentSpacerHeight);
 }
 
+export function getAndroidKeyboardTopY({
+    screenHeight,
+    windowHeight = screenHeight,
+    keyboardHeight,
+    reportedScreenY,
+}: {
+    screenHeight: number;
+    windowHeight?: number;
+    keyboardHeight: number;
+    reportedScreenY?: number | null;
+}) {
+    const heightDerivedTopY = Math.max(0, screenHeight - Math.max(0, keyboardHeight));
+    const viewportDerivedTopY = Math.max(0, windowHeight - Math.max(0, keyboardHeight));
+
+    if (typeof reportedScreenY !== 'number' || !Number.isFinite(reportedScreenY) || reportedScreenY <= 0) {
+        return Math.min(heightDerivedTopY, viewportDerivedTopY);
+    }
+
+    // Android keyboard events can exclude IME chrome or system-bar space from
+    // either screenY or height. The earliest plausible edge across the screen and
+    // app viewport is the safe boundary; choosing a later one leaves the composer
+    // partially under the keyboard on affected OEM builds.
+    return Math.min(reportedScreenY, heightDerivedTopY, viewportDerivedTopY);
+}
+
 export function isAndroidKeyboardMeasurementCurrent({
     isKeyboardVisible,
     activeMetrics,
@@ -503,14 +529,14 @@ export function isAndroidKeyboardMeasurementCurrent({
 
 export function shouldFloatAndroidComposerOverContent({
     platform,
-    surfaceKind,
+    composerPresentation,
     isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
-    surfaceKind: 'solid' | 'glass';
+    composerPresentation: 'inline' | 'capsule';
     isKeyboardVisible: boolean;
 }) {
-    return platform === 'android' && surfaceKind === 'glass' && !isKeyboardVisible;
+    return platform === 'android' && composerPresentation === 'capsule' && !isKeyboardVisible;
 }
 
 export function getAndroidFloatingComposerBottomOffset({
@@ -757,7 +783,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     );
 }
 
-export const ChatScreen = () => {
+const ChatScreenContent = () => {
     const {
         activeThread,
         messages,
@@ -777,8 +803,7 @@ export const ChatScreen = () => {
     usePreventRemove(isPreparingDocuments, () => undefined);
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
-    const appearance = useScreenAppearance();
-    const primaryActionContentClassName = getThemeActionContentClassName(appearance, 'primary');
+    const { resolvedTheme } = useTheme();
     const modelRegistryRevision = useModelRegistryRevision();
     const router = useRouter();
     const { openErrorReport, sheetProps: errorReportSheetProps } = useErrorReportSheetController();
@@ -873,7 +898,7 @@ export const ChatScreen = () => {
     const isAndroidKeyboardOpen = Platform.OS === 'android' && isAndroidKeyboardVisible;
     const shouldFloatComposerOverContent = shouldFloatAndroidComposerOverContent({
         platform: Platform.OS,
-        surfaceKind: appearance.surfaceKind,
+        composerPresentation: resolvedTheme.components.chat.composerPresentation,
         isKeyboardVisible: isAndroidKeyboardVisible,
     });
     const androidFloatingComposerBottomOffset = getAndroidFloatingComposerBottomOffset({
@@ -1030,13 +1055,12 @@ export const ChatScreen = () => {
                     size="sm"
                     iconSize="xs"
                     className="mt-0.5 h-6 w-6"
-                    iconClassName="text-primary-500"
                 />
                 <Box className="min-w-0 flex-1">
-                    <Text className="text-xs font-semibold leading-4 text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold leading-4  ">
                         {t('chat.attachments.retainedForRegenerate', { count: retainedRegenerateAttachments.length })}
                     </Text>
-                    <Text className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                    <Text colorRole="accent" className="mt-0.5 text-xs leading-4  ">
                         {retainedRegenerateAttachmentsSendBlocked
                             ? t('chat.attachments.retainedForRegenerateBlockedDescription', {
                                 reason: t(retainedRegenerateAttachmentsBlockedReason ?? visionAttachmentReadinessReason),
@@ -2672,7 +2696,12 @@ export const ChatScreen = () => {
 
             if (keyboardMetrics) {
                 const screenHeight = Dimensions.get('screen').height;
-                keyboardMetrics.topY = Math.max(0, screenHeight - keyboardMetrics.height);
+                keyboardMetrics.topY = getAndroidKeyboardTopY({
+                    screenHeight,
+                    windowHeight: window.height,
+                    keyboardHeight: keyboardMetrics.height,
+                    reportedScreenY: keyboardMetrics.topY,
+                });
             }
 
             updateAndroidKeyboardInsetFromLayout();
@@ -2681,11 +2710,15 @@ export const ChatScreen = () => {
         const updateKeyboardMetrics = (event: KeyboardEvent) => {
             isKeyboardVisibleRef.current = true;
             setIsAndroidKeyboardVisible(true);
+            const keyboardHeight = event.endCoordinates.height;
             androidKeyboardMetricsRef.current = {
-                height: event.endCoordinates.height,
-                topY: event.endCoordinates.screenY > 0
-                    ? event.endCoordinates.screenY
-                    : Math.max(0, Dimensions.get('screen').height - event.endCoordinates.height),
+                height: keyboardHeight,
+                topY: getAndroidKeyboardTopY({
+                    screenHeight: Dimensions.get('screen').height,
+                    windowHeight: Dimensions.get('window').height,
+                    keyboardHeight,
+                    reportedScreenY: event.endCoordinates.screenY,
+                }),
             };
         };
 
@@ -2836,45 +2869,46 @@ export const ChatScreen = () => {
     ]);
 
     return (
-        <ScreenRoot className="w-full max-w-2xl mx-auto">
+        <>
+            <ChatHeader
+                androidContentBlurTargetRef={warmupContentBlurTargetRef}
+                title={headerTitle}
+                presetLabel={activePresetLabel}
+                modelLabel={headerModelLabel}
+                modelSelectable={hasDownloadedModels}
+                statusLabel={statusLabel}
+                statusTone={statusTone}
+                canStartNewChat={!isGenerationBusy}
+                onStartNewChat={() => {
+                    try {
+                        startNewChat();
+                        handleCancelComposerMode();
+                    } catch (error: any) {
+                        showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
+                    }
+                }}
+                onOpenModelControls={() => {
+                    openModelParameters(configurableModelId);
+                }}
+                onOpenPresetSelector={() => {
+                    setPresetSelectorOpen(true);
+                }}
+                canOpenPresetSelector={!isGenerationBusy}
+                onOpenModelSelector={hasDownloadedModels
+                    ? () => {
+                        setModelSelectorOpen(true);
+                    }
+                    : undefined}
+                canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
+                canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
+                onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
+            />
+
             <ScreenAndroidContentBlurTarget
                 blurTargetRef={warmupContentBlurTargetRef}
                 style={styles.warmupContentBlurTarget}
                 testID="chat-warmup-content-blur-target"
             >
-                <ChatHeader
-                    title={headerTitle}
-                    presetLabel={activePresetLabel}
-                    modelLabel={headerModelLabel}
-                    modelSelectable={hasDownloadedModels}
-                    statusLabel={statusLabel}
-                    statusTone={statusTone}
-                    canStartNewChat={!isGenerationBusy}
-                    onStartNewChat={() => {
-                        try {
-                            startNewChat();
-                            handleCancelComposerMode();
-                        } catch (error: any) {
-                            showAlertForError('conversations.startNewChatErrorTitle', 'ChatScreen.startNewChat', error);
-                        }
-                    }}
-                    onOpenModelControls={() => {
-                        openModelParameters(configurableModelId);
-                    }}
-                    onOpenPresetSelector={() => {
-                        setPresetSelectorOpen(true);
-                    }}
-                    canOpenPresetSelector={!isGenerationBusy}
-                    onOpenModelSelector={hasDownloadedModels
-                        ? () => {
-                            setModelSelectorOpen(true);
-                        }
-                        : undefined}
-                    canOpenModelSelector={hasDownloadedModels && !isGenerationBusy}
-                    canOpenModelControls={Boolean(configurableModelId) && !isGenerationBusy && !isModelSelectionPending}
-                    onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
-                />
-
                 <Box className="flex-1">
                 <Box className="flex-1 px-3 pt-1.5">
                     {shouldShowRecoveryBanner ? (
@@ -3000,7 +3034,6 @@ export const ChatScreen = () => {
                                     testID="chat-recovery-card"
                                     tone="warning"
                                     padding="none"
-                                    decorative="matte"
                                     className="items-center px-6 py-8"
                                 >
                                     <ScreenIconTile
@@ -3012,24 +3045,24 @@ export const ChatScreen = () => {
                                     />
 
                                     {hasActiveModel ? (
-                                        <ScreenSurface className={`mt-4 ${appearance.classNames.inlinePillClassName}`}>
-                                            <Text className="text-xs font-semibold uppercase tracking-wide text-typography-600 dark:text-typography-300">
+                                        <ScreenSurface material={{ role: 'control', variant: 'inline' }} shape="full" className="mt-4 px-3 py-1.5">
+                                            <Text colorRole="secondary" className="text-xs font-semibold uppercase tracking-wide">
                                                 {modelLabel}
                                             </Text>
                                         </ScreenSurface>
                                     ) : null}
 
-                                    <Text
-                                        className="mt-5 text-center text-xl font-semibold leading-7 text-typography-900 dark:text-typography-100"
+                                    <Text colorRole="primary"
+                                        className="mt-5 text-center text-xl font-semibold leading-7  "
                                     >
                                         {recoveryTitle}
                                     </Text>
 
                                     {isModelInitializing ? (
-                                        <ScreenSurface tone="accent" withControlTint className={`mt-4 w-full rounded-2xl border px-3 py-2.5 ${appearance.classNames.toneClassNameByTone.accent.surfaceClassName}`}>
+                                        <ScreenSurface tone="accent" withControlTint className="mt-4 w-full px-3 py-2.5">
                                             <Box className="mb-2 flex-row items-center justify-end">
-                                                <ScreenSurface tone="accent" withControlTint className={`rounded-full px-2.5 py-1 ${appearance.classNames.toneClassNameByTone.accent.percentPillClassName}`}>
-                                                    <Text className="text-xs font-bold text-primary-700 dark:text-primary-200">
+                                                <ScreenSurface material={{ role: 'control', variant: 'inline', tone: 'accent' }} shape="full" className="px-2.5 py-1">
+                                                    <Text colorRole="accent" className="text-xs font-bold">
                                                         {warmupProgressPercent}%
                                                     </Text>
                                                 </ScreenSurface>
@@ -3041,13 +3074,12 @@ export const ChatScreen = () => {
                                                 size="lg"
                                                 tone="primary"
                                                 variant="framed"
-                                                fillClassName={appearance.classNames.toneClassNameByTone.primary.progressFillClassName}
                                             />
                                         </ScreenSurface>
                                     ) : null}
 
-                                    <Text
-                                        className="mt-3 text-center text-sm leading-6 text-typography-600 dark:text-typography-300"
+                                    <Text colorRole="secondary"
+                                        className="mt-3 text-center text-sm leading-6  "
                                     >
                                         {recoveryDescription}
                                     </Text>
@@ -3062,13 +3094,13 @@ export const ChatScreen = () => {
                                         <MaterialSymbols
                                             name={hasActiveModel ? 'tune' : 'download'}
                                             size={18}
-                                            className={primaryActionContentClassName}
+                                            colorRole="onAccent"
                                         />
                                         <ButtonText>{resolvedModelRecoveryActionLabel}</ButtonText>
                                     </Button>
 
-                                    <Text
-                                        className="mt-4 text-center text-xs leading-5 text-typography-500 dark:text-typography-300"
+                                    <Text colorRole="secondary"
+                                        className="mt-4 text-center text-xs leading-5  "
                                     >
                                         {activeThread
                                             ? t('chat.emptyExistingThread')
@@ -3078,10 +3110,10 @@ export const ChatScreen = () => {
                             </Box>
                         ) : (
                             <Box className="flex-1 items-center px-6 pt-14 pb-8">
-                                <Text className="text-xl font-semibold text-typography-800 dark:text-typography-100">
+                                <Text colorRole="primary" className="text-xl font-semibold  ">
                                     {t('chat.noMessages')}
                                 </Text>
-                                <Text className="mt-2 text-center text-sm leading-6 text-typography-500 dark:text-typography-400">
+                                <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-6  ">
                                     {activeThread
                                         ? t('chat.emptyExistingThread')
                                         : t('chat.emptyNewThread')}
@@ -3260,9 +3292,15 @@ export const ChatScreen = () => {
                 {...errorReportSheetProps}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
             />
-        </ScreenRoot>
+        </>
     );
 };
+
+export const ChatScreen = () => (
+    <ScreenRoot className="w-full max-w-2xl mx-auto">
+        <ChatScreenContent />
+    </ScreenRoot>
+);
 
 const styles = StyleSheet.create({
     androidQaEvidenceSurface: {

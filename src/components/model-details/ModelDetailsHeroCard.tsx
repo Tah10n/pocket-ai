@@ -1,8 +1,6 @@
 import React from 'react';
 import { Box } from '../ui/box';
 import { Text, composeTextRole } from '../ui/text';
-import { useTheme } from '@/providers/ThemeProvider';
-import { DEFAULT_THEME_ID, getThemeAppearance } from '@/utils/themeTokens';
 import { ScreenSurface } from '../ui/ScreenShell';
 import { SectionCard } from './ModelDetailsPrimitives';
 
@@ -27,9 +25,6 @@ export function ModelDetailsHeroCard({
   openOnHuggingFaceButton,
   className,
 }: ModelDetailsHeroCardProps) {
-  const theme = useTheme();
-  const appearance = theme.appearance ?? getThemeAppearance(theme.themeId ?? DEFAULT_THEME_ID, theme.resolvedMode ?? 'light');
-
   return (
     <SectionCard className={className}>
       {badges ? (
@@ -38,12 +33,12 @@ export function ModelDetailsHeroCard({
         </Box>
       ) : null}
 
-      <Text className={composeTextRole('screenTitle', 'mt-3 tracking-tight dark:text-typography-50')}>
+<Text colorRole="primary" className={composeTextRole('screenTitle', 'mt-3 tracking-tight ')}>
         {title}
       </Text>
 
-      <ScreenSurface className={`mt-2 self-start ${appearance.classNames.inlinePillClassName}`}>
-        <Text className={composeTextRole('chip', 'font-medium text-typography-600 dark:text-typography-300')}>
+      <ScreenSurface material={{ role: 'control', variant: 'inline' }} shape="full" className="mt-2 self-start px-3 py-1.5">
+        <Text colorRole="secondary" className={composeTextRole('chip', 'font-medium')}>
           {modelId}
         </Text>
       </ScreenSurface>

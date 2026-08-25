@@ -52,7 +52,7 @@ export function ModelDetailsTagsSection({
           ))}
         </Box>
       ) : (
-        <Text className="text-sm leading-6 text-typography-500 dark:text-typography-400">
+<Text colorRole="tertiary" className="text-sm leading-6  ">
           {emptyLabel}
         </Text>
       )}

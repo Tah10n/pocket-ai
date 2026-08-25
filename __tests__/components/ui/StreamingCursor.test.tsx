@@ -37,7 +37,8 @@ describe('StreamingCursor', () => {
   it('renders the default cursor style and starts the blink animation', () => {
     const screen = render(<StreamingCursor />);
 
-    expect(screen.getByText('▏').props.className).toBe('text-sm leading-6 text-typography-500 opacity-70 dark:text-typography-400');
+    expect(screen.getByText('▏').props.className).toBe('text-sm leading-6 opacity-70');
+    expect(screen.getByText('▏').props.colorRole).toBe('tertiary');
     expect(screen.getByText('▏').props.accessible).toBe(false);
     expect(screen.getByText('▏').props.importantForAccessibility).toBe('no');
     expect(mockWithTiming).toHaveBeenCalledWith(0, expect.objectContaining({ duration: 500 }));
@@ -47,7 +48,8 @@ describe('StreamingCursor', () => {
   it('renders the compact cursor style when requested', () => {
     const screen = render(<StreamingCursor compact />);
 
-    expect(screen.getByText('▏').props.className).toBe('text-xs leading-4 text-typography-400 opacity-60 dark:text-typography-500');
+    expect(screen.getByText('▏').props.className).toBe('text-xs leading-4 opacity-60');
+    expect(screen.getByText('▏').props.colorRole).toBe('tertiary');
   });
 
   it('keeps the decorative cursor static when deterministic QA motion is required', () => {

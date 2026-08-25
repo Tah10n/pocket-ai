@@ -299,6 +299,7 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
 
   return {
     ChatHeader: ({
+      androidContentBlurTargetRef,
       title,
       canStartNewChat,
       onStartNewChat,
@@ -314,6 +315,7 @@ jest.mock('../../src/components/ui/ChatHeader', () => {
       canOpenModelControls,
     }: any) => {
       lastChatHeaderProps = {
+        androidContentBlurTargetRef,
         title,
         canStartNewChat,
         onStartNewChat,
@@ -687,6 +689,7 @@ const {
   getAndroidFloatingComposerBottomOffset,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getAndroidKeyboardTopY,
   getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
   handleAndroidBackNavigation,
@@ -2687,6 +2690,25 @@ describe('ChatScreen', () => {
     })).toBe(48);
   });
 
+  it('derives the earliest plausible Android IME top when screenY points at the window bottom', () => {
+    expect(getAndroidKeyboardTopY({
+      screenHeight: 804,
+      windowHeight: 756,
+      keyboardHeight: 255,
+      reportedScreenY: 533,
+    })).toBe(501);
+    expect(getAndroidKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 804,
+    })).toBe(504);
+    expect(getAndroidKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 496,
+    })).toBe(496);
+  });
+
   it('rejects an Android keyboard measurement after hide or a newer frame event', () => {
     const measuredMetrics = { height: 320, topY: 2080 };
 
@@ -2710,22 +2732,22 @@ describe('ChatScreen', () => {
   it('returns the Android glass composer to normal flow while the keyboard is visible', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
-      surfaceKind: 'glass',
+      composerPresentation: 'capsule',
       isKeyboardVisible: false,
     })).toBe(true);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
-      surfaceKind: 'solid',
+      composerPresentation: 'inline',
       isKeyboardVisible: false,
     })).toBe(false);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
-      surfaceKind: 'glass',
+      composerPresentation: 'capsule',
       isKeyboardVisible: true,
     })).toBe(false);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
-      surfaceKind: 'glass',
+      composerPresentation: 'capsule',
       isKeyboardVisible: false,
     })).toBe(false);
   });
@@ -3139,6 +3161,8 @@ describe('ChatScreen', () => {
 
     expect(lastChatHeaderProps.modelSelectable).toBe(false);
     expect(lastChatHeaderProps.canOpenModelSelector).toBe(false);
+    expect(lastChatHeaderProps.androidContentBlurTargetRef)
+      .toBe(lastChatInputBarProps.androidContentBlurTargetRef);
   });
 
   it('opens a downloaded-only model selector from the header badge', () => {
@@ -4897,7 +4921,10 @@ describe('ChatScreen', () => {
 
     expect(getByText('chat.warmingUp')).toBeTruthy();
     expect(getByText('42%')).toBeTruthy();
-    expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toMatchObject({
+      width: '42%',
+      backgroundColor: '#1f7aff',
+    });
     expect(queryByTestId('model-warmup-progress-fill')).toBeNull();
   });
 
@@ -5876,7 +5903,10 @@ describe('ChatScreen', () => {
     rerender(React.createElement(ChatScreen));
 
     expect(getByText('chat.warmingUp 42%')).toBeTruthy();
-    expect(getByTestId('model-warmup-progress-fill').props.style).toEqual({ width: '42%' });
+    expect(getByTestId('model-warmup-progress-fill').props.style).toMatchObject({
+      width: '42%',
+      backgroundColor: '#1f7aff',
+    });
 
     await act(async () => {
       reloadDeferred.resolve();

@@ -27,8 +27,8 @@ export default function ModalScreen() {
           <Text textRole="screenTitle" className="text-center">
             {t('common.more')}
           </Text>
-          <Box className="my-5 h-px w-full bg-outline-200 dark:bg-outline-800" />
-          <Text textRole="body" className="text-center text-typography-700 dark:text-typography-300">
+          <Box className="my-5 h-px w-full" style={{ backgroundColor: colors.divider }} />
+          <Text textRole="body" colorRole="secondary" className="text-center">
             {t('modal.body')}
           </Text>
         </ScreenCard>

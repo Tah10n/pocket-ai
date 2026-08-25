@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Alert, Image, Platform, ScrollView, StyleSheet } from 'react-native';
+import { AccessibilityInfo, Alert, Image, Keyboard, Platform, ScrollView, StyleSheet } from 'react-native';
 import { Box } from '@/components/ui/box';
 import { Text } from '@/components/ui/text';
-import { ScreenIconButton, ScreenIconTile, ScreenInlineInput, ScreenSurface, useScreenAppearance } from './ScreenShell';
-import { getThemeActionContentClassName, screenChromeTokens, withAlpha, type ResolvedThemeMode } from '../../utils/themeTokens';
+import { ScreenIconButton, ScreenIconTile, ScreenInlineInput, ScreenSurface } from './ScreenShell';
+import { screenChromeTokens } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 import { useTranslation } from 'react-i18next';
 import { getReportedErrorMessage } from '../../services/AppError';
@@ -23,6 +23,13 @@ import type { AttachmentDraft } from '../../types/multimodal';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../types/attachments';
 import type { AndroidBlurTargetRef } from '../../utils/androidBlur';
 import { markInteractiveWorkStarted } from '../../utils/idleTask';
+import { EffectSurface } from '../../design-system/materials/EffectSurface';
+import { Surface } from '../../design-system/materials/Surface';
+
+const CHAT_COMPOSER_MATERIAL = { role: 'chrome', variant: 'composer' } as const;
+const CHAT_PRIMARY_ACTION_MATERIAL = { role: 'control', variant: 'selected', tone: 'primary' } as const;
+const CHAT_DISABLED_ACTION_MATERIAL = { role: 'control', variant: 'inline', tone: 'neutral' } as const;
+const CHAT_MODE_MATERIAL = { role: 'content', variant: 'composerMode' } as const;
 
 interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
@@ -100,42 +107,6 @@ export function markChatInputErrorReported(error: unknown): unknown {
 
 export function isChatInputErrorReported(error: unknown): boolean {
     return Boolean(error && typeof error === 'object' && reportedChatInputErrors.has(error));
-}
-
-export function getPrimaryActionGlassStyle(primaryStrong: string, mode: ResolvedThemeMode) {
-    return {
-        backgroundColor: withAlpha(primaryStrong, mode === 'dark' ? 0.22 : 0.1),
-        borderWidth: 0,
-    };
-}
-
-export function getGlassComposerCapsuleStyle(highlightColor: string, borderStrong: string, mode: ResolvedThemeMode) {
-    const baseStyle = {
-        borderRadius: 999,
-    };
-
-    if (mode !== 'dark') {
-        return baseStyle;
-    }
-
-    return {
-        ...baseStyle,
-        backgroundColor: withAlpha(highlightColor, 0.1),
-        borderColor: withAlpha(borderStrong, 0.28),
-        borderWidth: 1,
-    };
-}
-
-export function getModeBannerGlassStyle(highlightColor: string, primaryStrong: string, mode: ResolvedThemeMode) {
-    if (mode !== 'dark') {
-        return undefined;
-    }
-
-    return {
-        backgroundColor: withAlpha(highlightColor, 0.09),
-        borderColor: withAlpha(primaryStrong, 0.26),
-        borderWidth: 1,
-    };
 }
 
 function getAttachmentDraftPreviewCandidates(draft: AttachmentDraft): string[] {
@@ -294,8 +265,7 @@ export const ChatInputBar = ({
     const lastIosAttachmentAnnouncementRef = useRef<string | null>(null);
     const { t } = useTranslation();
     const theme = useTheme();
-    const appearance = useScreenAppearance();
-    const isDarkGlass = appearance.surfaceKind === 'glass' && theme.resolvedMode === 'dark';
+    const isCapsuleComposer = theme.resolvedTheme.components.chat.composerPresentation === 'capsule';
     const isControlled = typeof draft === 'string';
     const message = isControlled ? draft : internalMessage;
     const hasAttachmentCopyFailures = imageAttachmentsEnabled && hasFailedDraftImageAttachments(attachmentDrafts);
@@ -434,6 +404,7 @@ export const ChatInputBar = ({
 
         submitLockRef.current = true;
         setIsSubmitting(true);
+        Keyboard.dismiss();
         const nextMessage = message.trim();
         setMessage('');
 
@@ -528,27 +499,6 @@ export const ChatInputBar = ({
     };
 
     const primaryActionEnabled = isSending || canSend;
-    const primaryActionClassName = appearance.surfaceKind === 'glass'
-        ? 'bg-primary-500/8'
-        : 'border-0 bg-primary-500';
-    const primaryActionStyle = appearance.surfaceKind === 'glass' && primaryActionEnabled
-        ? getPrimaryActionGlassStyle(theme.colors.primaryStrong, theme.resolvedMode)
-        : undefined;
-    const glassComposerCapsuleStyle = getGlassComposerCapsuleStyle(
-        theme.colors.text,
-        theme.colors.borderStrong,
-        theme.resolvedMode,
-    );
-    const modeBannerClassName = isDarkGlass
-        ? 'mb-1.5 rounded-2xl px-3 py-2'
-        : `mb-1.5 ${appearance.classNames.modeBannerClassName}`;
-    const modeBannerStyle = isDarkGlass
-        ? getModeBannerGlassStyle(
-            theme.colors.text,
-            theme.colors.primaryStrong,
-            theme.resolvedMode,
-        )
-        : undefined;
     const resolvedTrailingActions = trailingActions ?? (
         <ScreenIconButton
             testID={isSending ? 'chat-primary-action-stop' : 'chat-primary-action-send'}
@@ -556,11 +506,9 @@ export const ChatInputBar = ({
             disabled={!isSending && !canSend}
             accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
             iconName={isSending ? 'stop' : 'arrow-upward'}
-            className={`${primaryActionEnabled
-                ? primaryActionClassName
-                : appearance.classNames.toneClassNameByTone.neutral.iconTileClassName}`}
-            iconClassName={primaryActionEnabled ? getThemeActionContentClassName(appearance, 'primary') : 'text-typography-500'}
-            style={primaryActionStyle}
+            material={primaryActionEnabled ? CHAT_PRIMARY_ACTION_MATERIAL : CHAT_DISABLED_ACTION_MATERIAL}
+            tone={primaryActionEnabled ? 'primary' : 'neutral'}
+            iconColorRole={primaryActionEnabled ? 'onAccent' : 'tertiary'}
         />
     );
     const imageAttachmentHelperText = (() => {
@@ -773,7 +721,7 @@ export const ChatInputBar = ({
     const inputRow = (
         <Box
             testID="chat-input-bar-row"
-            className={appearance.surfaceKind === 'glass'
+            className={isCapsuleComposer
                 ? 'h-full flex-row items-center gap-2'
                 : 'flex-row items-center gap-2'}
         >
@@ -787,19 +735,19 @@ export const ChatInputBar = ({
             <ScreenInlineInput
                 testID="chat-message-input"
                 variant="composer"
-                applyGlassFrame={appearance.surfaceKind !== 'glass'}
+                embedded={isCapsuleComposer}
                 className={disabled
                     ? 'flex-1 opacity-60'
-                    : appearance.surfaceKind === 'glass'
+                    : isCapsuleComposer
                         ? 'flex-1 border-0 bg-transparent'
                         : 'flex-1'}
-                style={appearance.surfaceKind === 'glass' ? styles.transparentInlineInput : undefined}
+                style={isCapsuleComposer ? styles.transparentInlineInput : undefined}
                 accessibilityLabel={t('chat.inputAccessibilityLabel')}
                 placeholder={placeholder}
                 keyboardType="default"
                 returnKeyType="send"
                 enterKeyHint="send"
-                submitBehavior="submit"
+                submitBehavior="blurAndSubmit"
                 textAlignVertical="center"
                 value={message}
                 onChangeText={handleMessageChange}
@@ -840,9 +788,8 @@ export const ChatInputBar = ({
                         size="sm"
                         tone="accent"
                         className="h-6 w-6 border-0 bg-transparent"
-                        iconClassName="text-primary-500"
                     />
-                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold  ">
                         {t('chat.attachments.preparingImage')}
                     </Text>
                 </Box>
@@ -864,9 +811,8 @@ export const ChatInputBar = ({
                         size="sm"
                         tone="accent"
                         className="h-6 w-6 border-0 bg-transparent"
-                        iconClassName="text-primary-500"
                     />
-                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold  ">
                         {t('chat.attachments.preparingDocument')}
                     </Text>
                 </Box>
@@ -887,9 +833,8 @@ export const ChatInputBar = ({
                         size="sm"
                         tone="accent"
                         className="h-6 w-6 border-0 bg-transparent"
-                        iconClassName="text-primary-500"
                     />
-                    <Text className="text-xs font-semibold text-primary-700 dark:text-primary-300">
+                    <Text colorRole="accent" className="text-xs font-semibold  ">
                         {t('chat.attachments.preparingAudio')}
                     </Text>
                 </Box>
@@ -916,7 +861,8 @@ export const ChatInputBar = ({
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
                                 <ScreenSurface
-                                    tone={isFailed ? 'danger' : 'default'}
+                                    material={{ role: 'content', variant: isFailed ? 'messageError' : 'messageAttachment' }}
+                                    shape="md"
                                     className="relative h-16 w-16 overflow-hidden rounded-2xl p-1"
                                 >
                                     {isFailed ? (
@@ -989,7 +935,8 @@ export const ChatInputBar = ({
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
                                 <ScreenSurface
-                                    tone={isFailed ? 'danger' : 'default'}
+                                    material={{ role: 'content', variant: isFailed ? 'messageError' : 'messageAttachment' }}
+                                    shape="md"
                                     className="relative h-16 w-44 rounded-2xl px-3 py-2"
                                     accessibilityRole="summary"
                                     accessibilityLabel={accessibilityLabel}
@@ -1004,10 +951,10 @@ export const ChatInputBar = ({
                                             className="h-8 w-8"
                                         />
                                         <Box className="min-w-0 flex-1">
-                                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                                            <Text colorRole="primary" numberOfLines={1} className="text-xs font-semibold  ">
                                                 {title}
                                             </Text>
-                                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                                            <Text colorRole="secondary" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                                                 {subtitle}
                                             </Text>
                                         </Box>
@@ -1060,7 +1007,8 @@ export const ChatInputBar = ({
                         return (
                             <Box key={`${draftKey}-${index}`} className="mr-2">
                                 <ScreenSurface
-                                    tone={isFailed ? 'danger' : 'default'}
+                                    material={{ role: 'content', variant: isFailed ? 'messageError' : 'messageAttachment' }}
+                                    shape="md"
                                     className="relative h-16 w-44 rounded-2xl px-3 py-2"
                                     accessibilityRole="summary"
                                     accessibilityLabel={accessibilityLabel}
@@ -1075,10 +1023,10 @@ export const ChatInputBar = ({
                                             className="h-8 w-8"
                                         />
                                         <Box className="min-w-0 flex-1">
-                                            <Text numberOfLines={1} className="text-xs font-semibold text-typography-800 dark:text-typography-100">
+                                            <Text colorRole="primary" numberOfLines={1} className="text-xs font-semibold  ">
                                                 {title}
                                             </Text>
-                                            <Text numberOfLines={1} className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-300">
+                                            <Text colorRole="secondary" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                                                 {subtitle}
                                             </Text>
                                         </Box>
@@ -1110,11 +1058,11 @@ export const ChatInputBar = ({
             ) : null}
 
             {attachmentHelperText ? (
-                <Text
+                <Text colorRole="secondary"
                     testID="chat-image-attachment-readiness-text"
                     accessibilityLiveRegion={Platform.OS === 'android' ? 'polite' : undefined}
                     role="status"
-                    className="text-xs leading-4 text-typography-600 dark:text-typography-300"
+                    className="text-xs leading-4  "
                 >
                     {attachmentHelperText}
                 </Text>
@@ -1123,29 +1071,27 @@ export const ChatInputBar = ({
     ) : null;
 
     const modeBanner = modeLabel ? (
-        <ScreenSurface
+        <Surface
             testID="chat-regeneration-mode"
-            tone={isDarkGlass ? 'default' : 'accent'}
-            withControlTint={!isDarkGlass}
-            className={modeBannerClassName}
-            style={modeBannerStyle}
+            material={CHAT_MODE_MATERIAL}
+            shape="md"
+            className="mb-1.5 px-3 py-2"
         >
             <Box className="flex-row items-start justify-between gap-3">
                 <Box className="min-w-0 flex-1 flex-row items-start gap-3">
                     <ScreenIconTile
                         iconName="edit"
-                        tone={isDarkGlass ? 'neutral' : 'accent'}
+                        tone="accent"
                         size="sm"
                         iconSize="xs"
                         className="mt-0.5 h-6 w-6"
-                        iconClassName="text-primary-500"
                     />
                     <Box className="min-w-0 flex-1">
-                        <Text numberOfLines={1} className="text-sm font-semibold text-primary-700 dark:text-primary-300">
+                        <Text colorRole="accent" numberOfLines={1} className="text-sm font-semibold  ">
                             {modeLabel}
                         </Text>
                         {modeDescription ? (
-                            <Text numberOfLines={2} className="mt-0.5 text-xs leading-4 text-primary-700/80 dark:text-primary-300/80">
+                            <Text colorRole="accent" numberOfLines={2} className="mt-0.5 text-xs leading-4  ">
                                 {modeDescription}
                             </Text>
                         ) : null}
@@ -1163,11 +1109,10 @@ export const ChatInputBar = ({
                         iconSize="xs"
                         size="micro"
                         className="border-0"
-                        iconClassName="text-primary-500"
                     />
                 ) : null}
             </Box>
-        </ScreenSurface>
+        </Surface>
     ) : null;
     const attachmentsContent = attachmentsTray || builtInAttachmentsTray ? (
         <Box testID="chat-input-bar-attachments-tray" className="mb-2">
@@ -1176,7 +1121,7 @@ export const ChatInputBar = ({
         </Box>
     ) : null;
 
-    if (appearance.surfaceKind !== 'glass') {
+    if (!isCapsuleComposer) {
         return (
             <Box
                 testID="chat-input-bar-container"
@@ -1197,16 +1142,15 @@ export const ChatInputBar = ({
         >
             {modeBanner}
             {attachmentsContent}
-            <ScreenSurface
+            <EffectSurface
                 testID="chat-input-bar-capsule"
-                decorative="matte"
                 androidBlurTargetRef={androidContentBlurTargetRef}
-                forceNativeAndroidBlur={Boolean(androidContentBlurTargetRef)}
+                material={CHAT_COMPOSER_MATERIAL}
+                shape="full"
                 className="h-12 rounded-full px-1.5 py-1"
-                style={glassComposerCapsuleStyle}
             >
                 {inputRow}
-            </ScreenSurface>
+            </EffectSurface>
             {attachmentMenuSheet}
         </Box>
     );

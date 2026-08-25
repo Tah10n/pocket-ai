@@ -35,16 +35,16 @@ export function CodeBlock({ code, language, selectable = false }: CodeBlockProps
   return (
     <ScreenCard padding="none" className="px-3 py-3">
       <Box className="mb-2 flex-row items-center justify-between">
-        <Text className="text-xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+        <Text colorRole="tertiary" className="text-xs font-semibold uppercase tracking-wide  ">
           {language || t('common.code')}
         </Text>
         <ScreenActionPill testID="copy-code-button" onPress={handleCopy} tone="soft" size="sm" className="border-0">
-          <Text className="text-xs font-semibold text-primary-500">
+          <Text colorRole="accent" className="text-xs font-semibold ">
             {copied ? t('common.copied') : t('common.copy')}
           </Text>
         </ScreenActionPill>
       </Box>
-      <Text selectable={selectable} className="font-mono text-sm leading-6 text-typography-900 dark:text-typography-100">
+      <Text colorRole="primary" selectable={selectable} className="font-mono text-sm leading-6  ">
         {code}
       </Text>
     </ScreenCard>

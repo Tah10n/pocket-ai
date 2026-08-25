@@ -1,0 +1,15 @@
+{
+  "name": "pocket-liquid-glass",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Pocket AI Android-only shared-backdrop Liquid Glass approximation.",
+  "license": "MIT",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "react-native": "./index.ts",
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

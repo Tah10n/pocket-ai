@@ -42,11 +42,12 @@ export const StreamingCursor = ({
 
   return (
     <AnimatedText
+      colorRole="tertiary"
       accessible={false}
       importantForAccessibility="no"
       className={compact
-        ? 'text-xs leading-4 text-typography-400 opacity-60 dark:text-typography-500'
-        : 'text-sm leading-6 text-typography-500 opacity-70 dark:text-typography-400'}
+        ? 'text-xs leading-4 opacity-60'
+        : 'text-sm leading-6 opacity-70'}
       style={animatedStyle}
     >
       ▏

@@ -48,10 +48,7 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
   const mockReact = jest.requireActual('react');
   const { Pressable, Text, View } = jest.requireActual('react-native');
   return {
-    getGlassCornerRadiusStyle: () => undefined,
-    getGlassSurfaceFrameStyle: () => undefined,
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
-    useScreenAppearance: () => require('../../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
     ScreenCard: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenSurface: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenPressableSurface: ({ children, onPress, ...props }: any) =>

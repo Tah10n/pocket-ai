@@ -32,7 +32,10 @@ import { resetPrivateAppStorageAndRuntimeStateAfterConfirmation } from '../src/s
 import { notificationService } from '../src/services/NotificationService';
 import { useBootstrapStore, type BootstrapCriticalOutcome } from '../src/store/bootstrapStore';
 import { StorageRecoveryScreen, type StorageRecoveryBusyState } from '../src/ui/screens/StorageRecoveryScreen';
-import { createNavigationTheme, getThemeColors, type ResolvedThemeMode } from '../src/utils/themeTokens';
+import type { ResolvedThemeMode } from '../src/design-system/themes/legacyTheme';
+import { DEFAULT_THEME_ID } from '../src/design-system/themes/registry';
+import { resolveTheme } from '../src/design-system/themes/resolver';
+import { RuntimeMaterialEnvironmentProvider } from '../src/design-system/materials/MaterialEnvironmentProvider';
 import '../src/i18n';
 import '../global.css';
 
@@ -282,7 +285,9 @@ export default function RootLayout() {
 
   return (
     <CustomThemeProvider>
-      <RootNavigator />
+      <RuntimeMaterialEnvironmentProvider>
+        <RootNavigator />
+      </RuntimeMaterialEnvironmentProvider>
     </CustomThemeProvider>
   );
 }
@@ -325,8 +330,11 @@ function useStorageRecoveryActions() {
 function StorageBlockedRootNavigator() {
   const systemScheme = useSystemColorScheme();
   const resolvedMode: ResolvedThemeMode = systemScheme === 'dark' ? 'dark' : 'light';
-  const colors = useMemo(() => getThemeColors(resolvedMode), [resolvedMode]);
-  const navigationTheme = useMemo(() => createNavigationTheme(resolvedMode), [resolvedMode]);
+  const resolvedTheme = useMemo(
+    () => resolveTheme(DEFAULT_THEME_ID, resolvedMode),
+    [resolvedMode],
+  );
+  const { colors, navigationTheme } = resolvedTheme;
   const criticalStorageHealth = useBootstrapStore((state) => state.criticalStorageHealth);
   const { recoveryBusy, handleStorageReset, handleStorageRetry } = useStorageRecoveryActions();
 
@@ -339,7 +347,7 @@ function StorageBlockedRootNavigator() {
   }, [colors.background]);
 
   return (
-    <StaticAppThemeProvider resolvedMode={resolvedMode}>
+    <StaticAppThemeProvider resolvedMode={resolvedMode} resolvedTheme={resolvedTheme}>
       <ThemeProvider value={navigationTheme}>
         <StorageRecoveryScreen
           health={criticalStorageHealth ?? getPrivateStorageHealthSnapshot()}
@@ -451,6 +459,7 @@ function RootNavigator() {
         <Stack.Screen
           name="modal"
           options={{
+            headerShown: false,
             presentation: 'modal',
             title: t('common.more'),
             animation: motion.motionPreset === 'full' ? 'fade' : 'none',

@@ -173,6 +173,80 @@ describe('Android build content provenance', () => {
     }
   });
 
+  it('ignores local Expo module Gradle churn without hiding module build inputs', () => {
+    const projectRoot = createProject();
+    const moduleBuildPath = path.join(
+      projectRoot,
+      'modules',
+      'pocket-anydoc',
+      'android',
+      'build.gradle',
+    );
+    const gradleCachePath = path.join(
+      projectRoot,
+      'modules',
+      'pocket-anydoc',
+      'android',
+      '.gradle',
+      '9.2.0',
+      'fileHashes',
+      'fileHashes.lock',
+    );
+    const liquidGlassBuildPath = path.join(
+      projectRoot,
+      'modules',
+      'pocket-liquid-glass',
+      'android',
+      'build.gradle',
+    );
+    const liquidGlassCachePath = path.join(
+      projectRoot,
+      'modules',
+      'pocket-liquid-glass',
+      'android',
+      'build',
+      'intermediates',
+      'compile_library_classes_jar',
+      'debug',
+      'classes.jar',
+    );
+    fs.mkdirSync(path.dirname(moduleBuildPath), { recursive: true });
+    fs.writeFileSync(moduleBuildPath, 'android { namespace = "com.pocketai.one" }');
+    fs.mkdirSync(path.dirname(liquidGlassBuildPath), { recursive: true });
+    fs.writeFileSync(liquidGlassBuildPath, 'android { namespace = "com.pocketai.glass.one" }');
+
+    try {
+      const beforeCacheChurn = collectPrebuildInputState(projectRoot, { variant: 'debug' });
+      fs.mkdirSync(path.dirname(gradleCachePath), { recursive: true });
+      fs.writeFileSync(gradleCachePath, 'first-cache-state');
+      const afterCacheCreation = collectPrebuildInputState(projectRoot, { variant: 'debug' });
+      fs.writeFileSync(gradleCachePath, 'second-cache-state');
+      fs.mkdirSync(path.dirname(liquidGlassCachePath), { recursive: true });
+      fs.writeFileSync(liquidGlassCachePath, 'generated-classes');
+      const afterCacheMutation = collectPrebuildInputState(projectRoot, { variant: 'debug' });
+
+      expect(afterCacheCreation.digest).toBe(beforeCacheChurn.digest);
+      expect(afterCacheMutation.digest).toBe(beforeCacheChurn.digest);
+      expect(afterCacheMutation.entries.some((entry) => entry.path.includes('/.gradle/'))).toBe(false);
+      expect(isExcludedAndroidBuildInput(
+        'modules/pocket-anydoc/android/.gradle/9.2.0/fileHashes/fileHashes.lock',
+      )).toBe(true);
+      expect(isExcludedAndroidBuildInput(
+        'modules/pocket-liquid-glass/android/build/intermediates/compile_library_classes_jar/debug/classes.jar',
+      )).toBe(true);
+
+      fs.writeFileSync(moduleBuildPath, 'android { namespace = "com.pocketai.two" }');
+      expect(collectPrebuildInputState(projectRoot, { variant: 'debug' }).digest)
+        .not.toBe(beforeCacheChurn.digest);
+      fs.writeFileSync(moduleBuildPath, 'android { namespace = "com.pocketai.one" }');
+      fs.writeFileSync(liquidGlassBuildPath, 'android { namespace = "com.pocketai.glass.two" }');
+      expect(collectPrebuildInputState(projectRoot, { variant: 'debug' }).digest)
+        .not.toBe(beforeCacheChurn.digest);
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
   it('excludes Gradle, Kotlin, and native intermediates without hiding tracked Android source', () => {
     const projectRoot = createProject();
     const trackedNativeSourcePath = path.join(

@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
-import { Pressable, Text as RNText } from 'react-native';
+import { Pressable, StyleSheet, Text as RNText } from 'react-native';
 import { ValueSelectorRow } from '../../src/components/ui/ValueSelectorRow';
 
 jest.mock('../../src/components/ui/box', () => {
@@ -78,6 +78,7 @@ describe('ValueSelectorRow', () => {
         onPress={jest.fn()}
         accessibilityLabel="Selected GGUF file: Q4_K_M - 3.80 GB"
         accessibilityHint="Opens the GGUF file picker."
+        accessibilityValue={{ text: 'Q4_K_M - 3.80 GB' }}
         testID="value-selector-row"
       />,
     );
@@ -86,6 +87,7 @@ describe('ValueSelectorRow', () => {
     expect(row.props.accessible).toBe(true);
     expect(row.props.accessibilityLabel).toBe('Selected GGUF file: Q4_K_M - 3.80 GB');
     expect(row.props.accessibilityHint).toBe('Opens the GGUF file picker.');
+    expect(row.props.accessibilityValue).toEqual({ text: 'Q4_K_M - 3.80 GB' });
   });
 
   it('passes accessibility label and hint to the read-only row', () => {
@@ -116,6 +118,41 @@ describe('ValueSelectorRow', () => {
 
     expect(screen.getByText('Q4_K_M - 3.80 GB')).toBeTruthy();
     expect(screen.getByText('models.ramFitYes')).toBeTruthy();
+  });
+
+  it('renders a custom leading preview before the selected value', () => {
+    const screen = render(
+      <ValueSelectorRow
+        value="Standard"
+        leading={<RNText testID="theme-preview">Preview</RNText>}
+        testID="value-selector-row"
+      />,
+    );
+
+    expect(screen.getByTestId('theme-preview')).toBeTruthy();
+    expect(screen.getByText('Standard')).toBeTruthy();
+  });
+
+  it('keeps compact selector rows on the 44px geometry contract', () => {
+    const screen = render(
+      <ValueSelectorRow
+        density="compact"
+        value="Standard"
+        leading={<RNText style={{ height: 30 }}>Preview</RNText>}
+        onPress={jest.fn()}
+        testID="value-selector-row"
+      />,
+    );
+
+    expect(StyleSheet.flatten(screen.getByTestId('value-selector-row').props.style)).toMatchObject({
+      minHeight: 44,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    });
+    expect(StyleSheet.flatten(screen.getByTestId('value-selector-row').props.style)).toMatchObject({
+      borderRadius: 16,
+      backgroundColor: expect.any(String),
+    });
   });
 
   it('can render the selected value without a visible label', () => {

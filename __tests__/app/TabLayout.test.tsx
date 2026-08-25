@@ -54,11 +54,11 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => {
   };
 });
 
-jest.mock('../../src/components/ui/TabBarGlassBackground', () => {
+jest.mock('../../src/components/ui/TabBarMaterialBackground', () => {
   const mockReact = require('react');
   const { View } = require('react-native');
   return {
-    TabBarGlassBackground: () => mockReact.createElement(View, { testID: 'tab-bar-glass-background' }),
+    TabBarMaterialBackground: () => mockReact.createElement(View, { testID: 'tab-bar-material-background' }),
   };
 });
 
@@ -81,10 +81,12 @@ describe('TabLayout', () => {
     mockTabsProps.mockClear();
     mockTabScreenProps.mockClear();
     mockHasActiveChatGenerationWork.mockReturnValue(false);
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
+    const { resolveTheme } = require('../../src/design-system/themes/resolver');
+    const resolvedTheme = resolveTheme('default', 'light');
     mockThemeContext = {
-      appearance: getThemeAppearance('default', 'light'),
-      colors: getThemeColors('light', 'default'),
+      appearance: resolvedTheme.appearance,
+      colors: resolvedTheme.colors,
+      resolvedTheme,
     };
   });
 
@@ -98,10 +100,12 @@ describe('TabLayout', () => {
   });
 
   it('installs a keyed glass tab background when switching to the glass island', () => {
-    const { getThemeAppearance, getThemeColors } = require('../../src/utils/themeTokens');
+    const { resolveTheme } = require('../../src/design-system/themes/resolver');
+    const resolvedTheme = resolveTheme('glass', 'light');
     mockThemeContext = {
-      appearance: getThemeAppearance('glass', 'light'),
-      colors: getThemeColors('light', 'glass'),
+      appearance: resolvedTheme.appearance,
+      colors: resolvedTheme.colors,
+      resolvedTheme,
     };
 
     render(<TabLayout />);

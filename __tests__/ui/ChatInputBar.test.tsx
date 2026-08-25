@@ -1,11 +1,8 @@
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
-import { AccessibilityInfo, Alert, Platform, Text as RNText } from 'react-native';
+import { AccessibilityInfo, Alert, Keyboard, Platform, Text as RNText } from 'react-native';
 import {
   ChatInputBar,
-  getGlassComposerCapsuleStyle,
-  getModeBannerGlassStyle,
-  getPrimaryActionGlassStyle,
   markChatInputDraftConsumedError,
   markChatInputErrorReported,
 } from '../../src/components/ui/ChatInputBar';
@@ -15,6 +12,8 @@ import type { AttachmentDraft } from '../../src/types/multimodal';
 import type { ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from '../../src/types/attachments';
 import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { getInteractiveWorkRevision } from '../../src/utils/idleTask';
+import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
+import { resolveTheme } from '../../src/design-system/themes/resolver';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -111,26 +110,78 @@ describe('ChatInputBar', () => {
     expect(getByTestId('chat-primary-action-stop')).toBeTruthy();
   });
 
-  it('sends the message when the input submits', async () => {
-    const onSendMessage = jest.fn().mockResolvedValue(undefined);
-    const { getByPlaceholderText } = render(
-      <ChatInputBar onSendMessage={onSendMessage} />,
+  it('selects composer chrome from theme presentation without changing the default layout', () => {
+    const defaultComposer = render(
+      <StaticThemeProvider themeId="default" resolvedMode="light">
+        <ChatInputBar onSendMessage={jest.fn()} />
+      </StaticThemeProvider>,
     );
 
-    const input = getByPlaceholderText('chat.inputPlaceholder');
+    expect(defaultComposer.queryByTestId('chat-input-bar-capsule')).toBeNull();
+    defaultComposer.unmount();
 
-    fireEvent.changeText(input, 'Hello from enter');
-    fireEvent(input, 'submitEditing', {
-      nativeEvent: {
-        text: 'Hello from enter',
-      },
+    const glassComposer = render(
+      <StaticThemeProvider themeId="glass" resolvedMode="light">
+        <ChatInputBar onSendMessage={jest.fn()} />
+      </StaticThemeProvider>,
+    );
+
+    expect(glassComposer.getByTestId('chat-input-bar-capsule')).toBeTruthy();
+    expect(glassComposer.getByTestId('chat-input-bar-row').props.className).toContain('h-full');
+    glassComposer.unmount();
+
+    const resolvedGlassTheme = resolveTheme('glass', 'dark');
+    const darkGlassComposer = render(
+      <StaticThemeProvider themeId="glass" resolvedMode="dark">
+        <ChatInputBar
+          draft="Ready"
+          modeLabel="Regenerate"
+          onSendMessage={jest.fn()}
+        />
+      </StaticThemeProvider>,
+    );
+
+    expect(flattenStyle(darkGlassComposer.getByTestId('chat-input-bar-capsule').props.style)).toMatchObject({
+      backgroundColor: resolvedGlassTheme.colors.surfaceOverlay,
+      borderColor: resolvedGlassTheme.colors.borderSubtle,
     });
-
-    await waitFor(() => {
-      expect(onSendMessage).toHaveBeenCalledWith('Hello from enter');
+    expect(flattenStyle(darkGlassComposer.getByTestId('chat-primary-action-send').props.style)).toMatchObject({
+      backgroundColor: resolvedGlassTheme.colors.primarySoft,
+      borderWidth: 1,
     });
+    expect(flattenStyle(darkGlassComposer.getByTestId('chat-regeneration-mode').props.style)).toMatchObject({
+      backgroundColor: resolvedGlassTheme.colors.primarySoft,
+      borderWidth: 0,
+    });
+  });
 
-    expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
+  it('sends the message when the input submits', async () => {
+    const onSendMessage = jest.fn().mockResolvedValue(undefined);
+    const dismissKeyboardSpy = jest.spyOn(Keyboard, 'dismiss').mockImplementation(() => undefined);
+    try {
+      const { getByPlaceholderText } = render(
+        <ChatInputBar onSendMessage={onSendMessage} />,
+      );
+
+      const input = getByPlaceholderText('chat.inputPlaceholder');
+      expect(input.props.submitBehavior).toBe('blurAndSubmit');
+
+      fireEvent.changeText(input, 'Hello from enter');
+      fireEvent(input, 'submitEditing', {
+        nativeEvent: {
+          text: 'Hello from enter',
+        },
+      });
+
+      await waitFor(() => {
+        expect(onSendMessage).toHaveBeenCalledWith('Hello from enter');
+      });
+
+      expect(dismissKeyboardSpy).toHaveBeenCalledTimes(1);
+      expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
+    } finally {
+      dismissKeyboardSpy.mockRestore();
+    }
   });
 
   it('reports real composer typing and attachment selection as interactive work', () => {
@@ -1256,32 +1307,4 @@ describe('ChatInputBar', () => {
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('Wait for this image');
   });
 
-  it('derives glass primary action colors from the active primary token', () => {
-    expect(getPrimaryActionGlassStyle('#2563eb', 'light')).toEqual({
-      backgroundColor: 'rgba(37, 99, 235, 0.1)',
-      borderWidth: 0,
-    });
-    expect(getPrimaryActionGlassStyle('#38bdf8', 'dark')).toEqual({
-      backgroundColor: 'rgba(56, 189, 248, 0.22)',
-      borderWidth: 0,
-    });
-  });
-
-  it('softens dark glass composer and mode banner shells without changing light-mode fallbacks', () => {
-    expect(getGlassComposerCapsuleStyle('#020617', '#475569', 'light')).toEqual({
-      borderRadius: 999,
-    });
-    expect(getGlassComposerCapsuleStyle('#f7fbff', '#475569', 'dark')).toEqual({
-      backgroundColor: 'rgba(247, 251, 255, 0.1)',
-      borderColor: 'rgba(71, 85, 105, 0.28)',
-      borderRadius: 999,
-      borderWidth: 1,
-    });
-    expect(getModeBannerGlassStyle('#020617', '#60a5fa', 'light')).toBeUndefined();
-    expect(getModeBannerGlassStyle('#f7fbff', '#60a5fa', 'dark')).toEqual({
-      backgroundColor: 'rgba(247, 251, 255, 0.09)',
-      borderColor: 'rgba(96, 165, 250, 0.26)',
-      borderWidth: 1,
-    });
-  });
 });

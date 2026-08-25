@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '../../src/components/ui/box';
 import { MaterialSymbols } from '../../src/components/ui/MaterialSymbols';
 import type { MaterialSymbolName } from '../../src/components/ui/MaterialSymbols';
-import { TabBarGlassBackground } from '../../src/components/ui/TabBarGlassBackground';
+import { TabBarMaterialBackground } from '../../src/components/ui/TabBarMaterialBackground';
 import { useTheme } from '../../src/providers/ThemeProvider';
 import { createBottomTabBarStyle } from '../../src/utils/tabBarLayout';
 import { withAlpha } from '../../src/utils/themeTokens';
@@ -15,17 +15,18 @@ import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationSe
 
 export default function TabLayout() {
   const { t } = useTranslation();
-  const { colors, appearance } = useTheme();
+  const { colors, resolvedTheme } = useTheme();
   const insets = useSafeAreaInsets();
-  const tabBarStyle = createBottomTabBarStyle(colors, insets.bottom, Platform.OS, appearance);
-  const isGlassTabBar = appearance.surfaceKind === 'glass';
+  const tabBarPresentation = resolvedTheme.components.tabBar.presentation;
+  const tabBarStyle = createBottomTabBarStyle(colors, insets.bottom, Platform.OS, tabBarPresentation);
+  const isFloatingTabBar = tabBarPresentation === 'floating';
   const preventBusyTabNavigation = React.useCallback((event: { preventDefault: () => void }) => {
     if (hasActiveChatGenerationWork()) {
       event.preventDefault();
     }
   }, []);
   const renderTabIcon = (name: MaterialSymbolName, color: string, focused: boolean) => {
-    if (!isGlassTabBar) {
+    if (!isFloatingTabBar) {
       return <MaterialSymbols size={28} name={name} color={color} />;
     }
 
@@ -61,22 +62,22 @@ export default function TabLayout() {
         tabBarInactiveTintColor: colors.tabBarInactive,
         headerShown: false,
         tabBarHideOnKeyboard: false,
-        tabBarBackground: isGlassTabBar
-          ? () => <TabBarGlassBackground key={`${appearance.id}-${colors.headerBlurTint}`} />
+        tabBarBackground: isFloatingTabBar
+          ? () => <TabBarMaterialBackground key={`${resolvedTheme.id}-${resolvedTheme.mode}`} />
           : undefined,
         tabBarStyle,
         tabBarItemStyle: {
-          paddingTop: isGlassTabBar ? 6 : 4,
-          paddingBottom: isGlassTabBar ? 6 : 4,
+          paddingTop: isFloatingTabBar ? 6 : 4,
+          paddingBottom: isFloatingTabBar ? 6 : 4,
         },
         tabBarIconStyle: {
-          marginTop: isGlassTabBar ? -1 : -10,
-          marginBottom: isGlassTabBar ? 4 : 0,
+          marginTop: isFloatingTabBar ? -1 : -10,
+          marginBottom: isFloatingTabBar ? 4 : 0,
         },
         tabBarLabelStyle: {
-          fontSize: isGlassTabBar ? 11 : 12,
+          fontSize: isFloatingTabBar ? 11 : 12,
           fontWeight: '600',
-          lineHeight: isGlassTabBar ? 13 : undefined,
+          lineHeight: isFloatingTabBar ? 13 : undefined,
         },
       }}>
       <Tabs.Screen

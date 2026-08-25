@@ -65,6 +65,17 @@ jest.mock('expo-blur', () => ({
   BlurView: ({ children }: any) => children ?? null,
 }));
 
+jest.mock('expo-glass-effect', () => {
+  const MockGlassView = ({ children }: any) => children ?? null;
+
+  return {
+    GlassContainer: MockGlassView,
+    GlassView: MockGlassView,
+    isGlassEffectAPIAvailable: jest.fn(() => false),
+    isLiquidGlassAvailable: jest.fn(() => false),
+  };
+});
+
 jest.mock('expo-linear-gradient', () => ({
   LinearGradient: ({ children }: any) => children ?? null,
 }));

@@ -23,12 +23,14 @@ import { useDeviceMetrics } from '../../hooks/useDeviceMetrics';
 import { useFloatingScrollInsets } from '../../hooks/useTabBarContentInset';
 import { useLLMEngine } from '../../hooks/useLLMEngine';
 import { useTheme } from '../../providers/ThemeProvider';
+import { ThemeStyleSelector } from '../../design-system/components/ThemeStyleSelector';
+import { getThemeMetadata } from '../../design-system/themes/registry';
 import { huggingFaceTokenService } from '../../services/HuggingFaceTokenService';
 import { llmEngineService } from '../../services/LLMEngineService';
 import { getErrorMessage } from '../../services/AppError';
 import { getAppStorageMetrics, type AppStorageMetrics } from '../../services/StorageManagerService';
 import { getSettings, subscribeSettings, updateSettings } from '../../services/SettingsStore';
-import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeId, type ThemeTone } from '../../utils/themeTokens';
+import { screenLayoutMetrics, semanticColorTokens, withAlpha, type ThemeTone } from '../../utils/themeTokens';
 
 function clampPercentage(value: number) {
     if (!Number.isFinite(value)) {
@@ -37,6 +39,8 @@ function clampPercentage(value: number) {
 
     return Math.max(0, Math.min(100, value));
 }
+
+const visualThemeMetadata = getThemeMetadata();
 
 function formatSystemCapacity(value: number) {
     if (!Number.isFinite(value) || value <= 0) {
@@ -101,21 +105,21 @@ function SettingsNavCard({
                 <ScreenIconTile iconName={iconName} tone={iconTone} iconClassName={iconClassName} />
 
                 <Box className="min-w-0 flex-1">
-                    <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                    <Text colorRole="primary" className="text-base font-semibold  ">
                         {title}
                     </Text>
-                    <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                    <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                         {description}
                     </Text>
                 </Box>
 
                 <Box className="shrink-0 flex-row items-center gap-1">
                     {trailingText ? (
-                        <Text className="text-sm font-semibold text-primary-500">
+                        <Text colorRole="accent" className="text-sm font-semibold ">
                             {trailingText}
                         </Text>
                     ) : null}
-                    <MaterialSymbols name="chevron-right" size="lg" className="text-typography-400 dark:text-typography-500" />
+                    <MaterialSymbols colorRole="tertiary" name="chevron-right" size="lg" className=" " />
                 </Box>
             </Box>
         </ScreenPressableCard>
@@ -233,11 +237,11 @@ function LayeredUsageMeter({
     );
 }
 
-export const SettingsScreen = () => {
+const SettingsScreenContent = () => {
     const { t, i18n } = useTranslation();
     const router = useRouter();
     const isFocused = useIsFocused();
-    const { mode, themeId, resolvedMode, setTheme, setThemeId, colors, appearance } = useTheme();
+    const { mode, themeId, resolvedMode, setTheme, setThemeId, colors } = useTheme();
     const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
     const { metrics, refresh } = useDeviceMetrics({ enabled: isFocused, refreshIntervalMs: 5000 });
     const { state: engineState, isReady: isEngineReady } = useLLMEngine();
@@ -387,14 +391,10 @@ export const SettingsScreen = () => {
         { key: 'dark', label: t('settings.themeDark'), testID: 'settings-theme-mode-dark' },
     ];
 
-    const visualThemeOptions = [
-        { key: 'default', label: t('settings.themeStyleDefault'), testID: 'settings-theme-style-default' },
-        { key: 'glass', label: t('settings.themeStyleGlass'), testID: 'settings-theme-style-glass' },
-    ];
-
     return (
-        <ScreenRoot>
+        <>
             <HeaderBar
+                testID="settings-header"
                 title={`${t('settings.title')}`}
                 onBack={undefined}
                 backAccessibilityLabel={t('chat.headerBackAccessibilityLabel')}
@@ -423,12 +423,12 @@ export const SettingsScreen = () => {
                             <ScreenStack className="mt-2" gap="compact">
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <ScreenIconTile iconName="memory" tone="accent" iconClassName="text-primary-500" />
+                                        <ScreenIconTile iconName="memory" tone="accent" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t('settings.memoryTitle')}
                                             </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                 {t(isSystemRamSource ? 'settings.memoryDescription' : 'settings.memoryDescriptionFallback')}
                                             </Text>
                                         </Box>
@@ -436,10 +436,10 @@ export const SettingsScreen = () => {
 
                                     <Box className="mt-4 flex-row items-start justify-between gap-3">
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-2xl font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-2xl font-extrabold tracking-tight  ">
                                                 {ramPrimaryValue}
                                             </Text>
-                                            <Text className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-0.5 text-xs leading-4  ">
                                                 {ramPrimaryLabel}
                                             </Text>
                                         </Box>
@@ -448,10 +448,10 @@ export const SettingsScreen = () => {
                                             padding="none"
                                             className="self-start shrink-0 px-3 py-2.5"
                                         >
-                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="text-2xs font-semibold uppercase tracking-wide  ">
                                                 {ramAsideLabel}
                                             </Text>
-                                            <Text className="mt-1 text-sm font-extrabold text-primary-500">
+                                            <Text colorRole="accent" className="mt-1 text-sm font-extrabold ">
                                                 {ramAsideValue}
                                             </Text>
                                         </ScreenCard>
@@ -498,7 +498,7 @@ export const SettingsScreen = () => {
                                     </ScreenStack>
 
                                     {canForceUnloadModel ? (
-                                        <Box className={`mt-4 border-t pt-3 ${appearance.classNames.dividerClassName}`}>
+                                        <Box className="mt-4 border-t pt-3" style={{ borderColor: colors.divider }}>
                                             <Button
                                                 onPress={unloadActiveModel}
                                                 accessibilityRole="button"
@@ -507,7 +507,7 @@ export const SettingsScreen = () => {
                                                 size="sm"
                                                 className="self-start"
                                             >
-                                                <MaterialSymbols name="close" size="lg" className="text-error-500" />
+                                                <MaterialSymbols colorRole="danger" name="close" size="lg" className="" />
                                                 <ButtonText>{t('settings.forceUnloadModel')}</ButtonText>
                                             </Button>
                                         </Box>
@@ -518,10 +518,10 @@ export const SettingsScreen = () => {
                                     <Box className="flex-row items-start gap-3">
                                         <ScreenIconTile iconName="storage" tone="success" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t('settings.storageTitle')}
                                             </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                 {t('settings.storageDescription')}
                                             </Text>
                                         </Box>
@@ -529,10 +529,10 @@ export const SettingsScreen = () => {
 
                                     <Box className="mt-4 flex-row items-start justify-between gap-3">
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-2xl font-extrabold tracking-tight text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-2xl font-extrabold tracking-tight  ">
                                                 {formatSystemCapacity(storageUsedBytes)}
                                             </Text>
-                                            <Text className="mt-0.5 text-xs leading-4 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-0.5 text-xs leading-4  ">
                                                 {t('settings.storageUsedOf', { total: formatSystemCapacity(storageTotalBytes) })}
                                             </Text>
                                         </Box>
@@ -541,10 +541,10 @@ export const SettingsScreen = () => {
                                             padding="none"
                                             className="self-start shrink-0 px-3 py-2.5"
                                         >
-                                            <Text className="text-2xs font-semibold uppercase tracking-wide text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="text-2xs font-semibold uppercase tracking-wide  ">
                                                 {t('settings.free')}
                                             </Text>
-                                            <Text className="mt-1 text-sm font-extrabold text-success-600 dark:text-success-300">
+                                            <Text colorRole="success" className="mt-1 text-sm font-extrabold  ">
                                                 {formatSystemCapacity(storageFreeBytes)}
                                             </Text>
                                         </ScreenCard>
@@ -587,10 +587,10 @@ export const SettingsScreen = () => {
                                     <Box className="flex-row items-start gap-3">
                                         <ScreenIconTile iconName="palette" tone="info" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t('settings.themeMode')}
                                             </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                 {t('settings.themeDescription')}
                                             </Text>
                                         </Box>
@@ -609,21 +609,19 @@ export const SettingsScreen = () => {
                                     <Box className="flex-row items-start gap-3">
                                         <ScreenIconTile iconName="auto-awesome" tone="accent" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t('settings.themeStyle')}
                                             </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                 {t('settings.themeStyleDescription')}
                                             </Text>
                                         </Box>
                                     </Box>
 
-                                    <ScreenSegmentedControl
-                                        className="mt-4"
-                                        testID="settings-theme-style-control"
-                                        activeKey={themeId}
-                                        onChange={(nextThemeId) => setThemeId(nextThemeId as ThemeId)}
-                                        options={visualThemeOptions}
+                                    <ThemeStyleSelector
+                                        themes={visualThemeMetadata}
+                                        activeThemeId={themeId}
+                                        onChange={setThemeId}
                                     />
                                 </ScreenCard>
 
@@ -632,7 +630,6 @@ export const SettingsScreen = () => {
                                     description={t('settings.languageDescription')}
                                     iconName="language"
                                     iconTone="accent"
-                                    iconClassName="text-primary-500"
                                     trailingText={settings.language === 'en' ? t('settings.languageEnglish') : t('settings.languageRussian')}
                                     onPress={handleLanguagePress}
                                 />
@@ -646,10 +643,10 @@ export const SettingsScreen = () => {
                                     <Box className="flex-row items-start gap-3">
                                         <ScreenIconTile iconName="cell-tower" tone="info" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t('settings.cellularDownloads')}
                                             </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                 {t('settings.cellularDownloadsDescription')}
                                             </Text>
                                         </Box>
@@ -664,12 +661,12 @@ export const SettingsScreen = () => {
                                 </ScreenCard>
                                 <ScreenCard padding="compact">
                                     <Box className="flex-row items-start gap-3">
-                                        <ScreenIconTile iconName="model-training" tone="accent" iconClassName="text-primary-500" />
+                                        <ScreenIconTile iconName="model-training" tone="accent" />
                                         <Box className="min-w-0 flex-1">
-                                            <Text className="text-base font-semibold text-typography-900 dark:text-typography-100">
+                                            <Text colorRole="primary" className="text-base font-semibold  ">
                                                 {t('settings.advancedInferenceControls')}
                                             </Text>
-                                            <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                                            <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                                                 {t('settings.advancedInferenceControlsDescription')}
                                             </Text>
                                         </Box>
@@ -701,7 +698,6 @@ export const SettingsScreen = () => {
                                     description={t('settings.huggingFaceTokenDescription')}
                                     iconName="key"
                                     iconTone="accent"
-                                    iconClassName="text-primary-500"
                                     trailingText={hasHuggingFaceToken
                                         ? t('settings.huggingFaceTokenConfigured')
                                         : t('settings.huggingFaceTokenMissing')}
@@ -712,7 +708,6 @@ export const SettingsScreen = () => {
                                     description={t('settings.privacyDisclosuresDescription')}
                                     iconName="security"
                                     iconTone="accent"
-                                    iconClassName="text-primary-500"
                                     onPress={handleLegalPress}
                                 />
                                 {typeof __DEV__ !== 'undefined' && __DEV__ ? (
@@ -729,6 +724,12 @@ export const SettingsScreen = () => {
                     </ScreenStack>
                 </ScreenContent>
             </ScrollView>
-        </ScreenRoot>
+        </>
     );
 };
+
+export const SettingsScreen = () => (
+    <ScreenRoot>
+        <SettingsScreenContent />
+    </ScreenRoot>
+);

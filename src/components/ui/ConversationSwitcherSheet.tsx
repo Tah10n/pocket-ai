@@ -109,7 +109,7 @@ export function ConversationSwitcherSheet({
                   }}
                   className="flex-1"
                 >
-                  <MaterialSymbols name="edit-square" size="md" className="text-primary-500" />
+                  <MaterialSymbols colorRole="accent" name="edit-square" size="md" className="" />
                   <ButtonText>{t('chat.conversationSwitcher.startNewChat')}</ButtonText>
                 </Button>
 
@@ -123,7 +123,7 @@ export function ConversationSwitcherSheet({
                     }}
                     className="flex-1"
                   >
-                    <MaterialSymbols name="manage-search" size="md" className="text-typography-700 dark:text-typography-200" />
+                    <MaterialSymbols colorRole="secondary" name="manage-search" size="md" className=" " />
                     <ButtonText>{t('common.manage')}</ButtonText>
                   </Button>
                 ) : null}
@@ -142,20 +142,20 @@ export function ConversationSwitcherSheet({
                 >
                   <Box className="flex-row items-center justify-between gap-3">
                     <Box className="min-w-0 flex-1">
-                      <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+                      <Text colorRole="primary" className="text-sm font-semibold  ">
                         {t('chat.conversationSwitcher.presetTitle')}
                       </Text>
-                      <Text className="mt-1 text-sm text-typography-500 dark:text-typography-400" numberOfLines={1}>
+                      <Text colorRole="tertiary" className="mt-1 text-sm  " numberOfLines={1}>
                         {canOpenPresetSelector
                           ? t('chat.conversationSwitcher.presetCurrent', { name: activePresetName ?? t('common.default') })
                           : t('chat.conversationSwitcher.presetBlocked')}
                       </Text>
                     </Box>
 
-                    <MaterialSymbols
+                    <MaterialSymbols colorRole="tertiary"
                       name="tune"
                       size="md"
-                      className={canOpenPresetSelector ? 'text-typography-500 dark:text-typography-300' : 'text-typography-300 dark:text-typography-600'}
+                      className={canOpenPresetSelector ? ' ' : ' '}
                     />
                   </Box>
                 </ScreenPressableCard>

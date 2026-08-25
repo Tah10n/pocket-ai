@@ -121,13 +121,9 @@ interface ParameterControlCardProps {
   helperText?: string;
 }
 
-const accentEyebrowClassName = 'text-xs font-semibold uppercase tracking-wider text-primary-600 dark:text-primary-300';
-const cardTitleClassName = 'text-base font-semibold text-typography-900 dark:text-typography-100';
-const cardDescriptionClassName = 'text-sm leading-5 text-typography-500 dark:text-typography-400';
-const statusFooterTitleClassNameByTone = {
-  accent: accentEyebrowClassName,
-  success: 'text-xs font-semibold uppercase tracking-wider text-success-600 dark:text-success-400',
-} as const;
+const accentEyebrowClassName = 'text-xs font-semibold uppercase tracking-wider';
+const cardTitleClassName = 'text-base font-semibold';
+const cardDescriptionClassName = 'text-sm leading-5';
 const modelParametersSheetFooterFallbackHeightByKind = {
   apply: 104,
   saveConfirmation: 88,
@@ -174,7 +170,6 @@ function ModelParametersSheetButton({
 
 function ModelParametersSheetStatusFooter({
   testID,
-  dividerClassName,
   titleTone,
   title,
   description,
@@ -183,29 +178,31 @@ function ModelParametersSheetStatusFooter({
   onMeasuredHeight,
 }: {
   testID: string;
-  dividerClassName: string;
-  titleTone: keyof typeof statusFooterTitleClassNameByTone;
+  titleTone: 'accent' | 'success';
   title: string;
   description: string;
   descriptionNumberOfLines?: number;
   action?: React.ReactNode;
   onMeasuredHeight: (height: number) => void;
 }) {
+  const { colors } = useTheme();
+
   return (
     <Box
       testID={testID}
-      className={joinClassNames('mt-2 border-t pt-2', dividerClassName)}
+      className="mt-2 border-t pt-2"
+      style={{ borderColor: colors.divider }}
       onLayout={(event) => {
         onMeasuredHeight(Math.ceil(event.nativeEvent.layout.height));
       }}
     >
       <ScreenCard className="mb-2 px-3 py-2" tone="accent" variant="inset" padding="none">
-        <Text className={statusFooterTitleClassNameByTone[titleTone]}>
+        <Text colorRole={titleTone} className={accentEyebrowClassName}>
           {title}
         </Text>
-        <Text
+        <Text colorRole="secondary"
           numberOfLines={descriptionNumberOfLines}
-          className="mt-0.5 text-xs leading-4 text-typography-700 dark:text-typography-200"
+          className="mt-0.5 text-xs leading-4  "
         >
           {description}
         </Text>
@@ -251,14 +248,14 @@ function ParameterControlCard({
       <ScreenStack gap="default">
         <Box className="flex-row items-start justify-between gap-3">
           <Box className="min-w-0 flex-1">
-            <Text className={cardTitleClassName}>
+            <Text colorRole="primary" className={cardTitleClassName}>
               {label}
             </Text>
-            <Text className={`mt-1 ${cardDescriptionClassName}`}>
+            <Text colorRole="tertiary" className={`mt-1 ${cardDescriptionClassName}`}>
               {description}
             </Text>
             {helperText ? (
-              <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+              <Text colorRole="tertiary" className="mt-2 text-xs leading-5  ">
                 {helperText}
               </Text>
             ) : null}
@@ -325,10 +322,10 @@ function SliderRow({
         />
 
         <Box className="flex-row items-center justify-between">
-          <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
+          <Text colorRole="tertiary" className="text-xs font-medium  ">
             {minLabel}
           </Text>
-          <Text className="text-xs font-medium text-typography-400 dark:text-typography-500">
+          <Text colorRole="tertiary" className="text-xs font-medium  ">
             {maxLabel}
           </Text>
         </Box>
@@ -458,7 +455,6 @@ export function ModelParametersSheet({
   onApplyReload,
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
-  const { appearance } = useTheme();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [seedInput, setSeedInput] = useState(() => (params.seed === null ? '' : String(params.seed)));
@@ -881,7 +877,6 @@ export function ModelParametersSheet({
   const footerContent = showApplyReload ? (
     <ModelParametersSheetStatusFooter
       testID="model-apply-footer"
-      dividerClassName={appearance.classNames.dividerClassName}
       titleTone="accent"
       title={t('chat.modelControls.pendingLoadProfileTitle')}
       description={t('chat.modelControls.pendingLoadProfileDescription')}
@@ -903,7 +898,6 @@ export function ModelParametersSheet({
   ) : didSaveLoadProfile ? (
     <ModelParametersSheetStatusFooter
       testID="model-save-confirmation-footer"
-      dividerClassName={appearance.classNames.dividerClassName}
       titleTone="success"
       title={t('chat.modelControls.savedLoadProfileTitle')}
       description={t('chat.modelControls.savedLoadProfileDescription')}
@@ -930,10 +924,10 @@ export function ModelParametersSheet({
           >
             <Box className="flex-row items-start justify-between gap-4">
               <Box className="min-w-0 flex-1">
-                <Text className="text-lg font-semibold text-typography-900 dark:text-typography-100">
+                <Text colorRole="primary" className="text-lg font-semibold  ">
                   {t('chat.modelControls.title')}
                 </Text>
-                <Text className="mt-1 text-sm leading-5 text-typography-500 dark:text-typography-400">
+                <Text colorRole="tertiary" className="mt-1 text-sm leading-5  ">
                   {modelId
                     ? t('chat.modelControls.descriptionForModel', { modelLabel, loadAction: applyButtonLabel })
                     : t('chat.modelControls.descriptionNoModel')}
@@ -964,10 +958,10 @@ export function ModelParametersSheet({
           >
             <ScreenCard testID="model-parameters-sheet-active-profile" className="mb-3 flex-row items-center justify-between" tone="accent" variant="inset" padding="compact">
               <Box className="min-w-0 flex-1 pr-3">
-                <Text className={accentEyebrowClassName}>
+                <Text colorRole="accent" className={accentEyebrowClassName}>
                   {t('chat.modelControls.activeProfile')}
                 </Text>
-                <Text numberOfLines={1} className="mt-1 text-sm font-semibold text-typography-900 dark:text-typography-100">
+                <Text colorRole="primary" numberOfLines={1} className="mt-1 text-sm font-semibold  ">
                   {modelLabel}
                 </Text>
               </Box>
@@ -985,10 +979,10 @@ export function ModelParametersSheet({
 
             {showThinkingCapabilityRetry ? (
               <ScreenCard testID="thinking-capability-retry-card" className="mb-3" tone="warning" padding="compact">
-                <Text className="text-sm font-semibold text-typography-900 dark:text-typography-100">
+                <Text colorRole="primary" className="text-sm font-semibold  ">
                   {t('chat.modelControls.thinkingDetectionPausedTitle')}
                 </Text>
-                <Text className="mt-1 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                <Text colorRole="secondary" className="mt-1 text-sm leading-5  ">
                   {t('chat.modelControls.thinkingDetectionPausedDescription')}
                 </Text>
                 <ModelParametersSheetButton
@@ -1012,10 +1006,10 @@ export function ModelParametersSheet({
               <ScreenCard tone="accent">
                 <ScreenStack gap="default">
                   <Box>
-                    <Text className={accentEyebrowClassName}>
+                    <Text colorRole="accent" className={accentEyebrowClassName}>
                       {t('chat.modelControls.liveSampling')}
                     </Text>
-                    <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                    <Text colorRole="secondary" className="mt-2 text-sm leading-5  ">
                       {t('chat.modelControls.liveSamplingDescription')}
                     </Text>
                   </Box>
@@ -1243,20 +1237,20 @@ export function ModelParametersSheet({
               <ScreenCard tone="accent">
                 <ScreenStack gap="default">
                   <Box>
-                    <Text className={accentEyebrowClassName}>
+                    <Text colorRole="accent" className={accentEyebrowClassName}>
                       {t('chat.modelControls.runtimeReload')}
                     </Text>
-                    <Text className="mt-2 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                    <Text colorRole="secondary" className="mt-2 text-sm leading-5  ">
                       {t('chat.modelControls.runtimeReloadDescription')}
                     </Text>
                   </Box>
 
                   {typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
                     <ScreenCard tone="default" variant="inset" padding="compact">
-                      <Text className={accentEyebrowClassName}>
+                      <Text colorRole="accent" className={accentEyebrowClassName}>
                         {t('chat.modelControls.runtimeLoadedTitle')}
                       </Text>
-                      <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                      <Text colorRole="secondary" className="mt-1 text-sm leading-5  ">
                         {t('chat.modelControls.runtimeLoadedValue', {
                           contextSize: Math.round(loadedContextSize),
                           gpuLayers: Math.round(reportedLoadedGpuLayers ?? 0),
@@ -1267,41 +1261,41 @@ export function ModelParametersSheet({
 
                   {showAdvancedInferenceControls ? (
                     <ScreenCard tone="default" variant="inset" padding="compact">
-                      <Text className={accentEyebrowClassName}>
+                      <Text colorRole="accent" className={accentEyebrowClassName}>
                         {t('chat.modelControls.backendBenchmarkTitle')}
                       </Text>
-                      <Text className="mt-1 text-sm leading-5 text-typography-600 dark:text-typography-300">
+                      <Text colorRole="secondary" className="mt-1 text-sm leading-5  ">
                         {t('chat.modelControls.backendBenchmarkDescription')}
                       </Text>
 
                       {autotuneBestStable ? (
-                        <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="mt-2 text-sm leading-5  ">
                           {t('chat.modelControls.backendBenchmarkBestStable', {
                             backend: autotuneBestStableBackendLabel,
                             layers: Math.max(0, Math.round(autotuneBestStable.nGpuLayers)),
                           })}
                         </Text>
                       ) : (
-                        <Text className="mt-2 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="mt-2 text-sm leading-5  ">
                           {t('chat.modelControls.backendBenchmarkNoResult')}
                         </Text>
                       )}
 
                       {showApplyReload ? (
-                        <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="mt-2 text-xs leading-5  ">
                           {t('chat.modelControls.backendBenchmarkPendingChangesHint')}
                         </Text>
                       ) : null}
 
                       {!isAutotuneRunning && autotuneResult?.cancelled ? (
-                        <Text className="mt-2 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                        <Text colorRole="tertiary" className="mt-2 text-xs leading-5  ">
                           {t('chat.modelControls.backendBenchmarkCancelledNote')}
                         </Text>
                       ) : null}
 
                       {!isAutotuneRunning && autotuneCandidates.length > 0 ? (
                         <Box className="mt-3 gap-2">
-                          <Text className="text-xs font-semibold uppercase tracking-wider text-typography-500 dark:text-typography-400">
+                          <Text colorRole="tertiary" className="text-xs font-semibold uppercase tracking-wider  ">
                             {t('chat.modelControls.backendBenchmarkResultsTitle')}
                           </Text>
 
@@ -1341,18 +1335,18 @@ export function ModelParametersSheet({
 
                             return (
                               <Box key={candidateKey} className="gap-0.5">
-                                <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                <Text colorRole="secondary" className="text-sm leading-5  ">
                                   {primaryLine}
                                 </Text>
 
                                 {details.length > 0 ? (
-                                  <Text className="text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                  <Text colorRole="tertiary" className="text-xs leading-5  ">
                                     {details.join(' • ')}
                                   </Text>
                                 ) : null}
 
                                 {failureCategory ? (
-                                  <Text className="text-xs leading-5 text-typography-500 dark:text-typography-400">
+                                  <Text colorRole="tertiary" className="text-xs leading-5  ">
                                     {failureCategory}
                                   </Text>
                                 ) : null}
@@ -1365,13 +1359,13 @@ export function ModelParametersSheet({
                       {isAutotuneRunning ? (
                         <Box className="mt-3 gap-2">
                           {autotuneProgressStageLabel ? (
-                            <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                            <Text colorRole="secondary" className="text-sm leading-5  ">
                               {autotuneProgressPercent !== null
                                 ? `${autotuneProgressStageLabel} ${autotuneProgressPercent}%`
                                 : autotuneProgressStageLabel}
                             </Text>
                           ) : (
-                            <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                            <Text colorRole="secondary" className="text-sm leading-5  ">
                               {t('chat.modelControls.backendBenchmarkRunning')}
                             </Text>
                           )}
@@ -1411,120 +1405,121 @@ export function ModelParametersSheet({
                   {showAdvancedInferenceControls && engineDiagnostics ? (
                     <ScreenCard tone={shouldHighlightNoGpu ? 'warning' : 'default'} variant="inset" padding="compact">
                       <Text
-                        className={`text-xs font-semibold uppercase tracking-wider ${shouldHighlightNoGpu ? 'text-warning-700 dark:text-warning-200' : 'text-primary-600 dark:text-primary-300'}`}
+                        colorRole={shouldHighlightNoGpu ? 'warning' : 'accent'}
+                        className="text-xs font-semibold uppercase tracking-wider"
                       >
                         {t('chat.modelControls.runtimeBackendTitle')}
                       </Text>
                       <Box className="mt-1 gap-1">
-                      <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                      <Text colorRole="secondary" className="text-sm leading-5  ">
                         {t('chat.modelControls.runtimeBackendBackend', { backend: backendLabel })}
                       </Text>
 
                       {resolvedLoadedContextSize === null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendNotLoaded')}
                         </Text>
                       ) : null}
 
                       {engineDiagnostics.requestedBackendPolicy ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendRequestedPolicy', { policy: requestedBackendPolicyLabel })}
                         </Text>
                       ) : null}
 
                       {engineDiagnostics.effectiveBackendPolicy &&
                       engineDiagnostics.effectiveBackendPolicy !== engineDiagnostics.requestedBackendPolicy ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendEffectivePolicy', { policy: effectiveBackendPolicyLabel })}
                         </Text>
                       ) : null}
 
                       {runtimeRequestedGpuLayers !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendRequestedLayers', { count: runtimeRequestedGpuLayers })}
                         </Text>
                       ) : null}
 
                       {runtimeLoadedGpuLayers !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendLoadedLayers', { count: runtimeLoadedGpuLayers })}
                         </Text>
                       ) : null}
 
                       {initGpuLayers !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendInitLayers', { count: initGpuLayers })}
                         </Text>
                       ) : null}
 
                       {initDeviceCount !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendInitDevices', { devices: initDeviceCount })}
                         </Text>
                       ) : null}
 
                       {backendDeviceCount !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendDevices', { devices: backendDeviceCount })}
                         </Text>
                       ) : null}
 
                       {initCacheTypeK && initCacheTypeV ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendKvCacheTypes', { k: initCacheTypeK, v: initCacheTypeV })}
                         </Text>
                       ) : null}
 
                       {initFlashAttnType ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendFlashAttn', { value: initFlashAttnType })}
                         </Text>
                       ) : null}
 
                       {initUseMmap !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendMmap', { value: initUseMmap ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
                         </Text>
                       ) : null}
 
                       {initUseMlock !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendMlock', { value: initUseMlock ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
                         </Text>
                       ) : null}
 
                       {initNParallel !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendParallelSlots', { count: initNParallel })}
                         </Text>
                       ) : null}
 
                       {initNThreads !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendThreads', { count: initNThreads })}
                         </Text>
                       ) : null}
 
                       {initCpuMask ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendCpuMask', { mask: initCpuMask })}
                         </Text>
                       ) : null}
 
                       {initCpuStrict !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendCpuStrict', { value: initCpuStrict ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
                         </Text>
                       ) : null}
 
                       {initNBatch !== null && initNUbatch !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendBatch', { batch: initNBatch, ubatch: initNUbatch })}
                         </Text>
                       ) : null}
 
                       {initKvUnified !== null ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendKvUnified', { value: initKvUnified ? t('chat.modelControls.runtimeBackendEnabled') : t('chat.modelControls.runtimeBackendDisabled') })}
                         </Text>
                       ) : null}
@@ -1532,45 +1527,45 @@ export function ModelParametersSheet({
                       {backendPolicyReasons.length > 0 ? backendPolicyReasons.map((reason, index) => {
                         const localizedReason = t(reason, { defaultValue: reason });
                         return (
-                          <Text key={`backend-policy-reason-${index}`} className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                          <Text colorRole="secondary" key={`backend-policy-reason-${index}`} className="text-sm leading-5  ">
                             {t('chat.modelControls.runtimeBackendPolicyReason', { reason: localizedReason })}
                           </Text>
                         );
                       }) : null}
 
                       {engineDiagnostics.androidLib ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendLibrary', { library: engineDiagnostics.androidLib })}
                         </Text>
                       ) : null}
 
                       {androidGpuInfo?.glRenderer ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendGlRenderer', { value: androidGpuInfo.glRenderer })}
                         </Text>
                       ) : null}
 
                       {androidGpuInfo?.glVendor ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendGlVendor', { value: androidGpuInfo.glVendor })}
                         </Text>
                       ) : null}
 
                       {androidGpuInfo?.socModel ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendSocModel', { value: androidGpuInfo.socModel })}
                         </Text>
                       ) : null}
 
                       {engineDiagnostics.reasonNoGPU ? (
-                        <Text className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                        <Text colorRole="secondary" className="text-sm leading-5  ">
                           {t('chat.modelControls.runtimeBackendReason', { reason: engineDiagnostics.reasonNoGPU })}
                         </Text>
                       ) : null}
 
                       {backendInitAttempts.length > 0 ? (
                         <Box className="mt-2 gap-1">
-                          <Text className={accentEyebrowClassName}>
+                          <Text colorRole="accent" className={accentEyebrowClassName}>
                             {t('chat.modelControls.runtimeBackendAttemptsTitle')}
                           </Text>
                           {backendInitAttempts.map((attempt, index) => {
@@ -1593,7 +1588,7 @@ export function ModelParametersSheet({
                             ].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' | ');
 
                             return (
-                              <Text key={`backend-init-attempt-${index}`} className="text-xs leading-5 text-typography-500 dark:text-typography-400">
+                              <Text colorRole="tertiary" key={`backend-init-attempt-${index}`} className="text-xs leading-5  ">
                                 {`${index + 1}) ${attemptBackend} - ${attemptOutcome}${attemptDetails ? ` | ${attemptDetails}` : ''}`}
                               </Text>
                             );
@@ -1602,9 +1597,9 @@ export function ModelParametersSheet({
                       ) : null}
 
                       {engineDiagnostics.systemInfo ? (
-                        <Text
+                        <Text colorRole="secondary"
                           numberOfLines={3}
-                          className="text-sm leading-5 text-typography-700 dark:text-typography-200"
+                          className="text-sm leading-5  "
                         >
                           {t('chat.modelControls.runtimeBackendSystemInfo', { info: engineDiagnostics.systemInfo })}
                         </Text>
@@ -1618,10 +1613,10 @@ export function ModelParametersSheet({
                   !showApplyReload &&
                   loadedContextSize < loadParamsDraft.contextSize ? (
                     <ScreenCard tone="warning" variant="inset" padding="compact">
-                      <Text className="text-xs font-semibold uppercase tracking-wider text-warning-700 dark:text-warning-200">
+                      <Text colorRole="warning" className="text-xs font-semibold uppercase tracking-wider  ">
                         {t('chat.modelControls.runtimeMismatchTitle')}
                       </Text>
-                      <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                      <Text colorRole="secondary" className="mt-1 text-sm leading-5  ">
                         {isSafeModeActive
                           ? t('chat.modelControls.runtimeMismatchDescriptionSafe', {
                               requested: Math.round(loadParamsDraft.contextSize),
@@ -1641,10 +1636,10 @@ export function ModelParametersSheet({
                   runtimeLoadedGpuLayers < runtimeRequestedGpuLayers &&
                   !showApplyReload ? (
                     <ScreenCard tone="warning" variant="inset" padding="compact">
-                      <Text className="text-xs font-semibold uppercase tracking-wider text-warning-700 dark:text-warning-200">
+                      <Text colorRole="warning" className="text-xs font-semibold uppercase tracking-wider  ">
                         {t('chat.modelControls.runtimeGpuMismatchTitle')}
                       </Text>
-                      <Text className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                      <Text colorRole="secondary" className="mt-1 text-sm leading-5  ">
                         {isSafeModeActive
                           ? t('chat.modelControls.runtimeGpuMismatchDescriptionSafe', {
                               requested: Math.round(runtimeRequestedGpuLayers),
@@ -1690,18 +1685,18 @@ export function ModelParametersSheet({
                             variant="inset"
                             padding="compact"
                           >
-                            <Text className={accentEyebrowClassName}>
+                            <Text colorRole="accent" className={accentEyebrowClassName}>
                               {t('chat.modelControls.mtpTelemetryTitle')}
                             </Text>
-                            <Text
+                            <Text colorRole="secondary"
                               testID="mtp-runtime-status"
-                              className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200"
+                              className="mt-1 text-sm leading-5  "
                             >
                               {t('chat.modelControls.mtpStatusValue', { status: mtpStatusText })}
                             </Text>
                             {mtpLastCompletion ? (
                               <Box className="mt-1 gap-1">
-                                <Text testID="mtp-runtime-draft-counters" className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                <Text colorRole="secondary" testID="mtp-runtime-draft-counters" className="text-sm leading-5  ">
                                   {t('chat.modelControls.mtpDraftAcceptance', {
                                     accepted: mtpLastCompletion.mtp.draftTokensAccepted,
                                     drafted: mtpLastCompletion.mtp.draftTokens,
@@ -1711,14 +1706,14 @@ export function ModelParametersSheet({
                                   })}
                                 </Text>
                                 {typeof mtpLastCompletion.predictedPerSecond === 'number' ? (
-                                  <Text testID="mtp-runtime-native-speed" className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                  <Text colorRole="secondary" testID="mtp-runtime-native-speed" className="text-sm leading-5  ">
                                     {t('chat.modelControls.mtpNativeSpeed', {
                                       speed: mtpLastCompletion.predictedPerSecond.toFixed(2),
                                     })}
                                   </Text>
                                 ) : null}
                                 {typeof mtpLastCompletion.timeToFirstTokenMs === 'number' ? (
-                                  <Text testID="mtp-runtime-ttft" className="text-sm leading-5 text-typography-700 dark:text-typography-200">
+                                  <Text colorRole="secondary" testID="mtp-runtime-ttft" className="text-sm leading-5  ">
                                     {t('chat.modelControls.mtpTtft', {
                                       milliseconds: Math.round(mtpLastCompletion.timeToFirstTokenMs),
                                     })}
@@ -1727,14 +1722,14 @@ export function ModelParametersSheet({
                               </Box>
                             ) : null}
                             {typeof mtpMemoryDeltaBytes === 'number' ? (
-                              <Text testID="mtp-runtime-memory-delta" className="mt-1 text-sm leading-5 text-typography-700 dark:text-typography-200">
+                              <Text colorRole="secondary" testID="mtp-runtime-memory-delta" className="mt-1 text-sm leading-5  ">
                                 {t('chat.modelControls.mtpMemoryDelta', {
                                   memory: formatMebibytes(mtpMemoryDeltaBytes),
                                 })}
                               </Text>
                             ) : null}
                             {typeof mtpDiagnostics.draftModelBytes === 'number' ? (
-                              <Text className="mt-1 text-xs leading-5 text-typography-500 dark:text-typography-400">
+                              <Text colorRole="tertiary" className="mt-1 text-xs leading-5  ">
                                 {t('chat.modelControls.mtpDraftSize', {
                                   memory: formatMebibytes(mtpDiagnostics.draftModelBytes),
                                 })}

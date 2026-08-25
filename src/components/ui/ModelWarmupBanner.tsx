@@ -4,7 +4,7 @@ import { AccessibilityInfo, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Box } from '@/components/ui/box';
 import { ProgressBar } from '@/components/ui/ProgressBar';
-import { ScreenBanner, ScreenIconTile, useScreenAppearance } from '@/components/ui/ScreenShell';
+import { ScreenBanner, ScreenIconTile } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { EngineStatus, type EngineState } from '@/types/models';
@@ -12,6 +12,7 @@ import type { MultimodalReadinessState, MultimodalReadinessStatus } from '@/type
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { sanitizeMultimodalFailureReason } from '@/utils/multimodalFailureReason';
 import { getNativeBottomSafeAreaInset } from '@/utils/safeArea';
+import { useTheme } from '@/providers/ThemeProvider';
 
 export const MODEL_WARMUP_BANNER_BOTTOM_GAP = 8;
 export const MODEL_WARMUP_BANNER_RESERVED_HEIGHT = 120;
@@ -46,7 +47,7 @@ export function ModelWarmupBanner({
   multimodalReadiness?: MultimodalReadinessState;
 }) {
   const { t } = useTranslation();
-  const appearance = useScreenAppearance();
+  const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const lastIosAnnouncementRef = useRef<string | null>(null);
 
@@ -55,7 +56,6 @@ export function ModelWarmupBanner({
     [engineState.loadProgress],
   );
   const safeBottomOffset = getNativeBottomSafeAreaInset(insets.bottom);
-  const shouldForceNativeAndroidBlur = Boolean(androidContentBlurTargetRef);
   const diagnosticsMultimodal = engineState.diagnostics?.multimodal;
   const multimodalReadinessStatus = multimodalReadiness?.status ?? diagnosticsMultimodal?.readinessStatus;
   const multimodalReadinessKey = multimodalReadinessStatus
@@ -112,7 +112,6 @@ export function ModelWarmupBanner({
         testID="model-warmup-banner"
         floating
         tone="accent"
-        forceNativeAndroidBlur={shouldForceNativeAndroidBlur}
         androidBlurTargetRef={androidContentBlurTargetRef ?? null}
         className="w-full max-w-lg"
       >
@@ -125,32 +124,32 @@ export function ModelWarmupBanner({
           className="mb-2 flex-row items-center gap-2"
         >
           <ScreenIconTile iconName="sync" tone="accent" size="sm" className="h-8 w-8">
-            <Spinner className="text-primary-600 dark:text-primary-300" />
+            <Spinner color={colors.primaryStrong} />
           </ScreenIconTile>
           <Box className="min-w-0 flex-1">
-            <Text
+            <Text colorRole="accent"
               numberOfLines={1}
               textRole="action"
-              className="text-primary-700 dark:text-primary-200"
+              className=" "
             >
               {warmupPhaseText}{' '}{progressPercent}%
             </Text>
             {multimodalReadinessText ? (
-              <Text
+              <Text colorRole="accent"
                 testID="model-warmup-multimodal-readiness"
                 numberOfLines={1}
                 textRole="caption"
-                className="text-primary-700 dark:text-primary-200"
+                className=" "
               >
                 {multimodalReadinessText}
               </Text>
             ) : null}
             {multimodalFailureReason ? (
-              <Text
+              <Text colorRole="accent"
                 testID="model-warmup-multimodal-failure"
                 numberOfLines={1}
                 textRole="caption"
-                className="text-primary-700 dark:text-primary-200"
+                className=" "
               >
                 {multimodalFailureReason}
               </Text>
@@ -164,9 +163,6 @@ export function ModelWarmupBanner({
           size="lg"
           tone="primary"
           variant="framed"
-          fillClassName={appearance.classNames.toneClassNameByTone.primary.progressFillClassName}
-          forceNativeAndroidBlur={shouldForceNativeAndroidBlur}
-          androidBlurTargetRef={androidContentBlurTargetRef ?? null}
         />
       </ScreenBanner>
     </Box>

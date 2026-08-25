@@ -1,9 +1,12 @@
 import React from 'react';
+// Namespace import is required so tests can replace the platform color-scheme hook.
+// eslint-disable-next-line no-restricted-imports
 import * as ReactNative from 'react-native';
 import { Pressable, Text } from 'react-native';
 import { act, fireEvent, render } from '@testing-library/react-native';
-import { ThemeProvider, useTheme } from '../../src/providers/ThemeProvider';
+import { StaticThemeProvider, ThemeProvider, useTheme } from '../../src/providers/ThemeProvider';
 import { getSettings, subscribeSettings, updateSettings } from '../../src/services/SettingsStore';
+import { resolveTheme } from '../../src/design-system/themes/resolver';
 
 const mockSetColorScheme = jest.fn();
 let settingsListener: ((settings: any) => void) | null = null;
@@ -21,7 +24,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
 }));
 
 function ThemeProbe() {
-  const { mode, themeId, resolvedMode, colors, appearance, navigationTheme, setTheme, setThemeId } = useTheme();
+  const { mode, themeId, resolvedMode, colors, resolvedTheme, navigationTheme, setTheme, setThemeId } = useTheme();
 
   return (
     <>
@@ -30,8 +33,10 @@ function ThemeProbe() {
       <Text testID="resolved-mode">{resolvedMode}</Text>
       <Text testID="primary-color">{colors.primary}</Text>
       <Text testID="card-surface">{colors.cardBackground}</Text>
-      <Text testID="surface-kind">{appearance.surfaceKind}</Text>
+      <Text testID="tab-presentation">{resolvedTheme.components.tabBar.presentation}</Text>
       <Text testID="navigation-card">{navigationTheme.colors.card}</Text>
+      <Text testID="resolved-theme-id">{resolvedTheme.id}</Text>
+      <Text testID="resolved-navigation-card">{resolvedTheme.navigationTheme.colors.card}</Text>
       <Pressable testID="set-system" onPress={() => setTheme('system')}>
         <Text>System</Text>
       </Pressable>
@@ -79,6 +84,8 @@ describe('ThemeProvider', () => {
     expect(getByTestId('resolved-mode').props.children).toBe('dark');
     expect(getByTestId('primary-color').props.children).toBe('#1f7aff');
     expect(getByTestId('navigation-card').props.children).toBe('rgba(21, 33, 52, 0.94)');
+    expect(getByTestId('resolved-theme-id').props.children).toBe('default');
+    expect(getByTestId('resolved-navigation-card').props.children).toBe(getByTestId('navigation-card').props.children);
     expect(mockSetColorScheme).toHaveBeenCalledWith('system');
     expect(mockUpdateSettings).not.toHaveBeenCalled();
   });
@@ -124,7 +131,7 @@ describe('ThemeProvider', () => {
     expect(getByTestId('theme-mode').props.children).toBe('system');
     expect(getByTestId('theme-id').props.children).toBe('glass');
     expect(getByTestId('resolved-mode').props.children).toBe('light');
-    expect(getByTestId('surface-kind').props.children).toBe('glass');
+    expect(getByTestId('tab-presentation').props.children).toBe('floating');
     expect(getByTestId('card-surface').props.children).toBe('rgba(255, 255, 255, 0.3)');
   });
 
@@ -145,6 +152,41 @@ describe('ThemeProvider', () => {
 
     expect(mockUpdateSettings).toHaveBeenCalledWith({ themeId: 'glass' });
     expect(getByTestId('theme-id').props.children).toBe('glass');
-    expect(getByTestId('surface-kind').props.children).toBe('glass');
+    expect(getByTestId('tab-presentation').props.children).toBe('floating');
+  });
+
+  it('keeps the storage-recovery provider independent from private settings', () => {
+    mockGetSettings.mockClear();
+
+    const { getByTestId } = render(
+      <StaticThemeProvider resolvedMode="dark">
+        <ThemeProbe />
+      </StaticThemeProvider>,
+    );
+
+    expect(getByTestId('theme-id').props.children).toBe('default');
+    expect(getByTestId('resolved-mode').props.children).toBe('dark');
+    expect(mockGetSettings).not.toHaveBeenCalled();
+  });
+
+  it('reuses the resolved storage-recovery theme as the provider source of truth', () => {
+    mockGetSettings.mockClear();
+    const resolvedTheme = resolveTheme('glass', 'dark');
+
+    const { getByTestId } = render(
+      <StaticThemeProvider
+        resolvedMode="light"
+        themeId="default"
+        resolvedTheme={resolvedTheme}
+      >
+        <ThemeProbe />
+      </StaticThemeProvider>,
+    );
+
+    expect(getByTestId('theme-id').props.children).toBe('glass');
+    expect(getByTestId('resolved-mode').props.children).toBe('dark');
+    expect(getByTestId('resolved-theme-id').props.children).toBe('glass');
+    expect(mockSetColorScheme).toHaveBeenCalledWith('dark');
+    expect(mockGetSettings).not.toHaveBeenCalled();
   });
 });

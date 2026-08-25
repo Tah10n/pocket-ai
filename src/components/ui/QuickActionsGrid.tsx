@@ -37,7 +37,7 @@ export const QuickActionsGrid = ({ onCatalogPress }: QuickActionsGridProps) => {
             className="min-h-[112px] flex-1 flex-col items-center justify-center px-4 py-4"
           >
             <ScreenIconTile iconName={action.icon} tone="accent" size="lg" iconSize={24} className="mb-3 h-12 w-12 rounded-full" />
-            <Text className="text-center text-xs font-semibold text-typography-700 dark:text-typography-300">
+            <Text colorRole="secondary" className="text-center text-xs font-semibold  ">
               {action.label}
             </Text>
           </ScreenPressableCard>

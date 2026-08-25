@@ -1,7 +1,7 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
 import { ModelsFilter } from '../../src/components/models/ModelsFilter';
-import { getThemeAppearance, getThemeColors } from '../../src/utils/themeTokens';
+import { resolveTheme } from '../../src/design-system/themes/resolver';
 import type { ModelFilterCriteria, ModelSortPreference } from '../../src/store/modelsStore';
 
 let mockThemeContext: any;
@@ -11,8 +11,8 @@ jest.mock('../../src/providers/ThemeProvider', () => ({
 }));
 
 jest.mock('../../src/components/ui/MaterialSymbols', () => {
-  const mockReact = require('react');
-  const { Text } = require('react-native');
+  const mockReact = jest.requireActual<typeof import('react')>('react');
+  const { Text } = jest.requireActual<typeof import('react-native')>('react-native');
   return {
     MaterialSymbols: ({ name, ...props }: any) => mockReact.createElement(Text, props, name),
   };
@@ -45,26 +45,28 @@ function renderModelsFilter() {
 
 describe('ModelsFilter', () => {
   beforeEach(() => {
+    const resolvedTheme = resolveTheme('default', 'light');
     mockThemeContext = {
-      appearance: getThemeAppearance('default', 'light'),
-      colors: getThemeColors('light'),
+      colors: resolvedTheme.colors,
       resolvedMode: 'light',
+      resolvedTheme,
       themeId: 'default',
     };
   });
 
-  it('keeps the solid theme filter bar surface behind trigger buttons', () => {
+  it('keeps the filter bar background owned by semantic trigger surfaces', () => {
     const screen = renderModelsFilter();
 
-    expect(screen.toJSON()?.props.className).toContain('bg-background-0');
+    expect(screen.toJSON()?.props.className).toBe('py-1.5');
     expect(screen.getByTestId('models-filter-toggle').props.className).toContain('rounded-2xl');
   });
 
   it('does not paint a full-width glass rectangle behind trigger buttons', () => {
+    const resolvedTheme = resolveTheme('glass', 'light');
     mockThemeContext = {
-      appearance: getThemeAppearance('glass', 'light'),
-      colors: getThemeColors('light', 'glass'),
+      colors: resolvedTheme.colors,
       resolvedMode: 'light',
+      resolvedTheme,
       themeId: 'glass',
     };
 

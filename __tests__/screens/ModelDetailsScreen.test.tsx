@@ -140,10 +140,7 @@ jest.mock('../../src/components/ui/pressable', () => {
 });
 
 jest.mock('../../src/components/ui/ScreenShell', () => ({
-  getGlassCornerRadiusStyle: () => undefined,
-  getGlassSurfaceFrameStyle: () => undefined,
   joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
-  useScreenAppearance: () => require('../../src/utils/themeTokens').getThemeAppearance('default', 'light'),
   ScreenHeaderShell: ({ children }: any) => children,
   ScreenAndroidContentBlurTarget: (props: any) => {
     lastContentBlurTargetProps = props;

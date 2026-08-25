@@ -316,7 +316,8 @@ describe('EffectSurface', () => {
     });
   });
 
-  it('applies Android pressable layout and state styling exactly once', () => {
+  it('keeps Android pressable layout and hitbox styling on the real pressable host', () => {
+    const onPress = jest.fn();
     const environment = createMaterialEnvironment('android', {
       androidSdkVersion: 34,
       androidLiquidGlassAvailable: true,
@@ -325,28 +326,54 @@ describe('EffectSurface', () => {
     const screen = render(
       <MaterialEnvironmentProvider environment={environment}>
         <EffectPressableSurface
-          disabled
           testID="android-glass-control"
-          className="h-12 items-center justify-center opacity-55"
+          className="flex-1 m-2 absolute w-3/4 flex-row items-center justify-center gap-2"
           material={{ role: 'control', variant: 'floating' }}
-          style={({ pressed }) => ({ opacity: pressed ? 0.4 : 0.55 })}
+          onPress={onPress}
+          style={({ pressed }) => ({
+            flex: 1,
+            left: 10,
+            margin: 8,
+            opacity: pressed ? 0.4 : 1,
+            position: 'absolute',
+            width: '75%',
+          })}
         >
-          control
+          <View testID="control-icon" />
+          <View testID="control-label" />
         </EffectPressableSurface>
       </MaterialEnvironmentProvider>,
     );
     const control = screen.getByTestId('android-glass-control');
-    const captureBoundary = screen.UNSAFE_getAllByType(View).find((node: any) => (
+    const captureBoundaries = screen.UNSAFE_getAllByType(View).filter((node: any) => (
       node.props.androidLiquidGlassCaptureExclusion === true
     ));
 
-    expect(control.props.className).toBeUndefined();
-    expect(control.props.style).toBeUndefined();
-    expect(captureBoundary?.props.className).toBe('h-12 items-center justify-center opacity-55');
-    expect(StyleSheet.flatten(captureBoundary?.props.style)).toMatchObject({
+    expect(control.props.className).toBe('flex-1 m-2 absolute w-3/4 flex-row items-center justify-center gap-2');
+    expect(StyleSheet.flatten(control.props.style({ pressed: true }))).toMatchObject({
       borderRadius: 16,
-      opacity: 0.55,
+      borderColor: 'transparent',
+      borderWidth: 1,
+      flex: 1,
+      left: 10,
+      margin: 8,
+      opacity: 0.4,
+      position: 'absolute',
+      width: '75%',
     });
+    expect(captureBoundaries).toHaveLength(3);
+    expect(captureBoundaries.every((boundary: any) => boundary.props.className === undefined)).toBe(true);
+    expect(StyleSheet.flatten(captureBoundaries[0].props.style)).toMatchObject({
+      bottom: 0,
+      left: 0,
+      right: 0,
+      top: 0,
+    });
+    expect(captureBoundaries.slice(1).every((boundary: any) => boundary.props.style === undefined)).toBe(true);
+    expect(captureBoundaries[1].findByProps({ testID: 'control-icon' })).toBeTruthy();
+    expect(captureBoundaries[2].findByProps({ testID: 'control-label' })).toBeTruthy();
+    fireEvent.press(control);
+    expect(onPress).toHaveBeenCalledTimes(1);
   });
 
   it('uses a ready explicit Android target for sibling composer chrome', () => {

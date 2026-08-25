@@ -51,6 +51,18 @@ describe('Pocket Liquid Glass Android source boundaries', () => {
     expect(surface).toContain('onWindowFocusChanged');
   });
 
+  it('invalidates external surfaces immediately when the active provider changes', () => {
+    const surface = read('PocketLiquidGlassSurface.kt');
+    const handler = surface.slice(
+      surface.indexOf('internal fun onBackdropProviderChanged()'),
+      surface.indexOf('private fun findProvider()'),
+    );
+    expect(handler).toContain('recordedProvider = null');
+    expect(handler).toContain('resetRendererFailure()');
+    expect(handler).toContain('renderer?.invalidateMaterial()');
+    expect(handler).toContain('postInvalidateOnAnimation()');
+  });
+
   it('keeps the capture guard API 24-safe and excludes the complete effect subtree', () => {
     const registry = read('PocketLiquidGlassBackdropRegistry.kt');
     const exclusion = read('PocketLiquidGlassCaptureExclusion.kt');

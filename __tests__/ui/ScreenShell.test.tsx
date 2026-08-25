@@ -196,6 +196,67 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.queryByTestId('screen-material-scene-blur-target')).toBeNull();
   });
 
+  it.each([
+    ['native Android Liquid Glass', createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
+    })],
+    ['legacy Android blur', createMaterialEnvironment('android', {
+      androidSdkVersion: 32,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
+    })],
+    ['Android without blur', createMaterialEnvironment('android', {
+      androidSdkVersion: 30,
+      transparencyState: 'allowed',
+    })],
+    ['web', createMaterialEnvironment('web')],
+  ])('keeps the stateful screen subtree mounted while switching Standard and Glass on %s', (_label, environment) => {
+    const defaultTheme = resolveTheme('default', 'light');
+    const glassTheme = resolveTheme('glass', 'light');
+    mockEnvironment = environment;
+    mockThemeContext = {
+      colors: defaultTheme.colors,
+      resolvedMode: 'light',
+      resolvedTheme: defaultTheme,
+      themeId: 'default',
+    };
+    const unmount = jest.fn();
+    function StatefulScreen() {
+      const [draft, setDraft] = React.useState('draft');
+      React.useEffect(() => () => unmount(), []);
+      return <Text testID="stateful-draft" onPress={() => setDraft('preserved')}>{draft}</Text>;
+    }
+    const renderRoot = () => <ScreenRoot><StatefulScreen /></ScreenRoot>;
+    const screen = render(renderRoot());
+
+    fireEvent.press(screen.getByTestId('stateful-draft'));
+    expect(screen.getByTestId('stateful-draft').props.children).toBe('preserved');
+
+    mockThemeContext = {
+      colors: glassTheme.colors,
+      resolvedMode: 'light',
+      resolvedTheme: glassTheme,
+      themeId: 'glass',
+    };
+    screen.rerender(renderRoot());
+    expect(screen.getByTestId('stateful-draft').props.children).toBe('preserved');
+
+    mockThemeContext = {
+      colors: defaultTheme.colors,
+      resolvedMode: 'light',
+      resolvedTheme: defaultTheme,
+      themeId: 'default',
+    };
+    screen.rerender(renderRoot());
+    expect(screen.getByTestId('stateful-draft').props.children).toBe('preserved');
+    expect(unmount).not.toHaveBeenCalled();
+  });
+
   it('maps content cards to dense raised or inset material variants', () => {
     const screen = render(
       <>
@@ -331,25 +392,32 @@ describe('ScreenShell semantic material contracts', () => {
     expect(mockMaterialSymbols).toHaveBeenCalledWith(expect.objectContaining({ name: 'delete', colorRole: 'danger' }));
   });
 
-  it('fails closed to a normal view until Android target blur is supported', () => {
+  it.each([
+    { apiLevel: 34, nativeAvailable: true, targetSupported: true, expectedBlurTarget: false },
+    { apiLevel: 34, nativeAvailable: false, targetSupported: true, expectedBlurTarget: true },
+    { apiLevel: 32, nativeAvailable: false, targetSupported: true, expectedBlurTarget: true },
+    { apiLevel: 30, nativeAvailable: false, targetSupported: false, expectedBlurTarget: false },
+  ])('selects the content blur target for Android renderer capabilities %#', ({
+    apiLevel,
+    nativeAvailable,
+    targetSupported,
+    expectedBlurTarget,
+  }) => {
     const targetRef = React.createRef<View>();
-    const fallback = render(
-      <ScreenAndroidContentBlurTarget testID="target" blurTargetRef={targetRef}>content</ScreenAndroidContentBlurTarget>,
-    );
-    expect(fallback.getByTestId('target').props.collapsable).toBeUndefined();
-
-    fallback.unmount();
     const resolvedTheme = resolveTheme('glass', 'light');
     mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
     mockEnvironment = createMaterialEnvironment('android', {
-      androidSdkVersion: 34,
-      androidTargetBlurSupported: true,
+      androidSdkVersion: apiLevel,
+      androidLiquidGlassAvailable: nativeAvailable,
+      androidTargetBlurSupported: targetSupported,
       blurViewAvailable: true,
       transparencyState: 'allowed',
     });
-    const supported = render(
+    const screen = render(
       <ScreenAndroidContentBlurTarget testID="target" blurTargetRef={targetRef}>content</ScreenAndroidContentBlurTarget>,
     );
-    expect(supported.getByTestId('target').props.collapsable).toBe(false);
+    expect(screen.getByTestId('target').props.collapsable).toBe(
+      expectedBlurTarget ? false : undefined,
+    );
   });
 });

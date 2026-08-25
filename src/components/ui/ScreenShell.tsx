@@ -445,9 +445,12 @@ export function ScreenRoot({
   const shouldUseAndroidLiquidGlass = environment.platform === 'android'
     && environment.androidLiquidGlassAvailable
     && hasAndroidLiquidGlassChrome;
-  const shouldUseAndroidBlurTarget = environment.platform === 'android'
+  const shouldMountAndroidLiquidGlassProvider = environment.platform === 'android'
+    && environment.androidLiquidGlassAvailable;
+  const shouldMountAndroidBlurTargets = environment.platform === 'android'
     && environment.androidTargetBlurSupported
-    && !shouldUseAndroidLiquidGlass
+    && !environment.androidLiquidGlassAvailable;
+  const shouldUseAndroidBlurTarget = shouldMountAndroidBlurTargets
     && hasAndroidBlurChrome;
   const shouldRegisterAndroidBlurTarget = shouldUseAndroidBlurTarget && isFocused;
   const materialBackgroundBlurTarget = useAndroidBlurTargetHandle(
@@ -498,32 +501,7 @@ export function ScreenRoot({
       style={[{ backgroundColor: colors.background }, style]}
     >
       {hasBackgroundDecoration ? <ScreenBackgroundDecoration mode={theme.resolvedMode} /> : null}
-      {hasBackgroundDecoration ? <ScreenBackgroundDecoration dim mode={theme.resolvedMode} /> : null}
-      {screenContent}
-    </Box>
-  );
-
-  if (shouldUseAndroidLiquidGlass) {
-    return (
-      <AndroidLiquidGlassBackdropProvider
-        testID="screen-material-liquid-glass-scene"
-        active={isFocused}
-        collapsable={false}
-        style={styles.screenSceneBlurTarget}
-      >
-        {rootScene}
-      </AndroidLiquidGlassBackdropProvider>
-    );
-  }
-
-  return (
-    <Box
-      testID={testID}
-      className={joinClassNames('flex-1', hasBackgroundDecoration ? 'overflow-hidden' : undefined, className)}
-      style={[{ backgroundColor: colors.background }, style]}
-    >
-      {hasBackgroundDecoration ? <ScreenBackgroundDecoration mode={theme.resolvedMode} /> : null}
-      {shouldUseAndroidBlurTarget ? (
+      {shouldMountAndroidBlurTargets ? (
         <>
           <BlurTargetView
             testID="screen-material-blur-target"
@@ -544,16 +522,29 @@ export function ScreenRoot({
             {screenContent}
           </BlurTargetView>
         </>
-      ) : hasBackgroundDecoration ? (
+      ) : (
         <>
-          <ScreenBackgroundDecoration dim mode={theme.resolvedMode} />
+          {hasBackgroundDecoration ? <ScreenBackgroundDecoration dim mode={theme.resolvedMode} /> : null}
           {screenContent}
         </>
-      ) : (
-        screenContent
       )}
     </Box>
   );
+
+  if (shouldMountAndroidLiquidGlassProvider) {
+    return (
+      <AndroidLiquidGlassBackdropProvider
+        testID="screen-material-liquid-glass-scene"
+        active={shouldUseAndroidLiquidGlass && isFocused}
+        collapsable={false}
+        style={styles.screenSceneBlurTarget}
+      >
+        {rootScene}
+      </AndroidLiquidGlassBackdropProvider>
+    );
+  }
+
+  return rootScene;
 }
 
 export function ScreenAndroidContentBlurTarget({
@@ -566,6 +557,7 @@ export function ScreenAndroidContentBlurTarget({
   const environment = useMaterialEnvironment();
   const shouldUseAndroidBlurTarget = environment.platform === 'android'
     && environment.androidTargetBlurSupported
+    && !environment.androidLiquidGlassAvailable
     && themeUsesAndroidTargetBlur(theme.resolvedTheme.materials);
   const blurTarget = useAndroidBlurTargetHandle(
     blurTargetRef,

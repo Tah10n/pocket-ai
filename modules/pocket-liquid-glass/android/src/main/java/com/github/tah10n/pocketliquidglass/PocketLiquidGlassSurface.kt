@@ -120,6 +120,8 @@ class PocketLiquidGlassSurface(context: Context, appContext: AppContext) : ExpoV
   internal fun onBackdropProviderChanged() {
     recordedProvider = null
     resetRendererFailure()
+    renderer?.invalidateMaterial()
+    postInvalidateOnAnimation()
   }
 
   private fun findProvider(): PocketLiquidGlassBackdropProvider? {

@@ -286,6 +286,17 @@ export function EffectPressableSurface({
   const resolvedStyle = typeof style === 'function'
     ? (state: PressableStateCallbackType): StyleProp<ViewStyle> => [frameStyle, style(state)]
     : [frameStyle, style];
+  const androidHostStyle = typeof style === 'function'
+    ? (state: PressableStateCallbackType): StyleProp<ViewStyle> => [
+      clipStyle,
+      { borderColor: 'transparent', borderWidth: frameStyle.borderWidth },
+      style(state),
+    ]
+    : [
+      clipStyle,
+      { borderColor: 'transparent', borderWidth: frameStyle.borderWidth },
+      style,
+    ];
   const nativeGlassIsInteractive = (
     recipe.renderer === 'native-liquid-glass'
     || recipe.renderer === 'android-liquid-glass'
@@ -308,24 +319,40 @@ export function EffectPressableSurface({
     </>
   );
   if (recipe.renderer === 'android-liquid-glass') {
-    const exclusionStyle = typeof style === 'function'
-      ? [frameStyle, style({ pressed: isPressed })]
-      : [frameStyle, style];
+    const excludedContent = React.Children.map(children, (child) => (
+      <AndroidLiquidGlassCaptureExclusion
+        collapsable={false}
+        pointerEvents="box-none"
+      >
+        {nativeGlassIsInteractive ? <Box pointerEvents="none">{child}</Box> : child}
+      </AndroidLiquidGlassCaptureExclusion>
+    ));
+
     return (
       <Pressable
         {...props}
+        className={className}
         disabled={disabled}
         onPressIn={handlePressIn}
         onPressOut={handlePressOut}
+        style={androidHostStyle}
       >
         <AndroidLiquidGlassCaptureExclusion
-          className={className}
           collapsable={false}
-          pointerEvents="box-none"
-          style={exclusionStyle}
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFill, frameStyle]}
         >
-          {content}
+          <EffectLayers
+            androidBlurTarget={androidBlurTarget}
+            clipStyle={clipStyle}
+            effectiveEnvironment={effectiveEnvironment}
+            interactive={!disabled}
+            pressed={isPressed}
+            mode={resolvedTheme.mode}
+            recipe={recipe}
+          />
         </AndroidLiquidGlassCaptureExclusion>
+        {excludedContent}
       </Pressable>
     );
   }

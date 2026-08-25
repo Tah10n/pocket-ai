@@ -110,7 +110,10 @@ export function resolveMaterialRecipe(
   );
 }
 
-export function themeUsesAndroidTargetBlur(materials: ThemeMaterialRecipes): boolean {
+export function themeNeedsAndroidTargetBlur(
+  materials: ThemeMaterialRecipes,
+  environment: MaterialEnvironment,
+): boolean {
   const effectEligibleRecipes = [
     ...Object.values(materials.chrome),
     ...Object.values(materials.control),
@@ -118,10 +121,7 @@ export function themeUsesAndroidTargetBlur(materials: ThemeMaterialRecipes): boo
   ];
 
   return effectEligibleRecipes.some((toneRecipes) => Object.values(toneRecipes)
-    .some((definition) => (
-      definition.preferredByPlatform.android.renderer === 'blur'
-      || definition.platformFallbackByPlatform?.android?.renderer === 'blur'
-    )));
+    .some((definition) => resolveDefinition(definition, environment).renderer === 'blur'));
 }
 
 export function themeUsesAndroidLiquidGlass(materials: ThemeMaterialRecipes): boolean {

@@ -96,8 +96,25 @@ describe('Pocket Liquid Glass Android source boundaries', () => {
     expect(provider).toContain('activeRecorder.capture(sceneContainer)');
     expect(provider).toContain('catch (_: Throwable)');
     expect(provider).toContain('scheduleCaptureRetry()');
-    expect(provider).toContain('recorderGeneration += 1');
     expect(renderer).toContain('recordedSceneGeneration != provider.recordedSceneGeneration');
+  });
+
+  it('refreshes changed backdrop scenes without a consumer invalidation loop', () => {
+    const provider = read('PocketLiquidGlassBackdropProvider.kt');
+    expect(provider).toContain('override fun onDescendantInvalidated(child: View, target: View)');
+    expect(provider).toContain('if (isBackdropContentTarget(target)) sceneDirty = true');
+    expect(provider).toContain('&& sceneDirty');
+    expect(provider.indexOf('activeRecorder.capture(sceneContainer)')).toBeLessThan(
+      provider.indexOf('recorderGeneration += 1'),
+    );
+    expect(provider.indexOf('recorderGeneration += 1')).toBeLessThan(
+      provider.indexOf('PocketLiquidGlassBackdropRegistry.notifySceneUpdated()'),
+    );
+    expect(provider).toContain('candidate is PocketLiquidGlassCaptureExclusion || candidate is PocketLiquidGlassSurface');
+    expect(provider).toContain('ViewTreeObserver.OnScrollChangedListener');
+    expect(provider).toContain('postInvalidateOnAnimation()');
+    expect(provider).toContain('observer.addOnScrollChangedListener(sceneScrollChangedListener)');
+    expect(provider).toContain('removeOnScrollChangedListener(sceneScrollChangedListener)');
   });
 
   it('passes recipe tint opacity into the runtime shader', () => {

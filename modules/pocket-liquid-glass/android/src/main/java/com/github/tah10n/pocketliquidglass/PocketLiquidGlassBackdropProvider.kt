@@ -6,6 +6,7 @@ import android.os.Build
 import android.view.View
 import android.view.View.MeasureSpec
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.views.ExpoView
@@ -15,8 +16,14 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
   private val sceneContainer = FrameLayout(context)
   private var recorder: PocketLiquidGlassSceneRecorder? = null
   private var recorderGeneration = 0L
+  private var sceneDirty = true
   private var consecutiveCaptureFailures = 0
   private var captureRetryScheduled = false
+  private var registeredViewTreeObserver: ViewTreeObserver? = null
+  private val sceneScrollChangedListener = ViewTreeObserver.OnScrollChangedListener {
+    sceneDirty = true
+    postInvalidateOnAnimation()
+  }
   private val captureRetry = Runnable {
     captureRetryScheduled = false
     if (isAttachedToWindow && isProviderActive && consecutiveCaptureFailures < MAX_CAPTURE_ATTEMPTS) {
@@ -45,6 +52,7 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
+    registerSceneScrollListener()
     resetCaptureFailure()
     updateRegistration()
   }
@@ -56,6 +64,7 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
 
   override fun onDetachedFromWindow() {
     PocketLiquidGlassBackdropRegistry.deactivate(this)
+    unregisterSceneScrollListener()
     removeCallbacks(captureRetry)
     captureRetryScheduled = false
     recorder?.let { runCatching { it.dispose() } }
@@ -72,6 +81,11 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
     }
   }
 
+  override fun onDescendantInvalidated(child: View, target: View) {
+    if (isBackdropContentTarget(target)) sceneDirty = true
+    super.onDescendantInvalidated(child, target)
+  }
+
   override fun dispatchDraw(canvas: Canvas) {
     // Complete the visible hardware pass first. Apart from keeping chrome
     // responsive, this builds descendant display lists before the software
@@ -82,17 +96,20 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
     if (
       isProviderActive && canvas.isHardwareAccelerated
       && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+      && sceneDirty
       && consecutiveCaptureFailures < MAX_CAPTURE_ATTEMPTS
     ) {
       try {
         val activeRecorder = recorder ?: PocketLiquidGlassSceneRecorderFactory.create().also {
           recorder = it
-          recorderGeneration += 1
         }
-        val wasReady = activeRecorder.ready
         activeRecorder.capture(sceneContainer)
         consecutiveCaptureFailures = 0
-        if (!wasReady && activeRecorder.ready) PocketLiquidGlassBackdropRegistry.notifySceneUpdated()
+        if (activeRecorder.ready) {
+          sceneDirty = false
+          recorderGeneration += 1
+          PocketLiquidGlassBackdropRegistry.notifySceneUpdated()
+        }
       } catch (_: Throwable) {
         recorder?.let { runCatching { it.dispose() } }
         recorder = null
@@ -163,9 +180,34 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
 
   private fun resetCaptureFailure() {
     removeCallbacks(captureRetry)
+    sceneDirty = true
     consecutiveCaptureFailures = 0
     captureRetryScheduled = false
     invalidate()
+  }
+
+  private fun isBackdropContentTarget(target: View): Boolean {
+    var candidate: View? = target
+    while (candidate != null && candidate !== this) {
+      if (candidate is PocketLiquidGlassCaptureExclusion || candidate is PocketLiquidGlassSurface) {
+        return false
+      }
+      candidate = candidate.parent as? View
+    }
+    return true
+  }
+
+  private fun registerSceneScrollListener() {
+    val observer = viewTreeObserver
+    if (!observer.isAlive) return
+    observer.addOnScrollChangedListener(sceneScrollChangedListener)
+    registeredViewTreeObserver = observer
+  }
+
+  private fun unregisterSceneScrollListener() {
+    registeredViewTreeObserver?.takeIf { it.isAlive }
+      ?.removeOnScrollChangedListener(sceneScrollChangedListener)
+    registeredViewTreeObserver = null
   }
 
   private fun toHostLayoutParams(params: ViewGroup.LayoutParams?): LayoutParams = when (params) {

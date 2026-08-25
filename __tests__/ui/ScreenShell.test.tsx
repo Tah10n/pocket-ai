@@ -393,19 +393,22 @@ describe('ScreenShell semantic material contracts', () => {
   });
 
   it.each([
-    { apiLevel: 34, nativeAvailable: true, targetSupported: true, expectedBlurTarget: false },
-    { apiLevel: 34, nativeAvailable: false, targetSupported: true, expectedBlurTarget: true },
-    { apiLevel: 32, nativeAvailable: false, targetSupported: true, expectedBlurTarget: true },
-    { apiLevel: 30, nativeAvailable: false, targetSupported: false, expectedBlurTarget: false },
+    { apiLevel: 34, nativeAvailable: true, targetSupported: true, themeId: 'glass', expectedBlurTarget: false },
+    { apiLevel: 34, nativeAvailable: false, targetSupported: true, themeId: 'glass', expectedBlurTarget: true },
+    { apiLevel: 34, nativeAvailable: true, targetSupported: true, themeId: 'default', expectedBlurTarget: false },
+    { apiLevel: 32, nativeAvailable: false, targetSupported: true, themeId: 'glass', expectedBlurTarget: true },
+    { apiLevel: 32, nativeAvailable: false, targetSupported: true, themeId: 'default', expectedBlurTarget: true },
+    { apiLevel: 30, nativeAvailable: false, targetSupported: false, themeId: 'glass', expectedBlurTarget: false },
   ])('selects the content blur target for Android renderer capabilities %#', ({
     apiLevel,
     nativeAvailable,
     targetSupported,
+    themeId,
     expectedBlurTarget,
   }) => {
     const targetRef = React.createRef<View>();
-    const resolvedTheme = resolveTheme('glass', 'light');
-    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    const resolvedTheme = resolveTheme(themeId as 'default' | 'glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId };
     mockEnvironment = createMaterialEnvironment('android', {
       androidSdkVersion: apiLevel,
       androidLiquidGlassAvailable: nativeAvailable,
@@ -419,5 +422,55 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.getByTestId('target').props.collapsable).toBe(
       expectedBlurTarget ? false : undefined,
     );
+  });
+
+  it('mounts API 33+ targets for a current blur-only theme without affecting native Glass', () => {
+    const targetRef = React.createRef<View>();
+    const denseTheme = resolveTheme('default', 'light');
+    const liquidTheme = resolveTheme('glass', 'light');
+    const floatingControl = liquidTheme.materials.control.floating.neutral;
+    const blurOnlyTheme = {
+      ...denseTheme,
+      materials: {
+        ...denseTheme.materials,
+        control: {
+          ...denseTheme.materials.control,
+          floating: {
+            neutral: {
+              ...floatingControl,
+              preferredByPlatform: {
+                ...floatingControl.preferredByPlatform,
+                android: floatingControl.platformFallbackByPlatform!.android!,
+              },
+            },
+          },
+        },
+      },
+    };
+    mockThemeContext = {
+      colors: blurOnlyTheme.colors,
+      resolvedMode: 'light',
+      resolvedTheme: blurOnlyTheme,
+      themeId: 'future-blur-only',
+    };
+    mockEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    });
+
+    const contentTargetScreen = render(
+      <ScreenAndroidContentBlurTarget testID="target" blurTargetRef={targetRef}>
+        content
+      </ScreenAndroidContentBlurTarget>,
+    );
+
+    expect(contentTargetScreen.getByTestId('target').props.collapsable).toBe(false);
+    contentTargetScreen.unmount();
+
+    const rootScreen = render(<ScreenRoot>content</ScreenRoot>);
+    expect(rootScreen.getByTestId('screen-material-blur-target')).toBeTruthy();
+    expect(rootScreen.getByTestId('screen-material-scene-blur-target')).toBeTruthy();
   });
 });

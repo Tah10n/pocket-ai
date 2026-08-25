@@ -354,6 +354,7 @@ describe('EffectSurface', () => {
       borderRadius: 16,
       borderColor: 'transparent',
       borderWidth: 1,
+      elevation: 10,
       flex: 1,
       left: 10,
       margin: 8,
@@ -364,12 +365,19 @@ describe('EffectSurface', () => {
     expect(captureBoundaries).toHaveLength(3);
     expect(captureBoundaries.every((boundary: any) => boundary.props.className === undefined)).toBe(true);
     expect(StyleSheet.flatten(captureBoundaries[0].props.style)).toMatchObject({
-      bottom: 0,
-      left: 0,
-      right: 0,
-      top: 0,
+      bottom: -1,
+      elevation: 0,
+      left: -1,
+      right: -1,
+      shadowColor: 'transparent',
+      shadowOpacity: 0,
+      shadowRadius: 0,
+      top: -1,
+      zIndex: 0,
     });
-    expect(captureBoundaries.slice(1).every((boundary: any) => boundary.props.style === undefined)).toBe(true);
+    expect(captureBoundaries.slice(1).every((boundary: any) => (
+      StyleSheet.flatten(boundary.props.style).zIndex === 1
+    ))).toBe(true);
     expect(captureBoundaries[1].findByProps({ testID: 'control-icon' })).toBeTruthy();
     expect(captureBoundaries[2].findByProps({ testID: 'control-label' })).toBeTruthy();
     fireEvent.press(control);

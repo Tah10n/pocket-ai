@@ -1,8 +1,8 @@
 import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
 import {
   resolveMaterialRecipe,
+  themeNeedsAndroidTargetBlur,
   themeUsesAndroidLiquidGlass,
-  themeUsesAndroidTargetBlur,
 } from '../../src/design-system/materials/resolver';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
 
@@ -14,9 +14,24 @@ const iosNativeEnvironment = createMaterialEnvironment('ios', {
 });
 
 describe('material resolver', () => {
-  it('derives Android target ownership from chrome recipes instead of theme identity', () => {
-    expect(themeUsesAndroidTargetBlur(resolveTheme('default', 'light').materials)).toBe(false);
-    expect(themeUsesAndroidTargetBlur(resolveTheme('glass', 'light').materials)).toBe(true);
+  it('derives Android target ownership from the renderer resolved for the environment', () => {
+    const denseMaterials = resolveTheme('default', 'light').materials;
+    const liquidMaterials = resolveTheme('glass', 'light').materials;
+    const nativeEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    });
+    const legacyEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 32,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    });
+
+    expect(themeNeedsAndroidTargetBlur(denseMaterials, nativeEnvironment)).toBe(false);
+    expect(themeNeedsAndroidTargetBlur(liquidMaterials, nativeEnvironment)).toBe(false);
+    expect(themeNeedsAndroidTargetBlur(liquidMaterials, legacyEnvironment)).toBe(true);
   });
 
   it('selects native Android glass only on API 33+ with the native view available', () => {
@@ -81,8 +96,32 @@ describe('material resolver', () => {
       },
     };
 
-    expect(themeUsesAndroidTargetBlur(overlayFallbackMaterials)).toBe(true);
-    expect(themeUsesAndroidTargetBlur(floatingControlMaterials)).toBe(true);
+    const nativeEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    });
+
+    expect(themeNeedsAndroidTargetBlur(overlayFallbackMaterials, nativeEnvironment)).toBe(true);
+    expect(themeNeedsAndroidTargetBlur(floatingControlMaterials, nativeEnvironment)).toBe(false);
+
+    const blurOnlyFloatingControlMaterials = {
+      ...denseMaterials,
+      control: {
+        ...denseMaterials.control,
+        floating: {
+          neutral: {
+            ...liquidMaterials.control.floating.neutral,
+            preferredByPlatform: {
+              ...liquidMaterials.control.floating.neutral.preferredByPlatform,
+              android: liquidMaterials.control.floating.neutral.platformFallbackByPlatform!.android!,
+            },
+          },
+        },
+      },
+    };
+    expect(themeNeedsAndroidTargetBlur(blurOnlyFloatingControlMaterials, nativeEnvironment)).toBe(true);
   });
 
   it('keeps default-theme roles dense and returns stable recipe references', () => {

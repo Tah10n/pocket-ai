@@ -286,15 +286,40 @@ export function EffectPressableSurface({
   const resolvedStyle = typeof style === 'function'
     ? (state: PressableStateCallbackType): StyleProp<ViewStyle> => [frameStyle, style(state)]
     : [frameStyle, style];
+  const frameBorderWidth = typeof frameStyle.borderWidth === 'number'
+    ? frameStyle.borderWidth
+    : 0;
+  const androidHostDepthStyle: ViewStyle = {
+    elevation: frameStyle.elevation,
+    shadowColor: frameStyle.shadowColor,
+    shadowOffset: frameStyle.shadowOffset,
+    shadowOpacity: frameStyle.shadowOpacity,
+    shadowRadius: frameStyle.shadowRadius,
+  };
+  const androidVisualFrameStyle: ViewStyle = {
+    ...frameStyle,
+    bottom: -frameBorderWidth,
+    elevation: 0,
+    left: -frameBorderWidth,
+    right: -frameBorderWidth,
+    shadowColor: 'transparent',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    top: -frameBorderWidth,
+    zIndex: 0,
+  };
   const androidHostStyle = typeof style === 'function'
     ? (state: PressableStateCallbackType): StyleProp<ViewStyle> => [
       clipStyle,
-      { borderColor: 'transparent', borderWidth: frameStyle.borderWidth },
+      { borderColor: 'transparent', borderWidth: frameBorderWidth },
+      androidHostDepthStyle,
       style(state),
     ]
     : [
       clipStyle,
-      { borderColor: 'transparent', borderWidth: frameStyle.borderWidth },
+      { borderColor: 'transparent', borderWidth: frameBorderWidth },
+      androidHostDepthStyle,
       style,
     ];
   const nativeGlassIsInteractive = (
@@ -323,6 +348,7 @@ export function EffectPressableSurface({
       <AndroidLiquidGlassCaptureExclusion
         collapsable={false}
         pointerEvents="box-none"
+        style={styles.androidGlassPressableContent}
       >
         {nativeGlassIsInteractive ? <Box pointerEvents="none">{child}</Box> : child}
       </AndroidLiquidGlassCaptureExclusion>
@@ -340,7 +366,7 @@ export function EffectPressableSurface({
         <AndroidLiquidGlassCaptureExclusion
           collapsable={false}
           pointerEvents="none"
-          style={[StyleSheet.absoluteFill, frameStyle]}
+          style={[StyleSheet.absoluteFill, androidVisualFrameStyle]}
         >
           <EffectLayers
             androidBlurTarget={androidBlurTarget}
@@ -369,3 +395,9 @@ export function EffectPressableSurface({
     </Pressable>
   );
 }
+
+const styles = StyleSheet.create({
+  androidGlassPressableContent: {
+    zIndex: 1,
+  },
+});

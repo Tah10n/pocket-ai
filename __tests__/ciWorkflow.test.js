@@ -195,6 +195,8 @@ describe('Android catalog QA CI configuration', () => {
     expect(nativeScope).toContain("'.github/workflows/release-please.yml'");
     expect(nativeScope).toContain("'scripts/android-*.js'");
     expect(nativeScope).toContain("'scripts/build-android-release.js'");
+    expect(nativeScope).toContain("'src/services/BackgroundTaskService.ts'");
+    expect(nativeScope).toContain("'src/services/NotificationService.ts'");
     expect(androidGate).toContain('api-level: [32, 33, 34, 35]');
     expect(androidGate).toContain('--pack native');
     expect(androidGate).toContain('--apk-variant release');

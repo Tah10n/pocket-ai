@@ -104,8 +104,8 @@ for (const library of [deviceLibrary, simulatorArmLibrary, simulatorIntelLibrary
 removeGenerated(BUILD_ROOT);
 mkdirSync(BUILD_ROOT, { recursive: true });
 const simulatorUniversalLibrary = join(BUILD_ROOT, LIBRARY_NAME);
-run('xcrun', ['lipo', '-create', simulatorArmLibrary, simulatorIntelLibrary, '-output', simulatorUniversalLibrary]);
-run('xcrun', ['lipo', '-verify_arch', 'arm64', 'x86_64', simulatorUniversalLibrary]);
+run('xcrun', ['lipo', simulatorArmLibrary, simulatorIntelLibrary, '-create', '-output', simulatorUniversalLibrary]);
+run('xcrun', ['lipo', simulatorUniversalLibrary, '-verify_arch', 'arm64', 'x86_64']);
 
 mkdirSync(GENERATED_ROOT, { recursive: true });
 removeGenerated(TEMP_XCFRAMEWORK);

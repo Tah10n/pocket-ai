@@ -47,6 +47,8 @@ jobs:
               - 'scripts/android-*.js'
               - 'scripts/build-android-release.js'
               - 'scripts/verify-native-config.js'
+              - 'src/services/BackgroundTaskService.ts'
+              - 'src/services/NotificationService.ts'
               - 'android/**'
               - 'ios/**'
 

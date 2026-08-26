@@ -37,6 +37,8 @@ export interface ModelDetailsMetadataItem {
 type Translate = (key: string) => string;
 
 const MARKDOWN_TABLE_DELIMITER_ROW = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/u;
+const MARKDOWN_AUTOLINK = /<((?:https?:\/\/|mailto:)[^<>\s]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})>/giu;
+const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*?)?\s*\/?>/gu;
 
 function findMarkdownTableStart(value: string): number | null {
   const lines = value.split('\n');
@@ -75,7 +77,8 @@ export function formatModelDetailsDescription(
   let formatted = source
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-    .replace(/<[^>]+>/g, ' ');
+    .replace(MARKDOWN_AUTOLINK, '$1')
+    .replace(HTML_TAG, ' ');
 
   const tableStart = findMarkdownTableStart(formatted);
   if (tableStart !== null) {
@@ -105,6 +108,7 @@ export function formatModelDetailsDescription(
     .replace(/`/g, '')
     .replace(/\*\*|__|~~/g, '')
     .replace(/\s+/g, ' ')
+    .replace(/\s+([.,;:!?])/g, '$1')
     .trim();
 
   return formatted || undefined;

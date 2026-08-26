@@ -76,6 +76,18 @@ describe('modelDetailsPresentation', () => {
     )).toBe('Supports A | B | C | D modes.');
   });
 
+  it('preserves comparison text while removing actual HTML tags', () => {
+    expect(formatModelDetailsDescription(
+      'Uses < 4 GB RAM. Quality > baseline. <strong>Fast</strong>.',
+    )).toBe('Uses < 4 GB RAM. Quality > baseline. Fast.');
+  });
+
+  it('preserves Markdown autolinks as readable text', () => {
+    expect(formatModelDetailsDescription(
+      'Docs: <https://example.com/model>. Contact <team@example.com>.',
+    )).toBe('Docs: https://example.com/model. Contact team@example.com.');
+  });
+
   it('removes a real multiline Markdown table without truncating preceding prose', () => {
     expect(formatModelDetailsDescription([
       'Optimized for local chat.',

@@ -194,6 +194,8 @@ const iosBuild = read('scripts/build-ios.mjs');
 requireText(iosBuild, 'xcodebuild', 'iOS deterministic build wrapper');
 requireText(iosBuild, 'IPHONEOS_DEPLOYMENT_TARGET: IOS_DEPLOYMENT_TARGET', 'iOS device Rust deployment target');
 requireText(iosBuild, 'IPHONESIMULATOR_DEPLOYMENT_TARGET: IOS_DEPLOYMENT_TARGET', 'iOS simulator Rust deployment target');
+requireText(iosBuild, "['lipo', simulatorArmLibrary, simulatorIntelLibrary, '-create', '-output', simulatorUniversalLibrary]", 'iOS lipo create argument order');
+requireText(iosBuild, "['lipo', simulatorUniversalLibrary, '-verify_arch', 'arm64', 'x86_64']", 'iOS lipo verify argument order');
 
 const typescript = read('src/index.ts');
 requireText(typescript, 'materializeAsset(request: PocketAnydocMaterializeAssetRequest)', 'TypeScript materialize bridge');

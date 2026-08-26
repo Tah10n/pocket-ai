@@ -201,7 +201,7 @@ jobs:
         run: >-
           xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI
           -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
-          CODE_SIGNING_ALLOWED=NO build
+          CLANG_ENABLE_EXPLICIT_MODULES=NO CODE_SIGNING_ALLOWED=NO build
 
   android-qa:
     name: android (qa)

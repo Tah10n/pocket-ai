@@ -192,6 +192,7 @@ const setup = read('scripts/setup.mjs');
 requireText(setup, 'isExactCargoNdkVersion(cargoNdkVersion)', 'Setup exact cargo-ndk check');
 const iosBuild = read('scripts/build-ios.mjs');
 requireText(iosBuild, 'xcodebuild', 'iOS deterministic build wrapper');
+requireText(iosBuild, '`.PocketAnyDoc.tmp-${process.pid}.xcframework`', 'temporary iOS XCFramework output extension');
 requireText(iosBuild, 'IPHONEOS_DEPLOYMENT_TARGET: IOS_DEPLOYMENT_TARGET', 'iOS device Rust deployment target');
 requireText(iosBuild, 'IPHONESIMULATOR_DEPLOYMENT_TARGET: IOS_DEPLOYMENT_TARGET', 'iOS simulator Rust deployment target');
 requireText(iosBuild, "['lipo', simulatorArmLibrary, simulatorIntelLibrary, '-create', '-output', simulatorUniversalLibrary]", 'iOS lipo create argument order');

@@ -23,7 +23,7 @@ import {
 const GENERATED_ROOT = join(MODULE_ROOT, 'ios', 'generated');
 const XCFRAMEWORK = join(GENERATED_ROOT, 'PocketAnyDoc.xcframework');
 const FINGERPRINT_FILE = join(GENERATED_ROOT, 'fingerprint.json');
-const TEMP_XCFRAMEWORK = join(GENERATED_ROOT, `.PocketAnyDoc.xcframework.tmp-${process.pid}`);
+const TEMP_XCFRAMEWORK = join(GENERATED_ROOT, `.PocketAnyDoc.tmp-${process.pid}.xcframework`);
 const BUILD_ROOT = join(MODULE_ROOT, 'ios', 'build', 'pocketAnyDoc');
 const LIBRARY_NAME = 'libpocket_anydoc.a';
 

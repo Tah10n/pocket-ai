@@ -204,7 +204,8 @@ describe('Android catalog QA CI configuration', () => {
     expect(androidGate).toContain('npm run verify:native-config -- --require-android');
     expect(iosGate).toContain('npm run anydoc:build:ios');
     expect(iosGate).toContain('npm run verify:native-config -- --require-ios');
-    expect(iosGate).toContain('xcodebuild -workspace ios/pocketai.xcworkspace');
+    expect(iosGate).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
+    expect(iosGate).not.toContain('-scheme pocketai');
     expect(iosGate).toContain('NODE_ENV: production');
     expect(iosGate).toContain('EAS_BUILD_PROFILE: production');
   });
@@ -218,7 +219,8 @@ describe('Android catalog QA CI configuration', () => {
     expect(releaseWorkflow).toContain('android-release-gate:');
     expect(releaseWorkflow).toContain('ios-release-gate:');
     expect(releaseWorkflow).toContain('build:android:production:clean');
-    expect(releaseWorkflow).toContain('xcodebuild -workspace ios/pocketai.xcworkspace');
+    expect(releaseWorkflow).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
+    expect(releaseWorkflow).not.toContain('-scheme pocketai');
     expect(extractWorkflowJob(releaseWorkflow, 'ios-release-gate')).toContain('NODE_ENV: production');
     expect(extractWorkflowJob(releaseWorkflow, 'ios-release-gate')).toContain('EAS_BUILD_PROFILE: production');
     expect(releaseJob).toContain('- android-release-gate');

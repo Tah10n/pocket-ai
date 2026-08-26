@@ -62,7 +62,7 @@ jobs:
       - run: cd ios && pod install
       - name: Compile unsigned release simulator app
         run: >-
-          xcodebuild -workspace ios/pocketai.xcworkspace -scheme pocketai
+          xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI
           -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
           CODE_SIGNING_ALLOWED=NO build
 

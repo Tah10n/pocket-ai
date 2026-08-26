@@ -93,6 +93,7 @@ import {
 } from '../../services/AndroidQaGenerationEvidence';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
+import { backgroundTaskService } from '../../services/BackgroundTaskService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -689,11 +690,32 @@ function EnabledAndroidQaGenerationEvidenceSurface({
 }: {
     documentDraftCount: number;
 }) {
+    const [backgroundTaskState, setBackgroundTaskState] = useState<'idle' | 'starting' | 'running' | 'failed'>('idle');
+    const didStartQaBackgroundTaskRef = useRef(false);
     const evidence = useSyncExternalStore(
         subscribeAndroidQaGenerationEvidence,
         getAndroidQaGenerationEvidenceSnapshot,
         getAndroidQaGenerationEvidenceSnapshot,
     );
+
+    const startQaBackgroundTask = useCallback(async () => {
+        setBackgroundTaskState('starting');
+        await backgroundTaskService.startBackgroundInference('Android QA foreground service');
+        didStartQaBackgroundTaskRef.current = backgroundTaskService.isActive;
+        setBackgroundTaskState(didStartQaBackgroundTaskRef.current ? 'running' : 'failed');
+    }, []);
+
+    const stopQaBackgroundTask = useCallback(async () => {
+        await backgroundTaskService.stopBackgroundTask('inference');
+        didStartQaBackgroundTaskRef.current = false;
+        setBackgroundTaskState('idle');
+    }, []);
+
+    useEffect(() => () => {
+        if (didStartQaBackgroundTaskRef.current && backgroundTaskService.isTaskActive('inference')) {
+            void backgroundTaskService.stopBackgroundTask('inference');
+        }
+    }, []);
 
     return (
         <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
@@ -729,7 +751,36 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 >
                     <ButtonText>QA first patch</ButtonText>
                 </Button>
+                {Platform.OS === 'android' ? (
+                    <>
+                        <Button
+                            size="xs"
+                            action="secondary"
+                            testID="chat-qa-start-background-task"
+                            onPress={() => void startQaBackgroundTask()}
+                        >
+                            <ButtonText>QA start FGS</ButtonText>
+                        </Button>
+                        <Button
+                            size="xs"
+                            action="secondary"
+                            testID="chat-qa-stop-background-task"
+                            onPress={() => void stopQaBackgroundTask()}
+                        >
+                            <ButtonText>QA stop FGS</ButtonText>
+                        </Button>
+                    </>
+                ) : null}
             </View>
+            {Platform.OS === 'android' ? (
+                <View
+                    accessible
+                    accessibilityLabel={`chat-qa-background-task-state-${backgroundTaskState}`}
+                    collapsable={false}
+                    testID={`chat-qa-background-task-state-${backgroundTaskState}`}
+                    style={styles.androidQaEvidenceMarker}
+                />
+            ) : null}
             {evidence.armedGate ? (
                 <View
                     accessible
@@ -3310,6 +3361,7 @@ const styles = StyleSheet.create({
     },
     androidQaEvidenceActions: {
         flexDirection: 'row',
+        flexWrap: 'wrap',
         gap: 4,
     },
     androidQaEvidenceMarker: {

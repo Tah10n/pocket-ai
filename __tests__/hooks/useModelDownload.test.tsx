@@ -10,7 +10,7 @@ import type { ProjectorArtifact } from '../../src/types/multimodal';
 
 jest.mock('../../src/services/NotificationService', () => ({
   notificationService: {
-    canStartForegroundServiceNotifications: jest.fn(),
+    areUserNotificationsEnabled: jest.fn(),
     requestPermissions: jest.fn(),
     openSystemSettings: jest.fn(),
   },
@@ -115,7 +115,7 @@ describe('useModelDownload', () => {
       downloadOptionsByModelId: {},
     });
     mockIsPrivateStorageWritable.mockReturnValue(true);
-    mockNotificationService.canStartForegroundServiceNotifications.mockResolvedValue(true);
+    mockNotificationService.areUserNotificationsEnabled.mockResolvedValue(true);
     mockNotificationService.requestPermissions.mockResolvedValue(true);
     mockNotificationService.openSystemSettings.mockResolvedValue(undefined);
     alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(jest.fn());
@@ -142,7 +142,7 @@ describe('useModelDownload', () => {
       'storageRecovery.title',
       'storageRecovery.privateUnavailableMessage',
     );
-    expect(mockNotificationService.canStartForegroundServiceNotifications).not.toHaveBeenCalled();
+    expect(mockNotificationService.areUserNotificationsEnabled).not.toHaveBeenCalled();
     expect(useDownloadStore.getState().queue).toEqual([]);
   });
 
@@ -150,7 +150,7 @@ describe('useModelDownload', () => {
     let storageWritable = true;
     const notificationReadiness = createDeferred<boolean>();
     mockIsPrivateStorageWritable.mockImplementation(() => storageWritable);
-    mockNotificationService.canStartForegroundServiceNotifications.mockReturnValue(notificationReadiness.promise);
+    mockNotificationService.areUserNotificationsEnabled.mockReturnValue(notificationReadiness.promise);
     const { getCurrentValue } = renderHookHarness();
 
     await waitFor(() => {

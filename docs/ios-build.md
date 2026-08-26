@@ -30,7 +30,7 @@ EAS invokes the same setup and build through `eas-build-pre-install`, before `po
 After the XCFramework exists, generate the native project from tracked Expo inputs:
 
 ```bash
-npx expo prebuild --clean --platform ios --no-install
+NODE_ENV=production EAS_BUILD_PROFILE=production npx expo prebuild --clean --platform ios --no-install
 ```
 
 Then install CocoaPods dependencies:
@@ -66,14 +66,28 @@ Xcode manages signing through the project settings:
 
 The bundle identifier is `com.github.tah10n.pocketai` (set in `app.json`).
 
-## Archive and distribute
+## Store build via EAS
+
+Production App Store uploads must come from the remote-versioned EAS production profile:
+
+```bash
+npm run build:ios:eas:production
+```
+
+Use `npm run build:all:eas:production` when preparing Android and iOS together. The EAS
+build reserves the next remote `CFBundleVersion`; a local archive does not.
+
+## Local archive for QA
+
+The following Xcode paths are useful for local signing, archive, and export diagnostics.
+Their artifacts must not be uploaded while `eas.json` uses the remote app version source.
 
 ### Via Xcode
 
 1. Select **Product > Scheme > pocketai** and set the destination to **Any iOS Device (arm64)**.
 2. Run **Product > Archive**.
 3. When the archive completes, the Organizer window opens. Select the archive and click **Distribute App**.
-4. Choose **App Store Connect** for TestFlight / App Store, or **Ad Hoc** / **Development** for direct installs.
+4. Choose **Ad Hoc** / **Development** for direct QA installs, or export locally for archive inspection.
 5. Follow the signing and upload prompts.
 
 ### Via command line
@@ -112,21 +126,13 @@ Create `ios/ExportOptions.plist` with your distribution settings if it does not 
 </plist>
 ```
 
-### Upload to App Store Connect
-
-After exporting, upload the IPA with:
-
-```bash
-xcrun altool --upload-app -f build/pocketai.ipa -t ios -u "you@example.com" -p "@keychain:AC_PASSWORD"
-```
-
-Or use **Transporter** (available on the Mac App Store) for a graphical upload flow.
-
 ## Versioning
 
 - `expo.version` in `app.json` is used as the iOS `CFBundleShortVersionString` (user-visible version).
-- iOS does not use `expo.android.versionCode`. The `CFBundleVersion` (build number) is managed by Xcode or can be set in `ios/pocketai/Info.plist`.
-- Bump the build number before each TestFlight or App Store upload — App Store Connect rejects duplicate build numbers for the same version.
+- EAS production builds use the remote version source and `autoIncrement: true`; EAS is the source of truth for both iOS `CFBundleVersion` and Android `versionCode` store builds.
+- Before the first production build after this migration, run `eas build:version:set` once for each platform and initialize it from the latest build already accepted by App Store Connect and Google Play. Do not guess these values from source control.
+- `eas build:version:sync` only copies the current remote value into local config for diagnostics. It does not reserve a new build number and does not make a local archive store-upload eligible.
+- App Store Connect rejects duplicate build numbers for the same version.
 
 ## Native plugins
 

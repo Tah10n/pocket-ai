@@ -111,6 +111,8 @@ const SCENARIO_PACK_SCENARIOS = {
   native: [
     ...CORE_SCENARIOS,
     ...STABLE_SECONDARY_SCENARIOS,
+    "native-glass-theme-matrix",
+    "foreground-service-notification-states",
   ],
   extended: [
     ...CORE_SCENARIOS,
@@ -142,6 +144,11 @@ const APP_TITLE_LABELS = ["Pocket AI"];
 const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
 const HOME_TAB_LABELS = ["Home", "Главная"];
 const CHAT_TAB_LABELS = ["Chat", "Чат"];
+const POST_NOTIFICATIONS_PERMISSION = "android.permission.POST_NOTIFICATIONS";
+const BACKGROUND_ACTIONS_CHANNEL_ID = "RN_BACKGROUND_ACTIONS_CHANNEL";
+const BACKGROUND_ACTIONS_SERVICE_CLASS = "com.asterinet.react.bgactions.RNBackgroundActionsTask";
+const QA_BACKGROUND_TASK_START_RESOURCE_ID = "chat-qa-start-background-task";
+const QA_BACKGROUND_TASK_STOP_RESOURCE_ID = "chat-qa-stop-background-task";
 const CLOSE_APP_LABELS = ["Close app", "Закрыть приложение"];
 const WAIT_LABELS = ["Wait", "Подождать"];
 const APP_NOT_RESPONDING_LABEL_FRAGMENTS = ["isn't responding", "не отвечает"];
@@ -407,6 +414,18 @@ const MOST_POPULAR_LABELS = ["Most popular", "Самые популярные"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
 const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
 const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
+const THEME_STYLE_LABELS = ["Visual Style", "Визуальный стиль"];
+const THEME_MODE_RESOURCE_IDS = {
+  light: "settings-theme-mode-light",
+  system: "settings-theme-mode-system",
+  dark: "settings-theme-mode-dark",
+};
+const THEME_STYLE_RESOURCE_IDS = {
+  default: "settings-theme-style-default",
+  glass: "settings-theme-style-glass",
+};
+const THEME_STYLE_CONTROL_RESOURCE_ID = "settings-theme-style-control";
+const THEME_STYLE_SHEET_RESOURCE_ID = "settings-theme-style-sheet";
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
 const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
 const CLEAR_ACTIVE_CACHE_LABELS = ["Clear Active Cache", "Очистить активный кэш"];
@@ -708,6 +727,7 @@ async function main() {
 
   fs.mkdirSync(artifactsRoot, { recursive: true });
   try {
+    validateScenarioExecutionOptions(selectedScenarios, cliOptions);
     configureScenarioBuildEnvironment(cliOptions, requiresCurrentHeadProvenance);
   } catch (error) {
     const results = [{
@@ -888,9 +908,10 @@ async function main() {
           }
 
           const sentinelOnlyEvidence = scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY;
+          const outcomeScreenshotPath = getScenarioOutcomeScreenshotPath(outcome);
           const screenshotPath = sentinelOnlyEvidence
             ? null
-            : await captureSettledScenarioScreenshot(
+            : outcomeScreenshotPath ?? await captureSettledScenarioScreenshot(
                 context,
                 scenario.captureFullEvidence
                   ? path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
@@ -1189,9 +1210,23 @@ function createScenarioContext(adbPath, serial) {
           continue;
         }
 
+        const resumedActivityOutput = runCapture(adbPath, [
+          "-s",
+          serial,
+          "shell",
+          "dumpsys",
+          "activity",
+          "activities",
+        ], { allowFailure: true });
+        const resumedPackageName = parseResumedActivityPackage(resumedActivityOutput);
+
+        if (resumedPackageName === appPackageName) {
+          return;
+        }
+
         const snapshot = createUiSnapshot(adbPath, serial);
 
-        if (isAppForegroundSnapshot(snapshot)) {
+        if (isScenarioAppForegroundEvidence(resumedActivityOutput, snapshot, appPackageName)) {
           return;
         }
 
@@ -1199,7 +1234,7 @@ function createScenarioContext(adbPath, serial) {
           visibleOnly: true,
         });
 
-        if (homeNode) {
+        if (!resumedPackageName && homeNode) {
           return;
         }
 
@@ -2068,6 +2103,535 @@ function assertAttachmentActionAvailable(attachNode) {
   }
 }
 
+function getScenarioOutcomeScreenshotPath(outcome) {
+  if (!outcome || typeof outcome.screenshotPath !== "string") {
+    return null;
+  }
+
+  const screenshotPath = outcome.screenshotPath.trim();
+  return screenshotPath.length > 0 ? screenshotPath : null;
+}
+
+function readAndroidSdkLevel(adbPath, serial) {
+  const raw = runCapture(adbPath, ["-s", serial, "shell", "getprop", "ro.build.version.sdk"]).trim();
+  const sdkLevel = Number.parseInt(raw, 10);
+  if (!Number.isInteger(sdkLevel) || sdkLevel <= 0) {
+    throw new Error(`Could not resolve Android SDK level from "${raw}".`);
+  }
+  return sdkLevel;
+}
+
+function isBackgroundActionsServicePresent(dumpsysOutput) {
+  return String(dumpsysOutput || "").includes(BACKGROUND_ACTIONS_SERVICE_CLASS);
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseAndroidRuntimePermission(dumpsysOutput, userId, permission) {
+  const output = String(dumpsysOutput || "");
+  const userHeader = new RegExp(`^\\s*User ${escapeRegex(userId)}:\\s`, "mu");
+  const userMatch = userHeader.exec(output);
+  if (!userMatch) {
+    throw new Error(`Android package state does not contain user ${userId}.`);
+  }
+
+  const userSectionStart = userMatch.index + userMatch[0].length;
+  const remainingOutput = output.slice(userSectionStart);
+  const nextUserMatch = /^\s*User \d+:\s/mu.exec(remainingOutput);
+  const userSection = nextUserMatch
+    ? remainingOutput.slice(0, nextUserMatch.index)
+    : remainingOutput;
+  const permissionLine = new RegExp(
+    `^\\s*${escapeRegex(permission)}:\\s+granted=(true|false)(?:,|\\s*$)`,
+    "mu"
+  ).exec(userSection);
+  if (!permissionLine) {
+    throw new Error(`Android package state does not expose ${permission} for user ${userId}.`);
+  }
+  return permissionLine[1] === "true";
+}
+
+function readAndroidCurrentUserId(adbPath, serial, options = {}) {
+  const capture = options.runCapture || runCapture;
+  const raw = capture(adbPath, ["-s", serial, "shell", "am", "get-current-user"]).trim();
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error(`Could not resolve the current Android user from "${raw}".`);
+  }
+  return raw;
+}
+
+function readPostNotificationsPermission(adbPath, serial, userId) {
+  const output = runCapture(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "dumpsys",
+    "package",
+    appPackageName,
+  ]);
+  return parseAndroidRuntimePermission(output, userId, POST_NOTIFICATIONS_PERMISSION);
+}
+
+function parseAndroidNotificationChannelEnabled(
+  dumpsysOutput,
+  packageName,
+  packageUid,
+  channelId
+) {
+  return parseAndroidNotificationChannelState(
+    dumpsysOutput,
+    packageName,
+    packageUid,
+    channelId
+  ).enabled;
+}
+
+function parseAndroidNotificationChannelState(
+  dumpsysOutput,
+  packageName,
+  packageUid,
+  channelId
+) {
+  const lines = String(dumpsysOutput).split(/\r?\n/u);
+  const headerPattern = new RegExp(
+    `^\\s*AppSettings: ${escapeRegex(packageName)} \\(${escapeRegex(packageUid)}\\)(?:\\s.*)?$`,
+    "u"
+  );
+  const sectionStart = lines.findIndex((line) => headerPattern.test(line));
+  if (sectionStart < 0) {
+    throw new Error(`Android notification state has no AppSettings block for ${packageName} (${packageUid}).`);
+  }
+  const nextSectionOffset = lines
+    .slice(sectionStart + 1)
+    .findIndex((line) => /^\s*AppSettings: /u.test(line));
+  const sectionEnd = nextSectionOffset < 0
+    ? lines.length
+    : sectionStart + 1 + nextSectionOffset;
+  const section = lines.slice(sectionStart + 1, sectionEnd).join("\n");
+
+  const channelLinePattern = new RegExp(
+    `NotificationChannel\\{mId='${escapeRegex(channelId)}'[^\\r\\n]*`,
+    "u"
+  );
+  const channelLine = section.match(channelLinePattern)?.[0];
+  const importance = channelLine?.match(/\bmImportance=(\d+)/u)?.[1];
+  const name = channelLine?.match(/\bmName=(.*?)(?=,\s+m(?:Description|Importance)=)/u)?.[1]?.trim();
+  if (importance === undefined || !name) {
+    throw new Error(`Android notification state has no ${channelId} channel for ${packageName}.`);
+  }
+  return {
+    enabled: Number.parseInt(importance, 10) > 0,
+    importance: Number.parseInt(importance, 10),
+    name,
+  };
+}
+
+function readBackgroundActionsChannelState(adbPath, serial, userId = null) {
+  const currentUserId = userId ?? readAndroidCurrentUserId(adbPath, serial);
+  const packageUid = resolveAndroidPackageUid(adbPath, serial, appPackageName, {
+    userId: currentUserId,
+  });
+  const output = runCapture(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "dumpsys",
+    "notification",
+    "--noredact",
+  ]);
+  return parseAndroidNotificationChannelState(
+    output,
+    appPackageName,
+    packageUid,
+    BACKGROUND_ACTIONS_CHANNEL_ID
+  );
+}
+
+function readBackgroundActionsChannelEnabled(adbPath, serial, userId = null) {
+  return readBackgroundActionsChannelState(adbPath, serial, userId).enabled;
+}
+
+function resolveNotificationChannelSettingsUi(snapshot, channelName) {
+  const matches = findMatchingNodes(snapshot, channelName, { visibleOnly: true })
+    .filter((node) => Boolean(node.bounds));
+  const title = matches.find((node) => node.bounds.top < 320);
+  if (title) {
+    return { ready: true, target: null };
+  }
+  return { ready: false, target: pickBestNode(matches) };
+}
+
+async function ensureNotificationChannelSettingsVisible(adbPath, serial, channelName) {
+  const initialSnapshot = createUiSnapshot(adbPath, serial);
+  const initialState = resolveNotificationChannelSettingsUi(initialSnapshot, channelName);
+  if (initialState.ready) {
+    return;
+  }
+  if (!initialState.target?.bounds) {
+    throw new Error(withUiSnapshotSummary(
+      initialSnapshot,
+      `Android notification settings did not expose channel "${channelName}".`
+    ));
+  }
+
+  tapBounds(adbPath, serial, initialState.target.bounds);
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    { timeoutMs: 10_000, pollIntervalMs: 250 },
+    (candidateSnapshot) => (
+      resolveNotificationChannelSettingsUi(candidateSnapshot, channelName).ready
+        ? true
+        : null
+    )
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      `Android notification settings did not open channel "${channelName}".`
+    ));
+  }
+}
+
+async function waitForBackgroundActionsService(adbPath, serial, shouldBeRunning, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const deadline = Date.now() + timeoutMs;
+  let lastOutput = "";
+  while (Date.now() < deadline) {
+    lastOutput = runCapture(adbPath, [
+      "-s",
+      serial,
+      "shell",
+      "dumpsys",
+      "activity",
+      "services",
+      appPackageName,
+    ], { allowFailure: true });
+    if (isBackgroundActionsServicePresent(lastOutput) === shouldBeRunning) {
+      return;
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `Android background-actions service did not become ${shouldBeRunning ? "running" : "stopped"}. `
+    + `Last dumpsys excerpt: ${lastOutput.slice(-1_000)}`
+  );
+}
+
+async function setAppNotificationsEnabled(ctx, enabled, userId) {
+  const adbPath = resolveAdbPath();
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "am",
+    "start",
+    "-a",
+    "android.settings.APP_NOTIFICATION_SETTINGS",
+    "--es",
+    "android.provider.extra.APP_PACKAGE",
+    appPackageName,
+  ]);
+
+  const notificationSwitch = await waitForResourceId(adbPath, ctx.serial, "switch_widget", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  if (!notificationSwitch.bounds) {
+    throw new Error("Android app-notification switch has no tap bounds.");
+  }
+  const previouslyEnabled = notificationSwitch.checked;
+  if (notificationSwitch.checked !== enabled) {
+    tapBounds(adbPath, ctx.serial, notificationSwitch.bounds);
+    const { match } = await waitForSnapshotMatch(
+      adbPath,
+      ctx.serial,
+      { timeoutMs: 10_000, pollIntervalMs: 250 },
+      (snapshot) => {
+        const candidate = findResourceIdInSnapshot(snapshot, "switch_widget", { visibleOnly: true });
+        return candidate?.checked === enabled ? candidate : null;
+      }
+    );
+    if (!match) {
+      throw new Error(`Android app notifications did not become ${enabled ? "enabled" : "disabled"}.`);
+    }
+  }
+
+  const permissionGranted = readPostNotificationsPermission(adbPath, ctx.serial, userId);
+  if (permissionGranted !== enabled) {
+    throw new Error(
+      `Android app notification UI and ${POST_NOTIFICATIONS_PERMISSION} disagree after the toggle.`
+    );
+  }
+
+  runChecked(adbPath, ["-s", ctx.serial, "shell", "input", "keyevent", "4"]);
+  // Some OEM settings apps keep their notification screen resumed after Back.
+  // Bring the tested package to the foreground explicitly before continuing.
+  await relaunchScenarioApp(ctx);
+  return previouslyEnabled;
+}
+
+async function setBackgroundActionsChannelEnabled(ctx, enabled, userId = null) {
+  const adbPath = resolveAdbPath();
+  const currentUserId = userId ?? readAndroidCurrentUserId(adbPath, ctx.serial);
+  const originalState = readBackgroundActionsChannelState(adbPath, ctx.serial, currentUserId);
+  if (originalState.enabled === enabled) {
+    return originalState.enabled;
+  }
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "am",
+    "start",
+    "-a",
+    "android.settings.CHANNEL_NOTIFICATION_SETTINGS",
+    "--es",
+    "android.provider.extra.APP_PACKAGE",
+    appPackageName,
+    "--es",
+    "android.provider.extra.CHANNEL_ID",
+    BACKGROUND_ACTIONS_CHANNEL_ID,
+  ]);
+
+  await ensureNotificationChannelSettingsVisible(
+    adbPath,
+    ctx.serial,
+    originalState.name
+  );
+
+  const channelSwitch = await waitForResourceId(adbPath, ctx.serial, "switch_widget", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  if (!channelSwitch.bounds) {
+    throw new Error("Android notification-channel switch has no tap bounds.");
+  }
+  const previouslyEnabled = originalState.enabled;
+  tapBounds(adbPath, ctx.serial, channelSwitch.bounds);
+  const deadline = Date.now() + 10_000;
+  let confirmed = false;
+  while (Date.now() < deadline) {
+    if (readBackgroundActionsChannelEnabled(adbPath, ctx.serial, currentUserId) === enabled) {
+      confirmed = true;
+      break;
+    }
+    await delay(250);
+  }
+  if (!confirmed) {
+    throw new Error(`Android notification channel did not become ${enabled ? "enabled" : "blocked"}.`);
+  }
+
+  runChecked(adbPath, ["-s", ctx.serial, "shell", "input", "keyevent", "4"]);
+  // OxygenOS can keep channel settings resumed after Back while UIAutomator
+  // returns a stale app hierarchy, so explicitly foreground the QA package.
+  await relaunchScenarioApp(ctx);
+  return previouslyEnabled;
+}
+
+async function runWithBestEffortCleanup(run, cleanupSteps) {
+  let result;
+  let primaryError = null;
+  try {
+    result = await run();
+  } catch (error) {
+    primaryError = error;
+  }
+
+  const cleanupErrors = [];
+  for (const { label, run: cleanup } of cleanupSteps) {
+    try {
+      await cleanup();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      cleanupErrors.push(new Error(`${label}: ${message}`, { cause: error }));
+    }
+  }
+
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
+      primaryError
+        ? "Android scenario and one or more cleanup steps failed."
+        : "One or more Android scenario cleanup steps failed."
+    );
+  }
+  if (primaryError) {
+    throw primaryError;
+  }
+  return result;
+}
+
+async function ensureBackgroundActionsChannelCreated(ctx) {
+  const adbPath = resolveAdbPath();
+  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_START_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-running", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await waitForBackgroundActionsService(adbPath, ctx.serial, true);
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_STOP_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-idle", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await waitForBackgroundActionsService(adbPath, ctx.serial, false);
+}
+
+async function exerciseQaForegroundService(ctx, evidenceLabel) {
+  const adbPath = resolveAdbPath();
+  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_START_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-running", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await waitForBackgroundActionsService(adbPath, ctx.serial, true);
+  ctx.captureScreenshot(`foreground-service-${evidenceLabel}.png`);
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_STOP_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-idle", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await waitForBackgroundActionsService(adbPath, ctx.serial, false);
+}
+
+function findSelectedResourceKey(snapshot, resourcesByKey, label) {
+  for (const [key, resourceId] of Object.entries(resourcesByKey)) {
+    const node = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+    if (node?.selected) {
+      return key;
+    }
+  }
+  throw new Error(`Could not resolve the selected ${label}.`);
+}
+
+async function readSelectedThemeMode(ctx) {
+  await goToSettings(ctx);
+  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  return findSelectedResourceKey(
+    createUiSnapshot(resolveAdbPath(), ctx.serial),
+    THEME_MODE_RESOURCE_IDS,
+    "theme mode"
+  );
+}
+
+async function selectThemeMode(ctx, mode) {
+  const resourceId = THEME_MODE_RESOURCE_IDS[mode];
+  if (!resourceId) {
+    throw new Error(`Unsupported theme mode ${mode}.`);
+  }
+  await goToSettings(ctx);
+  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  const { match } = await waitForSnapshotMatch(
+    resolveAdbPath(),
+    ctx.serial,
+    { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS, pollIntervalMs: 250 },
+    (snapshot) => {
+      const candidate = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+      return candidate?.selected ? candidate : null;
+    }
+  );
+  if (!match) {
+    throw new Error(`Theme mode ${mode} did not become selected.`);
+  }
+}
+
+async function openThemeStyleSheet(ctx) {
+  await goToSettings(ctx);
+  await scrollToAnyText(ctx, THEME_STYLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await tapVisibleResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await waitForResourceId(resolveAdbPath(), ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+}
+
+async function readSelectedThemeStyle(ctx) {
+  await openThemeStyleSheet(ctx);
+  const selected = findSelectedResourceKey(
+    createUiSnapshot(resolveAdbPath(), ctx.serial),
+    THEME_STYLE_RESOURCE_IDS,
+    "theme style"
+  );
+  await ctx.pressBack();
+  await waitForNoResourceId(resolveAdbPath(), ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  return selected;
+}
+
+async function selectThemeStyle(ctx, themeStyle) {
+  const resourceId = THEME_STYLE_RESOURCE_IDS[themeStyle];
+  if (!resourceId) {
+    throw new Error(`Unsupported theme style ${themeStyle}.`);
+  }
+  await openThemeStyleSheet(ctx);
+  await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await waitForNoResourceId(resolveAdbPath(), ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  const selected = await readSelectedThemeStyle(ctx);
+  if (selected !== themeStyle) {
+    throw new Error(`Theme style ${themeStyle} did not become selected.`);
+  }
+}
+
+async function captureCoreSurfaceScreenshots(ctx, prefix, settingsFocusLabels = LANGUAGE_ROW_LABELS) {
+  await goToHome(ctx);
+  await ctx.expectAnyText(APP_TITLE_LABELS);
+  ctx.captureScreenshot(`${prefix}-home.png`);
+
+  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  ctx.captureScreenshot(`${prefix}-chat.png`);
+
+  await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await scrollToAnyText(ctx, settingsFocusLabels, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  ctx.captureScreenshot(`${prefix}-settings.png`);
+
+  await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
+  await ctx.expectAnyText(ALL_MODELS_LABELS);
+  const screenshotPath = ctx.captureScreenshot(`${prefix}-models.png`);
+  await goToHome(ctx);
+  return { screenshotPath };
+}
+
+async function restoreThemePreferences(ctx, { mode, themeStyle }) {
+  const failures = [];
+  try {
+    await selectThemeStyle(ctx, themeStyle);
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await selectThemeMode(ctx, mode);
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await goToHome(ctx);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Failed to restore Android theme preferences after native QA.");
+  }
+}
+
 function buildScenarios() {
   return [
     {
@@ -2106,30 +2670,112 @@ function buildScenarios() {
       },
     },
     {
+      id: "native-glass-theme-matrix",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Verify Glass across Home, Chat, Models, and Settings in light and dark modes.",
+      run: async (ctx) => {
+        const originalPreferences = {
+          mode: await readSelectedThemeMode(ctx),
+          themeStyle: await readSelectedThemeStyle(ctx),
+        };
+
+        try {
+          await selectThemeStyle(ctx, "glass");
+          await selectThemeMode(ctx, "light");
+          await captureCoreSurfaceScreenshots(ctx, "native-glass-light", THEME_STYLE_LABELS);
+
+          await selectThemeMode(ctx, "dark");
+          return await captureCoreSurfaceScreenshots(ctx, "native-glass-dark", THEME_STYLE_LABELS);
+        } finally {
+          await restoreThemePreferences(ctx, originalPreferences);
+        }
+      },
+    },
+    {
+      id: "foreground-service-notification-states",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Verify the Android foreground service starts with granted, denied, and blocked notification states.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const sdkLevel = readAndroidSdkLevel(adbPath, ctx.serial);
+
+        if (sdkLevel < 33) {
+          await exerciseQaForegroundService(ctx, `api-${sdkLevel}-legacy`);
+          return;
+        }
+
+        const userId = readAndroidCurrentUserId(adbPath, ctx.serial);
+        const originalNotificationsEnabled = readPostNotificationsPermission(
+          adbPath,
+          ctx.serial,
+          userId
+        );
+        await ensureBackgroundActionsChannelCreated(ctx);
+        const originalChannelEnabled = readBackgroundActionsChannelState(
+          adbPath,
+          ctx.serial,
+          userId
+        ).enabled;
+
+        return runWithBestEffortCleanup(async () => {
+          await setBackgroundActionsChannelEnabled(ctx, true, userId);
+
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await setAppNotificationsEnabled(ctx, true, userId);
+          await exerciseQaForegroundService(ctx, `api-${sdkLevel}-permission-granted`);
+
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await setAppNotificationsEnabled(ctx, false, userId);
+          await exerciseQaForegroundService(ctx, `api-${sdkLevel}-permission-denied`);
+
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await setAppNotificationsEnabled(ctx, true, userId);
+          await setBackgroundActionsChannelEnabled(ctx, false, userId);
+          return exerciseQaForegroundService(ctx, `api-${sdkLevel}-channel-blocked`);
+        }, [
+          {
+            label: "force-stop before notification-state restore",
+            run: async () => forceStopScenarioApp(adbPath, ctx.serial),
+          },
+          {
+            label: "relaunch before notification-state restore",
+            run: async () => relaunchScenarioApp(ctx),
+          },
+          {
+            label: "temporarily enable app notifications for channel restore",
+            run: async () => setAppNotificationsEnabled(ctx, true, userId),
+          },
+          {
+            label: "restore the background-actions notification channel",
+            run: async () => setBackgroundActionsChannelEnabled(
+              ctx,
+              originalChannelEnabled,
+              userId
+            ),
+          },
+          {
+            label: "restore the app notification permission",
+            run: async () => setAppNotificationsEnabled(
+              ctx,
+              originalNotificationsEnabled,
+              userId
+            ),
+          },
+        ]);
+      },
+    },
+    {
       id: "style-screenshots",
       tier: "secondary",
       description: "Capture stable Home, Chat, Models, and Settings screenshots for styling dependency checks.",
-      run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.expectAnyText(APP_TITLE_LABELS);
-        ctx.captureScreenshot("style-home.png");
-
-        await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
-          timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
-        });
-        ctx.captureScreenshot("style-chat.png");
-
-        await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
-          timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-        });
-        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-        ctx.captureScreenshot("style-settings.png");
-
-        await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
-        await ctx.expectAnyText(ALL_MODELS_LABELS);
-        ctx.captureScreenshot("style-models.png");
-        await goToHome(ctx);
-      },
+      run: async (ctx) => captureCoreSurfaceScreenshots(ctx, "style"),
     },
     {
       id: "storage-cache-clear",
@@ -2185,11 +2831,13 @@ function buildScenarios() {
         }
 
         await ctx.expectAnyText(STORAGE_MANAGER_LABELS, { timeoutMs: 5_000 });
+        const screenshotPath = ctx.captureScreenshot("storage-cache-clear.png");
         await ctx.pressBack();
         await ctx.expectAnyText(SETTINGS_TITLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2204,9 +2852,11 @@ function buildScenarios() {
           timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
         });
         await ctx.expectAnyText(CHAT_EMPTY_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+        const screenshotPath = ctx.captureScreenshot("new-chat-cta.png");
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, NEW_CHAT_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2253,9 +2903,11 @@ function buildScenarios() {
           assertAttachmentActionAvailable(attachNode);
         }
 
+        const screenshotPath = ctx.captureScreenshot("chat-attachment-current-state-smoke.png");
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2397,6 +3049,7 @@ function buildScenarios() {
 
         await openFirstVisibleVariantPicker(ctx);
         await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 15_000 });
+        const screenshotPath = ctx.captureScreenshot("variant-picker-smoke.png");
 
         const adbPath = resolveAdbPath();
         await dismissTransientSurfaceWithBack(
@@ -2409,6 +3062,7 @@ function buildScenarios() {
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2421,9 +3075,11 @@ function buildScenarios() {
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await ctx.expectAnyText(ALL_MODELS_LABELS);
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
+        const screenshotPath = ctx.captureScreenshot("swap-model-cta.png");
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, ACTIVE_MODEL_CTA_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2579,6 +3235,7 @@ function buildScenarios() {
 
         let languageToggled = false;
         let scenarioError = null;
+        let screenshotPath = null;
 
         try {
           await ctx.tapAnyText(currentLanguageLabel, { afterTapDelayMs: 1_200 });
@@ -2587,6 +3244,7 @@ function buildScenarios() {
           await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, nextHomeLabel, {
             timeoutMs: 10_000,
           });
+          screenshotPath = ctx.captureScreenshot("language-switch.png");
         } catch (error) {
           scenarioError = error;
           throw error;
@@ -2605,6 +3263,8 @@ function buildScenarios() {
             }
           }
         }
+
+        return screenshotPath ? { screenshotPath } : undefined;
       },
     },
     {
@@ -4282,8 +4942,8 @@ function requireBranchFixtureState(state, step) {
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
-  } else if (options.pack === "documents" && !env.ANDROID_SMOKE_APK_VARIANT) {
-    // The documented document-pack command is self-contained and always exercises
+  } else if (["documents", "native"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
+    // Current-head packs are self-contained and always exercise
     // the embedded release bundle plus the universal native-library contract.
     env.ANDROID_SMOKE_APK_VARIANT = "release";
   }
@@ -4307,6 +4967,17 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
     androidQaEvidence: env.EXPO_PUBLIC_ANDROID_QA === "1",
     apkVariant: effectiveApkVariant,
   };
+}
+
+function validateScenarioExecutionOptions(selectedScenarios, options) {
+  const isolatedScenarioIds = selectedScenarios
+    .filter((scenario) => scenario.requiresIsolatedQaInstall)
+    .map((scenario) => scenario.id);
+  if (isolatedScenarioIds.length > 0 && !options.isolatedQaInstall) {
+    throw new ScenarioPreconditionFailureError(
+      `State-mutating Android scenarios require --isolated-qa-install: ${isolatedScenarioIds.join(", ")}.`
+    );
+  }
 }
 
 function normalizeAndroidResourceId(resourceId) {
@@ -5527,6 +6198,8 @@ function selectScenarios(scenarios, options) {
       ...BRANCH_REGENERATION_SCENARIOS,
       ...DOCUMENT_SCENARIOS,
       ...DOCUMENT_BENCHMARK_SCENARIOS,
+      "native-glass-theme-matrix",
+      "foreground-service-notification-states",
     ]);
     return scenarios.filter((scenario) => !explicitStateMutationScenarioIds.has(scenario.id));
   }
@@ -7347,6 +8020,7 @@ function parseUiNodes(xml) {
       resourceId: attributes["resource-id"] || "",
       packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
+      checked: attributes.checked === "true",
       enabled: attributes.enabled !== "false",
       selected: attributes.selected === "true",
       bounds: parseBounds(attributes.bounds),
@@ -7421,6 +8095,24 @@ function isAppForegroundSnapshot(snapshot) {
   });
 
   return Boolean(hasAppTitle && hasAppForegroundMarker);
+}
+
+function isPackageResumedActivity(dumpsysOutput, packageName) {
+  return Boolean(packageName && parseResumedActivityPackage(dumpsysOutput) === packageName);
+}
+
+function parseResumedActivityPackage(dumpsysOutput) {
+  return String(dumpsysOutput).match(
+    /(?:topResumedActivity|mResumedActivity)=[^\r\n]*\bu\d+\s+([a-zA-Z0-9._]+)\//u
+  )?.[1] || null;
+}
+
+function isScenarioAppForegroundEvidence(dumpsysOutput, snapshot, packageName) {
+  const resumedPackageName = parseResumedActivityPackage(dumpsysOutput);
+  if (resumedPackageName) {
+    return resumedPackageName === packageName;
+  }
+  return isAppForegroundSnapshot(snapshot);
 }
 
 function findNodesForLabelsInSnapshot(snapshot, labels, options = {}) {
@@ -7829,8 +8521,57 @@ function parseExactAndroidPackageListUid(output, packageName) {
   return matchingUids.size === 1 ? [...matchingUids][0] : null;
 }
 
+const ANDROID_UID_PER_USER_RANGE = 100_000;
+
+function isAndroidUidForUser(uid, userId) {
+  const numericUid = Number.parseInt(uid, 10);
+  const numericUserId = Number.parseInt(userId, 10);
+  return Number.isInteger(numericUid)
+    && Number.isInteger(numericUserId)
+    && Math.floor(numericUid / ANDROID_UID_PER_USER_RANGE) === numericUserId;
+}
+
+function isAndroidPackageInstalledForUser(packageDump, userId) {
+  const userLine = new RegExp(
+    `^\\s*User ${escapeRegex(userId)}:\\s+([^\\r\\n]*)$`,
+    "mu"
+  ).exec(String(packageDump || ""))?.[1];
+  return Boolean(userLine && /\binstalled=true\b/u.test(userLine));
+}
+
 function resolveAndroidPackageUid(adbPath, serial, packageName, options = {}) {
   const capture = options.runCapture || runCapture;
+  const currentUserId = options.userId ?? readAndroidCurrentUserId(adbPath, serial, {
+    runCapture: capture,
+  });
+  let packageList = null;
+  let packageListError = null;
+  try {
+    packageList = capture(
+      adbPath,
+      [
+        "-s",
+        serial,
+        "shell",
+        "cmd",
+        "package",
+        "list",
+        "packages",
+        "--user",
+        currentUserId,
+        "-U",
+        packageName,
+      ]
+    );
+  } catch (error) {
+    packageListError = error;
+  }
+
+  const packageListUid = parseExactAndroidPackageListUid(packageList || "", packageName);
+  if (packageListUid && isAndroidUidForUser(packageListUid, currentUserId)) {
+    return packageListUid;
+  }
+
   let packageDump = null;
   let packageDumpError = null;
   try {
@@ -7842,31 +8583,16 @@ function resolveAndroidPackageUid(adbPath, serial, packageName, options = {}) {
     packageDumpError = error;
   }
 
-  const packageDumpUid = packageDump?.match(/(?:^|\s)userId=(\d+)\b/m)?.[1] || null;
-  if (packageDumpUid) {
-    return packageDumpUid;
-  }
-
-  let packageList = null;
-  let packageListError = null;
-  try {
-    packageList = capture(
-      adbPath,
-      ["-s", serial, "shell", "cmd", "package", "list", "packages", "-U", packageName]
-    );
-  } catch (error) {
-    packageListError = error;
-  }
-
-  const packageListUid = parseExactAndroidPackageListUid(packageList || "", packageName);
-  if (packageListUid) {
-    return packageListUid;
+  const packageAppId = packageDump?.match(/(?:^|\s)(?:userId|appId)=(\d+)\b/m)?.[1] || null;
+  if (packageAppId && isAndroidPackageInstalledForUser(packageDump, currentUserId)) {
+    const appId = Number.parseInt(packageAppId, 10) % ANDROID_UID_PER_USER_RANGE;
+    return String(Number.parseInt(currentUserId, 10) * ANDROID_UID_PER_USER_RANGE + appId);
   }
 
   const bothInspectionsFailed = packageDumpError && packageListError;
   const detail = bothInspectionsFailed
     ? "both package inspection commands failed"
-    : "installed package metadata has no unambiguous exact-package UID";
+    : `installed package metadata has no unambiguous exact-package UID for user ${currentUserId}`;
   throw new ScenarioPreconditionFailureError(
     `Could not resolve the Android UID for ${packageName}; ${detail}.`,
     { cause: packageListError || packageDumpError || undefined }
@@ -8085,8 +8811,9 @@ async function startAndroidLogcatCollector({
   const requireOwnership = options.requireOwnership ?? !options.spawn;
   const privateRoot = path.resolve(options.privateRoot || PRIVATE_LOGCAT_DIRECTORY);
   const runCaptureForCollector = options.runCapture || runCapture;
-  const uid = resolveAndroidPackageUid(adbPath, serial, packageName, {
+  const uid = options.packageUid || resolveAndroidPackageUid(adbPath, serial, packageName, {
     runCapture: runCaptureForCollector,
+    userId: options.userId,
   });
   const startEpoch = readAndroidLogcatStartEpoch(adbPath, serial, {
     runCapture: runCaptureForCollector,
@@ -9189,7 +9916,7 @@ function parseCliOptions(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
-  if (options.pack === "documents") {
+  if (options.pack === "documents" || options.pack === "native") {
     options.isolatedQaInstall = true;
   }
 
@@ -9630,6 +10357,7 @@ module.exports = {
   createBranchRegenerationBaseline,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
+  getScenarioOutcomeScreenshotPath,
   activateClearedCatalogFilterOption,
   appPrivatePathExists,
   clearCatalogFiltersIfPresent,
@@ -9665,12 +10393,18 @@ module.exports = {
   inputFocusedTextForImmediateSend,
   installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
+  isPackageResumedActivity,
+  isScenarioAppForegroundEvidence,
+  isBackgroundActionsServicePresent,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
   extractVisibleConversationTokens,
   mergeOlderConversationOrder,
   markScenarioFailureRecorded,
   normalizeAndroidResourceId,
+  parseAndroidRuntimePermission,
+  parseAndroidNotificationChannelEnabled,
+  resolveNotificationChannelSettingsUi,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
@@ -9690,6 +10424,7 @@ module.exports = {
   resolveTargetAttachmentIds,
   restoreDocumentQaAppForCleanup,
   restoreLanguageAfterScenario,
+  runWithBestEffortCleanup,
   runCapture,
   runChecked,
   sanitizeQaLogcat,
@@ -9704,6 +10439,7 @@ module.exports = {
   shouldPrepareMetroForScenarioLaunch,
   shouldAppendRunnerFailure,
   validateQaProvenance,
+  validateScenarioExecutionOptions,
   waitForAnyNode,
   waitForEnabledAnyNode,
   waitForModelWarmupToSettleIfPresent,

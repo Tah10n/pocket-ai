@@ -252,13 +252,6 @@ class BackgroundTaskService {
             return;
         }
 
-        if (Platform.OS === 'android') {
-            const canStart = await notificationService.canStartForegroundServiceNotifications();
-            if (!canStart) {
-                return;
-            }
-        }
-
         const options = notificationService.getBackgroundTaskOptions(taskType);
         try {
             await BackgroundService.start(notificationService.keepJsAliveWhileRunning, options);

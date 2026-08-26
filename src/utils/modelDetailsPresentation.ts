@@ -36,6 +36,80 @@ export interface ModelDetailsMetadataItem {
 
 type Translate = (key: string) => string;
 
+const MARKDOWN_TABLE_DELIMITER_ROW = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/u;
+
+function findMarkdownTableStart(value: string): number | null {
+  const lines = value.split('\n');
+  let lineOffset = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const nextLine = lines[index + 1];
+    const pipeCount = line.match(/\|/g)?.length ?? 0;
+
+    if (pipeCount >= 1 && nextLine && MARKDOWN_TABLE_DELIMITER_ROW.test(nextLine)) {
+      return lineOffset + line.search(/\S/u);
+    }
+
+    // Some catalog descriptions collapse table rows onto one line. In that form,
+    // an empty boundary cell separates rows; ordinary prose with pipe separators does not.
+    if (pipeCount >= 6 && /\|\s*\|/u.test(line)) {
+      const firstPipeIndex = line.indexOf('|');
+      return lineOffset + Math.max(0, firstPipeIndex);
+    }
+
+    lineOffset += line.length + 1;
+  }
+
+  return null;
+}
+
+export function formatModelDetailsDescription(
+  description: string | null | undefined,
+): string | undefined {
+  const source = description?.trim();
+  if (!source) {
+    return undefined;
+  }
+
+  let formatted = source
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, ' ');
+
+  const tableStart = findMarkdownTableStart(formatted);
+  if (tableStart !== null) {
+    const proseBeforeTable = formatted.slice(0, tableStart).trim();
+    const tableText = formatted.slice(tableStart);
+
+    if (proseBeforeTable) {
+      formatted = proseBeforeTable;
+    } else {
+      formatted = tableText
+        .split('\n')
+        .filter((row) => !MARKDOWN_TABLE_DELIMITER_ROW.test(row))
+        .flatMap((row) => row.split('|'))
+        .map((cell) => cell.trim())
+        .filter((cell) => cell.length > 0)
+        .slice(0, 4)
+        .join(' · ');
+    }
+  }
+
+  formatted = formatted
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*[-+*]\s+/gm, '')
+    .replace(/^\s*\d+[.)]\s+/gm, '')
+    .replace(/```[^\n]*\n?/g, '')
+    .replace(/`/g, '')
+    .replace(/\*\*|__|~~/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return formatted || undefined;
+}
+
 function formatCount(value: number | null | undefined, fallback: string): string {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     return fallback;

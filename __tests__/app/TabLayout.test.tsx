@@ -129,4 +129,18 @@ describe('TabLayout', () => {
     expect(mockTabScreenProps).toHaveBeenCalledTimes(4);
     expect(preventDefault).toHaveBeenCalledTimes(4);
   });
+
+  it('gives every tab an explicit translated accessibility label', () => {
+    render(<TabLayout />);
+
+    expect(mockTabScreenProps.mock.calls.map(([{ options }]) => ({
+      title: options.title,
+      accessibilityLabel: options.tabBarAccessibilityLabel,
+    }))).toEqual([
+      { title: 'tabs.home', accessibilityLabel: 'tabs.home' },
+      { title: 'tabs.chat', accessibilityLabel: 'tabs.chat' },
+      { title: 'tabs.models', accessibilityLabel: 'tabs.models' },
+      { title: 'tabs.settings', accessibilityLabel: 'tabs.settings' },
+    ]);
+  });
 });

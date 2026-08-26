@@ -43,7 +43,10 @@ import {
   getModelDisplayProjectorCandidates,
   getModelDisplaySelectedProjectorId,
 } from '@/utils/modelSize';
-import { getModelDetailsTagTone } from '@/utils/modelDetailsPresentation';
+import {
+  formatModelDetailsDescription,
+  getModelDetailsTagTone,
+} from '@/utils/modelDetailsPresentation';
 import { canSelectModelVariant, getActiveModelVariant } from '@/utils/modelVariants';
 import {
   getConfiguredMtpDraftArtifact,
@@ -85,6 +88,10 @@ export function ModelDetailsScreen() {
     closeProjectorChoice,
     reportEngineError,
   } = useModelDetailsController(modelId, variantId);
+  const modelDescription = useMemo(
+    () => formatModelDetailsDescription(displayModel?.description),
+    [displayModel?.description],
+  );
   const warmupContentBlurTargetRef = useRef<View | null>(null);
   const [isVariantPickerVisible, setVariantPickerVisible] = useState(false);
 
@@ -370,7 +377,7 @@ export function ModelDetailsScreen() {
                   tone="info"
                 >
                   <Text colorRole="secondary" className="text-sm leading-7  ">
-                    {displayModel.description ?? t('models.descriptionUnavailable')}
+                    {modelDescription ?? t('models.descriptionUnavailable')}
                   </Text>
                 </SectionCard>
 

@@ -35,6 +35,7 @@ const {
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
+  getScenarioOutcomeScreenshotPath,
   cleanupAndroidLogcatCollector,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
@@ -75,7 +76,12 @@ const {
   inputFocusedTextForImmediateSend,
   installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
+  isPackageResumedActivity,
+  isScenarioAppForegroundEvidence,
+  isBackgroundActionsServicePresent,
   openFirstVisibleVariantPicker,
+  parseAndroidNotificationChannelEnabled,
+  parseAndroidRuntimePermission,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
@@ -86,6 +92,8 @@ const {
   resolveBranchRegenerationReplacement,
   resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidPackageUid,
+  resolveNotificationChannelSettingsUi,
+  runWithBestEffortCleanup,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
@@ -115,6 +123,7 @@ const {
   tapBottomTabUntilVisible,
   tapBoundsUntilAnyNode,
   validateQaProvenance,
+  validateScenarioExecutionOptions,
   areExactGitProvenancesEqual,
   waitForAnyNode,
   waitForEnabledAnyNode,
@@ -536,6 +545,148 @@ describe('android-scenarios smoke bootstrap args', () => {
       true,
       {},
     )).toThrow(ScenarioPreconditionFailureError);
+
+    const nativeEnv = {};
+    expect(configureScenarioBuildEnvironment(
+      { pack: 'native' },
+      true,
+      nativeEnv,
+    )).toEqual({
+      androidQaEvidence: true,
+      apkVariant: 'release',
+    });
+    expect(nativeEnv).toEqual({
+      ANDROID_SMOKE_APK_VARIANT: 'release',
+      EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true',
+    });
+  });
+
+  it('parses Android runtime notification permission state for the current user', () => {
+    const dumpsys = [
+      '    User 0: ceDataInode=100 installed=true',
+      '      runtime permissions:',
+      '        android.permission.POST_NOTIFICATIONS: granted=true, flags=[ USER_SET ]',
+      '    User 10: ceDataInode=200 installed=true',
+      '      runtime permissions:',
+      '        android.permission.POST_NOTIFICATIONS: granted=false, flags=[ USER_SET ]',
+    ].join('\n');
+
+    expect(parseAndroidRuntimePermission(
+      dumpsys,
+      '0',
+      'android.permission.POST_NOTIFICATIONS',
+    )).toBe(true);
+    expect(parseAndroidRuntimePermission(
+      dumpsys,
+      '10',
+      'android.permission.POST_NOTIFICATIONS',
+    )).toBe(false);
+    expect(() => parseAndroidRuntimePermission(
+      dumpsys,
+      '11',
+      'android.permission.POST_NOTIFICATIONS',
+    )).toThrow(/does not contain user 11/);
+    expect(() => parseAndroidRuntimePermission(
+      dumpsys,
+      '0',
+      'android.permission.CAMERA',
+    )).toThrow(/does not expose android\.permission\.CAMERA/);
+  });
+
+  it('recognizes the scenario package as the top resumed Android activity', () => {
+    const dumpsys = [
+      'ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)',
+      '  topResumedActivity=ActivityRecord{b93201a u0 com.github.tah10n.pocketai.qa/com.github.tah10n.pocketai.MainActivity t576}',
+    ].join('\n');
+
+    expect(isPackageResumedActivity(
+      dumpsys,
+      'com.github.tah10n.pocketai.qa',
+    )).toBe(true);
+    expect(isPackageResumedActivity(
+      dumpsys,
+      'com.github.tah10n.pocketai',
+    )).toBe(false);
+    expect(isPackageResumedActivity('', 'com.github.tah10n.pocketai.qa')).toBe(false);
+  });
+
+  it('rejects a stale app hierarchy when Android reports Settings as resumed', () => {
+    const staleAppSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="Pocket AI" package="com.github.tah10n.pocketai" bounds="[0,0][1080,2400]" />
+        <node text="Home" package="com.github.tah10n.pocketai" bounds="[0,100][300,200]" />
+      </hierarchy>
+    `);
+    const settingsResumed = [
+      'ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)',
+      '  topResumedActivity=ActivityRecord{cafe123 u0 com.oplus.notificationmanager/.ChannelNotificationSettings t581}',
+    ].join('\n');
+
+    expect(isScenarioAppForegroundEvidence(
+      settingsResumed,
+      staleAppSnapshot,
+      'com.github.tah10n.pocketai',
+    )).toBe(false);
+    expect(isScenarioAppForegroundEvidence(
+      '',
+      staleAppSnapshot,
+      'com.github.tah10n.pocketai',
+    )).toBe(true);
+  });
+
+  it('reads the notification channel for the current package UID only', () => {
+    const dumpsys = [
+      '  AppSettings: com.github.tah10n.pocketai.qa (10326)',
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=0, mOriginalImp=2}",
+      '  AppSettings: com.github.tah10n.pocketai.qa (10332) importance=NONE userSet=true',
+      "    NotificationChannel{mId='downloads', mName=Downloads, mImportance=4, mOriginalImp=4}",
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=2, mOriginalImp=2}",
+      '  AppSettings: com.android.settings (1000)',
+    ].join('\n');
+
+    expect(parseAndroidNotificationChannelEnabled(
+      dumpsys,
+      'com.github.tah10n.pocketai.qa',
+      '10332',
+      'RN_BACKGROUND_ACTIONS_CHANNEL',
+    )).toBe(true);
+    expect(parseAndroidNotificationChannelEnabled(
+      dumpsys,
+      'com.github.tah10n.pocketai.qa',
+      '10326',
+      'RN_BACKGROUND_ACTIONS_CHANNEL',
+    )).toBe(false);
+  });
+
+  it('navigates an OEM app-notification redirect into the requested channel', () => {
+    const appNotificationSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" bounds="[168,169][1059,242]" />
+        <node text="Generating response..." resource-id="android:id/title" bounds="[96,1911][529,1969]" />
+        <node text="On" resource-id="android:id/switch_widget" checked="true" bounds="[870,353][984,425]" />
+      </hierarchy>
+    `);
+    const channelSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" bounds="[0,0][1080,2400]" />
+        <node text="Generating response..." bounds="[168,169][1059,242]" />
+        <node text="On" resource-id="android:id/switch_widget" checked="true" bounds="[870,353][984,425]" />
+      </hierarchy>
+    `);
+
+    expect(resolveNotificationChannelSettingsUi(
+      appNotificationSnapshot,
+      'Generating response...',
+    )).toEqual(expect.objectContaining({
+      ready: false,
+      target: expect.objectContaining({ resourceId: 'android:id/title' }),
+    }));
+    expect(resolveNotificationChannelSettingsUi(
+      channelSnapshot,
+      'Generating response...',
+    )).toEqual({ ready: true, target: null });
   });
 
   it('uses fast smoke reuse flags when skip-build is enabled', () => {
@@ -2577,6 +2728,16 @@ describe('android-scenarios CLI parsing', () => {
     expect(buildSmokeLaunchArgs(options, null)).toContain('--isolated-qa-install');
   });
 
+  it('always isolates the native pack from an installed user app', () => {
+    const options = parseCliOptions(['--pack', 'native']);
+
+    expect(options).toEqual(expect.objectContaining({
+      pack: 'native',
+      isolatedQaInstall: true,
+    }));
+    expect(buildSmokeLaunchArgs(options, null)).toContain('--isolated-qa-install');
+  });
+
   it('does not expose optional scenarios as a named pack', () => {
     expect(() => parseCliOptions(['--pack', 'optional'])).toThrow('Unknown scenario pack "optional"');
   });
@@ -2602,6 +2763,12 @@ describe('android-scenarios pack selection', () => {
       'bottom-tabs',
       'new-chat-cta',
     ]);
+  });
+
+  it('uses an explicit target-state screenshot returned by a scenario', () => {
+    expect(getScenarioOutcomeScreenshotPath({ screenshotPath: '  target.png  ' })).toBe('target.png');
+    expect(getScenarioOutcomeScreenshotPath({ screenshotPath: '   ' })).toBeNull();
+    expect(getScenarioOutcomeScreenshotPath(undefined)).toBeNull();
   });
 
   it('taps the clickable upper portion of a bottom tab when a warning banner covers its center', () => {
@@ -2673,10 +2840,18 @@ describe('android-scenarios pack selection', () => {
           events.push('chat-viewport');
         }),
         tapAnyText: jest.fn().mockResolvedValue(undefined),
-        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn(async () => {
+          events.push('home');
+        }),
+        captureScreenshot: jest.fn((fileName) => {
+          events.push('capture');
+          return path.join(tempDir, fileName);
+        }),
       };
 
-      await isolatedScenarios.find((scenario) => scenario.id === 'new-chat-cta').run(newChatContext);
+      const newChatOutcome = await isolatedScenarios
+        .find((scenario) => scenario.id === 'new-chat-cta')
+        .run(newChatContext);
 
       expect(newChatContext.expectResourceId).toHaveBeenCalledWith('chat-list-viewport', {
         timeoutMs: 120_000,
@@ -2686,6 +2861,9 @@ describe('android-scenarios pack selection', () => {
         { timeoutMs: 120_000 }
       );
       expect(events.indexOf('chat-viewport')).toBeLessThan(events.indexOf('empty-copy'));
+      expect(events.indexOf('empty-copy')).toBeLessThan(events.indexOf('capture'));
+      expect(events.indexOf('capture')).toBeLessThan(events.indexOf('home'));
+      expect(newChatOutcome).toEqual({ screenshotPath: path.join(tempDir, 'new-chat-cta.png') });
 
       const dumpsBeforeBottomTabs = spawnSync.mock.calls.filter(([, args]) => args.includes('exec-out')).length;
       const bottomTabsContext = {
@@ -2807,6 +2985,7 @@ describe('android-scenarios pack selection', () => {
         expectAnyText: jest.fn().mockResolvedValue(undefined),
         tapAnyText,
         tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        captureScreenshot: jest.fn(() => path.join(tempDir, 'chat-attachment-current-state-smoke.png')),
       };
 
       await scenario.run(ctx);
@@ -3001,6 +3180,7 @@ describe('android-scenarios pack selection', () => {
         expectAnyText: jest.fn().mockResolvedValue(undefined),
         tapAnyText,
         tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        captureScreenshot: jest.fn(() => path.join(tempDir, 'chat-attachment-current-state-smoke.png')),
       };
 
       await scenario.run(ctx);
@@ -3769,7 +3949,93 @@ describe('android-scenarios pack selection', () => {
       'swap-model-cta',
       'hf-token-education',
       'conversations-management',
+      'native-glass-theme-matrix',
+      'foreground-service-notification-states',
     ]);
+  });
+
+  it('requires state-mutating native scenarios to use the isolated QA package', () => {
+    const nativeScenarios = selectScenarios(scenarios, parseCliOptions(['--pack', 'native']));
+
+    expect(() => validateScenarioExecutionOptions(nativeScenarios, {
+      isolatedQaInstall: false,
+    })).toThrow(ScenarioPreconditionFailureError);
+    expect(() => validateScenarioExecutionOptions(nativeScenarios, {
+      isolatedQaInstall: true,
+    })).not.toThrow();
+    expect(nativeScenarios).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'native-glass-theme-matrix',
+        requiresCurrentHeadProvenance: true,
+        requiresIsolatedQaInstall: true,
+      }),
+      expect.objectContaining({
+        id: 'foreground-service-notification-states',
+        requiresCurrentHeadProvenance: true,
+        requiresIsolatedQaInstall: true,
+      }),
+    ]));
+  });
+
+  it('recognizes only the background-actions service in Android dumpsys evidence', () => {
+    expect(isBackgroundActionsServicePresent([
+      '* ServiceRecord{abc u0 com.github.tah10n.pocketai/.MainActivity}',
+      'intent={cmp=com.github.tah10n.pocketai/com.asterinet.react.bgactions.RNBackgroundActionsTask}',
+    ].join('\n'))).toBe(true);
+    expect(isBackgroundActionsServicePresent(
+      '* ServiceRecord{abc u0 com.github.tah10n.pocketai/.UnrelatedService}'
+    )).toBe(false);
+  });
+
+  it('requires current-source release provenance for foreground-service device evidence', () => {
+    const scenario = buildScenarios().find(({ id }) => id === 'foreground-service-notification-states');
+
+    expect(scenario).toEqual(expect.objectContaining({
+      tier: 'critical',
+      requiresCurrentHeadProvenance: true,
+    }));
+  });
+
+  it('attempts every notification-state cleanup step and aggregates failures', async () => {
+    const calls = [];
+    const primaryError = new Error('scenario failed');
+
+    await expect(runWithBestEffortCleanup(
+      async () => {
+        calls.push('scenario');
+        throw primaryError;
+      },
+      [
+        {
+          label: 'first restore',
+          run: async () => {
+            calls.push('first');
+            throw new Error('first failed');
+          },
+        },
+        {
+          label: 'second restore',
+          run: async () => {
+            calls.push('second');
+          },
+        },
+        {
+          label: 'third restore',
+          run: async () => {
+            calls.push('third');
+            throw new Error('third failed');
+          },
+        },
+      ]
+    )).rejects.toMatchObject({
+      name: 'AggregateError',
+      errors: [
+        primaryError,
+        expect.objectContaining({ message: 'first restore: first failed' }),
+        expect.objectContaining({ message: 'third restore: third failed' }),
+      ],
+    });
+    expect(calls).toEqual(['scenario', 'first', 'second', 'third']);
   });
 
   it('selects styling-focused screenshots for dependency-ui checks', () => {
@@ -3844,6 +4110,8 @@ describe('android-scenarios pack selection', () => {
         ...BRANCH_REGENERATION_SCENARIOS,
         ...DOCUMENT_SCENARIOS,
         ...DOCUMENT_BENCHMARK_SCENARIOS,
+        'native-glass-theme-matrix',
+        'foreground-service-notification-states',
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
@@ -3859,6 +4127,8 @@ describe('android-scenarios pack selection', () => {
     expect(selectedIds).not.toContain('chat-attachment-preview-remove');
     expect(selectedIds).not.toContain('chat-attachment-prepared-send');
     expect(selectedIds).not.toContain('storage-cache-clear');
+    expect(selectedIds).not.toContain('native-glass-theme-matrix');
+    expect(selectedIds).not.toContain('foreground-service-notification-states');
     expect(selectedIds).not.toEqual(expect.arrayContaining(BRANCH_REGENERATION_SCENARIOS));
   });
 });
@@ -4830,9 +5100,15 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
 
   it('resolves Android package UIDs across platform package metadata formats', () => {
     const packageName = 'com.github.tah10n.pocketai';
-    const legacyCapture = jest.fn(() => (
-      `Package [${packageName}]\n  userId=10234\n`
-    ));
+    const legacyCapture = jest.fn((command, args) => {
+      if (args.includes('get-current-user')) {
+        return '0\n';
+      }
+      if (args.includes('list')) {
+        return '';
+      }
+      return `Package [${packageName}]\n  userId=10234\n  User 0: installed=true\n`;
+    });
 
     expect(resolveAndroidPackageUid(
       'adb',
@@ -4840,11 +5116,11 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       packageName,
       { runCapture: legacyCapture }
     )).toBe('10234');
-    expect(legacyCapture).toHaveBeenCalledTimes(1);
+    expect(legacyCapture).toHaveBeenCalledTimes(3);
 
     const vendorCapture = jest.fn((command, args) => (
-      args.includes('dumpsys')
-        ? `Package [${packageName}]\n  uid=10338 gids=[]\n  appId=10338\n`
+      args.includes('get-current-user')
+        ? '0\n'
         : `package:${packageName} uid:10338\n`
     ));
     expect(resolveAndroidPackageUid(
@@ -4864,9 +5140,46 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         'package',
         'list',
         'packages',
+        '--user',
+        '0',
         '-U',
         packageName,
       ]
+    );
+  });
+
+  it('resolves the current work-profile UID and ignores a stale user-0 notification block', () => {
+    const packageName = 'com.github.tah10n.pocketai.qa';
+    const capture = jest.fn((command, args) => {
+      if (args.includes('get-current-user')) {
+        return '10\n';
+      }
+      if (args.includes('list')) {
+        return `package:${packageName} uid:1010338\n`;
+      }
+      throw new Error('dumpsys fallback should not be needed');
+    });
+    const currentUid = resolveAndroidPackageUid('adb', 'device-1', packageName, {
+      runCapture: capture,
+    });
+    const dumpsys = [
+      `  AppSettings: ${packageName} (10338)`,
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=0, mOriginalImp=2}",
+      `  AppSettings: ${packageName} (1010338)`,
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=2, mOriginalImp=2}",
+    ].join('\n');
+
+    expect(currentUid).toBe('1010338');
+    expect(parseAndroidNotificationChannelEnabled(
+      dumpsys,
+      packageName,
+      currentUid,
+      'RN_BACKGROUND_ACTIONS_CHANNEL',
+    )).toBe(true);
+    expect(capture).toHaveBeenNthCalledWith(
+      2,
+      'adb',
+      ['-s', 'device-1', 'shell', 'cmd', 'package', 'list', 'packages', '--user', '10', '-U', packageName]
     );
   });
 
@@ -4878,9 +5191,11 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       packageName,
       {
         runCapture: jest.fn((command, args) => (
-          args.includes('dumpsys')
-            ? `Package [${packageName}]\n  appId=10338\n`
-            : packageList
+          args.includes('get-current-user')
+            ? '0\n'
+            : args.includes('dumpsys')
+              ? `Package [${packageName}]\n  appId=10338\n  User 0: installed=false\n`
+              : packageList
         )),
       }
     );
@@ -4923,6 +5238,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'branch-step',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         captureOwnership: () => null,
@@ -5046,6 +5362,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'close-race',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         captureOwnership: () => null,
@@ -5093,6 +5410,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'unexpected-exit',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         captureOwnership: () => null,
@@ -5140,6 +5458,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'spawn-error',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn: failingSpawn,
         captureOwnership: () => null,
@@ -5166,6 +5485,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'stop-timeout',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn: stuckSpawn,
         captureOwnership: (pid) => ({
@@ -5230,6 +5550,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'failed-start-retained',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         forceStopTimeoutMs: 1,

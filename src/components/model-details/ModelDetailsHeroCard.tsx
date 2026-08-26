@@ -33,7 +33,13 @@ export function ModelDetailsHeroCard({
         </Box>
       ) : null}
 
-<Text colorRole="primary" className={composeTextRole('screenTitle', 'mt-3 tracking-tight ')}>
+      <Text
+        colorRole="primary"
+        numberOfLines={2}
+        ellipsizeMode="tail"
+        textBreakStrategy="balanced"
+        className={composeTextRole('screenTitle', 'mt-3 tracking-tight')}
+      >
         {title}
       </Text>
 

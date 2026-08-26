@@ -7,6 +7,7 @@ describe('BackgroundTaskService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     await backgroundTaskService.stopBackgroundTask();
+    (backgroundTaskService as any).appState = 'active';
   });
 
   it('does not start the foreground service while the app is active', async () => {
@@ -17,6 +18,35 @@ describe('BackgroundTaskService', () => {
     } else {
       expect(BackgroundService.start).not.toHaveBeenCalled();
     }
+  });
+
+  it('attempts the Android foreground service without reading notification permission or channel state', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const Notifications = require('expo-notifications');
+
+    await backgroundTaskService.startBackgroundDownload();
+
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
+    expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+    expect(Notifications.getNotificationChannelsAsync).not.toHaveBeenCalled();
+  });
+
+  it('contains actual native foreground-service start failures and keeps the task tracked', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const nativeError = Object.assign(new Error('ForegroundServiceStartNotAllowedException'), {
+      name: 'ForegroundServiceStartNotAllowedException',
+    });
+    (BackgroundService.start as jest.Mock).mockRejectedValueOnce(nativeError);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(backgroundTaskService.startBackgroundInference('Model')).resolves.toBeUndefined();
+
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[BackgroundTaskService] Failed to start background task',
+      nativeError,
+    );
+    warnSpy.mockRestore();
   });
 
   it('starts the foreground service when the app backgrounds with active work', async () => {

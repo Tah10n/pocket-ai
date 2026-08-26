@@ -5,16 +5,89 @@ on:
     branches:
       - main
 
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
+  android-release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - run: cargo install cargo-ndk --version 4.1.2 --locked
+      - run: npm ci
+      - name: Clean Android release compile and native config verification
+        env:
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
+        run: |
+          npm run build:android:production:clean -- --task app:assembleRelease --no-bump
+          npm run verify:native-config -- --require-android
+
+  ios-release-gate:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      NODE_ENV: production
+      EAS_BUILD_PROFILE: production
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+      - run: npm ci
+      - run: npm run anydoc:setup -- --platform=ios
+      - run: npm run anydoc:build:ios
+      - run: npx expo prebuild --clean --platform ios --no-install
+      - run: npm run verify:native-config -- --require-ios
+      - run: cd ios && pod install
+      - name: Compile unsigned release simulator app
+        run: >-
+          xcodebuild -workspace ios/pocketai.xcworkspace -scheme pocketai
+          -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO build
+
   release-please:
+    needs:
+      - android-release-gate
+      - ios-release-gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
+      - name: Checkout gated revision
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Verify gated revision is still main HEAD
+        shell: bash
+        run: |
+          current_head="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [[ -z "$current_head" || "$current_head" != "$GITHUB_SHA" ]]; then
+            echo "Refusing to release stale revision $GITHUB_SHA; main is $current_head." >&2
+            exit 1
+          fi
+
       - name: Run Release Please
         uses: googleapis/release-please-action@v5
         with:

@@ -1,5 +1,6 @@
 import React from 'react';
 import { render } from '@testing-library/react-native';
+import { Image } from 'react-native';
 import { MarkdownRenderer } from '../../src/components/ui/MarkdownRenderer';
 
 jest.mock('react-native-css-interop', () => {
@@ -47,5 +48,41 @@ describe('MarkdownRenderer', () => {
     expect(getByText('item one')).toBeTruthy();
     expect(getByText('item two')).toBeTruthy();
     expect(getByText('bold')).toBeTruthy();
+  });
+
+  it('blocks every Markdown image source without creating a native image', () => {
+    const content = [
+      '![http image](http://tracker.example/pixel)',
+      '![https image](https://tracker.example/pixel)',
+      '![data image](data:image/png;base64,AAAA)',
+      '![relative image](./pixel.png)',
+      '![protocol relative](//tracker.example/pixel)',
+      '[![linked image](https://tracker.example/linked)](https://example.com)',
+      '![reference image][remote]',
+      '',
+      '[remote]: https://tracker.example/reference',
+    ].join('\n\n');
+
+    const screen = render(<MarkdownRenderer content={content} />);
+
+    for (const label of [
+      'http image',
+      'https image',
+      'data image',
+      'relative image',
+      'protocol relative',
+      'linked image',
+      'reference image',
+    ]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    expect(screen.UNSAFE_queryAllByType(Image)).toHaveLength(0);
+  });
+
+  it('renders a safe fallback for an image without alt text', () => {
+    const screen = render(<MarkdownRenderer content={'![](https://tracker.example/pixel)'} />);
+
+    expect(screen.getByText('chat.remoteImageBlocked')).toBeTruthy();
+    expect(screen.UNSAFE_queryAllByType(Image)).toHaveLength(0);
   });
 });

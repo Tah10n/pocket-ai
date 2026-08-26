@@ -34,7 +34,6 @@ const CHANNEL_IDS = {
     inference: 'inference',
 } as const;
 
-const BACKGROUND_ACTIONS_CHANNEL_ID = 'RN_BACKGROUND_ACTIONS_CHANNEL';
 const FOREGROUND_SERVICE_NOTIFICATION_COLOR = semanticColorTokens.primary[500];
 const INFERENCE_NOTIFICATION_IDENTIFIER_PREFIX = 'pocket-ai:inference:';
 const NOTIFICATION_RESPONSE_DEDUPE_TTL_MS = 5 * 60 * 1000;
@@ -585,14 +584,15 @@ class NotificationService {
         }
     }
 
-    async canStartForegroundServiceNotifications(): Promise<boolean> {
-        await this.ensureInitialized();
-
+    async areUserNotificationsEnabled(): Promise<boolean> {
+        // The download/autotune warning is Android-specific. Preserve the iOS flow,
+        // where the foreground task is time-limited and does not depend on this prompt.
         if (Platform.OS !== 'android') {
             return true;
         }
 
         try {
+            await this.ensureInitialized();
             const current = await Notifications.getPermissionsAsync();
             const permissionState = resolvePermissionState(current);
             const granted = permissionState === 'granted';
@@ -602,28 +602,11 @@ class NotificationService {
                 this.permissionState = 'denied';
             }
 
-            // On Android 13+, a foreground service notification can crash if notification
-            // permission is not granted, so refuse to start it until the user opts in.
-            if (!granted) {
-                return false;
-            }
+            return granted;
         } catch (error) {
-            console.warn('[NotificationService] Failed to read notification permission', error);
+            console.warn('[NotificationService] Failed to initialize or read notification permission', error);
             return false;
         }
-
-        // If the RN background-actions channel exists but is blocked, starting the FGS can crash.
-        try {
-            const channels = await Notifications.getNotificationChannelsAsync();
-            const fgsChannel = channels?.find((channel) => channel.id === BACKGROUND_ACTIONS_CHANNEL_ID) ?? null;
-            if (fgsChannel && fgsChannel.importance === Notifications.AndroidImportance.NONE) {
-                return false;
-            }
-        } catch {
-            // Ignore channel lookup failures, fall back to permission check.
-        }
-
-        return true;
     }
 
     private async canSendLocalNotifications(): Promise<boolean> {

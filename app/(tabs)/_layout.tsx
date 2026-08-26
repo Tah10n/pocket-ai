@@ -85,6 +85,7 @@ export default function TabLayout() {
         listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.home'),
+          tabBarAccessibilityLabel: t('tabs.home'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('home', color, focused),
         }}
       />
@@ -93,6 +94,7 @@ export default function TabLayout() {
         listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.chat'),
+          tabBarAccessibilityLabel: t('tabs.chat'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('chat', color, focused),
         }}
       />
@@ -101,6 +103,7 @@ export default function TabLayout() {
         listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.models'),
+          tabBarAccessibilityLabel: t('tabs.models'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('hub', color, focused),
         }}
       />
@@ -109,6 +112,7 @@ export default function TabLayout() {
         listeners={{ tabPress: preventBusyTabNavigation }}
         options={{
           title: t('tabs.settings'),
+          tabBarAccessibilityLabel: t('tabs.settings'),
           tabBarIcon: ({ color, focused }) => renderTabIcon('settings', color, focused),
         }}
       />

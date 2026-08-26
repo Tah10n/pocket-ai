@@ -67,6 +67,7 @@ describe('Android catalog QA CI configuration', () => {
   const dependabot = readAppFile('.github', 'dependabot.yml');
   const androidSmoke = readAppFile('scripts', 'android-smoke.js');
   const androidBuildProvenance = readAppFile('scripts', 'android-build-provenance.js');
+  const releaseWorkflow = readAppFile('.github', 'workflows', 'release-please.yml');
 
   it('lets the catalog pack label trigger Android QA and select the catalog pack', () => {
     const selection = extractAndroidQaPackSelection(workflow);
@@ -109,14 +110,15 @@ describe('Android catalog QA CI configuration', () => {
 
   it('defaults Android QA to runtime and delegates build reuse to the provenance-aware launcher', () => {
     const selection = extractAndroidQaPackSelection(workflow);
+    const hostedJob = extractWorkflowJob(workflow, 'android-qa');
     const scenarioStep = workflow.match(/- name: Run Android scenarios[\s\S]+?script: ([^\n]+)/)?.[0] || '';
 
     expect(selection).toContain('pack="runtime"');
     expect(scenarioStep).toContain('--fail-on-skip');
     expect(scenarioStep).not.toContain('--skip-build');
-    expect(workflow).not.toContain('npx expo prebuild');
-    expect(workflow).not.toContain('run: ./gradlew app:assembleRelease');
-    expect(workflow).not.toContain('gradle/actions/setup-gradle');
+    expect(hostedJob).not.toContain('npx expo prebuild');
+    expect(hostedJob).not.toContain('run: ./gradlew app:assembleRelease');
+    expect(hostedJob).not.toContain('gradle/actions/setup-gradle');
     expect(workflow).toContain('POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"');
   });
 
@@ -126,15 +128,15 @@ describe('Android catalog QA CI configuration', () => {
 
     expect(verifyJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
     expect(verifyJob).toContain('components: rustfmt, clippy');
-    expect(verifyJob).toContain('run: npm run verify:mobile-change');
+    expect(verifyJob).toContain('run: npm run verify:release');
     expect(packageJson.scripts['verify:mobile-change']).toContain('npm run anydoc:verify');
     expect(packageJson.scripts['anydoc:fmt:check']).toContain('--package pocket-anydoc');
     expect(packageJson.scripts['anydoc:fmt:check']).not.toContain('--all');
     expect(androidJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
     expect(androidJob).toContain('targets: aarch64-linux-android, x86_64-linux-android');
     expect(androidJob).toContain('cargo install cargo-ndk --version 4.1.2 --locked');
-    expect(workflow).not.toContain('runs-on: macos');
-    expect(workflow).not.toContain('self-hosted');
+    expect(verifyJob).not.toContain('runs-on: macos');
+    expect(androidJob).not.toContain('self-hosted');
     expect(dependabot).toContain('package-ecosystem: cargo');
     expect(dependabot).toContain('directory: /modules/pocket-anydoc/rust');
   });
@@ -179,5 +181,51 @@ describe('Android catalog QA CI configuration', () => {
     const workflowIndexes = packLabelPriority.map((label) => selection.indexOf(`'${label}'`));
     expect(workflowIndexes.every((index) => index >= 0)).toBe(true);
     expect(workflowIndexes).toEqual([...workflowIndexes].sort((a, b) => a - b));
+  });
+
+  it('requires release-sensitive PRs to exercise Android 32-35 and production iOS native projects', () => {
+    const nativeScope = extractWorkflowJob(workflow, 'native-scope');
+    const androidGate = extractWorkflowJob(workflow, 'android-native-release');
+    const iosGate = extractWorkflowJob(workflow, 'ios-native-release');
+
+    expect(workflow).toContain("startsWith(github.head_ref, 'release-please--')");
+    expect(nativeScope).toContain('contents: read');
+    expect(nativeScope).toContain('pull-requests: read');
+    expect(nativeScope).toContain("'.github/workflows/ci.yml'");
+    expect(nativeScope).toContain("'.github/workflows/release-please.yml'");
+    expect(nativeScope).toContain("'scripts/android-*.js'");
+    expect(nativeScope).toContain("'scripts/build-android-release.js'");
+    expect(androidGate).toContain('api-level: [32, 33, 34, 35]');
+    expect(androidGate).toContain('--pack native');
+    expect(androidGate).toContain('--apk-variant release');
+    expect(androidGate).toContain('--isolated-qa-install');
+    expect(androidGate).toContain('npm run verify:native-config -- --require-android');
+    expect(iosGate).toContain('npm run anydoc:build:ios');
+    expect(iosGate).toContain('npm run verify:native-config -- --require-ios');
+    expect(iosGate).toContain('xcodebuild -workspace ios/pocketai.xcworkspace');
+    expect(iosGate).toContain('NODE_ENV: production');
+    expect(iosGate).toContain('EAS_BUILD_PROFILE: production');
+  });
+
+  it('does not create a release tag before Android and iOS release gates pass', () => {
+    const releaseJob = extractWorkflowJob(releaseWorkflow, 'release-please');
+
+    expect(releaseWorkflow).toContain('concurrency:');
+    expect(releaseWorkflow).toContain('group: release-please-${{ github.ref }}');
+    expect(releaseWorkflow).toContain('cancel-in-progress: true');
+    expect(releaseWorkflow).toContain('android-release-gate:');
+    expect(releaseWorkflow).toContain('ios-release-gate:');
+    expect(releaseWorkflow).toContain('build:android:production:clean');
+    expect(releaseWorkflow).toContain('xcodebuild -workspace ios/pocketai.xcworkspace');
+    expect(extractWorkflowJob(releaseWorkflow, 'ios-release-gate')).toContain('NODE_ENV: production');
+    expect(extractWorkflowJob(releaseWorkflow, 'ios-release-gate')).toContain('EAS_BUILD_PROFILE: production');
+    expect(releaseJob).toContain('- android-release-gate');
+    expect(releaseJob).toContain('- ios-release-gate');
+    expect(releaseJob).toContain('name: Verify gated revision is still main HEAD');
+    expect(releaseJob).toContain('git ls-remote origin refs/heads/main');
+    expect(releaseJob).toContain('current_head" != "$GITHUB_SHA');
+    expect(releaseJob.indexOf('Verify gated revision is still main HEAD')).toBeLessThan(
+      releaseJob.indexOf('Run Release Please'),
+    );
   });
 });

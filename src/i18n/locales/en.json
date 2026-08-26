@@ -216,6 +216,7 @@
     "body": "This route is reserved for compact modal interactions that should inherit the shared theme, typography, and navigation chrome."
   },
   "chat": {
+    "remoteImageBlocked": "[Remote image blocked]",
     "title": "Chat",
     "newChatTitle": "New chat",
     "inputPlaceholder": "Ask local AI...",
@@ -471,8 +472,8 @@
       "runtimeGpuMismatchDescriptionSafe": "Requested {{requested}} GPU layers, but the model loaded with {{loaded}} GPU layers in safe mode to avoid running out of memory.",
       "backendBenchmarkTitle": "Backend autotune",
       "backendBenchmarkDescription": "Tries CPU and available accelerators (GPU/NPU), measures speed, and saves the fastest stable profile for Auto.",
-      "backendBenchmarkBackgroundWarningTitle": "Background autotune may pause",
-      "backendBenchmarkBackgroundWarningDescription": "Enable notifications so Android can keep autotune running in the background (foreground service notification).",
+      "backendBenchmarkBackgroundWarningTitle": "Autotune notifications are off",
+      "backendBenchmarkBackgroundWarningDescription": "Android can keep autotune running, but progress may appear only in Task Manager and completion alerts stay hidden.",
       "backendBenchmarkRun": "Run autotune",
       "backendBenchmarkCancel": "Cancel",
       "backendBenchmarkRunning": "Autotuning...",
@@ -1029,8 +1030,17 @@
       "projectorStatusFailedTitle": "Multimodal projector failed",
       "projectorStatusFailedDescription": "Retry the model download or choose another projector before using native media inputs."
     },
+    "text": {
+      "badge": "Text",
+      "capabilityLabel": "Text chat"
+    },
+    "reasoning": {
+      "badge": "Reasoning",
+      "capabilityLabel": "Reasoning model"
+    },
     "audio": {
-      "badge": "Audio"
+      "badge": "Audio",
+      "capabilityLabel": "Audio chat"
     },
     "sizeLabel": "Size:",
     "fileSizeLabel": "File size",

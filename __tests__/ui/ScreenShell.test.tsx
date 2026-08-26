@@ -6,6 +6,7 @@ import { createMaterialEnvironment } from '../../src/design-system/materials/env
 import {
   HeaderActionButton,
   ScreenAndroidContentBlurTarget,
+  ScreenBadge,
   ScreenCard,
   ScreenContent,
   ScreenHeaderShell,
@@ -272,6 +273,20 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.getByTestId('inset').props).toMatchObject({
       material: { role: 'content', variant: 'inset', tone: 'neutral' },
       shape: 'md',
+    });
+  });
+
+  it('exposes a labelled badge as one semantic text element', () => {
+    const screen = render(
+      <ScreenBadge accessibilityLabel="Vision supported" iconName="visibility" testID="vision-badge">
+        Vision
+      </ScreenBadge>,
+    );
+
+    expect(screen.getByLabelText('Vision supported')).toBe(screen.getByTestId('vision-badge'));
+    expect(screen.getByTestId('vision-badge').props).toMatchObject({
+      accessible: true,
+      accessibilityRole: 'text',
     });
   });
 

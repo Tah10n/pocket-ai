@@ -5366,6 +5366,51 @@ describe('ChatScreen', () => {
     );
   });
 
+  it('starts autotune foreground work before best-effort notification readiness', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+    const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');
+    const { notificationService } = require('../../src/services/NotificationService');
+    const startSpy = jest
+      .spyOn(backgroundTaskService, 'startBackgroundInference')
+      .mockResolvedValueOnce(undefined);
+    const readinessSpy = jest
+      .spyOn(notificationService, 'areUserNotificationsEnabled')
+      .mockRejectedValueOnce(new Error('notification initialization failed'));
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        fireEvent.press(getByTestId('model-controls-button'));
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await lastModelParametersSheetProps?.onRunAutotune();
+      });
+
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(readinessSpy).toHaveBeenCalledTimes(1);
+      expect(startSpy.mock.invocationCallOrder[0]).toBeLessThan(readinessSpy.mock.invocationCallOrder[0]);
+      expect(mockRunBackendAutotune).toHaveBeenCalledTimes(1);
+    } finally {
+      startSpy.mockRestore();
+      readinessSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
   it('keeps reasoning disabled for models without reasoning support', async () => {
     updateSettings({
       modelParamsByModelId: {

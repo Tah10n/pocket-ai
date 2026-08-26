@@ -17,6 +17,39 @@ permissions:
   contents: read
 
 jobs:
+  native-scope:
+    name: native scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      required: ${{ steps.scope.outputs.native == 'true' || startsWith(github.head_ref, 'release-please--') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect release-sensitive native changes
+        id: scope
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            native:
+              - 'app.json'
+              - 'eas.json'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'plugins/**'
+              - 'modules/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release-please.yml'
+              - 'scripts/android-*.js'
+              - 'scripts/build-android-release.js'
+              - 'scripts/verify-native-config.js'
+              - 'android/**'
+              - 'ios/**'
+
   verify:
     name: verify
     runs-on: ubuntu-latest
@@ -46,7 +79,127 @@ jobs:
         run: npm ci
 
       - name: Verify (Rust + typecheck + lint + tests)
-        run: npm run verify:mobile-change
+        run: npm run verify:release
+
+  android-native-release:
+    name: android native release (API ${{ matrix.api-level }})
+    if: needs.native-scope.outputs.required == 'true'
+    needs:
+      - native-scope
+      - verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [32, 33, 34, 35]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup pinned Rust for Android
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Install pinned cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and run native release pack
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_SMOKE_APK_VARIANT: release
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 4096
+          script: npm run android:scenarios -- --emulator --pack native --apk-variant release --isolated-qa-install --fail-on-skip --bootstrap-screenshot && npm run verify:native-config -- --require-android
+
+      - name: Upload Android native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-native-api-${{ matrix.api-level }}
+          if-no-files-found: warn
+          retention-days: 1
+          path: |
+            artifacts/android-scenarios/**
+            artifacts/bootstrap-logcat.txt
+
+  ios-native-release:
+    name: ios native release
+    if: needs.native-scope.outputs.required == 'true'
+    needs:
+      - native-scope
+      - verify
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      NODE_ENV: production
+      EAS_BUILD_PROFILE: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup pinned Rust for iOS
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build AnyDoc iOS
+        run: |
+          npm run anydoc:setup -- --platform=ios
+          npm run anydoc:build:ios
+
+      - name: Generate and verify iOS project
+        run: |
+          npx expo prebuild --clean --platform ios --no-install
+          npm run verify:native-config -- --require-ios
+
+      - name: Install CocoaPods
+        run: cd ios && pod install
+
+      - name: Compile unsigned release simulator app
+        run: >-
+          xcodebuild -workspace ios/pocketai.xcworkspace -scheme pocketai
+          -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO build
 
   android-qa:
     name: android (qa)

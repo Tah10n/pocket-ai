@@ -301,6 +301,7 @@ interface ScreenSectionLabelProps {
 
 interface ScreenBadgeProps {
   children: React.ReactNode;
+  accessibilityLabel?: string;
   className?: string;
   textClassName?: string;
   textColorRole?: SemanticForegroundRole;
@@ -1110,6 +1111,7 @@ export function ScreenSectionLabel({
 
 export function ScreenBadge({
   children,
+  accessibilityLabel,
   className,
   textClassName,
   textColorRole,
@@ -1128,6 +1130,9 @@ export function ScreenBadge({
 
   return (
     <MaterialSurface
+      accessible={Boolean(accessibilityLabel)}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityLabel ? 'text' : undefined}
       testID={testID}
       material={{ role: 'control', variant: 'inline', tone: materialTone }}
       shape="full"

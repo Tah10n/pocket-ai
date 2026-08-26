@@ -218,6 +218,7 @@
     "body": "Этот маршрут зарезервирован для компактных модальных экранов, которые должны наследовать общую тему, типографику и навигационный chrome."
   },
   "chat": {
+    "remoteImageBlocked": "[Удалённое изображение заблокировано]",
     "title": "Чат",
     "newChatTitle": "Новый чат",
     "inputPlaceholder": "Спросите локальный ИИ...",
@@ -479,8 +480,8 @@
       "runtimeGpuMismatchDescriptionSafe": "Запрошено {{requested}} GPU layers, но модель загрузилась с {{loaded}} GPU layers в безопасном режиме, чтобы избежать нехватки памяти.",
       "backendBenchmarkTitle": "Автотюнинг бэкенда",
       "backendBenchmarkDescription": "Пробует CPU и доступные ускорители (GPU/NPU), измеряет скорость и сохраняет самый быстрый стабильный профиль для Авто.",
-      "backendBenchmarkBackgroundWarningTitle": "Автотюнинг в фоне может остановиться",
-      "backendBenchmarkBackgroundWarningDescription": "Включите уведомления, чтобы Android мог держать автотюнинг в фоне (foreground service).",
+      "backendBenchmarkBackgroundWarningTitle": "Уведомления автотюнинга выключены",
+      "backendBenchmarkBackgroundWarningDescription": "Android продолжит автотюнинг, но прогресс может быть виден только в диспетчере задач, а уведомление о завершении не появится.",
       "backendBenchmarkRun": "Запустить автотюнинг",
       "backendBenchmarkCancel": "Отменить",
       "backendBenchmarkRunning": "Автотюнинг…",
@@ -1045,8 +1046,17 @@
       "projectorStatusFailedTitle": "Ошибка мультимодального проектора",
       "projectorStatusFailedDescription": "Повторите загрузку модели или выберите другой проектор перед использованием нативных медиа-входов."
     },
+    "text": {
+      "badge": "Текст",
+      "capabilityLabel": "Текстовый чат"
+    },
+    "reasoning": {
+      "badge": "Рассуждения",
+      "capabilityLabel": "Модель с рассуждениями"
+    },
     "audio": {
-      "badge": "Аудио"
+      "badge": "Аудио",
+      "capabilityLabel": "Аудиочат"
     },
     "sizeLabel": "Размер:",
     "fileSizeLabel": "Размер файла",

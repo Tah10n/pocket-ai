@@ -1,8 +1,16 @@
 import React from 'react';
 import { Linking, Text as RNText } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import Markdown from 'react-native-markdown-display';
 import { CodeBlock } from './CodeBlock';
 import { useTheme } from '../../providers/ThemeProvider';
+
+// The package runtime supports these security props, but its bundled TypeScript
+// declaration omits them in v7.0.2.
+const SafeMarkdown = Markdown as React.ComponentType<React.ComponentProps<typeof Markdown> & {
+  allowedImageHandlers?: string[];
+  defaultImageHandler?: string | null;
+}>;
 
 interface MarkdownRendererProps {
   content: string;
@@ -43,9 +51,12 @@ function openMarkdownUrl(url: unknown, customCallback?: (url: string) => boolean
 
 export function MarkdownRenderer({ content, selectable = false }: MarkdownRendererProps) {
   const { colors } = useTheme();
+  const { t } = useTranslation();
 
   return (
-    <Markdown
+    <SafeMarkdown
+      allowedImageHandlers={[]}
+      defaultImageHandler={null}
       style={{
         // react-native-markdown-display uses View wrappers for body/paragraph,
         // so the readable theme color has to live on text-bearing rules as well.
@@ -203,6 +214,13 @@ export function MarkdownRenderer({ content, selectable = false }: MarkdownRender
             {children}
           </RNText>
         ),
+        image: (node: any) => (
+          <RNText key={node.key} selectable={selectable} style={{ color: colors.textSecondary }}>
+            {typeof node.attributes?.alt === 'string' && node.attributes.alt.trim().length > 0
+              ? node.attributes.alt
+              : t('chat.remoteImageBlocked')}
+          </RNText>
+        ),
         code_inline: (node: any, _children: React.ReactNode[], _parent: any[], styles: any, inheritedStyles: any = {}) => (
           <RNText key={node.key} selectable={selectable} style={[inheritedStyles, styles.code_inline]}>
             {node.content}
@@ -219,6 +237,6 @@ export function MarkdownRenderer({ content, selectable = false }: MarkdownRender
       }}
     >
       {content}
-    </Markdown>
+    </SafeMarkdown>
   );
 }

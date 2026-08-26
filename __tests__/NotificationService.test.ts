@@ -361,25 +361,26 @@ describe('NotificationService', () => {
     warnSpy.mockRestore();
   });
 
-  it('refuses to start foreground-service notifications on Android when notifications are denied', async () => {
+  it('reports that user notifications are disabled on Android when permission is denied', async () => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'denied' });
 
-    const canStart = await notificationService.canStartForegroundServiceNotifications();
+    const canStart = await notificationService.areUserNotificationsEnabled();
 
     expect(canStart).toBe(false);
     expect(Notifications.getNotificationChannelsAsync).not.toHaveBeenCalled();
   });
 
-  it('refuses to start foreground-service notifications on Android when RN background-actions channel is blocked', async () => {
+  it('does not treat a blocked background-actions channel as a notification permission denial', async () => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
     (Notifications.getNotificationChannelsAsync as jest.Mock).mockResolvedValue([
       { id: 'RN_BACKGROUND_ACTIONS_CHANNEL', importance: Notifications.AndroidImportance.NONE },
     ]);
 
-    const canStart = await notificationService.canStartForegroundServiceNotifications();
+    const canStart = await notificationService.areUserNotificationsEnabled();
 
-    expect(canStart).toBe(false);
+    expect(canStart).toBe(true);
+    expect(Notifications.getNotificationChannelsAsync).not.toHaveBeenCalled();
   });
 });

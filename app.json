@@ -10,12 +10,7 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.github.tah10n.pocketai",
-      "infoPlist": {
-        "UIBackgroundModes": [
-          "processing"
-        ]
-      }
+      "bundleIdentifier": "com.github.tah10n.pocketai"
     },
     "android": {
       "versionCode": 22,

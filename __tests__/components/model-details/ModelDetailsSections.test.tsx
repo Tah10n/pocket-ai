@@ -70,6 +70,11 @@ describe('model details sections', () => {
     );
 
     expect(screen.getByText('Model title')).toBeTruthy();
+    expect(screen.getByText('Model title').props).toEqual(expect.objectContaining({
+      numberOfLines: 2,
+      ellipsizeMode: 'tail',
+      textBreakStrategy: 'balanced',
+    }));
     expect(screen.getByText('author/model-q4')).toBeTruthy();
     expect(screen.queryByText('Badge')).toBeNull();
     expect(screen.queryByText('Action')).toBeNull();

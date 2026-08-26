@@ -185,7 +185,7 @@
   "overrides": {
     "@babel/core": "7.29.6",
     "@tootallnate/once": "3.0.1",
-    "@xmldom/xmldom": "0.9.10",
+    "@xmldom/xmldom": "0.8.15",
     "fast-xml-builder": "1.1.7",
     "js-yaml@3.14.2": "3.15.0",
     "js-yaml@4.1.1": "4.3.0",

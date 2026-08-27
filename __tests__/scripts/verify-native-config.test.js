@@ -7,6 +7,7 @@ const { run } = require('../../scripts/verify-native-config');
 function createProject() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-native-config-'));
   fs.mkdirSync(path.join(root, 'ios', 'pocketai'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'ios', 'PocketAI.xcodeproj'), { recursive: true });
   fs.mkdirSync(path.join(root, 'android', 'app', 'src', 'main'), { recursive: true });
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
     expo: {
@@ -34,6 +35,13 @@ function createProject() {
       '<key>com.apple.developer.kernel.increased-memory-limit</key><true/>',
       '</dict></plist>',
     ].join(''),
+  );
+  fs.writeFileSync(
+    path.join(root, 'ios', 'PocketAI.xcodeproj', 'project.pbxproj'),
+    [
+      'path = "en.lproj/InfoPlist.strings";',
+      'path = "ru.lproj/InfoPlist.strings";',
+    ].join('\n'),
   );
   fs.writeFileSync(path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'), [
     '<manifest>',
@@ -86,6 +94,20 @@ describe('native configuration contract', () => {
       );
 
       expect(() => run(['--require-ios'], root)).toThrow(/extended-virtual-addressing/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects collapsed localized InfoPlist.strings Xcode paths', () => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(root, 'ios', 'PocketAI.xcodeproj', 'project.pbxproj'),
+        'path = InfoPlist.strings;',
+      );
+
+      expect(() => run(['--require-ios'], root)).toThrow(/missing en\.lproj\/InfoPlist\.strings/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

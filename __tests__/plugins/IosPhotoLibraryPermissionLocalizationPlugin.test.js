@@ -189,8 +189,8 @@ describe('iOS photo library permission localization config plugin', () => {
     expect(path.relative(platformProjectRoot, russianPath).replace(/\\/g, '/')).toBe(
       'PocketAI/Supporting/ru.lproj/InfoPlist.strings',
     );
-    expect(getLocalizedInfoPlistStringsResourceFilepath(projectName, 'en')).toBe(
-      'InfoPlist.strings',
+    expect(getLocalizedInfoPlistStringsResourceFilepath('en')).toBe(
+      'en.lproj/InfoPlist.strings',
     );
   });
 
@@ -241,12 +241,12 @@ describe('iOS photo library permission localization config plugin', () => {
     expect(ensureGroupRecursively).toHaveBeenCalledWith(project, 'PocketAI/Supporting/en.lproj');
     expect(ensureGroupRecursively).toHaveBeenCalledWith(project, 'PocketAI/Supporting/ru.lproj');
     expect(addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'InfoPlist.strings',
+      filepath: 'en.lproj/InfoPlist.strings',
       groupName: 'PocketAI/Supporting/en.lproj',
       isBuildFile: true,
     }));
     expect(addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'InfoPlist.strings',
+      filepath: 'ru.lproj/InfoPlist.strings',
       groupName: 'PocketAI/Supporting/ru.lproj',
       isBuildFile: true,
     }));
@@ -283,13 +283,13 @@ describe('iOS photo library permission localization config plugin', () => {
       },
     });
 
-    expect(fileReferences.EN_REF.path).toBe('InfoPlist.strings');
+    expect(fileReferences.EN_REF.path).toBe('en.lproj/InfoPlist.strings');
     expect(addResourceFileToGroup).not.toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'InfoPlist.strings',
+      filepath: 'en.lproj/InfoPlist.strings',
       groupName: 'PocketAI/Supporting/en.lproj',
     }));
     expect(addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'InfoPlist.strings',
+      filepath: 'ru.lproj/InfoPlist.strings',
       groupName: 'PocketAI/Supporting/ru.lproj',
     }));
   });
@@ -305,11 +305,11 @@ describe('iOS photo library permission localization config plugin', () => {
 
     expect(sections.pbxProject.knownRegions).toEqual(['"en"', 'Base', 'ru']);
     expect(sections.fileReferences.EN_STALE_REF.path).toBe(
-      'InfoPlist.strings',
+      'en.lproj/InfoPlist.strings',
     );
     expect(xcodeUtils.addResourceFileToGroup).toHaveBeenCalledTimes(1);
     expect(xcodeUtils.addResourceFileToGroup).toHaveBeenCalledWith(expect.objectContaining({
-      filepath: 'InfoPlist.strings',
+      filepath: 'ru.lproj/InfoPlist.strings',
       groupName: 'PocketAI/Supporting/ru.lproj',
       isBuildFile: true,
     }));

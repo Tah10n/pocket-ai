@@ -64,6 +64,10 @@ function assertIosGeneratedConfig(root = projectRoot) {
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),
     'Generated iOS entitlements',
   );
+  const xcodeProject = readText(
+    path.join(root, 'ios', 'PocketAI.xcodeproj', 'project.pbxproj'),
+    'Generated iOS Xcode project',
+  );
 
   if (/UIBackgroundModes[\s\S]{0,500}<string>processing<\/string>/u.test(plist)) {
     throw new Error('Generated Info.plist still declares unsupported background processing.');
@@ -85,6 +89,18 @@ function assertIosGeneratedConfig(root = projectRoot) {
     if (!entitlementPattern.test(entitlements)) {
       throw new Error(`Generated iOS entitlements are missing ${entitlement}=true.`);
     }
+  }
+  for (const locale of ['en', 'ru']) {
+    const localizedInfoPlistPattern = new RegExp(
+      `path = "?${locale}\\.lproj/InfoPlist\\.strings"?;`,
+      'u',
+    );
+    if (!localizedInfoPlistPattern.test(xcodeProject)) {
+      throw new Error(`Generated iOS Xcode project is missing ${locale}.lproj/InfoPlist.strings.`);
+    }
+  }
+  if (/path = "?InfoPlist\.strings"?;/u.test(xcodeProject)) {
+    throw new Error('Generated iOS Xcode project collapses localized InfoPlist.strings to a missing shared path.');
   }
 }
 

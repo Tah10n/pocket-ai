@@ -879,9 +879,12 @@ class NotificationService {
     }
 
     async keepJsAliveWhileRunning(): Promise<void> {
-        while (BackgroundService.isRunning()) {
+        // On Android the Headless JS task can begin before the native start promise
+        // resolves and before react-native-background-actions flips its JS running
+        // flag. Always survive that handshake window, then follow the running flag.
+        do {
             await sleep(1000);
-        }
+        } while (BackgroundService.isRunning());
     }
 }
 

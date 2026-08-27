@@ -73,6 +73,34 @@ describe('NotificationService', () => {
     expect(BackgroundService.updateNotification).toHaveBeenCalled();
   });
 
+  it('keeps the Headless JS task alive across the native start handshake', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const keepAlive = notificationService.keepJsAliveWhileRunning();
+      expect(BackgroundService.isRunning).not.toHaveBeenCalled();
+
+      await BackgroundService.start(async () => undefined, {
+        taskName: 'inference',
+        taskTitle: 'Running',
+        taskDesc: '...',
+        taskIcon: { name: 'ic_launcher', type: 'mipmap' },
+      });
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      expect(BackgroundService.isRunning).toHaveBeenCalledTimes(1);
+
+      await BackgroundService.stop();
+      jest.advanceTimersByTime(1000);
+      await Promise.resolve();
+      await expect(keepAlive).resolves.toBeUndefined();
+      expect(BackgroundService.isRunning).toHaveBeenCalledTimes(2);
+    } finally {
+      await BackgroundService.stop();
+      jest.useRealTimers();
+    }
+  });
+
   it('sendLocalNotification returns null when permission is undetermined', async () => {
     (notificationService as any).permissionState = 'unknown';
     (Notifications.getPermissionsAsync as jest.Mock).mockResolvedValueOnce({ status: 'undetermined' });

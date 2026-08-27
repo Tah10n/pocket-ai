@@ -112,6 +112,7 @@ const {
   markScenarioFailureRecorded,
   mergeOlderConversationOrder,
   normalizeAndroidResourceId,
+  openThemeStyleSheet,
   resolveBranchFixture,
   sanitizeQaLogcat,
   scanFatalAndroidLogs,
@@ -4060,6 +4061,29 @@ describe('android-scenarios pack selection', () => {
       snapshot,
       'settings-theme-style-control',
     )).toEqual(expect.objectContaining({ clickable: true }));
+  });
+
+  it('scrolls the visual-style control clear after its container becomes visible', async () => {
+    const calls = [];
+    const ctx = { serial: 'device-1' };
+
+    await openThemeStyleSheet(ctx, {
+      adbPath: 'adb',
+      goToSettings: async () => calls.push(['settings']),
+      scrollToResourceId: async (_ctx, resourceId) => calls.push(['scroll', resourceId]),
+      tapVisibleResource: async (_ctx, resourceId) => calls.push(['tap', resourceId]),
+      waitForResourceId: async (adbPath, serial, resourceId) => {
+        calls.push(['wait', adbPath, serial, resourceId]);
+      },
+    });
+
+    expect(calls).toEqual([
+      ['settings'],
+      ['scroll', 'settings-visual-style-container'],
+      ['scroll', 'settings-theme-style-control'],
+      ['tap', 'settings-theme-style-control'],
+      ['wait', 'adb', 'device-1', 'settings-theme-style-sheet'],
+    ]);
   });
 
   it('attempts every notification-state cleanup step and aggregates failures', async () => {

@@ -2699,15 +2699,24 @@ async function selectThemeMode(ctx, mode) {
   }
 }
 
-async function openThemeStyleSheet(ctx) {
-  await goToSettings(ctx);
-  await scrollToResourceId(ctx, THEME_STYLE_CONTAINER_RESOURCE_ID, {
+async function openThemeStyleSheet(ctx, options = {}) {
+  const navigateToSettings = options.goToSettings ?? goToSettings;
+  const scrollToResource = options.scrollToResourceId ?? scrollToResourceId;
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  const waitForResource = options.waitForResourceId ?? waitForResourceId;
+  const adbPath = options.adbPath ?? resolveAdbPath();
+
+  await navigateToSettings(ctx);
+  await scrollToResource(ctx, THEME_STYLE_CONTAINER_RESOURCE_ID, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
   });
-  await tapVisibleResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
+  await scrollToResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
   });
-  await waitForResourceId(resolveAdbPath(), ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+  await tapResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await waitForResource(adbPath, ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
     visibleOnly: true,
   });
@@ -10618,6 +10627,7 @@ module.exports = {
   mergeOlderConversationOrder,
   markScenarioFailureRecorded,
   normalizeAndroidResourceId,
+  openThemeStyleSheet,
   parseAndroidRuntimePermission,
   parseAndroidNotificationChannelEnabled,
   resolveNotificationChannelSettingsUi,

@@ -18,6 +18,7 @@ function createProject() {
     cli: { appVersionSource: 'remote' },
     build: { production: { autoIncrement: true } },
   }));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ private: true }));
   fs.writeFileSync(path.join(root, 'ios', 'pocketai', 'Info.plist'), [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<plist><dict>',
@@ -25,9 +26,6 @@ function createProject() {
     '<key>CFBundleVersion</key><string>1</string>',
     '</dict></plist>',
   ].join(''));
-  fs.writeFileSync(path.join(root, 'ios', 'Podfile.properties.json'), JSON.stringify({
-    'expo.jsEngine': 'hermes',
-  }));
   fs.writeFileSync(
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),
     [
@@ -93,22 +91,23 @@ describe('native configuration contract', () => {
     }
   });
 
-  it('rejects global iOS framework linkage in source and generated config', () => {
+  it('rejects an empty app-level codegen source directory that creates an iOS build cycle', () => {
     const root = createProject();
     try {
-      fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
-        expo: {
-          ios: { infoPlist: {} },
-          plugins: [['expo-build-properties', { ios: { useFrameworks: 'static' } }]],
+      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+        private: true,
+        codegenConfig: {
+          name: 'RNAppSpec',
+          type: 'all',
+          jsSrcsDir: 'src',
         },
       }));
-      expect(() => run([], root)).toThrow(/dependency cycle/);
+      fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'src', 'ordinary.ts'), 'export const value = 1;');
+      expect(() => run([], root)).toThrow(/must not declare an empty jsSrcsDir/);
 
-      fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({ expo: { ios: { infoPlist: {} } } }));
-      fs.writeFileSync(path.join(root, 'ios', 'Podfile.properties.json'), JSON.stringify({
-        'ios.useFrameworks': 'static',
-      }));
-      expect(() => run(['--require-ios'], root)).toThrow(/global use_frameworks/);
+      fs.writeFileSync(path.join(root, 'src', 'NativePocketAI.ts'), 'export default {};');
+      expect(() => run([], root)).not.toThrow();
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

@@ -204,13 +204,5 @@
       "markdown-it": "14.3.0"
     }
   },
-  "private": true,
-  "codegenConfig": {
-    "name": "RNAppSpec",
-    "type": "all",
-    "jsSrcsDir": "src",
-    "android": {
-      "javaPackageName": "com.github.tah10n.pocketai"
-    }
-  }
+  "private": true
 }

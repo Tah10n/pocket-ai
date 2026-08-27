@@ -10,20 +10,44 @@ function readText(filePath, label) {
   return fs.readFileSync(filePath, 'utf8');
 }
 
+function findAppCodegenSpecs(root, jsSrcsDir) {
+  const sourceRoot = path.resolve(root, jsSrcsDir);
+  if (!fs.existsSync(sourceRoot)) {
+    return [];
+  }
+
+  const directories = [sourceRoot];
+  const specs = [];
+  while (directories.length > 0) {
+    const directory = directories.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (entry.name !== '__mocks__') {
+          directories.push(path.join(directory, entry.name));
+        }
+        continue;
+      }
+      if (/^(?:Native.*|.*NativeComponent)\.(?:js|ts)$/u.test(entry.name)) {
+        specs.push(path.join(directory, entry.name));
+      }
+    }
+  }
+  return specs;
+}
+
 function assertSourceConfig(root = projectRoot) {
   const appConfig = JSON.parse(readText(path.join(root, 'app.json'), 'Expo app config'));
   const easConfig = JSON.parse(readText(path.join(root, 'eas.json'), 'EAS config'));
+  const packageConfig = JSON.parse(readText(path.join(root, 'package.json'), 'Package config'));
   const backgroundModes = appConfig.expo?.ios?.infoPlist?.UIBackgroundModes ?? [];
 
   if (backgroundModes.includes('processing')) {
     throw new Error('UIBackgroundModes=processing requires a real BGTaskScheduler implementation and is forbidden.');
   }
-  const buildPropertiesPlugin = (appConfig.expo?.plugins ?? []).find((plugin) => (
-    Array.isArray(plugin) && plugin[0] === 'expo-build-properties'
-  ));
-  if (buildPropertiesPlugin?.[1]?.ios?.useFrameworks) {
+  const appCodegenSourceDir = packageConfig.codegenConfig?.jsSrcsDir;
+  if (appCodegenSourceDir && findAppCodegenSpecs(root, appCodegenSourceDir).length === 0) {
     throw new Error(
-      'Global iOS useFrameworks creates an app-to-Expo pod dependency cycle in Release builds.',
+      'App codegenConfig must not declare an empty jsSrcsDir; ReactCodegen can infer a dependency on the generated iOS project and create a Release build cycle.',
     );
   }
   if (easConfig.cli?.appVersionSource !== 'remote') {
@@ -36,10 +60,6 @@ function assertSourceConfig(root = projectRoot) {
 
 function assertIosGeneratedConfig(root = projectRoot) {
   const plist = readText(path.join(root, 'ios', 'pocketai', 'Info.plist'), 'Generated iOS Info.plist');
-  const podfileProperties = JSON.parse(readText(
-    path.join(root, 'ios', 'Podfile.properties.json'),
-    'Generated iOS Podfile properties',
-  ));
   const entitlements = readText(
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),
     'Generated iOS entitlements',
@@ -47,9 +67,6 @@ function assertIosGeneratedConfig(root = projectRoot) {
 
   if (/UIBackgroundModes[\s\S]{0,500}<string>processing<\/string>/u.test(plist)) {
     throw new Error('Generated Info.plist still declares unsupported background processing.');
-  }
-  if (podfileProperties['ios.useFrameworks']) {
-    throw new Error('Generated iOS project still enables global use_frameworks linkage.');
   }
   if (!/<key>CFBundleIdentifier<\/key>/u.test(plist)) {
     throw new Error('Generated Info.plist is missing CFBundleIdentifier.');

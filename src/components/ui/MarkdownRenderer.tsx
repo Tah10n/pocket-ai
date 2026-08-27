@@ -1,5 +1,5 @@
 import React from 'react';
-import { Linking, Text as RNText } from 'react-native';
+import { Linking, Pressable, Text as RNText, View } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import Markdown from 'react-native-markdown-display';
 import { CodeBlock } from './CodeBlock';
@@ -213,6 +213,16 @@ export function MarkdownRenderer({ content, selectable = false }: MarkdownRender
           >
             {children}
           </RNText>
+        ),
+        blocklink: (node: any, children: React.ReactNode[], _parent: any[], styles: any, onLinkPress?: (url: string) => boolean) => (
+          <Pressable
+            key={node.key}
+            accessibilityRole="link"
+            style={styles.blocklink}
+            onPress={() => openMarkdownUrl(node.attributes.href, onLinkPress)}
+          >
+            <View style={styles.image}>{children}</View>
+          </Pressable>
         ),
         image: (node: any) => (
           <RNText key={node.key} selectable={selectable} style={{ color: colors.textSecondary }}>

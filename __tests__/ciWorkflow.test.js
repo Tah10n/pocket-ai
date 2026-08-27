@@ -212,19 +212,30 @@ describe('Android catalog QA CI configuration', () => {
   });
 
   it('does not create a release tag before Android and iOS release gates pass', () => {
+    const androidGate = extractWorkflowJob(releaseWorkflow, 'android-release-gate');
+    const iosGate = extractWorkflowJob(releaseWorkflow, 'ios-release-gate');
     const releaseJob = extractWorkflowJob(releaseWorkflow, 'release-please');
 
     expect(releaseWorkflow).toContain('concurrency:');
     expect(releaseWorkflow).toContain('group: release-please-${{ github.ref }}');
     expect(releaseWorkflow).toContain('cancel-in-progress: true');
+    expect(releaseWorkflow).toMatch(/permissions:\r?\n  contents: read/);
+    expect(androidGate).toContain('permissions:\n      contents: read');
+    expect(androidGate).toContain('persist-credentials: false');
+    expect(androidGate).not.toContain('contents: write');
+    expect(iosGate).toContain('permissions:\n      contents: read');
+    expect(iosGate).toContain('persist-credentials: false');
+    expect(iosGate).not.toContain('contents: write');
+    expect(releaseJob).toContain('contents: write');
+    expect(releaseJob).toContain('pull-requests: write');
     expect(releaseWorkflow).toContain('android-release-gate:');
     expect(releaseWorkflow).toContain('ios-release-gate:');
     expect(releaseWorkflow).toContain('build:android:production:clean');
     expect(releaseWorkflow).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
     expect(releaseWorkflow).toContain('CLANG_ENABLE_EXPLICIT_MODULES=NO CODE_SIGNING_ALLOWED=NO build');
     expect(releaseWorkflow).not.toContain('-scheme pocketai');
-    expect(extractWorkflowJob(releaseWorkflow, 'ios-release-gate')).toContain('NODE_ENV: production');
-    expect(extractWorkflowJob(releaseWorkflow, 'ios-release-gate')).toContain('EAS_BUILD_PROFILE: production');
+    expect(iosGate).toContain('NODE_ENV: production');
+    expect(iosGate).toContain('EAS_BUILD_PROFILE: production');
     expect(releaseJob).toContain('- android-release-gate');
     expect(releaseJob).toContain('- ios-release-gate');
     expect(releaseJob).toContain('name: Verify gated revision is still main HEAD');

@@ -1,6 +1,6 @@
 import React from 'react';
-import { render } from '@testing-library/react-native';
-import { Image } from 'react-native';
+import { fireEvent, render } from '@testing-library/react-native';
+import { Image, Linking } from 'react-native';
 import { MarkdownRenderer } from '../../src/components/ui/MarkdownRenderer';
 
 jest.mock('react-native-css-interop', () => {
@@ -84,5 +84,22 @@ describe('MarkdownRenderer', () => {
 
     expect(screen.getByText('chat.remoteImageBlocked')).toBeTruthy();
     expect(screen.UNSAFE_queryAllByType(Image)).toHaveLength(0);
+  });
+
+  it('blocks unsafe block links around remote-image fallbacks', () => {
+    const openUrl = jest.spyOn(Linking, 'openURL').mockResolvedValueOnce(undefined);
+    const screen = render(
+      <MarkdownRenderer
+        content={'[![unsafe linked image](https://tracker.example/pixel)](intent://settings)\n\n[![phone linked image](https://tracker.example/pixel)](tel:+123456789)\n\n[![safe linked image](https://tracker.example/pixel)](https://example.com)'}
+      />,
+    );
+
+    fireEvent.press(screen.getByText('unsafe linked image'));
+    fireEvent.press(screen.getByText('phone linked image'));
+    expect(openUrl).not.toHaveBeenCalled();
+
+    fireEvent.press(screen.getByText('safe linked image'));
+    expect(openUrl).toHaveBeenCalledTimes(1);
+    expect(openUrl).toHaveBeenCalledWith('https://example.com');
   });
 });

@@ -84,7 +84,7 @@ Their artifacts must not be uploaded while `eas.json` uses the remote app versio
 
 ### Via Xcode
 
-1. Select **Product > Scheme > pocketai** and set the destination to **Any iOS Device (arm64)**.
+1. Select **Product > Scheme > PocketAI** and set the destination to **Any iOS Device (arm64)**.
 2. Run **Product > Archive**.
 3. When the archive completes, the Organizer window opens. Select the archive and click **Distribute App**.
 4. Choose **Ad Hoc** / **Development** for direct QA installs, or export locally for archive inspection.
@@ -96,7 +96,7 @@ Build the archive:
 
 ```bash
 xcodebuild -workspace ios/pocketai.xcworkspace \
-  -scheme pocketai \
+  -scheme PocketAI \
   -configuration Release \
   -archivePath build/pocketai.xcarchive \
   archive

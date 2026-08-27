@@ -93,6 +93,7 @@ const {
   resolveReasoningAuthoritativeClearConfiguration,
   resolveAndroidPackageUid,
   resolveNotificationChannelSettingsUi,
+  resolveNotificationChannelToggle,
   runWithBestEffortCleanup,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
@@ -687,6 +688,22 @@ describe('android-scenarios smoke bootstrap args', () => {
       channelSnapshot,
       'Generating response...',
     )).toEqual({ ready: true, target: null });
+  });
+
+  it('selects the main notification-channel switch above secondary channel preferences', () => {
+    const channelSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node text="Generating response..." bounds="[168,169][1059,242]" />
+        <node text="All notifications" resource-id="android:id/switch_widget" checked="true" clickable="false" bounds="[870,353][984,425]" />
+        <node text="Vibrate" resource-id="android:id/switch_widget" checked="false" clickable="true" bounds="[900,640][970,700]" />
+      </hierarchy>
+    `);
+
+    expect(resolveNotificationChannelToggle(channelSnapshot)).toEqual(expect.objectContaining({
+      text: 'All notifications',
+      checked: true,
+    }));
   });
 
   it('uses fast smoke reuse flags when skip-build is enabled', () => {

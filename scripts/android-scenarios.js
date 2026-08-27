@@ -2249,10 +2249,6 @@ function readBackgroundActionsChannelState(adbPath, serial, userId = null) {
   );
 }
 
-function readBackgroundActionsChannelEnabled(adbPath, serial, userId = null) {
-  return readBackgroundActionsChannelState(adbPath, serial, userId).enabled;
-}
-
 function resolveNotificationChannelSettingsUi(snapshot, channelName) {
   const matches = findMatchingNodes(snapshot, channelName, { visibleOnly: true })
     .filter((node) => Boolean(node.bounds));
@@ -2261,6 +2257,33 @@ function resolveNotificationChannelSettingsUi(snapshot, channelName) {
     return { ready: true, target: null };
   }
   return { ready: false, target: pickBestNode(matches) };
+}
+
+function resolveNotificationChannelToggle(snapshot) {
+  const matches = snapshot.nodes
+    .filter((node) => (
+      isResourceId(node, "switch_widget")
+      && Boolean(node.bounds)
+      && (!snapshot.viewportBounds || isBoundsInViewport(node.bounds, snapshot.viewportBounds))
+    ))
+    .sort((left, right) => {
+      const verticalDelta = left.bounds.top - right.bounds.top;
+      if (verticalDelta !== 0) {
+        return verticalDelta;
+      }
+
+      const clickableDelta = Number(right.clickable) - Number(left.clickable);
+      if (clickableDelta !== 0) {
+        return clickableDelta;
+      }
+
+      return left.bounds.area - right.bounds.area;
+    });
+
+  // ChannelNotificationSettings uses a main switch above optional per-channel
+  // preferences such as vibration. Choosing the smallest generic switch can
+  // toggle one of those secondary preferences on Android 13.
+  return matches[0] || null;
 }
 
 async function ensureNotificationChannelSettingsVisible(adbPath, serial, channelName) {
@@ -2402,26 +2425,77 @@ async function setBackgroundActionsChannelEnabled(ctx, enabled, userId = null) {
     originalState.name
   );
 
-  const channelSwitch = await waitForResourceId(adbPath, ctx.serial, "switch_widget", {
-    timeoutMs: 15_000,
-    visibleOnly: true,
-  });
-  if (!channelSwitch.bounds) {
-    throw new Error("Android notification-channel switch has no tap bounds.");
+  const { match: initialChannelSwitch, snapshot: initialChannelSnapshot } = await waitForSnapshotMatch(
+    adbPath,
+    ctx.serial,
+    { timeoutMs: 15_000, pollIntervalMs: 250 },
+    (snapshot) => resolveNotificationChannelToggle(snapshot)
+  );
+  const channelSwitch = initialChannelSwitch;
+  if (!channelSwitch?.bounds) {
+    throw new Error(withUiSnapshotSummary(
+      initialChannelSnapshot,
+      "Android notification-channel switch has no tap bounds."
+    ));
+  }
+  if (channelSwitch.checked !== originalState.enabled) {
+    throw new Error(withUiSnapshotSummary(
+      initialChannelSnapshot,
+      "Android notification-channel UI and dumpsys disagree before the toggle."
+    ));
   }
   const previouslyEnabled = originalState.enabled;
-  tapBounds(adbPath, ctx.serial, channelSwitch.bounds);
+  let currentChannelSwitch = channelSwitch;
+  let lastChannelSnapshot = initialChannelSnapshot;
+  for (let attempt = 1; attempt <= 3 && currentChannelSwitch.checked !== enabled; attempt += 1) {
+    tapBounds(adbPath, ctx.serial, currentChannelSwitch.bounds);
+    const { match, snapshot } = await waitForSnapshotMatch(
+      adbPath,
+      ctx.serial,
+      { timeoutMs: 4_000, pollIntervalMs: 250 },
+      (candidateSnapshot) => {
+        const candidate = resolveNotificationChannelToggle(candidateSnapshot);
+        return candidate?.checked === enabled ? candidate : null;
+      }
+    );
+    lastChannelSnapshot = snapshot;
+    if (match) {
+      currentChannelSwitch = match;
+      break;
+    }
+
+    const retrySwitch = resolveNotificationChannelToggle(snapshot);
+    if (!retrySwitch?.bounds) {
+      throw new Error(withUiSnapshotSummary(
+        snapshot,
+        "Android notification-channel switch disappeared after the toggle."
+      ));
+    }
+    currentChannelSwitch = retrySwitch;
+  }
+  if (currentChannelSwitch.checked !== enabled) {
+    throw new Error(withUiSnapshotSummary(
+      lastChannelSnapshot,
+      `Android notification-channel switch did not become ${enabled ? "enabled" : "blocked"}.`
+    ));
+  }
+
   const deadline = Date.now() + 10_000;
   let confirmed = false;
+  let lastState = originalState;
   while (Date.now() < deadline) {
-    if (readBackgroundActionsChannelEnabled(adbPath, ctx.serial, currentUserId) === enabled) {
+    lastState = readBackgroundActionsChannelState(adbPath, ctx.serial, currentUserId);
+    if (lastState.enabled === enabled) {
       confirmed = true;
       break;
     }
     await delay(250);
   }
   if (!confirmed) {
-    throw new Error(`Android notification channel did not become ${enabled ? "enabled" : "blocked"}.`);
+    throw new Error(
+      `Android notification channel did not become ${enabled ? "enabled" : "blocked"}; `
+      + `the system UI changed, but dumpsys still reports importance ${lastState.importance}.`
+    );
   }
 
   runChecked(adbPath, ["-s", ctx.serial, "shell", "input", "keyevent", "4"]);
@@ -10405,6 +10479,7 @@ module.exports = {
   parseAndroidRuntimePermission,
   parseAndroidNotificationChannelEnabled,
   resolveNotificationChannelSettingsUi,
+  resolveNotificationChannelToggle,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,

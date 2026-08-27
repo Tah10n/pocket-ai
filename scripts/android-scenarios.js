@@ -6,6 +6,7 @@ const { spawnSync } = require("child_process");
 const {
   buildGradleAssembleArgs,
   captureOwnedProcessOwnership,
+  dismissExternalLauncherAnrDialog,
   ensureMetroServer,
   resolveAndroidQaApplicationId,
   spawnOwnedProcess,
@@ -8208,8 +8209,20 @@ function dumpUiHierarchy(adbPath, serial, options = {}) {
   );
 }
 
-function createUiSnapshot(adbPath, serial) {
-  return parseUiSnapshot(dumpUiHierarchy(adbPath, serial));
+function createUiSnapshot(adbPath, serial, options = {}) {
+  const dumpHierarchy = options.dumpUiHierarchy ?? dumpUiHierarchy;
+  const dismissLauncherAnr =
+    options.dismissExternalLauncherAnrDialog ?? dismissExternalLauncherAnrDialog;
+  const pause = options.sleepSync ?? sleepSync;
+  let hierarchy = dumpHierarchy(adbPath, serial);
+
+  if (dismissLauncherAnr(adbPath, serial, appPackageName, hierarchy, options)) {
+    log("Dismissed an external emulator launcher ANR dialog before reading scenario UI state.");
+    pause(options.launcherAnrSettleMs ?? 250);
+    hierarchy = dumpHierarchy(adbPath, serial);
+  }
+
+  return parseUiSnapshot(hierarchy);
 }
 
 function parseUiSnapshot(xml) {
@@ -10578,6 +10591,7 @@ module.exports = {
   configureScenarioBuildEnvironment,
   collectCurrentQaBuildProvenance,
   buildDocumentFailureFields,
+  createUiSnapshot,
   createBranchRegenerationBaseline,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,

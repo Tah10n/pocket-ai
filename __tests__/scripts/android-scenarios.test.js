@@ -41,6 +41,7 @@ const {
   cleanupTransferredMetroOwnership,
   collectCurrentQaBuildProvenance,
   configureScenarioBuildEnvironment,
+  createUiSnapshot,
   createBranchRegenerationBaseline,
   activateClearedCatalogFilterOption,
   appPrivatePathExists,
@@ -134,6 +135,46 @@ const {
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
+
+describe('android-scenarios external launcher ANR recovery', () => {
+  it('re-reads the hierarchy after dismissing a confirmed launcher ANR', () => {
+    const blockedHierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_wait" text="Wait" bounds="[100,200][300,300]" />',
+      '</hierarchy>',
+    ].join('');
+    const homeHierarchy = [
+      '<hierarchy>',
+      '<node package="com.github.tah10n.pocketai" resource-id="home-root" text="Pocket AI" bounds="[0,0][1080,2400]" />',
+      '</hierarchy>',
+    ].join('');
+    const dumpUiHierarchy = jest.fn()
+      .mockReturnValueOnce(blockedHierarchy)
+      .mockReturnValueOnce(homeHierarchy);
+    const dismissLauncherAnr = jest.fn(() => true);
+    const sleepSync = jest.fn();
+
+    const snapshot = createUiSnapshot('adb', 'device-1', {
+      dumpUiHierarchy,
+      dismissExternalLauncherAnrDialog: dismissLauncherAnr,
+      sleepSync,
+      launcherAnrSettleMs: 0,
+    });
+
+    expect(dismissLauncherAnr).toHaveBeenCalledWith(
+      'adb',
+      'device-1',
+      'com.github.tah10n.pocketai',
+      blockedHierarchy,
+      expect.any(Object),
+    );
+    expect(dumpUiHierarchy).toHaveBeenCalledTimes(2);
+    expect(sleepSync).toHaveBeenCalledWith(0);
+    expect(snapshot.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceId: 'home-root', text: 'Pocket AI' }),
+    ]));
+  });
+});
 
 const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
 

@@ -7,6 +7,7 @@ const { run } = require('../../scripts/verify-native-config');
 function createProject() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-native-config-'));
   fs.mkdirSync(path.join(root, 'ios', 'pocketai'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'ios', 'PocketAI'), { recursive: true });
   fs.mkdirSync(path.join(root, 'ios', 'PocketAI.xcodeproj'), { recursive: true });
   fs.mkdirSync(path.join(root, 'android', 'app', 'src', 'main'), { recursive: true });
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
@@ -41,6 +42,15 @@ function createProject() {
     [
       'path = "en.lproj/InfoPlist.strings";',
       'path = "ru.lproj/InfoPlist.strings";',
+    ].join('\n'),
+  );
+  fs.writeFileSync(
+    path.join(root, 'ios', 'PocketAI', 'AppDelegate.swift'),
+    [
+      'import Foundation',
+      'private func excludePocketAiModelDirectoryFromBackup() {}',
+      '@main',
+      'public class AppDelegate: ExpoAppDelegate {}',
     ].join('\n'),
   );
   fs.writeFileSync(path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'), [
@@ -108,6 +118,29 @@ describe('native configuration contract', () => {
       );
 
       expect(() => run(['--require-ios'], root)).toThrow(/missing en\.lproj\/InfoPlist\.strings/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a backup exclusion helper scoped inside a trailing generated delegate class', () => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(root, 'ios', 'PocketAI', 'AppDelegate.swift'),
+        [
+          'import Foundation',
+          '@main',
+          'public class AppDelegate: ExpoAppDelegate {',
+          '  func application() { excludePocketAiModelDirectoryFromBackup() }',
+          '}',
+          'class ReactNativeDelegate {',
+          '  private func excludePocketAiModelDirectoryFromBackup() {}',
+          '}',
+        ].join('\n'),
+      );
+
+      expect(() => run(['--require-ios'], root)).toThrow(/file scope before AppDelegate/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

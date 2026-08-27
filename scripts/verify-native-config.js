@@ -68,6 +68,10 @@ function assertIosGeneratedConfig(root = projectRoot) {
     path.join(root, 'ios', 'PocketAI.xcodeproj', 'project.pbxproj'),
     'Generated iOS Xcode project',
   );
+  const appDelegate = readText(
+    path.join(root, 'ios', 'PocketAI', 'AppDelegate.swift'),
+    'Generated iOS AppDelegate',
+  );
 
   if (/UIBackgroundModes[\s\S]{0,500}<string>processing<\/string>/u.test(plist)) {
     throw new Error('Generated Info.plist still declares unsupported background processing.');
@@ -101,6 +105,11 @@ function assertIosGeneratedConfig(root = projectRoot) {
   }
   if (/path = "?InfoPlist\.strings"?;/u.test(xcodeProject)) {
     throw new Error('Generated iOS Xcode project collapses localized InfoPlist.strings to a missing shared path.');
+  }
+  const appDelegateDeclarationIndex = appDelegate.search(/^(?:@main\s*\n)?(?:public\s+)?class\s+AppDelegate\b/mu);
+  const backupHelperIndex = appDelegate.indexOf('private func excludePocketAiModelDirectoryFromBackup()');
+  if (appDelegateDeclarationIndex < 0 || backupHelperIndex < 0 || backupHelperIndex > appDelegateDeclarationIndex) {
+    throw new Error('Generated iOS AppDelegate must declare the backup exclusion helper at file scope before AppDelegate.');
   }
 }
 

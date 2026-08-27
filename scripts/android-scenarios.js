@@ -149,6 +149,20 @@ const BACKGROUND_ACTIONS_CHANNEL_ID = "RN_BACKGROUND_ACTIONS_CHANNEL";
 const BACKGROUND_ACTIONS_SERVICE_CLASS = "com.asterinet.react.bgactions.RNBackgroundActionsTask";
 const QA_BACKGROUND_TASK_START_RESOURCE_ID = "chat-qa-start-background-task";
 const QA_BACKGROUND_TASK_STOP_RESOURCE_ID = "chat-qa-stop-background-task";
+const QA_BACKGROUND_TASK_OUTCOME_STATUSES = [
+  "started",
+  "already_running",
+  "start_failed",
+  "skipped_android_background",
+  "skipped_ios_foreground",
+  "skipped_no_active_task",
+];
+const QA_BACKGROUND_TASK_FAILURE_CATEGORIES = [
+  "foreground_service_start_not_allowed",
+  "security_exception",
+  "native_rejection",
+  "unknown",
+];
 const CLOSE_APP_LABELS = ["Close app", "Закрыть приложение"];
 const WAIT_LABELS = ["Wait", "Подождать"];
 const APP_NOT_RESPONDING_LABEL_FRAGMENTS = ["isn't responding", "не отвечает"];
@@ -424,6 +438,7 @@ const THEME_STYLE_RESOURCE_IDS = {
   default: "settings-theme-style-default",
   glass: "settings-theme-style-glass",
 };
+const THEME_STYLE_CONTAINER_RESOURCE_ID = "settings-visual-style-container";
 const THEME_STYLE_CONTROL_RESOURCE_ID = "settings-theme-style-control";
 const THEME_STYLE_SHEET_RESOURCE_ID = "settings-theme-style-sheet";
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
@@ -2505,6 +2520,29 @@ async function setBackgroundActionsChannelEnabled(ctx, enabled, userId = null) {
   return previouslyEnabled;
 }
 
+function assertForegroundServiceNotificationState(
+  adbPath,
+  serial,
+  userId,
+  { permissionGranted, channelEnabled }
+) {
+  const actualPermissionGranted = readPostNotificationsPermission(adbPath, serial, userId);
+  if (actualPermissionGranted !== permissionGranted) {
+    throw new Error(
+      `Expected ${POST_NOTIFICATIONS_PERMISSION} granted=${permissionGranted}, `
+      + `observed granted=${actualPermissionGranted}.`
+    );
+  }
+
+  const channelState = readBackgroundActionsChannelState(adbPath, serial, userId);
+  if (channelState.enabled !== channelEnabled) {
+    throw new Error(
+      `Expected ${BACKGROUND_ACTIONS_CHANNEL_ID} enabled=${channelEnabled}, `
+      + `observed enabled=${channelState.enabled}.`
+    );
+  }
+}
+
 async function runWithBestEffortCleanup(run, cleanupSteps) {
   let result;
   let primaryError = null;
@@ -2544,10 +2582,7 @@ async function ensureBackgroundActionsChannelCreated(ctx) {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
   });
   await tapVisibleResource(ctx, QA_BACKGROUND_TASK_START_RESOURCE_ID, { timeoutMs: 15_000 });
-  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-running", {
-    timeoutMs: 15_000,
-    visibleOnly: true,
-  });
+  await waitForQaForegroundServiceStartOutcome(adbPath, ctx.serial);
   await waitForBackgroundActionsService(adbPath, ctx.serial, true);
   await tapVisibleResource(ctx, QA_BACKGROUND_TASK_STOP_RESOURCE_ID, { timeoutMs: 15_000 });
   await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-idle", {
@@ -2563,10 +2598,7 @@ async function exerciseQaForegroundService(ctx, evidenceLabel) {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
   });
   await tapVisibleResource(ctx, QA_BACKGROUND_TASK_START_RESOURCE_ID, { timeoutMs: 15_000 });
-  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-running", {
-    timeoutMs: 15_000,
-    visibleOnly: true,
-  });
+  await waitForQaForegroundServiceStartOutcome(adbPath, ctx.serial);
   await waitForBackgroundActionsService(adbPath, ctx.serial, true);
   ctx.captureScreenshot(`foreground-service-${evidenceLabel}.png`);
   await tapVisibleResource(ctx, QA_BACKGROUND_TASK_STOP_RESOURCE_ID, { timeoutMs: 15_000 });
@@ -2575,6 +2607,54 @@ async function exerciseQaForegroundService(ctx, evidenceLabel) {
     visibleOnly: true,
   });
   await waitForBackgroundActionsService(adbPath, ctx.serial, false);
+}
+
+function resolveQaForegroundServiceStartOutcome(snapshot) {
+  for (const status of QA_BACKGROUND_TASK_OUTCOME_STATUSES) {
+    const marker = findResourceIdInSnapshot(
+      snapshot,
+      `chat-qa-background-task-state-${status}`,
+      { visibleOnly: true }
+    );
+    if (!marker) {
+      continue;
+    }
+
+    const failureCategory = QA_BACKGROUND_TASK_FAILURE_CATEGORIES.find((category) => (
+      Boolean(findResourceIdInSnapshot(
+        snapshot,
+        `chat-qa-background-task-failure-${category}`,
+        { visibleOnly: true }
+      ))
+    ));
+    return { status, failureCategory: failureCategory ?? null };
+  }
+
+  return null;
+}
+
+async function waitForQaForegroundServiceStartOutcome(adbPath, serial) {
+  const { match: outcome, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    { timeoutMs: 15_000, pollIntervalMs: 100 },
+    resolveQaForegroundServiceStartOutcome
+  );
+  if (!outcome) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      "Timed out waiting for the QA foreground-service start outcome."
+    ));
+  }
+  if (outcome.status === "start_failed") {
+    throw new Error(
+      `QA foreground-service start failed (${outcome.failureCategory ?? "unknown"}).`
+    );
+  }
+  if (outcome.status.startsWith("skipped_")) {
+    throw new Error(`QA foreground-service start was ${outcome.status}.`);
+  }
+  return outcome;
 }
 
 function findSelectedResourceKey(snapshot, resourcesByKey, label) {
@@ -2621,7 +2701,9 @@ async function selectThemeMode(ctx, mode) {
 
 async function openThemeStyleSheet(ctx) {
   await goToSettings(ctx);
-  await scrollToAnyText(ctx, THEME_STYLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await scrollToResourceId(ctx, THEME_STYLE_CONTAINER_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
   await tapVisibleResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
   });
@@ -2629,6 +2711,53 @@ async function openThemeStyleSheet(ctx) {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
     visibleOnly: true,
   });
+}
+
+function findResourceIdClearOfBottomOverlay(snapshot, resourceId) {
+  const node = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+  if (!node || !isBoundsClearOfBottomOverlay(node.bounds, snapshot.viewportBounds)) {
+    return null;
+  }
+  return node;
+}
+
+async function scrollToResourceId(ctx, resourceId, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const maxSwipesDown = options.maxSwipesDown ?? 3;
+  const maxSwipesUp = options.maxSwipesUp ?? 10;
+  const adbPath = resolveAdbPath();
+  const startedAt = Date.now();
+  const findNow = () => findResourceIdClearOfBottomOverlay(
+    createUiSnapshot(adbPath, ctx.serial),
+    resourceId
+  );
+
+  let node = findNow();
+  if (node) {
+    return node;
+  }
+
+  for (let attempt = 0; attempt < maxSwipesDown && Date.now() - startedAt < timeoutMs; attempt += 1) {
+    await ctx.swipeDown();
+    node = findNow();
+    if (node) {
+      return node;
+    }
+  }
+
+  for (let attempt = 0; attempt < maxSwipesUp && Date.now() - startedAt < timeoutMs; attempt += 1) {
+    await ctx.swipeUp();
+    node = findNow();
+    if (node) {
+      return node;
+    }
+  }
+
+  throw new Error(withUiSummary(
+    adbPath,
+    ctx.serial,
+    `Timed out waiting for resource id "${resourceId}" outside the bottom overlay.`
+  ));
 }
 
 async function readSelectedThemeStyle(ctx) {
@@ -2801,17 +2930,29 @@ function buildScenarios() {
           forceStopScenarioApp(adbPath, ctx.serial);
           await relaunchScenarioApp(ctx);
           await setAppNotificationsEnabled(ctx, true, userId);
+          assertForegroundServiceNotificationState(adbPath, ctx.serial, userId, {
+            permissionGranted: true,
+            channelEnabled: true,
+          });
           await exerciseQaForegroundService(ctx, `api-${sdkLevel}-permission-granted`);
 
           forceStopScenarioApp(adbPath, ctx.serial);
           await relaunchScenarioApp(ctx);
           await setAppNotificationsEnabled(ctx, false, userId);
+          assertForegroundServiceNotificationState(adbPath, ctx.serial, userId, {
+            permissionGranted: false,
+            channelEnabled: true,
+          });
           await exerciseQaForegroundService(ctx, `api-${sdkLevel}-permission-denied`);
 
           forceStopScenarioApp(adbPath, ctx.serial);
           await relaunchScenarioApp(ctx);
           await setAppNotificationsEnabled(ctx, true, userId);
           await setBackgroundActionsChannelEnabled(ctx, false, userId);
+          assertForegroundServiceNotificationState(adbPath, ctx.serial, userId, {
+            permissionGranted: true,
+            channelEnabled: false,
+          });
           return exerciseQaForegroundService(ctx, `api-${sdkLevel}-channel-blocked`);
         }, [
           {
@@ -10458,6 +10599,7 @@ module.exports = {
   findSettledDocumentCancellationSendAction,
   findNodeInSnapshot,
   findResourceIdInSnapshot,
+  findResourceIdClearOfBottomOverlay,
   hasConversationHistoryStartAnchor,
   isBoundsClearOfBottomOverlay,
   getBottomTabTapPoint,
@@ -10480,6 +10622,7 @@ module.exports = {
   parseAndroidNotificationChannelEnabled,
   resolveNotificationChannelSettingsUi,
   resolveNotificationChannelToggle,
+  resolveQaForegroundServiceStartOutcome,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,

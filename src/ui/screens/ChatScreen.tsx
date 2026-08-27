@@ -93,7 +93,11 @@ import {
 } from '../../services/AndroidQaGenerationEvidence';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
-import { backgroundTaskService } from '../../services/BackgroundTaskService';
+import {
+    backgroundTaskService,
+    type ForegroundServiceStartFailureCategory,
+    type ForegroundServiceStartStatus,
+} from '../../services/BackgroundTaskService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -690,7 +694,12 @@ function EnabledAndroidQaGenerationEvidenceSurface({
 }: {
     documentDraftCount: number;
 }) {
-    const [backgroundTaskState, setBackgroundTaskState] = useState<'idle' | 'starting' | 'running' | 'failed'>('idle');
+    const [backgroundTaskState, setBackgroundTaskState] = useState<
+        'idle' | 'starting' | ForegroundServiceStartStatus
+    >('idle');
+    const [backgroundTaskFailureCategory, setBackgroundTaskFailureCategory] = useState<
+        ForegroundServiceStartFailureCategory | null
+    >(null);
     const didStartQaBackgroundTaskRef = useRef(false);
     const evidence = useSyncExternalStore(
         subscribeAndroidQaGenerationEvidence,
@@ -700,15 +709,24 @@ function EnabledAndroidQaGenerationEvidenceSurface({
 
     const startQaBackgroundTask = useCallback(async () => {
         setBackgroundTaskState('starting');
-        await backgroundTaskService.startBackgroundInference('Android QA foreground service');
-        didStartQaBackgroundTaskRef.current = backgroundTaskService.isActive;
-        setBackgroundTaskState(didStartQaBackgroundTaskRef.current ? 'running' : 'failed');
+        setBackgroundTaskFailureCategory(null);
+        const outcome = await backgroundTaskService.startBackgroundInference(
+            'Android QA foreground service',
+            { requireServiceStart: true },
+        );
+        didStartQaBackgroundTaskRef.current = outcome.serviceRunning;
+        setBackgroundTaskState(outcome.status);
+        setBackgroundTaskFailureCategory(outcome.failureCategory ?? null);
+        if (!outcome.requirementSatisfied) {
+            await backgroundTaskService.stopBackgroundTask('inference');
+        }
     }, []);
 
     const stopQaBackgroundTask = useCallback(async () => {
         await backgroundTaskService.stopBackgroundTask('inference');
         didStartQaBackgroundTaskRef.current = false;
         setBackgroundTaskState('idle');
+        setBackgroundTaskFailureCategory(null);
     }, []);
 
     useEffect(() => () => {
@@ -773,13 +791,24 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 ) : null}
             </View>
             {Platform.OS === 'android' ? (
-                <View
-                    accessible
-                    accessibilityLabel={`chat-qa-background-task-state-${backgroundTaskState}`}
-                    collapsable={false}
-                    testID={`chat-qa-background-task-state-${backgroundTaskState}`}
-                    style={styles.androidQaEvidenceMarker}
-                />
+                <>
+                    <View
+                        accessible
+                        accessibilityLabel={`chat-qa-background-task-state-${backgroundTaskState}`}
+                        collapsable={false}
+                        testID={`chat-qa-background-task-state-${backgroundTaskState}`}
+                        style={styles.androidQaEvidenceMarker}
+                    />
+                    {backgroundTaskFailureCategory ? (
+                        <View
+                            accessible
+                            accessibilityLabel={`chat-qa-background-task-failure-${backgroundTaskFailureCategory}`}
+                            collapsable={false}
+                            testID={`chat-qa-background-task-failure-${backgroundTaskFailureCategory}`}
+                            style={styles.androidQaEvidenceMarker}
+                        />
+                    ) : null}
+                </>
             ) : null}
             {evidence.armedGate ? (
                 <View

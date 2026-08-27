@@ -9,7 +9,10 @@ function createProject() {
   fs.mkdirSync(path.join(root, 'ios', 'pocketai'), { recursive: true });
   fs.mkdirSync(path.join(root, 'android', 'app', 'src', 'main'), { recursive: true });
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
-    expo: { ios: { infoPlist: {} } },
+    expo: {
+      ios: { infoPlist: {} },
+      plugins: [['expo-build-properties', { android: { buildArchs: ['arm64-v8a', 'x86_64'] } }]],
+    },
   }));
   fs.writeFileSync(path.join(root, 'eas.json'), JSON.stringify({
     cli: { appVersionSource: 'remote' },
@@ -22,6 +25,9 @@ function createProject() {
     '<key>CFBundleVersion</key><string>1</string>',
     '</dict></plist>',
   ].join(''));
+  fs.writeFileSync(path.join(root, 'ios', 'Podfile.properties.json'), JSON.stringify({
+    'expo.jsEngine': 'hermes',
+  }));
   fs.writeFileSync(
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),
     [
@@ -82,6 +88,27 @@ describe('native configuration contract', () => {
       );
 
       expect(() => run(['--require-ios'], root)).toThrow(/extended-virtual-addressing/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects global iOS framework linkage in source and generated config', () => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
+        expo: {
+          ios: { infoPlist: {} },
+          plugins: [['expo-build-properties', { ios: { useFrameworks: 'static' } }]],
+        },
+      }));
+      expect(() => run([], root)).toThrow(/dependency cycle/);
+
+      fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({ expo: { ios: { infoPlist: {} } } }));
+      fs.writeFileSync(path.join(root, 'ios', 'Podfile.properties.json'), JSON.stringify({
+        'ios.useFrameworks': 'static',
+      }));
+      expect(() => run(['--require-ios'], root)).toThrow(/global use_frameworks/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

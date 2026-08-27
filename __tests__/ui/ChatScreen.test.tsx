@@ -1172,6 +1172,62 @@ describe('ChatScreen', () => {
     )).toBeTruthy();
   });
 
+  it('publishes the required foreground-service start outcome through stable QA markers', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');
+    const startSpy = jest.spyOn(backgroundTaskService, 'startBackgroundInference').mockResolvedValueOnce({
+      status: 'started',
+      serviceRunning: true,
+      degraded: false,
+      required: true,
+      requirementSatisfied: true,
+    });
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        fireEvent.press(getByTestId('chat-qa-start-background-task'));
+        await Promise.resolve();
+      });
+
+      expect(startSpy).toHaveBeenCalledWith('Android QA foreground service', {
+        requireServiceStart: true,
+      });
+      expect(getByTestId('chat-qa-background-task-state-started')).toBeTruthy();
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it('publishes only a privacy-safe failure category and clears degraded QA work', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');
+    const startSpy = jest.spyOn(backgroundTaskService, 'startBackgroundInference').mockResolvedValueOnce({
+      status: 'start_failed',
+      serviceRunning: false,
+      degraded: true,
+      required: true,
+      requirementSatisfied: false,
+      failureCategory: 'security_exception',
+    });
+    const stopSpy = jest.spyOn(backgroundTaskService, 'stopBackgroundTask').mockResolvedValueOnce(undefined);
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        fireEvent.press(getByTestId('chat-qa-start-background-task'));
+        await Promise.resolve();
+      });
+
+      expect(getByTestId('chat-qa-background-task-state-start_failed')).toBeTruthy();
+      expect(getByTestId('chat-qa-background-task-failure-security_exception')).toBeTruthy();
+      expect(stopSpy).toHaveBeenCalledWith('inference');
+    } finally {
+      startSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
+  });
+
   it('enables ready vision attachments and sends copied drafts with multimodal readiness', async () => {
     registry.saveModels([
       createReadyVisionModel(),
@@ -5383,7 +5439,13 @@ describe('ChatScreen', () => {
     const { notificationService } = require('../../src/services/NotificationService');
     const startSpy = jest
       .spyOn(backgroundTaskService, 'startBackgroundInference')
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({
+        status: 'started',
+        serviceRunning: true,
+        degraded: false,
+        required: false,
+        requirementSatisfied: true,
+      });
     const readinessSpy = jest
       .spyOn(notificationService, 'areUserNotificationsEnabled')
       .mockRejectedValueOnce(new Error('notification initialization failed'));

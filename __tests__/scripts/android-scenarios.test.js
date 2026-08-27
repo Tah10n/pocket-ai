@@ -64,6 +64,7 @@ const {
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
+  findResourceIdClearOfBottomOverlay,
   findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
   findTextOnlySentMessageNode,
@@ -94,6 +95,7 @@ const {
   resolveAndroidPackageUid,
   resolveNotificationChannelSettingsUi,
   resolveNotificationChannelToggle,
+  resolveQaForegroundServiceStartOutcome,
   runWithBestEffortCleanup,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
@@ -4011,6 +4013,53 @@ describe('android-scenarios pack selection', () => {
       tier: 'critical',
       requiresCurrentHeadProvenance: true,
     }));
+  });
+
+  it('reads privacy-safe foreground-service outcomes without waiting for native service polling', () => {
+    const startedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-background-task-state-started" bounds="[40,100][100,160]" />
+      </hierarchy>
+    `);
+    const failedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-background-task-state-start_failed" bounds="[40,100][100,160]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-background-task-failure-security_exception" bounds="[40,100][100,160]" />
+      </hierarchy>
+    `);
+
+    expect(resolveQaForegroundServiceStartOutcome(startedSnapshot)).toEqual({
+      status: 'started',
+      failureCategory: null,
+    });
+    expect(resolveQaForegroundServiceStartOutcome(failedSnapshot)).toEqual({
+      status: 'start_failed',
+      failureCategory: 'security_exception',
+    });
+  });
+
+  it('finds an already visible visual-style control by stable hierarchy id without localized text', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2200]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/settings-visual-style-container" bounds="[40,600][1040,980]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/settings-theme-style-control" clickable="true" bounds="[80,790][1000,930]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(snapshot, ['Visual Style', 'Визуальный стиль'], {
+      visibleOnly: true,
+    })).toBeNull();
+    expect(findResourceIdClearOfBottomOverlay(
+      snapshot,
+      'settings-visual-style-container',
+    )).toEqual(expect.objectContaining({
+      resourceId: 'com.github.tah10n.pocketai.qa:id/settings-visual-style-container',
+    }));
+    expect(findResourceIdClearOfBottomOverlay(
+      snapshot,
+      'settings-theme-style-control',
+    )).toEqual(expect.objectContaining({ clickable: true }));
   });
 
   it('attempts every notification-state cleanup step and aggregates failures', async () => {

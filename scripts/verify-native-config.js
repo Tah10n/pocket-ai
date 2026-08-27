@@ -18,6 +18,14 @@ function assertSourceConfig(root = projectRoot) {
   if (backgroundModes.includes('processing')) {
     throw new Error('UIBackgroundModes=processing requires a real BGTaskScheduler implementation and is forbidden.');
   }
+  const buildPropertiesPlugin = (appConfig.expo?.plugins ?? []).find((plugin) => (
+    Array.isArray(plugin) && plugin[0] === 'expo-build-properties'
+  ));
+  if (buildPropertiesPlugin?.[1]?.ios?.useFrameworks) {
+    throw new Error(
+      'Global iOS useFrameworks creates an app-to-Expo pod dependency cycle in Release builds.',
+    );
+  }
   if (easConfig.cli?.appVersionSource !== 'remote') {
     throw new Error('EAS production builds must use the remote app version source.');
   }
@@ -28,6 +36,10 @@ function assertSourceConfig(root = projectRoot) {
 
 function assertIosGeneratedConfig(root = projectRoot) {
   const plist = readText(path.join(root, 'ios', 'pocketai', 'Info.plist'), 'Generated iOS Info.plist');
+  const podfileProperties = JSON.parse(readText(
+    path.join(root, 'ios', 'Podfile.properties.json'),
+    'Generated iOS Podfile properties',
+  ));
   const entitlements = readText(
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),
     'Generated iOS entitlements',
@@ -35,6 +47,9 @@ function assertIosGeneratedConfig(root = projectRoot) {
 
   if (/UIBackgroundModes[\s\S]{0,500}<string>processing<\/string>/u.test(plist)) {
     throw new Error('Generated Info.plist still declares unsupported background processing.');
+  }
+  if (podfileProperties['ios.useFrameworks']) {
+    throw new Error('Generated iOS project still enables global use_frameworks linkage.');
   }
   if (!/<key>CFBundleIdentifier<\/key>/u.test(plist)) {
     throw new Error('Generated Info.plist is missing CFBundleIdentifier.');

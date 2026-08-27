@@ -338,10 +338,17 @@ describe('SettingsScreen', () => {
     expect(getByText('settings.themeMode')).toBeTruthy();
     expect(getByText('settings.themeStyle')).toBeTruthy();
     expect(getByTestId('settings-theme-mode-control')).toBeTruthy();
+    expect(getByTestId('settings-visual-style-container')).toBeTruthy();
     expect(getByTestId('settings-theme-style-control')).toBeTruthy();
 
     fireEvent.press(getByTestId('settings-theme-mode-dark'));
     fireEvent.press(getByTestId('settings-theme-style-control'));
+    expect(getByTestId('settings-theme-style-default').props.accessibilityLabel).toBe(
+      'settings.themeStyleDefault',
+    );
+    expect(getByTestId('settings-theme-style-glass').props.accessibilityLabel).toBe(
+      'settings.themeStyleGlass',
+    );
     fireEvent.press(getByTestId('settings-theme-style-glass'));
 
     expect(mockSetTheme).toHaveBeenCalledWith('dark');

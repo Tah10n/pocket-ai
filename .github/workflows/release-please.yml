@@ -71,7 +71,7 @@ jobs:
         run: >-
           xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI
           -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
-          CLANG_ENABLE_EXPLICIT_MODULES=NO CODE_SIGNING_ALLOWED=NO build
+          CODE_SIGNING_ALLOWED=NO build
 
   release-please:
     permissions:

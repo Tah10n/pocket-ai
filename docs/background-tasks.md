@@ -24,7 +24,9 @@ Current behavior:
 - Starting a download can request notification permission so progress and completion notices remain visible.
 - Backend benchmark/autotune can show a warning that notification-drawer progress and completion alerts are hidden.
 - Background-task startup does not silently request permissions on its own.
-- The app attempts to start the user-initiated foreground service while its Activity is visible regardless of notification permission or channel state, and contains actual native start failures such as Android background-start or security exceptions.
+- The app attempts to start the user-initiated foreground service while its Activity is visible regardless of notification permission or channel state.
+- Every tracked-work start returns a structured service outcome: `started`, `already_running`, `start_failed`, or a specific `skipped_*` state. Native failures expose only a privacy-safe category.
+- Production work may remain tracked after a native start rejection, but the returned outcome is explicitly marked degraded. The isolated QA surface uses `requireServiceStart` and fails the native scenario on any degraded outcome.
 
 ### Background-actions notification channel
 

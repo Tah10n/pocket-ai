@@ -15,6 +15,66 @@ function normalizeAppState(state: string | null | undefined): AppStateStatus {
     return 'active';
 }
 
+export type ForegroundServiceStartStatus =
+    | 'started'
+    | 'already_running'
+    | 'skipped_android_background'
+    | 'skipped_ios_foreground'
+    | 'skipped_no_active_task'
+    | 'start_failed';
+
+export type ForegroundServiceStartFailureCategory =
+    | 'foreground_service_start_not_allowed'
+    | 'security_exception'
+    | 'native_rejection'
+    | 'unknown';
+
+export interface BackgroundTaskStartOptions {
+    requireServiceStart?: boolean;
+}
+
+export interface ForegroundServiceStartOutcome {
+    status: ForegroundServiceStartStatus;
+    serviceRunning: boolean;
+    degraded: boolean;
+    required: boolean;
+    requirementSatisfied: boolean;
+    failureCategory?: ForegroundServiceStartFailureCategory;
+}
+
+type ForegroundServiceStartAttempt = Omit<
+    ForegroundServiceStartOutcome,
+    'required' | 'requirementSatisfied'
+>;
+
+function classifyForegroundServiceStartFailure(error: unknown): ForegroundServiceStartFailureCategory {
+    if (!(error instanceof Error)) {
+        return 'unknown';
+    }
+
+    const nativeCategory = `${error.name} ${error.message}`.toLowerCase();
+    if (nativeCategory.includes('foregroundservicestartnotallowed')) {
+        return 'foreground_service_start_not_allowed';
+    }
+    if (nativeCategory.includes('securityexception')) {
+        return 'security_exception';
+    }
+
+    return 'native_rejection';
+}
+
+function applyStartRequirement(
+    attempt: ForegroundServiceStartAttempt,
+    requireServiceStart: boolean,
+): ForegroundServiceStartOutcome {
+    const requirementSatisfied = attempt.status === 'started' || attempt.status === 'already_running';
+    return {
+        ...attempt,
+        required: requireServiceStart,
+        requirementSatisfied,
+    };
+}
+
 class BackgroundTaskService {
     private activeTaskTypes = new Set<NotificationTaskType>();
     private startedAtByTask: Partial<Record<NotificationTaskType, number>> = {};
@@ -24,6 +84,7 @@ class BackgroundTaskService {
     private appStateSub?: NativeEventSubscription;
     private started = false;
     private expirationListeners = new Set<() => void>();
+    private foregroundServiceStartPromise: Promise<ForegroundServiceStartAttempt> | null = null;
 
     start() {
         if (this.started) {
@@ -77,24 +138,38 @@ class BackgroundTaskService {
         return this.activeTaskTypes.has(taskType);
     }
 
-    async startBackgroundDownload(notificationUpdate?: Extract<NotificationUpdate, { type: 'downloadProgress' | 'downloadPaused' }>) {
+    async startBackgroundDownload(
+        notificationUpdate?: Extract<NotificationUpdate, { type: 'downloadProgress' | 'downloadPaused' }>,
+        options: BackgroundTaskStartOptions = {},
+    ): Promise<ForegroundServiceStartOutcome> {
         this.start();
         this.setTaskActive('download');
         if (notificationUpdate) {
             this.latestNotificationUpdateByTask.download = notificationUpdate;
         }
-        await this.maybeStartForegroundService();
+        const outcome = applyStartRequirement(
+            await this.maybeStartForegroundService(),
+            options.requireServiceStart === true,
+        );
         await this.applyCurrentNotificationUpdate();
+        return outcome;
     }
 
-    async startBackgroundInference(modelName?: string) {
+    async startBackgroundInference(
+        modelName?: string,
+        options: BackgroundTaskStartOptions = {},
+    ): Promise<ForegroundServiceStartOutcome> {
         this.start();
         this.setTaskActive('inference');
         if (modelName) {
             this.latestNotificationUpdateByTask.inference = { type: 'inferenceProgress', modelName };
         }
-        await this.maybeStartForegroundService();
+        const outcome = applyStartRequirement(
+            await this.maybeStartForegroundService(),
+            options.requireServiceStart === true,
+        );
         await this.applyCurrentNotificationUpdate();
+        return outcome;
     }
 
     async stopBackgroundTask(taskType?: NotificationTaskType) {
@@ -120,6 +195,9 @@ class BackgroundTaskService {
     }
 
     private async stopAllTasksAndService() {
+        if (this.foregroundServiceStartPromise) {
+            await this.foregroundServiceStartPromise;
+        }
         if (BackgroundService.isRunning()) {
             try {
                 await BackgroundService.stop();
@@ -185,13 +263,10 @@ class BackgroundTaskService {
                 return;
             }
 
-            const wasRunning = BackgroundService.isRunning();
             void (async () => {
                 try {
                     await this.maybeStartForegroundService();
-                    if (wasRunning) {
-                        await this.applyCurrentNotificationUpdate();
-                    }
+                    await this.applyCurrentNotificationUpdate();
                 } catch (error) {
                     console.warn('[BackgroundTaskService] Failed to sync task notification', error);
                 }
@@ -205,7 +280,10 @@ class BackgroundTaskService {
             return;
         }
 
-        void this.maybeStartForegroundService();
+        void (async () => {
+            await this.maybeStartForegroundService();
+            await this.applyCurrentNotificationUpdate();
+        })();
     };
 
     private handleExpiration = () => {
@@ -234,30 +312,78 @@ class BackgroundTaskService {
         }
     }
 
-    private async maybeStartForegroundService(): Promise<void> {
+    private async maybeStartForegroundService(): Promise<ForegroundServiceStartAttempt> {
+        if (BackgroundService.isRunning()) {
+            return {
+                status: 'already_running',
+                serviceRunning: true,
+                degraded: false,
+            };
+        }
+
+        if (this.foregroundServiceStartPromise) {
+            return this.foregroundServiceStartPromise;
+        }
+
         if (Platform.OS === 'android' && this.appState !== 'active') {
-            return;
+            return {
+                status: 'skipped_android_background',
+                serviceRunning: false,
+                degraded: true,
+            };
         }
 
         if (this.appState === 'active' && Platform.OS !== 'android') {
-            return;
+            return {
+                status: 'skipped_ios_foreground',
+                serviceRunning: false,
+                degraded: true,
+            };
         }
 
         const taskType = this.getPrimaryTaskType();
         if (!taskType) {
-            return;
+            return {
+                status: 'skipped_no_active_task',
+                serviceRunning: false,
+                degraded: true,
+            };
         }
 
-        if (BackgroundService.isRunning()) {
-            return;
-        }
+        const startPromise = (async (): Promise<ForegroundServiceStartAttempt> => {
+            if (BackgroundService.isRunning()) {
+                return {
+                    status: 'already_running',
+                    serviceRunning: true,
+                    degraded: false,
+                };
+            }
 
-        const options = notificationService.getBackgroundTaskOptions(taskType);
+            const options = notificationService.getBackgroundTaskOptions(taskType);
+            try {
+                await BackgroundService.start(notificationService.keepJsAliveWhileRunning, options);
+                return {
+                    status: 'started',
+                    serviceRunning: true,
+                    degraded: false,
+                };
+            } catch (error) {
+                console.warn('[BackgroundTaskService] Failed to start background task', error);
+                return {
+                    status: 'start_failed',
+                    serviceRunning: false,
+                    degraded: true,
+                    failureCategory: classifyForegroundServiceStartFailure(error),
+                };
+            }
+        })();
+        this.foregroundServiceStartPromise = startPromise;
         try {
-            await BackgroundService.start(notificationService.keepJsAliveWhileRunning, options);
-            await this.applyCurrentNotificationUpdate();
-        } catch (error) {
-            console.warn('[BackgroundTaskService] Failed to start background task', error);
+            return await startPromise;
+        } finally {
+            if (this.foregroundServiceStartPromise === startPromise) {
+                this.foregroundServiceStartPromise = null;
+            }
         }
     }
 

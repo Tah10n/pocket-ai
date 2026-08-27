@@ -408,7 +408,7 @@ public final class PocketAnyDocModule: Module {
       ) {
         throw JobInvalidated(envelope: invalidated)
       }
-      try invoke(bytes) { pointer, length in
+      return try invoke(bytes) { pointer, length in
         pocket_anydoc_prepare(engine, pointer, length)
       }
     }
@@ -441,7 +441,7 @@ public final class PocketAnyDocModule: Module {
       ) {
         throw JobInvalidated(envelope: invalidated)
       }
-      try invoke(bytes) { pointer, length in
+      return try invoke(bytes) { pointer, length in
         pocket_anydoc_select_context(engine, pointer, length)
       }
     }

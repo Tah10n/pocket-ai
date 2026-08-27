@@ -313,9 +313,21 @@ async function main() {
     } else {
       launchInstalledApp(tools.adb, device.serial, appPackage);
     }
-    await waitForAppJsReady(tools.adb, device.serial, appPackage, {
-      lifecycle: metro?.lifecycle,
-    });
+    try {
+      await waitForAppJsReady(tools.adb, device.serial, appPackage, {
+        lifecycle: metro?.lifecycle,
+      });
+    } catch (error) {
+      if (screenshotPath) {
+        captureBootstrapFailureDiagnostics(
+          tools.adb,
+          device.serial,
+          appPackage,
+          path.dirname(screenshotPath)
+        );
+      }
+      throw error;
+    }
 
     if (screenshotPath) {
       await delay(launchDelayMs);
@@ -2614,28 +2626,69 @@ function reverseMetroPort(adbPath, serial, hostPort) {
   }
 }
 
-function launchInstalledApp(adbPath, serial, appPackage) {
+function launchInstalledApp(adbPath, serial, appPackage, options = {}) {
+  const capture = options.runCapture ?? runCapture;
   log("Launching the installed Android app...");
-  runCapture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
+  capture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
     allowFailure: true,
   });
-  runChecked(
+  const launcherActivity = resolveLauncherActivity(adbPath, serial, appPackage, {
+    runCapture: capture,
+  });
+  const launchOutput = capture(
     adbPath,
     [
       "-s",
       serial,
       "shell",
-      "monkey",
-      "-p",
-      appPackage,
+      "am",
+      "start",
+      "-W",
+      "-S",
+      "-n",
+      launcherActivity,
+    ],
+  );
+  if (!/^Status:\s+ok\s*$/imu.test(launchOutput) || /^Error:/imu.test(launchOutput)) {
+    throw new Error("Android launcher activity did not report a successful start.");
+  }
+}
+
+function parseResolvedLauncherActivity(output, appPackage) {
+  const componentPattern = /^([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)$/u;
+  for (const line of `${output || ""}`.split(/\r?\n/u).reverse()) {
+    const match = componentPattern.exec(line.trim());
+    if (match?.[1] === appPackage) {
+      return `${match[1]}/${match[2]}`;
+    }
+  }
+  return null;
+}
+
+function resolveLauncherActivity(adbPath, serial, appPackage, options = {}) {
+  const capture = options.runCapture ?? runCapture;
+  const output = capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "cmd",
+      "package",
+      "resolve-activity",
+      "--brief",
+      "-a",
+      "android.intent.action.MAIN",
       "-c",
       "android.intent.category.LAUNCHER",
-      "1",
+      appPackage,
     ],
-    {
-      stdio: "inherit",
-    }
   );
+  const launcherActivity = parseResolvedLauncherActivity(output, appPackage);
+  if (!launcherActivity) {
+    throw new Error("Unable to resolve the installed Android launcher activity.");
+  }
+  return launcherActivity;
 }
 
 function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
@@ -2819,12 +2872,16 @@ function saveLogcat(adbPath, serial, outputPath, options = {}) {
     ["-s", serial, "shell", "pidof", "-s", packageName],
     { allowFailure: true }
   ));
-  if (!uid || !processId) {
+  if (!uid) {
     throw new Error(
-      "Could not resolve the installed Android app UID and process for privacy-scoped bootstrap logcat."
+      "Could not resolve the installed Android app UID for privacy-scoped bootstrap logcat."
     );
   }
 
+  const privacyFilters = [`--uid=${uid}`];
+  if (processId) {
+    privacyFilters.push(`--pid=${processId}`);
+  }
   const logs = capture(
     adbPath,
     [
@@ -2834,8 +2891,7 @@ function saveLogcat(adbPath, serial, outputPath, options = {}) {
       "-d",
       "-v",
       "time",
-      `--uid=${uid}`,
-      `--pid=${processId}`,
+      ...privacyFilters,
       "-t",
       "800",
     ],
@@ -2847,6 +2903,24 @@ function saveLogcat(adbPath, serial, outputPath, options = {}) {
     sensitiveRoots: options.sensitiveRoots || [projectRoot],
   }));
   log("Saved sanitized app-scoped bootstrap logcat.");
+}
+
+function captureBootstrapFailureDiagnostics(adbPath, serial, appPackage, outputDirectory) {
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  try {
+    wakeAndUnlockDevice(adbPath, serial);
+    saveScreenshot(adbPath, serial, path.join(outputDirectory, "bootstrap-failed.png"));
+  } catch {
+    log("Bootstrap failure screenshot capture failed (code=bootstrap_screenshot_failed).");
+  }
+
+  try {
+    saveLogcat(adbPath, serial, path.join(outputDirectory, "bootstrap-failure-logcat.txt"), {
+      packageName: appPackage,
+    });
+  } catch {
+    log("Bootstrap failure log capture failed (code=bootstrap_logcat_failed).");
+  }
 }
 
 function captureAndroidScreenshot(adbPath, serial, outputPath, options = {}) {
@@ -3267,6 +3341,7 @@ module.exports = {
   buildWindowsProcessCommandLine,
   captureOwnedProcessOwnership,
   captureAndroidScreenshot,
+  captureBootstrapFailureDiagnostics,
   cleanupOwnedMetroAfterStartupFailure,
   createOwnedMetroProcessLifecycle,
   evaluateApkReuse,
@@ -3275,9 +3350,11 @@ module.exports = {
   ensureMetroServer,
   isInsufficientStorageInstallFailure,
   isAppJsReadyUiHierarchy,
+  launchInstalledApp,
   parseDumpsysPackageOutput,
   parseAndroidPackageUid,
   parseAndroidProcessId,
+  parseResolvedLauncherActivity,
   parseSha256Output,
   parseCliOptions,
   parseApkVariant,
@@ -3286,6 +3363,7 @@ module.exports = {
   readProcessIdentity,
   readAndroidUiHierarchy,
   readWindowsProcessTreeIdentities,
+  resolveLauncherActivity,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
   resolveAndroidQaApplicationId,

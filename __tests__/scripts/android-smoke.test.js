@@ -17,9 +17,11 @@ const {
   evaluateApkAbiCompatibility,
   evaluateInstallReuse,
   isAppJsReadyUiHierarchy,
+  launchInstalledApp,
   isInsufficientStorageInstallFailure,
   parseAndroidPackageUid,
   parseAndroidProcessId,
+  parseResolvedLauncherActivity,
   parseCliOptions,
   parseApkVariant,
   parseTargetAbi,
@@ -33,6 +35,7 @@ const {
   resolvePackagedAndroidAbis,
   resolveAndroidQaApplicationId,
   resolveDebugApkReuseDecision,
+  resolveLauncherActivity,
   runAdbInstall,
   runAndroidGradleBuild,
   runCapture,
@@ -291,6 +294,70 @@ describe('android-smoke app JS readiness', () => {
 
     expect(readAndroidUiHierarchy('adb', 'device-1', { spawnSync })).toBeNull();
     expect(spawnSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('android-smoke installed app launch', () => {
+  const appPackage = 'com.github.tah10n.pocketai.qa';
+
+  it('parses only a launcher component owned by the expected package', () => {
+    expect(parseResolvedLauncherActivity(
+      `priority=0\n${appPackage}/.MainActivity\n`,
+      appPackage,
+    )).toBe(`${appPackage}/.MainActivity`);
+    expect(parseResolvedLauncherActivity('com.android.settings/.Settings\n', appPackage)).toBeNull();
+  });
+
+  it('resolves the explicit launcher activity instead of relying on a monkey event', () => {
+    const runCapture = jest.fn(() => `${appPackage}/.MainActivity\n`);
+
+    expect(resolveLauncherActivity('adb', 'device-1', appPackage, { runCapture }))
+      .toBe(`${appPackage}/.MainActivity`);
+    expect(runCapture).toHaveBeenCalledWith('adb', [
+      '-s',
+      'device-1',
+      'shell',
+      'cmd',
+      'package',
+      'resolve-activity',
+      '--brief',
+      '-a',
+      'android.intent.action.MAIN',
+      '-c',
+      'android.intent.category.LAUNCHER',
+      appPackage,
+    ]);
+  });
+
+  it('waits for the resolved launcher activity to report a successful start', () => {
+    const runCapture = jest.fn()
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce(`${appPackage}/.MainActivity\n`)
+      .mockReturnValueOnce(`Starting: Intent { cmp=${appPackage}/.MainActivity }\nStatus: ok\n`);
+
+    expect(() => launchInstalledApp('adb', 'device-1', appPackage, { runCapture })).not.toThrow();
+    expect(runCapture.mock.calls[2][1]).toEqual([
+      '-s',
+      'device-1',
+      'shell',
+      'am',
+      'start',
+      '-W',
+      '-S',
+      '-n',
+      `${appPackage}/.MainActivity`,
+    ]);
+    expect(runCapture.mock.calls.flatMap((call) => call[1]).join(' ')).not.toContain(' monkey ');
+  });
+
+  it('fails immediately when activity manager does not confirm the launch', () => {
+    const runCapture = jest.fn()
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce(`${appPackage}/.MainActivity\n`)
+      .mockReturnValueOnce('Error: Activity not started\n');
+
+    expect(() => launchInstalledApp('adb', 'device-1', appPackage, { runCapture }))
+      .toThrow(/did not report a successful start/);
   });
 });
 
@@ -1292,6 +1359,37 @@ describe('android-smoke privacy-scoped bootstrap logcat', () => {
       expect(smokeSource).not.toContain('["-s", device.serial, "logcat", "-c"]');
       expect(smokeSource).toContain('log("Saved Android bootstrap screenshot.")');
       expect(smokeSource).not.toContain('Saved screenshot to ${');
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('keeps crash diagnostics privacy-scoped to the app UID after its process exits', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-bootstrap-logcat-uid-'));
+    const outputPath = path.join(tempDir, 'bootstrap-failure-logcat.txt');
+    const capture = jest.fn()
+      .mockReturnValueOnce(`package:${packageName} uid:10123\n`)
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce('E/AndroidRuntime: app process exited\n');
+
+    try {
+      saveLogcat('adb', 'device-1', outputPath, {
+        packageName,
+        runCapture: capture,
+      });
+
+      expect(capture.mock.calls[2][1]).toEqual([
+        '-s',
+        'device-1',
+        'logcat',
+        '-d',
+        '-v',
+        'time',
+        '--uid=10123',
+        '-t',
+        '800',
+      ]);
+      expect(fs.readFileSync(outputPath, 'utf8')).toContain('app process exited');
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });
     }

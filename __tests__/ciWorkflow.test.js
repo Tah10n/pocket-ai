@@ -204,6 +204,8 @@ describe('Android catalog QA CI configuration', () => {
     expect(androidGate).toContain('npm run verify:native-config -- --require-android');
     expect(iosGate).toContain('npm run anydoc:build:ios');
     expect(iosGate).toContain('npm run verify:native-config -- --require-ios');
+    expect(iosGate).toContain('runs-on: macos-26');
+    expect(iosGate).not.toContain('runs-on: macos-15');
     expect(iosGate).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
     expect(iosGate).toContain('CODE_SIGNING_ALLOWED=NO build');
     expect(iosGate).not.toContain('CLANG_ENABLE_EXPLICIT_MODULES=NO');
@@ -232,6 +234,8 @@ describe('Android catalog QA CI configuration', () => {
     expect(releaseWorkflow).toContain('android-release-gate:');
     expect(releaseWorkflow).toContain('ios-release-gate:');
     expect(releaseWorkflow).toContain('build:android:production:clean');
+    expect(iosGate).toContain('runs-on: macos-26');
+    expect(iosGate).not.toContain('runs-on: macos-15');
     expect(releaseWorkflow).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
     expect(releaseWorkflow).toContain('CODE_SIGNING_ALLOWED=NO build');
     expect(releaseWorkflow).not.toContain('CLANG_ENABLE_EXPLICIT_MODULES=NO');

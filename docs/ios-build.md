@@ -6,7 +6,7 @@ For general development setup, see the main [README](../README.md).
 
 ## Prerequisites
 
-- macOS with Xcode installed (latest stable recommended)
+- macOS with Xcode 26 or newer installed (Expo SDK 55 requires Xcode 26)
 - An [Apple Developer](https://developer.apple.com/) account enrolled in the Apple Developer Program
 - CocoaPods (`sudo gem install cocoapods` or via Homebrew)
 - Rust through `rustup`; the repository pins Rust 1.97.1 and the device, Apple Silicon

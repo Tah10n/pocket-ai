@@ -45,7 +45,7 @@ jobs:
   ios-release-gate:
     permissions:
       contents: read
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     env:
       NODE_ENV: production

@@ -4934,10 +4934,13 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       process.env,
       { NODE_ENV: nodeEnv },
     );
-    const gradleArgs = withAndroidProvenanceGradleExecutionArgs([
-      'app:assembleRelease',
-      '-PreactNativeArchitectures=x86_64',
-    ]);
+    const gradleArgs = [
+      ...withAndroidProvenanceGradleExecutionArgs([
+        'app:assembleRelease',
+        '-PreactNativeArchitectures=x86_64',
+      ]),
+      '--stacktrace',
+    ];
     const prebuildInputState = collectPrebuildInputState(appRoot, {
       env: isolatedEnvironment,
       hmacKeyPath,

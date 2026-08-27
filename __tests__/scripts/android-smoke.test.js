@@ -13,6 +13,7 @@ const {
   captureAndroidScreenshot,
   cleanupOwnedMetroAfterStartupFailure,
   createOwnedMetroProcessLifecycle,
+  dismissExternalLauncherAnrDialog,
   evaluateApkReuse,
   evaluateApkAbiCompatibility,
   evaluateInstallReuse,
@@ -21,6 +22,7 @@ const {
   isInsufficientStorageInstallFailure,
   parseAndroidPackageUid,
   parseAndroidProcessId,
+  parseResolvedDefaultHomePackage,
   parseResolvedLauncherActivity,
   parseCliOptions,
   parseApkVariant,
@@ -254,6 +256,65 @@ describe('android-smoke app JS readiness', () => {
     expect(readUiHierarchy).toHaveBeenCalledTimes(2);
   });
 
+  it('dismisses only a confirmed default-launcher ANR before requiring the app JS marker', async () => {
+    const launcherAnrHierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_wait" text="Wait" bounds="[100,200][300,300]" />',
+      '</hierarchy>',
+    ].join('');
+    const readUiHierarchy = jest.fn()
+      .mockReturnValueOnce(launcherAnrHierarchy)
+      .mockReturnValueOnce(readyHierarchy);
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return 'ANR in com.android.launcher3\n';
+      }
+      return '';
+    });
+
+    await expect(waitForAppJsReady('adb', 'device-1', appPackage, {
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      readUiHierarchy,
+      runCapture,
+      delay: () => Promise.resolve(),
+    })).resolves.toBeUndefined();
+
+    expect(runCapture).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'tap', '200', '250'],
+    );
+    expect(readUiHierarchy).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not dismiss an ANR attributed to the app under test', async () => {
+    const appAnrHierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_wait" text="Wait" bounds="[100,200][300,300]" />',
+      '</hierarchy>',
+    ].join('');
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return `ANR in ${appPackage}\n`;
+      }
+      return '';
+    });
+
+    await expect(waitForAppJsReady('adb', 'device-1', appPackage, {
+      timeoutMs: 0,
+      readUiHierarchy: jest.fn(() => appAnrHierarchy),
+      runCapture,
+    })).rejects.toThrow('Timed out while waiting');
+
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
   it('fails readiness immediately when the owned Metro exits', async () => {
     await expect(waitForAppJsReady('adb', 'device-1', appPackage, {
       timeoutMs: 1_000,
@@ -298,6 +359,35 @@ describe('android-smoke app JS readiness', () => {
 });
 
 describe('android-smoke installed app launch', () => {
+  it('parses the resolved default HOME package independently from its activity name', () => {
+    expect(parseResolvedDefaultHomePackage(
+      'priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n'
+      + 'com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBe('com.android.launcher3');
+    expect(parseResolvedDefaultHomePackage('No activity found')).toBeNull();
+  });
+
+  it('refuses to dismiss an ANR dialog without a matching launcher report', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return 'No ANR report available\n';
+      }
+      return '';
+    });
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      '<hierarchy><node package="android" resource-id="android:id/aerr_wait" bounds="[100,200][300,300]" /></hierarchy>',
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
   const appPackage = 'com.github.tah10n.pocketai.qa';
 
   it('parses only a launcher component owned by the expected package', () => {
@@ -920,6 +1010,7 @@ describe('android-smoke target ABI contract', () => {
       '--rerun-tasks',
       '--no-build-cache',
       '--no-configuration-cache',
+      '--stacktrace',
     ]);
     expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a')).toEqual([
       'app:assembleRelease',
@@ -927,6 +1018,7 @@ describe('android-smoke target ABI contract', () => {
       '--rerun-tasks',
       '--no-build-cache',
       '--no-configuration-cache',
+      '--stacktrace',
     ]);
     expect(() => buildGradleAssembleArgs(undefined, 'universal'))
       .toThrow(/requires an explicit assemble task/);
@@ -949,6 +1041,7 @@ describe('android-smoke target ABI contract', () => {
       '--rerun-tasks',
       '--no-build-cache',
       '--no-configuration-cache',
+      '--stacktrace',
     ]);
     expect(() => buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
       applicationId: 'com.example.untrusted',
@@ -984,6 +1077,7 @@ describe('android-smoke target ABI contract', () => {
         '--rerun-tasks',
         '--no-build-cache',
         '--no-configuration-cache',
+        '--stacktrace',
       ],
       expect.objectContaining({
         cwd: 'C:\\fixture\\android',
@@ -1008,7 +1102,7 @@ describe('android-smoke target ABI contract', () => {
         '/d',
         '/s',
         '/c',
-        'gradlew.bat app:assembleRelease -PreactNativeArchitectures=x86_64 --rerun-tasks --no-build-cache --no-configuration-cache',
+        'gradlew.bat app:assembleRelease -PreactNativeArchitectures=x86_64 --rerun-tasks --no-build-cache --no-configuration-cache --stacktrace',
       ],
       expect.objectContaining({ cwd: 'C:\\fixture\\android' }),
     );

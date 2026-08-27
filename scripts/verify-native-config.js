@@ -114,6 +114,10 @@ function assertIosGeneratedConfig(root = projectRoot) {
 }
 
 function assertAndroidGeneratedConfig(root = projectRoot) {
+  const gradleProperties = readText(
+    path.join(root, 'android', 'gradle.properties'),
+    'Generated Android Gradle properties',
+  );
   const manifest = readText(
     path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
     'Generated Android manifest',
@@ -130,6 +134,11 @@ function assertAndroidGeneratedConfig(root = projectRoot) {
   const service = manifest.match(/<service\b[^>]*RNBackgroundActionsTask[^>]*>/u)?.[0] ?? '';
   if (!service || !/android:foregroundServiceType="dataSync"/u.test(service)) {
     throw new Error('RNBackgroundActionsTask must declare foregroundServiceType=dataSync.');
+  }
+  if (!/^org\.gradle\.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m$/mu.test(gradleProperties)) {
+    throw new Error(
+      'Generated Android Gradle properties must reserve 1024 MiB of Metaspace for the native Release pack.',
+    );
   }
 }
 

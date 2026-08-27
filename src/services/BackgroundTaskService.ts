@@ -87,6 +87,13 @@ class BackgroundTaskService {
     private foregroundServiceStartPromise: Promise<ForegroundServiceStartAttempt> | null = null;
 
     start() {
+        // A long-lived singleton can miss an AppState transition while its listener is
+        // detached or before React Native delivers the event. Refresh from the native
+        // snapshot for every user-initiated start so a stale background value cannot
+        // incorrectly reject foreground work. A real background snapshot remains
+        // protected by maybeStartForegroundService below.
+        this.appState = normalizeAppState(AppState.currentState);
+
         if (this.started) {
             return;
         }

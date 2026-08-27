@@ -10,6 +10,10 @@ function createProject() {
   fs.mkdirSync(path.join(root, 'ios', 'PocketAI'), { recursive: true });
   fs.mkdirSync(path.join(root, 'ios', 'PocketAI.xcodeproj'), { recursive: true });
   fs.mkdirSync(path.join(root, 'android', 'app', 'src', 'main'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'android', 'gradle.properties'),
+    'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m\n',
+  );
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
     expo: {
       ios: { infoPlist: {} },
@@ -104,6 +108,20 @@ describe('native configuration contract', () => {
       );
 
       expect(() => run(['--require-ios'], root)).toThrow(/extended-virtual-addressing/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the generated Android project when native Release metaspace is undersized', () => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(root, 'android', 'gradle.properties'),
+        'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m\n',
+      );
+
+      expect(() => run(['--require-android'], root)).toThrow(/reserve 1024 MiB of Metaspace/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

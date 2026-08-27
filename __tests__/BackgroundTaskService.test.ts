@@ -1,20 +1,26 @@
 import BackgroundService from 'react-native-background-actions';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { backgroundTaskService } from '../src/services/BackgroundTaskService';
 
 describe('BackgroundTaskService', () => {
   const originalPlatform = Platform.OS;
+  const originalAppStateDescriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
 
   beforeEach(async () => {
     await backgroundTaskService.stopBackgroundTask();
+    backgroundTaskService.stop();
     jest.clearAllMocks();
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
     (backgroundTaskService as any).appState = 'active';
   });
 
   afterAll(() => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
+    if (originalAppStateDescriptor) {
+      Object.defineProperty(AppState, 'currentState', originalAppStateDescriptor);
+    }
   });
 
   it('returns a successful Android foreground-service start outcome', async () => {
@@ -75,6 +81,7 @@ describe('BackgroundTaskService', () => {
   });
 
   it('returns skipped_android_background instead of attempting a forbidden background start', async () => {
+    Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'background' });
     (backgroundTaskService as any).appState = 'background';
 
     await expect(backgroundTaskService.startBackgroundDownload(undefined, {
@@ -89,6 +96,22 @@ describe('BackgroundTaskService', () => {
 
     expect(BackgroundService.start).not.toHaveBeenCalled();
     expect(backgroundTaskService.isTaskActive('download')).toBe(true);
+  });
+
+  it('refreshes a stale cached background state before a foreground Android start', async () => {
+    (backgroundTaskService as any).appState = 'background';
+
+    await expect(backgroundTaskService.startBackgroundInference('Model', {
+      requireServiceStart: true,
+    })).resolves.toEqual({
+      status: 'started',
+      serviceRunning: true,
+      degraded: false,
+      required: true,
+      requirementSatisfied: true,
+    });
+
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
   });
 
   it('returns skipped_ios_foreground while foreground iOS work remains tracked', async () => {

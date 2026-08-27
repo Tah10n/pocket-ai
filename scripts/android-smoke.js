@@ -2743,6 +2743,8 @@ const appJsReadyTextLabels = [
   "Детали модели",
 ];
 
+const androidAnrWaitResourceId = "android:id/aerr_wait";
+
 function isAppJsReadyUiHierarchy(xml, appPackage) {
   if (
     typeof xml !== "string"
@@ -2788,12 +2790,104 @@ function readAndroidUiHierarchy(adbPath, serial, options = {}) {
   return dumpResult.stdout;
 }
 
+function parseResolvedDefaultHomePackage(output) {
+  const componentPattern = /^([A-Za-z0-9_.]+)\/[A-Za-z0-9_.$]+$/u;
+  for (const line of `${output || ""}`.split(/\r?\n/u).reverse()) {
+    const match = componentPattern.exec(line.trim());
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function findAndroidUiResourceCenter(xml, resourceId) {
+  if (typeof xml !== "string") {
+    return null;
+  }
+  for (const match of xml.matchAll(/<node\b[^>]*>/gu)) {
+    const node = match[0];
+    if (!node.includes(`resource-id="${resourceId}"`)) {
+      continue;
+    }
+    const bounds = /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u.exec(node);
+    if (!bounds) {
+      return null;
+    }
+    const [, left, top, right, bottom] = bounds.map(Number);
+    if (right <= left || bottom <= top) {
+      return null;
+    }
+    return {
+      x: Math.floor((left + right) / 2),
+      y: Math.floor((top + bottom) / 2),
+    };
+  }
+  return null;
+}
+
+function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy, options = {}) {
+  const waitActionCenter = findAndroidUiResourceCenter(hierarchy, androidAnrWaitResourceId);
+  if (!waitActionCenter) {
+    return false;
+  }
+
+  const capture = options.runCapture ?? runCapture;
+  const homeOutput = capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "cmd",
+      "package",
+      "resolve-activity",
+      "--brief",
+      "-a",
+      "android.intent.action.MAIN",
+      "-c",
+      "android.intent.category.HOME",
+    ],
+    { allowFailure: true },
+  );
+  const launcherPackage = parseResolvedDefaultHomePackage(homeOutput);
+  if (!launcherPackage || launcherPackage === appPackage) {
+    return false;
+  }
+
+  const lastAnrReport = capture(
+    adbPath,
+    ["-s", serial, "shell", "dumpsys", "activity", "lastanr"],
+    { allowFailure: true },
+  );
+  if (!`${lastAnrReport || ""}`.includes(launcherPackage)) {
+    return false;
+  }
+
+  capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "input",
+      "tap",
+      `${waitActionCenter.x}`,
+      `${waitActionCenter.y}`,
+    ],
+  );
+  return true;
+}
+
 async function waitForAppJsReady(adbPath, serial, appPackage, options = {}) {
   const timeoutMs = options.timeoutMs ?? appJsReadyTimeoutMs;
   const pollIntervalMs = options.pollIntervalMs ?? appJsReadyPollIntervalMs;
   const readUiHierarchy = options.readUiHierarchy ?? readAndroidUiHierarchy;
+  const dismissLauncherAnrDialog =
+    options.dismissLauncherAnrDialog ?? dismissExternalLauncherAnrDialog;
   const wait = options.delay ?? delay;
   const startedAt = Date.now();
+  let launcherAnrDismissed = false;
 
   do {
     if (options.lifecycle?.isStopRequested?.()) {
@@ -2808,6 +2902,15 @@ async function waitForAppJsReady(adbPath, serial, appPackage, options = {}) {
     if (isAppJsReadyUiHierarchy(hierarchy, appPackage)) {
       log("Confirmed that the app JS surface is visible.");
       return;
+    }
+    if (
+      !launcherAnrDismissed
+      && dismissLauncherAnrDialog(adbPath, serial, appPackage, hierarchy, options)
+    ) {
+      launcherAnrDismissed = true;
+      log("Dismissed an external emulator launcher ANR dialog before checking app readiness again.");
+      await wait(pollIntervalMs);
+      continue;
     }
 
     if (Date.now() - startedAt >= timeoutMs) {
@@ -3277,7 +3380,10 @@ function buildGradleAssembleArgs(assembleTask, targetAbi = "universal", options 
   if (requestedApplicationId !== defaultApplicationId) {
     buildArgs.push(`-PpocketAiApplicationId=${requestedApplicationId}`);
   }
-  return withAndroidProvenanceGradleExecutionArgs(buildArgs);
+  return [
+    ...withAndroidProvenanceGradleExecutionArgs(buildArgs),
+    "--stacktrace",
+  ];
 }
 
 function assertSmokeBuildOverrideContract(gradleArgs = null, options = {}) {
@@ -3348,10 +3454,12 @@ module.exports = {
   evaluateApkAbiCompatibility,
   evaluateInstallReuse,
   ensureMetroServer,
+  dismissExternalLauncherAnrDialog,
   isInsufficientStorageInstallFailure,
   isAppJsReadyUiHierarchy,
   launchInstalledApp,
   parseDumpsysPackageOutput,
+  parseResolvedDefaultHomePackage,
   parseAndroidPackageUid,
   parseAndroidProcessId,
   parseResolvedLauncherActivity,

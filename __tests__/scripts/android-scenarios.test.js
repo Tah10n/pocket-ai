@@ -34,6 +34,7 @@ const {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  captureCoreSurfaceScreenshots,
   captureSettledScenarioScreenshot,
   getScenarioOutcomeScreenshotPath,
   cleanupAndroidLogcatCollector,
@@ -68,6 +69,7 @@ const {
   findResourceIdClearOfBottomOverlay,
   findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
+  hideChatQaEvidenceForVisualCapture,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
@@ -4036,6 +4038,82 @@ describe('android-scenarios pack selection', () => {
         requiresIsolatedQaInstall: true,
       }),
     ]));
+  });
+
+  it('removes the QA panel from the hierarchy before capturing a production-like Glass chat screenshot', async () => {
+    const waitForResourceId = jest.fn().mockResolvedValue({ resourceId: 'matched' });
+    const tapVisibleResource = jest.fn().mockResolvedValue(undefined);
+    const waitForNoResourceId = jest.fn().mockResolvedValue({ nodes: [] });
+    const ctx = { serial: 'device-1' };
+
+    await hideChatQaEvidenceForVisualCapture(ctx, {
+      adbPath: 'adb',
+      waitForResourceId,
+      tapVisibleResource,
+      waitForNoResourceId,
+    });
+
+    expect(waitForResourceId).toHaveBeenNthCalledWith(
+      1,
+      'adb',
+      'device-1',
+      'chat-qa-generation-evidence',
+      expect.objectContaining({ visibleOnly: true }),
+    );
+    expect(tapVisibleResource).toHaveBeenCalledWith(
+      ctx,
+      'chat-qa-hide-generation-evidence',
+      expect.any(Object),
+    );
+    expect(waitForNoResourceId).toHaveBeenCalledWith(
+      'adb',
+      'device-1',
+      'chat-qa-generation-evidence',
+      expect.any(Object),
+    );
+    expect(waitForResourceId).toHaveBeenNthCalledWith(
+      2,
+      'adb',
+      'device-1',
+      'chat-header-model-selector',
+      expect.objectContaining({ visibleOnly: true }),
+    );
+    expect(waitForResourceId).toHaveBeenNthCalledWith(
+      3,
+      'adb',
+      'device-1',
+      'chat-message-input',
+      expect.objectContaining({ visibleOnly: true }),
+    );
+    expect(tapVisibleResource.mock.invocationCallOrder[0]).toBeLessThan(
+      waitForNoResourceId.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not capture the Glass chat frame until the QA hierarchy is hidden', async () => {
+    const callOrder = [];
+    const hideQaEvidence = jest.fn(async () => {
+      callOrder.push('hide-qa');
+    });
+    const ctx = {
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+      captureScreenshot: jest.fn((name) => {
+        callOrder.push(`capture:${name}`);
+        return name;
+      }),
+    };
+
+    await captureCoreSurfaceScreenshots(ctx, 'native-glass-light', ['Visual style'], {
+      hideChatQaEvidence: true,
+      hideChatQaEvidenceForVisualCapture: hideQaEvidence,
+      goToHome: jest.fn().mockResolvedValue(undefined),
+      tapBottomTabUntilVisible: jest.fn().mockResolvedValue(undefined),
+      scrollToAnyText: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(callOrder.indexOf('hide-qa')).toBeGreaterThan(callOrder.indexOf('capture:native-glass-light-home.png'));
+    expect(callOrder.indexOf('hide-qa')).toBeLessThan(callOrder.indexOf('capture:native-glass-light-chat.png'));
+    expect(hideQaEvidence).toHaveBeenCalledWith(ctx);
   });
 
   it('recognizes only the background-actions service in Android dumpsys evidence', () => {

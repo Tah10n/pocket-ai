@@ -46,14 +46,30 @@ jobs:
               - '.github/workflows/release-please.yml'
               - 'scripts/android-*.js'
               - 'scripts/build-android-release.js'
+              - 'scripts/verify-ci-gate-results.js'
               - 'scripts/verify-native-config.js'
+              - 'src/design-system/components/ThemeStyleSelector.tsx'
+              - 'src/design-system/materials/**'
+              - 'src/design-system/themes/**'
+              - 'src/components/ui/ChatHeader.tsx'
+              - 'src/components/ui/ChatInputBar.tsx'
+              - 'src/components/ui/ScreenShell.tsx'
+              - 'src/components/ui/TabBarMaterialBackground.tsx'
+              - 'src/providers/ThemeProvider.tsx'
+              - 'src/services/AndroidQaGenerationEvidence.ts'
               - 'src/services/BackgroundTaskService.ts'
               - 'src/services/NotificationService.ts'
+              - 'src/ui/screens/ChatScreen.tsx'
+              - 'src/utils/androidBlur.ts'
+              - 'src/utils/androidLiquidGlass.ts'
+              - 'src/utils/tabBarLayout.ts'
+              - 'src/utils/testIds.ts'
+              - 'app/(tabs)/_layout.tsx'
               - 'android/**'
               - 'ios/**'
 
-  verify:
-    name: verify
+  deterministic:
+    name: deterministic
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -88,7 +104,7 @@ jobs:
     if: needs.native-scope.outputs.required == 'true'
     needs:
       - native-scope
-      - verify
+      - deterministic
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -159,7 +175,7 @@ jobs:
     if: needs.native-scope.outputs.required == 'true'
     needs:
       - native-scope
-      - verify
+      - deterministic
     runs-on: macos-26
     timeout-minutes: 120
     env:
@@ -203,11 +219,40 @@ jobs:
           -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
           CODE_SIGNING_ALLOWED=NO build
 
+  verify:
+    name: verify
+    if: always()
+    needs:
+      - native-scope
+      - deterministic
+      - android-native-release
+      - ios-native-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Enforce deterministic and conditional native results
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          NATIVE_SCOPE_RESULT: ${{ needs.native-scope.result }}
+          NATIVE_REQUIRED: ${{ needs.native-scope.outputs.required }}
+          DETERMINISTIC_RESULT: ${{ needs.deterministic.result }}
+          ANDROID_NATIVE_RESULT: ${{ needs.android-native-release.result }}
+          IOS_NATIVE_RESULT: ${{ needs.ios-native-release.result }}
+        run: node scripts/verify-ci-gate-results.js
+
   android-qa:
     name: android (qa)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    needs: verify
+    needs: deterministic
     if: >-
       github.event_name == 'pull_request' &&
       (

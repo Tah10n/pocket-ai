@@ -41,7 +41,7 @@ Bootstrap note:
 Releases are automated with **Release Please**:
 
 - It opens/updates a Release PR after changes land on `main`.
-- Merging the Release PR updates versions, `.release-please-manifest.json`, and `CHANGELOG.md`. The push workflow cancels stale runs, confirms that the gated SHA is still the current `main` head, and creates a git tag and GitHub Release only after clean Android and iOS native release gates succeed.
+- Merging the Release PR updates versions, `.release-please-manifest.json`, and `CHANGELOG.md`. The push workflow cancels stale runs, runs deterministic release verification plus clean Android and iOS native release gates against the event SHA, confirms that SHA is still the current `main` head, and only then creates a git tag and GitHub Release.
 - EAS production builds are the only store-upload artifact path and use remote, auto-incremented Android and iOS developer-facing versions. Initialize both platforms from their latest accepted store builds before the first production build after enabling this workflow. Local Android bundles and Xcode archives are diagnostic only; `eas build:version:sync` does not reserve a new store number.
 
 If `main` is protected with required checks, configure a PAT secret (for example `RELEASE_PLEASE_TOKEN`) so CI runs on Release PRs.

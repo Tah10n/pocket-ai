@@ -1172,6 +1172,31 @@ describe('ChatScreen', () => {
     )).toBeTruthy();
   });
 
+  it('hides QA controls for a production-like visual capture and restores them on refocus', async () => {
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+    const view = render(React.createElement(ChatScreen));
+
+    fireEvent.press(view.getByTestId('chat-qa-hide-generation-evidence'));
+
+    expect(view.queryByTestId('chat-qa-generation-evidence')).toBeNull();
+    expect(view.getByTestId('chat-list-viewport')).toBeTruthy();
+    expect(view.getByTestId('chat-input-bar')).toBeTruthy();
+
+    await act(async () => {
+      navigation.__setIsFocused(false);
+      view.rerender(React.createElement(ChatScreen));
+    });
+    await act(async () => {
+      navigation.__setIsFocused(true);
+      view.rerender(React.createElement(ChatScreen));
+    });
+
+    expect(view.getByTestId('chat-qa-generation-evidence')).toBeTruthy();
+  });
+
   it('publishes the required foreground-service start outcome through stable QA markers', async () => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
     const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');

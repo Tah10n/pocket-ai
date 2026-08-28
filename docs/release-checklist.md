@@ -69,7 +69,7 @@ npm test
 node ./scripts/verify-native-config.js
 ```
 
-Release Please is downstream of clean Android release compilation and an unsigned iOS Release simulator build. Stale main-branch runs are cancelled, and the release job verifies that its gated SHA is still the current `main` head immediately before invoking Release Please. A tag or GitHub Release is not created when either native gate fails. Release PRs and changes to native modules, config plugins, native/release workflows and scripts, app/EAS config, or dependency lockfiles also trigger Android API 32/33/34/35 native packs and the iOS compile gate in PR CI.
+Release Please is downstream of exact-SHA deterministic release verification, clean Android release compilation, and an unsigned iOS Release simulator build. Stale main-branch runs are cancelled, and the release job verifies that its gated SHA is still the current `main` head immediately before invoking Release Please. A tag or GitHub Release is not created when any gate fails. In PR CI, the required `verify` context aggregates deterministic verification with the conditional native matrix: release PRs and changes to native modules, Glass/material integration, navigation chrome, config plugins, native/release workflows and scripts, app/EAS config, or dependency lockfiles must pass Android API 32/33/34/35 native packs and the iOS compile gate.
 
 If the release affects model loading, chat, downloads, storage, or navigation behavior, also run an Android phone smoke pass with a connected device:
 

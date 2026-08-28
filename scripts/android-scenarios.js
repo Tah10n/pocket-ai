@@ -150,6 +150,8 @@ const BACKGROUND_ACTIONS_CHANNEL_ID = "RN_BACKGROUND_ACTIONS_CHANNEL";
 const BACKGROUND_ACTIONS_SERVICE_CLASS = "com.asterinet.react.bgactions.RNBackgroundActionsTask";
 const QA_BACKGROUND_TASK_START_RESOURCE_ID = "chat-qa-start-background-task";
 const QA_BACKGROUND_TASK_STOP_RESOURCE_ID = "chat-qa-stop-background-task";
+const CHAT_QA_EVIDENCE_RESOURCE_ID = "chat-qa-generation-evidence";
+const CHAT_QA_HIDE_EVIDENCE_RESOURCE_ID = "chat-qa-hide-generation-evidence";
 const QA_BACKGROUND_TASK_OUTCOME_STATUSES = [
   "started",
   "already_running",
@@ -2800,26 +2802,66 @@ async function selectThemeStyle(ctx, themeStyle) {
   }
 }
 
-async function captureCoreSurfaceScreenshots(ctx, prefix, settingsFocusLabels = LANGUAGE_ROW_LABELS) {
-  await goToHome(ctx);
+async function hideChatQaEvidenceForVisualCapture(ctx, options = {}) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const waitForResource = options.waitForResourceId ?? waitForResourceId;
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  const waitForNoResource = options.waitForNoResourceId ?? waitForNoResourceId;
+
+  await waitForResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+  await tapResource(ctx, CHAT_QA_HIDE_EVIDENCE_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await waitForNoResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await waitForResource(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+  await waitForResource(adbPath, ctx.serial, CHAT_MESSAGE_INPUT_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+}
+
+async function captureCoreSurfaceScreenshots(
+  ctx,
+  prefix,
+  settingsFocusLabels = LANGUAGE_ROW_LABELS,
+  options = {}
+) {
+  const navigateHome = options.goToHome ?? goToHome;
+  const tapBottomTab = options.tapBottomTabUntilVisible ?? tapBottomTabUntilVisible;
+  const scrollToText = options.scrollToAnyText ?? scrollToAnyText;
+  const hideQaEvidence = options.hideChatQaEvidenceForVisualCapture
+    ?? hideChatQaEvidenceForVisualCapture;
+
+  await navigateHome(ctx);
   await ctx.expectAnyText(APP_TITLE_LABELS);
   ctx.captureScreenshot(`${prefix}-home.png`);
 
-  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+  await tapBottomTab(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
   });
+  if (options.hideChatQaEvidence) {
+    await hideQaEvidence(ctx);
+  }
   ctx.captureScreenshot(`${prefix}-chat.png`);
 
-  await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
+  await tapBottomTab(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
   });
-  await scrollToAnyText(ctx, settingsFocusLabels, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await scrollToText(ctx, settingsFocusLabels, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
   ctx.captureScreenshot(`${prefix}-settings.png`);
 
-  await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
+  await tapBottomTab(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
   await ctx.expectAnyText(ALL_MODELS_LABELS);
   const screenshotPath = ctx.captureScreenshot(`${prefix}-models.png`);
-  await goToHome(ctx);
+  await navigateHome(ctx);
   return { screenshotPath };
 }
 
@@ -2897,10 +2939,20 @@ function buildScenarios() {
         try {
           await selectThemeStyle(ctx, "glass");
           await selectThemeMode(ctx, "light");
-          await captureCoreSurfaceScreenshots(ctx, "native-glass-light", THEME_STYLE_LABELS);
+          await captureCoreSurfaceScreenshots(
+            ctx,
+            "native-glass-light",
+            THEME_STYLE_LABELS,
+            { hideChatQaEvidence: true }
+          );
 
           await selectThemeMode(ctx, "dark");
-          return await captureCoreSurfaceScreenshots(ctx, "native-glass-dark", THEME_STYLE_LABELS);
+          return await captureCoreSurfaceScreenshots(
+            ctx,
+            "native-glass-dark",
+            THEME_STYLE_LABELS,
+            { hideChatQaEvidence: true }
+          );
         } finally {
           await restoreThemePreferences(ctx, originalPreferences);
         }
@@ -10585,6 +10637,7 @@ module.exports = {
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
+  captureCoreSurfaceScreenshots,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
   cleanupAndroidLogcatCollector,
@@ -10623,6 +10676,7 @@ module.exports = {
   findNodeInSnapshot,
   findResourceIdInSnapshot,
   findResourceIdClearOfBottomOverlay,
+  hideChatQaEvidenceForVisualCapture,
   hasConversationHistoryStartAnchor,
   isBoundsClearOfBottomOverlay,
   getBottomTabTapPoint,

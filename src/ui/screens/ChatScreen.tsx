@@ -700,6 +700,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     const [backgroundTaskFailureCategory, setBackgroundTaskFailureCategory] = useState<
         ForegroundServiceStartFailureCategory | null
     >(null);
+    const [isHiddenForVisualCapture, setIsHiddenForVisualCapture] = useState(false);
     const didStartQaBackgroundTaskRef = useRef(false);
     const evidence = useSyncExternalStore(
         subscribeAndroidQaGenerationEvidence,
@@ -735,6 +736,14 @@ function EnabledAndroidQaGenerationEvidenceSurface({
         }
     }, []);
 
+    useFocusEffect(useCallback(() => {
+        setIsHiddenForVisualCapture(false);
+    }, []));
+
+    if (isHiddenForVisualCapture) {
+        return null;
+    }
+
     return (
         <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
             <View
@@ -745,6 +754,14 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 style={styles.androidQaEvidenceMarker}
             />
             <View style={styles.androidQaEvidenceActions}>
+                <Button
+                    size="xs"
+                    action="secondary"
+                    testID="chat-qa-hide-generation-evidence"
+                    onPress={() => setIsHiddenForVisualCapture(true)}
+                >
+                    <ButtonText>QA hide</ButtonText>
+                </Button>
                 <Button
                     size="xs"
                     action="secondary"

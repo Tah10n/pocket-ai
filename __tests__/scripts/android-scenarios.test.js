@@ -4042,14 +4042,14 @@ describe('android-scenarios pack selection', () => {
 
   it('removes the QA panel from the hierarchy before capturing a production-like Glass chat screenshot', async () => {
     const waitForResourceId = jest.fn().mockResolvedValue({ resourceId: 'matched' });
-    const tapVisibleResource = jest.fn().mockResolvedValue(undefined);
+    const tapAnyText = jest.fn().mockResolvedValue(undefined);
     const waitForNoResourceId = jest.fn().mockResolvedValue({ nodes: [] });
     const ctx = { serial: 'device-1' };
 
     await hideChatQaEvidenceForVisualCapture(ctx, {
       adbPath: 'adb',
       waitForResourceId,
-      tapVisibleResource,
+      tapAnyText,
       waitForNoResourceId,
     });
 
@@ -4060,9 +4060,8 @@ describe('android-scenarios pack selection', () => {
       'chat-qa-generation-evidence',
       expect.objectContaining({ visibleOnly: true }),
     );
-    expect(tapVisibleResource).toHaveBeenCalledWith(
-      ctx,
-      'chat-qa-hide-generation-evidence',
+    expect(tapAnyText).toHaveBeenCalledWith(
+      ['chat-qa-hide-generation-evidence-action'],
       expect.any(Object),
     );
     expect(waitForNoResourceId).toHaveBeenCalledWith(
@@ -4079,7 +4078,7 @@ describe('android-scenarios pack selection', () => {
       expect.objectContaining({ visibleOnly: true }),
     );
     expect(waitForResourceId).toHaveBeenCalledTimes(2);
-    expect(tapVisibleResource.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(tapAnyText.mock.invocationCallOrder[0]).toBeLessThan(
       waitForNoResourceId.mock.invocationCallOrder[0],
     );
   });

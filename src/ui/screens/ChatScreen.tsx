@@ -757,6 +757,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 <Button
                     size="xs"
                     action="secondary"
+                    accessibilityLabel="chat-qa-hide-generation-evidence-action"
                     testID="chat-qa-hide-generation-evidence"
                     onPress={() => setIsHiddenForVisualCapture(true)}
                 >

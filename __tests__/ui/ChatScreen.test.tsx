@@ -1179,7 +1179,11 @@ describe('ChatScreen', () => {
     navigation.__setIsFocused(true);
     const view = render(React.createElement(ChatScreen));
 
-    fireEvent.press(view.getByTestId('chat-qa-hide-generation-evidence'));
+    const hideEvidenceAction = view.getByTestId('chat-qa-hide-generation-evidence');
+    expect(hideEvidenceAction.props.accessibilityLabel).toBe(
+      'chat-qa-hide-generation-evidence-action',
+    );
+    fireEvent.press(hideEvidenceAction);
 
     expect(view.queryByTestId('chat-qa-generation-evidence')).toBeNull();
     expect(view.getByTestId('chat-list-viewport')).toBeTruthy();

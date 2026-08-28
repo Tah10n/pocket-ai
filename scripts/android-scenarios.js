@@ -152,6 +152,8 @@ const QA_BACKGROUND_TASK_START_RESOURCE_ID = "chat-qa-start-background-task";
 const QA_BACKGROUND_TASK_STOP_RESOURCE_ID = "chat-qa-stop-background-task";
 const CHAT_QA_EVIDENCE_RESOURCE_ID = "chat-qa-generation-evidence";
 const CHAT_QA_HIDE_EVIDENCE_RESOURCE_ID = "chat-qa-hide-generation-evidence";
+const CHAT_QA_HIDE_EVIDENCE_ACCESSIBILITY_LABEL =
+  "chat-qa-hide-generation-evidence-action";
 const QA_BACKGROUND_TASK_OUTCOME_STATUSES = [
   "started",
   "already_running",
@@ -2805,14 +2807,14 @@ async function selectThemeStyle(ctx, themeStyle) {
 async function hideChatQaEvidenceForVisualCapture(ctx, options = {}) {
   const adbPath = options.adbPath ?? resolveAdbPath();
   const waitForResource = options.waitForResourceId ?? waitForResourceId;
-  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  const tapAccessibilityAction = options.tapAnyText ?? ctx.tapAnyText;
   const waitForNoResource = options.waitForNoResourceId ?? waitForNoResourceId;
 
   await waitForResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
     visibleOnly: true,
   });
-  await tapResource(ctx, CHAT_QA_HIDE_EVIDENCE_RESOURCE_ID, {
+  await tapAccessibilityAction([CHAT_QA_HIDE_EVIDENCE_ACCESSIBILITY_LABEL], {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
   });
   await waitForNoResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {

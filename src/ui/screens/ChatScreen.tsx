@@ -736,7 +736,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
         }
     }, []);
 
-    useFocusEffect(useCallback(() => {
+    useFocusEffect(useCallback(() => () => {
         setIsHiddenForVisualCapture(false);
     }, []));
 

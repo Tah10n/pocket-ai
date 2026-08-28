@@ -4075,16 +4075,10 @@ describe('android-scenarios pack selection', () => {
       2,
       'adb',
       'device-1',
-      'chat-header-model-selector',
+      'chat-list-viewport',
       expect.objectContaining({ visibleOnly: true }),
     );
-    expect(waitForResourceId).toHaveBeenNthCalledWith(
-      3,
-      'adb',
-      'device-1',
-      'chat-message-input',
-      expect.objectContaining({ visibleOnly: true }),
-    );
+    expect(waitForResourceId).toHaveBeenCalledTimes(2);
     expect(tapVisibleResource.mock.invocationCallOrder[0]).toBeLessThan(
       waitForNoResourceId.mock.invocationCallOrder[0],
     );

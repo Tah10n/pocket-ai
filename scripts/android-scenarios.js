@@ -2818,11 +2818,7 @@ async function hideChatQaEvidenceForVisualCapture(ctx, options = {}) {
   await waitForNoResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
   });
-  await waitForResource(adbPath, ctx.serial, CHAT_MODEL_SELECTOR_RESOURCE_ID, {
-    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
-    visibleOnly: true,
-  });
-  await waitForResource(adbPath, ctx.serial, CHAT_MESSAGE_INPUT_RESOURCE_ID, {
+  await waitForResource(adbPath, ctx.serial, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
     visibleOnly: true,
   });

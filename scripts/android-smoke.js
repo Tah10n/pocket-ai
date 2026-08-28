@@ -2744,6 +2744,7 @@ const appJsReadyTextLabels = [
 ];
 
 const androidAnrWaitResourceId = "android:id/aerr_wait";
+const androidAnrCloseResourceId = "android:id/aerr_close";
 
 function isAppJsReadyUiHierarchy(xml, appPackage) {
   if (
@@ -2827,8 +2828,10 @@ function findAndroidUiResourceCenter(xml, resourceId) {
 }
 
 function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy, options = {}) {
+  const closeActionCenter = findAndroidUiResourceCenter(hierarchy, androidAnrCloseResourceId);
   const waitActionCenter = findAndroidUiResourceCenter(hierarchy, androidAnrWaitResourceId);
-  if (!waitActionCenter) {
+  const recoveryActionCenter = closeActionCenter ?? waitActionCenter;
+  if (!recoveryActionCenter) {
     return false;
   }
 
@@ -2872,8 +2875,8 @@ function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy
       "shell",
       "input",
       "tap",
-      `${waitActionCenter.x}`,
-      `${waitActionCenter.y}`,
+      `${recoveryActionCenter.x}`,
+      `${recoveryActionCenter.y}`,
     ],
   );
   return true;

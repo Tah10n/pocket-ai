@@ -388,6 +388,41 @@ describe('android-smoke installed app launch', () => {
     expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
   });
 
+  it('closes a confirmed external launcher ANR instead of leaving it in a restart loop', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return 'ANR in com.android.launcher3\n';
+      }
+      return '';
+    });
+    const hierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" />',
+      '<node package="android" resource-id="android:id/aerr_wait" bounds="[100,400][300,500]" />',
+      '</hierarchy>',
+    ].join('');
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(true);
+    expect(runCapture).toHaveBeenLastCalledWith('adb', [
+      '-s',
+      'device-1',
+      'shell',
+      'input',
+      'tap',
+      '200',
+      '250',
+    ]);
+  });
+
   const appPackage = 'com.github.tah10n.pocketai.qa';
 
   it('parses only a launcher component owned by the expected package', () => {

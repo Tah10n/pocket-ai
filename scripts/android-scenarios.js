@@ -151,9 +151,20 @@ const BACKGROUND_ACTIONS_SERVICE_CLASS = "com.asterinet.react.bgactions.RNBackgr
 const QA_BACKGROUND_TASK_START_RESOURCE_ID = "chat-qa-start-background-task";
 const QA_BACKGROUND_TASK_STOP_RESOURCE_ID = "chat-qa-stop-background-task";
 const CHAT_QA_EVIDENCE_RESOURCE_ID = "chat-qa-generation-evidence";
-const CHAT_QA_HIDE_EVIDENCE_RESOURCE_ID = "chat-qa-hide-generation-evidence";
 const CHAT_QA_HIDE_EVIDENCE_ACCESSIBILITY_LABEL =
   "chat-qa-hide-generation-evidence-action";
+const BOTTOM_TAB_RESOURCE_IDS = {
+  home: "bottom-tab-home",
+  chat: "bottom-tab-chat",
+  models: "bottom-tab-models",
+  settings: "bottom-tab-settings",
+};
+const TAB_DESTINATION_RESOURCE_IDS = {
+  home: "home-screen-content",
+  chat: "chat-list-viewport",
+  models: "models-screen-content",
+  settings: "settings-screen-content",
+};
 const QA_BACKGROUND_TASK_OUTCOME_STATUSES = [
   "started",
   "already_running",
@@ -432,7 +443,6 @@ const MOST_DOWNLOADED_LABELS = ["Most downloaded", "Самые скачивае�
 const MOST_POPULAR_LABELS = ["Most popular", "Самые популярные"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
 const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
-const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
 const THEME_STYLE_LABELS = ["Visual Style", "Визуальный стиль"];
 const THEME_MODE_RESOURCE_IDS = {
   light: "settings-theme-mode-light",
@@ -446,6 +456,7 @@ const THEME_STYLE_RESOURCE_IDS = {
 const THEME_STYLE_CONTAINER_RESOURCE_ID = "settings-visual-style-container";
 const THEME_STYLE_CONTROL_RESOURCE_ID = "settings-theme-style-control";
 const THEME_STYLE_SHEET_RESOURCE_ID = "settings-theme-style-sheet";
+const THEME_MODE_CONTROL_RESOURCE_ID = "settings-theme-mode-control";
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
 const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
 const CLEAR_ACTIVE_CACHE_LABELS = ["Clear Active Cache", "Очистить активный кэш"];
@@ -2674,7 +2685,9 @@ function findSelectedResourceKey(snapshot, resourcesByKey, label) {
 
 async function readSelectedThemeMode(ctx) {
   await goToSettings(ctx);
-  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
   return findSelectedResourceKey(
     createUiSnapshot(resolveAdbPath(), ctx.serial),
     THEME_MODE_RESOURCE_IDS,
@@ -2688,7 +2701,9 @@ async function selectThemeMode(ctx, mode) {
     throw new Error(`Unsupported theme mode ${mode}.`);
   }
   await goToSettings(ctx);
-  await scrollToAnyText(ctx, THEME_MODE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
   await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
   const { match } = await waitForSnapshotMatch(
     resolveAdbPath(),
@@ -2804,6 +2819,66 @@ async function selectThemeStyle(ctx, themeStyle) {
   }
 }
 
+function resolveSelectedBottomTabDestination(snapshot, tabResourceId, destinationResourceId) {
+  const tab = findResourceIdInSnapshot(snapshot, tabResourceId, { visibleOnly: true });
+  if (!tab?.selected) {
+    return null;
+  }
+
+  const destination = findResourceIdInSnapshot(snapshot, destinationResourceId, {
+    visibleOnly: true,
+  });
+  return destination ? { tab, destination } : null;
+}
+
+async function waitForSelectedBottomTabDestination(
+  ctx,
+  tabResourceId,
+  destinationResourceId,
+  options = {}
+) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const waitForSnapshot = options.waitForSnapshotMatch ?? waitForSnapshotMatch;
+  const { match, snapshot } = await waitForSnapshot(
+    adbPath,
+    ctx.serial,
+    {
+      timeoutMs: options.timeoutMs ?? CHAT_ROUTE_TIMEOUT_MS,
+      pollIntervalMs: options.pollIntervalMs ?? 250,
+    },
+    (candidateSnapshot) => resolveSelectedBottomTabDestination(
+      candidateSnapshot,
+      tabResourceId,
+      destinationResourceId
+    )
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      `Timed out waiting for selected bottom tab "${tabResourceId}" and destination "${destinationResourceId}".`
+    ));
+  }
+  return match;
+}
+
+async function tapBottomTabResourceUntilSelected(
+  ctx,
+  tabResourceId,
+  destinationResourceId,
+  options = {}
+) {
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  await tapResource(ctx, tabResourceId, {
+    timeoutMs: options.timeoutMs ?? CHAT_ROUTE_TIMEOUT_MS,
+  });
+  return waitForSelectedBottomTabDestination(
+    ctx,
+    tabResourceId,
+    destinationResourceId,
+    options
+  );
+}
+
 async function hideChatQaEvidenceForVisualCapture(ctx, options = {}) {
   const adbPath = options.adbPath ?? resolveAdbPath();
   const waitForResource = options.waitForResourceId ?? waitForResourceId;
@@ -2820,10 +2895,12 @@ async function hideChatQaEvidenceForVisualCapture(ctx, options = {}) {
   await waitForNoResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
     timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
   });
-  await waitForResource(adbPath, ctx.serial, CHAT_LIST_VIEWPORT_RESOURCE_ID, {
-    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
-    visibleOnly: true,
-  });
+  await waitForSelectedBottomTabDestination(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.chat,
+    TAB_DESTINATION_RESOURCE_IDS.chat,
+    options
+  );
 }
 
 async function captureCoreSurfaceScreenshots(
@@ -2832,34 +2909,59 @@ async function captureCoreSurfaceScreenshots(
   settingsFocusLabels = LANGUAGE_ROW_LABELS,
   options = {}
 ) {
-  const navigateHome = options.goToHome ?? goToHome;
-  const tapBottomTab = options.tapBottomTabUntilVisible ?? tapBottomTabUntilVisible;
+  const navigateBottomTab = options.tapBottomTabResourceUntilSelected
+    ?? tapBottomTabResourceUntilSelected;
   const scrollToText = options.scrollToAnyText ?? scrollToAnyText;
+  const scrollToResource = options.scrollToResourceId ?? scrollToResourceId;
   const hideQaEvidence = options.hideChatQaEvidenceForVisualCapture
     ?? hideChatQaEvidenceForVisualCapture;
 
-  await navigateHome(ctx);
-  await ctx.expectAnyText(APP_TITLE_LABELS);
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.home,
+    TAB_DESTINATION_RESOURCE_IDS.home,
+    { timeoutMs: HOME_ROUTE_TIMEOUT_MS }
+  );
   ctx.captureScreenshot(`${prefix}-home.png`);
 
-  await tapBottomTab(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
-    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
-  });
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.chat,
+    TAB_DESTINATION_RESOURCE_IDS.chat,
+    { timeoutMs: CHAT_ROUTE_TIMEOUT_MS }
+  );
   if (options.hideChatQaEvidence) {
     await hideQaEvidence(ctx);
   }
   ctx.captureScreenshot(`${prefix}-chat.png`);
 
-  await tapBottomTab(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
-    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-  });
-  await scrollToText(ctx, settingsFocusLabels, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.settings,
+    TAB_DESTINATION_RESOURCE_IDS.settings,
+    { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS }
+  );
+  if (options.settingsFocusResourceId) {
+    await scrollToResource(ctx, options.settingsFocusResourceId, {
+      timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    });
+  } else {
+    await scrollToText(ctx, settingsFocusLabels, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  }
   ctx.captureScreenshot(`${prefix}-settings.png`);
 
-  await tapBottomTab(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
-  await ctx.expectAnyText(ALL_MODELS_LABELS);
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.models,
+    TAB_DESTINATION_RESOURCE_IDS.models
+  );
   const screenshotPath = ctx.captureScreenshot(`${prefix}-models.png`);
-  await navigateHome(ctx);
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.home,
+    TAB_DESTINATION_RESOURCE_IDS.home,
+    { timeoutMs: HOME_ROUTE_TIMEOUT_MS }
+  );
   return { screenshotPath };
 }
 
@@ -2941,7 +3043,10 @@ function buildScenarios() {
             ctx,
             "native-glass-light",
             THEME_STYLE_LABELS,
-            { hideChatQaEvidence: true }
+            {
+              hideChatQaEvidence: true,
+              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
+            }
           );
 
           await selectThemeMode(ctx, "dark");
@@ -2949,7 +3054,10 @@ function buildScenarios() {
             ctx,
             "native-glass-dark",
             THEME_STYLE_LABELS,
-            { hideChatQaEvidence: true }
+            {
+              hideChatQaEvidence: true,
+              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
+            }
           );
         } finally {
           await restoreThemePreferences(ctx, originalPreferences);
@@ -6722,15 +6830,20 @@ async function tryReachHome(ctx, maxAttempts = 4) {
 
 async function goToSettings(ctx, options = {}) {
   const goHome = options.goToHome || goToHome;
+  const navigateBottomTab = options.tapBottomTabResourceUntilSelected
+    || tapBottomTabResourceUntilSelected;
   const waitForWarmup = options.waitForModelWarmup || (async (targetCtx) => {
     await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), targetCtx.serial);
   });
 
   await goHome(ctx);
   await waitForWarmup(ctx);
-  await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
-    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-  });
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.settings,
+    TAB_DESTINATION_RESOURCE_IDS.settings,
+    { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS }
+  );
 }
 
 async function goToModelCatalog(ctx, options = {}) {
@@ -10699,6 +10812,7 @@ module.exports = {
   resolveNotificationChannelSettingsUi,
   resolveNotificationChannelToggle,
   resolveQaForegroundServiceStartOutcome,
+  resolveSelectedBottomTabDestination,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
@@ -10739,6 +10853,7 @@ module.exports = {
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
   tapBottomTabUntilVisible,
+  tapBottomTabResourceUntilSelected,
   tapBoundsUntilAnyNode,
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,

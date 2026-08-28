@@ -99,6 +99,7 @@ const {
   resolveNotificationChannelSettingsUi,
   resolveNotificationChannelToggle,
   resolveQaForegroundServiceStartOutcome,
+  resolveSelectedBottomTabDestination,
   runWithBestEffortCleanup,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
@@ -4044,6 +4045,17 @@ describe('android-scenarios pack selection', () => {
     const waitForResourceId = jest.fn().mockResolvedValue({ resourceId: 'matched' });
     const tapAnyText = jest.fn().mockResolvedValue(undefined);
     const waitForNoResourceId = jest.fn().mockResolvedValue({ nodes: [] });
+    const selectedChatSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/bottom-tab-chat" selected="true" bounds="[270,2100][540,2280]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-list-viewport" bounds="[0,200][1080,2000]" />
+      </hierarchy>
+    `);
+    const waitForSnapshotMatch = jest.fn(async (_adbPath, _serial, _options, matcher) => ({
+      match: matcher(selectedChatSnapshot),
+      snapshot: selectedChatSnapshot,
+    }));
     const ctx = { serial: 'device-1' };
 
     await hideChatQaEvidenceForVisualCapture(ctx, {
@@ -4051,6 +4063,7 @@ describe('android-scenarios pack selection', () => {
       waitForResourceId,
       tapAnyText,
       waitForNoResourceId,
+      waitForSnapshotMatch,
     });
 
     expect(waitForResourceId).toHaveBeenNthCalledWith(
@@ -4070,14 +4083,8 @@ describe('android-scenarios pack selection', () => {
       'chat-qa-generation-evidence',
       expect.any(Object),
     );
-    expect(waitForResourceId).toHaveBeenNthCalledWith(
-      2,
-      'adb',
-      'device-1',
-      'chat-list-viewport',
-      expect.objectContaining({ visibleOnly: true }),
-    );
-    expect(waitForResourceId).toHaveBeenCalledTimes(2);
+    expect(waitForResourceId).toHaveBeenCalledTimes(1);
+    expect(waitForSnapshotMatch).toHaveBeenCalledTimes(1);
     expect(tapAnyText.mock.invocationCallOrder[0]).toBeLessThan(
       waitForNoResourceId.mock.invocationCallOrder[0],
     );
@@ -4089,24 +4096,67 @@ describe('android-scenarios pack selection', () => {
       callOrder.push('hide-qa');
     });
     const ctx = {
-      expectAnyText: jest.fn().mockResolvedValue(undefined),
       captureScreenshot: jest.fn((name) => {
         callOrder.push(`capture:${name}`);
         return name;
       }),
     };
+    const navigateBottomTab = jest.fn(async (_ctx, tabResourceId) => {
+      callOrder.push(`navigate:${tabResourceId}`);
+    });
 
     await captureCoreSurfaceScreenshots(ctx, 'native-glass-light', ['Visual style'], {
       hideChatQaEvidence: true,
       hideChatQaEvidenceForVisualCapture: hideQaEvidence,
-      goToHome: jest.fn().mockResolvedValue(undefined),
-      tapBottomTabUntilVisible: jest.fn().mockResolvedValue(undefined),
+      tapBottomTabResourceUntilSelected: navigateBottomTab,
       scrollToAnyText: jest.fn().mockResolvedValue(undefined),
     });
 
+    expect(navigateBottomTab.mock.calls.map(([, resourceId]) => resourceId)).toEqual([
+      'bottom-tab-home',
+      'bottom-tab-chat',
+      'bottom-tab-settings',
+      'bottom-tab-models',
+      'bottom-tab-home',
+    ]);
     expect(callOrder.indexOf('hide-qa')).toBeGreaterThan(callOrder.indexOf('capture:native-glass-light-home.png'));
     expect(callOrder.indexOf('hide-qa')).toBeLessThan(callOrder.indexOf('capture:native-glass-light-chat.png'));
     expect(hideQaEvidence).toHaveBeenCalledWith(ctx);
+  });
+
+  it('rejects an inactive Chat hierarchy even when its destination and localized tab text are present', () => {
+    const inactiveChatSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node text="Chat" resource-id="com.github.tah10n.pocketai.qa:id/bottom-tab-chat" selected="false" bounds="[270,2100][540,2280]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-list-viewport" bounds="[0,200][1080,2000]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-hide-generation-evidence" clickable="true" bounds="[40,220][240,300]" />
+      </hierarchy>
+    `);
+    const selectedChatSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node text="Chat" resource-id="com.github.tah10n.pocketai.qa:id/bottom-tab-chat" selected="true" bounds="[270,2100][540,2280]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-list-viewport" bounds="[0,200][1080,2000]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(inactiveChatSnapshot, ['Chat'], { visibleOnly: true })).not.toBeNull();
+    expect(resolveSelectedBottomTabDestination(
+      inactiveChatSnapshot,
+      'bottom-tab-chat',
+      'chat-list-viewport',
+    )).toBeNull();
+    expect(resolveSelectedBottomTabDestination(
+      selectedChatSnapshot,
+      'bottom-tab-chat',
+      'chat-list-viewport',
+    )).toEqual(expect.objectContaining({
+      tab: expect.objectContaining({ selected: true }),
+      destination: expect.objectContaining({
+        resourceId: 'com.github.tah10n.pocketai.qa:id/chat-list-viewport',
+      }),
+    }));
   });
 
   it('recognizes only the background-actions service in Android dumpsys evidence', () => {

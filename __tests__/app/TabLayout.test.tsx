@@ -130,17 +130,18 @@ describe('TabLayout', () => {
     expect(preventDefault).toHaveBeenCalledTimes(4);
   });
 
-  it('gives every tab an explicit translated accessibility label', () => {
+  it('gives every tab a translated accessibility label and stable QA selector', () => {
     render(<TabLayout />);
 
     expect(mockTabScreenProps.mock.calls.map(([{ options }]) => ({
       title: options.title,
       accessibilityLabel: options.tabBarAccessibilityLabel,
+      testID: options.tabBarButtonTestID,
     }))).toEqual([
-      { title: 'tabs.home', accessibilityLabel: 'tabs.home' },
-      { title: 'tabs.chat', accessibilityLabel: 'tabs.chat' },
-      { title: 'tabs.models', accessibilityLabel: 'tabs.models' },
-      { title: 'tabs.settings', accessibilityLabel: 'tabs.settings' },
+      { title: 'tabs.home', accessibilityLabel: 'tabs.home', testID: 'bottom-tab-home' },
+      { title: 'tabs.chat', accessibilityLabel: 'tabs.chat', testID: 'bottom-tab-chat' },
+      { title: 'tabs.models', accessibilityLabel: 'tabs.models', testID: 'bottom-tab-models' },
+      { title: 'tabs.settings', accessibilityLabel: 'tabs.settings', testID: 'bottom-tab-settings' },
     ]);
   });
 });

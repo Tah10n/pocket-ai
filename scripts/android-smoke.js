@@ -2743,7 +2743,6 @@ const appJsReadyTextLabels = [
   "Детали модели",
 ];
 
-const androidAnrWaitResourceId = "android:id/aerr_wait";
 const androidAnrCloseResourceId = "android:id/aerr_close";
 
 function isAppJsReadyUiHierarchy(xml, appPackage) {
@@ -2802,6 +2801,24 @@ function parseResolvedDefaultHomePackage(output) {
   return null;
 }
 
+function parseApplicationAtFaultPackage(output) {
+  const applicationAtFaultPattern = /^\s*Application at fault:\s*(.*?)\s*$/u;
+  const componentPattern = /^([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\/[A-Za-z0-9_.$]+$/u;
+  let applicationAtFaultPackage = null;
+  for (const line of `${output || ""}`.split(/\r?\n/u)) {
+    const fieldMatch = applicationAtFaultPattern.exec(line);
+    if (!fieldMatch) {
+      continue;
+    }
+    const componentMatch = componentPattern.exec(fieldMatch[1]);
+    if (applicationAtFaultPackage || !componentMatch) {
+      return null;
+    }
+    applicationAtFaultPackage = componentMatch[1];
+  }
+  return applicationAtFaultPackage;
+}
+
 function findAndroidUiResourceCenter(xml, resourceId) {
   if (typeof xml !== "string") {
     return null;
@@ -2829,9 +2846,7 @@ function findAndroidUiResourceCenter(xml, resourceId) {
 
 function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy, options = {}) {
   const closeActionCenter = findAndroidUiResourceCenter(hierarchy, androidAnrCloseResourceId);
-  const waitActionCenter = findAndroidUiResourceCenter(hierarchy, androidAnrWaitResourceId);
-  const recoveryActionCenter = closeActionCenter ?? waitActionCenter;
-  if (!recoveryActionCenter) {
+  if (!closeActionCenter) {
     return false;
   }
 
@@ -2860,10 +2875,15 @@ function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy
 
   const lastAnrReport = capture(
     adbPath,
-    ["-s", serial, "shell", "dumpsys", "activity", "lastanr"],
+    ["-s", serial, "shell", "dumpsys", "window", "lastanr"],
     { allowFailure: true },
   );
-  if (!`${lastAnrReport || ""}`.includes(launcherPackage)) {
+  const applicationAtFaultPackage = parseApplicationAtFaultPackage(lastAnrReport);
+  if (
+    !applicationAtFaultPackage
+    || applicationAtFaultPackage === appPackage
+    || applicationAtFaultPackage !== launcherPackage
+  ) {
     return false;
   }
 
@@ -2875,8 +2895,8 @@ function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy
       "shell",
       "input",
       "tap",
-      `${recoveryActionCenter.x}`,
-      `${recoveryActionCenter.y}`,
+      `${closeActionCenter.x}`,
+      `${closeActionCenter.y}`,
     ],
   );
   return true;
@@ -3462,6 +3482,7 @@ module.exports = {
   isAppJsReadyUiHierarchy,
   launchInstalledApp,
   parseDumpsysPackageOutput,
+  parseApplicationAtFaultPackage,
   parseResolvedDefaultHomePackage,
   parseAndroidPackageUid,
   parseAndroidProcessId,

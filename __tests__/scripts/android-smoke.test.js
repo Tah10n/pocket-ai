@@ -22,6 +22,7 @@ const {
   isInsufficientStorageInstallFailure,
   parseAndroidPackageUid,
   parseAndroidProcessId,
+  parseApplicationAtFaultPackage,
   parseResolvedDefaultHomePackage,
   parseResolvedLauncherActivity,
   parseCliOptions,
@@ -259,7 +260,7 @@ describe('android-smoke app JS readiness', () => {
   it('dismisses only a confirmed default-launcher ANR before requiring the app JS marker', async () => {
     const launcherAnrHierarchy = [
       '<hierarchy>',
-      '<node package="android" resource-id="android:id/aerr_wait" text="Wait" bounds="[100,200][300,300]" />',
+      '<node package="android" resource-id="android:id/aerr_close" text="Close app" bounds="[100,200][300,300]" />',
       '</hierarchy>',
     ].join('');
     const readUiHierarchy = jest.fn()
@@ -270,7 +271,7 @@ describe('android-smoke app JS readiness', () => {
         return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       if (args.includes('lastanr')) {
-        return 'ANR in com.android.launcher3\n';
+        return ' Application at fault: com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       return '';
     });
@@ -301,7 +302,7 @@ describe('android-smoke app JS readiness', () => {
         return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       if (args.includes('lastanr')) {
-        return `ANR in ${appPackage}\n`;
+        return ` Application at fault: ${appPackage}/.MainActivity\n`;
       }
       return '';
     });
@@ -367,6 +368,22 @@ describe('android-smoke installed app launch', () => {
     expect(parseResolvedDefaultHomePackage('No activity found')).toBeNull();
   });
 
+  it('parses only an exact Application at fault component', () => {
+    expect(parseApplicationAtFaultPackage(
+      'WINDOW MANAGER LAST ANR\n Application at fault: com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBe('com.android.launcher3');
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: Pocket AI\nRootTask com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBeNull();
+    expect(parseApplicationAtFaultPackage(
+      'RootTask com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBeNull();
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: com.android.launcher3/.Launcher\n'
+      + 'Application at fault: com.android.launcher3/.Launcher\n',
+    )).toBeNull();
+  });
+
   it('refuses to dismiss an ANR dialog without a matching launcher report', () => {
     const runCapture = jest.fn((_command, args) => {
       if (args.includes('android.intent.category.HOME')) {
@@ -382,7 +399,7 @@ describe('android-smoke installed app launch', () => {
       'adb',
       'device-1',
       appPackage,
-      '<hierarchy><node package="android" resource-id="android:id/aerr_wait" bounds="[100,200][300,300]" /></hierarchy>',
+      '<hierarchy><node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" /></hierarchy>',
       { runCapture },
     )).toBe(false);
     expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
@@ -394,7 +411,7 @@ describe('android-smoke installed app launch', () => {
         return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       if (args.includes('lastanr')) {
-        return 'ANR in com.android.launcher3\n';
+        return ' Application at fault: com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       return '';
     });
@@ -421,6 +438,83 @@ describe('android-smoke installed app launch', () => {
       '200',
       '250',
     ]);
+    expect(runCapture).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'dumpsys', 'window', 'lastanr'],
+      { allowFailure: true },
+    );
+    expect(runCapture.mock.calls.some(([, args]) => (
+      args.includes('tap') && args.includes('450')
+    ))).toBe(false);
+  });
+
+  it('does not recover when the fault field is not an exact launcher component', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return [
+          'Application at fault: Pocket AI',
+          'RootTask #1: com.android.launcher3/.uioverrides.QuickstepLauncher',
+        ].join('\n');
+      }
+      return '';
+    });
+    const hierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" />',
+      '<node package="android" resource-id="android:id/aerr_wait" bounds="[100,400][300,500]" />',
+      '</hierarchy>',
+    ].join('');
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
+  it('does not recover an app-owned ANR even when the launcher appears elsewhere', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return [
+          `Application at fault: ${appPackage}/.MainActivity`,
+          'RootTask #1: com.android.launcher3/.uioverrides.QuickstepLauncher',
+        ].join('\n');
+      }
+      return '';
+    });
+    const hierarchy = '<hierarchy><node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" /></hierarchy>';
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
+  it('does not fall back to Wait when the launcher ANR has no Close app action', () => {
+    const runCapture = jest.fn();
+    const hierarchy = '<hierarchy><node package="android" resource-id="android:id/aerr_wait" bounds="[100,400][300,500]" /></hierarchy>';
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture).not.toHaveBeenCalled();
   });
 
   const appPackage = 'com.github.tah10n.pocketai.qa';

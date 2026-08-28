@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert, Keyboard, Platform } from 'react-native';
+import { Alert, Keyboard, Platform, StyleSheet } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { getThreadActiveModelId } from '../../src/types/chat';
 import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
@@ -1153,7 +1153,11 @@ describe('ChatScreen', () => {
   it('exposes opt-in generation gates and privacy-safe prepared attachment markers', () => {
     const { getByTestId } = render(React.createElement(ChatScreen));
 
-    expect(getByTestId('chat-qa-generation-evidence')).toBeTruthy();
+    const evidenceSurface = getByTestId('chat-qa-generation-evidence');
+    expect(evidenceSurface).toBeTruthy();
+    expect(StyleSheet.flatten(evidenceSurface.props.style)).toEqual(expect.objectContaining({
+      marginTop: expect.any(Number),
+    }));
     expect(getByTestId('chat-qa-document-draft-count-0')).toBeTruthy();
     expect(getByTestId('chat-qa-arm-during-document-preparation')).toBeTruthy();
     fireEvent.press(getByTestId('chat-qa-arm-before-first-output'));

@@ -680,19 +680,28 @@ export function handleAndroidBackNavigation({
 
 function AndroidQaGenerationEvidenceSurface({
     documentDraftCount,
+    topInset,
 }: {
     documentDraftCount: number;
+    topInset: number;
 }) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
     }
-    return <EnabledAndroidQaGenerationEvidenceSurface documentDraftCount={documentDraftCount} />;
+    return (
+        <EnabledAndroidQaGenerationEvidenceSurface
+            documentDraftCount={documentDraftCount}
+            topInset={topInset}
+        />
+    );
 }
 
 function EnabledAndroidQaGenerationEvidenceSurface({
     documentDraftCount,
+    topInset,
 }: {
     documentDraftCount: number;
+    topInset: number;
 }) {
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
@@ -745,7 +754,10 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     }
 
     return (
-        <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
+        <View
+            testID="chat-qa-generation-evidence"
+            style={[styles.androidQaEvidenceSurface, { marginTop: topInset }]}
+        >
             <View
                 accessible
                 accessibilityLabel={`chat-qa-document-draft-count-${documentDraftCount}`}
@@ -3083,6 +3095,7 @@ const ChatScreenContent = () => {
 
                     <AndroidQaGenerationEvidenceSurface
                         documentDraftCount={documentAttachmentDrafts.drafts.length}
+                        topInset={headerInset}
                     />
 
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>

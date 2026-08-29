@@ -271,7 +271,7 @@ describe('android-smoke app JS readiness', () => {
         return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       if (args.includes('lastanr')) {
-        return ' Application at fault: com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+        return ' Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       return '';
     });
@@ -302,7 +302,7 @@ describe('android-smoke app JS readiness', () => {
         return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       if (args.includes('lastanr')) {
-        return ` Application at fault: ${appPackage}/.MainActivity\n`;
+        return ` Application at fault: ActivityRecord{123abc u0 ${appPackage}/.MainActivity\n`;
       }
       return '';
     });
@@ -368,19 +368,26 @@ describe('android-smoke installed app launch', () => {
     expect(parseResolvedDefaultHomePackage('No activity found')).toBeNull();
   });
 
-  it('parses only an exact Application at fault component', () => {
+  it('parses only one exact AOSP ActivityRecord from Application at fault', () => {
     expect(parseApplicationAtFaultPackage(
-      'WINDOW MANAGER LAST ANR\n Application at fault: com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+      'WINDOW MANAGER LAST ANR\n'
+      + ' Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.uioverrides.QuickstepLauncher\n',
     )).toBe('com.android.launcher3');
     expect(parseApplicationAtFaultPackage(
-      'Application at fault: Pocket AI\nRootTask com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+      'Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.Launcher t42}\n',
+    )).toBe('com.android.launcher3');
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: com.android.launcher3/.Launcher\n',
     )).toBeNull();
     expect(parseApplicationAtFaultPackage(
       'RootTask com.android.launcher3/.uioverrides.QuickstepLauncher\n',
     )).toBeNull();
     expect(parseApplicationAtFaultPackage(
-      'Application at fault: com.android.launcher3/.Launcher\n'
-      + 'Application at fault: com.android.launcher3/.Launcher\n',
+      'Application at fault: ActivityRecord{9275172 user0 com.android.launcher3/.Launcher\n',
+    )).toBeNull();
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.Launcher\n'
+      + 'Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.Launcher\n',
     )).toBeNull();
   });
 
@@ -411,7 +418,7 @@ describe('android-smoke installed app launch', () => {
         return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       if (args.includes('lastanr')) {
-        return ' Application at fault: com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+        return ' Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.uioverrides.QuickstepLauncher\n';
       }
       return '';
     });
@@ -455,7 +462,7 @@ describe('android-smoke installed app launch', () => {
       }
       if (args.includes('lastanr')) {
         return [
-          'Application at fault: Pocket AI',
+          'Application at fault: ActivityRecord{broken u0 com.android.launcher3/.Launcher',
           'RootTask #1: com.android.launcher3/.uioverrides.QuickstepLauncher',
         ].join('\n');
       }
@@ -485,7 +492,7 @@ describe('android-smoke installed app launch', () => {
       }
       if (args.includes('lastanr')) {
         return [
-          `Application at fault: ${appPackage}/.MainActivity`,
+          `Application at fault: ActivityRecord{123abc u0 ${appPackage}/.MainActivity`,
           'RootTask #1: com.android.launcher3/.uioverrides.QuickstepLauncher',
         ].join('\n');
       }

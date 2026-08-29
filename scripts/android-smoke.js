@@ -2803,18 +2803,23 @@ function parseResolvedDefaultHomePackage(output) {
 
 function parseApplicationAtFaultPackage(output) {
   const applicationAtFaultPattern = /^\s*Application at fault:\s*(.*?)\s*$/u;
-  const componentPattern = /^([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\/[A-Za-z0-9_.$]+$/u;
+  const activityRecordPattern = new RegExp(
+    String.raw`^ActivityRecord\{[0-9a-f]+\s+u\d+\s+`
+      + String.raw`([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/[A-Za-z0-9_.$]+`
+      + String.raw`(?:\s+t-?\d+)?\}?\s*$`,
+    "iu",
+  );
   let applicationAtFaultPackage = null;
   for (const line of `${output || ""}`.split(/\r?\n/u)) {
     const fieldMatch = applicationAtFaultPattern.exec(line);
     if (!fieldMatch) {
       continue;
     }
-    const componentMatch = componentPattern.exec(fieldMatch[1]);
-    if (applicationAtFaultPackage || !componentMatch) {
+    const activityRecordMatch = activityRecordPattern.exec(fieldMatch[1]);
+    if (applicationAtFaultPackage || !activityRecordMatch) {
       return null;
     }
-    applicationAtFaultPackage = componentMatch[1];
+    applicationAtFaultPackage = activityRecordMatch[1];
   }
   return applicationAtFaultPackage;
 }

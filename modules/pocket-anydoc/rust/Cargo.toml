@@ -16,7 +16,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 libc = "0.2.177"
 log = { version = "0.4.33", features = ["release_max_level_off"] }
 pdf-inspector = { path = "vendor/pdf-inspector" }
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.11.0"

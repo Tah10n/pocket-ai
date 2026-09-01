@@ -699,6 +699,13 @@ export function createLiquidThemeMaterialRecipes(
     intensity,
     'static',
   ));
+  const sheetChrome = neutral(effectDefinition(
+    colors,
+    mode,
+    mode === 'dark' ? colors.background : colors.surface,
+    mode === 'dark' ? 84 : 72,
+    'static',
+  ));
   const inlineControls = createGlassControlTones(colors, mode, false);
   const floatingControls = createGlassControlTones(colors, mode, true);
   const banner = createSemanticBannerTones(colors, 'tinted');
@@ -747,7 +754,7 @@ export function createLiquidThemeMaterialRecipes(
       header: softenGlassToneRecipes(chrome(mode === 'dark' ? 88 : 75), mode),
       tabBar: softenGlassToneRecipes(neutral(tabBarEffectDefinition(colors, mode)), mode),
       composer: softenGlassToneRecipes(chrome(mode === 'dark' ? 76 : 66), mode),
-      sheet: softenGlassToneRecipes(chrome(mode === 'dark' ? 84 : 72), mode),
+      sheet: softenGlassToneRecipes(sheetChrome, mode),
     },
     control: {
       inline: softenGlassToneRecipes(inlineControls, mode),

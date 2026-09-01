@@ -1,6 +1,20 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Alert, StyleSheet, type View } from 'react-native';
-import { FlashList, ListRenderItem } from '@shopify/flash-list';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type ReactNode,
+} from 'react';
+import {
+  Alert,
+  StyleSheet,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  type View,
+} from 'react-native';
+import { FlashList, type ListRenderItem } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
@@ -75,9 +89,25 @@ interface ModelsListProps {
   searchSessionKey?: number | string;
   androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   catalogContentTopOffset?: number;
+  catalogScrollSnapshotRef?: MutableRefObject<ModelsCatalogScrollSnapshot | null>;
   // Keep modal sheets outside Android's blur target while letting the routed screen own the full content target.
   renderContentContainer?: (content: ReactNode, floatingControls: ReactNode) => ReactNode;
 }
+
+const FILTERED_LOAD_MORE_MAX_REQUESTS = 4;
+
+type FilteredLoadMoreBatch = {
+  sessionIdentity: string;
+  targetVisibleCount: number;
+  requestsStarted: number;
+  lastCursor: string;
+  sawRequestInFlight: boolean;
+};
+
+export type ModelsCatalogScrollSnapshot = {
+  sessionIdentity: string;
+  offset: number;
+};
 
 interface ModelCardWithRuntimeStateProps {
   model: ModelMetadata;
@@ -316,6 +346,7 @@ export const ModelsList = ({
   searchSessionKey,
   androidContentBlurTargetRef,
   catalogContentTopOffset = MODEL_CATALOG_LIST_TOP_OFFSET,
+  catalogScrollSnapshotRef,
   renderContentContainer,
 }: ModelsListProps) => {
   const { t } = useTranslation();
@@ -343,7 +374,11 @@ export const ModelsList = ({
   const shouldAutoLoadMore = serverSort !== null;
   const autoFillAttemptsRef = useRef(0);
   const lastAutoFillCursorRef = useRef<string | null>(null);
+  const filteredLoadMoreBatchRef = useRef<FilteredLoadMoreBatch | null>(null);
+  const [isFilteredLoadMoreBatching, setIsFilteredLoadMoreBatching] = useState(false);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
+  const localCatalogScrollSnapshotRef = useRef<ModelsCatalogScrollSnapshot | null>(null);
+  const allCatalogScrollSnapshotRef = catalogScrollSnapshotRef ?? localCatalogScrollSnapshotRef;
   const localContentBlurTargetRef = useRef<View | null>(null);
   const warmupContentBlurTargetRef = androidContentBlurTargetRef ?? localContentBlurTargetRef;
   const [selectedVariantIds, setSelectedVariantIds] = useState<Record<string, string>>({});
@@ -364,6 +399,7 @@ export const ModelsList = ({
     hasTokenConfigured,
     isTokenStateHydrated,
     sessionIdentity,
+    dataSessionIdentity,
     handleLoadMore,
     handlePullToRefresh,
     handleCatalogScrollBeginDrag,
@@ -500,10 +536,68 @@ export const ModelsList = ({
     return sortModels(filtered, sort);
   }, [activeTab, displayModels, filters, selectedVariantIds, serverSort, sort]);
 
+  const handleCatalogScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    if (activeTab !== 'all' || dataSessionIdentity !== sessionIdentity) {
+      return;
+    }
+
+    allCatalogScrollSnapshotRef.current = {
+      sessionIdentity,
+      offset: Math.max(0, event.nativeEvent.contentOffset.y),
+    };
+  }, [activeTab, allCatalogScrollSnapshotRef, dataSessionIdentity, sessionIdentity]);
+
+  const restoredCatalogScrollOffset = activeTab === 'all'
+    && dataSessionIdentity === sessionIdentity
+    && allCatalogScrollSnapshotRef.current?.sessionIdentity === sessionIdentity
+    && allCatalogScrollSnapshotRef.current.offset > 0
+    ? allCatalogScrollSnapshotRef.current.offset
+    : null;
+  const restoredCatalogInitialViewOffset = restoredCatalogScrollOffset === null
+    ? null
+    : Math.max(0, restoredCatalogScrollOffset - headerInset - catalogContentTopOffset);
+
   useEffect(() => {
     autoFillAttemptsRef.current = 0;
     lastAutoFillCursorRef.current = null;
+    filteredLoadMoreBatchRef.current = null;
+    setIsFilteredLoadMoreBatching(false);
   }, [sessionIdentity]);
+
+  const handleLoadMorePress = useCallback(() => {
+    const shouldBatchFilteredResults = activeTab === 'all'
+      && (filters.fitsInRamOnly || filters.noTokenRequiredOnly);
+
+    if (!shouldBatchFilteredResults) {
+      handleLoadMore('manual');
+      return;
+    }
+
+    if (!hasMore || !nextCursor || loading || isFetchingMore) {
+      return;
+    }
+
+    filteredLoadMoreBatchRef.current = {
+      sessionIdentity,
+      targetVisibleCount: filteredModels.length + MODELS_PAGE_SIZE,
+      requestsStarted: 1,
+      lastCursor: nextCursor,
+      sawRequestInFlight: false,
+    };
+    setIsFilteredLoadMoreBatching(true);
+    handleLoadMore('manual');
+  }, [
+    activeTab,
+    filteredModels.length,
+    filters.fitsInRamOnly,
+    filters.noTokenRequiredOnly,
+    handleLoadMore,
+    hasMore,
+    isFetchingMore,
+    loading,
+    nextCursor,
+    sessionIdentity,
+  ]);
 
   useEffect(() => {
     if (activeTab !== 'all') {
@@ -740,7 +834,7 @@ export const ModelsList = ({
     }
 
     const needsAutoFill = filters.fitsInRamOnly || filters.noTokenRequiredOnly;
-    if (!needsAutoFill) {
+    if (!needsAutoFill || isFilteredLoadMoreBatching) {
       return;
     }
 
@@ -762,7 +856,7 @@ export const ModelsList = ({
       return;
     }
 
-    if (autoFillAttemptsRef.current >= 4) {
+    if (autoFillAttemptsRef.current >= FILTERED_LOAD_MORE_MAX_REQUESTS) {
       return;
     }
 
@@ -780,10 +874,74 @@ export const ModelsList = ({
     filteredModels.length,
     handleLoadMore,
     hasMore,
+    isFilteredLoadMoreBatching,
     isFetchingMore,
     loadMoreError,
     loading,
     nextCursor,
+  ]);
+
+  useEffect(() => {
+    if (!isFilteredLoadMoreBatching) {
+      return;
+    }
+
+    const batch = filteredLoadMoreBatchRef.current;
+    const finishBatch = () => {
+      filteredLoadMoreBatchRef.current = null;
+      setIsFilteredLoadMoreBatching(false);
+    };
+
+    if (!batch || batch.sessionIdentity !== sessionIdentity) {
+      finishBatch();
+      return;
+    }
+
+    if (loading || isFetchingMore) {
+      if (isFetchingMore) {
+        batch.sawRequestInFlight = true;
+      }
+      return;
+    }
+
+    if (loadMoreError) {
+      if (batch.sawRequestInFlight || nextCursor !== batch.lastCursor) {
+        finishBatch();
+      }
+      return;
+    }
+
+    if (
+      !hasMore
+      || !nextCursor
+      || filteredModels.length >= batch.targetVisibleCount
+      || batch.requestsStarted >= FILTERED_LOAD_MORE_MAX_REQUESTS
+    ) {
+      finishBatch();
+      return;
+    }
+
+    if (batch.lastCursor === nextCursor) {
+      if (batch.sawRequestInFlight) {
+        finishBatch();
+      }
+      return;
+    }
+
+    batch.requestsStarted += 1;
+    batch.lastCursor = nextCursor;
+    batch.sawRequestInFlight = false;
+    handleLoadMore('manual');
+  }, [
+    filteredModels.length,
+    handleLoadMore,
+    hasMore,
+    isFetchingMore,
+    isFilteredLoadMoreBatching,
+    loadMoreError,
+    loading,
+    nextCursor,
+    sessionIdentity,
   ]);
 
   const hasFilters =
@@ -853,9 +1011,15 @@ export const ModelsList = ({
       ) : null}
 
       {hasMore && nextCursor ? (
-        <Button action="secondary" size="sm" onPress={() => handleLoadMore('manual')} disabled={isFetchingMore}>
+        <Button
+          action="secondary"
+          size="sm"
+          testID="models-load-more"
+          onPress={handleLoadMorePress}
+          disabled={isFetchingMore || isFilteredLoadMoreBatching}
+        >
           <ButtonText>
-            {isFetchingMore
+            {isFetchingMore || isFilteredLoadMoreBatching
               ? t('common.loading')
               : loadMoreError
                 ? t('common.retry', 'Retry')
@@ -868,7 +1032,7 @@ export const ModelsList = ({
         </Text>
       ) : null}
     </Box>
-  ) : null), [activeTab, filteredModels.length, handleLoadMore, hasMore, isFetchingMore, loadMoreError, nextCursor, shouldAutoLoadMore, t]);
+  ) : null), [activeTab, filteredModels.length, handleLoadMorePress, hasMore, isFetchingMore, isFilteredLoadMoreBatching, loadMoreError, nextCursor, shouldAutoLoadMore, t]);
 
   const openVariantPicker = useCallback((modelId: string) => {
     const model = filteredModels.find((item) => item.id === modelId);
@@ -920,6 +1084,7 @@ export const ModelsList = ({
   const renderEmptyState = useCallback(() => emptyState, [emptyState]);
   const renderFooter = useCallback(() => footer, [footer]);
   const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
+  const isCatalogSessionSwitching = dataSessionIdentity !== sessionIdentity;
   const isModelWarmingUp = engineState.status === EngineStatus.INITIALIZING;
   const variantPickerModel = useMemo(() => {
     if (!variantPickerModelId) {
@@ -992,7 +1157,7 @@ export const ModelsList = ({
 
   const catalogListContent = (
     <ScreenStack className="flex-1" gap="compact">
-        {(isCatalogInitializing || (loading && models.length === 0)) ? (
+        {(isCatalogInitializing || isCatalogSessionSwitching || (loading && models.length === 0)) ? (
           <Box
             className="flex-1 items-center justify-center pb-8 pt-6"
             style={{ paddingTop: headerInset + catalogContentTopOffset }}
@@ -1002,6 +1167,7 @@ export const ModelsList = ({
           </Box>
         ) : (
           <FlashList
+            key={dataSessionIdentity}
             data={filteredModels}
             extraData={selectedVariantIds}
             keyExtractor={(item) => item.id}
@@ -1015,6 +1181,12 @@ export const ModelsList = ({
             refreshing={isRefreshing}
             onRefresh={handlePullToRefresh}
             onScrollBeginDrag={handleCatalogScrollBeginDrag}
+            onScroll={handleCatalogScroll}
+            scrollEventThrottle={100}
+            initialScrollIndex={restoredCatalogScrollOffset === null ? undefined : 0}
+            initialScrollIndexParams={restoredCatalogInitialViewOffset === null
+              ? undefined
+              : { viewOffset: restoredCatalogInitialViewOffset }}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}
             showsVerticalScrollIndicator={false}

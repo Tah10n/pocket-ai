@@ -78,15 +78,28 @@ function createModel(id: string): ModelMetadata {
   };
 }
 
-function renderHookHarness() {
+type HookHarnessInput = {
+  activeTab: 'all' | 'downloaded';
+  searchQuery: string;
+  searchSessionKey: number;
+};
+
+function renderHookHarness(initialInput: Partial<HookHarnessInput> = {}) {
   let currentValue: ReturnType<typeof useModelsCatalogData> | null = null;
   const applyDiscoveryPreset = jest.fn();
   const syncDiscoveryTokenState = jest.fn();
+  let input: HookHarnessInput = {
+    activeTab: 'all',
+    searchQuery: 'phi',
+    searchSessionKey: 0,
+    ...initialInput,
+  };
 
-  const Harness = () => {
+  const Harness = ({ inputValue }: { inputValue: HookHarnessInput }) => {
     const value = useModelsCatalogData({
-      activeTab: 'all',
-      searchQuery: 'phi',
+      activeTab: inputValue.activeTab,
+      searchQuery: inputValue.searchQuery,
+      searchSessionKey: inputValue.searchSessionKey,
       filters: baseFilters,
       sort: baseSort,
       serverSort: 'downloads',
@@ -102,10 +115,14 @@ function renderHookHarness() {
     return null;
   };
 
-  const rendered = render(<Harness />);
+  const rendered = render(<Harness inputValue={input} />);
 
   return {
     getCurrentValue: () => currentValue,
+    rerenderHook: (nextInput: Partial<HookHarnessInput>) => {
+      input = { ...input, ...nextInput };
+      rendered.rerender(<Harness inputValue={input} />);
+    },
     applyDiscoveryPreset,
     syncDiscoveryTokenState,
     ...rendered,
@@ -390,6 +407,90 @@ describe('useModelsCatalogData', () => {
     });
 
     expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores multiple appended All Models pages after visiting Downloaded', async () => {
+    mockCatalogService.searchModels
+      .mockResolvedValueOnce({
+        models: [createModel('org/second-model')],
+        hasMore: true,
+        nextCursor: 'https://huggingface.co/api/models?cursor=page-3',
+      })
+      .mockResolvedValueOnce({
+        models: [createModel('org/third-model')],
+        hasMore: true,
+        nextCursor: 'https://huggingface.co/api/models?cursor=page-4',
+      });
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+
+    await act(async () => {
+      getCurrentValue()?.handleLoadMore('manual');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      getCurrentValue()?.handleLoadMore('manual');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual([
+      'org/first-model',
+      'org/second-model',
+      'org/third-model',
+    ]);
+    expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-4');
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rerenderHook({ activeTab: 'downloaded' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([]);
+
+    await act(async () => {
+      rerenderHook({ activeTab: 'all' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual([
+      'org/first-model',
+      'org/second-model',
+      'org/third-model',
+    ]);
+    expect(getCurrentValue()?.hasMore).toBe(true);
+    expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-4');
+    expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(1);
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not restore an All Models snapshot into a different search session', async () => {
+    mockCatalogService.getCachedSearchResult.mockImplementation((query) => ({
+      models: [createModel(query === 'llama' ? 'org/llama-model' : 'org/phi-model')],
+      hasMore: false,
+      nextCursor: null,
+    }));
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/phi-model']);
+
+    await act(async () => {
+      rerenderHook({ activeTab: 'downloaded' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rerenderHook({ activeTab: 'all', searchQuery: 'llama', searchSessionKey: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/llama-model']);
+    expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(2);
   });
 
   it('blocks repeated auto-load attempts after a load-more error while preserving manual retry', async () => {

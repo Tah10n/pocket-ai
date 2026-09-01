@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   type CatalogSearchSession,
   type CatalogServerSort,
@@ -16,6 +16,14 @@ import { uniqueByKey } from '@/utils/uniqueBy';
 type FetchState = {
   warningMessage: string | null;
   loadMoreError: string | null;
+};
+
+type RestorableCatalogSnapshot = {
+  sessionIdentity: string;
+  models: ModelMetadata[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  fetchState: FetchState;
 };
 
 type UseModelsCatalogDataInput = {
@@ -100,6 +108,9 @@ export function useModelsCatalogData({
     sort.field,
     tokenRevision,
   ]);
+  const [dataSessionIdentity, setDataSessionIdentity] = useState(sessionIdentity);
+  const allCatalogSnapshotRef = useRef<RestorableCatalogSnapshot | null>(null);
+  const dataOwnerRef = useRef({ activeTab, sessionIdentity });
 
   const refreshDownloadedModels = useCallback(() => {
     if (activeTab !== 'downloaded') {
@@ -118,6 +129,7 @@ export function useModelsCatalogData({
   }, [activeTab]);
 
   const requestCatalogRefresh = useCallback(() => {
+    allCatalogSnapshotRef.current = null;
     setCacheRefreshRevision((current) => current + 1);
   }, []);
 
@@ -249,6 +261,7 @@ export function useModelsCatalogData({
   useEffect(() => {
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
       if (source === 'manual') {
+        allCatalogSnapshotRef.current = null;
         latestFetchIdRef.current += 1;
         appendInFlightRef.current = false;
         setLoading(false);
@@ -352,6 +365,22 @@ export function useModelsCatalogData({
   ]);
 
   useEffect(() => {
+    const owner = dataOwnerRef.current;
+    const hasRestorableState = models.length > 0 || nextCursor !== null || !hasMore;
+    if (owner.activeTab !== 'all' || !hasRestorableState) {
+      return;
+    }
+
+    allCatalogSnapshotRef.current = {
+      sessionIdentity: owner.sessionIdentity,
+      models,
+      hasMore,
+      nextCursor,
+      fetchState: { warningMessage, loadMoreError },
+    };
+  }, [hasMore, loadMoreError, models, nextCursor, sessionIdentity, warningMessage]);
+
+  useLayoutEffect(() => {
     if (!shouldBootstrapCatalogSession(activeTab, discoveryMode, isTokenStateHydrated)) {
       return;
     }
@@ -361,15 +390,29 @@ export function useModelsCatalogData({
     appendInFlightRef.current = false;
     lastAutoLoadCursorRef.current = null;
     hasUserScrolledCatalogRef.current = false;
-    setModels([]);
-    setHasMore(activeTab === 'all');
-    setNextCursor(null);
+    const preservedCatalog = activeTab === 'all'
+      && allCatalogSnapshotRef.current?.sessionIdentity === sessionIdentity
+      ? allCatalogSnapshotRef.current
+      : null;
+    dataOwnerRef.current = { activeTab, sessionIdentity };
+    setDataSessionIdentity(sessionIdentity);
     setLoading(false);
     setIsFetchingMore(false);
-    setFetchState({ warningMessage: null, loadMoreError: null });
     setIsRefreshing(false);
 
     if (activeTab === 'all') {
+      if (preservedCatalog) {
+        setModels(preservedCatalog.models);
+        setHasMore(preservedCatalog.hasMore);
+        setNextCursor(preservedCatalog.nextCursor);
+        setFetchState(preservedCatalog.fetchState);
+        return;
+      }
+
+      setModels([]);
+      setHasMore(true);
+      setNextCursor(null);
+      setFetchState({ warningMessage: null, loadMoreError: null });
       const cachedResult = modelCatalogService.getCachedSearchResult(searchQuery, {
         cursor: null,
         pageSize: MODELS_PAGE_SIZE,
@@ -392,6 +435,10 @@ export function useModelsCatalogData({
       return () => clearTimeout(timer);
     }
 
+    setModels([]);
+    setHasMore(false);
+    setNextCursor(null);
+    setFetchState({ warningMessage: null, loadMoreError: null });
     const fetchId = latestFetchIdRef.current + 1;
     latestFetchIdRef.current = fetchId;
     void modelCatalogService.getLocalModels()
@@ -519,6 +566,7 @@ export function useModelsCatalogData({
     hasTokenConfigured,
     isTokenStateHydrated,
     sessionIdentity,
+    dataSessionIdentity,
     handleLoadMore,
     handlePullToRefresh,
     handleCatalogScrollBeginDrag,

@@ -117,7 +117,7 @@ Do not hand-roll route-local `rounded-full` badges or search rows unless the sha
 - Chat-style headers should keep the title and action buttons on the first row, then place preset or model chips on their own content-aligned row instead of offsetting them for a back-button placeholder.
 - Avoid redundant transient header status copy when the screen already exposes a stronger live affordance. In chat, active streaming is represented by the transcript and stop control rather than a separate `Generating` label in the header.
 - For page-local tabs such as the `Models` screen, use the shared `ScreenSegmentedControl` pattern instead of rendering the sections as separate standalone buttons. Keep the tab ids in a shared module and localize only the visible labels.
-- `Models` should keep its `SearchHeader` compact: one title row, one shared inline-search row, then one segmented-tab row. Filter and sort triggers should read as compact controls inside the page, not as large standalone cards.
+- `Models` should keep `ScreenHeaderShell` limited to the title and header action. Its composer-shaped search field, compact segmented tabs, and filter/sort triggers form transparent floating chrome above the virtualized catalog. Reserve their initial space with the list content inset so cards can scroll beneath the effect surfaces and provide real backdrop content for blur; do not add an opaque tray behind the controls.
 
 ## Content width and bottom spacing
 

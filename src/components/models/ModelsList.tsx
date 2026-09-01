@@ -64,14 +64,19 @@ import { useTranslation } from 'react-i18next';
 import { useModelsCatalogData } from '@/hooks/useModelsCatalogData';
 import { useModelActions } from '@/hooks/useModelActions';
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
+import {
+  MODEL_CATALOG_FILTER_TOP_OFFSET,
+  MODEL_CATALOG_LIST_TOP_OFFSET,
+} from './modelCatalogLayout';
 
 interface ModelsListProps {
   activeTab: ModelsCatalogTab;
   searchQuery: string;
   searchSessionKey?: number | string;
   androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
+  catalogContentTopOffset?: number;
   // Keep modal sheets outside Android's blur target while letting the routed screen own the full content target.
-  renderContentContainer?: (content: ReactNode) => ReactNode;
+  renderContentContainer?: (content: ReactNode, floatingControls: ReactNode) => ReactNode;
 }
 
 interface ModelCardWithRuntimeStateProps {
@@ -310,6 +315,7 @@ export const ModelsList = ({
   searchQuery,
   searchSessionKey,
   androidContentBlurTargetRef,
+  catalogContentTopOffset = MODEL_CATALOG_LIST_TOP_OFFSET,
   renderContentContainer,
 }: ModelsListProps) => {
   const { t } = useTranslation();
@@ -944,51 +950,53 @@ export const ModelsList = ({
   const listBottomInset = screenLayoutMetrics.contentBottomInset
     + (isModelWarmingUp ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0)
     + tabBarInset;
+  const listContentContainerStyle = useMemo(() => ({
+    flexGrow: 1,
+    paddingTop: headerInset + catalogContentTopOffset,
+    paddingBottom: listBottomInset,
+  }), [catalogContentTopOffset, headerInset, listBottomInset]);
+  const listHeader = (
+    discoveryBanner
+    || (engineState.status === EngineStatus.ERROR && engineState.lastError)
+    || warningMessage
+  ) ? (
+    <ScreenStack className="pb-2" gap="compact">
+      {discoveryBanner}
 
-  const catalogContent = (
-    <>
-      <Box style={headerInset > 0 ? { paddingTop: headerInset } : undefined}>
-        <ModelsFilter
-          filters={filters}
-          sort={sort}
-          onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
-          onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
-          onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
-          onSortChange={(nextSort) => setSort(activeTab, nextSort)}
-          onClear={() => clearFilters(activeTab)}
-        />
-      </Box>
+      {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
+        <ScreenCard padding="compact" tone="error">
+          <Text colorRole="danger" className="text-sm font-semibold  ">
+            {t('common.errors.modelLoadFailed')}
+          </Text>
+          <Text colorRole="danger" selectable className="mt-1 text-sm  ">
+            {engineState.lastError}
+          </Text>
+          <Box className="mt-3 flex-row gap-2">
+            <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
+              <ButtonText>{t('common.close')}</ButtonText>
+            </Button>
+            <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
+              <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
+            </Button>
+          </Box>
+        </ScreenCard>
+      ) : null}
 
-      <ScreenStack className="flex-1 pt-2" gap="compact">
-        {discoveryBanner}
+      {warningMessage ? (
+        <ScreenCard padding="compact" tone="warning">
+          <Text colorRole="warning" className="text-sm  ">{warningMessage}</Text>
+        </ScreenCard>
+      ) : null}
+    </ScreenStack>
+  ) : null;
 
-        {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
-          <ScreenCard padding="compact" tone="error">
-            <Text colorRole="danger" className="text-sm font-semibold  ">
-              {t('common.errors.modelLoadFailed')}
-            </Text>
-            <Text colorRole="danger" selectable className="mt-1 text-sm  ">
-              {engineState.lastError}
-            </Text>
-            <Box className="mt-3 flex-row gap-2">
-              <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">
-                <ButtonText>{t('common.close')}</ButtonText>
-              </Button>
-              <Button action="softPrimary" size="sm" onPress={handleReportEngineError} className="flex-1">
-                <ButtonText>{t('models.errorReport.reportButton')}</ButtonText>
-              </Button>
-            </Box>
-          </ScreenCard>
-        ) : null}
-
-        {warningMessage ? (
-          <ScreenCard padding="compact" tone="warning">
-            <Text colorRole="warning" className="text-sm  ">{warningMessage}</Text>
-          </ScreenCard>
-        ) : null}
-
+  const catalogListContent = (
+    <ScreenStack className="flex-1" gap="compact">
         {(isCatalogInitializing || (loading && models.length === 0)) ? (
-          <Box className="flex-1 items-center justify-center pb-8 pt-6">
+          <Box
+            className="flex-1 items-center justify-center pb-8 pt-6"
+            style={{ paddingTop: headerInset + catalogContentTopOffset }}
+          >
             <Spinner size="large" />
             <Text colorRole="tertiary" className="mt-2 ">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>
@@ -999,9 +1007,11 @@ export const ModelsList = ({
             keyExtractor={(item) => item.id}
             renderItem={renderModelItem}
             ItemSeparatorComponent={renderItemSeparator}
+            ListHeaderComponent={listHeader}
             ListEmptyComponent={renderEmptyState}
             ListFooterComponent={renderFooter}
-            contentContainerStyle={{ flexGrow: 1, paddingBottom: listBottomInset }}
+            contentContainerStyle={listContentContainerStyle}
+            progressViewOffset={headerInset + catalogContentTopOffset}
             refreshing={isRefreshing}
             onRefresh={handlePullToRefresh}
             onScrollBeginDrag={handleCatalogScrollBeginDrag}
@@ -1010,20 +1020,47 @@ export const ModelsList = ({
             showsVerticalScrollIndicator={false}
           />
         )}
-      </ScreenStack>
+    </ScreenStack>
+  );
+  const floatingFilterControls = (
+    <Box testID="models-floating-filter-row" className="h-9 overflow-visible">
+      <ModelsFilter
+        androidContentBlurTargetRef={warmupContentBlurTargetRef}
+        filters={filters}
+        sort={sort}
+        onFitsInRamToggle={(enabled) => setFitsInRamOnly(activeTab, enabled)}
+        onNoTokenRequiredToggle={(enabled) => setNoTokenRequiredOnly(activeTab, enabled)}
+        onSizeRangeToggle={(sizeRange) => toggleSizeRange(activeTab, sizeRange)}
+        onSortChange={(nextSort) => setSort(activeTab, nextSort)}
+        onClear={() => clearFilters(activeTab)}
+      />
+    </Box>
+  );
+  const standaloneCatalogContent = (
+    <>
+      {catalogListContent}
+      <Box
+        className="absolute left-0 right-0 z-20"
+        style={{
+          top: headerInset + MODEL_CATALOG_FILTER_TOP_OFFSET,
+          zIndex: 20,
+        }}
+      >
+        {floatingFilterControls}
+      </Box>
     </>
   );
   const blurTargetContent = renderContentContainer
-    ? renderContentContainer(catalogContent)
+    ? renderContentContainer(catalogListContent, floatingFilterControls)
     : androidContentBlurTargetRef ? (
-      catalogContent
+      standaloneCatalogContent
     ) : (
       <ScreenAndroidContentBlurTarget
         blurTargetRef={warmupContentBlurTargetRef}
         style={styles.warmupContentBlurTarget}
         testID="models-warmup-content-blur-target"
       >
-        {catalogContent}
+        {standaloneCatalogContent}
       </ScreenAndroidContentBlurTarget>
     );
 

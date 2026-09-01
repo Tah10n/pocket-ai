@@ -11,6 +11,7 @@ import { StyleSheet, View } from 'react-native';
 import { SearchHeader } from '@/components/ui/SearchHeader';
 import { ScreenAndroidContentBlurTarget, ScreenContent, ScreenRoot } from '@/components/ui/ScreenShell';
 import { ModelsList } from '@/components/models/ModelsList';
+import { MODEL_CATALOG_LIST_TOP_OFFSET } from '@/components/models/modelCatalogLayout';
 import { resolveModelsCatalogTab, type ModelsCatalogTab } from '@/store/modelsCatalogTabs';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
@@ -31,11 +32,18 @@ interface CatalogChromeContextValue {
   onSearchChange: (query: string) => void;
   onTabChange: (tab: ModelsCatalogTab) => void;
   onOpenStorage: () => void;
+  onControlsContentOffsetChange: (offset: number) => void;
 }
 
 const CatalogChromeContext = React.createContext<CatalogChromeContextValue | null>(null);
 
-const CatalogContentContainer = React.memo(({ children }: { children: ReactNode }) => {
+const CatalogContentContainer = React.memo(({
+  children,
+  floatingControls,
+}: {
+  children: ReactNode;
+  floatingControls: ReactNode;
+}) => {
   const chrome = React.useContext(CatalogChromeContext);
   if (!chrome) {
     throw new Error('CatalogContentContainer must be rendered inside CatalogChromeContext');
@@ -48,12 +56,15 @@ const CatalogContentContainer = React.memo(({ children }: { children: ReactNode 
       testID="models-catalog-content-blur-target"
     >
       <SearchHeader
+        androidContentBlurTargetRef={chrome.catalogContentBlurTargetRef}
         searchQuery={chrome.searchQuery}
         onSearchChange={chrome.onSearchChange}
         activeTab={chrome.activeTab}
         onTabChange={chrome.onTabChange}
         onBack={undefined}
         onOpenStorage={chrome.onOpenStorage}
+        floatingControls={floatingControls}
+        onControlsContentOffsetChange={chrome.onControlsContentOffsetChange}
       />
       <ScreenContent
         testID="models-screen-content"
@@ -77,8 +88,12 @@ const CatalogContentContainer = React.memo(({ children }: { children: ReactNode 
 
 CatalogContentContainer.displayName = 'CatalogContentContainer';
 
-function renderCatalogContentContainer(content: ReactNode): ReactNode {
-  return <CatalogContentContainer>{content}</CatalogContentContainer>;
+function renderCatalogContentContainer(content: ReactNode, floatingControls: ReactNode): ReactNode {
+  return (
+    <CatalogContentContainer floatingControls={floatingControls}>
+      {content}
+    </CatalogContentContainer>
+  );
 }
 
 export const ModelsCatalogScreen = () => {
@@ -99,6 +114,9 @@ export const ModelsCatalogScreen = () => {
     || searchQuery !== deferredCatalogRenderSnapshot.searchQuery
     || searchSessionKey !== deferredCatalogRenderSnapshot.searchSessionKey;
   const catalogContentBlurTargetRef = useRef<View | null>(null);
+  const [catalogContentTopOffset, setCatalogContentTopOffset] = useState(
+    MODEL_CATALOG_LIST_TOP_OFFSET,
+  );
 
   useEffect(() => {
     setActiveTab(requestedTab);
@@ -123,6 +141,11 @@ export const ModelsCatalogScreen = () => {
   const handleOpenStorage = useCallback(() => {
     router.push('/storage');
   }, [router]);
+  const handleControlsContentOffsetChange = useCallback((offset: number) => {
+    setCatalogContentTopOffset((current) => (
+      Math.abs(current - offset) < 0.5 ? current : offset
+    ));
+  }, []);
   const catalogChromeContextValue = useMemo<CatalogChromeContextValue>(() => ({
     activeTab,
     searchQuery,
@@ -131,9 +154,11 @@ export const ModelsCatalogScreen = () => {
     onSearchChange: handleSearchChange,
     onTabChange: handleTabChange,
     onOpenStorage: handleOpenStorage,
+    onControlsContentOffsetChange: handleControlsContentOffsetChange,
   }), [
     activeTab,
     handleOpenStorage,
+    handleControlsContentOffsetChange,
     handleSearchChange,
     handleTabChange,
     isDeferredCatalogContentStale,
@@ -148,6 +173,7 @@ export const ModelsCatalogScreen = () => {
           searchQuery={deferredCatalogRenderSnapshot.searchQuery}
           searchSessionKey={deferredCatalogRenderSnapshot.searchSessionKey}
           androidContentBlurTargetRef={catalogContentBlurTargetRef}
+          catalogContentTopOffset={catalogContentTopOffset}
           renderContentContainer={renderCatalogContentContainer}
         />
       </ScreenRoot>

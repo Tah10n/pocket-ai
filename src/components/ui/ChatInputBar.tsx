@@ -515,6 +515,9 @@ export const ChatInputBar = ({
             iconColorRole={primaryActionEnabled ? 'onAccent' : 'tertiary'}
         />
     );
+    const imageAttachmentDisabledReasonText = !imageAttachmentsEnabled && imageAttachmentsDisabledReason
+        ? t(imageAttachmentsDisabledReason)
+        : null;
     const imageAttachmentHelperText = (() => {
         if (hasTooLargeAttachmentFailures && hasCopyOrStorageAttachmentFailures) {
             return t('chat.attachments.mixedFailures');
@@ -532,8 +535,12 @@ export const ChatInputBar = ({
             return t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS });
         }
 
-        if (!imageAttachmentsEnabled && imageAttachmentsDisabledReason) {
-            return t(imageAttachmentsDisabledReason);
+        if (
+            imageAttachmentDisabledReasonText
+            && imageAttachmentsDisabledReason !== 'chat.visionReadiness.ready'
+            && imageAttachmentsDisabledReason !== 'chat.visionReadiness.textOnly'
+        ) {
+            return imageAttachmentDisabledReasonText;
         }
 
         return null;
@@ -598,7 +605,7 @@ export const ChatInputBar = ({
     const attachmentHelperText = joinUniqueHelperTexts([imageAttachmentHelperText, documentAttachmentHelperText, mediaAttachmentHelperText]);
     const attachImageDisabledContext = [
         isImageAttachmentActionBusy ? t('chat.attachments.preparingImage') : null,
-        imageAttachmentHelperText,
+        imageAttachmentHelperText ?? imageAttachmentDisabledReasonText,
         disabled ? placeholder : null,
     ]
         .filter((entry): entry is string => Boolean(entry))

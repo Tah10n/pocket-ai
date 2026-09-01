@@ -65,9 +65,13 @@ jest.mock('../../src/components/ui/SearchHeader', () => {
   const mockReact = require('react');
   const { Pressable, Text, View } = require('react-native');
   return {
-    SearchHeader: ({ activeTab, onOpenStorage, onSearchChange, onTabChange }: any) => mockReact.createElement(
+    SearchHeader: ({ activeTab, androidContentBlurTargetRef, floatingControls, onControlsContentOffsetChange, onOpenStorage, onSearchChange, onTabChange }: any) => mockReact.createElement(
       View,
-      null,
+      {
+        testID: 'models-search-header',
+        androidContentBlurTargetRef,
+        onLayout: (event: any) => onControlsContentOffsetChange?.(event.nativeEvent.layout.height),
+      },
       mockReact.createElement(Text, { testID: 'models-active-tab' }, activeTab),
       mockReact.createElement(
         Pressable,
@@ -99,6 +103,7 @@ jest.mock('../../src/components/ui/SearchHeader', () => {
         { testID: 'open-storage', onPress: () => onOpenStorage?.() },
         mockReact.createElement(Text, null, 'Open storage'),
       ),
+      floatingControls,
     ),
   };
 });
@@ -107,12 +112,12 @@ jest.mock('../../src/components/models/ModelsList', () => {
   const mockReact = require('react');
   const { Pressable, Text, View } = require('react-native');
   return {
-    ModelsList: ({ activeTab, androidContentBlurTargetRef, renderContentContainer, searchQuery, searchSessionKey }: any) => {
+    ModelsList: ({ activeTab, androidContentBlurTargetRef, catalogContentTopOffset, renderContentContainer, searchQuery, searchSessionKey }: any) => {
       const state = `${activeTab}:${searchQuery}:${searchSessionKey}`;
       mockModelsListStates.push(state);
       const content = mockReact.createElement(
         View,
-        { testID: 'models-list-props', androidContentBlurTargetRef },
+        { testID: 'models-list-props', androidContentBlurTargetRef, catalogContentTopOffset },
         mockReact.createElement(Text, { testID: 'models-list-state' }, state),
         mockReact.createElement(
           Pressable,
@@ -129,7 +134,12 @@ jest.mock('../../src/components/models/ModelsList', () => {
       return mockReact.createElement(
         mockReact.Fragment,
         null,
-        renderContentContainer ? renderContentContainer(content) : content,
+        renderContentContainer
+          ? renderContentContainer(
+            content,
+            mockReact.createElement(View, { testID: 'models-floating-filter-row' }),
+          )
+          : content,
         mockReact.createElement(View, { testID: 'models-list-overlay' }),
       );
     },
@@ -165,6 +175,10 @@ describe('ModelsCatalogScreen', () => {
     expect(queryByTestId('models-catalog-content-blur-target')).toBeTruthy();
     expect(getByTestId('models-list-props').props.androidContentBlurTargetRef)
       .toBe(getByTestId('models-catalog-content-blur-target').props.blurTargetRef);
+    expect(getByTestId('models-search-header').props.androidContentBlurTargetRef)
+      .toBe(getByTestId('models-catalog-content-blur-target').props.blurTargetRef);
+    expect(getByTestId('models-floating-filter-row')).toBeTruthy();
+    expect(getByTestId('models-list-props').props.catalogContentTopOffset).toBe(152);
     expect(getByTestId('models-active-tab').props.children).toBe('downloaded');
     expect(getByTestId('models-list-state').props.children).toBe('downloaded::0');
 
@@ -172,6 +186,11 @@ describe('ModelsCatalogScreen', () => {
 
     expect(getByTestId('models-active-tab').props.children).toBe('all');
     expect(getByTestId('models-list-state').props.children).toBe('all::0');
+
+    fireEvent(getByTestId('models-search-header'), 'layout', {
+      nativeEvent: { layout: { height: 136 } },
+    });
+    expect(getByTestId('models-list-props').props.catalogContentTopOffset).toBe(136);
   });
 
   it('defaults invalid route params to all and resyncs when params change', () => {

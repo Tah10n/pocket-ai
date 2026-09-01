@@ -53,6 +53,16 @@ export const segmentedControlGeometry = {
   } as const satisfies Readonly<ViewStyle>,
 };
 
+export const compactSegmentedControlGeometry = {
+  container: { padding: 4, flexDirection: 'row' } as const satisfies Readonly<ViewStyle>,
+  item: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  } as const satisfies Readonly<ViewStyle>,
+};
+
 export const valueSelectorRowGeometryByDensity = {
   default: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10 },
   compact: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 6 },

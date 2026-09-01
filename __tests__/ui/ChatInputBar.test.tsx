@@ -944,7 +944,6 @@ describe('ChatInputBar', () => {
   it('keeps attachment controls disabled with every non-ready readiness explanation', () => {
     const restorePlatform = mockPlatformOS('android');
     const readinessKeys = [
-      'chat.visionReadiness.textOnly',
       'chat.visionReadiness.missingProjector',
       'chat.visionReadiness.ambiguousProjector',
       'chat.visionReadiness.projectorDownloading',
@@ -984,6 +983,26 @@ describe('ChatInputBar', () => {
     } finally {
       restorePlatform();
     }
+  });
+
+  it.each([
+    'chat.visionReadiness.ready',
+    'chat.visionReadiness.textOnly',
+  ])('keeps passive image readiness %s out of persistent composer space', (readinessKey) => {
+    const screen = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        imageAttachmentsEnabled={false}
+        imageAttachmentsDisabledReason={readinessKey}
+      />,
+    );
+
+    expect(screen.queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('chat-attach-menu-button'));
+    expect(screen.getByLabelText('chat.attachments.attachImageAccessibilityLabel').props.accessibilityHint)
+      .toBe(readinessKey);
   });
 
   it('shows a busy attachment affordance while the image picker or copy is running', () => {
@@ -1111,7 +1130,7 @@ describe('ChatInputBar', () => {
       ...copiedDraftImageAttachment,
     };
 
-    const { getByPlaceholderText, getByText } = render(
+    const { getByPlaceholderText, queryByTestId } = render(
       <ChatInputBar
         onSendMessage={onSendMessage}
         onAttachImages={jest.fn()}
@@ -1132,7 +1151,7 @@ describe('ChatInputBar', () => {
     await waitFor(() => {
       expect(onSendMessage).toHaveBeenCalledWith('Send text only');
     });
-    expect(getByText('chat.visionReadiness.textOnly')).toBeTruthy();
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
   });
 
@@ -1153,7 +1172,7 @@ describe('ChatInputBar', () => {
       copyStatus: 'copied',
     };
 
-    const { getByPlaceholderText, getByText } = render(
+    const { getByPlaceholderText, queryByTestId } = render(
       <ChatInputBar
         onSendMessage={onSendMessage}
         onAttachImages={jest.fn()}
@@ -1174,7 +1193,7 @@ describe('ChatInputBar', () => {
     await waitFor(() => {
       expect(onSendMessage).toHaveBeenCalledWith('Send text only');
     });
-    expect(getByText('chat.visionReadiness.textOnly')).toBeTruthy();
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
   });
 

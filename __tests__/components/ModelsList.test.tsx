@@ -13,6 +13,7 @@ let mockLastFlashListProps: any = null;
 let mockModelCardPropsLog: any[] = [];
 let mockLastVariantPickerProps: any = null;
 let mockLastProjectorChoiceSheetProps: any = null;
+let mockLastModelsFilterProps: any = null;
 let mockDownloadQueue: ModelMetadata[] = [];
 let mockOpenModelDetails = jest.fn();
 let mockUseModelActionsInput: any = null;
@@ -60,6 +61,9 @@ jest.mock('@shopify/flash-list', () => ({
     return mockReact.createElement(
       mockReact.Fragment,
       null,
+      typeof props.ListHeaderComponent === 'function'
+        ? mockReact.createElement(props.ListHeaderComponent)
+        : props.ListHeaderComponent,
       props.data?.map((item: any, index: number) => mockReact.createElement(
         mockReact.Fragment,
         { key: props.keyExtractor?.(item, index) ?? index },
@@ -76,7 +80,10 @@ jest.mock('react-i18next', () => ({
 }));
 
 jest.mock('../../src/components/models/ModelsFilter', () => ({
-  ModelsFilter: () => null,
+  ModelsFilter: (props: any) => {
+    mockLastModelsFilterProps = props;
+    return null;
+  },
 }));
 
 jest.mock('@/components/ui/box', () => ({
@@ -402,6 +409,7 @@ describe('ModelsList', () => {
     mockModelCardPropsLog = [];
     mockLastVariantPickerProps = null;
     mockLastProjectorChoiceSheetProps = null;
+    mockLastModelsFilterProps = null;
     mockDownloadQueue = [];
     mockOpenModelDetails = jest.fn();
     mockUseModelActionsInput = null;
@@ -448,8 +456,11 @@ describe('ModelsList', () => {
   it('keeps Android glass overlays outside the provided full-screen blur target', async () => {
     const handleLoadMore = jest.fn();
     const androidBlurTargetRef = React.createRef<any>();
-    const renderContentContainer = jest.fn((content) => (
-      <View testID="external-catalog-content-container">{content}</View>
+    const renderContentContainer = jest.fn((content, floatingControls) => (
+      <View testID="external-catalog-content-container">
+        {content}
+        {floatingControls}
+      </View>
     ));
     mockUseModelsCatalogData.mockReturnValue({
       ...createCatalogData(null, handleLoadMore),
@@ -468,6 +479,14 @@ describe('ModelsList', () => {
     expect(renderContentContainer).toHaveBeenCalledTimes(1);
     expect(getByTestId('external-catalog-content-container')).toBeTruthy();
     expect(queryByTestId('models-warmup-content-blur-target')).toBeNull();
+    expect(mockLastModelsFilterProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
+    expect(getByTestId('models-floating-filter-row').props.className)
+      .toContain('h-9');
+    expect(mockLastFlashListProps.contentContainerStyle).toMatchObject({
+      flexGrow: 1,
+      paddingTop: 152,
+    });
+    expect(mockLastFlashListProps.progressViewOffset).toBe(152);
     [
       'models-warmup-banner',
       'models-parameters-sheet',

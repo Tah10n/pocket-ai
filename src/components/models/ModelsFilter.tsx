@@ -1,14 +1,23 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Box } from '@/components/ui/box';
 import { MaterialSymbols, type MaterialSymbolName } from '@/components/ui/MaterialSymbols';
 import { Pressable } from '@/components/ui/pressable';
-import { joinClassNames, ScreenActionPill, ScreenBadge, ScreenPressableSurface, ScreenSurface } from '@/components/ui/ScreenShell';
+import {
+  joinClassNames,
+  ScreenActionPill,
+  ScreenBadge,
+  ScreenSurface,
+  useAndroidLiquidGlassSceneRefresh,
+} from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
 import { ModelFilterCriteria, ModelSizeRange, ModelSortField, ModelSortPreference } from '@/store/modelsStore';
 import { useTheme } from '@/providers/ThemeProvider';
+import { EffectPressableSurface, EffectSurface } from '@/design-system/materials/EffectSurface';
+import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 
 interface ModelsFilterProps {
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   filters: ModelFilterCriteria;
   sort: ModelSortPreference;
   onFitsInRamToggle: (enabled: boolean) => void;
@@ -21,6 +30,7 @@ interface ModelsFilterProps {
 type OpenPanel = 'filter' | 'sort' | null;
 
 type TriggerButtonProps = {
+  androidContentBlurTargetRef?: AndroidBlurTargetRef | null;
   testID: string;
   iconName: MaterialSymbolName;
   label: string;
@@ -53,6 +63,7 @@ const SORT_OPTIONS: { labelKey: string; field: ModelSortField }[] = [
 ];
 
 function TriggerButton({
+  androidContentBlurTargetRef,
   testID,
   iconName,
   label,
@@ -62,48 +73,51 @@ function TriggerButton({
   onPress,
 }: TriggerButtonProps) {
   return (
-    <ScreenPressableSurface
+    <EffectPressableSurface
       testID={testID}
+      androidBlurTargetRef={androidContentBlurTargetRef}
       onPress={onPress}
-      tone={isOpen ? 'accent' : 'neutral'}
-      withControlTint={isOpen}
+      hitSlop={4}
+      accessibilityRole="button"
+      accessibilityLabel={summary ? `${label}: ${summary}` : label}
+      accessibilityState={{ expanded: isOpen }}
+      material={{
+        role: 'control',
+        variant: 'floating',
+        tone: isOpen ? 'primary' : 'neutral',
+      }}
+      shape="full"
       className={joinClassNames(
-        'min-w-0 flex-1 flex-row items-center gap-1.5 rounded-2xl border px-2.5 py-2 active:opacity-80',
+        'h-9 min-w-0 flex-1 rounded-full active:opacity-80',
       )}
     >
-      <Box className="min-w-0 flex-1 flex-row items-center gap-2">
-        <MaterialSymbols
-          name={iconName}
-          size="sm"
-          colorRole={isOpen ? 'accent' : 'tertiary'}
-        />
+      <Box className="h-full w-full flex-row items-center gap-1.5 px-2.5">
+        <Box className="min-w-0 flex-1 flex-row items-center gap-2">
+          <MaterialSymbols
+            name={iconName}
+            size="sm"
+            colorRole={isOpen ? 'accent' : 'tertiary'}
+          />
 
-        <Text colorRole="primary" numberOfLines={1} className="min-w-0 flex-1 font-semibold text-sm  ">
-          {label}
-        </Text>
-      </Box>
-
-      <Box className="ml-1.5 flex-row items-center gap-1.5">
-        {summary ? (
-          <Text colorRole="tertiary"
-            numberOfLines={1}
-            className="max-w-[84px] text-xs  "
-          >
-            {summary}
+          <Text colorRole="primary" numberOfLines={1} className="min-w-0 flex-1 font-semibold text-sm  ">
+            {summary ?? label}
           </Text>
-        ) : null}
-        {badge ? (
-          <ScreenBadge tone="accent" size="micro">
-            {badge}
-          </ScreenBadge>
-        ) : null}
-        <MaterialSymbols
-          name={isOpen ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
-          size="sm"
-          colorRole={isOpen ? 'accent' : 'tertiary'}
-        />
+        </Box>
+
+        <Box className="ml-1.5 flex-row items-center gap-1.5">
+          {badge ? (
+            <ScreenBadge tone="accent" size="micro">
+              {badge}
+            </ScreenBadge>
+          ) : null}
+          <MaterialSymbols
+            name={isOpen ? 'keyboard-arrow-up' : 'keyboard-arrow-down'}
+            size="sm"
+            colorRole={isOpen ? 'accent' : 'tertiary'}
+          />
+        </Box>
       </Box>
-    </ScreenPressableSurface>
+    </EffectPressableSurface>
   );
 }
 
@@ -174,6 +188,7 @@ function getSortSummary(t: (key: string) => string, sort: ModelSortPreference) {
 }
 
 export const ModelsFilter = ({
+  androidContentBlurTargetRef,
   filters,
   sort,
   onFitsInRamToggle,
@@ -184,14 +199,19 @@ export const ModelsFilter = ({
 }: ModelsFilterProps) => {
   const { t } = useTranslation();
   const { colors } = useTheme();
+  const requestAndroidLiquidGlassSceneRefresh = useAndroidLiquidGlassSceneRefresh();
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
   const activeFilterCount = getActiveFilterCount(filters);
   const hasActiveFilters = activeFilterCount > 0;
   const sortSummary = getSortSummary(t, sort);
+  const handlePanelLayout = useCallback(() => {
+    requestAndroidLiquidGlassSceneRefresh();
+  }, [requestAndroidLiquidGlassSceneRefresh]);
   return (
-    <Box className="py-1.5">
+    <Box>
       <Box className="flex-row gap-1.5">
         <TriggerButton
+          androidContentBlurTargetRef={androidContentBlurTargetRef}
           testID="models-filter-toggle"
           iconName="filter-list"
           label={t('models.filtersTitle')}
@@ -202,6 +222,7 @@ export const ModelsFilter = ({
           }}
         />
         <TriggerButton
+          androidContentBlurTargetRef={androidContentBlurTargetRef}
           testID="models-sort-toggle"
           iconName="sort"
           label={t('models.sortTitle')}
@@ -214,10 +235,13 @@ export const ModelsFilter = ({
       </Box>
 
       {openPanel === 'filter' ? (
-        <ScreenSurface
+        <EffectSurface
           testID="models-filter-panel"
-          material={{ role: 'content', variant: 'inset', tone: 'neutral' }}
+          androidBlurTargetRef={androidContentBlurTargetRef}
+          material={{ role: 'overlay', variant: 'popover', tone: 'neutral' }}
+          shape="md"
           className="mt-1.5 p-1.5"
+          onLayout={handlePanelLayout}
         >
           {hasActiveFilters ? (
             <Box className="mb-1.5 flex-row justify-end">
@@ -259,14 +283,17 @@ export const ModelsFilter = ({
               />
             ))}
           </Box>
-        </ScreenSurface>
+        </EffectSurface>
       ) : null}
 
       {openPanel === 'sort' ? (
-        <ScreenSurface
+        <EffectSurface
           testID="models-sort-panel"
-          material={{ role: 'content', variant: 'inset', tone: 'neutral' }}
+          androidBlurTargetRef={androidContentBlurTargetRef}
+          material={{ role: 'overlay', variant: 'popover', tone: 'neutral' }}
+          shape="md"
           className="mt-1.5 p-1.5"
+          onLayout={handlePanelLayout}
         >
           <Box className="gap-1">
             {SORT_OPTIONS.map((option) => {
@@ -308,7 +335,7 @@ export const ModelsFilter = ({
               );
             })}
           </Box>
-        </ScreenSurface>
+        </EffectSurface>
       ) : null}
     </Box>
   );

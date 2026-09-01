@@ -16,6 +16,7 @@ import {
   ScreenSegmentedControl,
   ScreenSheet,
   ScreenSurface,
+  useAndroidLiquidGlassSceneRefresh,
 } from '../../src/components/ui/ScreenShell';
 
 let mockSafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
@@ -186,21 +187,30 @@ describe('ScreenShell semantic material contracts', () => {
       transparencyState: 'allowed',
     });
 
-    const screen = render(<ScreenRoot testID="root"><Text>recorded scene content</Text></ScreenRoot>);
+    function SceneRefreshControl() {
+      const requestSceneRefresh = useAndroidLiquidGlassSceneRefresh();
+      return <Text testID="request-scene-refresh" onPress={requestSceneRefresh}>recorded scene content</Text>;
+    }
+
+    const screen = render(<ScreenRoot testID="root"><SceneRefreshControl /></ScreenRoot>);
 
     const provider = screen.getByTestId('screen-material-liquid-glass-scene');
     expect(provider.props.active).toBe(true);
-    expect(provider.props.sceneRevision).toBe('glass-light');
+    expect(provider.props.sceneRevision).toBe('glass-light-0');
     expect(provider.findByProps({ children: 'recorded scene content' })).toBeTruthy();
     expect(provider.findByProps({ testID: 'screen-decoration' })).toBeTruthy();
     expect(provider.findByProps({ testID: 'screen-decoration-dim' })).toBeTruthy();
     expect(screen.queryByTestId('screen-material-blur-target')).toBeNull();
     expect(screen.queryByTestId('screen-material-scene-blur-target')).toBeNull();
 
+    fireEvent.press(screen.getByTestId('request-scene-refresh'));
+    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision)
+      .toBe('glass-light-1');
+
     const darkTheme = resolveTheme('glass', 'dark');
     mockThemeContext = { colors: darkTheme.colors, resolvedMode: 'dark', resolvedTheme: darkTheme, themeId: 'glass' };
-    screen.rerender(<ScreenRoot testID="root"><Text>recorded scene content</Text></ScreenRoot>);
-    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision).toBe('glass-dark');
+    screen.rerender(<ScreenRoot testID="root"><SceneRefreshControl /></ScreenRoot>);
+    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision).toBe('glass-dark-1');
   });
 
   it.each([
@@ -415,6 +425,38 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.getByText('Second').props.colorRole).toBe('onAccent');
     fireEvent.press(screen.getByText('First').parent as any);
     expect(onChange).toHaveBeenCalledWith('first');
+  });
+
+  it('supports compact embedded segmented controls inside effect chrome', () => {
+    const screen = render(
+      <ScreenSegmentedControl
+        testID="compact-segments"
+        activeKey="first"
+        density="compact"
+        embedded
+        onChange={jest.fn()}
+        options={[
+          { key: 'first', label: 'First', testID: 'compact-first' },
+          { key: 'second', label: 'Second' },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId('compact-segments').props.material).toBeNull();
+    expect(StyleSheet.flatten(screen.getByTestId('compact-segments').props.style)).toMatchObject({
+      padding: 4,
+    });
+    expect(StyleSheet.flatten(screen.getByTestId('compact-first').props.style)).toMatchObject({
+      paddingHorizontal: 10,
+    });
+    expect(StyleSheet.flatten(screen.getByTestId('compact-first').props.style)).not.toHaveProperty('minHeight');
+    expect(StyleSheet.flatten(screen.getByTestId('compact-first').props.style)).not.toHaveProperty('paddingVertical');
+    expect(screen.getByTestId('compact-first').props.hitSlop).toBe(8);
+    expect(screen.getByText('First').props).toMatchObject({
+      adjustsFontSizeToFit: true,
+      minimumFontScale: 0.85,
+      numberOfLines: 1,
+    });
   });
 
   it('keeps generic screen surfaces transparent until a caller opts into material', () => {

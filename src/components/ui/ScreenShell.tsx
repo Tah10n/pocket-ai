@@ -67,6 +67,7 @@ interface ScreenContentProps {
   respectFloatingHeader?: boolean;
   style?: StyleProp<ViewStyle>;
   testID?: string;
+  topSpacing?: 'none' | 'compact' | 'default';
 }
 
 interface ScreenRootProps {
@@ -642,6 +643,7 @@ export function ScreenContent({
   respectFloatingHeader = true,
   style,
   testID,
+  topSpacing = 'none',
 }: ScreenContentProps) {
   const insets = useSafeAreaInsets();
   const floatingHeaderInset = useFloatingHeaderInset();
@@ -649,14 +651,20 @@ export function ScreenContent({
     ? getNativeBottomSafeAreaInset(insets.bottom)
     : 0;
   const resolvedExtraBottomInset = Math.max(0, extraBottomInset);
-  const floatingHeaderInsetStyle = respectFloatingHeader && floatingHeaderInset > 0
-    ? { paddingTop: floatingHeaderInset }
+  const resolvedTopSpacing = topSpacing === 'default'
+    ? screenLayoutMetrics.contentTopInset
+    : topSpacing === 'compact'
+      ? 12
+      : 0;
+  const resolvedTopInset = (respectFloatingHeader ? floatingHeaderInset : 0) + resolvedTopSpacing;
+  const topInsetStyle = resolvedTopInset > 0
+    ? { paddingTop: resolvedTopInset }
     : undefined;
   const bottomInsetStyle = nativeBottomInset > 0 || resolvedExtraBottomInset > 0
     ? { paddingBottom: screenLayoutMetrics.contentBottomInset + nativeBottomInset + resolvedExtraBottomInset }
     : undefined;
-  const insetStyle = floatingHeaderInsetStyle || bottomInsetStyle
-    ? [floatingHeaderInsetStyle, bottomInsetStyle]
+  const insetStyle = topInsetStyle || bottomInsetStyle
+    ? [topInsetStyle, bottomInsetStyle]
     : undefined;
 
   return (

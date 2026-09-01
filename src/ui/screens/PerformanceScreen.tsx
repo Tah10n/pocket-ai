@@ -319,7 +319,7 @@ export function PerformanceScreen() {
       />
 
       <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-        <ScreenContent style={{ paddingTop: 18 }} includeBottomSafeArea>
+        <ScreenContent testID="performance-content" topSpacing="default" includeBottomSafeArea>
           <ScreenStack gap="loose">
             <ScreenCard>
               <Text colorRole="secondary" className="text-sm  ">

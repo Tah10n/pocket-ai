@@ -342,7 +342,11 @@ export function StorageManagerScreen() {
             />
 
             <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-                <ScreenContent className="pt-3" style={{ paddingBottom: insets.bottom + 32 }}>
+                <ScreenContent
+                    testID="storage-manager-content"
+                    topSpacing="default"
+                    style={{ paddingBottom: insets.bottom + 32 }}
+                >
                     <ScreenStack gap="default">
                         {hardwareStatus.isLowMemory ? (
                             <ScreenCard tone="warning" padding="compact">

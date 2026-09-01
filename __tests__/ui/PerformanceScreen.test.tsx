@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
-import { Alert, Share } from 'react-native';
+import { Alert, Share, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
@@ -103,6 +103,15 @@ describe('PerformanceScreen', () => {
       jest.runOnlyPendingTimers();
     });
     jest.useRealTimers();
+  });
+
+  it('keeps performance content below the header', async () => {
+    const screen = await renderScreen();
+
+    expect(StyleSheet.flatten(screen.getByTestId('performance-content').props.style)).toMatchObject({
+      paddingTop: 16,
+    });
+    screen.unmount();
   });
 
   it('navigates back when possible', async () => {

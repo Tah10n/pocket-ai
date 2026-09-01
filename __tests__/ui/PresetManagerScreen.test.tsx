@@ -1,5 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { PresetManagerScreen } from '../../src/ui/screens/PresetManagerScreen';
 import { presetManager } from '../../src/services/PresetManager';
@@ -105,6 +106,14 @@ describe('PresetManagerScreen', () => {
       systemPrompt: updates.systemPrompt,
       isBuiltIn: false,
     }) as any);
+  });
+
+  it('keeps the preset list separated from the header', async () => {
+    const screen = await renderScreen();
+
+    expect(StyleSheet.flatten(screen.getByTestId('preset-manager-content').props.style)).toMatchObject({
+      paddingTop: 16,
+    });
   });
 
   it('navigates back when possible', async () => {

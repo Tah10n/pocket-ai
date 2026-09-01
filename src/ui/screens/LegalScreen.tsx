@@ -88,7 +88,11 @@ export function LegalScreen() {
             />
 
             <ScrollView className="flex-1" showsVerticalScrollIndicator={false}>
-                <ScreenContent className="pt-5" style={{ paddingBottom: insets.bottom + 32 }}>
+                <ScreenContent
+                    testID="legal-content"
+                    topSpacing="default"
+                    style={{ paddingBottom: insets.bottom + 32 }}
+                >
                     <ScreenStack gap="loose">
                         <ScreenCard tone="accent" className="px-5 py-5">
                             <Text colorRole="accent" className="text-xs font-extrabold uppercase tracking-wide ">

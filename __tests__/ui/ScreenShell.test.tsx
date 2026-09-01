@@ -360,6 +360,41 @@ describe('ScreenShell semantic material contracts', () => {
     });
   });
 
+  it('adds semantic top spacing after a measured floating header', () => {
+    const resolvedTheme = resolveTheme('glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    const screen = render(
+      <ScreenRoot>
+        <ScreenHeaderShell testID="header">header</ScreenHeaderShell>
+        <ScreenContent testID="content" topSpacing="default">content</ScreenContent>
+      </ScreenRoot>,
+    );
+    let layoutNode: any = screen.getByTestId('header');
+
+    while (layoutNode && typeof layoutNode.props.onLayout !== 'function') {
+      layoutNode = layoutNode.parent;
+    }
+
+    expect(layoutNode).toBeTruthy();
+    fireEvent(layoutNode, 'layout', {
+      nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 124 } },
+    });
+
+    expect(StyleSheet.flatten(screen.getByTestId('content').props.style)).toMatchObject({
+      paddingTop: 140,
+    });
+  });
+
+  it('keeps semantic top spacing when the header participates in layout', () => {
+    const screen = render(
+      <ScreenContent testID="content" topSpacing="default">content</ScreenContent>,
+    );
+
+    expect(StyleSheet.flatten(screen.getByTestId('content').props.style)).toMatchObject({
+      paddingTop: 16,
+    });
+  });
+
   it('exposes selected state and semantic foregrounds for segmented controls', () => {
     const onChange = jest.fn();
     const screen = render(

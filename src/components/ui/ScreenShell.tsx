@@ -573,6 +573,7 @@ export function ScreenRoot({
       <AndroidLiquidGlassBackdropProvider
         testID="screen-material-liquid-glass-scene"
         active={shouldUseAndroidLiquidGlass && isFocused}
+        sceneRevision={`${theme.resolvedTheme.id}-${theme.resolvedMode}`}
         collapsable={false}
         style={styles.screenSceneBlurTarget}
       >

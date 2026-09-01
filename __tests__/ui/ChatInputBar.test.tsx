@@ -110,6 +110,34 @@ describe('ChatInputBar', () => {
     expect(getByTestId('chat-primary-action-stop')).toBeTruthy();
   });
 
+  it('keeps the send and stop actions the same size as the attachment action', () => {
+    const actionProps = {
+      draft: 'Ready',
+      imageAttachmentsEnabled: true,
+      onAttachImages: jest.fn(),
+      onSendMessage: jest.fn(),
+    };
+    const { getByTestId, rerender } = render(<ChatInputBar {...actionProps} />);
+    const attachmentClassName = getByTestId('chat-attach-menu-button').props.className as string;
+
+    expect(attachmentClassName).toEqual(expect.stringContaining('h-8 w-8'));
+    expect(getByTestId('chat-primary-action-send').props.className).toEqual(
+      expect.stringContaining('h-8 w-8'),
+    );
+
+    rerender(
+      <ChatInputBar
+        {...actionProps}
+        isSending
+        onStopGeneration={jest.fn()}
+      />,
+    );
+
+    expect(getByTestId('chat-primary-action-stop').props.className).toEqual(
+      expect.stringContaining('h-8 w-8'),
+    );
+  });
+
   it('selects composer chrome from theme presentation without changing the default layout', () => {
     const defaultComposer = render(
       <StaticThemeProvider themeId="default" resolvedMode="light">

@@ -228,7 +228,12 @@ function canSendRetainedAttachment(
 }
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
-type AndroidKeyboardMetrics = { height: number; topY: number };
+type AndroidKeyboardMetrics = {
+    height: number;
+    topY: number;
+    screenTopY?: number;
+    reportedScreenY?: number | null;
+};
 
 function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): string {
     return VISION_READINESS_TRANSLATION_KEYS[status];
@@ -520,6 +525,27 @@ export function getAndroidKeyboardTopY({
     return Math.min(reportedScreenY, heightDerivedTopY, viewportDerivedTopY);
 }
 
+export function getAndroidFloatingKeyboardTopY({
+    screenHeight,
+    keyboardHeight,
+    reportedScreenY,
+}: {
+    screenHeight: number;
+    keyboardHeight: number;
+    reportedScreenY?: number | null;
+}) {
+    const heightDerivedTopY = Math.max(0, screenHeight - Math.max(0, keyboardHeight));
+
+    if (typeof reportedScreenY !== 'number' || !Number.isFinite(reportedScreenY) || reportedScreenY <= 0) {
+        return heightDerivedTopY;
+    }
+
+    // measure() and KeyboardEvent.screenY use screen coordinates. Do not mix in
+    // Dimensions.get('window') here: on edge-to-edge OEM builds that window can
+    // exclude system chrome and lift an absolutely positioned composer too far.
+    return Math.min(reportedScreenY, heightDerivedTopY);
+}
+
 export function isAndroidKeyboardMeasurementCurrent({
     isKeyboardVisible,
     activeMetrics,
@@ -535,13 +561,15 @@ export function isAndroidKeyboardMeasurementCurrent({
 export function shouldFloatAndroidComposerOverContent({
     platform,
     composerPresentation,
-    isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
     composerPresentation: 'inline' | 'capsule';
     isKeyboardVisible: boolean;
 }) {
-    return platform === 'android' && composerPresentation === 'capsule' && !isKeyboardVisible;
+    // Keep the focused TextInput in one native layout mode while Android opens
+    // the IME. Some OEM builds drop input focus when its ancestor switches from
+    // absolute positioning to normal flow during the keyboard transition.
+    return platform === 'android' && composerPresentation === 'capsule';
 }
 
 export function getAndroidFloatingComposerBottomOffset({
@@ -1237,8 +1265,9 @@ const ChatScreenContent = () => {
                 ? t('chat.warmingUpDescription')
                 : t('chat.loadModelDescription');
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
-    const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
-    const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
+    const shouldShowModelRecovery = !isCurrentChatModelReady || isPendingModelSelectionForCurrentThread;
+    const shouldShowRecoveryBanner = shouldShowModelRecovery && hasMessages;
+    const shouldShowRecoveryCard = shouldShowModelRecovery && !hasMessages;
     const shouldShowFloatingWarmupBanner = isModelInitializing && !shouldShowRecoveryCard;
     const shouldReserveComposerTabBarInset = !shouldFloatComposerOverContent && !isAndroidKeyboardOpen;
     const composerBottomInsetStyle = shouldReserveComposerTabBarInset && tabBarInset > 0
@@ -2236,12 +2265,14 @@ const ChatScreenContent = () => {
                     viewportCompensation,
                     currentSpacerHeight: androidKeyboardInsetRef.current,
                     composerBottomY: pageY + height,
-                    keyboardTopY: keyboardMetrics.topY,
+                    keyboardTopY: shouldFloatComposerOverContent
+                        ? (keyboardMetrics.screenTopY ?? keyboardMetrics.topY)
+                        : keyboardMetrics.topY,
                     gap: screenLayoutMetrics.keyboardComposerGap,
                 }));
             });
         });
-    }, [setAndroidKeyboardInsetValue, tabBarHeight]);
+    }, [setAndroidKeyboardInsetValue, shouldFloatComposerOverContent, tabBarHeight]);
 
     const handleComposerContainerLayout = useCallback((event: LayoutChangeEvent) => {
         const nextHeight = event.nativeEvent.layout.height;
@@ -2810,7 +2841,12 @@ const ChatScreenContent = () => {
                     screenHeight,
                     windowHeight: window.height,
                     keyboardHeight: keyboardMetrics.height,
-                    reportedScreenY: keyboardMetrics.topY,
+                    reportedScreenY: keyboardMetrics.reportedScreenY ?? keyboardMetrics.topY,
+                });
+                keyboardMetrics.screenTopY = getAndroidFloatingKeyboardTopY({
+                    screenHeight,
+                    keyboardHeight: keyboardMetrics.height,
+                    reportedScreenY: keyboardMetrics.reportedScreenY ?? keyboardMetrics.screenTopY,
                 });
             }
 
@@ -2821,14 +2857,22 @@ const ChatScreenContent = () => {
             isKeyboardVisibleRef.current = true;
             setIsAndroidKeyboardVisible(true);
             const keyboardHeight = event.endCoordinates.height;
+            const screenHeight = Dimensions.get('screen').height;
+            const reportedScreenY = event.endCoordinates.screenY;
             androidKeyboardMetricsRef.current = {
                 height: keyboardHeight,
                 topY: getAndroidKeyboardTopY({
-                    screenHeight: Dimensions.get('screen').height,
+                    screenHeight,
                     windowHeight: Dimensions.get('window').height,
                     keyboardHeight,
-                    reportedScreenY: event.endCoordinates.screenY,
+                    reportedScreenY,
                 }),
+                screenTopY: getAndroidFloatingKeyboardTopY({
+                    screenHeight,
+                    keyboardHeight,
+                    reportedScreenY,
+                }),
+                reportedScreenY,
             };
         };
 

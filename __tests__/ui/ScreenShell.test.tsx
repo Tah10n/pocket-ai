@@ -190,11 +190,17 @@ describe('ScreenShell semantic material contracts', () => {
 
     const provider = screen.getByTestId('screen-material-liquid-glass-scene');
     expect(provider.props.active).toBe(true);
+    expect(provider.props.sceneRevision).toBe('glass-light');
     expect(provider.findByProps({ children: 'recorded scene content' })).toBeTruthy();
     expect(provider.findByProps({ testID: 'screen-decoration' })).toBeTruthy();
     expect(provider.findByProps({ testID: 'screen-decoration-dim' })).toBeTruthy();
     expect(screen.queryByTestId('screen-material-blur-target')).toBeNull();
     expect(screen.queryByTestId('screen-material-scene-blur-target')).toBeNull();
+
+    const darkTheme = resolveTheme('glass', 'dark');
+    mockThemeContext = { colors: darkTheme.colors, resolvedMode: 'dark', resolvedTheme: darkTheme, themeId: 'glass' };
+    screen.rerender(<ScreenRoot testID="root"><Text>recorded scene content</Text></ScreenRoot>);
+    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision).toBe('glass-dark');
   });
 
   it.each([
@@ -400,9 +406,15 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.getByTestId('header-action').props).toMatchObject({
       accessibilityLabel: 'Close',
       accessibilityRole: 'button',
+      hitSlop: 8,
       material: { role: 'control', variant: 'floating', tone: 'neutral' },
       shape: 'full',
     });
+    expect(screen.getByTestId('header-action').props.className).toContain('h-10 w-10');
+    expect(mockMaterialSymbols).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'close',
+      size: 20,
+    }));
     expect(screen.getByTestId('danger-action').props.material).toEqual({ role: 'control', variant: 'inline', tone: 'error' });
     expect(mockMaterialSymbols).toHaveBeenCalledWith(expect.objectContaining({ name: 'delete', colorRole: 'danger' }));
   });

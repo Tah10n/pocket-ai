@@ -689,6 +689,7 @@ const {
   getAndroidFloatingComposerBottomOffset,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getAndroidFloatingKeyboardTopY,
   getAndroidKeyboardTopY,
   getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
@@ -2798,6 +2799,24 @@ describe('ChatScreen', () => {
     })).toBe(496);
   });
 
+  it('keeps floating Android composer measurements in screen coordinates', () => {
+    expect(getAndroidFloatingKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 255,
+      reportedScreenY: 533,
+    })).toBe(533);
+    expect(getAndroidFloatingKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 804,
+    })).toBe(504);
+    expect(getAndroidFloatingKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 496,
+    })).toBe(496);
+  });
+
   it('rejects an Android keyboard measurement after hide or a newer frame event', () => {
     const measuredMetrics = { height: 320, topY: 2080 };
 
@@ -2818,7 +2837,7 @@ describe('ChatScreen', () => {
     })).toBe(false);
   });
 
-  it('returns the Android glass composer to normal flow while the keyboard is visible', () => {
+  it('keeps the Android capsule composer in one layout mode while the keyboard opens', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
       composerPresentation: 'capsule',
@@ -2833,7 +2852,7 @@ describe('ChatScreen', () => {
       platform: 'android',
       composerPresentation: 'capsule',
       isKeyboardVisible: true,
-    })).toBe(false);
+    })).toBe(true);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
       composerPresentation: 'capsule',
@@ -3060,9 +3079,10 @@ describe('ChatScreen', () => {
       activeThreadId: 'thread-1',
     });
 
-    const { getByTestId } = render(React.createElement(ChatScreen));
+    const { getByTestId, queryByTestId } = render(React.createElement(ChatScreen));
 
     expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+    expect(queryByTestId('chat-recovery-banner')).toBeNull();
 
     fireEvent(getByTestId('chat-flash-list'), 'touchStart');
 

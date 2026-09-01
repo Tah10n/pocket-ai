@@ -45,6 +45,13 @@ class PocketLiquidGlassBackdropProvider(context: Context, appContext: AppContext
       updateRegistration()
       invalidate()
     }
+  var sceneRevision: String = ""
+    set(value) {
+      if (field == value) return
+      field = value
+      resetCaptureFailure()
+      postInvalidateOnAnimation()
+    }
 
   init {
     super.addView(sceneContainer, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))

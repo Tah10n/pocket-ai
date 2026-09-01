@@ -181,8 +181,8 @@ export const screenChromeTokens = {
   headerContentGapClassName: 'gap-3',
   headerContentVerticalPaddingClassName: 'py-2',
   headerContentVerticalPaddingCompactClassName: 'py-1.5',
-  headerActionClassName: 'h-11 w-11',
-  headerActionIconSizePx: iconSizePx.xl,
+  headerActionClassName: 'h-10 w-10',
+  headerActionIconSizePx: iconSizePx.lg,
   bottomBarVerticalPaddingClassName: 'py-2',
 } as const;
 

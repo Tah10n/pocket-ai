@@ -30,6 +30,8 @@ const CHAT_COMPOSER_MATERIAL = { role: 'chrome', variant: 'composer' } as const;
 const CHAT_PRIMARY_ACTION_MATERIAL = { role: 'control', variant: 'selected', tone: 'primary' } as const;
 const CHAT_DISABLED_ACTION_MATERIAL = { role: 'control', variant: 'inline', tone: 'neutral' } as const;
 const CHAT_MODE_MATERIAL = { role: 'content', variant: 'composerMode' } as const;
+const CHAT_COMPOSER_ACTION_SIZE = 'compact' as const;
+const CHAT_COMPOSER_ACTION_ICON_SIZE = 'sm' as const;
 
 interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
@@ -506,6 +508,8 @@ export const ChatInputBar = ({
             disabled={!isSending && !canSend}
             accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
             iconName={isSending ? 'stop' : 'arrow-upward'}
+            iconSize={CHAT_COMPOSER_ACTION_ICON_SIZE}
+            size={CHAT_COMPOSER_ACTION_SIZE}
             material={primaryActionEnabled ? CHAT_PRIMARY_ACTION_MATERIAL : CHAT_DISABLED_ACTION_MATERIAL}
             tone={primaryActionEnabled ? 'primary' : 'neutral'}
             iconColorRole={primaryActionEnabled ? 'onAccent' : 'tertiary'}
@@ -702,8 +706,8 @@ export const ChatInputBar = ({
             accessibilityHint={attachmentStatusAnnouncement ?? undefined}
             accessibilityState={isAnyAttachmentActionBusy ? { busy: true } : undefined}
             iconName="attach-file"
-            iconSize="sm"
-            size="compact"
+            iconSize={CHAT_COMPOSER_ACTION_ICON_SIZE}
+            size={CHAT_COMPOSER_ACTION_SIZE}
             testID="chat-attach-menu-button"
         />
     ) : null;

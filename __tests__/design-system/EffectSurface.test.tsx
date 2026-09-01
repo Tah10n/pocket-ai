@@ -103,7 +103,13 @@ describe('EffectSurface', () => {
 
     expect(StyleSheet.flatten(surface.props.style)).toMatchObject({
       backgroundColor: mockResolvedTheme.colors.surfaceOverlay,
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.2),
       borderWidth: 1,
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.22),
+        inset: true,
+      }],
     });
     expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
       Object.prototype.hasOwnProperty.call(node.props, 'intensity')
@@ -185,7 +191,13 @@ describe('EffectSurface', () => {
       screen.getByTestId('reduced-transparency-surface').props.style,
     )).toMatchObject({
       backgroundColor: mockResolvedTheme.colors.surfaceOverlay,
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.2),
       borderWidth: 1,
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.22),
+        inset: true,
+      }],
     });
     expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
       Object.prototype.hasOwnProperty.call(node.props, 'intensity')
@@ -301,6 +313,7 @@ describe('EffectSurface', () => {
       cornerRadiusBottomRight: 0,
       fallbackColor: mockResolvedTheme.colors.warningSurface,
       fallbackBorderColor: mockResolvedTheme.colors.borderSubtle,
+      fallbackBorderOpacity: 0.32,
       fallbackBorderWidth: 1,
       tintOpacity: 0.34,
     });

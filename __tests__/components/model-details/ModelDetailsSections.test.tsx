@@ -76,6 +76,7 @@ describe('model details sections', () => {
       textBreakStrategy: 'balanced',
     }));
     expect(screen.getByText('author/model-q4')).toBeTruthy();
+    expect(screen.getByTestId('model-details-hero-content').props.gap).toBe('compact');
     expect(screen.queryByText('Badge')).toBeNull();
     expect(screen.queryByText('Action')).toBeNull();
     expect(screen.queryByText('Progress')).toBeNull();

@@ -8,6 +8,7 @@ import type {
   MaterialRecipeDefinition,
   MaterialRendererRecipe,
   MaterialRim,
+  MaterialSoftRim,
   MaterialShadow,
   MaterialTone,
   MaterialToneRecipes,
@@ -90,6 +91,114 @@ function denseDefinition(recipe: DenseMaterialRecipe): MaterialRecipeDefinition 
 
 function neutral(recipe: MaterialRecipeDefinition): MaterialToneRecipes {
   return { neutral: recipe };
+}
+
+const MATERIAL_TONES: readonly MaterialTone[] = [
+  'neutral',
+  'primary',
+  'accent',
+  'info',
+  'success',
+  'warning',
+  'error',
+];
+
+function softenGlassRecipe(
+  recipe: MaterialRendererRecipe,
+  mode: MaterialColorMode,
+  emphasized: boolean,
+): MaterialRendererRecipe {
+  if (recipe.rim.width <= 0 || recipe.rim.opacity <= 0) {
+    return recipe;
+  }
+
+  const softenedRim: MaterialRim = {
+    ...recipe.rim,
+    opacity: emphasized
+      ? mode === 'dark' ? 0.28 : 0.32
+      : mode === 'dark' ? 0.16 : 0.2,
+  };
+  const softRim: MaterialSoftRim = {
+    color: recipe.rim.color,
+    opacity: emphasized
+      ? mode === 'dark' ? 0.36 : 0.32
+      : mode === 'dark' ? 0.26 : 0.22,
+    blurRadius: emphasized ? 6 : 5,
+    spreadDistance: 0,
+  };
+
+  if (recipe.renderer === 'android-liquid-glass') {
+    return {
+      ...recipe,
+      rim: softenedRim,
+      softRim,
+      androidGlass: {
+        ...recipe.androidGlass,
+        fallbackRim: {
+          ...recipe.androidGlass.fallbackRim,
+          opacity: softenedRim.opacity,
+        },
+      },
+    };
+  }
+
+  return {
+    ...recipe,
+    rim: softenedRim,
+    softRim,
+  };
+}
+
+function softenGlassDefinition(
+  definition: MaterialRecipeDefinition,
+  mode: MaterialColorMode,
+  emphasized: boolean,
+): MaterialRecipeDefinition {
+  const soften = (recipe: MaterialRendererRecipe) => softenGlassRecipe(
+    recipe,
+    mode,
+    emphasized,
+  );
+  const platformFallbackByPlatform = definition.platformFallbackByPlatform;
+
+  return {
+    preferredByPlatform: {
+      ios: soften(definition.preferredByPlatform.ios),
+      android: soften(definition.preferredByPlatform.android),
+      web: soften(definition.preferredByPlatform.web),
+    },
+    platformFallbackByPlatform: platformFallbackByPlatform
+      ? {
+          ios: platformFallbackByPlatform.ios
+            ? soften(platformFallbackByPlatform.ios)
+            : undefined,
+          android: platformFallbackByPlatform.android
+            ? soften(platformFallbackByPlatform.android)
+            : undefined,
+          web: platformFallbackByPlatform.web
+            ? soften(platformFallbackByPlatform.web)
+            : undefined,
+        }
+      : undefined,
+    accessibilityFallback: soften(definition.accessibilityFallback) as DenseMaterialRecipe,
+    unsupportedPlatformFallback: soften(definition.unsupportedPlatformFallback) as DenseMaterialRecipe,
+  };
+}
+
+function softenGlassToneRecipes(
+  recipes: MaterialToneRecipes,
+  mode: MaterialColorMode,
+): MaterialToneRecipes {
+  const softened: Partial<Record<MaterialTone, MaterialRecipeDefinition>> = {};
+
+  for (const tone of MATERIAL_TONES) {
+    const definition = recipes[tone];
+    if (definition) {
+      softened[tone] = softenGlassDefinition(definition, mode, tone !== 'neutral');
+    }
+  }
+
+  return softened as MaterialToneRecipes;
 }
 
 function createSemanticControlTones(
@@ -610,35 +719,44 @@ export function createLiquidThemeMaterialRecipes(
   return {
     canvas: { base: neutral(canvas) },
     content: {
-      raised: createSemanticContentTones(colors, contentRaised, 'tinted'),
-      inset: createSemanticContentTones(colors, contentInset, 'tinted'),
-      list: createSemanticContentTones(colors, contentList, 'tinted'),
-      message: createSemanticContentTones(colors, contentMessage, 'tinted', {
+      raised: softenGlassToneRecipes(
+        createSemanticContentTones(colors, contentRaised, 'tinted'),
+        mode,
+      ),
+      inset: softenGlassToneRecipes(
+        createSemanticContentTones(colors, contentInset, 'tinted'),
+        mode,
+      ),
+      list: softenGlassToneRecipes(
+        createSemanticContentTones(colors, contentList, 'tinted'),
+        mode,
+      ),
+      message: softenGlassToneRecipes(createSemanticContentTones(colors, contentMessage, 'tinted', {
         primary: {
           fillColor: colors.primarySoft,
           rimColor: colors.primary,
           rimWidth: 0,
         },
-      }),
-      messageThought: neutral(messageThought),
-      messageAttachment: neutral(messageAttachment),
-      messageError: neutral(messageError),
-      composerMode: neutral(composerMode),
+      }), mode),
+      messageThought: softenGlassToneRecipes(neutral(messageThought), mode),
+      messageAttachment: softenGlassToneRecipes(neutral(messageAttachment), mode),
+      messageError: softenGlassToneRecipes(neutral(messageError), mode),
+      composerMode: softenGlassToneRecipes(neutral(composerMode), mode),
     },
     chrome: {
-      header: chrome(mode === 'dark' ? 88 : 75),
-      tabBar: neutral(tabBarEffectDefinition(colors, mode)),
-      composer: chrome(mode === 'dark' ? 76 : 66),
-      sheet: chrome(mode === 'dark' ? 84 : 72),
+      header: softenGlassToneRecipes(chrome(mode === 'dark' ? 88 : 75), mode),
+      tabBar: softenGlassToneRecipes(neutral(tabBarEffectDefinition(colors, mode)), mode),
+      composer: softenGlassToneRecipes(chrome(mode === 'dark' ? 76 : 66), mode),
+      sheet: softenGlassToneRecipes(chrome(mode === 'dark' ? 84 : 72), mode),
     },
     control: {
-      inline: inlineControls,
-      floating: floatingControls,
-      selected: inlineControls,
+      inline: softenGlassToneRecipes(inlineControls, mode),
+      floating: softenGlassToneRecipes(floatingControls, mode),
+      selected: softenGlassToneRecipes(inlineControls, mode),
     },
     overlay: {
-      banner,
-      popover,
+      banner: softenGlassToneRecipes(banner, mode),
+      popover: softenGlassToneRecipes(popover, mode),
       scrim: neutral(scrim),
     },
   };

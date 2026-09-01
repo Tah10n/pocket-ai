@@ -4,6 +4,7 @@ import { StyleSheet } from 'react-native';
 import { MaterialEnvironmentProvider } from '../../src/design-system/materials/MaterialEnvironmentProvider';
 import { PressableSurface, Surface } from '../../src/design-system/materials/Surface';
 import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
+import { withMaterialPaintOpacity } from '../../src/design-system/materials/style';
 import { semanticColorTokens, withAlpha } from '../../src/design-system/themes/legacyTheme';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
 
@@ -89,9 +90,17 @@ describe('material Surface primitives', () => {
 
     expect(StyleSheet.flatten(screen.getByTestId('content-surface').props.style)).toMatchObject({
       backgroundColor: mockResolvedTheme.colors.cardBackground,
-      borderColor: mockResolvedTheme.colors.borderSubtle,
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.2),
       borderRadius: 20,
       borderWidth: 1,
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.22),
+        inset: true,
+        offsetX: 0,
+        offsetY: 0,
+        spreadDistance: 0,
+      }],
     });
     expect(screen.toJSON()).toMatchObject({ type: 'View' });
   });
@@ -131,11 +140,53 @@ describe('material Surface primitives', () => {
       />,
     );
 
-    expect(StyleSheet.flatten(screen.getByTestId('default-raised-surface').props.style)).toMatchObject({
+    const frameStyle = StyleSheet.flatten(screen.getByTestId('default-raised-surface').props.style);
+
+    expect(frameStyle).toMatchObject({
       backgroundColor: fillColor,
       borderColor: rimColor,
       borderRadius: variant === 'raised' ? 20 : 16,
       borderWidth: 1,
+    });
+    expect(frameStyle.boxShadow).toBeUndefined();
+  });
+
+  it('uses a stronger inward-fading rim for semantic Glass surfaces', () => {
+    const screen = render(
+      <Surface
+        testID="warning-glass-surface"
+        material={{ role: 'content', variant: 'raised', tone: 'warning' }}
+      />,
+    );
+    const frameStyle = StyleSheet.flatten(screen.getByTestId('warning-glass-surface').props.style);
+
+    expect(frameStyle).toMatchObject({
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.warning, 0.32),
+      boxShadow: [{
+        blurRadius: 6,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.warning, 0.32),
+        inset: true,
+      }],
+    });
+  });
+
+  it('keeps the softened Glass rim subtle in dark mode', () => {
+    mockResolvedTheme = resolveTheme('glass', 'dark');
+    const screen = render(
+      <Surface
+        testID="dark-glass-surface"
+        material={{ role: 'content', variant: 'list' }}
+      />,
+    );
+    const frameStyle = StyleSheet.flatten(screen.getByTestId('dark-glass-surface').props.style);
+
+    expect(frameStyle).toMatchObject({
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.16),
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.26),
+        inset: true,
+      }],
     });
   });
 

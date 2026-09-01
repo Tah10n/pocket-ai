@@ -14,6 +14,7 @@ import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtu
 import { getInteractiveWorkRevision } from '../../src/utils/idleTask';
 import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
+import { withMaterialPaintOpacity } from '../../src/design-system/materials/style';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -171,7 +172,12 @@ describe('ChatInputBar', () => {
 
     expect(flattenStyle(darkGlassComposer.getByTestId('chat-input-bar-capsule').props.style)).toMatchObject({
       backgroundColor: resolvedGlassTheme.colors.surfaceOverlay,
-      borderColor: resolvedGlassTheme.colors.borderSubtle,
+      borderColor: withMaterialPaintOpacity(resolvedGlassTheme.colors.borderSubtle, 0.16),
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(resolvedGlassTheme.colors.borderSubtle, 0.26),
+        inset: true,
+      }],
     });
     expect(flattenStyle(darkGlassComposer.getByTestId('chat-primary-action-send').props.style)).toMatchObject({
       backgroundColor: resolvedGlassTheme.colors.primarySoft,

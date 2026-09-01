@@ -1,7 +1,7 @@
 import React from 'react';
 import { Box } from '../ui/box';
 import { Text, composeTextRole } from '../ui/text';
-import { ScreenSurface } from '../ui/ScreenShell';
+import { ScreenStack, ScreenSurface } from '../ui/ScreenShell';
 import { SectionCard } from './ModelDetailsPrimitives';
 
 export interface ModelDetailsHeroCardProps {
@@ -27,51 +27,41 @@ export function ModelDetailsHeroCard({
 }: ModelDetailsHeroCardProps) {
   return (
     <SectionCard className={className}>
-      {badges ? (
-        <Box className="flex-row flex-wrap gap-2">
-          {badges}
-        </Box>
-      ) : null}
+      <ScreenStack gap="compact" testID="model-details-hero-content">
+        {badges ? (
+          <Box className="flex-row flex-wrap gap-2">
+            {badges}
+          </Box>
+        ) : null}
 
-      <Text
-        colorRole="primary"
-        numberOfLines={2}
-        ellipsizeMode="tail"
-        textBreakStrategy="balanced"
-        className={composeTextRole('screenTitle', 'mt-3 tracking-tight')}
-      >
-        {title}
-      </Text>
-
-      <ScreenSurface material={{ role: 'control', variant: 'inline' }} shape="full" className="mt-2 self-start px-3 py-1.5">
-        <Text colorRole="secondary" className={composeTextRole('chip', 'font-medium')}>
-          {modelId}
+        <Text
+          colorRole="primary"
+          numberOfLines={2}
+          ellipsizeMode="tail"
+          textBreakStrategy="balanced"
+          className={composeTextRole('screenTitle', 'tracking-tight')}
+        >
+          {title}
         </Text>
-      </ScreenSurface>
 
-      {variantSelector ? (
-        <Box className="mt-4">
-          {variantSelector}
-        </Box>
-      ) : null}
+        <ScreenSurface material={{ role: 'control', variant: 'inline' }} shape="full" className="self-start px-3 py-1.5">
+          <Text colorRole="secondary" className={composeTextRole('chip', 'font-medium')}>
+            {modelId}
+          </Text>
+        </ScreenSurface>
 
-      {actions ? (
-        <Box className="mt-4">
-          {actions}
-        </Box>
-      ) : null}
+        {variantSelector}
 
-      {progress ? (
-        <Box className="mt-4">
-          {progress}
-        </Box>
-      ) : null}
+        {actions}
 
-      {openOnHuggingFaceButton ? (
-        <Box className="mt-4 self-start">
-          {openOnHuggingFaceButton}
-        </Box>
-      ) : null}
+        {progress}
+
+        {openOnHuggingFaceButton ? (
+          <Box className="self-start">
+            {openOnHuggingFaceButton}
+          </Box>
+        ) : null}
+      </ScreenStack>
     </SectionCard>
   );
 }

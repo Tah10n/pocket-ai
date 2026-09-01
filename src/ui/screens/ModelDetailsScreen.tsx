@@ -223,7 +223,7 @@ export function ModelDetailsScreen() {
         />
 
         {engineState.status === EngineStatus.ERROR && engineState.lastError ? (
-          <ScreenContent className="pt-3 pb-0">
+          <ScreenContent className="pb-0" topSpacing="compact">
             <ScreenCard padding="compact" tone="error">
               <Text colorRole="danger" className="text-sm font-semibold  ">
                 {t('common.errors.modelLoadFailed')}
@@ -245,11 +245,13 @@ export function ModelDetailsScreen() {
 
         <ScrollView className="flex-1">
           <ScreenContent
-            className="flex-1 pt-3"
+            testID="model-details-content"
+            className="flex-1"
             extraBottomInset={engineState.status === EngineStatus.INITIALIZING ? MODEL_WARMUP_BANNER_RESERVED_HEIGHT : 0}
             includeBottomSafeArea
+            topSpacing="compact"
           >
-            <ScreenStack gap="loose">
+            <ScreenStack gap="compact" testID="model-details-content-stack">
             {loading && !displayModel ? (
               <Box className="items-center justify-center pt-16">
                 <Spinner size="large" />
@@ -322,7 +324,7 @@ export function ModelDetailsScreen() {
                     />
                   )}
                   progress={shouldShowProjectorStatus || shouldShowDownloadProgress ? (
-                    <Box className="gap-3">
+                    <Box className="gap-2.5">
                       {shouldShowProjectorStatus && detailsPresentationModel ? (
                         <ModelProjectorStatus model={detailsPresentationModel} onChooseProjector={openProjectorChoice} />
                       ) : null}
@@ -359,7 +361,7 @@ export function ModelDetailsScreen() {
                   ) ? (openOnHuggingFaceButton ?? undefined) : undefined}
                 />
 
-                <Box className="flex-row flex-wrap gap-3">
+                <Box className="flex-row flex-wrap gap-2.5">
                   {heroMetrics.map((item) => (
                     <DetailValueCard
                       key={item.label}
@@ -376,7 +378,7 @@ export function ModelDetailsScreen() {
                   iconName="description"
                   tone="info"
                 >
-                  <Text colorRole="secondary" className="text-sm leading-7  ">
+                  <Text colorRole="secondary" className="text-sm leading-6  ">
                     {modelDescription ?? t('models.descriptionUnavailable')}
                   </Text>
                 </SectionCard>
@@ -387,7 +389,7 @@ export function ModelDetailsScreen() {
                     iconName="bolt"
                     tone="primary"
                   >
-                    <Box className="gap-3">
+                    <Box className="gap-2.5">
                       <Box className="flex-row flex-wrap items-center gap-2">
                         <ScreenBadge
                           tone={speculativeDecoding.mode === 'embedded' || isSpeculativeDraftReady

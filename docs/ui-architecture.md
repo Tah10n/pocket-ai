@@ -232,7 +232,7 @@ Reduce Transparency starts as `unknown`, is queried on provider mount, and is up
 | Native scene pending, software canvas, or bounded render failure | Recipe-owned semantic fill and rim |
 | Reduce Transparency is `unknown` or `reduced` | Dense accessibility fallback |
 
-On API 33+, each glass surface records only its bounds expanded by the blur/refraction margin, clamped to the provider. It never performs bitmap readback or creates a full-provider effected layer per surface. Provider attach/switch and window-focus changes reset transient failures; draw retries are bounded before the surface remains on its semantic fallback. On SDK 31–32, the existing target readiness and nested-boundary rules still prevent self/ancestor blur cycles.
+On API 33+, each glass surface records only its bounds expanded by the blur/refraction margin, clamped to the provider. It never performs bitmap readback or creates a full-provider effected layer per surface. Provider attach/switch and window-focus changes reset transient failures; draw retries are bounded before the surface remains on its semantic fallback. `ScreenRoot` also refreshes the recorded scene once when a floating header publishes a new measured inset, so the initial pre-measurement content frame cannot remain under Glass; duplicate measurements do not schedule extra captures. On SDK 31–32, the existing target readiness and nested-boundary rules still prevent self/ancestor blur cycles.
 
 #### Performance and testing rules
 
@@ -295,11 +295,11 @@ If you change shared theme, header, localization, motion, or routed-screen chrom
 ```bash
 npm run verify:mobile-change
 npm run android:scenarios -- --skip-build --pack dependency-ui
-node ./scripts/android-scenarios.js --skip-build --scenario hf-catalog-hardening
+node ./scripts/android-scenarios.js --skip-build --scenario hf-catalog-hardening --isolated-qa-install
 node ./scripts/android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-`npm run android:scenarios` defaults to a small core smoke pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for UI architecture changes, `--pack runtime` for localization or persisted-state changes, `npm run android:scenarios:native` for the isolated release-profile Glass matrix across Home, Chat, Models, and Settings in light and dark modes, and `--pack extended` when you need the broader stable pass without live catalog smoke. Raw `--pack native` is forced onto the same `.qa` package and restores the package's prior theme and notification state. Keep perf and other optional scenarios targeted unless `--pack all` is needed.
+`npm run android:scenarios` defaults to a small core smoke pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` for live model-catalog checks; it automatically targets the side-by-side `.qa` install because catalog setup clears persisted filters. Direct state-mutating catalog scenarios such as `--scenario variant-picker-smoke` require `--isolated-qa-install`, and `--pack all` excludes them. Use `--pack dependency-ui` for UI architecture changes, `--pack runtime` for localization or persisted-state changes, `npm run android:scenarios:native` for the isolated release-profile Glass matrix across Home, Chat, Models, and Settings in light and dark modes, and `--pack extended` when you need the broader stable pass without live catalog smoke. Raw `--pack native` is forced onto the same `.qa` package and restores the package's prior theme and notification state. Keep perf and other optional scenarios targeted unless `--pack all` is needed.
 
 Manual follow-up is still required for:
 

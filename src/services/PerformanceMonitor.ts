@@ -97,6 +97,7 @@ class PerformanceMonitor {
   private counters = new Map<string, number>();
   private maxEvents = 400;
   private enabled = typeof __DEV__ !== 'undefined' && __DEV__;
+  private revision = 0;
 
   public isEnabled(): boolean {
     return this.enabled;
@@ -104,10 +105,18 @@ class PerformanceMonitor {
 
   public setEnabled(nextEnabled: boolean): void {
     try {
+      if (this.enabled === nextEnabled) {
+        return;
+      }
       this.enabled = nextEnabled;
+      this.touch();
     } catch {
       // ignore
     }
+  }
+
+  public getRevision(): number {
+    return this.revision;
   }
 
   public getSessionInfo(): PerformanceTraceSession {
@@ -187,6 +196,8 @@ class PerformanceMonitor {
           value: nextValue,
           meta,
         });
+      } else {
+        this.touch();
       }
     } catch {
       // ignore
@@ -218,6 +229,8 @@ class PerformanceMonitor {
           value,
           meta,
         });
+      } else {
+        this.touch();
       }
     } catch {
       // ignore
@@ -226,8 +239,12 @@ class PerformanceMonitor {
 
   public clear(): void {
     try {
+      if (this.events.length === 0 && this.counters.size === 0) {
+        return;
+      }
       this.events = [];
       this.counters.clear();
+      this.touch();
     } catch {
       // ignore
     }
@@ -255,9 +272,14 @@ class PerformanceMonitor {
       if (this.events.length > this.maxEvents) {
         this.events.splice(0, this.events.length - this.maxEvents);
       }
+      this.touch();
     } catch {
       // ignore
     }
+  }
+
+  private touch(): void {
+    this.revision = this.revision >= Number.MAX_SAFE_INTEGER ? 0 : this.revision + 1;
   }
 }
 

@@ -114,6 +114,26 @@ describe('PerformanceScreen', () => {
     screen.unmount();
   });
 
+  it('does not rebuild an unchanged trace every second', async () => {
+    const snapshotSpy = jest.spyOn(performanceMonitor, 'snapshot');
+    const screen = await renderScreen();
+    snapshotSpy.mockClear();
+
+    act(() => {
+      jest.advanceTimersByTime(5_000);
+    });
+    expect(snapshotSpy).not.toHaveBeenCalled();
+
+    performanceMonitor.mark('test.changed');
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+    expect(snapshotSpy).toHaveBeenCalledTimes(1);
+
+    snapshotSpy.mockRestore();
+    screen.unmount();
+  });
+
   it('navigates back when possible', async () => {
     const { getByTestId, unmount } = await renderScreen();
 
@@ -215,6 +235,24 @@ describe('PerformanceScreen', () => {
 
     expect(clearSpy).toHaveBeenCalledTimes(1);
     unmount();
+  });
+
+  it('renders the first event recorded after clearing an already empty trace', async () => {
+    const snapshotSpy = jest.spyOn(performanceMonitor, 'snapshot');
+    const screen = await renderScreen();
+
+    fireEvent.press(screen.getByTestId('performance-clear-trace'));
+    snapshotSpy.mockClear();
+
+    performanceMonitor.mark('test.after-clear');
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+
+    expect(snapshotSpy).toHaveBeenCalledTimes(1);
+    expect(screen.queryAllByText('test.after-clear').length).toBeGreaterThan(0);
+    snapshotSpy.mockRestore();
+    screen.unmount();
   });
 
   it('renders span aggregates and event values', async () => {

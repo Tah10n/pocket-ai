@@ -464,7 +464,10 @@ function getSdkRoots() {
     }
 
     const normalized = path.resolve(candidate);
-    if (!roots.includes(normalized) && fs.existsSync(normalized)) {
+    // A restricted Windows workspace can allow access to the SDK executables while
+    // denying a metadata check on the SDK root itself. Keep candidate roots here and
+    // let resolveAndroidTools verify the exact adb/emulator paths below them.
+    if (!roots.includes(normalized)) {
       roots.push(normalized);
     }
   }

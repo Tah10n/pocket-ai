@@ -21,6 +21,7 @@ const {
   BRANCH_REGENERATION_SCENARIOS,
   DOCUMENT_BENCHMARK_SCENARIOS,
   DOCUMENT_SCENARIOS,
+  STATE_MUTATING_CATALOG_SCENARIOS,
   assertDocumentSentinelsStayAbsent,
   assertAuthoritativeThoughtClear,
   assertPreparedAttachmentGenerationEvidence,
@@ -89,6 +90,7 @@ const {
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
+  prepareCatalogForUnfilteredResults,
   prepareCatalogForVariantPickerSmokeScenario,
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
@@ -135,6 +137,7 @@ const {
   areExactGitProvenancesEqual,
   waitForAnyNode,
   waitForEnabledAnyNode,
+  waitForNoResourceId,
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
@@ -1458,6 +1461,28 @@ describe('android-scenarios asynchronous interaction settlement', () => {
     expect(panelOpen).toBe(true);
   });
 
+  it('recognizes an open native glass filter panel even when Android reports clipped bounds', async () => {
+    const createSnapshot = () => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="models-filter-toggle" text="Filters" content-desc="Filters" clickable="true" enabled="true" bounds="[42,533][532,627]" />
+        <node resource-id="models-filter-panel" text="" content-desc="" clickable="false" enabled="true" bounds="[42,643][1038,627]" />
+        <node resource-id="filter-option-fits-in-ram" text="Fits in RAM" content-desc="" clickable="true" enabled="true" bounds="[61,662][1019,627]" />
+      </hierarchy>
+    `);
+    const tapBounds = jest.fn();
+
+    await setCatalogFilterPanelOpen('adb', 'device-1', true, {
+      maxAttempts: 1,
+      timeoutMs: 0,
+      createSnapshot,
+      tapBounds,
+      delayFn: immediateDelay,
+    });
+
+    expect(tapBounds).not.toHaveBeenCalled();
+  });
+
   it('retries Back only while the transient sheet remains visible', async () => {
     let sheetOpen = true;
     const createSnapshot = () => parseUiSnapshot(`
@@ -1898,6 +1923,55 @@ describe('android-scenarios UI snapshot matching', () => {
     }));
   });
 
+  it('keeps native Glass sort options observable when Android reports inverted panel bounds', () => {
+    const sortSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" bounds="[0,0][1080,2400]" />
+        <node resource-id="models-sort-panel" bounds="[42,643][1038,627]" />
+        <node text="Most popular" bounds="[166,790][367,627]" />
+      </hierarchy>
+    `);
+
+    expect(findResourceIdInSnapshot(
+      sortSnapshot,
+      'models-sort-panel',
+      { visibleOnly: true },
+    )).toBeNull();
+    expect(findResourceIdInSnapshot(sortSnapshot, 'models-sort-panel')).not.toBeNull();
+    expect(findAnyNodeInSnapshot(
+      sortSnapshot,
+      ['Most popular'],
+      { visibleOnly: false },
+    )).not.toBeNull();
+  });
+
+  it('waits for an inverted Glass sort panel to leave the hierarchy before treating it as closed', async () => {
+    const openSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="models-sort-panel" bounds="[42,643][1038,627]" />
+      </hierarchy>
+    `);
+    const closedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(openSnapshot)
+      .mockReturnValue(closedSnapshot);
+
+    await waitForNoResourceId('adb', 'device-1', 'models-sort-panel', {
+      visibleOnly: false,
+      timeoutMs: 100,
+      pollIntervalMs: 0,
+      createSnapshot,
+      delayFn: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
     const uniquePrompt = 'Describe prepared image 12345 67890';
     const staleComposerSnapshot = parseUiSnapshot(`
@@ -2280,6 +2354,29 @@ describe('android-scenarios variant picker helpers', () => {
     expect(ctx.swipeUp).not.toHaveBeenCalled();
   });
 
+  it('clears persisted and visible empty-state filters before catalog assertions', async () => {
+    const ctx = {
+      serial: 'emulator-5554',
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+    const setFilterPanelOpen = jest.fn().mockResolvedValue(undefined);
+    const clearFilters = jest.fn().mockResolvedValue(undefined);
+    const clearEmptyFilters = jest.fn().mockResolvedValue(true);
+
+    await prepareCatalogForUnfilteredResults(ctx, {
+      resolveAdbPath: () => 'adb',
+      setCatalogFilterPanelOpen: setFilterPanelOpen,
+      clearCatalogFiltersIfPresent: clearFilters,
+      clearEmptyCatalogFiltersIfPresent: clearEmptyFilters,
+    });
+
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(1, 'adb', 'emulator-5554', true);
+    expect(clearFilters).toHaveBeenCalledWith('adb', 'emulator-5554');
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(2, 'adb', 'emulator-5554', false);
+    expect(clearEmptyFilters).toHaveBeenCalledWith(ctx, 'adb');
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']));
+  });
+
   it('normalizes catalog tab and filters before variant-picker smoke opens rows', async () => {
     const ctx = {
       serial: 'emulator-5554',
@@ -2287,7 +2384,8 @@ describe('android-scenarios variant picker helpers', () => {
       expectAnyText: jest.fn().mockResolvedValue(undefined),
     };
     const findAnyNodeNow = jest.fn()
-      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } });
+      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } })
+      .mockResolvedValueOnce({ node: { bounds: { centerX: 500, centerY: 900 } } });
     const setFilterPanelOpen = jest.fn().mockResolvedValue(undefined);
     const clearFilters = jest.fn().mockResolvedValue(undefined);
 
@@ -2304,9 +2402,15 @@ describe('android-scenarios variant picker helpers', () => {
       expect.objectContaining({ timeoutMs: 5_000 })
     );
     expect(setFilterPanelOpen).toHaveBeenNthCalledWith(1, 'adb', 'emulator-5554', true);
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(2, 'adb', 'emulator-5554', false);
     expect(clearFilters).toHaveBeenCalledWith('adb', 'emulator-5554');
-    expect(setFilterPanelOpen).toHaveBeenCalledTimes(1);
-    expect(ctx.tapAnyText).toHaveBeenCalledTimes(1);
+    expect(setFilterPanelOpen).toHaveBeenCalledTimes(2);
+    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining(['Clear filters']),
+      expect.objectContaining({ timeoutMs: 5_000 })
+    );
+    expect(ctx.tapAnyText).toHaveBeenCalledTimes(2);
     expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']), { timeoutMs: 8_000 });
   });
 });
@@ -4041,6 +4145,32 @@ describe('android-scenarios pack selection', () => {
     ]));
   });
 
+  it('isolates state-mutating catalog scenarios from the installed user app', () => {
+    const catalogOptions = parseCliOptions(['--pack', 'catalog']);
+    const catalogScenarios = selectScenarios(scenarios, catalogOptions);
+    const directScenario = selectScenarios(
+      scenarios,
+      parseCliOptions(['--scenario', 'hf-catalog-hardening']),
+    );
+
+    expect(catalogOptions.isolatedQaInstall).toBe(true);
+    expect(catalogScenarios).toEqual([
+      expect.objectContaining({
+        id: 'variant-picker-smoke',
+        requiresIsolatedQaInstall: true,
+      }),
+    ]);
+    expect(() => validateScenarioExecutionOptions(directScenario, {
+      isolatedQaInstall: false,
+    })).toThrow(ScenarioPreconditionFailureError);
+    expect(() => validateScenarioExecutionOptions(directScenario, {
+      isolatedQaInstall: true,
+    })).not.toThrow();
+    expect(directScenario[0]).toEqual(expect.objectContaining({
+      requiresIsolatedQaInstall: true,
+    }));
+  });
+
   it('removes the QA panel from the hierarchy before capturing a production-like Glass chat screenshot', async () => {
     const waitForResourceId = jest.fn().mockResolvedValue({ resourceId: 'matched' });
     const tapAnyText = jest.fn().mockResolvedValue(undefined);
@@ -4362,23 +4492,21 @@ describe('android-scenarios pack selection', () => {
         ...BRANCH_REGENERATION_SCENARIOS,
         ...DOCUMENT_SCENARIOS,
         ...DOCUMENT_BENCHMARK_SCENARIOS,
+        ...STATE_MUTATING_CATALOG_SCENARIOS,
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
-        'variant-picker-smoke',
         'chat-attachment-current-state-smoke',
         'chat-attachment-text-only-fallback',
-        'hf-catalog-hardening',
-        'memory-fit-badges',
-        'memory-fit-download-warning',
         'performance-logcat',
       ])
     );
     expect(selectedIds).not.toContain('chat-attachment-preview-remove');
     expect(selectedIds).not.toContain('chat-attachment-prepared-send');
     expect(selectedIds).not.toContain('storage-cache-clear');
+    expect(selectedIds).not.toEqual(expect.arrayContaining(STATE_MUTATING_CATALOG_SCENARIOS));
     expect(selectedIds).not.toContain('native-glass-theme-matrix');
     expect(selectedIds).not.toContain('foreground-service-notification-states');
     expect(selectedIds).not.toEqual(expect.arrayContaining(BRANCH_REGENERATION_SCENARIOS));

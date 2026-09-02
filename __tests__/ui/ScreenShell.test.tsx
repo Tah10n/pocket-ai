@@ -213,6 +213,48 @@ describe('ScreenShell semantic material contracts', () => {
     expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision).toBe('glass-dark-1');
   });
 
+  it('refreshes the Android Liquid Glass scene after measuring a floating header', () => {
+    const resolvedTheme = resolveTheme('glass', 'light');
+    mockThemeContext = { colors: resolvedTheme.colors, resolvedMode: 'light', resolvedTheme, themeId: 'glass' };
+    mockEnvironment = createMaterialEnvironment('android', {
+      androidSdkVersion: 34,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      blurViewAvailable: true,
+      transparencyState: 'allowed',
+    });
+
+    const screen = render(
+      <ScreenRoot testID="root">
+        <ScreenHeaderShell testID="floating-header">header</ScreenHeaderShell>
+        <Text>content</Text>
+      </ScreenRoot>,
+    );
+
+    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision)
+      .toBe('glass-light-0');
+
+    let layoutNode: any = screen.getByTestId('floating-header');
+    while (layoutNode && typeof layoutNode.props.onLayout !== 'function') {
+      layoutNode = layoutNode.parent;
+    }
+
+    expect(layoutNode).toBeTruthy();
+    fireEvent(layoutNode, 'layout', {
+      nativeEvent: { layout: { height: 132, width: 360, x: 0, y: 0 } },
+    });
+
+    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision)
+      .toBe('glass-light-1');
+
+    fireEvent(layoutNode, 'layout', {
+      nativeEvent: { layout: { height: 132, width: 360, x: 0, y: 0 } },
+    });
+
+    expect(screen.getByTestId('screen-material-liquid-glass-scene').props.sceneRevision)
+      .toBe('glass-light-1');
+  });
+
   it.each([
     ['native Android Liquid Glass', createMaterialEnvironment('android', {
       androidSdkVersion: 34,

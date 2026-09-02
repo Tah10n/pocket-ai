@@ -3264,15 +3264,21 @@ const ChatScreenContent = () => {
                                 </ScreenCard>
                             </Box>
                         ) : (
-                            <Box className="flex-1 items-center px-6 pt-14 pb-8">
-                                <Text colorRole="primary" className="text-xl font-semibold  ">
-                                    {t('chat.noMessages')}
-                                </Text>
-                                <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-6  ">
-                                    {activeThread
-                                        ? t('chat.emptyExistingThread')
-                                        : t('chat.emptyNewThread')}
-                                </Text>
+                            <Box
+                                testID="chat-empty-state"
+                                className="flex-1 px-6 pb-8"
+                                style={{ paddingTop: headerInset }}
+                            >
+                                <Box className="items-center pt-14">
+                                    <Text colorRole="primary" className="text-xl font-semibold  ">
+                                        {t('chat.noMessages')}
+                                    </Text>
+                                    <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-6  ">
+                                        {activeThread
+                                            ? t('chat.emptyExistingThread')
+                                            : t('chat.emptyNewThread')}
+                                    </Text>
+                                </Box>
                             </Box>
                         )}
                     </Box>

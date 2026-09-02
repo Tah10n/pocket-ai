@@ -4962,6 +4962,29 @@ describe('ChatScreen', () => {
     expect(queryByText('Saved user prompt')).toBeNull();
   });
 
+  it('keeps the empty-chat copy below the floating header', () => {
+    const scrollInsets = require('../../src/hooks/useTabBarContentInset');
+    const insetSpy = jest.spyOn(scrollInsets, 'useFloatingScrollInsets').mockReturnValue({
+      paddingTop: 180,
+      paddingBottom: 0,
+    });
+
+    try {
+      useChatStore.setState({
+        threads: {},
+        activeThreadId: null,
+      });
+
+      const { getByTestId } = render(React.createElement(ChatScreen));
+
+      expect(StyleSheet.flatten(getByTestId('chat-empty-state').props.style)).toMatchObject({
+        paddingTop: 180,
+      });
+    } finally {
+      insetSpy.mockRestore();
+    }
+  });
+
   it('shows an alert instead of throwing when header new chat fails synchronously', () => {
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     try {

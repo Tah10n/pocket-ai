@@ -17,6 +17,28 @@ describe('PerformanceMonitor', () => {
     expect(typeof session1.startedWallTime).toBe('number');
   });
 
+  it('changes revision only when observable trace state changes', () => {
+    const initialRevision = performanceMonitor.getRevision();
+
+    performanceMonitor.snapshot();
+    expect(performanceMonitor.getRevision()).toBe(initialRevision);
+
+    performanceMonitor.incrementCounter('test.counter');
+    const counterRevision = performanceMonitor.getRevision();
+    expect(counterRevision).toBeGreaterThan(initialRevision);
+
+    performanceMonitor.mark('test.mark');
+    expect(performanceMonitor.getRevision()).toBeGreaterThan(counterRevision);
+
+    const populatedRevision = performanceMonitor.getRevision();
+    performanceMonitor.clear();
+    expect(performanceMonitor.getRevision()).toBeGreaterThan(populatedRevision);
+
+    const emptyRevision = performanceMonitor.getRevision();
+    performanceMonitor.clear();
+    expect(performanceMonitor.getRevision()).toBe(emptyRevision);
+  });
+
   it('public APIs are exception-safe (no-throw)', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;

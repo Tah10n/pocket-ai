@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Platform, Share } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
@@ -121,16 +121,29 @@ function percentileNearestRank(sortedSamples: number[], percentile: number): num
 export function PerformanceScreen() {
   const router = useRouter();
   const { t } = useTranslation();
-  const [, setRevision] = useState(0);
+  const initialRevision = performanceMonitor.getRevision();
+  const renderedRevisionRef = useRef(initialRevision);
+  const [, setRevision] = useState(initialRevision);
+
+  const refreshIfChanged = useCallback(() => {
+    const nextRevision = performanceMonitor.getRevision();
+    if (nextRevision === renderedRevisionRef.current) {
+      return;
+    }
+
+    renderedRevisionRef.current = nextRevision;
+    setRevision(nextRevision);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
+      refreshIfChanged();
       const intervalId = setInterval(() => {
-        setRevision((current) => current + 1);
+        refreshIfChanged();
       }, 1000);
 
       return () => clearInterval(intervalId);
-    }, []),
+    }, [refreshIfChanged]),
   );
 
   const snapshot = performanceMonitor.snapshot();
@@ -249,8 +262,8 @@ export function PerformanceScreen() {
 
   const handleClear = useCallback(() => {
     performanceMonitor.clear();
-    setRevision((current) => current + 1);
-  }, []);
+    refreshIfChanged();
+  }, [refreshIfChanged]);
 
   const counters = useMemo(() => Object.entries(snapshot.counters), [snapshot.counters]);
   const spanAggregates = useMemo<SpanAggregate[]>(() => {
@@ -345,7 +358,7 @@ export function PerformanceScreen() {
                   testID="performance-toggle-instrumentation"
                   onPress={() => {
                     performanceMonitor.setEnabled(!performanceMonitor.isEnabled());
-                    setRevision((current) => current + 1);
+                    refreshIfChanged();
                   }}
                 >
                   <ButtonText>

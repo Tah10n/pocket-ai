@@ -53,6 +53,12 @@ const CORE_SCENARIOS = [
 const CATALOG_SCENARIOS = [
   "variant-picker-smoke",
 ];
+const STATE_MUTATING_CATALOG_SCENARIOS = [
+  "variant-picker-smoke",
+  "hf-catalog-hardening",
+  "memory-fit-badges",
+  "memory-fit-download-warning",
+];
 const STORAGE_SCENARIOS = [
   "storage-cache-clear",
 ];
@@ -262,6 +268,8 @@ const DOCUMENT_ERROR_LABELS_BY_CODE = {
 const MODELS_FILTER_TOGGLE_RESOURCE_ID = "models-filter-toggle";
 const MODELS_FILTER_PANEL_RESOURCE_ID = "models-filter-panel";
 const MODELS_FILTER_CLEAR_RESOURCE_ID = "models-filter-clear";
+const MODELS_SORT_TOGGLE_RESOURCE_ID = "models-sort-toggle";
+const MODELS_SORT_PANEL_RESOURCE_ID = "models-sort-panel";
 const MODELS_FILTER_SIZE_LARGE_RESOURCE_ID = "filter-option-size-large";
 const MODELS_FILTER_NO_TOKEN_REQUIRED_RESOURCE_ID = "filter-option-no-token-required";
 const MODEL_WARMUP_BANNER_RESOURCE_ID = "model-warmup-banner-container";
@@ -438,7 +446,7 @@ const MODELS_FILTER_TOGGLE_LABELS = ["Filters", "Фильтры"];
 const MODELS_FILTER_SIZE_LARGE_LABELS = ["> 5 GB", "> 5 ГБ"];
 const MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS = ["No token required", "Без токена"];
 const MODELS_FILTER_CLEAR_LABELS = ["Clear", "Очистить"];
-const SORT_LABELS = ["Sort", "Сортировка"];
+const CLEAR_FILTERS_LABELS = ["Clear filters", "Очистить фильтры"];
 const MOST_DOWNLOADED_LABELS = ["Most downloaded", "Самые скачиваемые"];
 const MOST_POPULAR_LABELS = ["Most popular", "Самые популярные"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
@@ -3425,6 +3433,7 @@ function buildScenarios() {
     {
       id: "variant-picker-smoke",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify the model catalog opens the GGUF file variant picker.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
@@ -3468,9 +3477,11 @@ function buildScenarios() {
     {
       id: "hf-catalog-hardening",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify guided discovery, new HF catalog controls, and routed model details.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
+        await prepareCatalogForUnfilteredResults(ctx);
 
         const adbPath = resolveAdbPath();
         const catalogResultsStartedAt = Date.now();
@@ -3480,11 +3491,24 @@ function buildScenarios() {
         log(`Catalog model cards became interactive in ${Date.now() - catalogResultsStartedAt}ms.`);
 
         await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
+        await setCatalogFilterPanelOpen(adbPath, ctx.serial, false);
 
-        await ctx.tapAnyText(SORT_LABELS);
-        await ctx.expectAnyText(MOST_DOWNLOADED_LABELS);
-        await ctx.expectAnyText(MOST_POPULAR_LABELS);
-        await ctx.tapAnyText(SORT_LABELS);
+        await tapVisibleResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
+        await waitForResourceId(adbPath, ctx.serial, MODELS_SORT_PANEL_RESOURCE_ID, {
+          visibleOnly: false,
+        });
+        // Native Glass can expose the open panel with inverted bounds until another frame is
+        // invalidated. Its stable panel id plus contained options remain reliable evidence.
+        await waitForAnyNode(adbPath, ctx.serial, MOST_DOWNLOADED_LABELS, {
+          visibleOnly: false,
+        });
+        await waitForAnyNode(adbPath, ctx.serial, MOST_POPULAR_LABELS, {
+          visibleOnly: false,
+        });
+        await tapVisibleResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
+        await waitForNoResourceId(adbPath, ctx.serial, MODELS_SORT_PANEL_RESOURCE_ID, {
+          visibleOnly: false,
+        });
 
         await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 5_000 });
         await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
@@ -3494,10 +3518,11 @@ function buildScenarios() {
     {
       id: "memory-fit-badges",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify memory-fit badges show up in quantization picker rows.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
-        await prepareCatalogForMemoryFitRiskBadgeScenario(ctx);
+        await prepareCatalogForUnfilteredResults(ctx);
 
         await openFirstVisibleVariantPicker(ctx);
         await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 10_000 });
@@ -3508,6 +3533,7 @@ function buildScenarios() {
     {
       id: "memory-fit-download-warning",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify download flows warn for RAM risk or limited verification.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
@@ -6581,6 +6607,7 @@ function selectScenarios(scenarios, options) {
       ...BRANCH_REGENERATION_SCENARIOS,
       ...DOCUMENT_SCENARIOS,
       ...DOCUMENT_BENCHMARK_SCENARIOS,
+      ...STATE_MUTATING_CATALOG_SCENARIOS,
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);
@@ -6895,10 +6922,18 @@ async function goToConversationManagement(ctx) {
   await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
 }
 
-async function prepareCatalogForMemoryFitRiskBadgeScenario(ctx) {
-  const adbPath = resolveAdbPath();
-  await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
-  await clearCatalogFiltersIfPresent(adbPath, ctx.serial);
+async function prepareCatalogForUnfilteredResults(ctx, options = {}) {
+  const resolveAdb = options.resolveAdbPath || resolveAdbPath;
+  const setFilterPanelOpen = options.setCatalogFilterPanelOpen || setCatalogFilterPanelOpen;
+  const clearFilters = options.clearCatalogFiltersIfPresent || clearCatalogFiltersIfPresent;
+  const clearEmptyFilters = options.clearEmptyCatalogFiltersIfPresent
+    || clearEmptyCatalogFiltersIfPresent;
+  const adbPath = resolveAdb();
+
+  await setFilterPanelOpen(adbPath, ctx.serial, true);
+  await clearFilters(adbPath, ctx.serial);
+  await setFilterPanelOpen(adbPath, ctx.serial, false);
+  await clearEmptyFilters(ctx, adbPath);
   await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
@@ -6921,6 +6956,17 @@ async function prepareCatalogForVariantPickerSmokeScenario(ctx, options = {}) {
 
   await setFilterPanelOpen(adbPath, ctx.serial, true);
   await clearFilters(adbPath, ctx.serial);
+  await setFilterPanelOpen(adbPath, ctx.serial, false);
+
+  const emptyStateClear = await findNodeNow(adbPath, ctx.serial, CLEAR_FILTERS_LABELS, {
+    visibleOnly: true,
+  });
+  if (emptyStateClear?.node?.bounds) {
+    await ctx.tapAnyText(CLEAR_FILTERS_LABELS, {
+      afterTapDelayMs: CATALOG_FILTER_MUTATION_QUIET_DELAY_MS,
+      timeoutMs: 5_000,
+    });
+  }
 
   await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
 }
@@ -7068,12 +7114,24 @@ function isLikelyQuantizationSelectorNode(node) {
 }
 
 async function prepareCatalogForRamWarningScenario(ctx) {
-  const adbPath = resolveAdbPath();
-  await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
-  await clearCatalogFiltersIfPresent(adbPath, ctx.serial);
+  await prepareCatalogForUnfilteredResults(ctx);
   // Clearing persisted filters (especially "Fits in RAM") exposes the live catalog's real risk
   // cards. The scenario does not need to mutate another toggle before validating the warning.
-  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+}
+
+async function clearEmptyCatalogFiltersIfPresent(ctx, adbPath = resolveAdbPath()) {
+  const clearAction = await findAnyNodeNow(adbPath, ctx.serial, CLEAR_FILTERS_LABELS, {
+    visibleOnly: true,
+  });
+  if (!clearAction?.node?.bounds) {
+    return false;
+  }
+
+  await ctx.tapAnyText(CLEAR_FILTERS_LABELS, {
+    afterTapDelayMs: CATALOG_FILTER_MUTATION_QUIET_DELAY_MS,
+    timeoutMs: 5_000,
+  });
+  return true;
 }
 
 async function scrollToAnyText(ctx, labels, options = {}) {
@@ -7596,12 +7654,13 @@ async function waitForResourceId(adbPath, serial, resourceId, options = {}) {
 }
 
 async function waitForNoResourceId(adbPath, serial, resourceId, options = {}) {
+  const visibleOnly = options.visibleOnly ?? true;
   const { match, snapshot } = await waitForSnapshotMatch(
     adbPath,
     serial,
     options,
     (candidateSnapshot) => (
-      findResourceIdInSnapshot(candidateSnapshot, resourceId, { visibleOnly: true })
+      findResourceIdInSnapshot(candidateSnapshot, resourceId, { visibleOnly })
         ? null
         : { absent: true }
     )
@@ -7673,7 +7732,11 @@ async function setCatalogFilterPanelOpen(adbPath, serial, shouldBeOpen, options 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const snapshot = createSnapshot(adbPath, serial);
     lastSnapshot = snapshot;
-    const panel = findResourceIdInSnapshot(snapshot, MODELS_FILTER_PANEL_RESOURCE_ID, { visibleOnly: true });
+    // Android can report inverted/clipped bounds for the native Liquid Glass panel even
+    // while it is visibly open. The stable panel testID is absent when closed, so its
+    // presence is the reliable state signal here; requiring positive bounds creates a
+    // false timeout on physical devices.
+    const panel = findResourceIdInSnapshot(snapshot, MODELS_FILTER_PANEL_RESOURCE_ID);
     if (Boolean(panel) === shouldBeOpen) {
       return panel;
     }
@@ -7703,8 +7766,7 @@ async function setCatalogFilterPanelOpen(adbPath, serial, shouldBeOpen, options 
       (candidateSnapshot) => {
         const candidatePanel = findResourceIdInSnapshot(
           candidateSnapshot,
-          MODELS_FILTER_PANEL_RESOURCE_ID,
-          { visibleOnly: true }
+          MODELS_FILTER_PANEL_RESOURCE_ID
         );
         return Boolean(candidatePanel) === shouldBeOpen
           ? { panel: candidatePanel, isOpen: shouldBeOpen }
@@ -10316,7 +10378,7 @@ function parseCliOptions(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
-  if (options.pack === "documents" || options.pack === "native") {
+  if (["catalog", "documents", "native"].includes(options.pack)) {
     options.isolatedQaInstall = true;
   }
 
@@ -10735,6 +10797,7 @@ module.exports = {
   DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS,
   DOCUMENT_RACE_POST_CANCEL_HORIZON_MS,
   DOCUMENT_SCENARIOS,
+  STATE_MUTATING_CATALOG_SCENARIOS,
   areExactGitProvenancesEqual,
   assertAuthoritativeThoughtClear,
   assertDocumentSentinelsStayAbsent,
@@ -10774,6 +10837,7 @@ module.exports = {
   findChatResourceWithScroll,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   openFirstVisibleVariantPicker,
+  prepareCatalogForUnfilteredResults,
   prepareCatalogForVariantPickerSmokeScenario,
   findAnyNodeInSnapshot,
   findAttachImageActionInSnapshot,
@@ -10850,6 +10914,7 @@ module.exports = {
   validateScenarioExecutionOptions,
   waitForAnyNode,
   waitForEnabledAnyNode,
+  waitForNoResourceId,
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
   tapBottomTabUntilVisible,

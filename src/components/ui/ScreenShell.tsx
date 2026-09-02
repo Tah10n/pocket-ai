@@ -532,6 +532,19 @@ export function ScreenRoot({
       current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1
     ));
   }, [shouldUseAndroidLiquidGlass]);
+  React.useEffect(() => {
+    if (!headerInset.isFloating || headerInset.height <= 0) {
+      return;
+    }
+
+    // Floating content is first laid out before the header height is known. Refresh the
+    // recorded scene after the inset is applied so Glass cannot retain that initial frame.
+    requestAndroidLiquidGlassSceneRefresh();
+  }, [
+    headerInset.height,
+    headerInset.isFloating,
+    requestAndroidLiquidGlassSceneRefresh,
+  ]);
   const screenContent = (
     <AndroidLiquidGlassSceneRefreshContext.Provider value={requestAndroidLiquidGlassSceneRefresh}>
       <ScreenHeaderInsetSetterContext.Provider value={setHeaderInset}>

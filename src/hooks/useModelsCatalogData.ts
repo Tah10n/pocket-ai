@@ -110,7 +110,6 @@ export function useModelsCatalogData({
   ]);
   const [dataSessionIdentity, setDataSessionIdentity] = useState(sessionIdentity);
   const allCatalogSnapshotRef = useRef<RestorableCatalogSnapshot | null>(null);
-  const dataOwnerRef = useRef({ activeTab, sessionIdentity });
 
   const refreshDownloadedModels = useCallback(() => {
     if (activeTab !== 'downloaded') {
@@ -365,20 +364,21 @@ export function useModelsCatalogData({
   ]);
 
   useEffect(() => {
-    const owner = dataOwnerRef.current;
     const hasRestorableState = models.length > 0 || nextCursor !== null || !hasMore;
-    if (owner.activeTab !== 'all' || !hasRestorableState) {
+    // A session change commits before its replacement data. Only save data owned
+    // by this render's session, rather than relabeling the previous render's data.
+    if (activeTab !== 'all' || dataSessionIdentity !== sessionIdentity || !hasRestorableState) {
       return;
     }
 
     allCatalogSnapshotRef.current = {
-      sessionIdentity: owner.sessionIdentity,
+      sessionIdentity,
       models,
       hasMore,
       nextCursor,
       fetchState: { warningMessage, loadMoreError },
     };
-  }, [hasMore, loadMoreError, models, nextCursor, sessionIdentity, warningMessage]);
+  }, [activeTab, dataSessionIdentity, hasMore, loadMoreError, models, nextCursor, sessionIdentity, warningMessage]);
 
   useLayoutEffect(() => {
     if (!shouldBootstrapCatalogSession(activeTab, discoveryMode, isTokenStateHydrated)) {
@@ -394,7 +394,6 @@ export function useModelsCatalogData({
       && allCatalogSnapshotRef.current?.sessionIdentity === sessionIdentity
       ? allCatalogSnapshotRef.current
       : null;
-    dataOwnerRef.current = { activeTab, sessionIdentity };
     setDataSessionIdentity(sessionIdentity);
     setLoading(false);
     setIsFetchingMore(false);

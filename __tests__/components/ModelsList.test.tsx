@@ -10,6 +10,9 @@ import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 import { registry } from '../../src/services/LocalStorageRegistry';
 
 let mockLastFlashListProps: any = null;
+let mockNativeScrollOffset = 0;
+let mockListHeaderHeight = 0;
+const mockScrollToOffset = jest.fn();
 let mockModelCardPropsLog: any[] = [];
 let mockLastVariantPickerProps: any = null;
 let mockLastProjectorChoiceSheetProps: any = null;
@@ -54,10 +57,27 @@ function hasAncestorWithTestId(node: any, testID: string): boolean {
   return false;
 }
 
-jest.mock('@shopify/flash-list', () => ({
-  FlashList: (props: any) => {
+jest.mock('@shopify/flash-list', () => {
+  const mockReact = require('react');
+  return { FlashList: mockReact.forwardRef(function MockFlashList(props: any, ref: any) {
       mockLastFlashListProps = props;
-      const mockReact = require('react');
+      mockReact.useImperativeHandle(ref, () => ({
+        scrollToOffset: (options: any) => {
+          mockScrollToOffset(options);
+          mockNativeScrollOffset = options.offset;
+          props.onScroll?.({ nativeEvent: { contentOffset: { x: 0, y: options.offset } } });
+        },
+      }));
+      mockReact.useEffect(() => {
+        // FlashList measures its header before onLoad. Its initial index API adds
+        // the first item offset (padding + header) to the supplied viewOffset.
+        mockNativeScrollOffset = props.initialScrollIndex === 0
+          ? props.contentContainerStyle.paddingTop + mockListHeaderHeight
+            + (props.initialScrollIndexParams?.viewOffset ?? 0)
+          : 0;
+        props.onScroll?.({ nativeEvent: { contentOffset: { x: 0, y: mockNativeScrollOffset } } });
+        props.onLoad?.({ elapsedTimeInMs: 1 });
+      }, []);
       return mockReact.createElement(
         mockReact.Fragment,
         null,
@@ -73,8 +93,8 @@ jest.mock('@shopify/flash-list', () => ({
           ? mockReact.createElement(props.ListFooterComponent)
           : props.ListFooterComponent,
       );
-  },
-}));
+  }) };
+});
 
 jest.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -372,13 +392,13 @@ function createProjectorCandidate(id: string, fileName: string) {
   };
 }
 
-function setModelsStoreState(filters: ModelFilterCriteria = defaultFilters) {
+function setModelsStoreState(filters: ModelFilterCriteria = defaultFilters, discoveryMode: 'full' | 'guided' = 'full') {
   (useModelsStore as unknown as jest.Mock).mockReturnValue({
     tabPreferences: {
       all: {
         filters,
         sort: defaultSort,
-        discoveryMode: 'full',
+        discoveryMode,
       },
       downloaded: {
         filters: {
@@ -410,6 +430,8 @@ describe('ModelsList', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockLastFlashListProps = null;
+    mockNativeScrollOffset = 0;
+    mockListHeaderHeight = 0;
     mockModelCardPropsLog = [];
     mockLastVariantPickerProps = null;
     mockLastProjectorChoiceSheetProps = null;
@@ -534,7 +556,16 @@ describe('ModelsList', () => {
     expect(screen.getByTestId('models-load-more').props.disabled).toBeFalsy();
   });
 
-  it('restores the All Models scroll offset after visiting Downloaded', () => {
+  it.each([
+    { savedOffset: 720, headerHeight: 0 },
+    { savedOffset: 720, headerHeight: 120 },
+    { savedOffset: 64, headerHeight: 0 },
+    { savedOffset: 64, headerHeight: 120 },
+  ])('restores absolute offset $savedOffset with list header $headerHeight after visiting Downloaded', ({ savedOffset, headerHeight }) => {
+    mockListHeaderHeight = headerHeight;
+    if (headerHeight > 0) {
+      setModelsStoreState(defaultFilters, 'guided');
+    }
     const handleLoadMore = jest.fn();
     const catalogScrollSnapshotRef = { current: null };
     const allCatalogData = {
@@ -564,7 +595,7 @@ describe('ModelsList', () => {
 
     act(() => {
       mockLastFlashListProps.onScroll({
-        nativeEvent: { contentOffset: { x: 0, y: 720 } },
+        nativeEvent: { contentOffset: { x: 0, y: savedOffset } },
       });
     });
 
@@ -590,8 +621,22 @@ describe('ModelsList', () => {
       );
     });
 
-    expect(mockLastFlashListProps.initialScrollIndex).toBe(0);
-    expect(mockLastFlashListProps.initialScrollIndexParams).toEqual({ viewOffset: 568 });
+    expect(mockNativeScrollOffset).toBe(savedOffset);
+    expect(mockScrollToOffset).toHaveBeenLastCalledWith({ offset: savedOffset, animated: false });
+    expect(catalogScrollSnapshotRef.current).toEqual({ sessionIdentity: 'all::phi::fits', offset: savedOffset });
+
+    act(() => {
+      mockLastFlashListProps.onLoad({ elapsedTimeInMs: 2 });
+      mockLastFlashListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: savedOffset + 50 } } });
+    });
+    expect(mockScrollToOffset).toHaveBeenCalledTimes(1);
+    expect(catalogScrollSnapshotRef.current).toEqual({ sessionIdentity: 'all::phi::fits', offset: savedOffset + 50 });
+
+    mockUseModelsCatalogData.mockReturnValue(downloadedCatalogData as any);
+    screen.rerender(<ModelsList activeTab="downloaded" searchQuery="phi" catalogScrollSnapshotRef={catalogScrollSnapshotRef} />);
+    mockUseModelsCatalogData.mockReturnValue(allCatalogData as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="phi" catalogScrollSnapshotRef={catalogScrollSnapshotRef} />);
+    expect(mockNativeScrollOffset).toBe(savedOffset + 50);
   });
 
   it('does not carry an All Models scroll offset into a different catalog session', () => {
@@ -623,6 +668,8 @@ describe('ModelsList', () => {
     });
     expect(mockLastFlashListProps.initialScrollIndex).toBeUndefined();
     expect(mockLastFlashListProps.initialScrollIndexParams).toBeUndefined();
+    expect(mockNativeScrollOffset).toBe(0);
+    expect(mockScrollToOffset).not.toHaveBeenCalled();
   });
 
   it('does not render models from the previous tab while the new catalog session is loading', () => {

@@ -16,7 +16,8 @@ describe('BackgroundTaskService', () => {
     (backgroundTaskService as any).appState = 'active';
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    await backgroundTaskService.stopBackgroundTask();
     Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
     if (originalAppStateDescriptor) {
       Object.defineProperty(AppState, 'currentState', originalAppStateDescriptor);
@@ -171,5 +172,82 @@ describe('BackgroundTaskService', () => {
     expect(BackgroundService.start).toHaveBeenCalledTimes(1);
     expect(backgroundTaskService.isTaskActive('download')).toBe(true);
     expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+  });
+
+  it('keeps a replacement download protected when inference stops during native startup', async () => {
+    const nativeStart = (BackgroundService.start as jest.Mock).getMockImplementation()!;
+    let releaseNativeStart!: () => void;
+    const nativeStartGate = new Promise<void>((resolve) => {
+      releaseNativeStart = resolve;
+    });
+    (BackgroundService.start as jest.Mock).mockImplementationOnce(async (...args) => {
+      await nativeStartGate;
+      await nativeStart(...args);
+    });
+
+    const inferenceStart = backgroundTaskService.startBackgroundInference('Model');
+    const inferenceStop = backgroundTaskService.stopBackgroundTask('inference');
+    const downloadStart = backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+    releaseNativeStart();
+    await Promise.all([inferenceStart, inferenceStop, downloadStart]);
+
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
+    expect(BackgroundService.stop).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(backgroundTaskService.isTaskActive('download')).toBe(true);
+    expect(backgroundTaskService.isActive).toBe(true);
+    expect(BackgroundService.off).not.toHaveBeenCalled();
+  });
+
+  it('stops a pending native startup when its final task is cancelled', async () => {
+    const nativeStart = (BackgroundService.start as jest.Mock).getMockImplementation()!;
+    let releaseNativeStart!: () => void;
+    const nativeStartGate = new Promise<void>((resolve) => {
+      releaseNativeStart = resolve;
+    });
+    (BackgroundService.start as jest.Mock).mockImplementationOnce(async (...args) => {
+      await nativeStartGate;
+      await nativeStart(...args);
+    });
+
+    const inferenceStart = backgroundTaskService.startBackgroundInference('Model');
+    const inferenceStop = backgroundTaskService.stopBackgroundTask('inference');
+    releaseNativeStart();
+    await Promise.all([inferenceStart, inferenceStop]);
+
+    expect(BackgroundService.stop).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(backgroundTaskService.isActive).toBe(false);
+    expect(BackgroundService.off).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts protection for a download arriving while the native service is stopping', async () => {
+    await backgroundTaskService.startBackgroundInference('Model');
+    const nativeStop = (BackgroundService.stop as jest.Mock).getMockImplementation()!;
+    let releaseNativeStop!: () => void;
+    const nativeStopGate = new Promise<void>((resolve) => {
+      releaseNativeStop = resolve;
+    });
+    (BackgroundService.stop as jest.Mock).mockImplementationOnce(async (...args) => {
+      await nativeStopGate;
+      await nativeStop(...args);
+    });
+
+    const inferenceStop = backgroundTaskService.stopBackgroundTask('inference');
+    const downloadStart = backgroundTaskService.startBackgroundDownload(
+      { type: 'downloadPaused' },
+      { requireServiceStart: true },
+    );
+    const startsBeforeStopCompleted = (BackgroundService.start as jest.Mock).mock.calls.length;
+    releaseNativeStop();
+    const [, outcome] = await Promise.all([inferenceStop, downloadStart]);
+
+    expect(startsBeforeStopCompleted).toBe(1);
+    expect(BackgroundService.stop).toHaveBeenCalledTimes(1);
+    expect(BackgroundService.start).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ status: 'started', requirementSatisfied: true, serviceRunning: true });
+    expect(backgroundTaskService.isTaskActive('download')).toBe(true);
+    expect(backgroundTaskService.isActive).toBe(true);
+    expect(BackgroundService.off).not.toHaveBeenCalled();
   });
 });

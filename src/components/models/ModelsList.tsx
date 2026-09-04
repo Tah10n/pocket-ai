@@ -14,7 +14,7 @@ import {
   type NativeSyntheticEvent,
   type View,
 } from 'react-native';
-import { FlashList, type ListRenderItem } from '@shopify/flash-list';
+import { FlashList, type FlashListProps, type FlashListRef, type ListRenderItem } from '@shopify/flash-list';
 import { Box } from '@/components/ui/box';
 import { Button, ButtonText } from '@/components/ui/button';
 import { ErrorReportSheet } from '@/components/ui/ErrorReportSheet';
@@ -108,6 +108,38 @@ export type ModelsCatalogScrollSnapshot = {
   sessionIdentity: string;
   offset: number;
 };
+
+function CatalogFlashList({
+  initialScrollOffset,
+  onScroll,
+  onLoad,
+  ...props
+}: FlashListProps<ModelMetadata> & { initialScrollOffset: number | null }) {
+  const listRef = useRef<FlashListRef<ModelMetadata>>(null);
+  // This component is keyed by data session. Keep its saved position stable while
+  // FlashList measures the header and emits its initial scroll events.
+  const initialScrollOffsetRef = useRef(initialScrollOffset);
+  const hasLoadedRef = useRef(false);
+  const handleLoad = useCallback<NonNullable<FlashListProps<ModelMetadata>['onLoad']>>((event) => {
+    if (!hasLoadedRef.current && initialScrollOffsetRef.current !== null) {
+      // scrollToOffset uses absolute content coordinates, unlike initialScrollIndex
+      // which adds both content padding and the measured ListHeaderComponent height.
+      listRef.current?.scrollToOffset({
+        offset: initialScrollOffsetRef.current,
+        animated: false,
+      });
+    }
+    hasLoadedRef.current = true;
+    onLoad?.(event);
+  }, [onLoad]);
+  const handleScroll = useCallback<NonNullable<FlashListProps<ModelMetadata>['onScroll']>>((event) => {
+    if (hasLoadedRef.current) {
+      onScroll?.(event);
+    }
+  }, [onScroll]);
+
+  return <FlashList {...props} ref={listRef} onLoad={handleLoad} onScroll={handleScroll} />;
+}
 
 interface ModelCardWithRuntimeStateProps {
   model: ModelMetadata;
@@ -553,9 +585,6 @@ export const ModelsList = ({
     && allCatalogScrollSnapshotRef.current.offset > 0
     ? allCatalogScrollSnapshotRef.current.offset
     : null;
-  const restoredCatalogInitialViewOffset = restoredCatalogScrollOffset === null
-    ? null
-    : Math.max(0, restoredCatalogScrollOffset - headerInset - catalogContentTopOffset);
 
   useEffect(() => {
     autoFillAttemptsRef.current = 0;
@@ -1166,8 +1195,9 @@ export const ModelsList = ({
             <Text colorRole="tertiary" className="mt-2 ">{t('models.searching', 'Searching Hugging Face...')}</Text>
           </Box>
         ) : (
-          <FlashList
+          <CatalogFlashList
             key={dataSessionIdentity}
+            initialScrollOffset={restoredCatalogScrollOffset}
             data={filteredModels}
             extraData={selectedVariantIds}
             keyExtractor={(item) => item.id}
@@ -1183,10 +1213,6 @@ export const ModelsList = ({
             onScrollBeginDrag={handleCatalogScrollBeginDrag}
             onScroll={handleCatalogScroll}
             scrollEventThrottle={100}
-            initialScrollIndex={restoredCatalogScrollOffset === null ? undefined : 0}
-            initialScrollIndexParams={restoredCatalogInitialViewOffset === null
-              ? undefined
-              : { viewOffset: restoredCatalogInitialViewOffset }}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}
             showsVerticalScrollIndicator={false}

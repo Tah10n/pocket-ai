@@ -85,6 +85,7 @@ class BackgroundTaskService {
     private started = false;
     private expirationListeners = new Set<() => void>();
     private foregroundServiceStartPromise: Promise<ForegroundServiceStartAttempt> | null = null;
+    private foregroundServiceStopPromise: Promise<void> | null = null;
 
     start() {
         // A long-lived singleton can miss an AppState transition while its listener is
@@ -202,17 +203,39 @@ class BackgroundTaskService {
     }
 
     private async stopAllTasksAndService() {
-        if (this.foregroundServiceStartPromise) {
-            await this.foregroundServiceStartPromise;
+        if (this.foregroundServiceStopPromise) {
+            return this.foregroundServiceStopPromise;
         }
-        if (BackgroundService.isRunning()) {
-            try {
-                await BackgroundService.stop();
-            } catch {
-                // ignore
+
+        const stopPromise = (async () => {
+            if (this.foregroundServiceStartPromise) {
+                await this.foregroundServiceStartPromise;
+            }
+            // A replacement task may have joined the pending native start.
+            if (this.activeTaskTypes.size > 0) {
+                return;
+            }
+            if (BackgroundService.isRunning()) {
+                try {
+                    await BackgroundService.stop();
+                } catch {
+                    // ignore
+                }
+            }
+            // Starts arriving during native stop keep their AppState subscription
+            // and wait for this stop before starting a new service.
+            if (this.activeTaskTypes.size === 0) {
+                this.stop();
+            }
+        })();
+        this.foregroundServiceStopPromise = stopPromise;
+        try {
+            await stopPromise;
+        } finally {
+            if (this.foregroundServiceStopPromise === stopPromise) {
+                this.foregroundServiceStopPromise = null;
             }
         }
-        this.stop();
     }
 
     subscribeToExpiration(listener: () => void) {
@@ -308,18 +331,14 @@ class BackgroundTaskService {
     };
 
     private async stopForegroundServiceIfRunning(): Promise<void> {
-        if (!BackgroundService.isRunning()) {
-            return;
-        }
-
-        try {
-            await BackgroundService.stop();
-        } catch {
-            // ignore
-        }
+        await this.stopAllTasksAndService();
     }
 
     private async maybeStartForegroundService(): Promise<ForegroundServiceStartAttempt> {
+        if (this.foregroundServiceStopPromise) {
+            await this.foregroundServiceStopPromise;
+        }
+
         if (BackgroundService.isRunning()) {
             return {
                 status: 'already_running',

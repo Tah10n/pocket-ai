@@ -493,6 +493,67 @@ describe('useModelsCatalogData', () => {
     expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['query', 'token', 'refresh'] as const)(
+    'does not relabel stale results when a %s session is interrupted by Downloaded',
+    async (sessionChange) => {
+      const previousModel = createModel('org/phi-model');
+      const nextModel = createModel('org/current-session-model');
+      mockCatalogService.getCachedSearchResult.mockReturnValueOnce({
+        models: [previousModel],
+        hasMore: true,
+        nextCursor: 'https://huggingface.co/api/models?cursor=old-session-page-2',
+      }).mockReturnValue(null);
+      mockCatalogService.searchModels.mockResolvedValue({
+        models: [nextModel],
+        hasMore: false,
+        nextCursor: null,
+      });
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      expect(getCurrentValue()?.models).toEqual([previousModel]);
+
+      await act(async () => {
+        if (sessionChange === 'query') {
+          rerenderHook({ searchQuery: 'llama', searchSessionKey: 1 });
+        } else if (sessionChange === 'token') {
+          const tokenListener = mockTokenService.subscribe.mock.calls[0][0];
+          tokenListener({ hasToken: true, updatedAt: 1 }, 'mutation');
+        } else {
+          getCurrentValue()?.requestCatalogRefresh();
+        }
+        await Promise.resolve();
+      });
+      expect(getCurrentValue()?.models).toEqual([]);
+      expect(getCurrentValue()?.loading).toBe(true);
+
+      // Leave before the uncached session's debounce fires, then restore the same session.
+      await act(async () => {
+        rerenderHook({ activeTab: 'downloaded' });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        rerenderHook({ activeTab: 'all' });
+        await Promise.resolve();
+      });
+
+      expect(getCurrentValue()?.models).toEqual([]);
+      expect(getCurrentValue()?.nextCursor).toBeNull();
+      expect(getCurrentValue()?.loading).toBe(true);
+
+      await act(async () => {
+        jest.advanceTimersByTime(400);
+        await Promise.resolve();
+      });
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+      expect(mockCatalogService.searchModels).toHaveBeenCalledWith(
+        sessionChange === 'query' ? 'llama' : 'phi',
+        expect.objectContaining({ cursor: null }),
+        mockCatalogSearchSession,
+      );
+      expect(getCurrentValue()?.models).toEqual([nextModel]);
+    },
+  );
+
   it('blocks repeated auto-load attempts after a load-more error while preserving manual retry', async () => {
     mockCatalogService.searchModels
       .mockRejectedValueOnce(new Error('rate limited'))

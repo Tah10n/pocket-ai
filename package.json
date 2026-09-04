@@ -56,7 +56,7 @@
     "android:scenarios:branch-regeneration": "node ./scripts/android-scenarios.js --pack branch-regeneration --apk-variant release --fail-on-skip",
     "android:scenarios:documents": "node ./scripts/android-scenarios.js --pack documents --apk-variant release --fail-on-skip",
     "android:scenarios:document-benchmark": "node ./scripts/android-scenarios.js --pack document-benchmark --apk-variant release --fail-on-skip",
-    "android:scenarios:native": "node ./scripts/android-scenarios.js --pack native",
+    "android:scenarios:native": "node ./scripts/android-scenarios.js --pack native --apk-variant release --isolated-qa-install --fail-on-skip",
     "android:scenarios:extended": "node ./scripts/android-scenarios.js --pack extended",
     "android:screens": "node ./scripts/android-screen-capture.js",
     "android:screens:emulator": "node ./scripts/android-screen-capture.js --emulator",
@@ -96,11 +96,13 @@
     "verify:mobile-change:android:vision": "npm run verify:mobile-change:android:vision-smoke",
     "roadmap:update": "node ./scripts/generate-roadmap.js",
     "roadmap:check": "node ./scripts/generate-roadmap.js --check",
-    "verify:release": "npm run verify:mobile-change",
+    "verify:native-config": "node ./scripts/verify-native-config.js",
+    "verify:release": "npm run verify:mobile-change && npm run verify:native-config",
     "build:android:production": "node ./scripts/build-android-release.js",
     "build:android:production:clean": "node ./scripts/build-android-release.js --clean",
     "build:android:eas:preview": "npx --yes eas-cli@18.5.0 build --platform android --profile preview",
     "build:android:eas:production": "npx --yes eas-cli@18.5.0 build --platform android --profile production",
+    "build:ios:eas:production": "npx --yes eas-cli@18.5.0 build --platform ios --profile production",
     "build:all:eas:production": "npx --yes eas-cli@18.5.0 build --platform all --profile production"
   },
   "dependencies": {
@@ -183,7 +185,7 @@
   "overrides": {
     "@babel/core": "7.29.6",
     "@tootallnate/once": "3.0.1",
-    "@xmldom/xmldom": "0.9.10",
+    "@xmldom/xmldom": "0.8.15",
     "fast-xml-builder": "1.1.7",
     "js-yaml@3.14.2": "3.15.0",
     "js-yaml@4.1.1": "4.3.0",
@@ -202,13 +204,5 @@
       "markdown-it": "14.3.0"
     }
   },
-  "private": true,
-  "codegenConfig": {
-    "name": "RNAppSpec",
-    "type": "all",
-    "jsSrcsDir": "src",
-    "android": {
-      "javaPackageName": "com.github.tah10n.pocketai"
-    }
-  }
+  "private": true
 }

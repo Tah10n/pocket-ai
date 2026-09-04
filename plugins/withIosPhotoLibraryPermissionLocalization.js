@@ -78,8 +78,8 @@ function getSupportingDirectory(platformProjectRoot, projectName) {
   return path.join(platformProjectRoot, projectName, 'Supporting');
 }
 
-function getLocalizedInfoPlistStringsResourceFilepath() {
-  return 'InfoPlist.strings';
+function getLocalizedInfoPlistStringsResourceFilepath(locale) {
+  return `${locale}.lproj/InfoPlist.strings`;
 }
 
 function writeLocalizedPhotoLibraryPermissionFiles({
@@ -122,14 +122,14 @@ function addLocalizedPhotoLibraryPermissionResourcesToProject({
       && ensureLocalizedInfoPlistStringsResourcePath(
         nextProject,
         existingInfoPlistStringsChild,
-        getLocalizedInfoPlistStringsResourceFilepath(projectName, locale),
+        getLocalizedInfoPlistStringsResourceFilepath(locale),
       )
     ) {
       continue;
     }
 
     nextProject = xcodeUtils.addResourceFileToGroup({
-      filepath: getLocalizedInfoPlistStringsResourceFilepath(projectName, locale),
+      filepath: getLocalizedInfoPlistStringsResourceFilepath(locale),
       groupName,
       project: nextProject,
       isBuildFile: true,

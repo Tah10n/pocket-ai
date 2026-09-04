@@ -41,6 +41,7 @@ import { getNativeBottomSafeAreaInset } from '../../utils/safeArea';
 import { buttonLayoutTokens, screenChromeTokens, screenLayoutMetrics, screenLayoutTokens, type ThemeTone } from '../../utils/themeTokens';
 import { useTheme } from '../../providers/ThemeProvider';
 import {
+  compactSegmentedControlGeometry,
   screenActionPillGeometryBySize,
   screenInlineInputGeometryByVariant,
   screenTextFieldGeometryBySize,
@@ -67,6 +68,7 @@ interface ScreenContentProps {
   respectFloatingHeader?: boolean;
   style?: StyleProp<ViewStyle>;
   testID?: string;
+  topSpacing?: 'none' | 'compact' | 'default';
 }
 
 interface ScreenRootProps {
@@ -147,6 +149,7 @@ interface ScreenHeaderInset {
 
 const ScreenHeaderInsetContext = React.createContext<ScreenHeaderInset>({ height: 0, isFloating: false });
 const ScreenHeaderInsetSetterContext = React.createContext<((inset: ScreenHeaderInset) => void) | null>(null);
+const AndroidLiquidGlassSceneRefreshContext = React.createContext<() => void>(() => undefined);
 
 export function useScreenHeaderInset() {
   return React.useContext(ScreenHeaderInsetContext);
@@ -301,6 +304,7 @@ interface ScreenSectionLabelProps {
 
 interface ScreenBadgeProps {
   children: React.ReactNode;
+  accessibilityLabel?: string;
   className?: string;
   textClassName?: string;
   textColorRole?: SemanticForegroundRole;
@@ -362,6 +366,12 @@ interface ScreenSegmentedControlProps {
   itemClassName?: string;
   testID?: string;
   disabled?: boolean;
+  density?: 'compact' | 'default';
+  embedded?: boolean;
+}
+
+export function useAndroidLiquidGlassSceneRefresh() {
+  return React.useContext(AndroidLiquidGlassSceneRefreshContext);
 }
 
 interface ScreenSheetProps {
@@ -379,8 +389,10 @@ interface ScreenModalOverlayProps {
 }
 
 interface ScreenChromeBarProps {
+  androidBlurTargetRef?: AndroidBlurTargetRef | null;
   children: React.ReactNode;
   className?: string;
+  shape?: MaterialShape;
   style?: StyleProp<ViewStyle>;
   testID?: string;
 }
@@ -500,6 +512,7 @@ export function ScreenRoot({
     shouldUseAndroidBlurTarget,
   );
   const [headerInset, setHeaderInsetState] = React.useState<ScreenHeaderInset>({ height: 0, isFloating: false });
+  const [liquidGlassSceneRevision, setLiquidGlassSceneRevision] = React.useState(0);
   const { colors } = theme;
   const androidBlurSampleTarget = shouldUseAndroidBlurTarget
     ? materialBackgroundBlurTarget.sample
@@ -510,16 +523,40 @@ export function ScreenRoot({
   const setHeaderInset = React.useCallback((nextInset: ScreenHeaderInset) => {
     setHeaderInsetState((currentInset) => getNextScreenHeaderInset(currentInset, nextInset));
   }, []);
+  const requestAndroidLiquidGlassSceneRefresh = React.useCallback(() => {
+    if (!shouldUseAndroidLiquidGlass) {
+      return;
+    }
+
+    setLiquidGlassSceneRevision((current) => (
+      current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1
+    ));
+  }, [shouldUseAndroidLiquidGlass]);
+  React.useEffect(() => {
+    if (!headerInset.isFloating || headerInset.height <= 0) {
+      return;
+    }
+
+    // Floating content is first laid out before the header height is known. Refresh the
+    // recorded scene after the inset is applied so Glass cannot retain that initial frame.
+    requestAndroidLiquidGlassSceneRefresh();
+  }, [
+    headerInset.height,
+    headerInset.isFloating,
+    requestAndroidLiquidGlassSceneRefresh,
+  ]);
   const screenContent = (
-    <ScreenHeaderInsetSetterContext.Provider value={setHeaderInset}>
-      <ScreenHeaderInsetContext.Provider value={headerInset}>
-        <AndroidBlurSampleTargetProvider target={androidBlurSampleTarget}>
-          <AndroidBlurBoundaryProvider boundary={androidSceneBoundary}>
-            {children}
-          </AndroidBlurBoundaryProvider>
-        </AndroidBlurSampleTargetProvider>
-      </ScreenHeaderInsetContext.Provider>
-    </ScreenHeaderInsetSetterContext.Provider>
+    <AndroidLiquidGlassSceneRefreshContext.Provider value={requestAndroidLiquidGlassSceneRefresh}>
+      <ScreenHeaderInsetSetterContext.Provider value={setHeaderInset}>
+        <ScreenHeaderInsetContext.Provider value={headerInset}>
+          <AndroidBlurSampleTargetProvider target={androidBlurSampleTarget}>
+            <AndroidBlurBoundaryProvider boundary={androidSceneBoundary}>
+              {children}
+            </AndroidBlurBoundaryProvider>
+          </AndroidBlurSampleTargetProvider>
+        </ScreenHeaderInsetContext.Provider>
+      </ScreenHeaderInsetSetterContext.Provider>
+    </AndroidLiquidGlassSceneRefreshContext.Provider>
   );
 
   React.useEffect(() => {
@@ -572,6 +609,7 @@ export function ScreenRoot({
       <AndroidLiquidGlassBackdropProvider
         testID="screen-material-liquid-glass-scene"
         active={shouldUseAndroidLiquidGlass && isFocused}
+        sceneRevision={`${theme.resolvedTheme.id}-${theme.resolvedMode}-${liquidGlassSceneRevision}`}
         collapsable={false}
         style={styles.screenSceneBlurTarget}
       >
@@ -640,6 +678,7 @@ export function ScreenContent({
   respectFloatingHeader = true,
   style,
   testID,
+  topSpacing = 'none',
 }: ScreenContentProps) {
   const insets = useSafeAreaInsets();
   const floatingHeaderInset = useFloatingHeaderInset();
@@ -647,14 +686,20 @@ export function ScreenContent({
     ? getNativeBottomSafeAreaInset(insets.bottom)
     : 0;
   const resolvedExtraBottomInset = Math.max(0, extraBottomInset);
-  const floatingHeaderInsetStyle = respectFloatingHeader && floatingHeaderInset > 0
-    ? { paddingTop: floatingHeaderInset }
+  const resolvedTopSpacing = topSpacing === 'default'
+    ? screenLayoutMetrics.contentTopInset
+    : topSpacing === 'compact'
+      ? 12
+      : 0;
+  const resolvedTopInset = (respectFloatingHeader ? floatingHeaderInset : 0) + resolvedTopSpacing;
+  const topInsetStyle = resolvedTopInset > 0
+    ? { paddingTop: resolvedTopInset }
     : undefined;
   const bottomInsetStyle = nativeBottomInset > 0 || resolvedExtraBottomInset > 0
     ? { paddingBottom: screenLayoutMetrics.contentBottomInset + nativeBottomInset + resolvedExtraBottomInset }
     : undefined;
-  const insetStyle = floatingHeaderInsetStyle || bottomInsetStyle
-    ? [floatingHeaderInsetStyle, bottomInsetStyle]
+  const insetStyle = topInsetStyle || bottomInsetStyle
+    ? [topInsetStyle, bottomInsetStyle]
     : undefined;
 
   return (
@@ -1110,6 +1155,7 @@ export function ScreenSectionLabel({
 
 export function ScreenBadge({
   children,
+  accessibilityLabel,
   className,
   textClassName,
   textColorRole,
@@ -1128,6 +1174,9 @@ export function ScreenBadge({
 
   return (
     <MaterialSurface
+      accessible={Boolean(accessibilityLabel)}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityLabel ? 'text' : undefined}
       testID={testID}
       material={{ role: 'control', variant: 'inline', tone: materialTone }}
       shape="full"
@@ -1345,7 +1394,12 @@ export function ScreenSegmentedControl({
   itemClassName,
   testID,
   disabled = false,
+  density = 'default',
+  embedded = false,
 }: ScreenSegmentedControlProps) {
+  const geometry = density === 'compact'
+    ? compactSegmentedControlGeometry
+    : segmentedControlGeometry;
   const renderLabel = (option: ScreenSegmentedControlOption, isActive: boolean) => {
     const labelKey = `${option.key}-${isActive ? 'active' : 'inactive'}-label`;
 
@@ -1353,6 +1407,8 @@ export function ScreenSegmentedControl({
       <Text
         key={labelKey}
         numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.85}
         colorRole={isActive ? 'onAccent' : 'secondary'}
         className={composeTextRole('action', 'text-center')}
       >
@@ -1365,14 +1421,14 @@ export function ScreenSegmentedControl({
     <MaterialSurface
       testID={testID}
       accessibilityRole="tablist"
-      material={{ role: 'control', variant: 'inline', tone: 'neutral' }}
+      material={embedded ? null : { role: 'control', variant: 'inline', tone: 'neutral' }}
       shape="full"
       className={joinClassNames(
         'flex-row',
         disabled ? 'opacity-60' : undefined,
         className,
       )}
-      style={segmentedControlGeometry.container}
+      style={geometry.container}
     >
       {options.map((option) => {
         const isActive = activeKey === option.key;
@@ -1385,11 +1441,12 @@ export function ScreenSegmentedControl({
             }
           },
           disabled,
+          hitSlop: density === 'compact' ? 8 : undefined,
           accessibilityRole: 'tab' as const,
           accessibilityLabel: option.accessibilityLabel || option.label,
           accessibilityState: { selected: isActive, disabled },
           className: itemClassName,
-          style: segmentedControlGeometry.item,
+          style: geometry.item,
         };
 
         return (
@@ -1408,16 +1465,19 @@ export function ScreenSegmentedControl({
 }
 
 export function ScreenChromeBar({
+  androidBlurTargetRef,
   children,
   className,
+  shape = 'none',
   style,
   testID,
 }: ScreenChromeBarProps) {
   return (
     <EffectSurface
       testID={testID}
+      androidBlurTargetRef={androidBlurTargetRef}
       material={{ role: 'chrome', variant: 'composer' }}
-      shape="none"
+      shape={shape}
       className={className}
       style={style}
     >

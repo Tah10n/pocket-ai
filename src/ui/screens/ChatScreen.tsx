@@ -93,6 +93,11 @@ import {
 } from '../../services/AndroidQaGenerationEvidence';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
+import {
+    backgroundTaskService,
+    type ForegroundServiceStartFailureCategory,
+    type ForegroundServiceStartStatus,
+} from '../../services/BackgroundTaskService';
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 32;
 const AUTO_SCROLL_DISARM_THRESHOLD_PX = 64;
@@ -223,7 +228,12 @@ function canSendRetainedAttachment(
 }
 
 type ScrollMetrics = Pick<NativeScrollEvent, 'contentOffset' | 'contentSize' | 'layoutMeasurement'>;
-type AndroidKeyboardMetrics = { height: number; topY: number };
+type AndroidKeyboardMetrics = {
+    height: number;
+    topY: number;
+    screenTopY?: number;
+    reportedScreenY?: number | null;
+};
 
 function getVisionReadinessTranslationKey(status: MultimodalReadinessStatus): string {
     return VISION_READINESS_TRANSLATION_KEYS[status];
@@ -515,6 +525,27 @@ export function getAndroidKeyboardTopY({
     return Math.min(reportedScreenY, heightDerivedTopY, viewportDerivedTopY);
 }
 
+export function getAndroidFloatingKeyboardTopY({
+    screenHeight,
+    keyboardHeight,
+    reportedScreenY,
+}: {
+    screenHeight: number;
+    keyboardHeight: number;
+    reportedScreenY?: number | null;
+}) {
+    const heightDerivedTopY = Math.max(0, screenHeight - Math.max(0, keyboardHeight));
+
+    if (typeof reportedScreenY !== 'number' || !Number.isFinite(reportedScreenY) || reportedScreenY <= 0) {
+        return heightDerivedTopY;
+    }
+
+    // measure() and KeyboardEvent.screenY use screen coordinates. Do not mix in
+    // Dimensions.get('window') here: on edge-to-edge OEM builds that window can
+    // exclude system chrome and lift an absolutely positioned composer too far.
+    return Math.min(reportedScreenY, heightDerivedTopY);
+}
+
 export function isAndroidKeyboardMeasurementCurrent({
     isKeyboardVisible,
     activeMetrics,
@@ -530,13 +561,15 @@ export function isAndroidKeyboardMeasurementCurrent({
 export function shouldFloatAndroidComposerOverContent({
     platform,
     composerPresentation,
-    isKeyboardVisible,
 }: {
     platform: typeof Platform.OS;
     composerPresentation: 'inline' | 'capsule';
     isKeyboardVisible: boolean;
 }) {
-    return platform === 'android' && composerPresentation === 'capsule' && !isKeyboardVisible;
+    // Keep the focused TextInput in one native layout mode while Android opens
+    // the IME. Some OEM builds drop input focus when its ancestor switches from
+    // absolute positioning to normal flow during the keyboard transition.
+    return platform === 'android' && composerPresentation === 'capsule';
 }
 
 export function getAndroidFloatingComposerBottomOffset({
@@ -675,28 +708,84 @@ export function handleAndroidBackNavigation({
 
 function AndroidQaGenerationEvidenceSurface({
     documentDraftCount,
+    topInset,
 }: {
     documentDraftCount: number;
+    topInset: number;
 }) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
     }
-    return <EnabledAndroidQaGenerationEvidenceSurface documentDraftCount={documentDraftCount} />;
+    return (
+        <EnabledAndroidQaGenerationEvidenceSurface
+            documentDraftCount={documentDraftCount}
+            topInset={topInset}
+        />
+    );
 }
 
 function EnabledAndroidQaGenerationEvidenceSurface({
     documentDraftCount,
+    topInset,
 }: {
     documentDraftCount: number;
+    topInset: number;
 }) {
+    const [backgroundTaskState, setBackgroundTaskState] = useState<
+        'idle' | 'starting' | ForegroundServiceStartStatus
+    >('idle');
+    const [backgroundTaskFailureCategory, setBackgroundTaskFailureCategory] = useState<
+        ForegroundServiceStartFailureCategory | null
+    >(null);
+    const [isHiddenForVisualCapture, setIsHiddenForVisualCapture] = useState(false);
+    const didStartQaBackgroundTaskRef = useRef(false);
     const evidence = useSyncExternalStore(
         subscribeAndroidQaGenerationEvidence,
         getAndroidQaGenerationEvidenceSnapshot,
         getAndroidQaGenerationEvidenceSnapshot,
     );
 
+    const startQaBackgroundTask = useCallback(async () => {
+        setBackgroundTaskState('starting');
+        setBackgroundTaskFailureCategory(null);
+        const outcome = await backgroundTaskService.startBackgroundInference(
+            'Android QA foreground service',
+            { requireServiceStart: true },
+        );
+        didStartQaBackgroundTaskRef.current = outcome.serviceRunning;
+        setBackgroundTaskState(outcome.status);
+        setBackgroundTaskFailureCategory(outcome.failureCategory ?? null);
+        if (!outcome.requirementSatisfied) {
+            await backgroundTaskService.stopBackgroundTask('inference');
+        }
+    }, []);
+
+    const stopQaBackgroundTask = useCallback(async () => {
+        await backgroundTaskService.stopBackgroundTask('inference');
+        didStartQaBackgroundTaskRef.current = false;
+        setBackgroundTaskState('idle');
+        setBackgroundTaskFailureCategory(null);
+    }, []);
+
+    useEffect(() => () => {
+        if (didStartQaBackgroundTaskRef.current && backgroundTaskService.isTaskActive('inference')) {
+            void backgroundTaskService.stopBackgroundTask('inference');
+        }
+    }, []);
+
+    useFocusEffect(useCallback(() => () => {
+        setIsHiddenForVisualCapture(false);
+    }, []));
+
+    if (isHiddenForVisualCapture) {
+        return null;
+    }
+
     return (
-        <View testID="chat-qa-generation-evidence" style={styles.androidQaEvidenceSurface}>
+        <View
+            testID="chat-qa-generation-evidence"
+            style={[styles.androidQaEvidenceSurface, { marginTop: topInset }]}
+        >
             <View
                 accessible
                 accessibilityLabel={`chat-qa-document-draft-count-${documentDraftCount}`}
@@ -705,6 +794,15 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 style={styles.androidQaEvidenceMarker}
             />
             <View style={styles.androidQaEvidenceActions}>
+                <Button
+                    size="xs"
+                    action="secondary"
+                    accessibilityLabel="chat-qa-hide-generation-evidence-action"
+                    testID="chat-qa-hide-generation-evidence"
+                    onPress={() => setIsHiddenForVisualCapture(true)}
+                >
+                    <ButtonText>QA hide</ButtonText>
+                </Button>
                 <Button
                     size="xs"
                     action="secondary"
@@ -729,7 +827,47 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 >
                     <ButtonText>QA first patch</ButtonText>
                 </Button>
+                {Platform.OS === 'android' ? (
+                    <>
+                        <Button
+                            size="xs"
+                            action="secondary"
+                            testID="chat-qa-start-background-task"
+                            onPress={() => void startQaBackgroundTask()}
+                        >
+                            <ButtonText>QA start FGS</ButtonText>
+                        </Button>
+                        <Button
+                            size="xs"
+                            action="secondary"
+                            testID="chat-qa-stop-background-task"
+                            onPress={() => void stopQaBackgroundTask()}
+                        >
+                            <ButtonText>QA stop FGS</ButtonText>
+                        </Button>
+                    </>
+                ) : null}
             </View>
+            {Platform.OS === 'android' ? (
+                <>
+                    <View
+                        accessible
+                        accessibilityLabel={`chat-qa-background-task-state-${backgroundTaskState}`}
+                        collapsable={false}
+                        testID={`chat-qa-background-task-state-${backgroundTaskState}`}
+                        style={styles.androidQaEvidenceMarker}
+                    />
+                    {backgroundTaskFailureCategory ? (
+                        <View
+                            accessible
+                            accessibilityLabel={`chat-qa-background-task-failure-${backgroundTaskFailureCategory}`}
+                            collapsable={false}
+                            testID={`chat-qa-background-task-failure-${backgroundTaskFailureCategory}`}
+                            style={styles.androidQaEvidenceMarker}
+                        />
+                    ) : null}
+                </>
+            ) : null}
             {evidence.armedGate ? (
                 <View
                     accessible
@@ -1127,8 +1265,9 @@ const ChatScreenContent = () => {
                 ? t('chat.warmingUpDescription')
                 : t('chat.loadModelDescription');
     const activePresetLabel = activeThread?.presetSnapshot.name ?? (settings.activePresetId ? resolvePresetSnapshot(settings.activePresetId).name : t('common.default'));
-    const shouldShowRecoveryBanner = isInputDisabled && hasMessages;
-    const shouldShowRecoveryCard = isInputDisabled && !hasMessages;
+    const shouldShowModelRecovery = !isCurrentChatModelReady || isPendingModelSelectionForCurrentThread;
+    const shouldShowRecoveryBanner = shouldShowModelRecovery && hasMessages;
+    const shouldShowRecoveryCard = shouldShowModelRecovery && !hasMessages;
     const shouldShowFloatingWarmupBanner = isModelInitializing && !shouldShowRecoveryCard;
     const shouldReserveComposerTabBarInset = !shouldFloatComposerOverContent && !isAndroidKeyboardOpen;
     const composerBottomInsetStyle = shouldReserveComposerTabBarInset && tabBarInset > 0
@@ -2126,12 +2265,14 @@ const ChatScreenContent = () => {
                     viewportCompensation,
                     currentSpacerHeight: androidKeyboardInsetRef.current,
                     composerBottomY: pageY + height,
-                    keyboardTopY: keyboardMetrics.topY,
+                    keyboardTopY: shouldFloatComposerOverContent
+                        ? (keyboardMetrics.screenTopY ?? keyboardMetrics.topY)
+                        : keyboardMetrics.topY,
                     gap: screenLayoutMetrics.keyboardComposerGap,
                 }));
             });
         });
-    }, [setAndroidKeyboardInsetValue, tabBarHeight]);
+    }, [setAndroidKeyboardInsetValue, shouldFloatComposerOverContent, tabBarHeight]);
 
     const handleComposerContainerLayout = useCallback((event: LayoutChangeEvent) => {
         const nextHeight = event.nativeEvent.layout.height;
@@ -2700,7 +2841,12 @@ const ChatScreenContent = () => {
                     screenHeight,
                     windowHeight: window.height,
                     keyboardHeight: keyboardMetrics.height,
-                    reportedScreenY: keyboardMetrics.topY,
+                    reportedScreenY: keyboardMetrics.reportedScreenY ?? keyboardMetrics.topY,
+                });
+                keyboardMetrics.screenTopY = getAndroidFloatingKeyboardTopY({
+                    screenHeight,
+                    keyboardHeight: keyboardMetrics.height,
+                    reportedScreenY: keyboardMetrics.reportedScreenY ?? keyboardMetrics.screenTopY,
                 });
             }
 
@@ -2711,14 +2857,22 @@ const ChatScreenContent = () => {
             isKeyboardVisibleRef.current = true;
             setIsAndroidKeyboardVisible(true);
             const keyboardHeight = event.endCoordinates.height;
+            const screenHeight = Dimensions.get('screen').height;
+            const reportedScreenY = event.endCoordinates.screenY;
             androidKeyboardMetricsRef.current = {
                 height: keyboardHeight,
                 topY: getAndroidKeyboardTopY({
-                    screenHeight: Dimensions.get('screen').height,
+                    screenHeight,
                     windowHeight: Dimensions.get('window').height,
                     keyboardHeight,
-                    reportedScreenY: event.endCoordinates.screenY,
+                    reportedScreenY,
                 }),
+                screenTopY: getAndroidFloatingKeyboardTopY({
+                    screenHeight,
+                    keyboardHeight,
+                    reportedScreenY,
+                }),
+                reportedScreenY,
             };
         };
 
@@ -2985,6 +3139,7 @@ const ChatScreenContent = () => {
 
                     <AndroidQaGenerationEvidenceSurface
                         documentDraftCount={documentAttachmentDrafts.drafts.length}
+                        topInset={headerInset}
                     />
 
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>
@@ -3109,15 +3264,21 @@ const ChatScreenContent = () => {
                                 </ScreenCard>
                             </Box>
                         ) : (
-                            <Box className="flex-1 items-center px-6 pt-14 pb-8">
-                                <Text colorRole="primary" className="text-xl font-semibold  ">
-                                    {t('chat.noMessages')}
-                                </Text>
-                                <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-6  ">
-                                    {activeThread
-                                        ? t('chat.emptyExistingThread')
-                                        : t('chat.emptyNewThread')}
-                                </Text>
+                            <Box
+                                testID="chat-empty-state"
+                                className="flex-1 px-6 pb-8"
+                                style={{ paddingTop: headerInset }}
+                            >
+                                <Box className="items-center pt-14">
+                                    <Text colorRole="primary" className="text-xl font-semibold  ">
+                                        {t('chat.noMessages')}
+                                    </Text>
+                                    <Text colorRole="tertiary" className="mt-2 text-center text-sm leading-6  ">
+                                        {activeThread
+                                            ? t('chat.emptyExistingThread')
+                                            : t('chat.emptyNewThread')}
+                                    </Text>
+                                </Box>
                             </Box>
                         )}
                     </Box>
@@ -3310,6 +3471,7 @@ const styles = StyleSheet.create({
     },
     androidQaEvidenceActions: {
         flexDirection: 'row',
+        flexWrap: 'wrap',
         gap: 4,
     },
     androidQaEvidenceMarker: {

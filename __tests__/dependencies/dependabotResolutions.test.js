@@ -1,4 +1,5 @@
 const MarkdownIt = require('markdown-it');
+const ExpoPlist = require('@expo/plist').default;
 const packageJson = require('../../package.json');
 const packageLock = require('../../package-lock.json');
 
@@ -22,6 +23,7 @@ describe('Dependabot resolution contract', () => {
     expect(resolvedVersions('linkify-it')).toEqual(['5.0.2']);
     expect(resolvedVersions('markdown-it')).toEqual(['14.3.0']);
     expect(resolvedVersions('postcss')).toEqual(['8.5.23']);
+    expect(resolvedVersions('@xmldom/xmldom')).toEqual(['0.8.15']);
   });
 
   it('keeps incompatible major versions scoped instead of forcing global overrides', () => {
@@ -33,7 +35,15 @@ describe('Dependabot resolution contract', () => {
     });
     expect(packageJson.overrides['js-yaml@3.14.2']).toBe('3.15.0');
     expect(packageJson.overrides['js-yaml@4.1.1']).toBe('4.3.0');
+    expect(packageJson.overrides['@xmldom/xmldom']).toBe('0.8.15');
     expect(packageJson.overrides.uuid).toBeUndefined();
+  });
+
+  it('keeps the Expo plist parser compatible with clean iOS prebuilds', () => {
+    expect(ExpoPlist.parse([
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict><key>CFBundleName</key><string>Pocket AI</string></dict></plist>',
+    ].join(''))).toEqual({ CFBundleName: 'Pocket AI' });
   });
 
   it('keeps quote- and URL-heavy model output bounded through markdown linkification', () => {

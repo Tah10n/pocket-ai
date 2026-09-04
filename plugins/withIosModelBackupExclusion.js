@@ -9,25 +9,25 @@ const SWIFT_CALL_BLOCK = `    // ${SWIFT_CALL_MARKER}
     excludePocketAiModelDirectoryFromBackup()
 `;
 
-const SWIFT_METHOD_BLOCK = `
-  private func excludePocketAiModelDirectoryFromBackup() {
-    let fileManager = FileManager.default
-    guard let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-      return
-    }
-
-    let backupExcludedDirectoryNames = ["${MODEL_DIRECTORY_NAME}", "${CHAT_ATTACHMENTS_DIRECTORY_NAME}"]
-
-    for directoryName in backupExcludedDirectoryNames {
-      let directory = documentsDirectory.appendingPathComponent(directoryName, isDirectory: true)
-      try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-
-      var resourceValues = URLResourceValues()
-      resourceValues.isExcludedFromBackup = true
-      var mutableDirectory = directory
-      try? mutableDirectory.setResourceValues(resourceValues)
-    }
+const SWIFT_METHOD_BLOCK = `private func excludePocketAiModelDirectoryFromBackup() {
+  let fileManager = FileManager.default
+  guard let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+    return
   }
+
+  let backupExcludedDirectoryNames = ["${MODEL_DIRECTORY_NAME}", "${CHAT_ATTACHMENTS_DIRECTORY_NAME}"]
+
+  for directoryName in backupExcludedDirectoryNames {
+    let directory = documentsDirectory.appendingPathComponent(directoryName, isDirectory: true)
+    try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    var resourceValues = URLResourceValues()
+    resourceValues.isExcludedFromBackup = true
+    var mutableDirectory = directory
+    try? mutableDirectory.setResourceValues(resourceValues)
+  }
+}
+
 `;
 
 const OBJC_CALL_BLOCK = `  // ${OBJC_CALL_MARKER}
@@ -134,20 +134,26 @@ function hasObjcChatAttachmentBackupExclusion(methodBlock) {
 }
 
 function ensureSwiftBackupExclusionMethod(contents) {
-  if (!SWIFT_METHOD_SIGNATURE_REGEX.test(contents)) {
-    return insertBeforeLastOccurrence(contents, '\n}', SWIFT_METHOD_BLOCK);
-  }
-
   const methodBlock = findBalancedMethodBlock(contents, SWIFT_METHOD_SIGNATURE_REGEX);
-  if (!methodBlock) {
+  const appDelegateMatch = /^(?:@main\s*\n)?(?:public\s+)?class\s+AppDelegate\b/m.exec(contents);
+  if (!appDelegateMatch) {
+    throw new Error('Unable to locate the Swift AppDelegate declaration for backup exclusion.');
+  }
+
+  if (
+    methodBlock
+    && methodBlock.end <= appDelegateMatch.index
+    && hasSwiftChatAttachmentBackupExclusion(methodBlock.block)
+  ) {
     return contents;
   }
 
-  if (hasSwiftChatAttachmentBackupExclusion(methodBlock.block)) {
-    return contents;
-  }
+  const withoutExistingMethod = methodBlock
+    ? `${contents.slice(0, methodBlock.start)}${contents.slice(methodBlock.end)}`
+    : contents;
+  const nextAppDelegateMatch = /^(?:@main\s*\n)?(?:public\s+)?class\s+AppDelegate\b/m.exec(withoutExistingMethod);
 
-  return `${contents.slice(0, methodBlock.start)}${SWIFT_METHOD_BLOCK}${contents.slice(methodBlock.end)}`;
+  return `${withoutExistingMethod.slice(0, nextAppDelegateMatch.index)}${SWIFT_METHOD_BLOCK}${withoutExistingMethod.slice(nextAppDelegateMatch.index)}`;
 }
 
 function addSwiftBackupExclusion(contents) {

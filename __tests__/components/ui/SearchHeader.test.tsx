@@ -1,5 +1,6 @@
 import React from 'react';
-import { fireEvent, render } from '@testing-library/react-native';
+import { fireEvent, render, within } from '@testing-library/react-native';
+import { View } from 'react-native';
 import { SearchHeader } from '../../../src/components/ui/SearchHeader';
 
 jest.mock('react-native-css-interop', () => {
@@ -15,16 +16,17 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
 
   return {
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
-    ScreenHeaderShell: ({ children }: any) => mockReact.createElement(View, null, children),
+    ScreenHeaderShell: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
+    ScreenChromeBar: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     HeaderActionButton: ({ accessibilityLabel, onPress }: any) =>
       mockReact.createElement(Pressable, { accessibilityLabel, onPress }, mockReact.createElement(Text, null, 'action')),
     HeaderActionPlaceholder: () => mockReact.createElement(View, { testID: 'header-action-placeholder' }),
     HeaderBackButton: ({ accessibilityLabel, onPress }: any) =>
       mockReact.createElement(Pressable, { accessibilityLabel, onPress }, mockReact.createElement(Text, null, 'back')),
-    ScreenInlineInput: ({ leadingAccessory, trailingAccessory, testID, ...props }: any) =>
+    ScreenInlineInput: ({ containerTestID, leadingAccessory, trailingAccessory, ...props }: any) =>
       mockReact.createElement(
         View,
-        { testID },
+        { ...props, testID: containerTestID },
         leadingAccessory,
         mockReact.createElement(TextInput, props),
         trailingAccessory,
@@ -35,10 +37,10 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
         { accessibilityLabel, onPress, testID },
         mockReact.createElement(Text, null, 'icon'),
       ),
-    ScreenSegmentedControl: ({ options, activeKey, onChange, testID }: any) =>
+    ScreenSegmentedControl: ({ options, activeKey, onChange, testID, ...props }: any) =>
       mockReact.createElement(
         View,
-        { testID },
+        { ...props, testID },
         options.map((option: any) => mockReact.createElement(
           Pressable,
           {
@@ -51,6 +53,7 @@ jest.mock('../../../src/components/ui/ScreenShell', () => {
           mockReact.createElement(Text, null, option.label),
         )),
       ),
+    useFloatingHeaderInset: () => 64,
   };
 });
 
@@ -97,6 +100,55 @@ jest.mock('../../../src/components/ui/MaterialSymbols', () => {
 });
 
 describe('SearchHeader', () => {
+  it('keeps only the title and storage action in the blurred header', () => {
+    const androidContentBlurTargetRef = { current: null };
+    const onControlsContentOffsetChange = jest.fn();
+    const screen = render(
+      <SearchHeader
+        androidContentBlurTargetRef={androidContentBlurTargetRef}
+        searchQuery=""
+        onSearchChange={jest.fn()}
+        activeTab="all"
+        onTabChange={jest.fn()}
+        onOpenStorage={jest.fn()}
+        floatingControls={<View testID="floating-filter-controls" />}
+        onControlsContentOffsetChange={onControlsContentOffsetChange}
+      />,
+    );
+
+    const header = screen.getByTestId('models-catalog-header');
+    expect(header.props.androidBlurTargetRef).toBe(androidContentBlurTargetRef);
+    expect(header.props.floating).toBe(true);
+    expect(within(header).queryByTestId('models-search-input')).toBeNull();
+    expect(within(header).queryByTestId('models-tab-control')).toBeNull();
+    expect(screen.getByTestId('models-catalog-controls').props).toEqual(expect.objectContaining({
+      className: expect.stringContaining('absolute'),
+      style: expect.objectContaining({ top: 72, zIndex: 30 }),
+    }));
+
+    expect(screen.getByTestId('models-search-glass').props).toEqual(expect.objectContaining({
+      androidBlurTargetRef: androidContentBlurTargetRef,
+      shape: 'full',
+    }));
+    expect(screen.getByTestId('models-search-input').props).toEqual(expect.objectContaining({
+      embedded: true,
+      variant: 'composer',
+    }));
+    expect(screen.getByTestId('models-tabs-glass').props.androidBlurTargetRef)
+      .toBe(androidContentBlurTargetRef);
+    expect(screen.getByTestId('models-tab-control').props).toEqual(expect.objectContaining({
+      density: 'compact',
+      embedded: true,
+    }));
+    expect(within(screen.getByTestId('models-catalog-controls')).getByTestId('floating-filter-controls'))
+      .toBeTruthy();
+
+    fireEvent(screen.getByTestId('models-catalog-controls'), 'layout', {
+      nativeEvent: { layout: { height: 120 } },
+    });
+    expect(onControlsContentOffsetChange).toHaveBeenCalledWith(136);
+  });
+
   it('renders a shared tab control and switches between all and downloaded tabs', () => {
     const onTabChange = jest.fn();
     const { getByTestId } = render(

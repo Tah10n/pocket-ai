@@ -40,15 +40,15 @@ class PocketLiquidGlassSurface(context: Context, appContext: AppContext) : ExpoV
   var materialTintOpacity: Float = 0f
     set(value) { field = value.coerceIn(0f, 1f); invalidateMaterial() }
   var fallbackColor: Int = Color.TRANSPARENT
-    set(value) { field = value; invalidate() }
+    set(value) { field = value; requestVisualRefresh() }
   var fallbackOpacity: Float = 1f
-    set(value) { field = value.coerceIn(0f, 1f); invalidate() }
+    set(value) { field = value.coerceIn(0f, 1f); requestVisualRefresh() }
   var fallbackBorderColor: Int = Color.TRANSPARENT
-    set(value) { field = value; invalidate() }
+    set(value) { field = value; requestVisualRefresh() }
   var fallbackBorderOpacity: Float = 1f
-    set(value) { field = value.coerceIn(0f, 1f); invalidate() }
+    set(value) { field = value.coerceIn(0f, 1f); requestVisualRefresh() }
   var fallbackBorderWidthDp: Float = 0f
-    set(value) { field = value.coerceAtLeast(0f); invalidate() }
+    set(value) { field = value.coerceAtLeast(0f); requestVisualRefresh() }
   var isInteractiveMaterial: Boolean = false
     set(value) { field = value; invalidateMaterial() }
   var isMaterialPressed: Boolean = false
@@ -56,7 +56,7 @@ class PocketLiquidGlassSurface(context: Context, appContext: AppContext) : ExpoV
       field = value
       pressedAmount = if (isInteractiveMaterial && value) 1f else 0f
       renderer?.invalidateMaterial()
-      invalidate()
+      requestVisualRefresh()
     }
   var effectsEnabled: Boolean = true
     set(value) { field = value; invalidateMaterial() }
@@ -180,7 +180,11 @@ class PocketLiquidGlassSurface(context: Context, appContext: AppContext) : ExpoV
   private fun invalidateMaterial() {
     resetRendererFailure()
     renderer?.invalidateMaterial()
-    invalidate()
+    requestVisualRefresh()
+  }
+
+  private fun requestVisualRefresh() {
+    if (isAttachedToWindow) postInvalidateOnAnimation() else invalidate()
   }
 
   private fun resetRendererFailure() { consecutiveFailures = 0; retryScheduled = false }

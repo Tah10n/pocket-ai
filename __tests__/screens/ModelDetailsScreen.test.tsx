@@ -59,6 +59,8 @@ let lastErrorReportSheetProps: any = null;
 let lastContentBlurTargetProps: any = null;
 let lastModelVariantPickerSheetProps: any = null;
 let lastProjectorChoiceSheetProps: any = null;
+const screenStackProps: any[] = [];
+const screenContentProps: any[] = [];
 const mockEngineState = {
   status: EngineStatus.IDLE,
   activeModelId: undefined as string | undefined,
@@ -147,8 +149,14 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
     return props.children;
   },
   ScreenRoot: ({ children }: any) => children,
-  ScreenContent: ({ children }: any) => children,
-  ScreenStack: ({ children }: any) => children,
+  ScreenContent: ({ children, ...props }: any) => {
+    screenContentProps.push(props);
+    return children;
+  },
+  ScreenStack: ({ children, ...props }: any) => {
+    screenStackProps.push(props);
+    return children;
+  },
   ScreenCard: ({ children }: any) => children,
   ScreenSurface: ({ children, ...props }: any) => {
     const mockReact = jest.requireActual('react');
@@ -444,6 +452,8 @@ describe('ModelDetailsScreen', () => {
     lastContentBlurTargetProps = null;
     lastModelVariantPickerSheetProps = null;
     lastProjectorChoiceSheetProps = null;
+    screenStackProps.length = 0;
+    screenContentProps.length = 0;
     mockFitsInRam.mockResolvedValue(true);
     useDownloadStore.setState({ queue: [], activeDownloadId: null });
     mockEngineState.status = EngineStatus.IDLE;
@@ -494,6 +504,23 @@ describe('ModelDetailsScreen', () => {
     expect(lastModelVariantPickerSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
     expect(lastProjectorChoiceSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
     expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
+  });
+
+  it('uses the shared compact rhythm for the details content', async () => {
+    render(<ModelDetailsScreen />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screenStackProps).toContainEqual(expect.objectContaining({
+      testID: 'model-details-content-stack',
+      gap: 'compact',
+    }));
+    expect(screenContentProps).toContainEqual(expect.objectContaining({
+      testID: 'model-details-content',
+      topSpacing: 'compact',
+    }));
   });
 
   it('opens the Hugging Face model page from the details flow', async () => {

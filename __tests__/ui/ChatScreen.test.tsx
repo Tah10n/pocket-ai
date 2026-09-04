@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert, Keyboard, Platform } from 'react-native';
+import { Alert, Keyboard, Platform, StyleSheet } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { getThreadActiveModelId } from '../../src/types/chat';
 import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
@@ -689,6 +689,7 @@ const {
   getAndroidFloatingComposerBottomOffset,
   getAndroidKeyboardOverlapCompensation,
   getAndroidKeyboardSpacerHeight,
+  getAndroidFloatingKeyboardTopY,
   getAndroidKeyboardTopY,
   getChatListBottomChromeInset,
   getChatWarmupBannerBottomOffset,
@@ -1153,7 +1154,11 @@ describe('ChatScreen', () => {
   it('exposes opt-in generation gates and privacy-safe prepared attachment markers', () => {
     const { getByTestId } = render(React.createElement(ChatScreen));
 
-    expect(getByTestId('chat-qa-generation-evidence')).toBeTruthy();
+    const evidenceSurface = getByTestId('chat-qa-generation-evidence');
+    expect(evidenceSurface).toBeTruthy();
+    expect(StyleSheet.flatten(evidenceSurface.props.style)).toEqual(expect.objectContaining({
+      marginTop: expect.any(Number),
+    }));
     expect(getByTestId('chat-qa-document-draft-count-0')).toBeTruthy();
     expect(getByTestId('chat-qa-arm-during-document-preparation')).toBeTruthy();
     fireEvent.press(getByTestId('chat-qa-arm-before-first-output'));
@@ -1170,6 +1175,91 @@ describe('ChatScreen', () => {
     expect(getByTestId(
       'chat-prepared-attachment-message-qa-assistant-image-attachment-image-1',
     )).toBeTruthy();
+  });
+
+  it('hides QA controls for a production-like visual capture and restores them on refocus', async () => {
+    const navigation = jest.requireMock('@react-navigation/native') as {
+      __setIsFocused: (isFocused: boolean) => void;
+    };
+    navigation.__setIsFocused(true);
+    const view = render(React.createElement(ChatScreen));
+
+    const hideEvidenceAction = view.getByTestId('chat-qa-hide-generation-evidence');
+    expect(hideEvidenceAction.props.accessibilityLabel).toBe(
+      'chat-qa-hide-generation-evidence-action',
+    );
+    fireEvent.press(hideEvidenceAction);
+
+    expect(view.queryByTestId('chat-qa-generation-evidence')).toBeNull();
+    expect(view.getByTestId('chat-list-viewport')).toBeTruthy();
+    expect(view.getByTestId('chat-input-bar')).toBeTruthy();
+
+    await act(async () => {
+      navigation.__setIsFocused(false);
+      view.rerender(React.createElement(ChatScreen));
+    });
+    await act(async () => {
+      navigation.__setIsFocused(true);
+      view.rerender(React.createElement(ChatScreen));
+    });
+
+    expect(view.getByTestId('chat-qa-generation-evidence')).toBeTruthy();
+  });
+
+  it('publishes the required foreground-service start outcome through stable QA markers', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');
+    const startSpy = jest.spyOn(backgroundTaskService, 'startBackgroundInference').mockResolvedValueOnce({
+      status: 'started',
+      serviceRunning: true,
+      degraded: false,
+      required: true,
+      requirementSatisfied: true,
+    });
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        fireEvent.press(getByTestId('chat-qa-start-background-task'));
+        await Promise.resolve();
+      });
+
+      expect(startSpy).toHaveBeenCalledWith('Android QA foreground service', {
+        requireServiceStart: true,
+      });
+      expect(getByTestId('chat-qa-background-task-state-started')).toBeTruthy();
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it('publishes only a privacy-safe failure category and clears degraded QA work', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');
+    const startSpy = jest.spyOn(backgroundTaskService, 'startBackgroundInference').mockResolvedValueOnce({
+      status: 'start_failed',
+      serviceRunning: false,
+      degraded: true,
+      required: true,
+      requirementSatisfied: false,
+      failureCategory: 'security_exception',
+    });
+    const stopSpy = jest.spyOn(backgroundTaskService, 'stopBackgroundTask').mockResolvedValueOnce(undefined);
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        fireEvent.press(getByTestId('chat-qa-start-background-task'));
+        await Promise.resolve();
+      });
+
+      expect(getByTestId('chat-qa-background-task-state-start_failed')).toBeTruthy();
+      expect(getByTestId('chat-qa-background-task-failure-security_exception')).toBeTruthy();
+      expect(stopSpy).toHaveBeenCalledWith('inference');
+    } finally {
+      startSpy.mockRestore();
+      stopSpy.mockRestore();
+    }
   });
 
   it('enables ready vision attachments and sends copied drafts with multimodal readiness', async () => {
@@ -2709,6 +2799,24 @@ describe('ChatScreen', () => {
     })).toBe(496);
   });
 
+  it('keeps floating Android composer measurements in screen coordinates', () => {
+    expect(getAndroidFloatingKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 255,
+      reportedScreenY: 533,
+    })).toBe(533);
+    expect(getAndroidFloatingKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 804,
+    })).toBe(504);
+    expect(getAndroidFloatingKeyboardTopY({
+      screenHeight: 804,
+      keyboardHeight: 300,
+      reportedScreenY: 496,
+    })).toBe(496);
+  });
+
   it('rejects an Android keyboard measurement after hide or a newer frame event', () => {
     const measuredMetrics = { height: 320, topY: 2080 };
 
@@ -2729,7 +2837,7 @@ describe('ChatScreen', () => {
     })).toBe(false);
   });
 
-  it('returns the Android glass composer to normal flow while the keyboard is visible', () => {
+  it('keeps the Android capsule composer in one layout mode while the keyboard opens', () => {
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'android',
       composerPresentation: 'capsule',
@@ -2744,7 +2852,7 @@ describe('ChatScreen', () => {
       platform: 'android',
       composerPresentation: 'capsule',
       isKeyboardVisible: true,
-    })).toBe(false);
+    })).toBe(true);
     expect(shouldFloatAndroidComposerOverContent({
       platform: 'ios',
       composerPresentation: 'capsule',
@@ -2971,9 +3079,10 @@ describe('ChatScreen', () => {
       activeThreadId: 'thread-1',
     });
 
-    const { getByTestId } = render(React.createElement(ChatScreen));
+    const { getByTestId, queryByTestId } = render(React.createElement(ChatScreen));
 
     expect(getByTestId('chat-flash-list').props.maintainVisibleContentPosition.autoscrollToBottomThreshold).toBe(0.02);
+    expect(queryByTestId('chat-recovery-banner')).toBeNull();
 
     fireEvent(getByTestId('chat-flash-list'), 'touchStart');
 
@@ -4853,6 +4962,29 @@ describe('ChatScreen', () => {
     expect(queryByText('Saved user prompt')).toBeNull();
   });
 
+  it('keeps the empty-chat copy below the floating header', () => {
+    const scrollInsets = require('../../src/hooks/useTabBarContentInset');
+    const insetSpy = jest.spyOn(scrollInsets, 'useFloatingScrollInsets').mockReturnValue({
+      paddingTop: 180,
+      paddingBottom: 0,
+    });
+
+    try {
+      useChatStore.setState({
+        threads: {},
+        activeThreadId: null,
+      });
+
+      const { getByTestId } = render(React.createElement(ChatScreen));
+
+      expect(StyleSheet.flatten(getByTestId('chat-empty-state').props.style)).toMatchObject({
+        paddingTop: 180,
+      });
+    } finally {
+      insetSpy.mockRestore();
+    }
+  });
+
   it('shows an alert instead of throwing when header new chat fails synchronously', () => {
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
@@ -5364,6 +5496,57 @@ describe('ChatScreen', () => {
       'chat.modelControls.backendBenchmarkRestoreWarningTitle',
       'chat.modelControls.backendBenchmarkRestoreWarningDescription',
     );
+  });
+
+  it('starts autotune foreground work before best-effort notification readiness', async () => {
+    registry.saveModels([
+      {
+        id: 'author/model-q4',
+        name: 'Qwen3-4B-Instruct-GGUF',
+        author: 'Test',
+        size: 512 * 1024 * 1024,
+        localPath: 'author-model-q4.gguf',
+        lifecycleStatus: 'downloaded',
+        modelType: 'qwen3',
+        tags: ['gguf', 'chat'],
+      },
+    ]);
+    const { backgroundTaskService } = require('../../src/services/BackgroundTaskService');
+    const { notificationService } = require('../../src/services/NotificationService');
+    const startSpy = jest
+      .spyOn(backgroundTaskService, 'startBackgroundInference')
+      .mockResolvedValueOnce({
+        status: 'started',
+        serviceRunning: true,
+        degraded: false,
+        required: false,
+        requirementSatisfied: true,
+      });
+    const readinessSpy = jest
+      .spyOn(notificationService, 'areUserNotificationsEnabled')
+      .mockRejectedValueOnce(new Error('notification initialization failed'));
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => {
+        fireEvent.press(getByTestId('model-controls-button'));
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await lastModelParametersSheetProps?.onRunAutotune();
+      });
+
+      expect(startSpy).toHaveBeenCalledTimes(1);
+      expect(readinessSpy).toHaveBeenCalledTimes(1);
+      expect(startSpy.mock.invocationCallOrder[0]).toBeLessThan(readinessSpy.mock.invocationCallOrder[0]);
+      expect(mockRunBackendAutotune).toHaveBeenCalledTimes(1);
+    } finally {
+      startSpy.mockRestore();
+      readinessSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 
   it('keeps reasoning disabled for models without reasoning support', async () => {

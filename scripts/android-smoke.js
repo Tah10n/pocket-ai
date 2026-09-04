@@ -313,9 +313,21 @@ async function main() {
     } else {
       launchInstalledApp(tools.adb, device.serial, appPackage);
     }
-    await waitForAppJsReady(tools.adb, device.serial, appPackage, {
-      lifecycle: metro?.lifecycle,
-    });
+    try {
+      await waitForAppJsReady(tools.adb, device.serial, appPackage, {
+        lifecycle: metro?.lifecycle,
+      });
+    } catch (error) {
+      if (screenshotPath) {
+        captureBootstrapFailureDiagnostics(
+          tools.adb,
+          device.serial,
+          appPackage,
+          path.dirname(screenshotPath)
+        );
+      }
+      throw error;
+    }
 
     if (screenshotPath) {
       await delay(launchDelayMs);
@@ -452,7 +464,10 @@ function getSdkRoots() {
     }
 
     const normalized = path.resolve(candidate);
-    if (!roots.includes(normalized) && fs.existsSync(normalized)) {
+    // A restricted Windows workspace can allow access to the SDK executables while
+    // denying a metadata check on the SDK root itself. Keep candidate roots here and
+    // let resolveAndroidTools verify the exact adb/emulator paths below them.
+    if (!roots.includes(normalized)) {
       roots.push(normalized);
     }
   }
@@ -2614,28 +2629,69 @@ function reverseMetroPort(adbPath, serial, hostPort) {
   }
 }
 
-function launchInstalledApp(adbPath, serial, appPackage) {
+function launchInstalledApp(adbPath, serial, appPackage, options = {}) {
+  const capture = options.runCapture ?? runCapture;
   log("Launching the installed Android app...");
-  runCapture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
+  capture(adbPath, ["-s", serial, "shell", "am", "force-stop", appPackage], {
     allowFailure: true,
   });
-  runChecked(
+  const launcherActivity = resolveLauncherActivity(adbPath, serial, appPackage, {
+    runCapture: capture,
+  });
+  const launchOutput = capture(
     adbPath,
     [
       "-s",
       serial,
       "shell",
-      "monkey",
-      "-p",
-      appPackage,
+      "am",
+      "start",
+      "-W",
+      "-S",
+      "-n",
+      launcherActivity,
+    ],
+  );
+  if (!/^Status:\s+ok\s*$/imu.test(launchOutput) || /^Error:/imu.test(launchOutput)) {
+    throw new Error("Android launcher activity did not report a successful start.");
+  }
+}
+
+function parseResolvedLauncherActivity(output, appPackage) {
+  const componentPattern = /^([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)$/u;
+  for (const line of `${output || ""}`.split(/\r?\n/u).reverse()) {
+    const match = componentPattern.exec(line.trim());
+    if (match?.[1] === appPackage) {
+      return `${match[1]}/${match[2]}`;
+    }
+  }
+  return null;
+}
+
+function resolveLauncherActivity(adbPath, serial, appPackage, options = {}) {
+  const capture = options.runCapture ?? runCapture;
+  const output = capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "cmd",
+      "package",
+      "resolve-activity",
+      "--brief",
+      "-a",
+      "android.intent.action.MAIN",
       "-c",
       "android.intent.category.LAUNCHER",
-      "1",
+      appPackage,
     ],
-    {
-      stdio: "inherit",
-    }
   );
+  const launcherActivity = parseResolvedLauncherActivity(output, appPackage);
+  if (!launcherActivity) {
+    throw new Error("Unable to resolve the installed Android launcher activity.");
+  }
+  return launcherActivity;
 }
 
 function launchDevClient(adbPath, serial, appPackage, appScheme, port) {
@@ -2690,6 +2746,8 @@ const appJsReadyTextLabels = [
   "Детали модели",
 ];
 
+const androidAnrCloseResourceId = "android:id/aerr_close";
+
 function isAppJsReadyUiHierarchy(xml, appPackage) {
   if (
     typeof xml !== "string"
@@ -2735,12 +2793,132 @@ function readAndroidUiHierarchy(adbPath, serial, options = {}) {
   return dumpResult.stdout;
 }
 
+function parseResolvedDefaultHomePackage(output) {
+  const componentPattern = /^([A-Za-z0-9_.]+)\/[A-Za-z0-9_.$]+$/u;
+  for (const line of `${output || ""}`.split(/\r?\n/u).reverse()) {
+    const match = componentPattern.exec(line.trim());
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function parseApplicationAtFaultPackage(output) {
+  const applicationAtFaultPattern = /^\s*Application at fault:\s*(.*?)\s*$/u;
+  const activityRecordPattern = new RegExp(
+    String.raw`^ActivityRecord\{[0-9a-f]+\s+u\d+\s+`
+      + String.raw`([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/[A-Za-z0-9_.$]+`
+      + String.raw`(?:\s+t-?\d+)?\}?\s*$`,
+    "iu",
+  );
+  let applicationAtFaultPackage = null;
+  for (const line of `${output || ""}`.split(/\r?\n/u)) {
+    const fieldMatch = applicationAtFaultPattern.exec(line);
+    if (!fieldMatch) {
+      continue;
+    }
+    const activityRecordMatch = activityRecordPattern.exec(fieldMatch[1]);
+    if (applicationAtFaultPackage || !activityRecordMatch) {
+      return null;
+    }
+    applicationAtFaultPackage = activityRecordMatch[1];
+  }
+  return applicationAtFaultPackage;
+}
+
+function findAndroidUiResourceCenter(xml, resourceId) {
+  if (typeof xml !== "string") {
+    return null;
+  }
+  for (const match of xml.matchAll(/<node\b[^>]*>/gu)) {
+    const node = match[0];
+    if (!node.includes(`resource-id="${resourceId}"`)) {
+      continue;
+    }
+    const bounds = /bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u.exec(node);
+    if (!bounds) {
+      return null;
+    }
+    const [, left, top, right, bottom] = bounds.map(Number);
+    if (right <= left || bottom <= top) {
+      return null;
+    }
+    return {
+      x: Math.floor((left + right) / 2),
+      y: Math.floor((top + bottom) / 2),
+    };
+  }
+  return null;
+}
+
+function dismissExternalLauncherAnrDialog(adbPath, serial, appPackage, hierarchy, options = {}) {
+  const closeActionCenter = findAndroidUiResourceCenter(hierarchy, androidAnrCloseResourceId);
+  if (!closeActionCenter) {
+    return false;
+  }
+
+  const capture = options.runCapture ?? runCapture;
+  const homeOutput = capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "cmd",
+      "package",
+      "resolve-activity",
+      "--brief",
+      "-a",
+      "android.intent.action.MAIN",
+      "-c",
+      "android.intent.category.HOME",
+    ],
+    { allowFailure: true },
+  );
+  const launcherPackage = parseResolvedDefaultHomePackage(homeOutput);
+  if (!launcherPackage || launcherPackage === appPackage) {
+    return false;
+  }
+
+  const lastAnrReport = capture(
+    adbPath,
+    ["-s", serial, "shell", "dumpsys", "window", "lastanr"],
+    { allowFailure: true },
+  );
+  const applicationAtFaultPackage = parseApplicationAtFaultPackage(lastAnrReport);
+  if (
+    !applicationAtFaultPackage
+    || applicationAtFaultPackage === appPackage
+    || applicationAtFaultPackage !== launcherPackage
+  ) {
+    return false;
+  }
+
+  capture(
+    adbPath,
+    [
+      "-s",
+      serial,
+      "shell",
+      "input",
+      "tap",
+      `${closeActionCenter.x}`,
+      `${closeActionCenter.y}`,
+    ],
+  );
+  return true;
+}
+
 async function waitForAppJsReady(adbPath, serial, appPackage, options = {}) {
   const timeoutMs = options.timeoutMs ?? appJsReadyTimeoutMs;
   const pollIntervalMs = options.pollIntervalMs ?? appJsReadyPollIntervalMs;
   const readUiHierarchy = options.readUiHierarchy ?? readAndroidUiHierarchy;
+  const dismissLauncherAnrDialog =
+    options.dismissLauncherAnrDialog ?? dismissExternalLauncherAnrDialog;
   const wait = options.delay ?? delay;
   const startedAt = Date.now();
+  let launcherAnrDismissed = false;
 
   do {
     if (options.lifecycle?.isStopRequested?.()) {
@@ -2755,6 +2933,15 @@ async function waitForAppJsReady(adbPath, serial, appPackage, options = {}) {
     if (isAppJsReadyUiHierarchy(hierarchy, appPackage)) {
       log("Confirmed that the app JS surface is visible.");
       return;
+    }
+    if (
+      !launcherAnrDismissed
+      && dismissLauncherAnrDialog(adbPath, serial, appPackage, hierarchy, options)
+    ) {
+      launcherAnrDismissed = true;
+      log("Dismissed an external emulator launcher ANR dialog before checking app readiness again.");
+      await wait(pollIntervalMs);
+      continue;
     }
 
     if (Date.now() - startedAt >= timeoutMs) {
@@ -2819,12 +3006,16 @@ function saveLogcat(adbPath, serial, outputPath, options = {}) {
     ["-s", serial, "shell", "pidof", "-s", packageName],
     { allowFailure: true }
   ));
-  if (!uid || !processId) {
+  if (!uid) {
     throw new Error(
-      "Could not resolve the installed Android app UID and process for privacy-scoped bootstrap logcat."
+      "Could not resolve the installed Android app UID for privacy-scoped bootstrap logcat."
     );
   }
 
+  const privacyFilters = [`--uid=${uid}`];
+  if (processId) {
+    privacyFilters.push(`--pid=${processId}`);
+  }
   const logs = capture(
     adbPath,
     [
@@ -2834,8 +3025,7 @@ function saveLogcat(adbPath, serial, outputPath, options = {}) {
       "-d",
       "-v",
       "time",
-      `--uid=${uid}`,
-      `--pid=${processId}`,
+      ...privacyFilters,
       "-t",
       "800",
     ],
@@ -2847,6 +3037,24 @@ function saveLogcat(adbPath, serial, outputPath, options = {}) {
     sensitiveRoots: options.sensitiveRoots || [projectRoot],
   }));
   log("Saved sanitized app-scoped bootstrap logcat.");
+}
+
+function captureBootstrapFailureDiagnostics(adbPath, serial, appPackage, outputDirectory) {
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  try {
+    wakeAndUnlockDevice(adbPath, serial);
+    saveScreenshot(adbPath, serial, path.join(outputDirectory, "bootstrap-failed.png"));
+  } catch {
+    log("Bootstrap failure screenshot capture failed (code=bootstrap_screenshot_failed).");
+  }
+
+  try {
+    saveLogcat(adbPath, serial, path.join(outputDirectory, "bootstrap-failure-logcat.txt"), {
+      packageName: appPackage,
+    });
+  } catch {
+    log("Bootstrap failure log capture failed (code=bootstrap_logcat_failed).");
+  }
 }
 
 function captureAndroidScreenshot(adbPath, serial, outputPath, options = {}) {
@@ -3203,7 +3411,10 @@ function buildGradleAssembleArgs(assembleTask, targetAbi = "universal", options 
   if (requestedApplicationId !== defaultApplicationId) {
     buildArgs.push(`-PpocketAiApplicationId=${requestedApplicationId}`);
   }
-  return withAndroidProvenanceGradleExecutionArgs(buildArgs);
+  return [
+    ...withAndroidProvenanceGradleExecutionArgs(buildArgs),
+    "--stacktrace",
+  ];
 }
 
 function assertSmokeBuildOverrideContract(gradleArgs = null, options = {}) {
@@ -3267,17 +3478,23 @@ module.exports = {
   buildWindowsProcessCommandLine,
   captureOwnedProcessOwnership,
   captureAndroidScreenshot,
+  captureBootstrapFailureDiagnostics,
   cleanupOwnedMetroAfterStartupFailure,
   createOwnedMetroProcessLifecycle,
   evaluateApkReuse,
   evaluateApkAbiCompatibility,
   evaluateInstallReuse,
   ensureMetroServer,
+  dismissExternalLauncherAnrDialog,
   isInsufficientStorageInstallFailure,
   isAppJsReadyUiHierarchy,
+  launchInstalledApp,
   parseDumpsysPackageOutput,
+  parseApplicationAtFaultPackage,
+  parseResolvedDefaultHomePackage,
   parseAndroidPackageUid,
   parseAndroidProcessId,
+  parseResolvedLauncherActivity,
   parseSha256Output,
   parseCliOptions,
   parseApkVariant,
@@ -3286,6 +3503,7 @@ module.exports = {
   readProcessIdentity,
   readAndroidUiHierarchy,
   readWindowsProcessTreeIdentities,
+  resolveLauncherActivity,
   sanitizeForFileName,
   resolvePackagedAndroidAbis,
   resolveAndroidQaApplicationId,

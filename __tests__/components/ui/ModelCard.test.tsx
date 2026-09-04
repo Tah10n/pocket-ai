@@ -120,6 +120,46 @@ describe('ModelCard', () => {
     mockT.mockClear();
   });
 
+  it('shows accessible text and reasoning capability badges', () => {
+    const screen = render(
+      <ModelCard
+        model={{
+          ...buildModel(ModelAccessState.PUBLIC),
+          name: 'DeepSeek R1',
+          modelType: 'deepseek-r1',
+          tags: ['reasoning'],
+        }}
+        {...buildModelCardHandlers()}
+        isActive={false}
+      />,
+    );
+
+    expect(screen.getByText('models.text.badge').props.accessibilityLabel)
+      .toBe('models.text.capabilityLabel');
+    expect(screen.getByText('models.reasoning.badge').props.accessibilityLabel)
+      .toBe('models.reasoning.capabilityLabel');
+  });
+
+  it('rerenders when probe metadata discovers reasoning capability', () => {
+    const handlers = buildModelCardHandlers();
+    const createModel = (supportsThinking: boolean): ModelMetadata => ({
+      ...buildModel(ModelAccessState.PUBLIC),
+      modelType: 'custom',
+      thinkingCapability: {
+        detectedAt: supportsThinking ? 2 : 1,
+        supportsThinking,
+        canDisableThinking: true,
+      },
+    });
+    const screen = render(<ModelCard model={createModel(false)} {...handlers} isActive={false} />);
+
+    expect(screen.queryByText('models.reasoning.badge')).toBeNull();
+
+    screen.rerender(<ModelCard model={createModel(true)} {...handlers} isActive={false} />);
+
+    expect(screen.getByText('models.reasoning.badge')).toBeTruthy();
+  });
+
   it('renders a token CTA for auth-required models', () => {
     const onConfigureToken = jest.fn();
     const onOpenDetails = jest.fn();

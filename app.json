@@ -10,12 +10,7 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.github.tah10n.pocketai",
-      "infoPlist": {
-        "UIBackgroundModes": [
-          "processing"
-        ]
-      }
+      "bundleIdentifier": "com.github.tah10n.pocketai"
     },
     "android": {
       "versionCode": 22,
@@ -86,6 +81,7 @@
           "enableOpenCLAndHexagon": true
         }
       ],
+      "./plugins/withAndroidGradleJvmMemory",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",
       "./plugins/withAndroidBackgroundActionsForegroundService",

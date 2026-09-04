@@ -6,6 +6,7 @@ const { spawnSync } = require("child_process");
 const {
   buildGradleAssembleArgs,
   captureOwnedProcessOwnership,
+  dismissExternalLauncherAnrDialog,
   ensureMetroServer,
   resolveAndroidQaApplicationId,
   spawnOwnedProcess,
@@ -51,6 +52,12 @@ const CORE_SCENARIOS = [
 ];
 const CATALOG_SCENARIOS = [
   "variant-picker-smoke",
+];
+const STATE_MUTATING_CATALOG_SCENARIOS = [
+  "variant-picker-smoke",
+  "hf-catalog-hardening",
+  "memory-fit-badges",
+  "memory-fit-download-warning",
 ];
 const STORAGE_SCENARIOS = [
   "storage-cache-clear",
@@ -111,6 +118,8 @@ const SCENARIO_PACK_SCENARIOS = {
   native: [
     ...CORE_SCENARIOS,
     ...STABLE_SECONDARY_SCENARIOS,
+    "native-glass-theme-matrix",
+    "foreground-service-notification-states",
   ],
   extended: [
     ...CORE_SCENARIOS,
@@ -142,6 +151,40 @@ const APP_TITLE_LABELS = ["Pocket AI"];
 const HOME_SECTION_LABELS = ["Recent Conversations", "Недавние разговоры"];
 const HOME_TAB_LABELS = ["Home", "Главная"];
 const CHAT_TAB_LABELS = ["Chat", "Чат"];
+const POST_NOTIFICATIONS_PERMISSION = "android.permission.POST_NOTIFICATIONS";
+const BACKGROUND_ACTIONS_CHANNEL_ID = "RN_BACKGROUND_ACTIONS_CHANNEL";
+const BACKGROUND_ACTIONS_SERVICE_CLASS = "com.asterinet.react.bgactions.RNBackgroundActionsTask";
+const QA_BACKGROUND_TASK_START_RESOURCE_ID = "chat-qa-start-background-task";
+const QA_BACKGROUND_TASK_STOP_RESOURCE_ID = "chat-qa-stop-background-task";
+const CHAT_QA_EVIDENCE_RESOURCE_ID = "chat-qa-generation-evidence";
+const CHAT_QA_HIDE_EVIDENCE_ACCESSIBILITY_LABEL =
+  "chat-qa-hide-generation-evidence-action";
+const BOTTOM_TAB_RESOURCE_IDS = {
+  home: "bottom-tab-home",
+  chat: "bottom-tab-chat",
+  models: "bottom-tab-models",
+  settings: "bottom-tab-settings",
+};
+const TAB_DESTINATION_RESOURCE_IDS = {
+  home: "home-screen-content",
+  chat: "chat-list-viewport",
+  models: "models-screen-content",
+  settings: "settings-screen-content",
+};
+const QA_BACKGROUND_TASK_OUTCOME_STATUSES = [
+  "started",
+  "already_running",
+  "start_failed",
+  "skipped_android_background",
+  "skipped_ios_foreground",
+  "skipped_no_active_task",
+];
+const QA_BACKGROUND_TASK_FAILURE_CATEGORIES = [
+  "foreground_service_start_not_allowed",
+  "security_exception",
+  "native_rejection",
+  "unknown",
+];
 const CLOSE_APP_LABELS = ["Close app", "Закрыть приложение"];
 const WAIT_LABELS = ["Wait", "Подождать"];
 const APP_NOT_RESPONDING_LABEL_FRAGMENTS = ["isn't responding", "не отвечает"];
@@ -225,6 +268,8 @@ const DOCUMENT_ERROR_LABELS_BY_CODE = {
 const MODELS_FILTER_TOGGLE_RESOURCE_ID = "models-filter-toggle";
 const MODELS_FILTER_PANEL_RESOURCE_ID = "models-filter-panel";
 const MODELS_FILTER_CLEAR_RESOURCE_ID = "models-filter-clear";
+const MODELS_SORT_TOGGLE_RESOURCE_ID = "models-sort-toggle";
+const MODELS_SORT_PANEL_RESOURCE_ID = "models-sort-panel";
 const MODELS_FILTER_SIZE_LARGE_RESOURCE_ID = "filter-option-size-large";
 const MODELS_FILTER_NO_TOKEN_REQUIRED_RESOURCE_ID = "filter-option-no-token-required";
 const MODEL_WARMUP_BANNER_RESOURCE_ID = "model-warmup-banner-container";
@@ -401,12 +446,25 @@ const MODELS_FILTER_TOGGLE_LABELS = ["Filters", "Фильтры"];
 const MODELS_FILTER_SIZE_LARGE_LABELS = ["> 5 GB", "> 5 ГБ"];
 const MODELS_FILTER_NO_TOKEN_REQUIRED_LABELS = ["No token required", "Без токена"];
 const MODELS_FILTER_CLEAR_LABELS = ["Clear", "Очистить"];
-const SORT_LABELS = ["Sort", "Сортировка"];
+const CLEAR_FILTERS_LABELS = ["Clear filters", "Очистить фильтры"];
 const MOST_DOWNLOADED_LABELS = ["Most downloaded", "Самые скачиваемые"];
 const MOST_POPULAR_LABELS = ["Most popular", "Самые популярные"];
 const SETTINGS_TAB_LABELS = ["Settings", "Настройки"];
 const SETTINGS_TITLE_LABELS = ["Settings", "Настройки"];
-const THEME_MODE_LABELS = ["Theme Mode", "Тема"];
+const THEME_STYLE_LABELS = ["Visual Style", "Визуальный стиль"];
+const THEME_MODE_RESOURCE_IDS = {
+  light: "settings-theme-mode-light",
+  system: "settings-theme-mode-system",
+  dark: "settings-theme-mode-dark",
+};
+const THEME_STYLE_RESOURCE_IDS = {
+  default: "settings-theme-style-default",
+  glass: "settings-theme-style-glass",
+};
+const THEME_STYLE_CONTAINER_RESOURCE_ID = "settings-visual-style-container";
+const THEME_STYLE_CONTROL_RESOURCE_ID = "settings-theme-style-control";
+const THEME_STYLE_SHEET_RESOURCE_ID = "settings-theme-style-sheet";
+const THEME_MODE_CONTROL_RESOURCE_ID = "settings-theme-mode-control";
 const LANGUAGE_ROW_LABELS = ["Language", "Язык"];
 const STORAGE_MANAGER_LABELS = ["Storage Manager", "Управление хранилищем"];
 const CLEAR_ACTIVE_CACHE_LABELS = ["Clear Active Cache", "Очистить активный кэш"];
@@ -708,6 +766,7 @@ async function main() {
 
   fs.mkdirSync(artifactsRoot, { recursive: true });
   try {
+    validateScenarioExecutionOptions(selectedScenarios, cliOptions);
     configureScenarioBuildEnvironment(cliOptions, requiresCurrentHeadProvenance);
   } catch (error) {
     const results = [{
@@ -888,9 +947,10 @@ async function main() {
           }
 
           const sentinelOnlyEvidence = scenario.evidencePolicy === DOCUMENT_EVIDENCE_POLICY;
+          const outcomeScreenshotPath = getScenarioOutcomeScreenshotPath(outcome);
           const screenshotPath = sentinelOnlyEvidence
             ? null
-            : await captureSettledScenarioScreenshot(
+            : outcomeScreenshotPath ?? await captureSettledScenarioScreenshot(
                 context,
                 scenario.captureFullEvidence
                   ? path.join(BRANCH_EVIDENCE_DIRECTORY, `${scenario.id}.png`)
@@ -1189,9 +1249,23 @@ function createScenarioContext(adbPath, serial) {
           continue;
         }
 
+        const resumedActivityOutput = runCapture(adbPath, [
+          "-s",
+          serial,
+          "shell",
+          "dumpsys",
+          "activity",
+          "activities",
+        ], { allowFailure: true });
+        const resumedPackageName = parseResumedActivityPackage(resumedActivityOutput);
+
+        if (resumedPackageName === appPackageName) {
+          return;
+        }
+
         const snapshot = createUiSnapshot(adbPath, serial);
 
-        if (isAppForegroundSnapshot(snapshot)) {
+        if (isScenarioAppForegroundEvidence(resumedActivityOutput, snapshot, appPackageName)) {
           return;
         }
 
@@ -1199,7 +1273,7 @@ function createScenarioContext(adbPath, serial) {
           visibleOnly: true,
         });
 
-        if (homeNode) {
+        if (!resumedPackageName && homeNode) {
           return;
         }
 
@@ -2068,6 +2142,859 @@ function assertAttachmentActionAvailable(attachNode) {
   }
 }
 
+function getScenarioOutcomeScreenshotPath(outcome) {
+  if (!outcome || typeof outcome.screenshotPath !== "string") {
+    return null;
+  }
+
+  const screenshotPath = outcome.screenshotPath.trim();
+  return screenshotPath.length > 0 ? screenshotPath : null;
+}
+
+function readAndroidSdkLevel(adbPath, serial) {
+  const raw = runCapture(adbPath, ["-s", serial, "shell", "getprop", "ro.build.version.sdk"]).trim();
+  const sdkLevel = Number.parseInt(raw, 10);
+  if (!Number.isInteger(sdkLevel) || sdkLevel <= 0) {
+    throw new Error(`Could not resolve Android SDK level from "${raw}".`);
+  }
+  return sdkLevel;
+}
+
+function isBackgroundActionsServicePresent(dumpsysOutput) {
+  return String(dumpsysOutput || "").includes(BACKGROUND_ACTIONS_SERVICE_CLASS);
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseAndroidRuntimePermission(dumpsysOutput, userId, permission) {
+  const output = String(dumpsysOutput || "");
+  const userHeader = new RegExp(`^\\s*User ${escapeRegex(userId)}:\\s`, "mu");
+  const userMatch = userHeader.exec(output);
+  if (!userMatch) {
+    throw new Error(`Android package state does not contain user ${userId}.`);
+  }
+
+  const userSectionStart = userMatch.index + userMatch[0].length;
+  const remainingOutput = output.slice(userSectionStart);
+  const nextUserMatch = /^\s*User \d+:\s/mu.exec(remainingOutput);
+  const userSection = nextUserMatch
+    ? remainingOutput.slice(0, nextUserMatch.index)
+    : remainingOutput;
+  const permissionLine = new RegExp(
+    `^\\s*${escapeRegex(permission)}:\\s+granted=(true|false)(?:,|\\s*$)`,
+    "mu"
+  ).exec(userSection);
+  if (!permissionLine) {
+    throw new Error(`Android package state does not expose ${permission} for user ${userId}.`);
+  }
+  return permissionLine[1] === "true";
+}
+
+function readAndroidCurrentUserId(adbPath, serial, options = {}) {
+  const capture = options.runCapture || runCapture;
+  const raw = capture(adbPath, ["-s", serial, "shell", "am", "get-current-user"]).trim();
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error(`Could not resolve the current Android user from "${raw}".`);
+  }
+  return raw;
+}
+
+function readPostNotificationsPermission(adbPath, serial, userId) {
+  const output = runCapture(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "dumpsys",
+    "package",
+    appPackageName,
+  ]);
+  return parseAndroidRuntimePermission(output, userId, POST_NOTIFICATIONS_PERMISSION);
+}
+
+function parseAndroidNotificationChannelEnabled(
+  dumpsysOutput,
+  packageName,
+  packageUid,
+  channelId
+) {
+  return parseAndroidNotificationChannelState(
+    dumpsysOutput,
+    packageName,
+    packageUid,
+    channelId
+  ).enabled;
+}
+
+function parseAndroidNotificationChannelState(
+  dumpsysOutput,
+  packageName,
+  packageUid,
+  channelId
+) {
+  const lines = String(dumpsysOutput).split(/\r?\n/u);
+  const headerPattern = new RegExp(
+    `^\\s*AppSettings: ${escapeRegex(packageName)} \\(${escapeRegex(packageUid)}\\)(?:\\s.*)?$`,
+    "u"
+  );
+  const sectionStart = lines.findIndex((line) => headerPattern.test(line));
+  if (sectionStart < 0) {
+    throw new Error(`Android notification state has no AppSettings block for ${packageName} (${packageUid}).`);
+  }
+  const nextSectionOffset = lines
+    .slice(sectionStart + 1)
+    .findIndex((line) => /^\s*AppSettings: /u.test(line));
+  const sectionEnd = nextSectionOffset < 0
+    ? lines.length
+    : sectionStart + 1 + nextSectionOffset;
+  const section = lines.slice(sectionStart + 1, sectionEnd).join("\n");
+
+  const channelLinePattern = new RegExp(
+    `NotificationChannel\\{mId='${escapeRegex(channelId)}'[^\\r\\n]*`,
+    "u"
+  );
+  const channelLine = section.match(channelLinePattern)?.[0];
+  const importance = channelLine?.match(/\bmImportance=(\d+)/u)?.[1];
+  const name = channelLine?.match(/\bmName=(.*?)(?=,\s+m(?:Description|Importance)=)/u)?.[1]?.trim();
+  if (importance === undefined || !name) {
+    throw new Error(`Android notification state has no ${channelId} channel for ${packageName}.`);
+  }
+  return {
+    enabled: Number.parseInt(importance, 10) > 0,
+    importance: Number.parseInt(importance, 10),
+    name,
+  };
+}
+
+function readBackgroundActionsChannelState(adbPath, serial, userId = null) {
+  const currentUserId = userId ?? readAndroidCurrentUserId(adbPath, serial);
+  const packageUid = resolveAndroidPackageUid(adbPath, serial, appPackageName, {
+    userId: currentUserId,
+  });
+  const output = runCapture(adbPath, [
+    "-s",
+    serial,
+    "shell",
+    "dumpsys",
+    "notification",
+    "--noredact",
+  ]);
+  return parseAndroidNotificationChannelState(
+    output,
+    appPackageName,
+    packageUid,
+    BACKGROUND_ACTIONS_CHANNEL_ID
+  );
+}
+
+function resolveNotificationChannelSettingsUi(snapshot, channelName) {
+  const matches = findMatchingNodes(snapshot, channelName, { visibleOnly: true })
+    .filter((node) => Boolean(node.bounds));
+  const title = matches.find((node) => node.bounds.top < 320);
+  if (title) {
+    return { ready: true, target: null };
+  }
+  return { ready: false, target: pickBestNode(matches) };
+}
+
+function resolveNotificationChannelToggle(snapshot) {
+  const matches = snapshot.nodes
+    .filter((node) => (
+      isResourceId(node, "switch_widget")
+      && Boolean(node.bounds)
+      && (!snapshot.viewportBounds || isBoundsInViewport(node.bounds, snapshot.viewportBounds))
+    ))
+    .sort((left, right) => {
+      const verticalDelta = left.bounds.top - right.bounds.top;
+      if (verticalDelta !== 0) {
+        return verticalDelta;
+      }
+
+      const clickableDelta = Number(right.clickable) - Number(left.clickable);
+      if (clickableDelta !== 0) {
+        return clickableDelta;
+      }
+
+      return left.bounds.area - right.bounds.area;
+    });
+
+  // ChannelNotificationSettings uses a main switch above optional per-channel
+  // preferences such as vibration. Choosing the smallest generic switch can
+  // toggle one of those secondary preferences on Android 13.
+  return matches[0] || null;
+}
+
+async function ensureNotificationChannelSettingsVisible(adbPath, serial, channelName) {
+  const initialSnapshot = createUiSnapshot(adbPath, serial);
+  const initialState = resolveNotificationChannelSettingsUi(initialSnapshot, channelName);
+  if (initialState.ready) {
+    return;
+  }
+  if (!initialState.target?.bounds) {
+    throw new Error(withUiSnapshotSummary(
+      initialSnapshot,
+      `Android notification settings did not expose channel "${channelName}".`
+    ));
+  }
+
+  tapBounds(adbPath, serial, initialState.target.bounds);
+  const { match, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    { timeoutMs: 10_000, pollIntervalMs: 250 },
+    (candidateSnapshot) => (
+      resolveNotificationChannelSettingsUi(candidateSnapshot, channelName).ready
+        ? true
+        : null
+    )
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      `Android notification settings did not open channel "${channelName}".`
+    ));
+  }
+}
+
+async function waitForBackgroundActionsService(adbPath, serial, shouldBeRunning, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const deadline = Date.now() + timeoutMs;
+  let lastOutput = "";
+  while (Date.now() < deadline) {
+    lastOutput = runCapture(adbPath, [
+      "-s",
+      serial,
+      "shell",
+      "dumpsys",
+      "activity",
+      "services",
+      appPackageName,
+    ], { allowFailure: true });
+    if (isBackgroundActionsServicePresent(lastOutput) === shouldBeRunning) {
+      return;
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `Android background-actions service did not become ${shouldBeRunning ? "running" : "stopped"}. `
+    + `Last dumpsys excerpt: ${lastOutput.slice(-1_000)}`
+  );
+}
+
+async function setAppNotificationsEnabled(ctx, enabled, userId) {
+  const adbPath = resolveAdbPath();
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "am",
+    "start",
+    "-a",
+    "android.settings.APP_NOTIFICATION_SETTINGS",
+    "--es",
+    "android.provider.extra.APP_PACKAGE",
+    appPackageName,
+  ]);
+
+  const notificationSwitch = await waitForResourceId(adbPath, ctx.serial, "switch_widget", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  if (!notificationSwitch.bounds) {
+    throw new Error("Android app-notification switch has no tap bounds.");
+  }
+  const previouslyEnabled = notificationSwitch.checked;
+  if (notificationSwitch.checked !== enabled) {
+    tapBounds(adbPath, ctx.serial, notificationSwitch.bounds);
+    const { match } = await waitForSnapshotMatch(
+      adbPath,
+      ctx.serial,
+      { timeoutMs: 10_000, pollIntervalMs: 250 },
+      (snapshot) => {
+        const candidate = findResourceIdInSnapshot(snapshot, "switch_widget", { visibleOnly: true });
+        return candidate?.checked === enabled ? candidate : null;
+      }
+    );
+    if (!match) {
+      throw new Error(`Android app notifications did not become ${enabled ? "enabled" : "disabled"}.`);
+    }
+  }
+
+  const permissionGranted = readPostNotificationsPermission(adbPath, ctx.serial, userId);
+  if (permissionGranted !== enabled) {
+    throw new Error(
+      `Android app notification UI and ${POST_NOTIFICATIONS_PERMISSION} disagree after the toggle.`
+    );
+  }
+
+  runChecked(adbPath, ["-s", ctx.serial, "shell", "input", "keyevent", "4"]);
+  // Some OEM settings apps keep their notification screen resumed after Back.
+  // Bring the tested package to the foreground explicitly before continuing.
+  await relaunchScenarioApp(ctx);
+  return previouslyEnabled;
+}
+
+async function setBackgroundActionsChannelEnabled(ctx, enabled, userId = null) {
+  const adbPath = resolveAdbPath();
+  const currentUserId = userId ?? readAndroidCurrentUserId(adbPath, ctx.serial);
+  const originalState = readBackgroundActionsChannelState(adbPath, ctx.serial, currentUserId);
+  if (originalState.enabled === enabled) {
+    return originalState.enabled;
+  }
+  runChecked(adbPath, [
+    "-s",
+    ctx.serial,
+    "shell",
+    "am",
+    "start",
+    "-a",
+    "android.settings.CHANNEL_NOTIFICATION_SETTINGS",
+    "--es",
+    "android.provider.extra.APP_PACKAGE",
+    appPackageName,
+    "--es",
+    "android.provider.extra.CHANNEL_ID",
+    BACKGROUND_ACTIONS_CHANNEL_ID,
+  ]);
+
+  await ensureNotificationChannelSettingsVisible(
+    adbPath,
+    ctx.serial,
+    originalState.name
+  );
+
+  const { match: initialChannelSwitch, snapshot: initialChannelSnapshot } = await waitForSnapshotMatch(
+    adbPath,
+    ctx.serial,
+    { timeoutMs: 15_000, pollIntervalMs: 250 },
+    (snapshot) => resolveNotificationChannelToggle(snapshot)
+  );
+  const channelSwitch = initialChannelSwitch;
+  if (!channelSwitch?.bounds) {
+    throw new Error(withUiSnapshotSummary(
+      initialChannelSnapshot,
+      "Android notification-channel switch has no tap bounds."
+    ));
+  }
+  if (channelSwitch.checked !== originalState.enabled) {
+    throw new Error(withUiSnapshotSummary(
+      initialChannelSnapshot,
+      "Android notification-channel UI and dumpsys disagree before the toggle."
+    ));
+  }
+  const previouslyEnabled = originalState.enabled;
+  let currentChannelSwitch = channelSwitch;
+  let lastChannelSnapshot = initialChannelSnapshot;
+  for (let attempt = 1; attempt <= 3 && currentChannelSwitch.checked !== enabled; attempt += 1) {
+    tapBounds(adbPath, ctx.serial, currentChannelSwitch.bounds);
+    const { match, snapshot } = await waitForSnapshotMatch(
+      adbPath,
+      ctx.serial,
+      { timeoutMs: 4_000, pollIntervalMs: 250 },
+      (candidateSnapshot) => {
+        const candidate = resolveNotificationChannelToggle(candidateSnapshot);
+        return candidate?.checked === enabled ? candidate : null;
+      }
+    );
+    lastChannelSnapshot = snapshot;
+    if (match) {
+      currentChannelSwitch = match;
+      break;
+    }
+
+    const retrySwitch = resolveNotificationChannelToggle(snapshot);
+    if (!retrySwitch?.bounds) {
+      throw new Error(withUiSnapshotSummary(
+        snapshot,
+        "Android notification-channel switch disappeared after the toggle."
+      ));
+    }
+    currentChannelSwitch = retrySwitch;
+  }
+  if (currentChannelSwitch.checked !== enabled) {
+    throw new Error(withUiSnapshotSummary(
+      lastChannelSnapshot,
+      `Android notification-channel switch did not become ${enabled ? "enabled" : "blocked"}.`
+    ));
+  }
+
+  const deadline = Date.now() + 10_000;
+  let confirmed = false;
+  let lastState = originalState;
+  while (Date.now() < deadline) {
+    lastState = readBackgroundActionsChannelState(adbPath, ctx.serial, currentUserId);
+    if (lastState.enabled === enabled) {
+      confirmed = true;
+      break;
+    }
+    await delay(250);
+  }
+  if (!confirmed) {
+    throw new Error(
+      `Android notification channel did not become ${enabled ? "enabled" : "blocked"}; `
+      + `the system UI changed, but dumpsys still reports importance ${lastState.importance}.`
+    );
+  }
+
+  runChecked(adbPath, ["-s", ctx.serial, "shell", "input", "keyevent", "4"]);
+  // OxygenOS can keep channel settings resumed after Back while UIAutomator
+  // returns a stale app hierarchy, so explicitly foreground the QA package.
+  await relaunchScenarioApp(ctx);
+  return previouslyEnabled;
+}
+
+function assertForegroundServiceNotificationState(
+  adbPath,
+  serial,
+  userId,
+  { permissionGranted, channelEnabled }
+) {
+  const actualPermissionGranted = readPostNotificationsPermission(adbPath, serial, userId);
+  if (actualPermissionGranted !== permissionGranted) {
+    throw new Error(
+      `Expected ${POST_NOTIFICATIONS_PERMISSION} granted=${permissionGranted}, `
+      + `observed granted=${actualPermissionGranted}.`
+    );
+  }
+
+  const channelState = readBackgroundActionsChannelState(adbPath, serial, userId);
+  if (channelState.enabled !== channelEnabled) {
+    throw new Error(
+      `Expected ${BACKGROUND_ACTIONS_CHANNEL_ID} enabled=${channelEnabled}, `
+      + `observed enabled=${channelState.enabled}.`
+    );
+  }
+}
+
+async function runWithBestEffortCleanup(run, cleanupSteps) {
+  let result;
+  let primaryError = null;
+  try {
+    result = await run();
+  } catch (error) {
+    primaryError = error;
+  }
+
+  const cleanupErrors = [];
+  for (const { label, run: cleanup } of cleanupSteps) {
+    try {
+      await cleanup();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      cleanupErrors.push(new Error(`${label}: ${message}`, { cause: error }));
+    }
+  }
+
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      primaryError ? [primaryError, ...cleanupErrors] : cleanupErrors,
+      primaryError
+        ? "Android scenario and one or more cleanup steps failed."
+        : "One or more Android scenario cleanup steps failed."
+    );
+  }
+  if (primaryError) {
+    throw primaryError;
+  }
+  return result;
+}
+
+async function ensureBackgroundActionsChannelCreated(ctx) {
+  const adbPath = resolveAdbPath();
+  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_START_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForQaForegroundServiceStartOutcome(adbPath, ctx.serial);
+  await waitForBackgroundActionsService(adbPath, ctx.serial, true);
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_STOP_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-idle", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await waitForBackgroundActionsService(adbPath, ctx.serial, false);
+}
+
+async function exerciseQaForegroundService(ctx, evidenceLabel) {
+  const adbPath = resolveAdbPath();
+  await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_START_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForQaForegroundServiceStartOutcome(adbPath, ctx.serial);
+  await waitForBackgroundActionsService(adbPath, ctx.serial, true);
+  ctx.captureScreenshot(`foreground-service-${evidenceLabel}.png`);
+  await tapVisibleResource(ctx, QA_BACKGROUND_TASK_STOP_RESOURCE_ID, { timeoutMs: 15_000 });
+  await waitForResourceId(adbPath, ctx.serial, "chat-qa-background-task-state-idle", {
+    timeoutMs: 15_000,
+    visibleOnly: true,
+  });
+  await waitForBackgroundActionsService(adbPath, ctx.serial, false);
+}
+
+function resolveQaForegroundServiceStartOutcome(snapshot) {
+  for (const status of QA_BACKGROUND_TASK_OUTCOME_STATUSES) {
+    const marker = findResourceIdInSnapshot(
+      snapshot,
+      `chat-qa-background-task-state-${status}`,
+      { visibleOnly: true }
+    );
+    if (!marker) {
+      continue;
+    }
+
+    const failureCategory = QA_BACKGROUND_TASK_FAILURE_CATEGORIES.find((category) => (
+      Boolean(findResourceIdInSnapshot(
+        snapshot,
+        `chat-qa-background-task-failure-${category}`,
+        { visibleOnly: true }
+      ))
+    ));
+    return { status, failureCategory: failureCategory ?? null };
+  }
+
+  return null;
+}
+
+async function waitForQaForegroundServiceStartOutcome(adbPath, serial) {
+  const { match: outcome, snapshot } = await waitForSnapshotMatch(
+    adbPath,
+    serial,
+    { timeoutMs: 15_000, pollIntervalMs: 100 },
+    resolveQaForegroundServiceStartOutcome
+  );
+  if (!outcome) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      "Timed out waiting for the QA foreground-service start outcome."
+    ));
+  }
+  if (outcome.status === "start_failed") {
+    throw new Error(
+      `QA foreground-service start failed (${outcome.failureCategory ?? "unknown"}).`
+    );
+  }
+  if (outcome.status.startsWith("skipped_")) {
+    throw new Error(`QA foreground-service start was ${outcome.status}.`);
+  }
+  return outcome;
+}
+
+function findSelectedResourceKey(snapshot, resourcesByKey, label) {
+  for (const [key, resourceId] of Object.entries(resourcesByKey)) {
+    const node = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+    if (node?.selected) {
+      return key;
+    }
+  }
+  throw new Error(`Could not resolve the selected ${label}.`);
+}
+
+async function readSelectedThemeMode(ctx) {
+  await goToSettings(ctx);
+  await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  return findSelectedResourceKey(
+    createUiSnapshot(resolveAdbPath(), ctx.serial),
+    THEME_MODE_RESOURCE_IDS,
+    "theme mode"
+  );
+}
+
+async function selectThemeMode(ctx, mode) {
+  const resourceId = THEME_MODE_RESOURCE_IDS[mode];
+  if (!resourceId) {
+    throw new Error(`Unsupported theme mode ${mode}.`);
+  }
+  await goToSettings(ctx);
+  await scrollToResourceId(ctx, THEME_MODE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  const { match } = await waitForSnapshotMatch(
+    resolveAdbPath(),
+    ctx.serial,
+    { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS, pollIntervalMs: 250 },
+    (snapshot) => {
+      const candidate = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+      return candidate?.selected ? candidate : null;
+    }
+  );
+  if (!match) {
+    throw new Error(`Theme mode ${mode} did not become selected.`);
+  }
+}
+
+async function openThemeStyleSheet(ctx, options = {}) {
+  const navigateToSettings = options.goToSettings ?? goToSettings;
+  const scrollToResource = options.scrollToResourceId ?? scrollToResourceId;
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  const waitForResource = options.waitForResourceId ?? waitForResourceId;
+  const adbPath = options.adbPath ?? resolveAdbPath();
+
+  await navigateToSettings(ctx);
+  await scrollToResource(ctx, THEME_STYLE_CONTAINER_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await scrollToResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await tapResource(ctx, THEME_STYLE_CONTROL_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  await waitForResource(adbPath, ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+}
+
+function findResourceIdClearOfBottomOverlay(snapshot, resourceId) {
+  const node = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
+  if (!node || !isBoundsClearOfBottomOverlay(node.bounds, snapshot.viewportBounds)) {
+    return null;
+  }
+  return node;
+}
+
+async function scrollToResourceId(ctx, resourceId, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const maxSwipesDown = options.maxSwipesDown ?? 3;
+  const maxSwipesUp = options.maxSwipesUp ?? 10;
+  const adbPath = resolveAdbPath();
+  const startedAt = Date.now();
+  const findNow = () => findResourceIdClearOfBottomOverlay(
+    createUiSnapshot(adbPath, ctx.serial),
+    resourceId
+  );
+
+  let node = findNow();
+  if (node) {
+    return node;
+  }
+
+  for (let attempt = 0; attempt < maxSwipesDown && Date.now() - startedAt < timeoutMs; attempt += 1) {
+    await ctx.swipeDown();
+    node = findNow();
+    if (node) {
+      return node;
+    }
+  }
+
+  for (let attempt = 0; attempt < maxSwipesUp && Date.now() - startedAt < timeoutMs; attempt += 1) {
+    await ctx.swipeUp();
+    node = findNow();
+    if (node) {
+      return node;
+    }
+  }
+
+  throw new Error(withUiSummary(
+    adbPath,
+    ctx.serial,
+    `Timed out waiting for resource id "${resourceId}" outside the bottom overlay.`
+  ));
+}
+
+async function readSelectedThemeStyle(ctx) {
+  await openThemeStyleSheet(ctx);
+  const selected = findSelectedResourceKey(
+    createUiSnapshot(resolveAdbPath(), ctx.serial),
+    THEME_STYLE_RESOURCE_IDS,
+    "theme style"
+  );
+  await ctx.pressBack();
+  await waitForNoResourceId(resolveAdbPath(), ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  return selected;
+}
+
+async function selectThemeStyle(ctx, themeStyle) {
+  const resourceId = THEME_STYLE_RESOURCE_IDS[themeStyle];
+  if (!resourceId) {
+    throw new Error(`Unsupported theme style ${themeStyle}.`);
+  }
+  await openThemeStyleSheet(ctx);
+  await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  await waitForNoResourceId(resolveAdbPath(), ctx.serial, THEME_STYLE_SHEET_RESOURCE_ID, {
+    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+  });
+  const selected = await readSelectedThemeStyle(ctx);
+  if (selected !== themeStyle) {
+    throw new Error(`Theme style ${themeStyle} did not become selected.`);
+  }
+}
+
+function resolveSelectedBottomTabDestination(snapshot, tabResourceId, destinationResourceId) {
+  const tab = findResourceIdInSnapshot(snapshot, tabResourceId, { visibleOnly: true });
+  if (!tab?.selected) {
+    return null;
+  }
+
+  const destination = findResourceIdInSnapshot(snapshot, destinationResourceId, {
+    visibleOnly: true,
+  });
+  return destination ? { tab, destination } : null;
+}
+
+async function waitForSelectedBottomTabDestination(
+  ctx,
+  tabResourceId,
+  destinationResourceId,
+  options = {}
+) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const waitForSnapshot = options.waitForSnapshotMatch ?? waitForSnapshotMatch;
+  const { match, snapshot } = await waitForSnapshot(
+    adbPath,
+    ctx.serial,
+    {
+      timeoutMs: options.timeoutMs ?? CHAT_ROUTE_TIMEOUT_MS,
+      pollIntervalMs: options.pollIntervalMs ?? 250,
+    },
+    (candidateSnapshot) => resolveSelectedBottomTabDestination(
+      candidateSnapshot,
+      tabResourceId,
+      destinationResourceId
+    )
+  );
+  if (!match) {
+    throw new Error(withUiSnapshotSummary(
+      snapshot,
+      `Timed out waiting for selected bottom tab "${tabResourceId}" and destination "${destinationResourceId}".`
+    ));
+  }
+  return match;
+}
+
+async function tapBottomTabResourceUntilSelected(
+  ctx,
+  tabResourceId,
+  destinationResourceId,
+  options = {}
+) {
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  await tapResource(ctx, tabResourceId, {
+    timeoutMs: options.timeoutMs ?? CHAT_ROUTE_TIMEOUT_MS,
+  });
+  return waitForSelectedBottomTabDestination(
+    ctx,
+    tabResourceId,
+    destinationResourceId,
+    options
+  );
+}
+
+async function hideChatQaEvidenceForVisualCapture(ctx, options = {}) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const waitForResource = options.waitForResourceId ?? waitForResourceId;
+  const tapAccessibilityAction = options.tapAnyText ?? ctx.tapAnyText;
+  const waitForNoResource = options.waitForNoResourceId ?? waitForNoResourceId;
+
+  await waitForResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+    visibleOnly: true,
+  });
+  await tapAccessibilityAction([CHAT_QA_HIDE_EVIDENCE_ACCESSIBILITY_LABEL], {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await waitForNoResource(adbPath, ctx.serial, CHAT_QA_EVIDENCE_RESOURCE_ID, {
+    timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+  });
+  await waitForSelectedBottomTabDestination(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.chat,
+    TAB_DESTINATION_RESOURCE_IDS.chat,
+    options
+  );
+}
+
+async function captureCoreSurfaceScreenshots(
+  ctx,
+  prefix,
+  settingsFocusLabels = LANGUAGE_ROW_LABELS,
+  options = {}
+) {
+  const navigateBottomTab = options.tapBottomTabResourceUntilSelected
+    ?? tapBottomTabResourceUntilSelected;
+  const scrollToText = options.scrollToAnyText ?? scrollToAnyText;
+  const scrollToResource = options.scrollToResourceId ?? scrollToResourceId;
+  const hideQaEvidence = options.hideChatQaEvidenceForVisualCapture
+    ?? hideChatQaEvidenceForVisualCapture;
+
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.home,
+    TAB_DESTINATION_RESOURCE_IDS.home,
+    { timeoutMs: HOME_ROUTE_TIMEOUT_MS }
+  );
+  ctx.captureScreenshot(`${prefix}-home.png`);
+
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.chat,
+    TAB_DESTINATION_RESOURCE_IDS.chat,
+    { timeoutMs: CHAT_ROUTE_TIMEOUT_MS }
+  );
+  if (options.hideChatQaEvidence) {
+    await hideQaEvidence(ctx);
+  }
+  ctx.captureScreenshot(`${prefix}-chat.png`);
+
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.settings,
+    TAB_DESTINATION_RESOURCE_IDS.settings,
+    { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS }
+  );
+  if (options.settingsFocusResourceId) {
+    await scrollToResource(ctx, options.settingsFocusResourceId, {
+      timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
+    });
+  } else {
+    await scrollToText(ctx, settingsFocusLabels, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
+  }
+  ctx.captureScreenshot(`${prefix}-settings.png`);
+
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.models,
+    TAB_DESTINATION_RESOURCE_IDS.models
+  );
+  const screenshotPath = ctx.captureScreenshot(`${prefix}-models.png`);
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.home,
+    TAB_DESTINATION_RESOURCE_IDS.home,
+    { timeoutMs: HOME_ROUTE_TIMEOUT_MS }
+  );
+  return { screenshotPath };
+}
+
+async function restoreThemePreferences(ctx, { mode, themeStyle }) {
+  const failures = [];
+  try {
+    await selectThemeStyle(ctx, themeStyle);
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await selectThemeMode(ctx, mode);
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await goToHome(ctx);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Failed to restore Android theme preferences after native QA.");
+  }
+}
+
 function buildScenarios() {
   return [
     {
@@ -2106,30 +3033,140 @@ function buildScenarios() {
       },
     },
     {
+      id: "native-glass-theme-matrix",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Verify Glass across Home, Chat, Models, and Settings in light and dark modes.",
+      run: async (ctx) => {
+        const originalPreferences = {
+          mode: await readSelectedThemeMode(ctx),
+          themeStyle: await readSelectedThemeStyle(ctx),
+        };
+
+        try {
+          await selectThemeStyle(ctx, "glass");
+          await selectThemeMode(ctx, "light");
+          await captureCoreSurfaceScreenshots(
+            ctx,
+            "native-glass-light",
+            THEME_STYLE_LABELS,
+            {
+              hideChatQaEvidence: true,
+              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
+            }
+          );
+
+          await selectThemeMode(ctx, "dark");
+          return await captureCoreSurfaceScreenshots(
+            ctx,
+            "native-glass-dark",
+            THEME_STYLE_LABELS,
+            {
+              hideChatQaEvidence: true,
+              settingsFocusResourceId: THEME_STYLE_CONTAINER_RESOURCE_ID,
+            }
+          );
+        } finally {
+          await restoreThemePreferences(ctx, originalPreferences);
+        }
+      },
+    },
+    {
+      id: "foreground-service-notification-states",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Verify the Android foreground service starts with granted, denied, and blocked notification states.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const sdkLevel = readAndroidSdkLevel(adbPath, ctx.serial);
+
+        if (sdkLevel < 33) {
+          await exerciseQaForegroundService(ctx, `api-${sdkLevel}-legacy`);
+          return;
+        }
+
+        const userId = readAndroidCurrentUserId(adbPath, ctx.serial);
+        const originalNotificationsEnabled = readPostNotificationsPermission(
+          adbPath,
+          ctx.serial,
+          userId
+        );
+        await ensureBackgroundActionsChannelCreated(ctx);
+        const originalChannelEnabled = readBackgroundActionsChannelState(
+          adbPath,
+          ctx.serial,
+          userId
+        ).enabled;
+
+        return runWithBestEffortCleanup(async () => {
+          await setBackgroundActionsChannelEnabled(ctx, true, userId);
+
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await setAppNotificationsEnabled(ctx, true, userId);
+          assertForegroundServiceNotificationState(adbPath, ctx.serial, userId, {
+            permissionGranted: true,
+            channelEnabled: true,
+          });
+          await exerciseQaForegroundService(ctx, `api-${sdkLevel}-permission-granted`);
+
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await setAppNotificationsEnabled(ctx, false, userId);
+          assertForegroundServiceNotificationState(adbPath, ctx.serial, userId, {
+            permissionGranted: false,
+            channelEnabled: true,
+          });
+          await exerciseQaForegroundService(ctx, `api-${sdkLevel}-permission-denied`);
+
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await setAppNotificationsEnabled(ctx, true, userId);
+          await setBackgroundActionsChannelEnabled(ctx, false, userId);
+          assertForegroundServiceNotificationState(adbPath, ctx.serial, userId, {
+            permissionGranted: true,
+            channelEnabled: false,
+          });
+          return exerciseQaForegroundService(ctx, `api-${sdkLevel}-channel-blocked`);
+        }, [
+          {
+            label: "force-stop before notification-state restore",
+            run: async () => forceStopScenarioApp(adbPath, ctx.serial),
+          },
+          {
+            label: "relaunch before notification-state restore",
+            run: async () => relaunchScenarioApp(ctx),
+          },
+          {
+            label: "temporarily enable app notifications for channel restore",
+            run: async () => setAppNotificationsEnabled(ctx, true, userId),
+          },
+          {
+            label: "restore the background-actions notification channel",
+            run: async () => setBackgroundActionsChannelEnabled(
+              ctx,
+              originalChannelEnabled,
+              userId
+            ),
+          },
+          {
+            label: "restore the app notification permission",
+            run: async () => setAppNotificationsEnabled(
+              ctx,
+              originalNotificationsEnabled,
+              userId
+            ),
+          },
+        ]);
+      },
+    },
+    {
       id: "style-screenshots",
       tier: "secondary",
       description: "Capture stable Home, Chat, Models, and Settings screenshots for styling dependency checks.",
-      run: async (ctx) => {
-        await goToHome(ctx);
-        await ctx.expectAnyText(APP_TITLE_LABELS);
-        ctx.captureScreenshot("style-home.png");
-
-        await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
-          timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
-        });
-        ctx.captureScreenshot("style-chat.png");
-
-        await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
-          timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-        });
-        await scrollToAnyText(ctx, LANGUAGE_ROW_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-        ctx.captureScreenshot("style-settings.png");
-
-        await tapBottomTabUntilVisible(ctx, MODELS_TAB_LABELS, MODEL_CATALOG_LABELS);
-        await ctx.expectAnyText(ALL_MODELS_LABELS);
-        ctx.captureScreenshot("style-models.png");
-        await goToHome(ctx);
-      },
+      run: async (ctx) => captureCoreSurfaceScreenshots(ctx, "style"),
     },
     {
       id: "storage-cache-clear",
@@ -2185,11 +3222,13 @@ function buildScenarios() {
         }
 
         await ctx.expectAnyText(STORAGE_MANAGER_LABELS, { timeoutMs: 5_000 });
+        const screenshotPath = ctx.captureScreenshot("storage-cache-clear.png");
         await ctx.pressBack();
         await ctx.expectAnyText(SETTINGS_TITLE_LABELS, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2204,9 +3243,11 @@ function buildScenarios() {
           timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
         });
         await ctx.expectAnyText(CHAT_EMPTY_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+        const screenshotPath = ctx.captureScreenshot("new-chat-cta.png");
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, NEW_CHAT_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2253,9 +3294,11 @@ function buildScenarios() {
           assertAttachmentActionAvailable(attachNode);
         }
 
+        const screenshotPath = ctx.captureScreenshot("chat-attachment-current-state-smoke.png");
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2390,6 +3433,7 @@ function buildScenarios() {
     {
       id: "variant-picker-smoke",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify the model catalog opens the GGUF file variant picker.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
@@ -2397,6 +3441,7 @@ function buildScenarios() {
 
         await openFirstVisibleVariantPicker(ctx);
         await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 15_000 });
+        const screenshotPath = ctx.captureScreenshot("variant-picker-smoke.png");
 
         const adbPath = resolveAdbPath();
         await dismissTransientSurfaceWithBack(
@@ -2409,6 +3454,7 @@ function buildScenarios() {
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, HOME_SECTION_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
@@ -2421,17 +3467,21 @@ function buildScenarios() {
         await ctx.expectAnyText(MODEL_CATALOG_LABELS);
         await ctx.expectAnyText(ALL_MODELS_LABELS);
         await ctx.expectAnyText(DOWNLOADED_TAB_LABELS);
+        const screenshotPath = ctx.captureScreenshot("swap-model-cta.png");
         await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, ACTIVE_MODEL_CTA_LABELS, {
           timeoutMs: HOME_ROUTE_TIMEOUT_MS,
         });
+        return { screenshotPath };
       },
     },
     {
       id: "hf-catalog-hardening",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify guided discovery, new HF catalog controls, and routed model details.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
+        await prepareCatalogForUnfilteredResults(ctx);
 
         const adbPath = resolveAdbPath();
         const catalogResultsStartedAt = Date.now();
@@ -2441,11 +3491,24 @@ function buildScenarios() {
         log(`Catalog model cards became interactive in ${Date.now() - catalogResultsStartedAt}ms.`);
 
         await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
+        await setCatalogFilterPanelOpen(adbPath, ctx.serial, false);
 
-        await ctx.tapAnyText(SORT_LABELS);
-        await ctx.expectAnyText(MOST_DOWNLOADED_LABELS);
-        await ctx.expectAnyText(MOST_POPULAR_LABELS);
-        await ctx.tapAnyText(SORT_LABELS);
+        await tapVisibleResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
+        await waitForResourceId(adbPath, ctx.serial, MODELS_SORT_PANEL_RESOURCE_ID, {
+          visibleOnly: false,
+        });
+        // Native Glass can expose the open panel with inverted bounds until another frame is
+        // invalidated. Its stable panel id plus contained options remain reliable evidence.
+        await waitForAnyNode(adbPath, ctx.serial, MOST_DOWNLOADED_LABELS, {
+          visibleOnly: false,
+        });
+        await waitForAnyNode(adbPath, ctx.serial, MOST_POPULAR_LABELS, {
+          visibleOnly: false,
+        });
+        await tapVisibleResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
+        await waitForNoResourceId(adbPath, ctx.serial, MODELS_SORT_PANEL_RESOURCE_ID, {
+          visibleOnly: false,
+        });
 
         await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 5_000 });
         await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
@@ -2455,10 +3518,11 @@ function buildScenarios() {
     {
       id: "memory-fit-badges",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify memory-fit badges show up in quantization picker rows.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
-        await prepareCatalogForMemoryFitRiskBadgeScenario(ctx);
+        await prepareCatalogForUnfilteredResults(ctx);
 
         await openFirstVisibleVariantPicker(ctx);
         await ctx.expectAnyText(VARIANT_PICKER_TITLE_LABELS, { timeoutMs: 10_000 });
@@ -2469,6 +3533,7 @@ function buildScenarios() {
     {
       id: "memory-fit-download-warning",
       tier: "optional",
+      requiresIsolatedQaInstall: true,
       description: "Verify download flows warn for RAM risk or limited verification.",
       run: async (ctx) => {
         await goToModelCatalog(ctx);
@@ -2579,6 +3644,7 @@ function buildScenarios() {
 
         let languageToggled = false;
         let scenarioError = null;
+        let screenshotPath = null;
 
         try {
           await ctx.tapAnyText(currentLanguageLabel, { afterTapDelayMs: 1_200 });
@@ -2587,6 +3653,7 @@ function buildScenarios() {
           await tapBottomTabUntilVisible(ctx, HOME_TAB_LABELS, nextHomeLabel, {
             timeoutMs: 10_000,
           });
+          screenshotPath = ctx.captureScreenshot("language-switch.png");
         } catch (error) {
           scenarioError = error;
           throw error;
@@ -2605,6 +3672,8 @@ function buildScenarios() {
             }
           }
         }
+
+        return screenshotPath ? { screenshotPath } : undefined;
       },
     },
     {
@@ -4282,8 +5351,8 @@ function requireBranchFixtureState(state, step) {
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
-  } else if (options.pack === "documents" && !env.ANDROID_SMOKE_APK_VARIANT) {
-    // The documented document-pack command is self-contained and always exercises
+  } else if (["documents", "native"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
+    // Current-head packs are self-contained and always exercise
     // the embedded release bundle plus the universal native-library contract.
     env.ANDROID_SMOKE_APK_VARIANT = "release";
   }
@@ -4307,6 +5376,17 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
     androidQaEvidence: env.EXPO_PUBLIC_ANDROID_QA === "1",
     apkVariant: effectiveApkVariant,
   };
+}
+
+function validateScenarioExecutionOptions(selectedScenarios, options) {
+  const isolatedScenarioIds = selectedScenarios
+    .filter((scenario) => scenario.requiresIsolatedQaInstall)
+    .map((scenario) => scenario.id);
+  if (isolatedScenarioIds.length > 0 && !options.isolatedQaInstall) {
+    throw new ScenarioPreconditionFailureError(
+      `State-mutating Android scenarios require --isolated-qa-install: ${isolatedScenarioIds.join(", ")}.`
+    );
+  }
 }
 
 function normalizeAndroidResourceId(resourceId) {
@@ -5527,6 +6607,9 @@ function selectScenarios(scenarios, options) {
       ...BRANCH_REGENERATION_SCENARIOS,
       ...DOCUMENT_SCENARIOS,
       ...DOCUMENT_BENCHMARK_SCENARIOS,
+      ...STATE_MUTATING_CATALOG_SCENARIOS,
+      "native-glass-theme-matrix",
+      "foreground-service-notification-states",
     ]);
     return scenarios.filter((scenario) => !explicitStateMutationScenarioIds.has(scenario.id));
   }
@@ -5774,15 +6857,20 @@ async function tryReachHome(ctx, maxAttempts = 4) {
 
 async function goToSettings(ctx, options = {}) {
   const goHome = options.goToHome || goToHome;
+  const navigateBottomTab = options.tapBottomTabResourceUntilSelected
+    || tapBottomTabResourceUntilSelected;
   const waitForWarmup = options.waitForModelWarmup || (async (targetCtx) => {
     await waitForModelWarmupToSettleIfPresent(resolveAdbPath(), targetCtx.serial);
   });
 
   await goHome(ctx);
   await waitForWarmup(ctx);
-  await tapBottomTabUntilVisible(ctx, SETTINGS_TAB_LABELS, SETTINGS_TITLE_LABELS, {
-    timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
-  });
+  await navigateBottomTab(
+    ctx,
+    BOTTOM_TAB_RESOURCE_IDS.settings,
+    TAB_DESTINATION_RESOURCE_IDS.settings,
+    { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS }
+  );
 }
 
 async function goToModelCatalog(ctx, options = {}) {
@@ -5834,10 +6922,18 @@ async function goToConversationManagement(ctx) {
   await ctx.expectAnyText(CONVERSATIONS_TITLE_LABELS);
 }
 
-async function prepareCatalogForMemoryFitRiskBadgeScenario(ctx) {
-  const adbPath = resolveAdbPath();
-  await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
-  await clearCatalogFiltersIfPresent(adbPath, ctx.serial);
+async function prepareCatalogForUnfilteredResults(ctx, options = {}) {
+  const resolveAdb = options.resolveAdbPath || resolveAdbPath;
+  const setFilterPanelOpen = options.setCatalogFilterPanelOpen || setCatalogFilterPanelOpen;
+  const clearFilters = options.clearCatalogFiltersIfPresent || clearCatalogFiltersIfPresent;
+  const clearEmptyFilters = options.clearEmptyCatalogFiltersIfPresent
+    || clearEmptyCatalogFiltersIfPresent;
+  const adbPath = resolveAdb();
+
+  await setFilterPanelOpen(adbPath, ctx.serial, true);
+  await clearFilters(adbPath, ctx.serial);
+  await setFilterPanelOpen(adbPath, ctx.serial, false);
+  await clearEmptyFilters(ctx, adbPath);
   await ctx.expectAnyText(MODEL_CATALOG_LABELS);
 }
 
@@ -5860,6 +6956,17 @@ async function prepareCatalogForVariantPickerSmokeScenario(ctx, options = {}) {
 
   await setFilterPanelOpen(adbPath, ctx.serial, true);
   await clearFilters(adbPath, ctx.serial);
+  await setFilterPanelOpen(adbPath, ctx.serial, false);
+
+  const emptyStateClear = await findNodeNow(adbPath, ctx.serial, CLEAR_FILTERS_LABELS, {
+    visibleOnly: true,
+  });
+  if (emptyStateClear?.node?.bounds) {
+    await ctx.tapAnyText(CLEAR_FILTERS_LABELS, {
+      afterTapDelayMs: CATALOG_FILTER_MUTATION_QUIET_DELAY_MS,
+      timeoutMs: 5_000,
+    });
+  }
 
   await ctx.expectAnyText(MODEL_CATALOG_LABELS, { timeoutMs: 8_000 });
 }
@@ -6007,12 +7114,24 @@ function isLikelyQuantizationSelectorNode(node) {
 }
 
 async function prepareCatalogForRamWarningScenario(ctx) {
-  const adbPath = resolveAdbPath();
-  await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
-  await clearCatalogFiltersIfPresent(adbPath, ctx.serial);
+  await prepareCatalogForUnfilteredResults(ctx);
   // Clearing persisted filters (especially "Fits in RAM") exposes the live catalog's real risk
   // cards. The scenario does not need to mutate another toggle before validating the warning.
-  await ctx.expectAnyText(MODEL_CATALOG_LABELS);
+}
+
+async function clearEmptyCatalogFiltersIfPresent(ctx, adbPath = resolveAdbPath()) {
+  const clearAction = await findAnyNodeNow(adbPath, ctx.serial, CLEAR_FILTERS_LABELS, {
+    visibleOnly: true,
+  });
+  if (!clearAction?.node?.bounds) {
+    return false;
+  }
+
+  await ctx.tapAnyText(CLEAR_FILTERS_LABELS, {
+    afterTapDelayMs: CATALOG_FILTER_MUTATION_QUIET_DELAY_MS,
+    timeoutMs: 5_000,
+  });
+  return true;
 }
 
 async function scrollToAnyText(ctx, labels, options = {}) {
@@ -6535,12 +7654,13 @@ async function waitForResourceId(adbPath, serial, resourceId, options = {}) {
 }
 
 async function waitForNoResourceId(adbPath, serial, resourceId, options = {}) {
+  const visibleOnly = options.visibleOnly ?? true;
   const { match, snapshot } = await waitForSnapshotMatch(
     adbPath,
     serial,
     options,
     (candidateSnapshot) => (
-      findResourceIdInSnapshot(candidateSnapshot, resourceId, { visibleOnly: true })
+      findResourceIdInSnapshot(candidateSnapshot, resourceId, { visibleOnly })
         ? null
         : { absent: true }
     )
@@ -6612,7 +7732,11 @@ async function setCatalogFilterPanelOpen(adbPath, serial, shouldBeOpen, options 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const snapshot = createSnapshot(adbPath, serial);
     lastSnapshot = snapshot;
-    const panel = findResourceIdInSnapshot(snapshot, MODELS_FILTER_PANEL_RESOURCE_ID, { visibleOnly: true });
+    // Android can report inverted/clipped bounds for the native Liquid Glass panel even
+    // while it is visibly open. The stable panel testID is absent when closed, so its
+    // presence is the reliable state signal here; requiring positive bounds creates a
+    // false timeout on physical devices.
+    const panel = findResourceIdInSnapshot(snapshot, MODELS_FILTER_PANEL_RESOURCE_ID);
     if (Boolean(panel) === shouldBeOpen) {
       return panel;
     }
@@ -6642,8 +7766,7 @@ async function setCatalogFilterPanelOpen(adbPath, serial, shouldBeOpen, options 
       (candidateSnapshot) => {
         const candidatePanel = findResourceIdInSnapshot(
           candidateSnapshot,
-          MODELS_FILTER_PANEL_RESOURCE_ID,
-          { visibleOnly: true }
+          MODELS_FILTER_PANEL_RESOURCE_ID
         );
         return Boolean(candidatePanel) === shouldBeOpen
           ? { panel: candidatePanel, isOpen: shouldBeOpen }
@@ -7311,8 +8434,20 @@ function dumpUiHierarchy(adbPath, serial, options = {}) {
   );
 }
 
-function createUiSnapshot(adbPath, serial) {
-  return parseUiSnapshot(dumpUiHierarchy(adbPath, serial));
+function createUiSnapshot(adbPath, serial, options = {}) {
+  const dumpHierarchy = options.dumpUiHierarchy ?? dumpUiHierarchy;
+  const dismissLauncherAnr =
+    options.dismissExternalLauncherAnrDialog ?? dismissExternalLauncherAnrDialog;
+  const pause = options.sleepSync ?? sleepSync;
+  let hierarchy = dumpHierarchy(adbPath, serial);
+
+  if (dismissLauncherAnr(adbPath, serial, appPackageName, hierarchy, options)) {
+    log("Dismissed an external emulator launcher ANR dialog before reading scenario UI state.");
+    pause(options.launcherAnrSettleMs ?? 250);
+    hierarchy = dumpHierarchy(adbPath, serial);
+  }
+
+  return parseUiSnapshot(hierarchy);
 }
 
 function parseUiSnapshot(xml) {
@@ -7347,6 +8482,7 @@ function parseUiNodes(xml) {
       resourceId: attributes["resource-id"] || "",
       packageName: attributes.package || "",
       clickable: attributes.clickable === "true",
+      checked: attributes.checked === "true",
       enabled: attributes.enabled !== "false",
       selected: attributes.selected === "true",
       bounds: parseBounds(attributes.bounds),
@@ -7421,6 +8557,24 @@ function isAppForegroundSnapshot(snapshot) {
   });
 
   return Boolean(hasAppTitle && hasAppForegroundMarker);
+}
+
+function isPackageResumedActivity(dumpsysOutput, packageName) {
+  return Boolean(packageName && parseResumedActivityPackage(dumpsysOutput) === packageName);
+}
+
+function parseResumedActivityPackage(dumpsysOutput) {
+  return String(dumpsysOutput).match(
+    /(?:topResumedActivity|mResumedActivity)=[^\r\n]*\bu\d+\s+([a-zA-Z0-9._]+)\//u
+  )?.[1] || null;
+}
+
+function isScenarioAppForegroundEvidence(dumpsysOutput, snapshot, packageName) {
+  const resumedPackageName = parseResumedActivityPackage(dumpsysOutput);
+  if (resumedPackageName) {
+    return resumedPackageName === packageName;
+  }
+  return isAppForegroundSnapshot(snapshot);
 }
 
 function findNodesForLabelsInSnapshot(snapshot, labels, options = {}) {
@@ -7829,8 +8983,57 @@ function parseExactAndroidPackageListUid(output, packageName) {
   return matchingUids.size === 1 ? [...matchingUids][0] : null;
 }
 
+const ANDROID_UID_PER_USER_RANGE = 100_000;
+
+function isAndroidUidForUser(uid, userId) {
+  const numericUid = Number.parseInt(uid, 10);
+  const numericUserId = Number.parseInt(userId, 10);
+  return Number.isInteger(numericUid)
+    && Number.isInteger(numericUserId)
+    && Math.floor(numericUid / ANDROID_UID_PER_USER_RANGE) === numericUserId;
+}
+
+function isAndroidPackageInstalledForUser(packageDump, userId) {
+  const userLine = new RegExp(
+    `^\\s*User ${escapeRegex(userId)}:\\s+([^\\r\\n]*)$`,
+    "mu"
+  ).exec(String(packageDump || ""))?.[1];
+  return Boolean(userLine && /\binstalled=true\b/u.test(userLine));
+}
+
 function resolveAndroidPackageUid(adbPath, serial, packageName, options = {}) {
   const capture = options.runCapture || runCapture;
+  const currentUserId = options.userId ?? readAndroidCurrentUserId(adbPath, serial, {
+    runCapture: capture,
+  });
+  let packageList = null;
+  let packageListError = null;
+  try {
+    packageList = capture(
+      adbPath,
+      [
+        "-s",
+        serial,
+        "shell",
+        "cmd",
+        "package",
+        "list",
+        "packages",
+        "--user",
+        currentUserId,
+        "-U",
+        packageName,
+      ]
+    );
+  } catch (error) {
+    packageListError = error;
+  }
+
+  const packageListUid = parseExactAndroidPackageListUid(packageList || "", packageName);
+  if (packageListUid && isAndroidUidForUser(packageListUid, currentUserId)) {
+    return packageListUid;
+  }
+
   let packageDump = null;
   let packageDumpError = null;
   try {
@@ -7842,31 +9045,16 @@ function resolveAndroidPackageUid(adbPath, serial, packageName, options = {}) {
     packageDumpError = error;
   }
 
-  const packageDumpUid = packageDump?.match(/(?:^|\s)userId=(\d+)\b/m)?.[1] || null;
-  if (packageDumpUid) {
-    return packageDumpUid;
-  }
-
-  let packageList = null;
-  let packageListError = null;
-  try {
-    packageList = capture(
-      adbPath,
-      ["-s", serial, "shell", "cmd", "package", "list", "packages", "-U", packageName]
-    );
-  } catch (error) {
-    packageListError = error;
-  }
-
-  const packageListUid = parseExactAndroidPackageListUid(packageList || "", packageName);
-  if (packageListUid) {
-    return packageListUid;
+  const packageAppId = packageDump?.match(/(?:^|\s)(?:userId|appId)=(\d+)\b/m)?.[1] || null;
+  if (packageAppId && isAndroidPackageInstalledForUser(packageDump, currentUserId)) {
+    const appId = Number.parseInt(packageAppId, 10) % ANDROID_UID_PER_USER_RANGE;
+    return String(Number.parseInt(currentUserId, 10) * ANDROID_UID_PER_USER_RANGE + appId);
   }
 
   const bothInspectionsFailed = packageDumpError && packageListError;
   const detail = bothInspectionsFailed
     ? "both package inspection commands failed"
-    : "installed package metadata has no unambiguous exact-package UID";
+    : `installed package metadata has no unambiguous exact-package UID for user ${currentUserId}`;
   throw new ScenarioPreconditionFailureError(
     `Could not resolve the Android UID for ${packageName}; ${detail}.`,
     { cause: packageListError || packageDumpError || undefined }
@@ -8085,8 +9273,9 @@ async function startAndroidLogcatCollector({
   const requireOwnership = options.requireOwnership ?? !options.spawn;
   const privateRoot = path.resolve(options.privateRoot || PRIVATE_LOGCAT_DIRECTORY);
   const runCaptureForCollector = options.runCapture || runCapture;
-  const uid = resolveAndroidPackageUid(adbPath, serial, packageName, {
+  const uid = options.packageUid || resolveAndroidPackageUid(adbPath, serial, packageName, {
     runCapture: runCaptureForCollector,
+    userId: options.userId,
   });
   const startEpoch = readAndroidLogcatStartEpoch(adbPath, serial, {
     runCapture: runCaptureForCollector,
@@ -9189,7 +10378,7 @@ function parseCliOptions(argv) {
     throw new Error(`Unknown option: ${arg}`);
   }
 
-  if (options.pack === "documents") {
+  if (["catalog", "documents", "native"].includes(options.pack)) {
     options.isolatedQaInstall = true;
   }
 
@@ -9608,6 +10797,7 @@ module.exports = {
   DOCUMENT_NATIVE_CONVERSION_DEADLINE_MS,
   DOCUMENT_RACE_POST_CANCEL_HORIZON_MS,
   DOCUMENT_SCENARIOS,
+  STATE_MUTATING_CATALOG_SCENARIOS,
   areExactGitProvenancesEqual,
   assertAuthoritativeThoughtClear,
   assertDocumentSentinelsStayAbsent,
@@ -9621,15 +10811,18 @@ module.exports = {
   buildPreparedAttachmentSendPrompt,
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
+  captureCoreSurfaceScreenshots,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
   cleanupAndroidLogcatCollector,
   configureScenarioBuildEnvironment,
   collectCurrentQaBuildProvenance,
   buildDocumentFailureFields,
+  createUiSnapshot,
   createBranchRegenerationBaseline,
   captureAndroidScreenshot,
   captureSettledScenarioScreenshot,
+  getScenarioOutcomeScreenshotPath,
   activateClearedCatalogFilterOption,
   appPrivatePathExists,
   clearCatalogFiltersIfPresent,
@@ -9644,6 +10837,7 @@ module.exports = {
   findChatResourceWithScroll,
   findQuantizationSelectorNodeClearOfBottomOverlay,
   openFirstVisibleVariantPicker,
+  prepareCatalogForUnfilteredResults,
   prepareCatalogForVariantPickerSmokeScenario,
   findAnyNodeInSnapshot,
   findAttachImageActionInSnapshot,
@@ -9656,6 +10850,8 @@ module.exports = {
   findSettledDocumentCancellationSendAction,
   findNodeInSnapshot,
   findResourceIdInSnapshot,
+  findResourceIdClearOfBottomOverlay,
+  hideChatQaEvidenceForVisualCapture,
   hasConversationHistoryStartAnchor,
   isBoundsClearOfBottomOverlay,
   getBottomTabTapPoint,
@@ -9665,12 +10861,22 @@ module.exports = {
   inputFocusedTextForImmediateSend,
   installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
+  isPackageResumedActivity,
+  isScenarioAppForegroundEvidence,
+  isBackgroundActionsServicePresent,
   findBlockingSystemDialogAction,
   escapeAdbInputText,
   extractVisibleConversationTokens,
   mergeOlderConversationOrder,
   markScenarioFailureRecorded,
   normalizeAndroidResourceId,
+  openThemeStyleSheet,
+  parseAndroidRuntimePermission,
+  parseAndroidNotificationChannelEnabled,
+  resolveNotificationChannelSettingsUi,
+  resolveNotificationChannelToggle,
+  resolveQaForegroundServiceStartOutcome,
+  resolveSelectedBottomTabDestination,
   pickClosestNodePair,
   selectScenarios,
   parseCliOptions,
@@ -9690,6 +10896,7 @@ module.exports = {
   resolveTargetAttachmentIds,
   restoreDocumentQaAppForCleanup,
   restoreLanguageAfterScenario,
+  runWithBestEffortCleanup,
   runCapture,
   runChecked,
   sanitizeQaLogcat,
@@ -9704,11 +10911,14 @@ module.exports = {
   shouldPrepareMetroForScenarioLaunch,
   shouldAppendRunnerFailure,
   validateQaProvenance,
+  validateScenarioExecutionOptions,
   waitForAnyNode,
   waitForEnabledAnyNode,
+  waitForNoResourceId,
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
   tapBottomTabUntilVisible,
+  tapBottomTabResourceUntilSelected,
   tapBoundsUntilAnyNode,
   assertAttachmentActionBlocked,
   assertAttachmentActionAvailable,

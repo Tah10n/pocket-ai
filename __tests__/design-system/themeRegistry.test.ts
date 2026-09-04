@@ -63,6 +63,23 @@ describe('theme registry', () => {
     expect(resolveTheme('glass', 'dark').colors.divider).toBe('transparent');
   });
 
+  it('keeps dark Glass dense surfaces darker than their light-mode counterparts', () => {
+    expect(resolveTheme('glass', 'dark').colors).toMatchObject({
+      surface: withAlpha(semanticColorTokens.background[0], 0.12),
+      surfaceMuted: withAlpha(semanticColorTokens.background[0], 0.1),
+      surfaceElevated: withAlpha(semanticColorTokens.background[0], 0.15),
+      inputBackground: withAlpha(semanticColorTokens.background[0], 0.12),
+      cardBackground: withAlpha(semanticColorTokens.background[0], 0.14),
+    });
+    expect(resolveTheme('glass', 'light').colors).toMatchObject({
+      surface: withAlpha(semanticColorTokens.background[50], 0.3),
+      surfaceMuted: withAlpha(semanticColorTokens.background[50], 0.24),
+      surfaceElevated: withAlpha(semanticColorTokens.background[50], 0.34),
+      inputBackground: withAlpha(semanticColorTokens.background[50], 0.26),
+      cardBackground: withAlpha(semanticColorTokens.background[50], 0.3),
+    });
+  });
+
   it('keeps thumbnail backgrounds theme-owned', () => {
     expect(resolveTheme('default', 'light').colors.thumbnailBackground).toBe(semanticColorTokens.background[200]);
     expect(resolveTheme('default', 'dark').colors.thumbnailBackground).toBe(semanticColorTokens.background[800]);

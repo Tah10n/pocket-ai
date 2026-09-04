@@ -103,7 +103,13 @@ describe('EffectSurface', () => {
 
     expect(StyleSheet.flatten(surface.props.style)).toMatchObject({
       backgroundColor: mockResolvedTheme.colors.surfaceOverlay,
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.2),
       borderWidth: 1,
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.22),
+        inset: true,
+      }],
     });
     expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
       Object.prototype.hasOwnProperty.call(node.props, 'intensity')
@@ -185,7 +191,13 @@ describe('EffectSurface', () => {
       screen.getByTestId('reduced-transparency-surface').props.style,
     )).toMatchObject({
       backgroundColor: mockResolvedTheme.colors.surfaceOverlay,
+      borderColor: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.2),
       borderWidth: 1,
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(mockResolvedTheme.colors.borderSubtle, 0.22),
+        inset: true,
+      }],
     });
     expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
       Object.prototype.hasOwnProperty.call(node.props, 'intensity')
@@ -301,6 +313,7 @@ describe('EffectSurface', () => {
       cornerRadiusBottomRight: 0,
       fallbackColor: mockResolvedTheme.colors.warningSurface,
       fallbackBorderColor: mockResolvedTheme.colors.borderSubtle,
+      fallbackBorderOpacity: 0.32,
       fallbackBorderWidth: 1,
       tintOpacity: 0.34,
     });
@@ -314,6 +327,54 @@ describe('EffectSurface', () => {
     expect(StyleSheet.flatten(captureBoundary?.props.style)).not.toMatchObject({
       display: 'contents',
     });
+  });
+
+  it('uses the dark canvas tint for dark Glass sheets while keeping native fallback opaque', () => {
+    mockResolvedTheme = resolveTheme('glass', 'dark');
+    const environment = createMaterialEnvironment('android', {
+      androidSdkVersion: 33,
+      androidLiquidGlassAvailable: true,
+      androidTargetBlurSupported: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectSurface material={{ role: 'chrome', variant: 'sheet' }} shape="sheet" />
+      </MaterialEnvironmentProvider>,
+    );
+    const nativeLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'fallbackColor')
+    ));
+
+    expect(nativeLayer?.props).toMatchObject({
+      dark: true,
+      fallbackColor: mockResolvedTheme.colors.background,
+      fallbackOpacity: 1,
+      tintColor: mockResolvedTheme.colors.background,
+      tintOpacity: 0.28,
+    });
+  });
+
+  it('keeps light Glass sheets on the existing translucent surface tint', () => {
+    const environment = createMaterialEnvironment('ios', {
+      blurViewAvailable: true,
+      liquidGlassApiAvailable: true,
+      liquidGlassComponentAvailable: true,
+      transparencyState: 'allowed',
+    });
+    const screen = render(
+      <MaterialEnvironmentProvider environment={environment}>
+        <EffectSurface material={{ role: 'chrome', variant: 'sheet' }} shape="sheet" />
+      </MaterialEnvironmentProvider>,
+    );
+    const glassLayer = screen.UNSAFE_getAllByType(View).find((node: any) => (
+      Object.prototype.hasOwnProperty.call(node.props, 'glassEffectStyle')
+    ));
+
+    expect(glassLayer?.props.tintColor).toBe(withMaterialPaintOpacity(
+      mockResolvedTheme.colors.surface,
+      0.34,
+    ));
   });
 
   it('keeps Android pressable layout and hitbox styling on the real pressable host', () => {

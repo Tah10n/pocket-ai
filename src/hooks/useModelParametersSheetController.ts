@@ -1029,10 +1029,10 @@ export function useModelParametersSheetController({
 
     try {
       try {
-        const canStartForegroundNotifications = await notificationService.canStartForegroundServiceNotifications();
         await ensureBackgroundInferenceStarted();
+        const userNotificationsEnabled = await notificationService.areUserNotificationsEnabled();
 
-        if (!canStartForegroundNotifications && !hasShownAutotuneNotificationWarning) {
+        if (!userNotificationsEnabled && !hasShownAutotuneNotificationWarning) {
           hasShownAutotuneNotificationWarning = true;
           Alert.alert(
             t('chat.modelControls.backendBenchmarkBackgroundWarningTitle'),

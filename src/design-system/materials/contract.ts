@@ -84,6 +84,13 @@ export interface MaterialRim {
   readonly width: number;
 }
 
+export interface MaterialSoftRim {
+  readonly color: string;
+  readonly opacity: number;
+  readonly blurRadius: number;
+  readonly spreadDistance: number;
+}
+
 export interface MaterialShadow {
   readonly color: string;
   readonly opacity: number;
@@ -98,6 +105,7 @@ interface MaterialRendererRecipeBase {
   readonly tint: MaterialPaint | null;
   readonly contrastFilm: MaterialPaint | null;
   readonly rim: MaterialRim;
+  readonly softRim?: MaterialSoftRim | null;
   readonly shadow: MaterialShadow;
   readonly interactionSupport: 'static' | 'pressable' | 'native';
 }

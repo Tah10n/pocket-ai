@@ -218,7 +218,7 @@ export function PresetManagerScreen() {
                 )}
             />
 
-            <ScreenContent className="flex-1 pt-2">
+            <ScreenContent testID="preset-manager-content" className="flex-1" topSpacing="default">
                 <FlashList
                     data={presets}
                     keyExtractor={(item) => item.id}
@@ -252,7 +252,7 @@ export function PresetManagerScreen() {
                         ) : undefined}
                     />
 
-                    <ScreenContent className="flex-1 pt-2">
+                    <ScreenContent testID="preset-editor-content" className="flex-1" topSpacing="default">
                         <ScrollView
                             className="flex-1"
                             showsVerticalScrollIndicator={false}
@@ -283,7 +283,7 @@ export function PresetManagerScreen() {
                         </ScrollView>
                     </ScreenContent>
 
-                    <ScreenContent className="pt-4" includeBottomSafeArea>
+                    <ScreenContent className="pt-4" includeBottomSafeArea respectFloatingHeader={false}>
                         <Box className="flex-row gap-3">
                             <Button action="primary" className="flex-1" testID="preset-editor-save" onPress={handleSaveAndActivate}>
                                 <ButtonText>{t('presets.saveAndActivate')}</ButtonText>

@@ -23,7 +23,7 @@ import {
 const GENERATED_ROOT = join(MODULE_ROOT, 'ios', 'generated');
 const XCFRAMEWORK = join(GENERATED_ROOT, 'PocketAnyDoc.xcframework');
 const FINGERPRINT_FILE = join(GENERATED_ROOT, 'fingerprint.json');
-const TEMP_XCFRAMEWORK = join(GENERATED_ROOT, `.PocketAnyDoc.xcframework.tmp-${process.pid}`);
+const TEMP_XCFRAMEWORK = join(GENERATED_ROOT, `.PocketAnyDoc.tmp-${process.pid}.xcframework`);
 const BUILD_ROOT = join(MODULE_ROOT, 'ios', 'build', 'pocketAnyDoc');
 const LIBRARY_NAME = 'libpocket_anydoc.a';
 
@@ -104,8 +104,8 @@ for (const library of [deviceLibrary, simulatorArmLibrary, simulatorIntelLibrary
 removeGenerated(BUILD_ROOT);
 mkdirSync(BUILD_ROOT, { recursive: true });
 const simulatorUniversalLibrary = join(BUILD_ROOT, LIBRARY_NAME);
-run('xcrun', ['lipo', '-create', simulatorArmLibrary, simulatorIntelLibrary, '-output', simulatorUniversalLibrary]);
-run('xcrun', ['lipo', '-verify_arch', 'arm64', 'x86_64', simulatorUniversalLibrary]);
+run('xcrun', ['lipo', simulatorArmLibrary, simulatorIntelLibrary, '-create', '-output', simulatorUniversalLibrary]);
+run('xcrun', ['lipo', simulatorUniversalLibrary, '-verify_arch', 'arm64', 'x86_64']);
 
 mkdirSync(GENERATED_ROOT, { recursive: true });
 removeGenerated(TEMP_XCFRAMEWORK);

@@ -605,7 +605,10 @@ const SettingsScreenContent = () => {
                                     />
                                 </ScreenCard>
 
-                                <ScreenCard padding="compact">
+                                <ScreenCard
+                                    padding="compact"
+                                    testID="settings-visual-style-container"
+                                >
                                     <Box className="flex-row items-start gap-3">
                                         <ScreenIconTile iconName="auto-awesome" tone="accent" />
                                         <Box className="min-w-0 flex-1">

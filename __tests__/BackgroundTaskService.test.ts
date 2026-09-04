@@ -1,78 +1,253 @@
 import BackgroundService from 'react-native-background-actions';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { backgroundTaskService } from '../src/services/BackgroundTaskService';
 
 describe('BackgroundTaskService', () => {
+  const originalPlatform = Platform.OS;
+  const originalAppStateDescriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
+
   beforeEach(async () => {
-    jest.clearAllMocks();
     await backgroundTaskService.stopBackgroundTask();
+    backgroundTaskService.stop();
+    jest.clearAllMocks();
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'active' });
+    (backgroundTaskService as any).appState = 'active';
   });
 
-  it('does not start the foreground service while the app is active', async () => {
-    await backgroundTaskService.startBackgroundDownload();
+  afterAll(async () => {
+    await backgroundTaskService.stopBackgroundTask();
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: originalPlatform });
+    if (originalAppStateDescriptor) {
+      Object.defineProperty(AppState, 'currentState', originalAppStateDescriptor);
+    }
+  });
+
+  it('returns a successful Android foreground-service start outcome', async () => {
+    const Notifications = require('expo-notifications');
+
+    await expect(backgroundTaskService.startBackgroundDownload()).resolves.toEqual({
+      status: 'started',
+      serviceRunning: true,
+      degraded: false,
+      required: false,
+      requirementSatisfied: true,
+    });
+
     expect(backgroundTaskService.taskType).toBe('download');
-    if (Platform.OS === 'android') {
-      expect(BackgroundService.start).toHaveBeenCalled();
-    } else {
-      expect(BackgroundService.start).not.toHaveBeenCalled();
-    }
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
+    expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+    expect(Notifications.getNotificationChannelsAsync).not.toHaveBeenCalled();
   });
 
-  it('starts the foreground service when the app backgrounds with active work', async () => {
-    await backgroundTaskService.startBackgroundDownload();
+  it('returns already_running without starting a second native service', async () => {
+    await backgroundTaskService.startBackgroundInference('Model');
 
-    // Simulate AppState change to background.
-    await (backgroundTaskService as any).handleAppStateChange('background');
+    await expect(backgroundTaskService.startBackgroundInference('Model')).resolves.toEqual({
+      status: 'already_running',
+      serviceRunning: true,
+      degraded: false,
+      required: false,
+      requirementSatisfied: true,
+    });
 
-    expect(BackgroundService.start).toHaveBeenCalled();
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
   });
 
-  it('reapplies inference notification details when work backgrounds after starting in the foreground', async () => {
-    await backgroundTaskService.startBackgroundInference('Test Model');
+  it('preserves a privacy-safe native rejection outcome while production work stays tracked', async () => {
+    const nativeError = Object.assign(new Error('ForegroundServiceStartNotAllowedException'), {
+      name: 'ForegroundServiceStartNotAllowedException',
+    });
+    (BackgroundService.start as jest.Mock).mockRejectedValueOnce(nativeError);
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await (backgroundTaskService as any).handleAppStateChange('background');
+    await expect(backgroundTaskService.startBackgroundInference('Model', {
+      requireServiceStart: true,
+    })).resolves.toEqual({
+      status: 'start_failed',
+      serviceRunning: false,
+      degraded: true,
+      required: true,
+      requirementSatisfied: false,
+      failureCategory: 'foreground_service_start_not_allowed',
+    });
 
-    expect(BackgroundService.updateNotification).toHaveBeenCalledWith(
-      expect.objectContaining({
-        linkingURI: 'pocketai:///(tabs)/chat',
-      }),
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[BackgroundTaskService] Failed to start background task',
+      nativeError,
     );
+    warnSpy.mockRestore();
   });
 
-  it('fires expiration listeners while inference is active even if a download task is also active', async () => {
-    const listener = jest.fn();
-    const unsubscribe = backgroundTaskService.subscribeToExpiration(listener);
+  it('returns skipped_android_background instead of attempting a forbidden background start', async () => {
+    Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'background' });
+    (backgroundTaskService as any).appState = 'background';
 
-    try {
-      await backgroundTaskService.startBackgroundInference('Test Model');
-      await backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+    await expect(backgroundTaskService.startBackgroundDownload(undefined, {
+      requireServiceStart: true,
+    })).resolves.toEqual({
+      status: 'skipped_android_background',
+      serviceRunning: false,
+      degraded: true,
+      required: true,
+      requirementSatisfied: false,
+    });
 
-      (backgroundTaskService as any).handleExpiration();
-
-      expect(listener).toHaveBeenCalledTimes(1);
-    } finally {
-      unsubscribe();
-    }
-  });
-
-  it('stops only inference work when asked, keeping downloads active', async () => {
-    await backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
-    await backgroundTaskService.startBackgroundInference('Test Model');
-
-    await backgroundTaskService.stopBackgroundTask('inference');
-
+    expect(BackgroundService.start).not.toHaveBeenCalled();
     expect(backgroundTaskService.isTaskActive('download')).toBe(true);
-    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
   });
 
-  it('stops only download work when asked, keeping inference active', async () => {
-    await backgroundTaskService.startBackgroundInference('Test Model');
+  it('refreshes a stale cached background state before a foreground Android start', async () => {
+    (backgroundTaskService as any).appState = 'background';
+
+    await expect(backgroundTaskService.startBackgroundInference('Model', {
+      requireServiceStart: true,
+    })).resolves.toEqual({
+      status: 'started',
+      serviceRunning: true,
+      degraded: false,
+      required: true,
+      requirementSatisfied: true,
+    });
+
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns skipped_ios_foreground while foreground iOS work remains tracked', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'ios' });
+
+    await expect(backgroundTaskService.startBackgroundInference('Model')).resolves.toEqual({
+      status: 'skipped_ios_foreground',
+      serviceRunning: false,
+      degraded: true,
+      required: false,
+      requirementSatisfied: false,
+    });
+
+    expect(BackgroundService.start).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+  });
+
+  it('stops the native service when the final tracked task stops', async () => {
     await backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
 
     await backgroundTaskService.stopBackgroundTask('download');
 
+    expect(BackgroundService.stop).toHaveBeenCalledTimes(1);
     expect(backgroundTaskService.isTaskActive('download')).toBe(false);
+    expect(backgroundTaskService.isActive).toBe(false);
+  });
+
+  it('shares one native start across concurrent download and inference work', async () => {
+    let releaseNativeStart!: () => void;
+    const nativeStartGate = new Promise<void>((resolve) => {
+      releaseNativeStart = resolve;
+    });
+    (BackgroundService.start as jest.Mock).mockImplementationOnce(async () => {
+      await nativeStartGate;
+    });
+
+    const inferenceStart = backgroundTaskService.startBackgroundInference('Test Model');
+    const downloadStart = backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+    releaseNativeStart();
+
+    await expect(Promise.all([inferenceStart, downloadStart])).resolves.toEqual([
+      {
+        status: 'started',
+        serviceRunning: true,
+        degraded: false,
+        required: false,
+        requirementSatisfied: true,
+      },
+      {
+        status: 'started',
+        serviceRunning: true,
+        degraded: false,
+        required: false,
+        requirementSatisfied: true,
+      },
+    ]);
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('download')).toBe(true);
     expect(backgroundTaskService.isTaskActive('inference')).toBe(true);
+  });
+
+  it('keeps a replacement download protected when inference stops during native startup', async () => {
+    const nativeStart = (BackgroundService.start as jest.Mock).getMockImplementation()!;
+    let releaseNativeStart!: () => void;
+    const nativeStartGate = new Promise<void>((resolve) => {
+      releaseNativeStart = resolve;
+    });
+    (BackgroundService.start as jest.Mock).mockImplementationOnce(async (...args) => {
+      await nativeStartGate;
+      await nativeStart(...args);
+    });
+
+    const inferenceStart = backgroundTaskService.startBackgroundInference('Model');
+    const inferenceStop = backgroundTaskService.stopBackgroundTask('inference');
+    const downloadStart = backgroundTaskService.startBackgroundDownload({ type: 'downloadPaused' });
+    releaseNativeStart();
+    await Promise.all([inferenceStart, inferenceStop, downloadStart]);
+
+    expect(BackgroundService.start).toHaveBeenCalledTimes(1);
+    expect(BackgroundService.stop).not.toHaveBeenCalled();
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(backgroundTaskService.isTaskActive('download')).toBe(true);
+    expect(backgroundTaskService.isActive).toBe(true);
+    expect(BackgroundService.off).not.toHaveBeenCalled();
+  });
+
+  it('stops a pending native startup when its final task is cancelled', async () => {
+    const nativeStart = (BackgroundService.start as jest.Mock).getMockImplementation()!;
+    let releaseNativeStart!: () => void;
+    const nativeStartGate = new Promise<void>((resolve) => {
+      releaseNativeStart = resolve;
+    });
+    (BackgroundService.start as jest.Mock).mockImplementationOnce(async (...args) => {
+      await nativeStartGate;
+      await nativeStart(...args);
+    });
+
+    const inferenceStart = backgroundTaskService.startBackgroundInference('Model');
+    const inferenceStop = backgroundTaskService.stopBackgroundTask('inference');
+    releaseNativeStart();
+    await Promise.all([inferenceStart, inferenceStop]);
+
+    expect(BackgroundService.stop).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskService.isTaskActive('inference')).toBe(false);
+    expect(backgroundTaskService.isActive).toBe(false);
+    expect(BackgroundService.off).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts protection for a download arriving while the native service is stopping', async () => {
+    await backgroundTaskService.startBackgroundInference('Model');
+    const nativeStop = (BackgroundService.stop as jest.Mock).getMockImplementation()!;
+    let releaseNativeStop!: () => void;
+    const nativeStopGate = new Promise<void>((resolve) => {
+      releaseNativeStop = resolve;
+    });
+    (BackgroundService.stop as jest.Mock).mockImplementationOnce(async (...args) => {
+      await nativeStopGate;
+      await nativeStop(...args);
+    });
+
+    const inferenceStop = backgroundTaskService.stopBackgroundTask('inference');
+    const downloadStart = backgroundTaskService.startBackgroundDownload(
+      { type: 'downloadPaused' },
+      { requireServiceStart: true },
+    );
+    const startsBeforeStopCompleted = (BackgroundService.start as jest.Mock).mock.calls.length;
+    releaseNativeStop();
+    const [, outcome] = await Promise.all([inferenceStop, downloadStart]);
+
+    expect(startsBeforeStopCompleted).toBe(1);
+    expect(BackgroundService.stop).toHaveBeenCalledTimes(1);
+    expect(BackgroundService.start).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ status: 'started', requirementSatisfied: true, serviceRunning: true });
+    expect(backgroundTaskService.isTaskActive('download')).toBe(true);
+    expect(backgroundTaskService.isActive).toBe(true);
+    expect(BackgroundService.off).not.toHaveBeenCalled();
   });
 });

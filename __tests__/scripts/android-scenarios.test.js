@@ -134,6 +134,7 @@ const {
   tapBoundsUntilAnyNode,
   validateQaProvenance,
   validateScenarioExecutionOptions,
+  verifyCatalogSortSelection,
   areExactGitProvenancesEqual,
   waitForAnyNode,
   waitForEnabledAnyNode,
@@ -141,6 +142,63 @@ const {
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
+
+describe('catalog sort selection smoke', () => {
+  function sortSnapshot(label, { panelBounds, toggleBounds = '[500,100][1000,200]' } = {}) {
+    return parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="models-sort-toggle" content-desc="Sort: ${label}" bounds="${toggleBounds}" />
+        ${panelBounds ? `<node resource-id="models-sort-panel" bounds="${panelBounds}" />` : ''}
+      </hierarchy>
+    `);
+  }
+
+  it('selects two distinct options with visible taps and observes the updated summary after each', async () => {
+    let selected = 'Most popular';
+    const tapVisibleResource = jest.fn(async (_ctx, resourceId) => {
+      if (resourceId === 'sort-option-downloads') selected = 'Most downloaded';
+      if (resourceId === 'sort-option-likes') selected = 'Most popular';
+    });
+    const createSnapshot = jest.fn(() => sortSnapshot(selected));
+    const ctx = { serial: 'device-1' };
+
+    await verifyCatalogSortSelection(ctx, {
+      adbPath: 'adb', tapVisibleResource, createSnapshot, timeoutMs: 0,
+    });
+
+    expect(tapVisibleResource.mock.calls).toEqual([
+      [ctx, 'models-sort-toggle'],
+      [ctx, 'sort-option-downloads'],
+      [ctx, 'models-sort-toggle'],
+      [ctx, 'sort-option-likes'],
+    ]);
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails when an option tap only closes the panel without changing the selected value', async () => {
+    const tapVisibleResource = jest.fn();
+    await expect(verifyCatalogSortSelection({ serial: 'device-1' }, {
+      adbPath: 'adb',
+      tapVisibleResource,
+      createSnapshot: () => sortSnapshot('Most downloaded'),
+      timeoutMs: 0,
+    })).rejects.toThrow('Sort selection did not update after tapping "sort-option-likes"');
+  });
+
+  it.each([
+    ['an inverted panel remains open', { panelBounds: '[42,643][1038,627]' }],
+    ['the selected summary has inverted bounds', { toggleBounds: '[500,200][1000,100]' }],
+    ['the selected summary is outside the viewport', { toggleBounds: '[500,2500][1000,2600]' }],
+  ])('rejects a matching summary when %s', async (_description, bounds) => {
+    await expect(verifyCatalogSortSelection({ serial: 'device-1' }, {
+      adbPath: 'adb',
+      tapVisibleResource: jest.fn(),
+      createSnapshot: () => sortSnapshot('Most downloaded', bounds),
+      timeoutMs: 0,
+    })).rejects.toThrow('Sort selection did not update after tapping "sort-option-downloads"');
+  });
+});
 
 describe('android-scenarios external launcher ANR recovery', () => {
   it('re-reads the hierarchy after dismissing a confirmed launcher ANR', () => {

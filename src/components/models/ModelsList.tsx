@@ -101,7 +101,7 @@ type FilteredLoadMoreBatch = {
   targetVisibleCount: number;
   requestsStarted: number;
   lastCursor: string;
-  sawRequestInFlight: boolean;
+  requestPending: boolean;
 };
 
 export type ModelsCatalogScrollSnapshot = {
@@ -408,6 +408,7 @@ export const ModelsList = ({
   const lastAutoFillCursorRef = useRef<string | null>(null);
   const filteredLoadMoreBatchRef = useRef<FilteredLoadMoreBatch | null>(null);
   const [isFilteredLoadMoreBatching, setIsFilteredLoadMoreBatching] = useState(false);
+  const [filteredLoadMoreCompletion, setFilteredLoadMoreCompletion] = useState(0);
   const catalogFirstResultsShownSessionRef = useRef<string | null>(null);
   const localCatalogScrollSnapshotRef = useRef<ModelsCatalogScrollSnapshot | null>(null);
   const allCatalogScrollSnapshotRef = catalogScrollSnapshotRef ?? localCatalogScrollSnapshotRef;
@@ -591,7 +592,29 @@ export const ModelsList = ({
     lastAutoFillCursorRef.current = null;
     filteredLoadMoreBatchRef.current = null;
     setIsFilteredLoadMoreBatching(false);
+    return () => {
+      filteredLoadMoreBatchRef.current = null;
+    };
   }, [sessionIdentity]);
+
+  const requestFilteredLoadMore = useCallback((batch: FilteredLoadMoreBatch) => {
+    batch.requestPending = true;
+    // Completion belongs to this request even when React batches away the
+    // intermediate fetching state, or a previous retry error is still rendered.
+    void Promise.resolve(handleLoadMore('manual')).then(() => {
+      if (filteredLoadMoreBatchRef.current !== batch) {
+        return;
+      }
+      batch.requestPending = false;
+      setFilteredLoadMoreCompletion((current) => current + 1);
+    }, () => {
+      if (filteredLoadMoreBatchRef.current !== batch) {
+        return;
+      }
+      filteredLoadMoreBatchRef.current = null;
+      setIsFilteredLoadMoreBatching(false);
+    });
+  }, [handleLoadMore]);
 
   const handleLoadMorePress = useCallback(() => {
     const shouldBatchFilteredResults = activeTab === 'all'
@@ -602,19 +625,20 @@ export const ModelsList = ({
       return;
     }
 
-    if (!hasMore || !nextCursor || loading || isFetchingMore) {
+    if (!hasMore || !nextCursor || loading || isFetchingMore || filteredLoadMoreBatchRef.current) {
       return;
     }
 
-    filteredLoadMoreBatchRef.current = {
+    const batch: FilteredLoadMoreBatch = {
       sessionIdentity,
       targetVisibleCount: filteredModels.length + MODELS_PAGE_SIZE,
       requestsStarted: 1,
       lastCursor: nextCursor,
-      sawRequestInFlight: false,
+      requestPending: true,
     };
+    filteredLoadMoreBatchRef.current = batch;
     setIsFilteredLoadMoreBatching(true);
-    handleLoadMore('manual');
+    requestFilteredLoadMore(batch);
   }, [
     activeTab,
     filteredModels.length,
@@ -625,6 +649,7 @@ export const ModelsList = ({
     isFetchingMore,
     loading,
     nextCursor,
+    requestFilteredLoadMore,
     sessionIdentity,
   ]);
 
@@ -926,17 +951,12 @@ export const ModelsList = ({
       return;
     }
 
-    if (loading || isFetchingMore) {
-      if (isFetchingMore) {
-        batch.sawRequestInFlight = true;
-      }
+    if (batch.requestPending || loading || isFetchingMore) {
       return;
     }
 
     if (loadMoreError) {
-      if (batch.sawRequestInFlight || nextCursor !== batch.lastCursor) {
-        finishBatch();
-      }
+      finishBatch();
       return;
     }
 
@@ -951,25 +971,23 @@ export const ModelsList = ({
     }
 
     if (batch.lastCursor === nextCursor) {
-      if (batch.sawRequestInFlight) {
-        finishBatch();
-      }
+      finishBatch();
       return;
     }
 
     batch.requestsStarted += 1;
     batch.lastCursor = nextCursor;
-    batch.sawRequestInFlight = false;
-    handleLoadMore('manual');
+    requestFilteredLoadMore(batch);
   }, [
     filteredModels.length,
-    handleLoadMore,
+    filteredLoadMoreCompletion,
     hasMore,
     isFetchingMore,
     isFilteredLoadMoreBatching,
     loadMoreError,
     loading,
     nextCursor,
+    requestFilteredLoadMore,
     sessionIdentity,
   ]);
 
@@ -1221,7 +1239,7 @@ export const ModelsList = ({
     </ScreenStack>
   );
   const floatingFilterControls = (
-    <Box testID="models-floating-filter-row" className="h-9 overflow-visible">
+    <Box testID="models-floating-filter-row" className="min-h-9">
       <ModelsFilter
         androidContentBlurTargetRef={warmupContentBlurTargetRef}
         filters={filters}

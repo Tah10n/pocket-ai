@@ -3493,22 +3493,7 @@ function buildScenarios() {
         await setCatalogFilterPanelOpen(adbPath, ctx.serial, true);
         await setCatalogFilterPanelOpen(adbPath, ctx.serial, false);
 
-        await tapVisibleResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
-        await waitForResourceId(adbPath, ctx.serial, MODELS_SORT_PANEL_RESOURCE_ID, {
-          visibleOnly: false,
-        });
-        // Native Glass can expose the open panel with inverted bounds until another frame is
-        // invalidated. Its stable panel id plus contained options remain reliable evidence.
-        await waitForAnyNode(adbPath, ctx.serial, MOST_DOWNLOADED_LABELS, {
-          visibleOnly: false,
-        });
-        await waitForAnyNode(adbPath, ctx.serial, MOST_POPULAR_LABELS, {
-          visibleOnly: false,
-        });
-        await tapVisibleResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
-        await waitForNoResourceId(adbPath, ctx.serial, MODELS_SORT_PANEL_RESOURCE_ID, {
-          visibleOnly: false,
-        });
+        await verifyCatalogSortSelection(ctx);
 
         await ctx.tapAnyText(MODEL_DETAILS_CTA_LABELS, { timeoutMs: 5_000 });
         await ctx.expectAnyText(MODEL_DETAILS_TITLE_LABELS);
@@ -5968,6 +5953,42 @@ function isChatResourceTapSafe(snapshot, node) {
     && node.bounds.top >= viewport.bounds.top
     && node.bounds.bottom <= safeBottom
   );
+}
+
+async function verifyCatalogSortSelection(ctx, options = {}) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  // Establish one known selection, then change it. This also works when a previous run
+  // left either preference selected; merely closing the panel cannot satisfy both checks.
+  for (const [resourceId, labels] of [
+    ["sort-option-downloads", MOST_DOWNLOADED_LABELS],
+    ["sort-option-likes", MOST_POPULAR_LABELS],
+  ]) {
+    await tapResource(ctx, MODELS_SORT_TOGGLE_RESOURCE_ID);
+    await tapResource(ctx, resourceId);
+    const { match, snapshot } = await waitForSnapshotMatch(
+      adbPath,
+      ctx.serial,
+      options,
+      (candidateSnapshot) => {
+        // Check closure using the entire hierarchy so inverted Glass bounds cannot
+        // masquerade as a closed panel. The selected value itself must be visible.
+        if (findResourceIdInSnapshot(candidateSnapshot, MODELS_SORT_PANEL_RESOURCE_ID)) {
+          return null;
+        }
+        const toggle = findResourceIdInSnapshot(candidateSnapshot, MODELS_SORT_TOGGLE_RESOURCE_ID, {
+          visibleOnly: true,
+        });
+        return toggle && labels.some((label) => matchesUiFragment(toggle, label)) ? toggle : null;
+      }
+    );
+    if (!match) {
+      throw new Error(withUiSnapshotSummary(
+        snapshot,
+        `Sort selection did not update after tapping "${resourceId}".`
+      ));
+    }
+  }
 }
 
 async function tapVisibleResource(ctx, resourceId, options = {}) {
@@ -10912,6 +10933,7 @@ module.exports = {
   shouldAppendRunnerFailure,
   validateQaProvenance,
   validateScenarioExecutionOptions,
+  verifyCatalogSortSelection,
   waitForAnyNode,
   waitForEnabledAnyNode,
   waitForNoResourceId,

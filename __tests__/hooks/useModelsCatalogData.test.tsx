@@ -29,6 +29,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
     cancelPendingSearchRequests: jest.fn(),
     subscribeCacheInvalidations: jest.fn(() => jest.fn()),
     subscribeMetadataUpdates: jest.fn(() => jest.fn()),
+    resumeMetadataResolution: jest.fn(),
   },
 }));
 
@@ -152,6 +153,7 @@ describe('useModelsCatalogData', () => {
     mockTokenService.subscribe.mockReturnValue(jest.fn());
     mockCatalogService.subscribeCacheInvalidations.mockImplementation(() => jest.fn());
     mockCatalogService.subscribeMetadataUpdates.mockImplementation(() => jest.fn());
+    mockCatalogService.resumeMetadataResolution.mockResolvedValue(undefined);
     mockCatalogService.createSearchSession.mockReturnValue(mockCatalogSearchSession);
     mockCatalogService.getLocalModels.mockResolvedValue([]);
     mockCatalogService.getCachedSearchResult.mockReturnValue({
@@ -465,6 +467,97 @@ describe('useModelsCatalogData', () => {
     expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-4');
     expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(1);
     expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('resumes pending metadata on retained pages and ignores a detached restoration', async () => {
+    const summary = { ...createModel('org/pending'), size: null, fitsInRam: null, requiresTreeProbe: true };
+    const ready = createModel('org/ready-page-2');
+    const enriched = { ...summary, size: 2048, fitsInRam: true, requiresTreeProbe: false };
+    const metadata = createDeferred<void>();
+    mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+    mockCatalogService.searchModels.mockResolvedValueOnce({
+      models: [summary], hasMore: true, nextCursor: 'page-2',
+    }).mockResolvedValueOnce({
+      models: [ready], hasMore: true, nextCursor: 'catalog-buffer:retained-next-page',
+    });
+    mockCatalogService.resumeMetadataResolution.mockReturnValue(metadata.promise);
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+    await act(async () => { jest.advanceTimersByTime(400); });
+    await act(async () => { await getCurrentValue()?.handleLoadMore(); });
+    expect(getCurrentValue()?.models).toEqual([summary, ready]);
+
+    await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+    expect(mockCatalogSearchSession.cancelPendingRequests).toHaveBeenCalledWith('superseded');
+    await act(async () => { rerenderHook({ activeTab: 'all' }); });
+    expect(mockCatalogService.resumeMetadataResolution).toHaveBeenCalledWith(
+      [summary, ready], mockCatalogSearchSession, expect.any(Function),
+    );
+    const staleUpdate = mockCatalogService.resumeMetadataResolution.mock.calls[0][2];
+    expect(getCurrentValue()?.models[0].fitsInRam).toBeNull();
+    expect(getCurrentValue()?.nextCursor).toBe('catalog-buffer:retained-next-page');
+
+    await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+    await act(async () => { rerenderHook({ activeTab: 'all' }); });
+    const currentUpdate = mockCatalogService.resumeMetadataResolution.mock.calls[1][2];
+    await act(async () => {
+      staleUpdate({ models: [enriched], removedModelIds: [ready.id] });
+    });
+    expect(getCurrentValue()?.models).toEqual([summary, ready]);
+    await act(async () => {
+      currentUpdate({ models: [enriched], removedModelIds: [] });
+      metadata.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([enriched, ready]);
+    expect(getCurrentValue()?.models[0].fitsInRam).toBe(true);
+    expect(getCurrentValue()?.nextCursor).toBe('catalog-buffer:retained-next-page');
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['clear', 'refresh'] as const)(
+    'ignores restored metadata updates and errors after a manual %s',
+    async (action) => {
+      const pending = createDeferred<void>();
+      mockCatalogService.resumeMetadataResolution.mockReturnValue(pending.promise);
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+      await act(async () => { rerenderHook({ activeTab: 'all' }); });
+      const update = mockCatalogService.resumeMetadataResolution.mock.calls[0][2];
+      await act(async () => {
+        if (action === 'clear') {
+          mockCatalogService.subscribeCacheInvalidations.mock.calls[0][0](1, 'manual');
+        } else {
+          getCurrentValue()?.handlePullToRefresh();
+        }
+      });
+      const expectedModels = getCurrentValue()?.models;
+      await act(async () => {
+        update({ models: [], removedModelIds: expectedModels!.map((model) => model.id) });
+        pending.reject(new Error('cancelled stale metadata'));
+      });
+      expect(getCurrentValue()?.models).toBe(expectedModels);
+      expect(getCurrentValue()?.warningMessage).toBeNull();
+      expect(getCurrentValue()?.loadMoreError).toBeNull();
+    },
+  );
+
+  it('continues restored metadata enrichment while another page loads', async () => {
+    const pending = createDeferred<void>();
+    mockCatalogService.resumeMetadataResolution.mockReturnValue(pending.promise);
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+    await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+    await act(async () => { rerenderHook({ activeTab: 'all' }); });
+    const update = mockCatalogService.resumeMetadataResolution.mock.calls[0][2];
+    await act(async () => { await getCurrentValue()?.handleLoadMore(); });
+    const enriched = { ...createModel('org/first-model'), size: 4096 };
+    await act(async () => {
+      update({ models: [enriched], removedModelIds: [] });
+      pending.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([enriched, createModel('org/second-model')]);
+    expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-3');
   });
 
   it('does not restore an All Models snapshot into a different search session', async () => {

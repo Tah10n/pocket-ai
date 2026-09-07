@@ -143,10 +143,46 @@ describe('SearchHeader', () => {
     expect(within(screen.getByTestId('models-catalog-controls')).getByTestId('floating-filter-controls'))
       .toBeTruthy();
 
-    fireEvent(screen.getByTestId('models-catalog-controls'), 'layout', {
-      nativeEvent: { layout: { height: 120 } },
+    fireEvent(screen.getByTestId('models-catalog-controls-base'), 'layout', {
+      nativeEvent: { layout: { height: 94 } },
     });
-    expect(onControlsContentOffsetChange).toHaveBeenCalledWith(136);
+    expect(onControlsContentOffsetChange).toHaveBeenCalledWith(152);
+  });
+
+  it('keeps the catalog inset fixed when a filter popover expands the floating controls', () => {
+    const onControlsContentOffsetChange = jest.fn();
+    const props = {
+      searchQuery: '',
+      onSearchChange: jest.fn(),
+      activeTab: 'all' as const,
+      onTabChange: jest.fn(),
+      onControlsContentOffsetChange,
+    };
+    const screen = render(
+      <SearchHeader {...props} floatingControls={<View style={{ minHeight: 36 }} />} />,
+    );
+    fireEvent(screen.getByTestId('models-catalog-controls-base'), 'layout', {
+      nativeEvent: { layout: { height: 94 } },
+    });
+    expect(onControlsContentOffsetChange).toHaveBeenLastCalledWith(152);
+
+    screen.rerender(
+      <SearchHeader
+        {...props}
+        floatingControls={<View style={{ minHeight: 36 }}><View testID="open-sort-panel" style={{ height: 240 }} /></View>}
+      />,
+    );
+    expect(within(screen.getByTestId('models-catalog-controls')).getByTestId('open-sort-panel')).toBeTruthy();
+    expect(within(screen.getByTestId('models-catalog-controls-base')).queryByTestId('open-sort-panel')).toBeNull();
+    fireEvent(screen.getByTestId('models-catalog-controls'), 'layout', {
+      nativeEvent: { layout: { height: 376 } },
+    });
+    expect(onControlsContentOffsetChange).toHaveBeenCalledTimes(1);
+    // A later measurement of the permanent chrome still produces the same inset.
+    fireEvent(screen.getByTestId('models-catalog-controls-base'), 'layout', {
+      nativeEvent: { layout: { height: 94 } },
+    });
+    expect(onControlsContentOffsetChange).toHaveBeenLastCalledWith(152);
   });
 
   it('renders a shared tab control and switches between all and downloaded tabs', () => {

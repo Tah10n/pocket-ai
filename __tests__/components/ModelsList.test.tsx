@@ -340,6 +340,16 @@ function createCatalogData(nextCursor: string | null, handleLoadMore: jest.Mock)
   };
 }
 
+function createDeferredLoadMore() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
   return {
     id: 'org/model',
@@ -480,7 +490,11 @@ describe('ModelsList', () => {
   });
 
   it('continues a manual filtered load across network cursors until a visible page is filled', async () => {
-    const handleLoadMore = jest.fn();
+    const firstRequest = createDeferredLoadMore();
+    const secondRequest = createDeferredLoadMore();
+    const handleLoadMore = jest.fn()
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockReturnValueOnce(secondRequest.promise);
     const sessionIdentity = 'session:fits-in-ram';
     const createResult = (count: number, nextCursor: string) => ({
       ...createCatalogData(nextCursor, handleLoadMore),
@@ -508,6 +522,7 @@ describe('ModelsList', () => {
     ) as any);
     await act(async () => {
       screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      firstRequest.resolve();
       await Promise.resolve();
     });
 
@@ -520,15 +535,18 @@ describe('ModelsList', () => {
     ) as any);
     await act(async () => {
       screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      secondRequest.resolve();
       await Promise.resolve();
     });
 
     expect(handleLoadMore).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('models-load-more').props.disabled).toBeFalsy();
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
   });
 
   it('bounds manual filtered network fill when consecutive pages add no matching models', async () => {
+    const requests = Array.from({ length: 4 }, createDeferredLoadMore);
     const handleLoadMore = jest.fn();
+    requests.forEach((request) => handleLoadMore.mockReturnValueOnce(request.promise));
     const sessionIdentity = 'session:sparse-fit-results';
     const fittingModel = createModel({ id: 'org/only-fit', name: 'Only fit' });
     const createResult = (page: number) => ({
@@ -548,12 +566,116 @@ describe('ModelsList', () => {
       mockUseModelsCatalogData.mockReturnValue(createResult(page) as any);
       await act(async () => {
         screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+        requests[page - 3].resolve();
         await Promise.resolve();
       });
     }
 
     expect(handleLoadMore).toHaveBeenCalledTimes(4);
-    expect(screen.getByTestId('models-load-more').props.disabled).toBeFalsy();
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+  });
+
+  it('unlocks retry after a fast failed request without a fetching render, including the same error twice', async () => {
+    const handleLoadMore = jest.fn();
+    let catalogData = {
+      ...createCatalogData('https://huggingface.co/api/models?cursor=page-2', handleLoadMore),
+      loadMoreError: null as string | null,
+    };
+    mockUseModelsCatalogData.mockImplementation(() => catalogData as any);
+    handleLoadMore.mockImplementation(async () => {
+      catalogData = { ...catalogData, loadMoreError: 'Offline' };
+    });
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('models-load-more'));
+      });
+      expect(handleLoadMore).toHaveBeenCalledTimes(attempt);
+      expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+      expect(screen.getByText('Retry')).toBeTruthy();
+      expect(catalogData.isFetchingMore).toBe(false);
+    }
+  });
+
+  it('keeps retry pending despite an old error and continues after its own successful request', async () => {
+    const request = createDeferredLoadMore();
+    const nextRequest = createDeferredLoadMore();
+    const handleLoadMore = jest.fn()
+      .mockReturnValueOnce(request.promise)
+      .mockReturnValueOnce(nextRequest.promise);
+    const catalogData = {
+      ...createCatalogData('https://huggingface.co/api/models?cursor=page-2', handleLoadMore),
+      loadMoreError: 'Offline',
+    };
+    mockUseModelsCatalogData.mockReturnValue(catalogData as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    fireEvent.press(screen.getByTestId('models-load-more'));
+    await act(async () => {
+      screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+    });
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBe(true);
+    expect(handleLoadMore).toHaveBeenCalledTimes(1);
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalogData,
+      nextCursor: 'https://huggingface.co/api/models?cursor=page-3',
+      loadMoreError: null,
+    } as any);
+    await act(async () => {
+      request.resolve();
+    });
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBe(true);
+
+    await act(async () => {
+      nextRequest.resolve();
+    });
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+  });
+
+  it.each(['filters', 'tab'] as const)('ignores stale completion after changing %s and starting a new batch', async (change) => {
+    const staleRequest = createDeferredLoadMore();
+    const currentRequest = createDeferredLoadMore();
+    const handleLoadMore = jest.fn()
+      .mockReturnValueOnce(staleRequest.promise)
+      .mockReturnValueOnce(currentRequest.promise);
+    const catalogData = createCatalogData('https://huggingface.co/api/models?cursor=page-2', handleLoadMore);
+    mockUseModelsCatalogData.mockReturnValue(catalogData as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+    fireEvent.press(screen.getByTestId('models-load-more'));
+
+    if (change === 'tab') {
+      mockUseModelsCatalogData.mockReturnValue({
+        ...catalogData,
+        sessionIdentity: 'downloaded-session',
+      } as any);
+      screen.rerender(<ModelsList activeTab="downloaded" searchQuery="phi" />);
+      mockUseModelsCatalogData.mockReturnValue(catalogData as any);
+    } else {
+      setModelsStoreState({ ...defaultFilters, noTokenRequiredOnly: true });
+      mockUseModelsCatalogData.mockReturnValue({
+        ...catalogData,
+        sessionIdentity: 'new-filter-session',
+        dataSessionIdentity: 'new-filter-session',
+      } as any);
+    }
+    screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+    fireEvent.press(screen.getByTestId('models-load-more'));
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      staleRequest.resolve();
+    });
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBe(true);
+
+    await act(async () => {
+      currentRequest.resolve();
+    });
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
   });
 
   it.each([
@@ -715,7 +837,7 @@ describe('ModelsList', () => {
     expect(queryByTestId('models-warmup-content-blur-target')).toBeNull();
     expect(mockLastModelsFilterProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
     expect(getByTestId('models-floating-filter-row').props.className)
-      .toContain('h-9');
+      .toBe('min-h-9');
     expect(mockLastFlashListProps.contentContainerStyle).toMatchObject({
       flexGrow: 1,
       paddingTop: 152,
@@ -997,6 +1119,27 @@ describe('ModelsList', () => {
       visionConfidence: 'trusted',
       selectedProjectorId: secondProjectorId,
     }));
+  });
+
+  it('reveals a retained model under Fits in RAM after deferred metadata completes', () => {
+    const summary = createModel({
+      size: null,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      variants: undefined,
+      requiresTreeProbe: true,
+      sizeResolutionState: 'resolving',
+    });
+    const catalog = createCatalogData(null, jest.fn());
+    mockUseModelsCatalogData.mockReturnValue({ ...catalog, models: [summary] } as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+    expect(mockLastFlashListProps.data).toHaveLength(0);
+
+    mockUseModelsCatalogData.mockReturnValue({ ...catalog, models: [createModel()] } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockModelCardPropsLog.at(-1)?.model.id).toBe(summary.id);
   });
 
   it('hides a selected variant that no longer satisfies RAM filters', async () => {

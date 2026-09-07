@@ -1,4 +1,6 @@
 import DeviceInfo from 'react-native-device-info';
+import { act, renderHook, waitFor } from '@testing-library/react-native';
+import { useModelsCatalogData } from '../../src/hooks/useModelsCatalogData';
 import * as SecureStore from 'expo-secure-store';
 import {
   ModelCatalogError,
@@ -1448,6 +1450,215 @@ describe('ModelCatalogService', () => {
     } finally {
       service.dispose();
     }
+  });
+
+  it('resumes a real cancelled metadata request when the catalog hook returns from Downloaded', async () => {
+    const resumedTree = createDeferred<any>();
+    const treeAbort = jest.fn();
+    let treeCalls = 0;
+    global.fetch = jest.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/tree/main?recursive=true')) {
+        treeCalls += 1;
+        if (treeCalls > 1) {
+          return resumedTree.promise;
+        }
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            treeAbort();
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        });
+      }
+      return Promise.resolve({
+        ok: true, status: 200, headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve([makeRepoWithUnknownSize('org/tab-resume-model')]),
+      });
+    }) as jest.Mock;
+    const input = {
+      searchQuery: 'tab-resume',
+      filters: { fitsInRamOnly: true, noTokenRequiredOnly: false, sizeRanges: [] },
+      sort: { field: 'downloads' as const, direction: 'desc' as const },
+      serverSort: 'downloads' as const,
+      discoveryMode: 'full' as const,
+      applyDiscoveryPreset: jest.fn(),
+      syncDiscoveryTokenState: jest.fn(),
+    };
+    const hook = renderHook(({ activeTab }: { activeTab: 'all' | 'downloaded' }) => (
+      useModelsCatalogData({ ...input, activeTab })
+    ), { initialProps: { activeTab: 'all' } });
+    try {
+      await waitFor(() => expect(treeCalls).toBe(1));
+      expect(hook.result.current.models[0]).toMatchObject({
+        id: 'org/tab-resume-model', fitsInRam: null, sizeResolutionState: 'resolving',
+      });
+      act(() => hook.rerender({ activeTab: 'downloaded' }));
+      await waitFor(() => expect(treeAbort).toHaveBeenCalledTimes(1));
+      act(() => hook.rerender({ activeTab: 'all' }));
+      await waitFor(() => expect(treeCalls).toBe(2));
+      expect(hook.result.current.models[0].size).toBeNull();
+      await act(async () => {
+        resumedTree.resolve({
+          ok: true, status: 200, headers: { get: jest.fn(() => null) },
+          json: () => Promise.resolve([{
+            path: 'model.Q4_K_M.gguf', size: 256 * 1024 * 1024,
+            lfs: { oid: `sha256:${TREE_SHA256}` },
+          }]),
+        });
+      });
+      await waitFor(() => expect(hook.result.current.models[0]).toMatchObject({
+        id: 'org/tab-resume-model', fitsInRam: true, sizeResolutionState: 'resolved',
+        requiresTreeProbe: false,
+      }));
+      expect(hook.result.current.hasMore).toBe(false);
+      expect(hook.result.current.nextCursor).toBeNull();
+      expect((global.fetch as jest.Mock).mock.calls.filter(([url]) => (
+        String(url).includes('/api/models?')
+      ))).toHaveLength(1);
+    } finally {
+      hook.unmount();
+      await waitForCatalogRequestMapsToSettle(modelCatalogService);
+    }
+  });
+
+  describe('resumed metadata resolution', () => {
+    function retainedModel(id: string): ModelMetadata {
+      return {
+        ...makeLocalModel(id),
+        localPath: undefined,
+        lifecycleStatus: LifecycleStatus.AVAILABLE,
+        downloadProgress: 0,
+        downloadUrl: `https://huggingface.co/${id}/resolve/main/model.Q4_K_M.gguf`,
+        resolvedFileName: 'model.Q4_K_M.gguf',
+        size: null,
+        fitsInRam: null,
+        requiresTreeProbe: true,
+        sizeResolutionState: 'resolving',
+      };
+    }
+
+    function treeResponse(entries = [{
+      path: 'model.Q4_K_M.gguf', size: 256 * 1024 * 1024,
+      lfs: { oid: `sha256:${TREE_SHA256}` },
+    }]) {
+      return {
+        ok: true, status: 200, headers: { get: jest.fn(() => null) },
+        json: () => Promise.resolve(entries),
+      };
+    }
+
+    it('reuses metadata completed by another consumer without issuing HTTP requests', async () => {
+      const model = retainedModel('org/resume-cached-model');
+      const cachedModel = {
+        ...model, size: 256 * 1024 * 1024, fitsInRam: true,
+        requiresTreeProbe: false, sizeResolutionState: 'resolved' as const,
+      };
+      new ModelCatalogCacheStore().putModelSnapshots([cachedModel], 'anon');
+      const service = new ModelCatalogService();
+      const session = service.createSearchSession();
+      const onBatchResolved = jest.fn();
+      global.fetch = jest.fn();
+      try {
+        await service.resumeMetadataResolution([model], session, onBatchResolved);
+        expect(onBatchResolved).toHaveBeenCalledTimes(1);
+        expect(onBatchResolved).toHaveBeenCalledWith({
+          models: [expect.objectContaining({
+            id: model.id, size: cachedModel.size, fitsInRam: true,
+            requiresTreeProbe: false, sizeResolutionState: 'resolved',
+          })],
+          removedModelIds: [],
+        });
+        expect(global.fetch).not.toHaveBeenCalled();
+      } finally {
+        session.dispose();
+        service.dispose();
+      }
+    });
+
+    it('resolves the retained revision instead of reusing an enriched snapshot for another revision', async () => {
+      const model = { ...retainedModel('org/resume-revision-model'), hfRevision: 'revision-new' };
+      new ModelCatalogCacheStore().putModelSnapshots([{
+        ...model, hfRevision: 'revision-old', size: 1024, requiresTreeProbe: false,
+        sizeResolutionState: 'resolved',
+      }], 'anon');
+      const service = new ModelCatalogService();
+      const session = service.createSearchSession();
+      const onBatchResolved = jest.fn();
+      global.fetch = jest.fn(async () => treeResponse()) as jest.Mock;
+      try {
+        await service.resumeMetadataResolution([model], session, onBatchResolved);
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        expect(String((global.fetch as jest.Mock).mock.calls[0][0])).toContain('/tree/revision-new?');
+        expect(onBatchResolved).toHaveBeenCalledTimes(1);
+        expect(onBatchResolved).toHaveBeenCalledWith({
+          models: [expect.objectContaining({
+            id: model.id, hfRevision: 'revision-new', size: 256 * 1024 * 1024,
+            sizeResolutionState: 'resolved',
+          })], removedModelIds: [],
+        });
+      } finally {
+        session.dispose();
+        service.dispose();
+      }
+    });
+
+    it.each(['cancel', 'clear', 'auth change'] as const)(
+      'does not publish or cache late resumed metadata after %s', async (invalidation) => {
+        if (invalidation === 'auth change') await huggingFaceTokenService.saveToken('hf_resume_token_a');
+        const model = retainedModel(`org/resume-stale-${invalidation.replace(' ', '-')}`);
+        if (invalidation === 'auth change') {
+          model.isGated = true;
+          model.accessState = ModelAccessState.AUTH_REQUIRED;
+        }
+        const service = new ModelCatalogService();
+        const session = service.createSearchSession();
+        const onBatchResolved = jest.fn();
+        const response = createDeferred<ReturnType<typeof treeResponse>>();
+        // Simulate a transport that delivers a late response despite AbortSignal.
+        global.fetch = jest.fn(() => response.promise) as jest.Mock;
+        const pending = service.resumeMetadataResolution([model], session, onBatchResolved);
+        const outcome = pending.then(() => null, (error: unknown) => error);
+        try {
+          await waitForMockCallCount(global.fetch as jest.Mock, 1);
+          if (invalidation === 'cancel') session.cancelPendingRequests('superseded');
+          if (invalidation === 'clear') service.clearCache('manual');
+          if (invalidation === 'auth change') await huggingFaceTokenService.saveToken('hf_resume_token_b');
+          response.resolve(treeResponse());
+          expect(await outcome).toBeInstanceOf(Error);
+          await waitForCatalogRequestMapsToSettle(service);
+          expect(onBatchResolved).not.toHaveBeenCalled();
+          expect(service.getCachedModel(model.id)).toBeNull();
+          const persisted = new ModelCatalogCacheStore();
+          expect(persisted.getModelSnapshot(model.id, 'anon', Number.POSITIVE_INFINITY)).toBeNull();
+          expect(persisted.getModelSnapshot(model.id, 'auth', Number.POSITIVE_INFINITY)).toBeNull();
+        } finally {
+          response.resolve(treeResponse());
+          session.dispose();
+          service.dispose();
+          await outcome;
+        }
+      },
+    );
+
+    it('removes a retained model when resumed tree metadata confirms no usable GGUF', async () => {
+      const model = retainedModel('org/resume-no-gguf-model');
+      new ModelCatalogCacheStore().putModelSnapshots([model], 'anon');
+      const service = new ModelCatalogService();
+      const session = service.createSearchSession();
+      const onBatchResolved = jest.fn();
+      global.fetch = jest.fn(async () => treeResponse([])) as jest.Mock;
+      try {
+        expect(service.getCachedModel(model.id)).not.toBeNull();
+        await service.resumeMetadataResolution([model], session, onBatchResolved);
+        expect(onBatchResolved).toHaveBeenCalledWith({ models: [], removedModelIds: [model.id] });
+        expect(service.getCachedModel(model.id)).toBeNull();
+        expect(new ModelCatalogCacheStore().getModelSnapshot(
+          model.id, 'anon', Number.POSITIVE_INFINITY,
+        )).toBeNull();
+      } finally {
+        session.dispose();
+        service.dispose();
+      }
+    });
   });
 
   it('cancels a superseded catalog search instead of leaving it alive in the background', async () => {

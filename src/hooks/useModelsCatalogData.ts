@@ -66,6 +66,7 @@ export function useModelsCatalogData({
     loadMoreError: null,
   });
   const latestFetchIdRef = useRef(0);
+  const metadataResumeGenerationRef = useRef(0);
   const catalogSearchSessionRef = useRef<CatalogSearchSession | null>(null);
   const appendInFlightRef = useRef(false);
   const lastAutoLoadCursorRef = useRef<string | null>(null);
@@ -261,6 +262,7 @@ export function useModelsCatalogData({
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
       if (source === 'manual') {
         allCatalogSnapshotRef.current = null;
+        metadataResumeGenerationRef.current += 1;
         latestFetchIdRef.current += 1;
         appendInFlightRef.current = false;
         setLoading(false);
@@ -405,7 +407,32 @@ export function useModelsCatalogData({
         setHasMore(preservedCatalog.hasMore);
         setNextCursor(preservedCatalog.nextCursor);
         setFetchState(preservedCatalog.fetchState);
-        return;
+        const session = catalogSearchSessionRef.current;
+        const resumeGeneration = ++metadataResumeGenerationRef.current;
+        let cancelled = false;
+        if (session) {
+          void modelCatalogService.resumeMetadataResolution(preservedCatalog.models, session, ({
+            models: updatedModels,
+            removedModelIds,
+          }) => {
+            if (cancelled || resumeGeneration !== metadataResumeGenerationRef.current) {
+              return;
+            }
+            const replacements = new Map(updatedModels.map((model) => [model.id, model]));
+            const removals = new Set(removedModelIds);
+            setModels((current) => current.flatMap((model) => (
+              removals.has(model.id) ? [] : [replacements.get(model.id) ?? model]
+            )));
+          }).catch((error) => {
+            if (!cancelled && resumeGeneration === metadataResumeGenerationRef.current) {
+              setFetchState((current) => ({
+                ...current,
+                warningMessage: getModelCatalogErrorMessage(error),
+              }));
+            }
+          });
+        }
+        return () => { cancelled = true; };
       }
 
       setModels([]);
@@ -497,7 +524,7 @@ export function useModelsCatalogData({
       hasUserScrolledCatalogRef.current = false;
     }
 
-    void fetchModels(searchQuery, nextCursor, true);
+    return fetchModels(searchQuery, nextCursor, true);
   }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
 
   const handlePullToRefresh = useCallback(() => {
@@ -512,6 +539,7 @@ export function useModelsCatalogData({
     setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
 
     if (activeTab === 'all') {
+      metadataResumeGenerationRef.current += 1;
       catalogSearchSessionRef.current?.cancelPendingRequests('superseded');
       void fetchModels(searchQuery, null, false, true, true).finally(() => {
         setIsRefreshing(false);

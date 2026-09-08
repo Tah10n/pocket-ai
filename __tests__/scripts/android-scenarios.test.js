@@ -67,7 +67,7 @@ const {
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
-  findResourceIdClearOfBottomOverlay,
+  findResourceIdClearOfOverlays,
   findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
   hideChatQaEvidenceForVisualCapture,
@@ -108,6 +108,7 @@ const {
   resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
   selectScenarios,
+  scrollToResourceId,
   ScenarioSkipError,
   restoreLanguageAfterScenario,
   assertAttachmentPreviewRemovePreconditions,
@@ -4429,16 +4430,59 @@ describe('android-scenarios pack selection', () => {
     expect(findAnyNodeInSnapshot(snapshot, ['Visual Style', 'Визуальный стиль'], {
       visibleOnly: true,
     })).toBeNull();
-    expect(findResourceIdClearOfBottomOverlay(
+    expect(findResourceIdClearOfOverlays(
       snapshot,
       'settings-visual-style-container',
     )).toEqual(expect.objectContaining({
       resourceId: 'com.github.tah10n.pocketai.qa:id/settings-visual-style-container',
     }));
-    expect(findResourceIdClearOfBottomOverlay(
+    expect(findResourceIdClearOfOverlays(
       snapshot,
       'settings-theme-style-control',
     )).toEqual(expect.objectContaining({ clickable: true }));
+  });
+
+  it('rejects the theme mode tap reported beneath the floating Settings header on API 34', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2412]" />
+        <node resource-id="settings-theme-mode-control" bounds="[77,0][1004,132]" />
+        <node resource-id="settings-theme-mode-light" bounds="[92,9][391,117]" />
+        <node resource-id="settings-header" bounds="[0,96][1080,243]" />
+      </hierarchy>
+    `);
+
+    // Accessibility exposes both nodes as visible, although their tap centers hit chrome.
+    expect(findResourceIdInSnapshot(snapshot, 'settings-theme-mode-light', {
+      visibleOnly: true,
+    })).not.toBeNull();
+    expect(findResourceIdClearOfOverlays(snapshot, 'settings-theme-mode-control')).toBeNull();
+    expect(findResourceIdClearOfOverlays(snapshot, 'settings-theme-mode-light')).toBeNull();
+  });
+
+  it('scrolls a visible theme control below the Settings header before accepting it', async () => {
+    const snapshotAt = (bounds) => parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2412]" />
+        <node resource-id="settings-header" bounds="[0,96][1080,243]" />
+        <node resource-id="settings-theme-mode-control" bounds="${bounds}" />
+      </hierarchy>
+    `);
+    const covered = snapshotAt('[77,0][1004,132]');
+    const clear = snapshotAt('[77,450][1004,582]');
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(covered)
+      .mockReturnValue(clear);
+    const ctx = { serial: 'device-1', swipeDown: jest.fn(), swipeUp: jest.fn() };
+
+    const control = await scrollToResourceId(ctx, 'settings-theme-mode-control', {
+      adbPath: 'adb', createSnapshot,
+    });
+
+    expect(control.bounds.centerY).toBe(516);
+    expect(ctx.swipeDown).toHaveBeenCalledTimes(1);
+    expect(ctx.swipeUp).not.toHaveBeenCalled();
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
   });
 
   it('scrolls the visual-style control clear after its container becomes visible', async () => {

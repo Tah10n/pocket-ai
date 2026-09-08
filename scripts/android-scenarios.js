@@ -2715,7 +2715,7 @@ async function selectThemeMode(ctx, mode) {
     timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS,
   });
   await tapVisibleResource(ctx, resourceId, { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS });
-  const { match } = await waitForSnapshotMatch(
+  const { match, snapshot } = await waitForSnapshotMatch(
     resolveAdbPath(),
     ctx.serial,
     { timeoutMs: SETTINGS_ROUTE_TIMEOUT_MS, pollIntervalMs: 250 },
@@ -2725,7 +2725,7 @@ async function selectThemeMode(ctx, mode) {
     }
   );
   if (!match) {
-    throw new Error(`Theme mode ${mode} did not become selected.`);
+    throw new Error(withUiSnapshotSummary(snapshot, `Theme mode ${mode} did not become selected.`));
   }
 }
 
@@ -2752,9 +2752,16 @@ async function openThemeStyleSheet(ctx, options = {}) {
   });
 }
 
-function findResourceIdClearOfBottomOverlay(snapshot, resourceId) {
+function findResourceIdClearOfOverlays(snapshot, resourceId) {
   const node = findResourceIdInSnapshot(snapshot, resourceId, { visibleOnly: true });
   if (!node || !isBoundsClearOfBottomOverlay(node.bounds, snapshot.viewportBounds)) {
+    return null;
+  }
+
+  // Settings retains its scroll position when switching to Glass. Accessibility can
+  // still expose the mode control beneath the floating header (or status bar).
+  const header = findResourceIdInSnapshot(snapshot, "settings-header", { visibleOnly: true });
+  if (header?.bounds && node.bounds.centerY <= header.bounds.bottom) {
     return null;
   }
   return node;
@@ -2764,10 +2771,11 @@ async function scrollToResourceId(ctx, resourceId, options = {}) {
   const timeoutMs = options.timeoutMs ?? 20_000;
   const maxSwipesDown = options.maxSwipesDown ?? 3;
   const maxSwipesUp = options.maxSwipesUp ?? 10;
-  const adbPath = resolveAdbPath();
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
   const startedAt = Date.now();
-  const findNow = () => findResourceIdClearOfBottomOverlay(
-    createUiSnapshot(adbPath, ctx.serial),
+  const findNow = () => findResourceIdClearOfOverlays(
+    createSnapshot(adbPath, ctx.serial),
     resourceId
   );
 
@@ -2795,7 +2803,7 @@ async function scrollToResourceId(ctx, resourceId, options = {}) {
   throw new Error(withUiSummary(
     adbPath,
     ctx.serial,
-    `Timed out waiting for resource id "${resourceId}" outside the bottom overlay.`
+    `Timed out waiting for resource id "${resourceId}" outside the header and bottom overlays.`
   ));
 }
 
@@ -10884,7 +10892,7 @@ module.exports = {
   findSettledDocumentCancellationSendAction,
   findNodeInSnapshot,
   findResourceIdInSnapshot,
-  findResourceIdClearOfBottomOverlay,
+  findResourceIdClearOfOverlays,
   hideChatQaEvidenceForVisualCapture,
   hasConversationHistoryStartAnchor,
   isBoundsClearOfBottomOverlay,
@@ -10913,6 +10921,7 @@ module.exports = {
   resolveSelectedBottomTabDestination,
   pickClosestNodePair,
   selectScenarios,
+  scrollToResourceId,
   parseCliOptions,
   readAndroidProcessRssBytes,
   summarizePocketAnydocSessionQaLog,

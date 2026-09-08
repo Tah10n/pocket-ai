@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -50,11 +50,11 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: aarch64-linux-android, x86_64-linux-android
       - run: cargo install cargo-ndk --version 4.1.2 --locked
@@ -82,7 +82,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
       - run: npm ci

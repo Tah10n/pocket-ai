@@ -24,6 +24,7 @@ type RestorableCatalogSnapshot = {
   hasMore: boolean;
   nextCursor: string | null;
   fetchState: FetchState;
+  requiresRevalidation: boolean;
 };
 
 type UseModelsCatalogDataInput = {
@@ -55,6 +56,7 @@ export function useModelsCatalogData({
   const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [requiresRevalidation, setRequiresRevalidation] = useState(true);
   const [tokenRevision, setTokenRevision] = useState(0);
   const [isTokenStateHydrated, setIsTokenStateHydrated] = useState(false);
   const [hasTokenConfigured, setHasTokenConfigured] = useState(
@@ -198,6 +200,7 @@ export function useModelsCatalogData({
         }
 
         setHasMore(result.hasMore);
+        setRequiresRevalidation(result.isFallback === true || Boolean(result.warning));
         setNextCursor(result.nextCursor);
         setModels((current) => (
           append
@@ -220,6 +223,7 @@ export function useModelsCatalogData({
         if (append) {
           setFetchState((current) => ({ ...current, loadMoreError: message }));
         } else {
+          setRequiresRevalidation(true);
           if (!preserveExistingResults) {
             setModels([]);
             setHasMore(false);
@@ -379,8 +383,9 @@ export function useModelsCatalogData({
       hasMore,
       nextCursor,
       fetchState: { warningMessage, loadMoreError },
+      requiresRevalidation,
     };
-  }, [activeTab, dataSessionIdentity, hasMore, loadMoreError, models, nextCursor, sessionIdentity, warningMessage]);
+  }, [activeTab, dataSessionIdentity, hasMore, loadMoreError, models, nextCursor, requiresRevalidation, sessionIdentity, warningMessage]);
 
   useLayoutEffect(() => {
     if (!shouldBootstrapCatalogSession(activeTab, discoveryMode, isTokenStateHydrated)) {
@@ -402,8 +407,18 @@ export function useModelsCatalogData({
     setIsRefreshing(false);
 
     if (activeTab === 'all') {
-      if (preservedCatalog) {
+      // Keep successful pages, but retry failed/offline results and cursor buffers
+      // that the service has expired or evicted while this tab was inactive.
+      if (preservedCatalog && !preservedCatalog.requiresRevalidation
+        && modelCatalogService.isSearchCursorAvailable(searchQuery, {
+          cursor: preservedCatalog.nextCursor,
+          pageSize: MODELS_PAGE_SIZE,
+          sort: serverSort,
+          gated: filters.noTokenRequiredOnly ? false : undefined,
+          metadataResolution: 'deferred',
+        })) {
         setModels(preservedCatalog.models);
+        setRequiresRevalidation(false);
         setHasMore(preservedCatalog.hasMore);
         setNextCursor(preservedCatalog.nextCursor);
         setFetchState(preservedCatalog.fetchState);
@@ -436,6 +451,7 @@ export function useModelsCatalogData({
       }
 
       setModels([]);
+      setRequiresRevalidation(true);
       setHasMore(true);
       setNextCursor(null);
       setFetchState({ warningMessage: null, loadMoreError: null });
@@ -449,6 +465,7 @@ export function useModelsCatalogData({
 
       if (cachedResult) {
         setModels(cachedResult.models);
+        setRequiresRevalidation(Boolean(preservedCatalog) || cachedResult.isFallback === true);
         setHasMore(cachedResult.hasMore);
         setNextCursor(cachedResult.nextCursor);
       } else {
@@ -456,7 +473,7 @@ export function useModelsCatalogData({
       }
 
       const timer = setTimeout(() => {
-        void fetchModels(searchQuery, null, false, Boolean(cachedResult));
+        void fetchModels(searchQuery, null, false, Boolean(cachedResult), Boolean(preservedCatalog));
       }, cachedResult ? 0 : 400);
       return () => clearTimeout(timer);
     }
@@ -524,8 +541,20 @@ export function useModelsCatalogData({
       hasUserScrolledCatalogRef.current = false;
     }
 
+    if (!modelCatalogService.isSearchCursorAvailable(searchQuery, {
+      cursor: nextCursor,
+      pageSize: MODELS_PAGE_SIZE,
+      sort: serverSort,
+      gated: filters.noTokenRequiredOnly ? false : undefined,
+      metadataResolution: 'deferred',
+    })) {
+      metadataResumeGenerationRef.current += 1;
+      catalogSearchSessionRef.current?.cancelPendingRequests('superseded');
+      return fetchModels(searchQuery, null, false, true, true);
+    }
+
     return fetchModels(searchQuery, nextCursor, true);
-  }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
+  }, [activeTab, fetchModels, filters.noTokenRequiredOnly, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery, serverSort]);
 
   const handlePullToRefresh = useCallback(() => {
     if (loading || isRefreshing || isFetchingMore || appendInFlightRef.current) {

@@ -30,6 +30,7 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
     subscribeCacheInvalidations: jest.fn(() => jest.fn()),
     subscribeMetadataUpdates: jest.fn(() => jest.fn()),
     resumeMetadataResolution: jest.fn(),
+    isSearchCursorAvailable: jest.fn(),
   },
 }));
 
@@ -154,6 +155,7 @@ describe('useModelsCatalogData', () => {
     mockCatalogService.subscribeCacheInvalidations.mockImplementation(() => jest.fn());
     mockCatalogService.subscribeMetadataUpdates.mockImplementation(() => jest.fn());
     mockCatalogService.resumeMetadataResolution.mockResolvedValue(undefined);
+    mockCatalogService.isSearchCursorAvailable.mockReturnValue(true);
     mockCatalogService.createSearchSession.mockReturnValue(mockCatalogSearchSession);
     mockCatalogService.getLocalModels.mockResolvedValue([]);
     mockCatalogService.getCachedSearchResult.mockReturnValue({
@@ -468,6 +470,93 @@ describe('useModelsCatalogData', () => {
     expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(1);
     expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['rejection', 'warning', 'empty offline fallback', 'populated offline fallback'])(
+    'retries a retained %s when returning to All Models',
+    async (failure) => {
+      mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+      if (failure === 'rejection') {
+        mockCatalogService.searchModels.mockRejectedValueOnce(new Error('Network unavailable'));
+      } else {
+        mockCatalogService.searchModels.mockResolvedValueOnce({
+          models: failure === 'populated offline fallback' ? [createModel('org/offline')] : [],
+          hasMore: false,
+          nextCursor: null,
+          ...(failure === 'warning'
+            ? { warning: Object.assign(new Error('Network unavailable'), { code: 'network' as const }) }
+            : { isFallback: true }),
+        });
+      }
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      await act(async () => { jest.advanceTimersByTime(400); });
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+
+      rerenderHook({ activeTab: 'downloaded' });
+      await flushMicrotasks();
+      rerenderHook({ activeTab: 'all' });
+      await act(async () => { jest.advanceTimersByTime(400); });
+
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+      expect(mockCatalogService.searchModels).toHaveBeenLastCalledWith('phi', expect.objectContaining({
+        cursor: null, forceRefresh: true,
+      }), mockCatalogSearchSession);
+      expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/second-model']);
+      expect(getCurrentValue()?.warningMessage).toBeNull();
+      expect(getCurrentValue()?.hasMore).toBe(true);
+    },
+  );
+
+  it('restores a successful empty result without replaying its search', async () => {
+    mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+    mockCatalogService.searchModels.mockResolvedValueOnce({ models: [], hasMore: false, nextCursor: null });
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+    await act(async () => { jest.advanceTimersByTime(400); });
+    rerenderHook({ activeTab: 'downloaded' });
+    await flushMicrotasks();
+    rerenderHook({ activeTab: 'all' });
+    await act(async () => { jest.advanceTimersByTime(400); });
+
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+    expect(getCurrentValue()?.models).toEqual([]);
+    expect(getCurrentValue()?.hasMore).toBe(false);
+    expect(getCurrentValue()?.warningMessage).toBeNull();
+  });
+
+  it.each(['return from Downloaded', 'load more'])(
+    'refreshes the first page when a buffered cursor expires before %s',
+    async (action) => {
+      const cursor = 'catalog-buffer:anon:0:1';
+      mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+      mockCatalogService.searchModels.mockResolvedValueOnce({
+        models: [createModel('org/old')], hasMore: true, nextCursor: cursor,
+      });
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      await act(async () => { jest.advanceTimersByTime(400); });
+      mockCatalogService.isSearchCursorAvailable.mockReturnValue(false);
+      if (action === 'return from Downloaded') {
+        rerenderHook({ activeTab: 'downloaded' });
+        await flushMicrotasks();
+        rerenderHook({ activeTab: 'all' });
+        await act(async () => { jest.advanceTimersByTime(400); });
+      } else {
+        await act(async () => { await getCurrentValue()?.handleLoadMore(); });
+      }
+
+      expect(mockCatalogService.isSearchCursorAvailable).toHaveBeenCalledWith('phi', {
+        cursor, pageSize: 8, sort: 'downloads', gated: undefined, metadataResolution: 'deferred',
+      });
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+      expect(mockCatalogService.searchModels).toHaveBeenLastCalledWith('phi', expect.objectContaining({
+        cursor: null, forceRefresh: true,
+      }), mockCatalogSearchSession);
+      expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/second-model']);
+      expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-3');
+      expect(getCurrentValue()?.loadMoreError).toBeNull();
+    },
+  );
 
   it('resumes pending metadata on retained pages and ignores a detached restoration', async () => {
     const summary = { ...createModel('org/pending'), size: null, fitsInRam: null, requiresTreeProbe: true };

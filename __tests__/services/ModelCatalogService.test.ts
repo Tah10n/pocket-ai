@@ -2937,6 +2937,16 @@ describe('ModelCatalogService', () => {
     expect(result.hasMore).toBe(false);
     expect(result.warning).toBeInstanceOf(ModelCatalogError);
     expect(result.warning?.code).toBe('rate_limited');
+    expect(result.isFallback).toBe(true);
+  });
+
+  it('marks a warning-free empty offline catalog as a fallback', async () => {
+    (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
+    global.fetch = jest.fn();
+    const result = await modelCatalogService.searchModels('offline-empty');
+    expect(result).toMatchObject({ models: [], hasMore: false, nextCursor: null, isFallback: true });
+    expect(result.warning).toBeUndefined();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it('reuses the persisted first-page catalog cache for offline cold starts', async () => {
@@ -2949,6 +2959,7 @@ describe('ModelCatalogService', () => {
 
     const initialResult = await modelCatalogService.searchModels('phi', { pageSize: 10 });
     expect(initialResult.models[0].id).toBe('org/persisted-catalog-model');
+    expect(initialResult.isFallback).toBeUndefined();
 
     (hardwareListenerService.getCurrentStatus as jest.Mock).mockReturnValue({ isConnected: false });
     const coldStartService = new ModelCatalogService();
@@ -2957,6 +2968,7 @@ describe('ModelCatalogService', () => {
     coldStartService.dispose();
 
     expect(offlineResult.models[0].id).toBe('org/persisted-catalog-model');
+    expect(offlineResult.isFallback).toBe(true);
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -3252,10 +3264,12 @@ describe('ModelCatalogService', () => {
     const cachedFirstPage = modelCatalogService.getCachedSearchResult('phi', { pageSize: 10 });
     expect(cachedFirstPage?.hasMore).toBe(false);
     expect(cachedFirstPage?.nextCursor).toBeNull();
+    expect(cachedFirstPage?.isFallback).toBe(true);
 
     const offlineResult = await modelCatalogService.searchModels('phi', { pageSize: 10 });
     expect(offlineResult.hasMore).toBe(false);
     expect(offlineResult.nextCursor).toBeNull();
+    expect(offlineResult.isFallback).toBe(true);
 
     await expect(modelCatalogService.searchModels('phi', {
       cursor: 'https://huggingface.co/api/models?search=phi%20gguf&limit=20&cursor=page-2',
@@ -5730,6 +5744,85 @@ describe('ModelCatalogService', () => {
     expect(secondPage.hasMore).toBe(false);
     expect(secondPage.nextCursor).toBeNull();
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  describe('retained search cursor availability', () => {
+    const options = { pageSize: 2, sort: 'downloads' as const, gated: false };
+
+    async function createBufferedPage() {
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        headers: { get: jest.fn(() => null) },
+        json: async () => [makeRepo('org/buffer-a'), makeRepo('org/buffer-b'), makeRepo('org/buffer-c')],
+      })) as jest.Mock;
+      const result = await modelCatalogService.searchModels('phi', options);
+      expect(result.nextCursor).toMatch(/^catalog-buffer:/);
+      return { ...options, cursor: result.nextCursor };
+    }
+
+    it('accepts initial and trusted remote cursors without fetching or accepting invalid URLs', () => {
+      global.fetch = jest.fn();
+      expect(modelCatalogService.isSearchCursorAvailable('phi', {})).toBe(true);
+      expect(modelCatalogService.isSearchCursorAvailable('phi', {
+        cursor: 'https://huggingface.co/api/models?cursor=next',
+      })).toBe(true);
+      for (const cursor of ['catalog-buffer:invalid', 'https://example.com/api/models?cursor=next']) {
+        expect(modelCatalogService.isSearchCursorAvailable('phi', { cursor })).toBe(false);
+      }
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('requires the complete buffered query scope and does not consume or touch the page', async () => {
+      const bufferedOptions = await createBufferedPage();
+      const internals = modelCatalogService as any;
+      const before = [...internals.searchCache.entries()];
+      const requests = (global.fetch as jest.Mock).mock.calls.length;
+      expect(modelCatalogService.isSearchCursorAvailable('phi', bufferedOptions)).toBe(true);
+      expect(modelCatalogService.isSearchCursorAvailable('llama', bufferedOptions)).toBe(false);
+      for (const changedOptions of [
+        { pageSize: 8 },
+        { sort: 'likes' as const },
+        { gated: undefined },
+        { metadataResolution: 'deferred' as const },
+      ]) {
+        expect(modelCatalogService.isSearchCursorAvailable('phi', {
+          ...bufferedOptions, ...changedOptions,
+        })).toBe(false);
+      }
+      expect([...internals.searchCache.entries()]).toEqual(before);
+      expect(global.fetch).toHaveBeenCalledTimes(requests);
+      expect((await modelCatalogService.searchModels('phi', bufferedOptions)).models).toHaveLength(1);
+    });
+
+    it('rejects the exact expiry boundary and evicted pages without refreshing their age', async () => {
+      const now = jest.spyOn(Date, 'now').mockReturnValue(10_000);
+      try {
+        const bufferedOptions = await createBufferedPage();
+        now.mockReturnValue(10_000 + 20 * 60 * 1000 - 1);
+        expect(modelCatalogService.isSearchCursorAvailable('phi', bufferedOptions)).toBe(true);
+        now.mockReturnValue(10_000 + 20 * 60 * 1000);
+        expect(modelCatalogService.isSearchCursorAvailable('phi', bufferedOptions)).toBe(false);
+        await expect(modelCatalogService.searchModels('phi', bufferedOptions)).rejects.toThrow('Buffered catalog page expired');
+        now.mockReturnValue(10_000);
+        expect(modelCatalogService.isSearchCursorAvailable('phi', bufferedOptions)).toBe(false);
+      } finally {
+        now.mockRestore();
+      }
+    });
+
+    it('keeps anonymous buffers usable with a token but rejects obsolete authenticated buffers', async () => {
+      const anonymousOptions = await createBufferedPage();
+      await huggingFaceTokenService.saveToken('hf_cursor_token_a');
+      expect(modelCatalogService.isSearchCursorAvailable('phi', anonymousOptions)).toBe(true);
+      const authenticatedOptions = await createBufferedPage();
+      expect(authenticatedOptions.cursor).toMatch(/^catalog-buffer:auth:/);
+      expect(modelCatalogService.isSearchCursorAvailable('phi', authenticatedOptions)).toBe(true);
+      await huggingFaceTokenService.saveToken('hf_cursor_token_b');
+      expect(modelCatalogService.isSearchCursorAvailable('phi', authenticatedOptions)).toBe(false);
+      expect(modelCatalogService.isSearchCursorAvailable('phi', anonymousOptions)).toBe(true);
+      modelCatalogService.clearCache('manual');
+      expect(modelCatalogService.isSearchCursorAvailable('phi', anonymousOptions)).toBe(false);
+    });
   });
 
   it('serves buffered cursor pages even after the normal cache TTL expires', async () => {

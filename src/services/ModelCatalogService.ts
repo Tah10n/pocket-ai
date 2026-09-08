@@ -172,6 +172,7 @@ export interface ModelCatalogSearchResult {
   hasMore: boolean;
   nextCursor: string | null;
   warning?: ModelCatalogError;
+  isFallback?: boolean;
 }
 
 export type ModelCatalogSearchOptions = {
@@ -903,12 +904,12 @@ export class ModelCatalogService {
             memoryFitContext,
             metadataResolution,
           );
-          return {
+          return this.coerceCachedResultForConnectivity({
             ...this.sanitizeSearchResultCursor(currentCached.result),
             models: metadataResolution === 'deferred'
               ? this.copySizeResolutionStates(filteredCachedModels, mergedCachedModels)
               : mergedCachedModels,
-          };
+          });
         }
       }
     }
@@ -1453,6 +1454,43 @@ export class ModelCatalogService {
     this.modelSnapshotCache.set(cacheKey, model);
   }
 
+  /** Check retained pagination without changing cache state or starting requests. */
+  public isSearchCursorAvailable(query: string, options: ModelCatalogSearchOptions): boolean {
+    const rawCursor = options.cursor ?? null;
+    const cursor = this.normalizeCatalogSearchCursor(rawCursor);
+    if (this.isDisposed || (rawCursor !== null && cursor === null)) {
+      return false;
+    }
+
+    const authScope = this.getBufferedCursorAuthScope(cursor);
+    if (authScope === null) {
+      return true;
+    }
+
+    const hasAuthToken = authScope === 'auth';
+    const authVersion = hasAuthToken ? this.authCacheVersion : 0;
+    if (
+      (hasAuthToken && !huggingFaceTokenService.getCachedState().hasToken)
+      || Number(cursor!.split(':')[2]) !== authVersion
+    ) {
+      return false;
+    }
+
+    const cacheKey = this.buildMemorySearchCacheKey(
+      this.normalizeQuery(query),
+      cursor,
+      options.pageSize ?? 20,
+      options.sort ?? null,
+      hasAuthToken,
+      options.gated,
+      options.metadataResolution ?? 'blocking',
+      authVersion,
+    );
+    const cached = this.searchCache.get(cacheKey);
+    return cached?.isBufferedCursor === true
+      && Date.now() - cached.timestamp < BUFFERED_SEARCH_CACHE_MAX_AGE;
+  }
+
   public getCachedSearchResult(
     query: string = 'gguf',
     options?: ModelCatalogSearchOptions,
@@ -1559,6 +1597,7 @@ export class ModelCatalogService {
       ...result,
       hasMore: false,
       nextCursor: null,
+      isFallback: true,
     };
   }
 
@@ -2261,11 +2300,11 @@ export class ModelCatalogService {
       this.upsertModelSnapshots(merged, 'anon');
     }
 
-    return {
+    return this.toNonPaginatedFallback({
       models: merged,
       hasMore: false,
       nextCursor: null,
-    };
+    });
   }
 
   private async getTotalMemory(): Promise<number | null> {

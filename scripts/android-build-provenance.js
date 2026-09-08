@@ -110,7 +110,7 @@ const ANDROID_MODULE_GENERATED_INPUT_DIRECTORIES = new Set([
 const ANDROID_GRADLE_GENERATED_INPUT_PATTERN =
   /^android\/app\/src\/main\/assets\/ggml-hexagon\/libggml-htp-[^/]*\.so$/u;
 const WINDOWS_NINJA_LEGACY_MAX_PATH_CHARS = 259;
-const WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS = 214;
+const WINDOWS_NATIVE_BUILD_DESCENDANT_BUDGET_CHARS = 215;
 const ANDROID_NATIVE_BUILD_INTERMEDIATE_NAMES = Object.freeze([
   ".cxx",
   ".externalNativeBuild",

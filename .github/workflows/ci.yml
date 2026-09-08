@@ -32,7 +32,7 @@ jobs:
 
       - name: Detect release-sensitive native changes
         id: scope
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             native:
@@ -123,7 +123,7 @@ jobs:
           cache: npm
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -198,7 +198,27 @@ jobs:
           targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
 
       - name: Install dependencies
-        run: npm ci
+        shell: bash
+        run: |
+          install_log="$(mktemp)"
+          trap 'rm -f "$install_log"' EXIT
+          # llama.rn downloads outside npm's fetch retry handling. Retry transient
+          # release-host errors without skipping postinstall or checksum checks.
+          for attempt in 1 2 3; do
+            echo "Installing dependencies (attempt $attempt/3)"
+            if npm ci > "$install_log" 2>&1; then
+              cat "$install_log"
+              exit 0
+            else
+              install_status=$?
+            fi
+            cat "$install_log"
+            if [[ "$attempt" -eq 3 ]] || ! grep -Eq 'llama\.rn: Download failed for https://github\.com/mybigday/llama\.rn/releases/download/[^[:space:]]+ with status code (429|5[0-9]{2})([^0-9]|$)' "$install_log"; then
+              exit "$install_status"
+            fi
+            echo "::warning::Transient llama.rn native artifact download failure; retrying npm ci."
+            sleep "$((attempt * 15))"
+          done
 
       - name: Build AnyDoc iOS
         run: |
@@ -284,7 +304,7 @@ jobs:
           cache: npm
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17

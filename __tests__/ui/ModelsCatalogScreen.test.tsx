@@ -1,12 +1,15 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 import { ModelsCatalogScreen } from '../../src/ui/screens/ModelsCatalogScreen';
 
 let mockHoldDeferredCatalogSnapshot = false;
 let mockDeferredCatalogSnapshot: unknown;
 let mockModelsListStates: string[] = [];
+let mockModelsListScrollSnapshotRefs: unknown[] = [];
 const mockChangeStaleFilters = jest.fn();
 const mockOpenStaleRemoteModel = jest.fn();
+const mockRequestAndroidLiquidGlassSceneRefresh = jest.fn();
 
 jest.mock('react', () => {
   const actualReact = jest.requireActual('react');
@@ -51,6 +54,7 @@ jest.mock('../../src/components/ui/ScreenShell', () => {
   const { View } = require('react-native');
   return {
     joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
+    useAndroidLiquidGlassSceneRefresh: () => mockRequestAndroidLiquidGlassSceneRefresh,
     ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => mockReact.createElement(View, props, children),
     ScreenRoot: ({ children, ...props }: any) => mockReact.createElement(
       View,
@@ -65,9 +69,13 @@ jest.mock('../../src/components/ui/SearchHeader', () => {
   const mockReact = require('react');
   const { Pressable, Text, View } = require('react-native');
   return {
-    SearchHeader: ({ activeTab, onOpenStorage, onSearchChange, onTabChange }: any) => mockReact.createElement(
+    SearchHeader: ({ activeTab, androidContentBlurTargetRef, floatingControls, onControlsContentOffsetChange, onOpenStorage, onSearchChange, onTabChange }: any) => mockReact.createElement(
       View,
-      null,
+      {
+        testID: 'models-search-header',
+        androidContentBlurTargetRef,
+        onLayout: (event: any) => onControlsContentOffsetChange?.(event.nativeEvent.layout.height),
+      },
       mockReact.createElement(Text, { testID: 'models-active-tab' }, activeTab),
       mockReact.createElement(
         Pressable,
@@ -99,6 +107,7 @@ jest.mock('../../src/components/ui/SearchHeader', () => {
         { testID: 'open-storage', onPress: () => onOpenStorage?.() },
         mockReact.createElement(Text, null, 'Open storage'),
       ),
+      floatingControls,
     ),
   };
 });
@@ -107,12 +116,13 @@ jest.mock('../../src/components/models/ModelsList', () => {
   const mockReact = require('react');
   const { Pressable, Text, View } = require('react-native');
   return {
-    ModelsList: ({ activeTab, androidContentBlurTargetRef, renderContentContainer, searchQuery, searchSessionKey }: any) => {
+    ModelsList: ({ activeTab, androidContentBlurTargetRef, catalogContentTopOffset, catalogScrollSnapshotRef, renderContentContainer, searchQuery, searchSessionKey }: any) => {
       const state = `${activeTab}:${searchQuery}:${searchSessionKey}`;
       mockModelsListStates.push(state);
+      mockModelsListScrollSnapshotRefs.push(catalogScrollSnapshotRef);
       const content = mockReact.createElement(
         View,
-        { testID: 'models-list-props', androidContentBlurTargetRef },
+        { testID: 'models-list-props', androidContentBlurTargetRef, catalogContentTopOffset },
         mockReact.createElement(Text, { testID: 'models-list-state' }, state),
         mockReact.createElement(
           Pressable,
@@ -129,7 +139,12 @@ jest.mock('../../src/components/models/ModelsList', () => {
       return mockReact.createElement(
         mockReact.Fragment,
         null,
-        renderContentContainer ? renderContentContainer(content) : content,
+        renderContentContainer
+          ? renderContentContainer(
+            content,
+            mockReact.createElement(View, { testID: 'models-floating-filter-row' }),
+          )
+          : content,
         mockReact.createElement(View, { testID: 'models-list-overlay' }),
       );
     },
@@ -153,8 +168,10 @@ describe('ModelsCatalogScreen', () => {
     mockHoldDeferredCatalogSnapshot = false;
     mockDeferredCatalogSnapshot = undefined;
     mockModelsListStates = [];
+    mockModelsListScrollSnapshotRefs = [];
     mockChangeStaleFilters.mockClear();
     mockOpenStaleRemoteModel.mockClear();
+    mockRequestAndroidLiquidGlassSceneRefresh.mockClear();
     mockPush.mockClear();
   });
 
@@ -165,13 +182,24 @@ describe('ModelsCatalogScreen', () => {
     expect(queryByTestId('models-catalog-content-blur-target')).toBeTruthy();
     expect(getByTestId('models-list-props').props.androidContentBlurTargetRef)
       .toBe(getByTestId('models-catalog-content-blur-target').props.blurTargetRef);
+    expect(getByTestId('models-search-header').props.androidContentBlurTargetRef)
+      .toBe(getByTestId('models-catalog-content-blur-target').props.blurTargetRef);
+    expect(getByTestId('models-floating-filter-row')).toBeTruthy();
+    expect(getByTestId('models-list-props').props.catalogContentTopOffset).toBe(152);
     expect(getByTestId('models-active-tab').props.children).toBe('downloaded');
     expect(getByTestId('models-list-state').props.children).toBe('downloaded::0');
+    const initialCatalogScrollSnapshotRef = mockModelsListScrollSnapshotRefs.at(-1);
 
     fireEvent.press(getByTestId('switch-to-all'));
 
     expect(getByTestId('models-active-tab').props.children).toBe('all');
     expect(getByTestId('models-list-state').props.children).toBe('all::0');
+    expect(mockModelsListScrollSnapshotRefs.at(-1)).toBe(initialCatalogScrollSnapshotRef);
+
+    fireEvent(getByTestId('models-search-header'), 'layout', {
+      nativeEvent: { layout: { height: 136 } },
+    });
+    expect(getByTestId('models-list-props').props.catalogContentTopOffset).toBe(136);
   });
 
   it('defaults invalid route params to all and resyncs when params change', () => {
@@ -216,9 +244,9 @@ describe('ModelsCatalogScreen', () => {
       .toBe(true);
   });
 
-  it('keeps a delayed All snapshot coherent and inert while switching to Downloaded', () => {
+  it('switches the tab chrome immediately without displaying the deferred previous tab', () => {
     mockInitialTab = 'all';
-    const { getByTestId, rerender } = render(<ModelsCatalogScreen />);
+    const { getByTestId, queryByTestId, rerender } = render(<ModelsCatalogScreen />);
 
     expect(getByTestId('models-list-state').props.children).toBe('all::0');
     expect(mockModelsListStates).toEqual(['all::0']);
@@ -228,6 +256,22 @@ describe('ModelsCatalogScreen', () => {
 
     expect(getByTestId('models-active-tab').props.children).toBe('downloaded');
     expect(getByTestId('models-list-state', { includeHiddenElements: true }).props.children).toBe('all::0');
+    expect(mockModelsListStates).toEqual(['all::0']);
+    expect(StyleSheet.flatten(
+      getByTestId('models-deferred-catalog-content', { includeHiddenElements: true }).props.style,
+    )).toEqual(expect.objectContaining({ display: 'none' }));
+    expect(getByTestId('models-deferred-catalog-content', { includeHiddenElements: true }).props).toEqual(expect.objectContaining({
+      accessibilityElementsHidden: true,
+      importantForAccessibility: 'no-hide-descendants',
+      pointerEvents: 'none',
+    }));
+    expect(getByTestId('models-tab-transition-placeholder')).toBeTruthy();
+    expect(getByTestId('models-floating-controls-transition-placeholder')).toBeTruthy();
+    expect(queryByTestId('models-floating-filter-row')).toBeNull();
+
+    fireEvent.press(getByTestId('search-mistral'));
+    expect(getByTestId('models-list-state', { includeHiddenElements: true }).props.children).toBe('all::0');
+    expect(mockModelsListStates).toEqual(['all::0']);
     expect(getByTestId('models-deferred-catalog-content', { includeHiddenElements: true }).props).toEqual(expect.objectContaining({
       accessibilityElementsHidden: true,
       importantForAccessibility: 'no-hide-descendants',
@@ -239,19 +283,34 @@ describe('ModelsCatalogScreen', () => {
     expect(mockChangeStaleFilters).not.toHaveBeenCalled();
     expect(mockOpenStaleRemoteModel).not.toHaveBeenCalled();
 
-    fireEvent.press(getByTestId('search-mistral'));
-    expect(getByTestId('models-list-state', { includeHiddenElements: true }).props.children).toBe('all::0');
-    expect(mockModelsListStates).toEqual(['all::0']);
-
     mockHoldDeferredCatalogSnapshot = false;
     rerender(<ModelsCatalogScreen />);
 
     expect(getByTestId('models-list-state').props.children).toBe('downloaded:mistral:1');
     expect(mockModelsListStates).toEqual(['all::0', 'downloaded:mistral:1']);
+    expect(queryByTestId('models-tab-transition-placeholder')).toBeNull();
+    expect(queryByTestId('models-floating-controls-transition-placeholder')).toBeNull();
+    expect(getByTestId('models-floating-filter-row')).toBeTruthy();
     expect(getByTestId('models-deferred-catalog-content').props).toEqual(expect.objectContaining({
       accessibilityElementsHidden: false,
       importantForAccessibility: 'auto',
       pointerEvents: 'auto',
     }));
+  });
+
+  it('refreshes the Android liquid glass scene at both tab transition boundaries', () => {
+    mockInitialTab = 'all';
+    const { getByTestId, rerender } = render(<ModelsCatalogScreen />);
+    mockRequestAndroidLiquidGlassSceneRefresh.mockClear();
+    mockHoldDeferredCatalogSnapshot = true;
+
+    fireEvent.press(getByTestId('switch-to-downloaded'));
+
+    expect(mockRequestAndroidLiquidGlassSceneRefresh).toHaveBeenCalledTimes(1);
+
+    mockHoldDeferredCatalogSnapshot = false;
+    rerender(<ModelsCatalogScreen />);
+
+    expect(mockRequestAndroidLiquidGlassSceneRefresh).toHaveBeenCalledTimes(2);
   });
 });

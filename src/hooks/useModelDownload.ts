@@ -55,8 +55,8 @@ export function useModelDownload() {
           return;
         }
 
-        const canStartForegroundNotifications = await notificationService.canStartForegroundServiceNotifications();
-        if (canStartForegroundNotifications || hasShownNotificationsWarning) {
+        const userNotificationsEnabled = await notificationService.areUserNotificationsEnabled();
+        if (userNotificationsEnabled || hasShownNotificationsWarning) {
           queueDownload();
           return;
         }

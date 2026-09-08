@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Modal } from 'react-native';
+import { Alert, KeyboardAvoidingView, Modal, Platform } from 'react-native';
 import { FlashList } from '@shopify/flash-list';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -218,7 +218,7 @@ export function PresetManagerScreen() {
                 )}
             />
 
-            <ScreenContent className="flex-1 pt-2">
+            <ScreenContent testID="preset-manager-content" className="flex-1" topSpacing="default">
                 <FlashList
                     data={presets}
                     keyExtractor={(item) => item.id}
@@ -252,47 +252,55 @@ export function PresetManagerScreen() {
                         ) : undefined}
                     />
 
-                    <ScreenContent className="flex-1 pt-2">
-                        <ScrollView
-                            className="flex-1"
-                            showsVerticalScrollIndicator={false}
-                            keyboardShouldPersistTaps="handled"
-                            contentContainerStyle={{ flexGrow: 1 }}
-                        >
-                            <Box className="flex-1 pb-2">
-                                <ScreenTextField
-                                    label={t('presets.nameLabel')}
-                                    size="prominent"
-                                    placeholder={t('presets.namePlaceholder')}
-                                    testID="preset-editor-name"
-                                    value={draftName}
-                                    onChangeText={setDraftName}
-                                />
+                    <KeyboardAvoidingView
+                        testID="preset-editor-keyboard-boundary"
+                        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                        style={{ flex: 1 }}
+                    >
+                        <ScreenContent testID="preset-editor-content" className="flex-1" topSpacing="default">
+                            <ScrollView
+                                testID="preset-editor-scroll"
+                                className="flex-1"
+                                showsVerticalScrollIndicator={false}
+                                keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+                                keyboardShouldPersistTaps="handled"
+                                contentContainerStyle={{ flexGrow: 1 }}
+                            >
+                                <Box className="flex-1 pb-2">
+                                    <ScreenTextField
+                                        label={t('presets.nameLabel')}
+                                        size="prominent"
+                                        placeholder={t('presets.namePlaceholder')}
+                                        testID="preset-editor-name"
+                                        value={draftName}
+                                        onChangeText={setDraftName}
+                                    />
 
-                                <ScreenTextField
-                                    label={t('presets.systemPromptLabel')}
-                                    containerClassName="mt-5 flex-1"
-                                    fieldClassName="flex-1"
-                                    size="prominentMultiline"
-                                    placeholder={t('presets.systemPromptPlaceholder')}
-                                    testID="preset-editor-prompt"
-                                    value={draftPrompt}
-                                    onChangeText={setDraftPrompt}
-                                />
+                                    <ScreenTextField
+                                        label={t('presets.systemPromptLabel')}
+                                        containerClassName="mt-5 flex-1"
+                                        fieldClassName="flex-1"
+                                        size="prominentMultiline"
+                                        placeholder={t('presets.systemPromptPlaceholder')}
+                                        testID="preset-editor-prompt"
+                                        value={draftPrompt}
+                                        onChangeText={setDraftPrompt}
+                                    />
+                                </Box>
+                            </ScrollView>
+                        </ScreenContent>
+
+                        <ScreenContent testID="preset-editor-footer" className="pt-4" includeBottomSafeArea respectFloatingHeader={false}>
+                            <Box className="flex-row gap-3">
+                                <Button action="primary" className="flex-1" testID="preset-editor-save" onPress={handleSaveAndActivate}>
+                                    <ButtonText>{t('presets.saveAndActivate')}</ButtonText>
+                                </Button>
+                                <Button action="secondary" className="flex-1" testID="preset-editor-cancel" onPress={closeEditor}>
+                                    <ButtonText>{t('common.cancel')}</ButtonText>
+                                </Button>
                             </Box>
-                        </ScrollView>
-                    </ScreenContent>
-
-                    <ScreenContent className="pt-4" includeBottomSafeArea>
-                        <Box className="flex-row gap-3">
-                            <Button action="primary" className="flex-1" testID="preset-editor-save" onPress={handleSaveAndActivate}>
-                                <ButtonText>{t('presets.saveAndActivate')}</ButtonText>
-                            </Button>
-                            <Button action="secondary" className="flex-1" testID="preset-editor-cancel" onPress={closeEditor}>
-                                <ButtonText>{t('common.cancel')}</ButtonText>
-                            </Button>
-                        </Box>
-                    </ScreenContent>
+                        </ScreenContent>
+                    </KeyboardAvoidingView>
                 </ScreenRoot>
             </Modal>
         </ScreenRoot>

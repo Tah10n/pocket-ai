@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   type CatalogSearchSession,
   type CatalogServerSort,
@@ -16,6 +16,15 @@ import { uniqueByKey } from '@/utils/uniqueBy';
 type FetchState = {
   warningMessage: string | null;
   loadMoreError: string | null;
+};
+
+type RestorableCatalogSnapshot = {
+  sessionIdentity: string;
+  models: ModelMetadata[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  fetchState: FetchState;
+  requiresRevalidation: boolean;
 };
 
 type UseModelsCatalogDataInput = {
@@ -47,6 +56,7 @@ export function useModelsCatalogData({
   const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [requiresRevalidation, setRequiresRevalidation] = useState(true);
   const [tokenRevision, setTokenRevision] = useState(0);
   const [isTokenStateHydrated, setIsTokenStateHydrated] = useState(false);
   const [hasTokenConfigured, setHasTokenConfigured] = useState(
@@ -58,6 +68,7 @@ export function useModelsCatalogData({
     loadMoreError: null,
   });
   const latestFetchIdRef = useRef(0);
+  const metadataResumeGenerationRef = useRef(0);
   const catalogSearchSessionRef = useRef<CatalogSearchSession | null>(null);
   const appendInFlightRef = useRef(false);
   const lastAutoLoadCursorRef = useRef<string | null>(null);
@@ -100,6 +111,8 @@ export function useModelsCatalogData({
     sort.field,
     tokenRevision,
   ]);
+  const [dataSessionIdentity, setDataSessionIdentity] = useState(sessionIdentity);
+  const allCatalogSnapshotRef = useRef<RestorableCatalogSnapshot | null>(null);
 
   const refreshDownloadedModels = useCallback(() => {
     if (activeTab !== 'downloaded') {
@@ -118,6 +131,7 @@ export function useModelsCatalogData({
   }, [activeTab]);
 
   const requestCatalogRefresh = useCallback(() => {
+    allCatalogSnapshotRef.current = null;
     setCacheRefreshRevision((current) => current + 1);
   }, []);
 
@@ -186,6 +200,7 @@ export function useModelsCatalogData({
         }
 
         setHasMore(result.hasMore);
+        setRequiresRevalidation(result.isFallback === true || Boolean(result.warning));
         setNextCursor(result.nextCursor);
         setModels((current) => (
           append
@@ -208,6 +223,7 @@ export function useModelsCatalogData({
         if (append) {
           setFetchState((current) => ({ ...current, loadMoreError: message }));
         } else {
+          setRequiresRevalidation(true);
           if (!preserveExistingResults) {
             setModels([]);
             setHasMore(false);
@@ -249,6 +265,8 @@ export function useModelsCatalogData({
   useEffect(() => {
     return modelCatalogService.subscribeCacheInvalidations((_revision, source) => {
       if (source === 'manual') {
+        allCatalogSnapshotRef.current = null;
+        metadataResumeGenerationRef.current += 1;
         latestFetchIdRef.current += 1;
         appendInFlightRef.current = false;
         setLoading(false);
@@ -352,6 +370,24 @@ export function useModelsCatalogData({
   ]);
 
   useEffect(() => {
+    const hasRestorableState = models.length > 0 || nextCursor !== null || !hasMore;
+    // A session change commits before its replacement data. Only save data owned
+    // by this render's session, rather than relabeling the previous render's data.
+    if (activeTab !== 'all' || dataSessionIdentity !== sessionIdentity || !hasRestorableState) {
+      return;
+    }
+
+    allCatalogSnapshotRef.current = {
+      sessionIdentity,
+      models,
+      hasMore,
+      nextCursor,
+      fetchState: { warningMessage, loadMoreError },
+      requiresRevalidation,
+    };
+  }, [activeTab, dataSessionIdentity, hasMore, loadMoreError, models, nextCursor, requiresRevalidation, sessionIdentity, warningMessage]);
+
+  useLayoutEffect(() => {
     if (!shouldBootstrapCatalogSession(activeTab, discoveryMode, isTokenStateHydrated)) {
       return;
     }
@@ -361,15 +397,64 @@ export function useModelsCatalogData({
     appendInFlightRef.current = false;
     lastAutoLoadCursorRef.current = null;
     hasUserScrolledCatalogRef.current = false;
-    setModels([]);
-    setHasMore(activeTab === 'all');
-    setNextCursor(null);
+    const preservedCatalog = activeTab === 'all'
+      && allCatalogSnapshotRef.current?.sessionIdentity === sessionIdentity
+      ? allCatalogSnapshotRef.current
+      : null;
+    setDataSessionIdentity(sessionIdentity);
     setLoading(false);
     setIsFetchingMore(false);
-    setFetchState({ warningMessage: null, loadMoreError: null });
     setIsRefreshing(false);
 
     if (activeTab === 'all') {
+      // Keep successful pages, but retry failed/offline results and cursor buffers
+      // that the service has expired or evicted while this tab was inactive.
+      if (preservedCatalog && !preservedCatalog.requiresRevalidation
+        && modelCatalogService.isSearchCursorAvailable(searchQuery, {
+          cursor: preservedCatalog.nextCursor,
+          pageSize: MODELS_PAGE_SIZE,
+          sort: serverSort,
+          gated: filters.noTokenRequiredOnly ? false : undefined,
+          metadataResolution: 'deferred',
+        })) {
+        setModels(preservedCatalog.models);
+        setRequiresRevalidation(false);
+        setHasMore(preservedCatalog.hasMore);
+        setNextCursor(preservedCatalog.nextCursor);
+        setFetchState(preservedCatalog.fetchState);
+        const session = catalogSearchSessionRef.current;
+        const resumeGeneration = ++metadataResumeGenerationRef.current;
+        let cancelled = false;
+        if (session) {
+          void modelCatalogService.resumeMetadataResolution(preservedCatalog.models, session, ({
+            models: updatedModels,
+            removedModelIds,
+          }) => {
+            if (cancelled || resumeGeneration !== metadataResumeGenerationRef.current) {
+              return;
+            }
+            const replacements = new Map(updatedModels.map((model) => [model.id, model]));
+            const removals = new Set(removedModelIds);
+            setModels((current) => current.flatMap((model) => (
+              removals.has(model.id) ? [] : [replacements.get(model.id) ?? model]
+            )));
+          }).catch((error) => {
+            if (!cancelled && resumeGeneration === metadataResumeGenerationRef.current) {
+              setFetchState((current) => ({
+                ...current,
+                warningMessage: getModelCatalogErrorMessage(error),
+              }));
+            }
+          });
+        }
+        return () => { cancelled = true; };
+      }
+
+      setModels([]);
+      setRequiresRevalidation(true);
+      setHasMore(true);
+      setNextCursor(null);
+      setFetchState({ warningMessage: null, loadMoreError: null });
       const cachedResult = modelCatalogService.getCachedSearchResult(searchQuery, {
         cursor: null,
         pageSize: MODELS_PAGE_SIZE,
@@ -380,6 +465,7 @@ export function useModelsCatalogData({
 
       if (cachedResult) {
         setModels(cachedResult.models);
+        setRequiresRevalidation(Boolean(preservedCatalog) || cachedResult.isFallback === true);
         setHasMore(cachedResult.hasMore);
         setNextCursor(cachedResult.nextCursor);
       } else {
@@ -387,11 +473,15 @@ export function useModelsCatalogData({
       }
 
       const timer = setTimeout(() => {
-        void fetchModels(searchQuery, null, false, Boolean(cachedResult));
+        void fetchModels(searchQuery, null, false, Boolean(cachedResult), Boolean(preservedCatalog));
       }, cachedResult ? 0 : 400);
       return () => clearTimeout(timer);
     }
 
+    setModels([]);
+    setHasMore(false);
+    setNextCursor(null);
+    setFetchState({ warningMessage: null, loadMoreError: null });
     const fetchId = latestFetchIdRef.current + 1;
     latestFetchIdRef.current = fetchId;
     void modelCatalogService.getLocalModels()
@@ -451,8 +541,20 @@ export function useModelsCatalogData({
       hasUserScrolledCatalogRef.current = false;
     }
 
-    void fetchModels(searchQuery, nextCursor, true);
-  }, [activeTab, fetchModels, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery]);
+    if (!modelCatalogService.isSearchCursorAvailable(searchQuery, {
+      cursor: nextCursor,
+      pageSize: MODELS_PAGE_SIZE,
+      sort: serverSort,
+      gated: filters.noTokenRequiredOnly ? false : undefined,
+      metadataResolution: 'deferred',
+    })) {
+      metadataResumeGenerationRef.current += 1;
+      catalogSearchSessionRef.current?.cancelPendingRequests('superseded');
+      return fetchModels(searchQuery, null, false, true, true);
+    }
+
+    return fetchModels(searchQuery, nextCursor, true);
+  }, [activeTab, fetchModels, filters.noTokenRequiredOnly, hasMore, isFetchingMore, loadMoreError, loading, nextCursor, searchQuery, serverSort]);
 
   const handlePullToRefresh = useCallback(() => {
     if (loading || isRefreshing || isFetchingMore || appendInFlightRef.current) {
@@ -466,6 +568,7 @@ export function useModelsCatalogData({
     setFetchState((current) => ({ ...current, warningMessage: null, loadMoreError: null }));
 
     if (activeTab === 'all') {
+      metadataResumeGenerationRef.current += 1;
       catalogSearchSessionRef.current?.cancelPendingRequests('superseded');
       void fetchModels(searchQuery, null, false, true, true).finally(() => {
         setIsRefreshing(false);
@@ -519,6 +622,7 @@ export function useModelsCatalogData({
     hasTokenConfigured,
     isTokenStateHydrated,
     sessionIdentity,
+    dataSessionIdentity,
     handleLoadMore,
     handlePullToRefresh,
     handleCatalogScrollBeginDrag,

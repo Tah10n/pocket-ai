@@ -61,7 +61,11 @@ jest.mock('../../src/components/ui/ScreenShell', () => ({
   joinClassNames: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' '),
   ScreenHeaderShell: ({ children }: any) => children,
   ScreenRoot: ({ children }: any) => children,
-  ScreenContent: ({ children }: any) => children,
+  ScreenContent: ({ children, ...props }: any) => {
+    const mockReact = require('react');
+    const { View } = require('react-native');
+    return mockReact.createElement(View, props, children);
+  },
   ScreenStack: ({ children }: any) => children,
   ScreenCard: ({ children }: any) => children,
   ScreenSheet: ({ children }: any) => children,
@@ -155,6 +159,16 @@ describe('HuggingFaceTokenScreen', () => {
 
     expect(keyboardBoundary.props.behavior).toBe(Platform.OS === 'ios' ? 'padding' : 'height');
     expect(StyleSheet.flatten(keyboardBoundary.props.style)).toMatchObject({ flex: 1 });
+  });
+
+  it('keeps the token form separated from the header without offsetting the footer', () => {
+    const screen = render(<HuggingFaceTokenScreen />);
+
+    expect(screen.getByTestId('hugging-face-token-content').props.topSpacing).toBe('default');
+    const screenContentNodes = screen.UNSAFE_getAllByType(require('react-native').View)
+      .filter((node) => node.props.includeBottomSafeArea);
+    expect(screenContentNodes).toHaveLength(1);
+    expect(screenContentNodes[0].props.respectFloatingHeader).toBe(false);
   });
 
   it('opens the Hugging Face token settings page from the helper CTA', async () => {

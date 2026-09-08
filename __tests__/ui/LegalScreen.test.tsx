@@ -1,5 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { LegalScreen } from '../../src/ui/screens/LegalScreen';
 
@@ -48,6 +49,23 @@ describe('LegalScreen', () => {
     mockBack.mockReset();
     mockReplace.mockReset();
     mockCanGoBack = true;
+  });
+
+  it('keeps privacy content separated from the header', () => {
+    const screen = render(
+      <SafeAreaProvider
+        initialMetrics={{
+          frame: { x: 0, y: 0, width: 390, height: 844 },
+          insets: { top: 0, left: 0, right: 0, bottom: 0 },
+        }}
+      >
+        <LegalScreen />
+      </SafeAreaProvider>,
+    );
+
+    expect(StyleSheet.flatten(screen.getByTestId('legal-content').props.style)).toMatchObject({
+      paddingTop: 16,
+    });
   });
 
   it('renders all disclosure sections', () => {

@@ -21,6 +21,7 @@ const {
   BRANCH_REGENERATION_SCENARIOS,
   DOCUMENT_BENCHMARK_SCENARIOS,
   DOCUMENT_SCENARIOS,
+  STATE_MUTATING_CATALOG_SCENARIOS,
   assertDocumentSentinelsStayAbsent,
   assertAuthoritativeThoughtClear,
   assertPreparedAttachmentGenerationEvidence,
@@ -34,12 +35,15 @@ const {
   buildScenarioLaunchPlan,
   buildSmokeLaunchArgs,
   captureAndroidScreenshot,
+  captureCoreSurfaceScreenshots,
   captureSettledScenarioScreenshot,
+  getScenarioOutcomeScreenshotPath,
   cleanupAndroidLogcatCollector,
   cleanupScenarioOwnedMetro,
   cleanupTransferredMetroOwnership,
   collectCurrentQaBuildProvenance,
   configureScenarioBuildEnvironment,
+  createUiSnapshot,
   createBranchRegenerationBaseline,
   activateClearedCatalogFilterOption,
   appPrivatePathExists,
@@ -63,8 +67,10 @@ const {
   findPreparedAssistantResponseNode,
   findPreparedSentMessageContext,
   findResourceIdInSnapshot,
+  findResourceIdClearOfBottomOverlay,
   findSettledDocumentCancellationSendAction,
   hasConversationHistoryStartAnchor,
+  hideChatQaEvidenceForVisualCapture,
   findTextOnlySentMessageNode,
   findNodeInSnapshot,
   isBoundsClearOfBottomOverlay,
@@ -75,17 +81,29 @@ const {
   inputFocusedTextForImmediateSend,
   installScenarioResourceSignalHandlers,
   isAppForegroundSnapshot,
+  isPackageResumedActivity,
+  isScenarioAppForegroundEvidence,
+  isBackgroundActionsServicePresent,
   openFirstVisibleVariantPicker,
+  parseAndroidNotificationChannelEnabled,
+  parseAndroidRuntimePermission,
   parseCliOptions,
   parseUiSnapshot,
   pickClosestNodePair,
+  prepareCatalogForUnfilteredResults,
   prepareCatalogForVariantPickerSmokeScenario,
   readAndroidLogcatCollector,
   readTransferredMetroOwnership,
   recordDocumentQaHostCheckpoint,
   resolveBranchRegenerationReplacement,
   resolveReasoningAuthoritativeClearConfiguration,
+  disableReasoningForAuthoritativeClear,
   resolveAndroidPackageUid,
+  resolveNotificationChannelSettingsUi,
+  resolveNotificationChannelToggle,
+  resolveQaForegroundServiceStartOutcome,
+  resolveSelectedBottomTabDestination,
+  runWithBestEffortCleanup,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,
@@ -101,6 +119,7 @@ const {
   markScenarioFailureRecorded,
   mergeOlderConversationOrder,
   normalizeAndroidResourceId,
+  openThemeStyleSheet,
   resolveBranchFixture,
   sanitizeQaLogcat,
   scanFatalAndroidLogs,
@@ -115,12 +134,112 @@ const {
   tapBottomTabUntilVisible,
   tapBoundsUntilAnyNode,
   validateQaProvenance,
+  validateScenarioExecutionOptions,
+  verifyCatalogSortSelection,
   areExactGitProvenancesEqual,
   waitForAnyNode,
   waitForEnabledAnyNode,
+  waitForNoResourceId,
   waitForModelWarmupToSettleIfPresent,
   waitForSettledAttachImageAction,
 } = require('../../scripts/android-scenarios');
+
+describe('catalog sort selection smoke', () => {
+  function sortSnapshot(label, { panelBounds, toggleBounds = '[500,100][1000,200]' } = {}) {
+    return parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="models-sort-toggle" content-desc="Sort: ${label}" bounds="${toggleBounds}" />
+        ${panelBounds ? `<node resource-id="models-sort-panel" bounds="${panelBounds}" />` : ''}
+      </hierarchy>
+    `);
+  }
+
+  it('selects two distinct options with visible taps and observes the updated summary after each', async () => {
+    let selected = 'Most popular';
+    const tapVisibleResource = jest.fn(async (_ctx, resourceId) => {
+      if (resourceId === 'sort-option-downloads') selected = 'Most downloaded';
+      if (resourceId === 'sort-option-likes') selected = 'Most popular';
+    });
+    const createSnapshot = jest.fn(() => sortSnapshot(selected));
+    const ctx = { serial: 'device-1' };
+
+    await verifyCatalogSortSelection(ctx, {
+      adbPath: 'adb', tapVisibleResource, createSnapshot, timeoutMs: 0,
+    });
+
+    expect(tapVisibleResource.mock.calls).toEqual([
+      [ctx, 'models-sort-toggle'],
+      [ctx, 'sort-option-downloads'],
+      [ctx, 'models-sort-toggle'],
+      [ctx, 'sort-option-likes'],
+    ]);
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails when an option tap only closes the panel without changing the selected value', async () => {
+    const tapVisibleResource = jest.fn();
+    await expect(verifyCatalogSortSelection({ serial: 'device-1' }, {
+      adbPath: 'adb',
+      tapVisibleResource,
+      createSnapshot: () => sortSnapshot('Most downloaded'),
+      timeoutMs: 0,
+    })).rejects.toThrow('Sort selection did not update after tapping "sort-option-likes"');
+  });
+
+  it.each([
+    ['an inverted panel remains open', { panelBounds: '[42,643][1038,627]' }],
+    ['the selected summary has inverted bounds', { toggleBounds: '[500,200][1000,100]' }],
+    ['the selected summary is outside the viewport', { toggleBounds: '[500,2500][1000,2600]' }],
+  ])('rejects a matching summary when %s', async (_description, bounds) => {
+    await expect(verifyCatalogSortSelection({ serial: 'device-1' }, {
+      adbPath: 'adb',
+      tapVisibleResource: jest.fn(),
+      createSnapshot: () => sortSnapshot('Most downloaded', bounds),
+      timeoutMs: 0,
+    })).rejects.toThrow('Sort selection did not update after tapping "sort-option-downloads"');
+  });
+});
+
+describe('android-scenarios external launcher ANR recovery', () => {
+  it('re-reads the hierarchy after dismissing a confirmed launcher ANR', () => {
+    const blockedHierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_wait" text="Wait" bounds="[100,200][300,300]" />',
+      '</hierarchy>',
+    ].join('');
+    const homeHierarchy = [
+      '<hierarchy>',
+      '<node package="com.github.tah10n.pocketai" resource-id="home-root" text="Pocket AI" bounds="[0,0][1080,2400]" />',
+      '</hierarchy>',
+    ].join('');
+    const dumpUiHierarchy = jest.fn()
+      .mockReturnValueOnce(blockedHierarchy)
+      .mockReturnValueOnce(homeHierarchy);
+    const dismissLauncherAnr = jest.fn(() => true);
+    const sleepSync = jest.fn();
+
+    const snapshot = createUiSnapshot('adb', 'device-1', {
+      dumpUiHierarchy,
+      dismissExternalLauncherAnrDialog: dismissLauncherAnr,
+      sleepSync,
+      launcherAnrSettleMs: 0,
+    });
+
+    expect(dismissLauncherAnr).toHaveBeenCalledWith(
+      'adb',
+      'device-1',
+      'com.github.tah10n.pocketai',
+      blockedHierarchy,
+      expect.any(Object),
+    );
+    expect(dumpUiHierarchy).toHaveBeenCalledTimes(2);
+    expect(sleepSync).toHaveBeenCalledWith(0);
+    expect(snapshot.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceId: 'home-root', text: 'Pocket AI' }),
+    ]));
+  });
+});
 
 const withAndroidReleaseConfig = require('../../plugins/withAndroidReleaseConfig');
 
@@ -536,6 +655,164 @@ describe('android-scenarios smoke bootstrap args', () => {
       true,
       {},
     )).toThrow(ScenarioPreconditionFailureError);
+
+    const nativeEnv = {};
+    expect(configureScenarioBuildEnvironment(
+      { pack: 'native' },
+      true,
+      nativeEnv,
+    )).toEqual({
+      androidQaEvidence: true,
+      apkVariant: 'release',
+    });
+    expect(nativeEnv).toEqual({
+      ANDROID_SMOKE_APK_VARIANT: 'release',
+      EXPO_PUBLIC_ANDROID_QA: '1',
+      POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: 'true',
+    });
+  });
+
+  it('parses Android runtime notification permission state for the current user', () => {
+    const dumpsys = [
+      '    User 0: ceDataInode=100 installed=true',
+      '      runtime permissions:',
+      '        android.permission.POST_NOTIFICATIONS: granted=true, flags=[ USER_SET ]',
+      '    User 10: ceDataInode=200 installed=true',
+      '      runtime permissions:',
+      '        android.permission.POST_NOTIFICATIONS: granted=false, flags=[ USER_SET ]',
+    ].join('\n');
+
+    expect(parseAndroidRuntimePermission(
+      dumpsys,
+      '0',
+      'android.permission.POST_NOTIFICATIONS',
+    )).toBe(true);
+    expect(parseAndroidRuntimePermission(
+      dumpsys,
+      '10',
+      'android.permission.POST_NOTIFICATIONS',
+    )).toBe(false);
+    expect(() => parseAndroidRuntimePermission(
+      dumpsys,
+      '11',
+      'android.permission.POST_NOTIFICATIONS',
+    )).toThrow(/does not contain user 11/);
+    expect(() => parseAndroidRuntimePermission(
+      dumpsys,
+      '0',
+      'android.permission.CAMERA',
+    )).toThrow(/does not expose android\.permission\.CAMERA/);
+  });
+
+  it('recognizes the scenario package as the top resumed Android activity', () => {
+    const dumpsys = [
+      'ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)',
+      '  topResumedActivity=ActivityRecord{b93201a u0 com.github.tah10n.pocketai.qa/com.github.tah10n.pocketai.MainActivity t576}',
+    ].join('\n');
+
+    expect(isPackageResumedActivity(
+      dumpsys,
+      'com.github.tah10n.pocketai.qa',
+    )).toBe(true);
+    expect(isPackageResumedActivity(
+      dumpsys,
+      'com.github.tah10n.pocketai',
+    )).toBe(false);
+    expect(isPackageResumedActivity('', 'com.github.tah10n.pocketai.qa')).toBe(false);
+  });
+
+  it('rejects a stale app hierarchy when Android reports Settings as resumed', () => {
+    const staleAppSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="Pocket AI" package="com.github.tah10n.pocketai" bounds="[0,0][1080,2400]" />
+        <node text="Home" package="com.github.tah10n.pocketai" bounds="[0,100][300,200]" />
+      </hierarchy>
+    `);
+    const settingsResumed = [
+      'ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)',
+      '  topResumedActivity=ActivityRecord{cafe123 u0 com.oplus.notificationmanager/.ChannelNotificationSettings t581}',
+    ].join('\n');
+
+    expect(isScenarioAppForegroundEvidence(
+      settingsResumed,
+      staleAppSnapshot,
+      'com.github.tah10n.pocketai',
+    )).toBe(false);
+    expect(isScenarioAppForegroundEvidence(
+      '',
+      staleAppSnapshot,
+      'com.github.tah10n.pocketai',
+    )).toBe(true);
+  });
+
+  it('reads the notification channel for the current package UID only', () => {
+    const dumpsys = [
+      '  AppSettings: com.github.tah10n.pocketai.qa (10326)',
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=0, mOriginalImp=2}",
+      '  AppSettings: com.github.tah10n.pocketai.qa (10332) importance=NONE userSet=true',
+      "    NotificationChannel{mId='downloads', mName=Downloads, mImportance=4, mOriginalImp=4}",
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=2, mOriginalImp=2}",
+      '  AppSettings: com.android.settings (1000)',
+    ].join('\n');
+
+    expect(parseAndroidNotificationChannelEnabled(
+      dumpsys,
+      'com.github.tah10n.pocketai.qa',
+      '10332',
+      'RN_BACKGROUND_ACTIONS_CHANNEL',
+    )).toBe(true);
+    expect(parseAndroidNotificationChannelEnabled(
+      dumpsys,
+      'com.github.tah10n.pocketai.qa',
+      '10326',
+      'RN_BACKGROUND_ACTIONS_CHANNEL',
+    )).toBe(false);
+  });
+
+  it('navigates an OEM app-notification redirect into the requested channel', () => {
+    const appNotificationSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" bounds="[0,0][1080,2400]" />
+        <node text="Pocket AI" bounds="[168,169][1059,242]" />
+        <node text="Generating response..." resource-id="android:id/title" bounds="[96,1911][529,1969]" />
+        <node text="On" resource-id="android:id/switch_widget" checked="true" bounds="[870,353][984,425]" />
+      </hierarchy>
+    `);
+    const channelSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" bounds="[0,0][1080,2400]" />
+        <node text="Generating response..." bounds="[168,169][1059,242]" />
+        <node text="On" resource-id="android:id/switch_widget" checked="true" bounds="[870,353][984,425]" />
+      </hierarchy>
+    `);
+
+    expect(resolveNotificationChannelSettingsUi(
+      appNotificationSnapshot,
+      'Generating response...',
+    )).toEqual(expect.objectContaining({
+      ready: false,
+      target: expect.objectContaining({ resourceId: 'android:id/title' }),
+    }));
+    expect(resolveNotificationChannelSettingsUi(
+      channelSnapshot,
+      'Generating response...',
+    )).toEqual({ ready: true, target: null });
+  });
+
+  it('selects the main notification-channel switch above secondary channel preferences', () => {
+    const channelSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node text="Generating response..." bounds="[168,169][1059,242]" />
+        <node text="All notifications" resource-id="android:id/switch_widget" checked="true" clickable="false" bounds="[870,353][984,425]" />
+        <node text="Vibrate" resource-id="android:id/switch_widget" checked="false" clickable="true" bounds="[900,640][970,700]" />
+      </hierarchy>
+    `);
+
+    expect(resolveNotificationChannelToggle(channelSnapshot)).toEqual(expect.objectContaining({
+      text: 'All notifications',
+      checked: true,
+    }));
   });
 
   it('uses fast smoke reuse flags when skip-build is enabled', () => {
@@ -1025,8 +1302,15 @@ describe('android-scenarios asynchronous interaction settlement', () => {
     `);
   }
 
+  it('accepts the requested short fallback answer while rejecting prompt echoes', () => {
+    const prompt = 'Text fallback smoke 123 456 Reply with hello only';
+    expect(isPreparedAssistantResponseLabel('hello', prompt)).toBe(true);
+    expect(isPreparedAssistantResponseLabel(prompt, prompt)).toBe(false);
+    expect(isPreparedAssistantResponseLabel(`Echo: ${prompt}`, prompt)).toBe(false);
+  });
+
   it('retries the full ADB prompt when the first injected character is lost', async () => {
-    const prompt = 'Text fallback smoke 123 456';
+    const prompt = 'Text fallback smoke 123 456 Reply with hello only';
     let typedValue = '';
     let inputAttempts = 0;
     const runCommand = jest.fn((_adbPath, args) => {
@@ -1086,12 +1370,21 @@ describe('android-scenarios asynchronous interaction settlement', () => {
         <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `);
+    const busySnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library, busy" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
+      </hierarchy>
+    `);
     const createSnapshot = jest.fn()
       .mockReturnValueOnce(closedSnapshot)
       .mockReturnValueOnce(closedSnapshot)
+      .mockReturnValueOnce(busySnapshot)
       .mockReturnValue(openSnapshot);
     const tap = jest.fn();
-    const dismissMenu = jest.fn();
+    const events = [];
+    const onSettledSnapshot = jest.fn(() => events.push('settled'));
+    const dismissMenu = jest.fn(() => events.push('dismiss'));
 
     const match = await waitForSettledAttachImageAction('adb', 'device-1', {
       timeoutMs: 1_000,
@@ -1099,6 +1392,7 @@ describe('android-scenarios asynchronous interaction settlement', () => {
       afterMenuOpenDelayMs: 0,
       afterMenuDismissDelayMs: 0,
       createSnapshot,
+      onSettledSnapshot,
       tapBounds: tap,
       dismissAttachmentMenu: dismissMenu,
       delayFn: immediateDelay,
@@ -1107,6 +1401,10 @@ describe('android-scenarios asynchronous interaction settlement', () => {
     expect(match.node.resourceId).toBe('chat-attach-image-button');
     expect(tap).toHaveBeenCalledTimes(1);
     expect(dismissMenu).toHaveBeenCalledTimes(1);
+    expect(createSnapshot).toHaveBeenCalledTimes(4);
+    expect(onSettledSnapshot).toHaveBeenCalledTimes(1);
+    expect(onSettledSnapshot).toHaveBeenCalledWith(openSnapshot);
+    expect(events).toEqual(['settled', 'dismiss']);
   });
 
   it('waits for the model warmup banner to disappear before chat interaction', async () => {
@@ -1241,6 +1539,28 @@ describe('android-scenarios asynchronous interaction settlement', () => {
     expect(delayFn).toHaveBeenCalled();
     expect(capturedTooEarly).toBe(false);
     expect(panelOpen).toBe(true);
+  });
+
+  it('recognizes an open native glass filter panel even when Android reports clipped bounds', async () => {
+    const createSnapshot = () => parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="models-filter-toggle" text="Filters" content-desc="Filters" clickable="true" enabled="true" bounds="[42,533][532,627]" />
+        <node resource-id="models-filter-panel" text="" content-desc="" clickable="false" enabled="true" bounds="[42,643][1038,627]" />
+        <node resource-id="filter-option-fits-in-ram" text="Fits in RAM" content-desc="" clickable="true" enabled="true" bounds="[61,662][1019,627]" />
+      </hierarchy>
+    `);
+    const tapBounds = jest.fn();
+
+    await setCatalogFilterPanelOpen('adb', 'device-1', true, {
+      maxAttempts: 1,
+      timeoutMs: 0,
+      createSnapshot,
+      tapBounds,
+      delayFn: immediateDelay,
+    });
+
+    expect(tapBounds).not.toHaveBeenCalled();
   });
 
   it('retries Back only while the transient sheet remains visible', async () => {
@@ -1683,6 +2003,55 @@ describe('android-scenarios UI snapshot matching', () => {
     }));
   });
 
+  it('keeps native Glass sort options observable when Android reports inverted panel bounds', () => {
+    const sortSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" bounds="[0,0][1080,2400]" />
+        <node resource-id="models-sort-panel" bounds="[42,643][1038,627]" />
+        <node text="Most popular" bounds="[166,790][367,627]" />
+      </hierarchy>
+    `);
+
+    expect(findResourceIdInSnapshot(
+      sortSnapshot,
+      'models-sort-panel',
+      { visibleOnly: true },
+    )).toBeNull();
+    expect(findResourceIdInSnapshot(sortSnapshot, 'models-sort-panel')).not.toBeNull();
+    expect(findAnyNodeInSnapshot(
+      sortSnapshot,
+      ['Most popular'],
+      { visibleOnly: false },
+    )).not.toBeNull();
+  });
+
+  it('waits for an inverted Glass sort panel to leave the hierarchy before treating it as closed', async () => {
+    const openSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="models-sort-panel" bounds="[42,643][1038,627]" />
+      </hierarchy>
+    `);
+    const closedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+      </hierarchy>
+    `);
+    const createSnapshot = jest.fn()
+      .mockReturnValueOnce(openSnapshot)
+      .mockReturnValue(closedSnapshot);
+
+    await waitForNoResourceId('adb', 'device-1', 'models-sort-panel', {
+      visibleOnly: false,
+      timeoutMs: 100,
+      pollIntervalMs: 0,
+      createSnapshot,
+      delayFn: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(createSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('does not treat stale composer text with an appended prompt as an exact prepared-send prompt match', () => {
     const uniquePrompt = 'Describe prepared image 12345 67890';
     const staleComposerSnapshot = parseUiSnapshot(`
@@ -2065,6 +2434,29 @@ describe('android-scenarios variant picker helpers', () => {
     expect(ctx.swipeUp).not.toHaveBeenCalled();
   });
 
+  it('clears persisted and visible empty-state filters before catalog assertions', async () => {
+    const ctx = {
+      serial: 'emulator-5554',
+      expectAnyText: jest.fn().mockResolvedValue(undefined),
+    };
+    const setFilterPanelOpen = jest.fn().mockResolvedValue(undefined);
+    const clearFilters = jest.fn().mockResolvedValue(undefined);
+    const clearEmptyFilters = jest.fn().mockResolvedValue(true);
+
+    await prepareCatalogForUnfilteredResults(ctx, {
+      resolveAdbPath: () => 'adb',
+      setCatalogFilterPanelOpen: setFilterPanelOpen,
+      clearCatalogFiltersIfPresent: clearFilters,
+      clearEmptyCatalogFiltersIfPresent: clearEmptyFilters,
+    });
+
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(1, 'adb', 'emulator-5554', true);
+    expect(clearFilters).toHaveBeenCalledWith('adb', 'emulator-5554');
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(2, 'adb', 'emulator-5554', false);
+    expect(clearEmptyFilters).toHaveBeenCalledWith(ctx, 'adb');
+    expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']));
+  });
+
   it('normalizes catalog tab and filters before variant-picker smoke opens rows', async () => {
     const ctx = {
       serial: 'emulator-5554',
@@ -2072,7 +2464,8 @@ describe('android-scenarios variant picker helpers', () => {
       expectAnyText: jest.fn().mockResolvedValue(undefined),
     };
     const findAnyNodeNow = jest.fn()
-      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } });
+      .mockResolvedValueOnce({ node: { bounds: { centerX: 100, centerY: 100 } } })
+      .mockResolvedValueOnce({ node: { bounds: { centerX: 500, centerY: 900 } } });
     const setFilterPanelOpen = jest.fn().mockResolvedValue(undefined);
     const clearFilters = jest.fn().mockResolvedValue(undefined);
 
@@ -2089,9 +2482,15 @@ describe('android-scenarios variant picker helpers', () => {
       expect.objectContaining({ timeoutMs: 5_000 })
     );
     expect(setFilterPanelOpen).toHaveBeenNthCalledWith(1, 'adb', 'emulator-5554', true);
+    expect(setFilterPanelOpen).toHaveBeenNthCalledWith(2, 'adb', 'emulator-5554', false);
     expect(clearFilters).toHaveBeenCalledWith('adb', 'emulator-5554');
-    expect(setFilterPanelOpen).toHaveBeenCalledTimes(1);
-    expect(ctx.tapAnyText).toHaveBeenCalledTimes(1);
+    expect(setFilterPanelOpen).toHaveBeenCalledTimes(2);
+    expect(ctx.tapAnyText).toHaveBeenNthCalledWith(
+      2,
+      expect.arrayContaining(['Clear filters']),
+      expect.objectContaining({ timeoutMs: 5_000 })
+    );
+    expect(ctx.tapAnyText).toHaveBeenCalledTimes(2);
     expect(ctx.expectAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Model Catalog']), { timeoutMs: 8_000 });
   });
 });
@@ -2577,6 +2976,16 @@ describe('android-scenarios CLI parsing', () => {
     expect(buildSmokeLaunchArgs(options, null)).toContain('--isolated-qa-install');
   });
 
+  it('always isolates the native pack from an installed user app', () => {
+    const options = parseCliOptions(['--pack', 'native']);
+
+    expect(options).toEqual(expect.objectContaining({
+      pack: 'native',
+      isolatedQaInstall: true,
+    }));
+    expect(buildSmokeLaunchArgs(options, null)).toContain('--isolated-qa-install');
+  });
+
   it('does not expose optional scenarios as a named pack', () => {
     expect(() => parseCliOptions(['--pack', 'optional'])).toThrow('Unknown scenario pack "optional"');
   });
@@ -2602,6 +3011,12 @@ describe('android-scenarios pack selection', () => {
       'bottom-tabs',
       'new-chat-cta',
     ]);
+  });
+
+  it('uses an explicit target-state screenshot returned by a scenario', () => {
+    expect(getScenarioOutcomeScreenshotPath({ screenshotPath: '  target.png  ' })).toBe('target.png');
+    expect(getScenarioOutcomeScreenshotPath({ screenshotPath: '   ' })).toBeNull();
+    expect(getScenarioOutcomeScreenshotPath(undefined)).toBeNull();
   });
 
   it('taps the clickable upper portion of a bottom tab when a warning banner covers its center', () => {
@@ -2673,10 +3088,18 @@ describe('android-scenarios pack selection', () => {
           events.push('chat-viewport');
         }),
         tapAnyText: jest.fn().mockResolvedValue(undefined),
-        tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        tapBottomTab: jest.fn(async () => {
+          events.push('home');
+        }),
+        captureScreenshot: jest.fn((fileName) => {
+          events.push('capture');
+          return path.join(tempDir, fileName);
+        }),
       };
 
-      await isolatedScenarios.find((scenario) => scenario.id === 'new-chat-cta').run(newChatContext);
+      const newChatOutcome = await isolatedScenarios
+        .find((scenario) => scenario.id === 'new-chat-cta')
+        .run(newChatContext);
 
       expect(newChatContext.expectResourceId).toHaveBeenCalledWith('chat-list-viewport', {
         timeoutMs: 120_000,
@@ -2686,6 +3109,9 @@ describe('android-scenarios pack selection', () => {
         { timeoutMs: 120_000 }
       );
       expect(events.indexOf('chat-viewport')).toBeLessThan(events.indexOf('empty-copy'));
+      expect(events.indexOf('empty-copy')).toBeLessThan(events.indexOf('capture'));
+      expect(events.indexOf('capture')).toBeLessThan(events.indexOf('home'));
+      expect(newChatOutcome).toEqual({ screenshotPath: path.join(tempDir, 'new-chat-cta.png') });
 
       const dumpsBeforeBottomTabs = spawnSync.mock.calls.filter(([, args]) => args.includes('exec-out')).length;
       const bottomTabsContext = {
@@ -2807,6 +3233,7 @@ describe('android-scenarios pack selection', () => {
         expectAnyText: jest.fn().mockResolvedValue(undefined),
         tapAnyText,
         tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        captureScreenshot: jest.fn(() => path.join(tempDir, 'chat-attachment-current-state-smoke.png')),
       };
 
       await scenario.run(ctx);
@@ -2897,7 +3324,7 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
-  it('sends a text prompt for current-state loaded fallback smoke', async () => {
+  it('sends a text prompt for current-state loaded fallback smoke with fallback copy only inside the attachment menu', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
     const previousAndroidHome = process.env.ANDROID_HOME;
     const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
@@ -2913,7 +3340,6 @@ describe('android-scenarios pack selection', () => {
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${prompt || ''}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="${prompt ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
@@ -2934,7 +3360,7 @@ describe('android-scenarios pack selection', () => {
         <node text="${prompt || ''}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
         <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-text-fallback" clickable="false" enabled="true" bounds="[40,1360][1040,1560]">
           <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-fallback" clickable="false" enabled="true" bounds="[40,1380][1040,1540]">
-            <node text="Fallback text response is visible." content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
+            <node text="hello" content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
           </node>
         </node>
       </hierarchy>
@@ -2989,6 +3415,7 @@ describe('android-scenarios pack selection', () => {
           events.push('tap-input');
         }
         if (labels.includes('Send message')) {
+          expect(attachmentMenuOpened).toBe(false);
           events.push('tap-send');
           sendTapped = true;
         }
@@ -3001,11 +3428,15 @@ describe('android-scenarios pack selection', () => {
         expectAnyText: jest.fn().mockResolvedValue(undefined),
         tapAnyText,
         tapBottomTab: jest.fn().mockResolvedValue(undefined),
+        captureScreenshot: jest.fn(() => path.join(tempDir, 'chat-attachment-current-state-smoke.png')),
       };
 
       await scenario.run(ctx);
 
-      expect(prompt).toMatch(/^Text fallback smoke \d+ \d+$/);
+      expect(attachmentMenuOpened).toBe(false);
+
+      expect(prompt).toMatch(/^Text fallback smoke \d+ \d+ Reply with hello only$/);
+      expect(escapeAdbInputText(prompt)).toBe(prompt.replace(/ /g, '%s'));
       expect(prompt).not.toBe('Text fallback smoke');
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
       expect(events).toEqual(expect.arrayContaining([
@@ -3032,7 +3463,7 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
-  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy', async () => {
+  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy with fallback copy only inside the attachment menu', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
     const previousAndroidHome = process.env.ANDROID_HOME;
     const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
@@ -3048,7 +3479,6 @@ describe('android-scenarios pack selection', () => {
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
         <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${typedPrompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
@@ -3067,7 +3497,7 @@ describe('android-scenarios pack selection', () => {
         <node text="${typedPrompt}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
         <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-text-only" clickable="false" enabled="true" bounds="[40,1330][1040,1540]">
           <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-only" clickable="false" enabled="true" bounds="[40,1340][1040,1520]">
-            <node text="Text fallback assistant response" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
+            <node text="hello" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
           </node>
         </node>
         <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
@@ -3114,6 +3544,7 @@ describe('android-scenarios pack selection', () => {
       const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-text-only-fallback');
       const tapAnyText = jest.fn((labels) => {
         if (labels.includes('Send message')) {
+          expect(attachmentMenuOpened).toBe(false);
           sendTapped = true;
         }
         return Promise.resolve();
@@ -3129,11 +3560,14 @@ describe('android-scenarios pack selection', () => {
 
       await scenario.run(ctx);
 
+      expect(attachmentMenuOpened).toBe(false);
+
       expect(ctx.ensureAppVisible).toHaveBeenCalled();
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Chat message input']), expect.anything());
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Send message']), expect.anything());
-      expect(typedPrompt).toMatch(/^Text fallback smoke \d+ \d+$/);
+      expect(typedPrompt).toMatch(/^Text fallback smoke \d+ \d+ Reply with hello only$/);
+      expect(escapeAdbInputText(typedPrompt)).toBe(typedPrompt.replace(/ /g, '%s'));
       expect(typedPrompt).not.toBe('Text fallback smoke');
       expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
       expect(spawnSync).toHaveBeenCalledWith(
@@ -3769,7 +4203,307 @@ describe('android-scenarios pack selection', () => {
       'swap-model-cta',
       'hf-token-education',
       'conversations-management',
+      'native-glass-theme-matrix',
+      'foreground-service-notification-states',
     ]);
+  });
+
+  it('requires state-mutating native scenarios to use the isolated QA package', () => {
+    const nativeScenarios = selectScenarios(scenarios, parseCliOptions(['--pack', 'native']));
+
+    expect(() => validateScenarioExecutionOptions(nativeScenarios, {
+      isolatedQaInstall: false,
+    })).toThrow(ScenarioPreconditionFailureError);
+    expect(() => validateScenarioExecutionOptions(nativeScenarios, {
+      isolatedQaInstall: true,
+    })).not.toThrow();
+    expect(nativeScenarios).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'native-glass-theme-matrix',
+        requiresCurrentHeadProvenance: true,
+        requiresIsolatedQaInstall: true,
+      }),
+      expect.objectContaining({
+        id: 'foreground-service-notification-states',
+        requiresCurrentHeadProvenance: true,
+        requiresIsolatedQaInstall: true,
+      }),
+    ]));
+  });
+
+  it('isolates state-mutating catalog scenarios from the installed user app', () => {
+    const catalogOptions = parseCliOptions(['--pack', 'catalog']);
+    const catalogScenarios = selectScenarios(scenarios, catalogOptions);
+    const directScenario = selectScenarios(
+      scenarios,
+      parseCliOptions(['--scenario', 'hf-catalog-hardening']),
+    );
+
+    expect(catalogOptions.isolatedQaInstall).toBe(true);
+    expect(catalogScenarios).toEqual([
+      expect.objectContaining({
+        id: 'variant-picker-smoke',
+        requiresIsolatedQaInstall: true,
+      }),
+    ]);
+    expect(() => validateScenarioExecutionOptions(directScenario, {
+      isolatedQaInstall: false,
+    })).toThrow(ScenarioPreconditionFailureError);
+    expect(() => validateScenarioExecutionOptions(directScenario, {
+      isolatedQaInstall: true,
+    })).not.toThrow();
+    expect(directScenario[0]).toEqual(expect.objectContaining({
+      requiresIsolatedQaInstall: true,
+    }));
+  });
+
+  it('removes the QA panel from the hierarchy before capturing a production-like Glass chat screenshot', async () => {
+    const waitForResourceId = jest.fn().mockResolvedValue({ resourceId: 'matched' });
+    const tapAnyText = jest.fn().mockResolvedValue(undefined);
+    const waitForNoResourceId = jest.fn().mockResolvedValue({ nodes: [] });
+    const selectedChatSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/bottom-tab-chat" selected="true" bounds="[270,2100][540,2280]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-list-viewport" bounds="[0,200][1080,2000]" />
+      </hierarchy>
+    `);
+    const waitForSnapshotMatch = jest.fn(async (_adbPath, _serial, _options, matcher) => ({
+      match: matcher(selectedChatSnapshot),
+      snapshot: selectedChatSnapshot,
+    }));
+    const ctx = { serial: 'device-1' };
+
+    await hideChatQaEvidenceForVisualCapture(ctx, {
+      adbPath: 'adb',
+      waitForResourceId,
+      tapAnyText,
+      waitForNoResourceId,
+      waitForSnapshotMatch,
+    });
+
+    expect(waitForResourceId).toHaveBeenNthCalledWith(
+      1,
+      'adb',
+      'device-1',
+      'chat-qa-generation-evidence',
+      expect.objectContaining({ visibleOnly: true }),
+    );
+    expect(tapAnyText).toHaveBeenCalledWith(
+      ['chat-qa-hide-generation-evidence-action'],
+      expect.any(Object),
+    );
+    expect(waitForNoResourceId).toHaveBeenCalledWith(
+      'adb',
+      'device-1',
+      'chat-qa-generation-evidence',
+      expect.any(Object),
+    );
+    expect(waitForResourceId).toHaveBeenCalledTimes(1);
+    expect(waitForSnapshotMatch).toHaveBeenCalledTimes(1);
+    expect(tapAnyText.mock.invocationCallOrder[0]).toBeLessThan(
+      waitForNoResourceId.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not capture the Glass chat frame until the QA hierarchy is hidden', async () => {
+    const callOrder = [];
+    const hideQaEvidence = jest.fn(async () => {
+      callOrder.push('hide-qa');
+    });
+    const ctx = {
+      captureScreenshot: jest.fn((name) => {
+        callOrder.push(`capture:${name}`);
+        return name;
+      }),
+    };
+    const navigateBottomTab = jest.fn(async (_ctx, tabResourceId) => {
+      callOrder.push(`navigate:${tabResourceId}`);
+    });
+
+    await captureCoreSurfaceScreenshots(ctx, 'native-glass-light', ['Visual style'], {
+      hideChatQaEvidence: true,
+      hideChatQaEvidenceForVisualCapture: hideQaEvidence,
+      tapBottomTabResourceUntilSelected: navigateBottomTab,
+      scrollToAnyText: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(navigateBottomTab.mock.calls.map(([, resourceId]) => resourceId)).toEqual([
+      'bottom-tab-home',
+      'bottom-tab-chat',
+      'bottom-tab-settings',
+      'bottom-tab-models',
+      'bottom-tab-home',
+    ]);
+    expect(callOrder.indexOf('hide-qa')).toBeGreaterThan(callOrder.indexOf('capture:native-glass-light-home.png'));
+    expect(callOrder.indexOf('hide-qa')).toBeLessThan(callOrder.indexOf('capture:native-glass-light-chat.png'));
+    expect(hideQaEvidence).toHaveBeenCalledWith(ctx);
+  });
+
+  it('rejects an inactive Chat hierarchy even when its destination and localized tab text are present', () => {
+    const inactiveChatSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node text="Chat" resource-id="com.github.tah10n.pocketai.qa:id/bottom-tab-chat" selected="false" bounds="[270,2100][540,2280]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-list-viewport" bounds="[0,200][1080,2000]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-hide-generation-evidence" clickable="true" bounds="[40,220][240,300]" />
+      </hierarchy>
+    `);
+    const selectedChatSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2400]" />
+        <node text="Chat" resource-id="com.github.tah10n.pocketai.qa:id/bottom-tab-chat" selected="true" bounds="[270,2100][540,2280]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-list-viewport" bounds="[0,200][1080,2000]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(inactiveChatSnapshot, ['Chat'], { visibleOnly: true })).not.toBeNull();
+    expect(resolveSelectedBottomTabDestination(
+      inactiveChatSnapshot,
+      'bottom-tab-chat',
+      'chat-list-viewport',
+    )).toBeNull();
+    expect(resolveSelectedBottomTabDestination(
+      selectedChatSnapshot,
+      'bottom-tab-chat',
+      'chat-list-viewport',
+    )).toEqual(expect.objectContaining({
+      tab: expect.objectContaining({ selected: true }),
+      destination: expect.objectContaining({
+        resourceId: 'com.github.tah10n.pocketai.qa:id/chat-list-viewport',
+      }),
+    }));
+  });
+
+  it('recognizes only the background-actions service in Android dumpsys evidence', () => {
+    expect(isBackgroundActionsServicePresent([
+      '* ServiceRecord{abc u0 com.github.tah10n.pocketai/.MainActivity}',
+      'intent={cmp=com.github.tah10n.pocketai/com.asterinet.react.bgactions.RNBackgroundActionsTask}',
+    ].join('\n'))).toBe(true);
+    expect(isBackgroundActionsServicePresent(
+      '* ServiceRecord{abc u0 com.github.tah10n.pocketai/.UnrelatedService}'
+    )).toBe(false);
+  });
+
+  it('requires current-source release provenance for foreground-service device evidence', () => {
+    const scenario = buildScenarios().find(({ id }) => id === 'foreground-service-notification-states');
+
+    expect(scenario).toEqual(expect.objectContaining({
+      tier: 'critical',
+      requiresCurrentHeadProvenance: true,
+    }));
+  });
+
+  it('reads privacy-safe foreground-service outcomes without waiting for native service polling', () => {
+    const startedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-background-task-state-started" bounds="[40,100][100,160]" />
+      </hierarchy>
+    `);
+    const failedSnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-background-task-state-start_failed" bounds="[40,100][100,160]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/chat-qa-background-task-failure-security_exception" bounds="[40,100][100,160]" />
+      </hierarchy>
+    `);
+
+    expect(resolveQaForegroundServiceStartOutcome(startedSnapshot)).toEqual({
+      status: 'started',
+      failureCategory: null,
+    });
+    expect(resolveQaForegroundServiceStartOutcome(failedSnapshot)).toEqual({
+      status: 'start_failed',
+      failureCategory: 'security_exception',
+    });
+  });
+
+  it('finds an already visible visual-style control by stable hierarchy id without localized text', () => {
+    const snapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node bounds="[0,0][1080,2200]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/settings-visual-style-container" bounds="[40,600][1040,980]" />
+        <node resource-id="com.github.tah10n.pocketai.qa:id/settings-theme-style-control" clickable="true" bounds="[80,790][1000,930]" />
+      </hierarchy>
+    `);
+
+    expect(findAnyNodeInSnapshot(snapshot, ['Visual Style', 'Визуальный стиль'], {
+      visibleOnly: true,
+    })).toBeNull();
+    expect(findResourceIdClearOfBottomOverlay(
+      snapshot,
+      'settings-visual-style-container',
+    )).toEqual(expect.objectContaining({
+      resourceId: 'com.github.tah10n.pocketai.qa:id/settings-visual-style-container',
+    }));
+    expect(findResourceIdClearOfBottomOverlay(
+      snapshot,
+      'settings-theme-style-control',
+    )).toEqual(expect.objectContaining({ clickable: true }));
+  });
+
+  it('scrolls the visual-style control clear after its container becomes visible', async () => {
+    const calls = [];
+    const ctx = { serial: 'device-1' };
+
+    await openThemeStyleSheet(ctx, {
+      adbPath: 'adb',
+      goToSettings: async () => calls.push(['settings']),
+      scrollToResourceId: async (_ctx, resourceId) => calls.push(['scroll', resourceId]),
+      tapVisibleResource: async (_ctx, resourceId) => calls.push(['tap', resourceId]),
+      waitForResourceId: async (adbPath, serial, resourceId) => {
+        calls.push(['wait', adbPath, serial, resourceId]);
+      },
+    });
+
+    expect(calls).toEqual([
+      ['settings'],
+      ['scroll', 'settings-visual-style-container'],
+      ['scroll', 'settings-theme-style-control'],
+      ['tap', 'settings-theme-style-control'],
+      ['wait', 'adb', 'device-1', 'settings-theme-style-sheet'],
+    ]);
+  });
+
+  it('attempts every notification-state cleanup step and aggregates failures', async () => {
+    const calls = [];
+    const primaryError = new Error('scenario failed');
+
+    await expect(runWithBestEffortCleanup(
+      async () => {
+        calls.push('scenario');
+        throw primaryError;
+      },
+      [
+        {
+          label: 'first restore',
+          run: async () => {
+            calls.push('first');
+            throw new Error('first failed');
+          },
+        },
+        {
+          label: 'second restore',
+          run: async () => {
+            calls.push('second');
+          },
+        },
+        {
+          label: 'third restore',
+          run: async () => {
+            calls.push('third');
+            throw new Error('third failed');
+          },
+        },
+      ]
+    )).rejects.toMatchObject({
+      name: 'AggregateError',
+      errors: [
+        primaryError,
+        expect.objectContaining({ message: 'first restore: first failed' }),
+        expect.objectContaining({ message: 'third restore: third failed' }),
+      ],
+    });
+    expect(calls).toEqual(['scenario', 'first', 'second', 'third']);
   });
 
   it('selects styling-focused screenshots for dependency-ui checks', () => {
@@ -3844,21 +4578,23 @@ describe('android-scenarios pack selection', () => {
         ...BRANCH_REGENERATION_SCENARIOS,
         ...DOCUMENT_SCENARIOS,
         ...DOCUMENT_BENCHMARK_SCENARIOS,
+        ...STATE_MUTATING_CATALOG_SCENARIOS,
+        'native-glass-theme-matrix',
+        'foreground-service-notification-states',
       ].includes(scenarioId)));
     expect(selectedIds).toEqual(
       expect.arrayContaining([
-        'variant-picker-smoke',
         'chat-attachment-current-state-smoke',
         'chat-attachment-text-only-fallback',
-        'hf-catalog-hardening',
-        'memory-fit-badges',
-        'memory-fit-download-warning',
         'performance-logcat',
       ])
     );
     expect(selectedIds).not.toContain('chat-attachment-preview-remove');
     expect(selectedIds).not.toContain('chat-attachment-prepared-send');
     expect(selectedIds).not.toContain('storage-cache-clear');
+    expect(selectedIds).not.toEqual(expect.arrayContaining(STATE_MUTATING_CATALOG_SCENARIOS));
+    expect(selectedIds).not.toContain('native-glass-theme-matrix');
+    expect(selectedIds).not.toContain('foreground-service-notification-states');
     expect(selectedIds).not.toEqual(expect.arrayContaining(BRANCH_REGENERATION_SCENARIOS));
   });
 });
@@ -4260,6 +4996,62 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       }));
   });
 
+  it.each([false, true])('selects optional Off and verifies it before closing the controls (already selected: %s)', async (alreadySelected) => {
+    const snapshotFor = (selected) => parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node resource-id="reasoning-effort-off" enabled="true" selected="${selected}" bounds="[100,100][200,200]" />
+      </hierarchy>
+    `);
+    const initial = snapshotFor(alreadySelected);
+    const settled = snapshotFor(true);
+    const calls = [];
+    const tap = jest.fn((_adb, _serial, bounds) => calls.push(['select-off', bounds]));
+    const waitForMatch = jest.fn(async (_adb, _serial, _options, predicate) => {
+      expect(predicate(snapshotFor(false))).toBeNull();
+      const match = predicate(settled);
+      expect(match.selected).toBe(true);
+      calls.push(['verified-off']);
+      return { match, snapshot: settled };
+    });
+    const result = await disableReasoningForAuthoritativeClear({ serial: 'test-device' }, {
+      adbPath: 'test-adb',
+      tapVisibleResource: async (_ctx, id) => calls.push(['tap', id]),
+      waitForResourceId: jest.fn().mockResolvedValue(undefined),
+      createSnapshot: () => initial,
+      tapBounds: tap,
+      waitForSnapshotMatch: waitForMatch,
+      waitForNoResourceId: async (_adb, _serial, id) => calls.push(['absent', id]),
+    });
+
+    expect(result).toEqual({ reasoningEffort: 'off', verifiedSelected: true, verifiedUnsupported: false });
+    expect(tap).toHaveBeenCalledTimes(alreadySelected ? 0 : 1);
+    expect(waitForMatch).toHaveBeenCalledTimes(alreadySelected ? 0 : 1);
+    expect(calls).toEqual([
+      ['tap', 'chat-header-model-controls'],
+      ...(!alreadySelected ? [['select-off', initial.nodes[0].bounds], ['verified-off']] : []),
+      ['tap', 'model-parameters-sheet-close-button'],
+      ['absent', 'model-parameters-sheet'],
+    ]);
+  });
+
+  it('fails reasoning-clear when the tapped optional Off never becomes selected', async () => {
+    const snapshot = parseUiSnapshot('<hierarchy bounds="[0,0][1080,2412]"><node resource-id="reasoning-effort-off" enabled="true" selected="false" bounds="[100,100][200,200]" /></hierarchy>');
+    const tap = jest.fn();
+    await expect(disableReasoningForAuthoritativeClear({ serial: 'test-device' }, {
+      adbPath: 'test-adb',
+      tapVisibleResource: jest.fn().mockResolvedValue(undefined),
+      waitForResourceId: jest.fn().mockResolvedValue(undefined),
+      createSnapshot: () => snapshot,
+      tapBounds: tap,
+      waitForSnapshotMatch: async (_adb, _serial, _options, predicate) => {
+        expect(predicate(snapshot)).toBeNull();
+        return { match: null, snapshot };
+      },
+      waitForNoResourceId: jest.fn(),
+    })).rejects.toThrow(/Reasoning-off selection did not settle/);
+    expect(tap).toHaveBeenCalledWith('test-adb', 'test-device', snapshot.nodes[0].bounds);
+  });
+
   it('still fails reasoning-clear setup when Off is absent for a reasoning-required model', () => {
     const snapshot = parseUiSnapshot(`
       <hierarchy bounds="[0,0][1080,2412]">
@@ -4574,10 +5366,13 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       process.env,
       { NODE_ENV: nodeEnv },
     );
-    const gradleArgs = withAndroidProvenanceGradleExecutionArgs([
-      'app:assembleRelease',
-      '-PreactNativeArchitectures=x86_64',
-    ]);
+    const gradleArgs = [
+      ...withAndroidProvenanceGradleExecutionArgs([
+        'app:assembleRelease',
+        '-PreactNativeArchitectures=x86_64',
+      ]),
+      '--stacktrace',
+    ];
     const prebuildInputState = collectPrebuildInputState(appRoot, {
       env: isolatedEnvironment,
       hmacKeyPath,
@@ -4830,9 +5625,15 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
 
   it('resolves Android package UIDs across platform package metadata formats', () => {
     const packageName = 'com.github.tah10n.pocketai';
-    const legacyCapture = jest.fn(() => (
-      `Package [${packageName}]\n  userId=10234\n`
-    ));
+    const legacyCapture = jest.fn((command, args) => {
+      if (args.includes('get-current-user')) {
+        return '0\n';
+      }
+      if (args.includes('list')) {
+        return '';
+      }
+      return `Package [${packageName}]\n  userId=10234\n  User 0: installed=true\n`;
+    });
 
     expect(resolveAndroidPackageUid(
       'adb',
@@ -4840,11 +5641,11 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       packageName,
       { runCapture: legacyCapture }
     )).toBe('10234');
-    expect(legacyCapture).toHaveBeenCalledTimes(1);
+    expect(legacyCapture).toHaveBeenCalledTimes(3);
 
     const vendorCapture = jest.fn((command, args) => (
-      args.includes('dumpsys')
-        ? `Package [${packageName}]\n  uid=10338 gids=[]\n  appId=10338\n`
+      args.includes('get-current-user')
+        ? '0\n'
         : `package:${packageName} uid:10338\n`
     ));
     expect(resolveAndroidPackageUid(
@@ -4864,9 +5665,46 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         'package',
         'list',
         'packages',
+        '--user',
+        '0',
         '-U',
         packageName,
       ]
+    );
+  });
+
+  it('resolves the current work-profile UID and ignores a stale user-0 notification block', () => {
+    const packageName = 'com.github.tah10n.pocketai.qa';
+    const capture = jest.fn((command, args) => {
+      if (args.includes('get-current-user')) {
+        return '10\n';
+      }
+      if (args.includes('list')) {
+        return `package:${packageName} uid:1010338\n`;
+      }
+      throw new Error('dumpsys fallback should not be needed');
+    });
+    const currentUid = resolveAndroidPackageUid('adb', 'device-1', packageName, {
+      runCapture: capture,
+    });
+    const dumpsys = [
+      `  AppSettings: ${packageName} (10338)`,
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=0, mOriginalImp=2}",
+      `  AppSettings: ${packageName} (1010338)`,
+      "    NotificationChannel{mId='RN_BACKGROUND_ACTIONS_CHANNEL', mName=Generating response..., mImportance=2, mOriginalImp=2}",
+    ].join('\n');
+
+    expect(currentUid).toBe('1010338');
+    expect(parseAndroidNotificationChannelEnabled(
+      dumpsys,
+      packageName,
+      currentUid,
+      'RN_BACKGROUND_ACTIONS_CHANNEL',
+    )).toBe(true);
+    expect(capture).toHaveBeenNthCalledWith(
+      2,
+      'adb',
+      ['-s', 'device-1', 'shell', 'cmd', 'package', 'list', 'packages', '--user', '10', '-U', packageName]
     );
   });
 
@@ -4878,9 +5716,11 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
       packageName,
       {
         runCapture: jest.fn((command, args) => (
-          args.includes('dumpsys')
-            ? `Package [${packageName}]\n  appId=10338\n`
-            : packageList
+          args.includes('get-current-user')
+            ? '0\n'
+            : args.includes('dumpsys')
+              ? `Package [${packageName}]\n  appId=10338\n  User 0: installed=false\n`
+              : packageList
         )),
       }
     );
@@ -4923,6 +5763,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'branch-step',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         captureOwnership: () => null,
@@ -5046,6 +5887,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'close-race',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         captureOwnership: () => null,
@@ -5093,6 +5935,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'unexpected-exit',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         captureOwnership: () => null,
@@ -5140,6 +5983,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'spawn-error',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn: failingSpawn,
         captureOwnership: () => null,
@@ -5166,6 +6010,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'stop-timeout',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn: stuckSpawn,
         captureOwnership: (pid) => ({
@@ -5230,6 +6075,7 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         stem: 'failed-start-retained',
       }, {
         privateRoot: tempDir,
+        packageUid: '10234',
         runCapture,
         spawn,
         forceStopTimeoutMs: 1,

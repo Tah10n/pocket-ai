@@ -6003,7 +6003,13 @@ describe('ModelDownloadManager Basic', () => {
       lifecycleStatus: LifecycleStatus.QUEUED,
     };
     const pauseAsync = jest.fn().mockResolvedValue({ resumeData: 'resume-data' });
-    const startBackgroundDownloadSpy = jest.spyOn(backgroundTaskService, 'startBackgroundDownload').mockResolvedValue(undefined);
+    const startBackgroundDownloadSpy = jest.spyOn(backgroundTaskService, 'startBackgroundDownload').mockResolvedValue({
+      status: 'started',
+      serviceRunning: true,
+      degraded: false,
+      required: false,
+      requirementSatisfied: true,
+    });
     const stopBackgroundTaskSpy = jest.spyOn(backgroundTaskService, 'stopBackgroundTask');
     jest.spyOn(hardwareListenerService, 'getCurrentStatus').mockReturnValue({
       isLowMemory: false,

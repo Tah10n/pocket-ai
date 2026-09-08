@@ -166,9 +166,16 @@ an ordered, destructive recovery matrix:
 ```bash
 npm run android:scenarios:runtime -- --fail-on-skip
 npm run android:scenarios:attachments -- --fail-on-skip
+npm run android:scenarios:native
 npm run android:scenarios:documents
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
 ```
+
+The native pack is self-contained: it builds a provenance-verified release APK under the
+side-by-side `.qa` application ID, preserves the installed user app, verifies Glass on Home,
+Chat, Models, and Settings in light and dark modes, and exercises foreground-service behavior
+with notification permission granted, denied, and the background-actions channel blocked.
+It restores the isolated package's original theme, notification permission, and channel state.
 
 The document pack uses checked-in synthetic fixtures, requires a loaded local model, and
 verifies exact source/build/install provenance. See
@@ -212,6 +219,15 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [UI Architecture](docs/ui-architecture.md) | Component and layout guidelines |
 | [New Architecture](docs/new-architecture.md) | React Native new architecture notes |
 | [Release Checklist](docs/release-checklist.md) | Pre-release verification steps |
+
+## Current limitations
+
+- Video attachments and microphone recording are not implemented.
+- Scanned PDFs without extractable text require a vision-capable model or a separate OCR workflow.
+- Raw attachment files use app-managed platform storage but are not separately encrypted; chat history and attachment metadata are encrypted.
+- iOS background inference is best-effort and limited by the time granted to `UIApplication.beginBackgroundTask`.
+
+The issue-driven roadmap below tracks committed follow-up work; an empty column does not remove the product limitations above.
 
 ## Roadmap
 

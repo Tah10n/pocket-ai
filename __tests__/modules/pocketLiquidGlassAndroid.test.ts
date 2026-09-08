@@ -63,6 +63,26 @@ describe('Pocket Liquid Glass Android source boundaries', () => {
     expect(handler).toContain('postInvalidateOnAnimation()');
   });
 
+  it('refreshes the shared scene and surfaces on the next frame when appearance changes', () => {
+    const module = read('PocketLiquidGlassModule.kt');
+    const provider = read('PocketLiquidGlassBackdropProvider.kt');
+    const surface = read('PocketLiquidGlassSurface.kt');
+    const revisionSetter = provider.slice(
+      provider.indexOf('var sceneRevision'),
+      provider.indexOf('init {'),
+    );
+    const visualRefresh = surface.slice(
+      surface.indexOf('private fun requestVisualRefresh()'),
+      surface.indexOf('private fun resetRendererFailure()'),
+    );
+
+    expect(module).toContain('Prop("sceneRevision")');
+    expect(revisionSetter).toContain('resetCaptureFailure()');
+    expect(revisionSetter).toContain('postInvalidateOnAnimation()');
+    expect(surface).toContain('requestVisualRefresh()');
+    expect(visualRefresh).toContain('postInvalidateOnAnimation()');
+  });
+
   it('keeps the capture guard API 24-safe and excludes the complete effect subtree', () => {
     const registry = read('PocketLiquidGlassBackdropRegistry.kt');
     const exclusion = read('PocketLiquidGlassCaptureExclusion.kt');

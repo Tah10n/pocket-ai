@@ -218,6 +218,7 @@
     "body": "Этот маршрут зарезервирован для компактных модальных экранов, которые должны наследовать общую тему, типографику и навигационный chrome."
   },
   "chat": {
+    "remoteImageBlocked": "[Удалённое изображение заблокировано]",
     "title": "Чат",
     "newChatTitle": "Новый чат",
     "inputPlaceholder": "Спросите локальный ИИ...",
@@ -479,8 +480,8 @@
       "runtimeGpuMismatchDescriptionSafe": "Запрошено {{requested}} GPU layers, но модель загрузилась с {{loaded}} GPU layers в безопасном режиме, чтобы избежать нехватки памяти.",
       "backendBenchmarkTitle": "Автотюнинг бэкенда",
       "backendBenchmarkDescription": "Пробует CPU и доступные ускорители (GPU/NPU), измеряет скорость и сохраняет самый быстрый стабильный профиль для Авто.",
-      "backendBenchmarkBackgroundWarningTitle": "Автотюнинг в фоне может остановиться",
-      "backendBenchmarkBackgroundWarningDescription": "Включите уведомления, чтобы Android мог держать автотюнинг в фоне (foreground service).",
+      "backendBenchmarkBackgroundWarningTitle": "Уведомления автотюнинга выключены",
+      "backendBenchmarkBackgroundWarningDescription": "Android продолжит автотюнинг, но прогресс может быть виден только в диспетчере задач, а уведомление о завершении не появится.",
       "backendBenchmarkRun": "Запустить автотюнинг",
       "backendBenchmarkCancel": "Отменить",
       "backendBenchmarkRunning": "Автотюнинг…",
@@ -858,6 +859,8 @@
     "sizeRangeLarge": "> 5 ГБ",
     "emptyFiltered": "Попробуйте очистить один или несколько фильтров, чтобы расширить каталог.",
     "emptySearchHint": "Попробуйте другой поисковый запрос или загрузите больше результатов.",
+    "emptyDownloadedTitle": "Нет скачанных моделей",
+    "emptyDownloadedHint": "Откройте вкладку «Все модели», чтобы найти и скачать модель.",
     "clearFilters": "Очистить фильтры",
     "searching": "Поиск в Hugging Face...",
     "paginationLocalSortHint": "Эта сортировка выполняется на устройстве. Новые модели могут появляться выше в списке.",
@@ -1045,8 +1048,17 @@
       "projectorStatusFailedTitle": "Ошибка мультимодального проектора",
       "projectorStatusFailedDescription": "Повторите загрузку модели или выберите другой проектор перед использованием нативных медиа-входов."
     },
+    "text": {
+      "badge": "Текст",
+      "capabilityLabel": "Текстовый чат"
+    },
+    "reasoning": {
+      "badge": "Рассуждения",
+      "capabilityLabel": "Модель с рассуждениями"
+    },
     "audio": {
-      "badge": "Аудио"
+      "badge": "Аудио",
+      "capabilityLabel": "Аудиочат"
     },
     "sizeLabel": "Размер:",
     "fileSizeLabel": "Размер файла",

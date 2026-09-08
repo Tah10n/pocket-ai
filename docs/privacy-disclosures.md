@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-07-21
+Last updated: 2026-08-25
 
 ## Summary
 
@@ -58,6 +58,7 @@ Pocket AI uses the network only for model-management flows:
 - Model file downloads for the selected GGUF variant and any compatible multimodal projector or optional MTP draft companion from remote hosting endpoints
 - If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
+- Generated Markdown images are rendered as text labels and are never fetched automatically, including HTTP(S), data, relative, protocol-relative, linked-image, and reference-image syntax. Ordinary HTTP(S) text links open only after a user taps them.
 
 The app can display public, token-required, and access-denied Hugging Face repositories in the same catalog. When a token is configured, token-scoped catalog state is kept only in memory and is cleared when the token is updated or removed; the on-disk catalog cache stores only anonymous/public results. Saving or clearing a token clears the local Hugging Face catalog cache so stale access labels are not reused. When the network is available, cached first-page catalog results are revalidated against Hugging Face on reopen.
 

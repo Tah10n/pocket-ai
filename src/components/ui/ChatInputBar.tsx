@@ -30,6 +30,8 @@ const CHAT_COMPOSER_MATERIAL = { role: 'chrome', variant: 'composer' } as const;
 const CHAT_PRIMARY_ACTION_MATERIAL = { role: 'control', variant: 'selected', tone: 'primary' } as const;
 const CHAT_DISABLED_ACTION_MATERIAL = { role: 'control', variant: 'inline', tone: 'neutral' } as const;
 const CHAT_MODE_MATERIAL = { role: 'content', variant: 'composerMode' } as const;
+const CHAT_COMPOSER_ACTION_SIZE = 'compact' as const;
+const CHAT_COMPOSER_ACTION_ICON_SIZE = 'sm' as const;
 
 interface ChatInputBarProps {
     onSendMessage: (content: string) => Promise<void> | void;
@@ -506,11 +508,16 @@ export const ChatInputBar = ({
             disabled={!isSending && !canSend}
             accessibilityLabel={isSending ? t('chat.stopAccessibilityLabel') : t('chat.sendAccessibilityLabel')}
             iconName={isSending ? 'stop' : 'arrow-upward'}
+            iconSize={CHAT_COMPOSER_ACTION_ICON_SIZE}
+            size={CHAT_COMPOSER_ACTION_SIZE}
             material={primaryActionEnabled ? CHAT_PRIMARY_ACTION_MATERIAL : CHAT_DISABLED_ACTION_MATERIAL}
             tone={primaryActionEnabled ? 'primary' : 'neutral'}
             iconColorRole={primaryActionEnabled ? 'onAccent' : 'tertiary'}
         />
     );
+    const imageAttachmentDisabledReasonText = !imageAttachmentsEnabled && imageAttachmentsDisabledReason
+        ? t(imageAttachmentsDisabledReason)
+        : null;
     const imageAttachmentHelperText = (() => {
         if (hasTooLargeAttachmentFailures && hasCopyOrStorageAttachmentFailures) {
             return t('chat.attachments.mixedFailures');
@@ -528,8 +535,12 @@ export const ChatInputBar = ({
             return t('chat.attachments.limitReached', { count: MAX_CHAT_IMAGE_ATTACHMENTS });
         }
 
-        if (!imageAttachmentsEnabled && imageAttachmentsDisabledReason) {
-            return t(imageAttachmentsDisabledReason);
+        if (
+            imageAttachmentDisabledReasonText
+            && imageAttachmentsDisabledReason !== 'chat.visionReadiness.ready'
+            && imageAttachmentsDisabledReason !== 'chat.visionReadiness.textOnly'
+        ) {
+            return imageAttachmentDisabledReasonText;
         }
 
         return null;
@@ -594,7 +605,7 @@ export const ChatInputBar = ({
     const attachmentHelperText = joinUniqueHelperTexts([imageAttachmentHelperText, documentAttachmentHelperText, mediaAttachmentHelperText]);
     const attachImageDisabledContext = [
         isImageAttachmentActionBusy ? t('chat.attachments.preparingImage') : null,
-        imageAttachmentHelperText,
+        imageAttachmentHelperText ?? imageAttachmentDisabledReasonText,
         disabled ? placeholder : null,
     ]
         .filter((entry): entry is string => Boolean(entry))
@@ -702,8 +713,8 @@ export const ChatInputBar = ({
             accessibilityHint={attachmentStatusAnnouncement ?? undefined}
             accessibilityState={isAnyAttachmentActionBusy ? { busy: true } : undefined}
             iconName="attach-file"
-            iconSize="sm"
-            size="compact"
+            iconSize={CHAT_COMPOSER_ACTION_ICON_SIZE}
+            size={CHAT_COMPOSER_ACTION_SIZE}
             testID="chat-attach-menu-button"
         />
     ) : null;

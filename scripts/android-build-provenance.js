@@ -2139,7 +2139,7 @@ function readZipEntryBuffer(zipBuffer, entry, artifactPath) {
   return contents;
 }
 
-function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
+function inspectAndroidArtifactNativeEntries(zipEntries, artifactType, options = {}) {
   const normalizedArtifactType = `${artifactType || ""}`.trim().toLowerCase();
   if (!["apk", "aab"].includes(normalizedArtifactType)) {
     throw new Error(`Unsupported Android native artifact type: ${artifactType}.`);
@@ -2169,14 +2169,20 @@ function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
     .filter(Boolean)
     .filter((abi, index, values) => values.indexOf(abi) === index)
     .sort();
-  const canonicalAbis = [...ANDROID_UNIVERSAL_ABIS].sort();
-  if (!areExactStringSetsEqual(packagedAbis, canonicalAbis)) {
+  const targeted = options.targetAbi !== undefined;
+  if (targeted && (normalizedArtifactType !== "apk" || !ANDROID_UNIVERSAL_ABIS.includes(options.targetAbi))) {
+    throw new Error("Targeted Android native inspection requires an APK and a supported target ABI.");
+  }
+  const expectedAbis = targeted ? [options.targetAbi] : [...ANDROID_UNIVERSAL_ABIS].sort();
+  if (!areExactStringSetsEqual(packagedAbis, expectedAbis)) {
     throw new Error(
-      `Android ${normalizedArtifactType.toUpperCase()} must package exactly the canonical Android ABI set.`
+      targeted
+        ? `Android APK must package exactly the target ABI ${options.targetAbi}.`
+        : `Android ${normalizedArtifactType.toUpperCase()} must package exactly the canonical Android ABI set.`
     );
   }
 
-  const missingEntries = canonicalAbis.flatMap((abi) => (
+  const missingEntries = expectedAbis.flatMap((abi) => (
     ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI[abi]
       .map((library) => `${libraryPrefix}${abi}/${library}`)
       .filter((entry) => !normalizedEntries.has(entry))
@@ -2192,15 +2198,16 @@ function inspectAndroidArtifactNativeEntries(zipEntries, artifactType) {
   };
 }
 
-function inspectAndroidArtifactNativeLibraries(artifactPath, artifactType) {
+function inspectAndroidArtifactNativeLibraries(artifactPath, artifactType, options = {}) {
   const archive = readZipArchive(artifactPath);
   const inspection = inspectAndroidArtifactNativeEntries(
     archive.entries.map((entry) => entry.name),
-    artifactType
+    artifactType,
+    options
   );
   const normalizedArtifactType = `${artifactType}`.trim().toLowerCase();
   const libraryPrefix = normalizedArtifactType === "aab" ? "base/lib/" : "lib/";
-  const nativeLibraryFingerprints = ANDROID_UNIVERSAL_ABIS.flatMap((abi) => (
+  const nativeLibraryFingerprints = inspection.packagedAbis.flatMap((abi) => (
     POCKET_ANYDOC_ANDROID_LIBRARIES.map((library) => {
       const expectedName = `${libraryPrefix}${abi}/${library}`;
       const entry = archive.entries.find(

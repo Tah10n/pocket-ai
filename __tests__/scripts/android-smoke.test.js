@@ -13,13 +13,18 @@ const {
   captureAndroidScreenshot,
   cleanupOwnedMetroAfterStartupFailure,
   createOwnedMetroProcessLifecycle,
+  dismissExternalLauncherAnrDialog,
   evaluateApkReuse,
   evaluateApkAbiCompatibility,
   evaluateInstallReuse,
   isAppJsReadyUiHierarchy,
+  launchInstalledApp,
   isInsufficientStorageInstallFailure,
   parseAndroidPackageUid,
   parseAndroidProcessId,
+  parseApplicationAtFaultPackage,
+  parseResolvedDefaultHomePackage,
+  parseResolvedLauncherActivity,
   parseCliOptions,
   parseApkVariant,
   parseTargetAbi,
@@ -33,6 +38,7 @@ const {
   resolvePackagedAndroidAbis,
   resolveAndroidQaApplicationId,
   resolveDebugApkReuseDecision,
+  resolveLauncherActivity,
   runAdbInstall,
   runAndroidGradleBuild,
   runCapture,
@@ -251,6 +257,65 @@ describe('android-smoke app JS readiness', () => {
     expect(readUiHierarchy).toHaveBeenCalledTimes(2);
   });
 
+  it('dismisses only a confirmed default-launcher ANR before requiring the app JS marker', async () => {
+    const launcherAnrHierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_close" text="Close app" bounds="[100,200][300,300]" />',
+      '</hierarchy>',
+    ].join('');
+    const readUiHierarchy = jest.fn()
+      .mockReturnValueOnce(launcherAnrHierarchy)
+      .mockReturnValueOnce(readyHierarchy);
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return ' Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      return '';
+    });
+
+    await expect(waitForAppJsReady('adb', 'device-1', appPackage, {
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      readUiHierarchy,
+      runCapture,
+      delay: () => Promise.resolve(),
+    })).resolves.toBeUndefined();
+
+    expect(runCapture).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'input', 'tap', '200', '250'],
+    );
+    expect(readUiHierarchy).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not dismiss an ANR attributed to the app under test', async () => {
+    const appAnrHierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_wait" text="Wait" bounds="[100,200][300,300]" />',
+      '</hierarchy>',
+    ].join('');
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return ` Application at fault: ActivityRecord{123abc u0 ${appPackage}/.MainActivity\n`;
+      }
+      return '';
+    });
+
+    await expect(waitForAppJsReady('adb', 'device-1', appPackage, {
+      timeoutMs: 0,
+      readUiHierarchy: jest.fn(() => appAnrHierarchy),
+      runCapture,
+    })).rejects.toThrow('Timed out while waiting');
+
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
   it('fails readiness immediately when the owned Metro exits', async () => {
     await expect(waitForAppJsReady('adb', 'device-1', appPackage, {
       timeoutMs: 1_000,
@@ -291,6 +356,234 @@ describe('android-smoke app JS readiness', () => {
 
     expect(readAndroidUiHierarchy('adb', 'device-1', { spawnSync })).toBeNull();
     expect(spawnSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('android-smoke installed app launch', () => {
+  it('parses the resolved default HOME package independently from its activity name', () => {
+    expect(parseResolvedDefaultHomePackage(
+      'priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n'
+      + 'com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBe('com.android.launcher3');
+    expect(parseResolvedDefaultHomePackage('No activity found')).toBeNull();
+  });
+
+  it('parses only one exact AOSP ActivityRecord from Application at fault', () => {
+    expect(parseApplicationAtFaultPackage(
+      'WINDOW MANAGER LAST ANR\n'
+      + ' Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBe('com.android.launcher3');
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.Launcher t42}\n',
+    )).toBe('com.android.launcher3');
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: com.android.launcher3/.Launcher\n',
+    )).toBeNull();
+    expect(parseApplicationAtFaultPackage(
+      'RootTask com.android.launcher3/.uioverrides.QuickstepLauncher\n',
+    )).toBeNull();
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: ActivityRecord{9275172 user0 com.android.launcher3/.Launcher\n',
+    )).toBeNull();
+    expect(parseApplicationAtFaultPackage(
+      'Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.Launcher\n'
+      + 'Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.Launcher\n',
+    )).toBeNull();
+  });
+
+  it('refuses to dismiss an ANR dialog without a matching launcher report', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return 'No ANR report available\n';
+      }
+      return '';
+    });
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      '<hierarchy><node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" /></hierarchy>',
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
+  it('closes a confirmed external launcher ANR instead of leaving it in a restart loop', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return ' Application at fault: ActivityRecord{9275172 u0 com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      return '';
+    });
+    const hierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" />',
+      '<node package="android" resource-id="android:id/aerr_wait" bounds="[100,400][300,500]" />',
+      '</hierarchy>',
+    ].join('');
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(true);
+    expect(runCapture).toHaveBeenLastCalledWith('adb', [
+      '-s',
+      'device-1',
+      'shell',
+      'input',
+      'tap',
+      '200',
+      '250',
+    ]);
+    expect(runCapture).toHaveBeenCalledWith(
+      'adb',
+      ['-s', 'device-1', 'shell', 'dumpsys', 'window', 'lastanr'],
+      { allowFailure: true },
+    );
+    expect(runCapture.mock.calls.some(([, args]) => (
+      args.includes('tap') && args.includes('450')
+    ))).toBe(false);
+  });
+
+  it('does not recover when the fault field is not an exact launcher component', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return [
+          'Application at fault: ActivityRecord{broken u0 com.android.launcher3/.Launcher',
+          'RootTask #1: com.android.launcher3/.uioverrides.QuickstepLauncher',
+        ].join('\n');
+      }
+      return '';
+    });
+    const hierarchy = [
+      '<hierarchy>',
+      '<node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" />',
+      '<node package="android" resource-id="android:id/aerr_wait" bounds="[100,400][300,500]" />',
+      '</hierarchy>',
+    ].join('');
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
+  it('does not recover an app-owned ANR even when the launcher appears elsewhere', () => {
+    const runCapture = jest.fn((_command, args) => {
+      if (args.includes('android.intent.category.HOME')) {
+        return 'com.android.launcher3/.uioverrides.QuickstepLauncher\n';
+      }
+      if (args.includes('lastanr')) {
+        return [
+          `Application at fault: ActivityRecord{123abc u0 ${appPackage}/.MainActivity`,
+          'RootTask #1: com.android.launcher3/.uioverrides.QuickstepLauncher',
+        ].join('\n');
+      }
+      return '';
+    });
+    const hierarchy = '<hierarchy><node package="android" resource-id="android:id/aerr_close" bounds="[100,200][300,300]" /></hierarchy>';
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture.mock.calls.some(([, args]) => args.includes('tap'))).toBe(false);
+  });
+
+  it('does not fall back to Wait when the launcher ANR has no Close app action', () => {
+    const runCapture = jest.fn();
+    const hierarchy = '<hierarchy><node package="android" resource-id="android:id/aerr_wait" bounds="[100,400][300,500]" /></hierarchy>';
+
+    expect(dismissExternalLauncherAnrDialog(
+      'adb',
+      'device-1',
+      appPackage,
+      hierarchy,
+      { runCapture },
+    )).toBe(false);
+    expect(runCapture).not.toHaveBeenCalled();
+  });
+
+  const appPackage = 'com.github.tah10n.pocketai.qa';
+
+  it('parses only a launcher component owned by the expected package', () => {
+    expect(parseResolvedLauncherActivity(
+      `priority=0\n${appPackage}/.MainActivity\n`,
+      appPackage,
+    )).toBe(`${appPackage}/.MainActivity`);
+    expect(parseResolvedLauncherActivity('com.android.settings/.Settings\n', appPackage)).toBeNull();
+  });
+
+  it('resolves the explicit launcher activity instead of relying on a monkey event', () => {
+    const runCapture = jest.fn(() => `${appPackage}/.MainActivity\n`);
+
+    expect(resolveLauncherActivity('adb', 'device-1', appPackage, { runCapture }))
+      .toBe(`${appPackage}/.MainActivity`);
+    expect(runCapture).toHaveBeenCalledWith('adb', [
+      '-s',
+      'device-1',
+      'shell',
+      'cmd',
+      'package',
+      'resolve-activity',
+      '--brief',
+      '-a',
+      'android.intent.action.MAIN',
+      '-c',
+      'android.intent.category.LAUNCHER',
+      appPackage,
+    ]);
+  });
+
+  it('waits for the resolved launcher activity to report a successful start', () => {
+    const runCapture = jest.fn()
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce(`${appPackage}/.MainActivity\n`)
+      .mockReturnValueOnce(`Starting: Intent { cmp=${appPackage}/.MainActivity }\nStatus: ok\n`);
+
+    expect(() => launchInstalledApp('adb', 'device-1', appPackage, { runCapture })).not.toThrow();
+    expect(runCapture.mock.calls[2][1]).toEqual([
+      '-s',
+      'device-1',
+      'shell',
+      'am',
+      'start',
+      '-W',
+      '-S',
+      '-n',
+      `${appPackage}/.MainActivity`,
+    ]);
+    expect(runCapture.mock.calls.flatMap((call) => call[1]).join(' ')).not.toContain(' monkey ');
+  });
+
+  it('fails immediately when activity manager does not confirm the launch', () => {
+    const runCapture = jest.fn()
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce(`${appPackage}/.MainActivity\n`)
+      .mockReturnValueOnce('Error: Activity not started\n');
+
+    expect(() => launchInstalledApp('adb', 'device-1', appPackage, { runCapture }))
+      .toThrow(/did not report a successful start/);
   });
 });
 
@@ -853,6 +1146,7 @@ describe('android-smoke target ABI contract', () => {
       '--rerun-tasks',
       '--no-build-cache',
       '--no-configuration-cache',
+      '--stacktrace',
     ]);
     expect(buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a')).toEqual([
       'app:assembleRelease',
@@ -860,6 +1154,7 @@ describe('android-smoke target ABI contract', () => {
       '--rerun-tasks',
       '--no-build-cache',
       '--no-configuration-cache',
+      '--stacktrace',
     ]);
     expect(() => buildGradleAssembleArgs(undefined, 'universal'))
       .toThrow(/requires an explicit assemble task/);
@@ -882,6 +1177,7 @@ describe('android-smoke target ABI contract', () => {
       '--rerun-tasks',
       '--no-build-cache',
       '--no-configuration-cache',
+      '--stacktrace',
     ]);
     expect(() => buildGradleAssembleArgs('app:assembleRelease', 'arm64-v8a', {
       applicationId: 'com.example.untrusted',
@@ -917,6 +1213,7 @@ describe('android-smoke target ABI contract', () => {
         '--rerun-tasks',
         '--no-build-cache',
         '--no-configuration-cache',
+        '--stacktrace',
       ],
       expect.objectContaining({
         cwd: 'C:\\fixture\\android',
@@ -941,7 +1238,7 @@ describe('android-smoke target ABI contract', () => {
         '/d',
         '/s',
         '/c',
-        'gradlew.bat app:assembleRelease -PreactNativeArchitectures=x86_64 --rerun-tasks --no-build-cache --no-configuration-cache',
+        'gradlew.bat app:assembleRelease -PreactNativeArchitectures=x86_64 --rerun-tasks --no-build-cache --no-configuration-cache --stacktrace',
       ],
       expect.objectContaining({ cwd: 'C:\\fixture\\android' }),
     );
@@ -1292,6 +1589,37 @@ describe('android-smoke privacy-scoped bootstrap logcat', () => {
       expect(smokeSource).not.toContain('["-s", device.serial, "logcat", "-c"]');
       expect(smokeSource).toContain('log("Saved Android bootstrap screenshot.")');
       expect(smokeSource).not.toContain('Saved screenshot to ${');
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true });
+    }
+  });
+
+  it('keeps crash diagnostics privacy-scoped to the app UID after its process exits', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-bootstrap-logcat-uid-'));
+    const outputPath = path.join(tempDir, 'bootstrap-failure-logcat.txt');
+    const capture = jest.fn()
+      .mockReturnValueOnce(`package:${packageName} uid:10123\n`)
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce('E/AndroidRuntime: app process exited\n');
+
+    try {
+      saveLogcat('adb', 'device-1', outputPath, {
+        packageName,
+        runCapture: capture,
+      });
+
+      expect(capture.mock.calls[2][1]).toEqual([
+        '-s',
+        'device-1',
+        'logcat',
+        '-d',
+        '-v',
+        'time',
+        '--uid=10123',
+        '-t',
+        '800',
+      ]);
+      expect(fs.readFileSync(outputPath, 'utf8')).toContain('app process exited');
     } finally {
       fs.rmSync(tempDir, { force: true, recursive: true });
     }

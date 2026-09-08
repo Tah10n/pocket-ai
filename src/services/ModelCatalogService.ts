@@ -172,6 +172,7 @@ export interface ModelCatalogSearchResult {
   hasMore: boolean;
   nextCursor: string | null;
   warning?: ModelCatalogError;
+  isFallback?: boolean;
 }
 
 export type ModelCatalogSearchOptions = {
@@ -903,12 +904,12 @@ export class ModelCatalogService {
             memoryFitContext,
             metadataResolution,
           );
-          return {
+          return this.coerceCachedResultForConnectivity({
             ...this.sanitizeSearchResultCursor(currentCached.result),
             models: metadataResolution === 'deferred'
               ? this.copySizeResolutionStates(filteredCachedModels, mergedCachedModels)
               : mergedCachedModels,
-          };
+          });
         }
       }
     }
@@ -1453,6 +1454,43 @@ export class ModelCatalogService {
     this.modelSnapshotCache.set(cacheKey, model);
   }
 
+  /** Check retained pagination without changing cache state or starting requests. */
+  public isSearchCursorAvailable(query: string, options: ModelCatalogSearchOptions): boolean {
+    const rawCursor = options.cursor ?? null;
+    const cursor = this.normalizeCatalogSearchCursor(rawCursor);
+    if (this.isDisposed || (rawCursor !== null && cursor === null)) {
+      return false;
+    }
+
+    const authScope = this.getBufferedCursorAuthScope(cursor);
+    if (authScope === null) {
+      return true;
+    }
+
+    const hasAuthToken = authScope === 'auth';
+    const authVersion = hasAuthToken ? this.authCacheVersion : 0;
+    if (
+      (hasAuthToken && !huggingFaceTokenService.getCachedState().hasToken)
+      || Number(cursor!.split(':')[2]) !== authVersion
+    ) {
+      return false;
+    }
+
+    const cacheKey = this.buildMemorySearchCacheKey(
+      this.normalizeQuery(query),
+      cursor,
+      options.pageSize ?? 20,
+      options.sort ?? null,
+      hasAuthToken,
+      options.gated,
+      options.metadataResolution ?? 'blocking',
+      authVersion,
+    );
+    const cached = this.searchCache.get(cacheKey);
+    return cached?.isBufferedCursor === true
+      && Date.now() - cached.timestamp < BUFFERED_SEARCH_CACHE_MAX_AGE;
+  }
+
   public getCachedSearchResult(
     query: string = 'gguf',
     options?: ModelCatalogSearchOptions,
@@ -1559,6 +1597,7 @@ export class ModelCatalogService {
       ...result,
       hasMore: false,
       nextCursor: null,
+      isFallback: true,
     };
   }
 
@@ -2261,11 +2300,11 @@ export class ModelCatalogService {
       this.upsertModelSnapshots(merged, 'anon');
     }
 
-    return {
+    return this.toNonPaginatedFallback({
       models: merged,
       hasMore: false,
       nextCursor: null,
-    };
+    });
   }
 
   private async getTotalMemory(): Promise<number | null> {
@@ -2939,6 +2978,74 @@ export class ModelCatalogService {
         models: publicModels,
       },
     );
+  }
+
+  /** Resume enrichment of retained pages without replaying their (possibly expired) cursors. */
+  public async resumeMetadataResolution(
+    models: ModelMetadata[],
+    session: CatalogSearchSession,
+    onBatchResolved: (update: Pick<ModelCatalogMetadataUpdate, 'models' | 'removedModelIds'>) => void,
+  ): Promise<void> {
+    const searchScope = this.captureCatalogSearchRequestScope(session);
+    const cacheOperationGeneration = this.cacheOperationGeneration;
+    await this.waitForPersistentCacheHydrationAttempt();
+    const requestContext = await this.createRequestContext();
+    const memoryFitContext = await this.getCurrentMemoryFitContext(cacheOperationGeneration);
+    const assertCurrent = () => {
+      this.assertCatalogSearchIsCurrent(searchScope);
+      this.assertCacheOperationIsCurrent(cacheOperationGeneration);
+      this.assertRequestContextIsCurrent(requestContext);
+    };
+    assertCurrent();
+
+    // Another consumer may have finished enrichment while these pages were hidden.
+    const pending: ModelMetadata[] = [];
+    const cachedUpdates: ModelMetadata[] = [];
+    for (const model of models) {
+      if (!this.shouldResolveDeferredMetadata(model, requestContext)) {
+        continue;
+      }
+      const cached = this.getCachedModel(model.id);
+      const current = cached && (!model.hfRevision || cached.hfRevision === model.hfRevision)
+        ? cached
+        : model;
+      if (this.shouldResolveDeferredMetadata(current, requestContext)) {
+        pending.push(current);
+      } else {
+        cachedUpdates.push(this.withCompletedSizeResolution(current));
+      }
+    }
+    if (cachedUpdates.length > 0) {
+      onBatchResolved({ models: cachedUpdates, removedModelIds: [] });
+    }
+    if (pending.length === 0) {
+      return;
+    }
+
+    await this.resolveMissingModelMetadata(pending, memoryFitContext, requestContext, {
+      treeProbeMode: 'bounded',
+      treeProbeMaxPages: DEFERRED_METADATA_TREE_MAX_PAGES,
+      resolveProjectorAwareModels: false,
+      batchSize: DEFERRED_METADATA_BATCH_SIZE,
+      signal: searchScope.signal,
+      onBatchResolved: ({ requestedModelIds, models: resolvedModels }) => {
+        assertCurrent();
+        const completedModels = filterCatalogSearchModels(resolvedModels).map((model) => (
+          this.withCompletedSizeResolution(this.toSearchResultModel(
+            this.mergeModelWithRegistry(model, memoryFitContext) ?? model,
+          ))
+        ));
+        const retainedIds = new Set(completedModels.map((model) => model.id));
+        const removedModelIds = requestedModelIds.filter((id) => !retainedIds.has(id));
+        removedModelIds.forEach((id) => this.evictModelFromCatalogCaches(id));
+        this.upsertModelSnapshots(completedModels, this.getAuthScope(requestContext.hasAuthToken));
+        if (requestContext.hasAuthToken) {
+          this.reconcileAnonymousModelVisibility(completedModels);
+        }
+        onBatchResolved({ models: completedModels, removedModelIds });
+      },
+    });
+    assertCurrent();
   }
 
   private shouldResolveDeferredMetadata(

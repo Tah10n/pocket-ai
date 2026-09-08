@@ -171,7 +171,7 @@ describe('NotificationService (behavior)', () => {
   it('single-flights three public initialization paths', async () => {
     const results = await Promise.all([
       notificationService.initialize(),
-      notificationService.canStartForegroundServiceNotifications(),
+      notificationService.areUserNotificationsEnabled(),
       notificationService.sendLocalNotification({ title: 'ready' }),
     ]);
 
@@ -1028,13 +1028,26 @@ describe('NotificationService (behavior)', () => {
     expect(Notifications.scheduleNotificationAsync).not.toHaveBeenCalled();
   });
 
-  it('canStartForegroundServiceNotifications refuses on Android when permission lookup fails', async () => {
+  it('areUserNotificationsEnabled fails closed when permission lookup fails', async () => {
     Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
     (Notifications.getPermissionsAsync as jest.Mock).mockRejectedValueOnce(new Error('no perms'));
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const canStart = await notificationService.canStartForegroundServiceNotifications();
+    const canStart = await notificationService.areUserNotificationsEnabled();
 
     expect(canStart).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it('areUserNotificationsEnabled fails closed when Android initialization fails', async () => {
+    Object.defineProperty(Platform, 'OS', { configurable: true, value: 'android' });
+    (Notifications.setNotificationHandler as jest.Mock).mockImplementationOnce(() => {
+      throw new Error('handler unavailable');
+    });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(notificationService.areUserNotificationsEnabled()).resolves.toBe(false);
+    expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+
     warnSpy.mockRestore();
   });
 

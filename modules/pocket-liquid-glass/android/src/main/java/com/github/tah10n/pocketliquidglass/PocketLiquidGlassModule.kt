@@ -21,6 +21,9 @@ class PocketLiquidGlassModule : Module() {
       Prop("active") { view: PocketLiquidGlassBackdropProvider, active: Boolean ->
         view.isProviderActive = active
       }
+      Prop("sceneRevision") { view: PocketLiquidGlassBackdropProvider, revision: String ->
+        view.sceneRevision = revision
+      }
     }
 
     View(PocketLiquidGlassSurface::class) {

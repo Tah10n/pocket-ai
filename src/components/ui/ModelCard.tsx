@@ -12,6 +12,7 @@ import {
   getModelVisionCapabilityBadgePresentation,
 } from '../../utils/modelCapabilities';
 import { getVariantMemoryBadgePresentation } from '../../utils/modelMemoryBadgePresentation';
+import { resolveModelReasoningCapability } from '../../utils/modelReasoningCapabilities';
 import {
   formatModelFileSize,
   getModelDisplayArtifactSizeBytes,
@@ -86,6 +87,11 @@ const ModelCardComponent = ({
     : model;
   const visionBadge = getModelVisionCapabilityBadgePresentation(capabilityBadgeModel);
   const audioBadge = getModelAudioCapabilityBadgePresentation(capabilityBadgeModel);
+  const isPrimaryChatModel = capabilityBadgeModel.artifactRole !== 'projector_companion';
+  const reasoningCapability = resolveModelReasoningCapability(
+    capabilityBadgeModel,
+    activeVariant?.fileName,
+  );
   const accessBadge = model.accessState === ModelAccessState.AUTH_REQUIRED
     ? {
         text: t('models.requiresToken'),
@@ -134,14 +140,44 @@ const ModelCardComponent = ({
             {accessBadge.text}
           </ScreenBadge>
         ) : null}
+        {isPrimaryChatModel ? (
+          <ScreenBadge
+            tone="neutral"
+            size="micro"
+            iconName="menu-book"
+            accessibilityLabel={t('models.text.capabilityLabel')}
+          >
+            {t('models.text.badge')}
+          </ScreenBadge>
+        ) : null}
         {visionBadge ? (
-          <ScreenBadge tone={visionBadge.tone} size="micro" iconName={visionBadge.iconName}>
+          <ScreenBadge
+            tone={visionBadge.tone}
+            size="micro"
+            iconName={visionBadge.iconName}
+            accessibilityLabel={t('models.vision.capabilityLabel')}
+          >
             {t(visionBadge.labelKey)}
           </ScreenBadge>
         ) : null}
         {audioBadge ? (
-          <ScreenBadge tone={audioBadge.tone} size="micro" iconName={audioBadge.iconName}>
+          <ScreenBadge
+            tone={audioBadge.tone}
+            size="micro"
+            iconName={audioBadge.iconName}
+            accessibilityLabel={t('models.audio.capabilityLabel')}
+          >
             {t(audioBadge.labelKey)}
+          </ScreenBadge>
+        ) : null}
+        {isPrimaryChatModel && reasoningCapability.supportsReasoning ? (
+          <ScreenBadge
+            tone="accent"
+            size="micro"
+            iconName="psychology"
+            accessibilityLabel={t('models.reasoning.capabilityLabel')}
+          >
+            {t('models.reasoning.badge')}
           </ScreenBadge>
         ) : null}
         {shouldShowStandaloneMemoryBadge ? (
@@ -300,6 +336,18 @@ function modelVisionFieldsEqual(prevModel: ModelMetadata, nextModel: ModelMetada
     nullableFieldEqual(prevModel.selectedProjectorId, nextModel.selectedProjectorId);
 }
 
+function modelReasoningFieldsEqual(prevModel: ModelMetadata, nextModel: ModelMetadata): boolean {
+  return nullableFieldEqual(prevModel.modelType, nextModel.modelType) &&
+    scalarArrayFieldEqual(prevModel.architectures, nextModel.architectures) &&
+    scalarArrayFieldEqual(prevModel.baseModels, nextModel.baseModels) &&
+    scalarArrayFieldEqual(prevModel.tags, nextModel.tags) &&
+    nullableFieldEqual(prevModel.thinkingCapability?.detectedAt, nextModel.thinkingCapability?.detectedAt) &&
+    nullableFieldEqual(prevModel.thinkingCapability?.supportsThinking, nextModel.thinkingCapability?.supportsThinking) &&
+    nullableFieldEqual(prevModel.thinkingCapability?.canDisableThinking, nextModel.thinkingCapability?.canDisableThinking) &&
+    nullableFieldEqual(prevModel.thinkingCapability?.thinkingStartTag, nextModel.thinkingCapability?.thinkingStartTag) &&
+    nullableFieldEqual(prevModel.thinkingCapability?.thinkingEndTag, nextModel.thinkingCapability?.thinkingEndTag);
+}
+
 function multimodalReadinessEqual(
   prev: ModelMetadata['multimodalReadiness'],
   next: ModelMetadata['multimodalReadiness'],
@@ -412,6 +460,7 @@ export const ModelCard = memo(ModelCardComponent, (prevProps, nextProps) => {
            prevProps.model.sizeResolutionState === nextProps.model.sizeResolutionState &&
            modelVariantsEqual(prevProps.model, nextProps.model) &&
            modelVisionFieldsEqual(prevProps.model, nextProps.model) &&
+           modelReasoningFieldsEqual(prevProps.model, nextProps.model) &&
            multimodalReadinessEqual(prevProps.model.multimodalReadiness, nextProps.model.multimodalReadiness) &&
            inputCapabilitiesEqual(prevProps.model.inputCapabilities, nextProps.model.inputCapabilities) &&
            modelArtifactsEqual(prevProps.model.artifacts, nextProps.model.artifacts) &&

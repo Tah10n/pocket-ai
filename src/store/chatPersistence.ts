@@ -2811,23 +2811,25 @@ export function sanitizeChatThreadForPersistence(thread: ChatThread): ChatThread
 }
 
 export function recoverStaleStreamingThread(thread: ChatThread, now = Date.now()): ChatThread {
+  // Sanitization can rebuild completed attachment metadata without new chat activity.
+  // Check the original messages because it also removes empty streaming placeholders.
+  const needsStreamingRecovery = thread.status === 'generating'
+    || thread.messages.some((message) => message.state === 'streaming');
   const sanitizedThread = sanitizeChatThreadForPersistence(thread);
-  let changed = sanitizedThread !== thread || sanitizedThread.status === 'generating';
+  if (!needsStreamingRecovery) {
+    return sanitizedThread;
+  }
+
   const messages = sanitizedThread.messages.map((message) => {
     if (message.state !== 'streaming') {
       return message;
     }
 
-    changed = true;
     return {
       ...message,
       state: 'stopped' as const,
     };
   });
-
-  if (!changed) {
-    return thread;
-  }
 
   return {
     ...sanitizedThread,

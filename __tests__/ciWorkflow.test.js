@@ -67,6 +67,7 @@ describe('Android catalog QA CI configuration', () => {
   const dependabot = readAppFile('.github', 'dependabot.yml');
   const androidSmoke = readAppFile('scripts', 'android-smoke.js');
   const androidBuildProvenance = readAppFile('scripts', 'android-build-provenance.js');
+  const releaseWorkflow = readAppFile('.github', 'workflows', 'release-please.yml');
 
   it('lets the catalog pack label trigger Android QA and select the catalog pack', () => {
     const selection = extractAndroidQaPackSelection(workflow);
@@ -109,32 +110,33 @@ describe('Android catalog QA CI configuration', () => {
 
   it('defaults Android QA to runtime and delegates build reuse to the provenance-aware launcher', () => {
     const selection = extractAndroidQaPackSelection(workflow);
+    const hostedJob = extractWorkflowJob(workflow, 'android-qa');
     const scenarioStep = workflow.match(/- name: Run Android scenarios[\s\S]+?script: ([^\n]+)/)?.[0] || '';
 
     expect(selection).toContain('pack="runtime"');
     expect(scenarioStep).toContain('--fail-on-skip');
     expect(scenarioStep).not.toContain('--skip-build');
-    expect(workflow).not.toContain('npx expo prebuild');
-    expect(workflow).not.toContain('run: ./gradlew app:assembleRelease');
-    expect(workflow).not.toContain('gradle/actions/setup-gradle');
+    expect(hostedJob).not.toContain('npx expo prebuild');
+    expect(hostedJob).not.toContain('run: ./gradlew app:assembleRelease');
+    expect(hostedJob).not.toContain('gradle/actions/setup-gradle');
     expect(workflow).toContain('POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"');
   });
 
   it('uses the pinned Rust toolchain in existing jobs and tracks Cargo dependencies', () => {
-    const verifyJob = extractWorkflowJob(workflow, 'verify');
+    const deterministicJob = extractWorkflowJob(workflow, 'deterministic');
     const androidJob = extractWorkflowJob(workflow, 'android-qa');
 
-    expect(verifyJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
-    expect(verifyJob).toContain('components: rustfmt, clippy');
-    expect(verifyJob).toContain('run: npm run verify:mobile-change');
+    expect(deterministicJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
+    expect(deterministicJob).toContain('components: rustfmt, clippy');
+    expect(deterministicJob).toContain('run: npm run verify:release');
     expect(packageJson.scripts['verify:mobile-change']).toContain('npm run anydoc:verify');
     expect(packageJson.scripts['anydoc:fmt:check']).toContain('--package pocket-anydoc');
     expect(packageJson.scripts['anydoc:fmt:check']).not.toContain('--all');
     expect(androidJob).toContain('uses: dtolnay/rust-toolchain@1.97.1');
     expect(androidJob).toContain('targets: aarch64-linux-android, x86_64-linux-android');
     expect(androidJob).toContain('cargo install cargo-ndk --version 4.1.2 --locked');
-    expect(workflow).not.toContain('runs-on: macos');
-    expect(workflow).not.toContain('self-hosted');
+    expect(deterministicJob).not.toContain('runs-on: macos');
+    expect(androidJob).not.toContain('self-hosted');
     expect(dependabot).toContain('package-ecosystem: cargo');
     expect(dependabot).toContain('directory: /modules/pocket-anydoc/rust');
   });
@@ -179,5 +181,118 @@ describe('Android catalog QA CI configuration', () => {
     const workflowIndexes = packLabelPriority.map((label) => selection.indexOf(`'${label}'`));
     expect(workflowIndexes.every((index) => index >= 0)).toBe(true);
     expect(workflowIndexes).toEqual([...workflowIndexes].sort((a, b) => a - b));
+  });
+
+  it('requires release-sensitive PRs to exercise Android 32-35 and production iOS native projects', () => {
+    const nativeScope = extractWorkflowJob(workflow, 'native-scope');
+    const deterministicGate = extractWorkflowJob(workflow, 'deterministic');
+    const androidGate = extractWorkflowJob(workflow, 'android-native-release');
+    const iosGate = extractWorkflowJob(workflow, 'ios-native-release');
+    const requiredVerify = extractWorkflowJob(workflow, 'verify');
+
+    expect(workflow).toContain("startsWith(github.head_ref, 'release-please--')");
+    expect(nativeScope).toContain('contents: read');
+    expect(nativeScope).toContain('pull-requests: read');
+    expect(nativeScope).toContain("'.github/workflows/ci.yml'");
+    expect(nativeScope).toContain("'.github/workflows/release-please.yml'");
+    expect(nativeScope).toContain("'scripts/android-*.js'");
+    expect(nativeScope).toContain("'scripts/build-android-release.js'");
+    expect(nativeScope).toContain("'scripts/verify-ci-gate-results.js'");
+    expect(nativeScope).toContain("'src/design-system/materials/**'");
+    expect(nativeScope).toContain("'src/design-system/themes/**'");
+    expect(nativeScope).toContain("'src/components/ui/ChatHeader.tsx'");
+    expect(nativeScope).toContain("'src/components/ui/ChatInputBar.tsx'");
+    expect(nativeScope).toContain("'src/components/ui/ScreenShell.tsx'");
+    expect(nativeScope).toContain("'src/components/ui/TabBarMaterialBackground.tsx'");
+    expect(nativeScope).toContain("'src/providers/ThemeProvider.tsx'");
+    expect(nativeScope).toContain("'src/services/AndroidQaGenerationEvidence.ts'");
+    expect(nativeScope).toContain("'src/services/BackgroundTaskService.ts'");
+    expect(nativeScope).toContain("'src/services/NotificationService.ts'");
+    expect(nativeScope).toContain("'src/ui/screens/ChatScreen.tsx'");
+    expect(nativeScope).toContain("'src/utils/androidBlur.ts'");
+    expect(nativeScope).toContain("'src/utils/androidLiquidGlass.ts'");
+    expect(nativeScope).toContain("'src/utils/tabBarLayout.ts'");
+    expect(nativeScope).toContain("'src/utils/testIds.ts'");
+    expect(nativeScope).toContain("'app/(tabs)/_layout.tsx'");
+    expect(deterministicGate).toContain('name: deterministic');
+    expect(deterministicGate).toContain('npm run verify:release');
+    expect(androidGate).toContain('- deterministic');
+    expect(androidGate).not.toContain('- verify');
+    expect(iosGate).toContain('- deterministic');
+    expect(iosGate).not.toContain('- verify');
+    expect(androidGate).toContain('api-level: [32, 33, 34, 35]');
+    expect(androidGate).toContain('--pack native');
+    expect(androidGate).toContain('--apk-variant release');
+    expect(androidGate).toContain('--isolated-qa-install');
+    expect(androidGate).toContain('npm run verify:native-config -- --require-android');
+    expect(iosGate).toContain('npm run anydoc:build:ios');
+    expect(iosGate).toContain('npm run verify:native-config -- --require-ios');
+    expect(iosGate).toContain('runs-on: macos-26');
+    expect(iosGate).not.toContain('runs-on: macos-15');
+    expect(iosGate).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
+    expect(iosGate).toContain('CODE_SIGNING_ALLOWED=NO build');
+    expect(iosGate).not.toContain('CLANG_ENABLE_EXPLICIT_MODULES=NO');
+    expect(iosGate).not.toContain('-scheme pocketai');
+    expect(iosGate).toContain('NODE_ENV: production');
+    expect(iosGate).toContain('EAS_BUILD_PROFILE: production');
+    expect(requiredVerify).toContain('name: verify');
+    expect(requiredVerify).toContain('if: always()');
+    expect(requiredVerify).toContain('- native-scope');
+    expect(requiredVerify).toContain('- deterministic');
+    expect(requiredVerify).toContain('- android-native-release');
+    expect(requiredVerify).toContain('- ios-native-release');
+    expect(requiredVerify).toContain('NATIVE_REQUIRED: ${{ needs.native-scope.outputs.required }}');
+    expect(requiredVerify).toContain('DETERMINISTIC_RESULT: ${{ needs.deterministic.result }}');
+    expect(requiredVerify).toContain('ANDROID_NATIVE_RESULT: ${{ needs.android-native-release.result }}');
+    expect(requiredVerify).toContain('IOS_NATIVE_RESULT: ${{ needs.ios-native-release.result }}');
+    expect(requiredVerify).toContain('run: node scripts/verify-ci-gate-results.js');
+    expect(requiredVerify).not.toContain('continue-on-error');
+  });
+
+  it('does not create a release tag before Android and iOS release gates pass', () => {
+    const deterministicGate = extractWorkflowJob(releaseWorkflow, 'deterministic-release-gate');
+    const androidGate = extractWorkflowJob(releaseWorkflow, 'android-release-gate');
+    const iosGate = extractWorkflowJob(releaseWorkflow, 'ios-release-gate');
+    const releaseJob = extractWorkflowJob(releaseWorkflow, 'release-please');
+
+    expect(releaseWorkflow).toContain('concurrency:');
+    expect(releaseWorkflow).toContain('group: release-please-${{ github.ref }}');
+    expect(releaseWorkflow).toContain('cancel-in-progress: true');
+    expect(releaseWorkflow).toMatch(/permissions:\r?\n  contents: read/);
+    expect(deterministicGate).toContain('permissions:\n      contents: read');
+    expect(deterministicGate).toContain('ref: ${{ github.sha }}');
+    expect(deterministicGate).toContain('persist-credentials: false');
+    expect(deterministicGate).toContain('uses: dtolnay/rust-toolchain@1.97.1');
+    expect(deterministicGate).toContain('components: rustfmt, clippy');
+    expect(deterministicGate).toContain('run: npm run verify:release');
+    expect(deterministicGate).not.toContain('continue-on-error');
+    expect(androidGate).toContain('permissions:\n      contents: read');
+    expect(androidGate).toContain('persist-credentials: false');
+    expect(androidGate).not.toContain('contents: write');
+    expect(iosGate).toContain('permissions:\n      contents: read');
+    expect(iosGate).toContain('persist-credentials: false');
+    expect(iosGate).not.toContain('contents: write');
+    expect(releaseJob).toContain('contents: write');
+    expect(releaseJob).toContain('pull-requests: write');
+    expect(releaseWorkflow).toContain('android-release-gate:');
+    expect(releaseWorkflow).toContain('ios-release-gate:');
+    expect(releaseWorkflow).toContain('build:android:production:clean');
+    expect(iosGate).toContain('runs-on: macos-26');
+    expect(iosGate).not.toContain('runs-on: macos-15');
+    expect(releaseWorkflow).toContain('xcodebuild -workspace ios/pocketai.xcworkspace -scheme PocketAI');
+    expect(releaseWorkflow).toContain('CODE_SIGNING_ALLOWED=NO build');
+    expect(releaseWorkflow).not.toContain('CLANG_ENABLE_EXPLICIT_MODULES=NO');
+    expect(releaseWorkflow).not.toContain('-scheme pocketai');
+    expect(iosGate).toContain('NODE_ENV: production');
+    expect(iosGate).toContain('EAS_BUILD_PROFILE: production');
+    expect(releaseJob).toContain('- android-release-gate');
+    expect(releaseJob).toContain('- ios-release-gate');
+    expect(releaseJob).toContain('- deterministic-release-gate');
+    expect(releaseJob).toContain('name: Verify gated revision is still main HEAD');
+    expect(releaseJob).toContain('git ls-remote origin refs/heads/main');
+    expect(releaseJob).toContain('current_head" != "$GITHUB_SHA');
+    expect(releaseJob.indexOf('Verify gated revision is still main HEAD')).toBeLessThan(
+      releaseJob.indexOf('Run Release Please'),
+    );
   });
 });

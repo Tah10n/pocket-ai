@@ -51,10 +51,22 @@ export function getMaterialFrameStyle(
   recipe: MaterialRendererRecipe,
   shape: MaterialShape,
 ): ViewStyle {
+  const softRim = recipe.softRim;
+
   return {
     backgroundColor: withMaterialPaintOpacity(recipe.fill.color, recipe.fill.opacity),
     borderColor: withMaterialPaintOpacity(recipe.rim.color, recipe.rim.opacity),
     borderWidth: recipe.rim.width,
+    boxShadow: softRim
+      ? [{
+          blurRadius: softRim.blurRadius,
+          color: withMaterialPaintOpacity(softRim.color, softRim.opacity),
+          inset: true,
+          offsetX: 0,
+          offsetY: 0,
+          spreadDistance: softRim.spreadDistance,
+        }]
+      : undefined,
     elevation: recipe.shadow.elevation,
     shadowColor: recipe.shadow.color,
     shadowOffset: {

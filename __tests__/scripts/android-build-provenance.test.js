@@ -1469,7 +1469,7 @@ describe('Android build provenance routing', () => {
       'transforms',
       '08797f5609b8613ea13a1ae6d79a7559',
       'transformed',
-      'react-android-0.83.6-release',
+      `react-android-${require('../../package.json').dependencies['react-native']}-release`,
       'prefab',
       'modules',
       'reactnative',
@@ -1480,8 +1480,19 @@ describe('Android build provenance routing', () => {
       'androidtextinput',
       'AndroidTextInputComponentDescriptor.h',
     );
-    expect(path.win32.relative(first, representativeNativePath).length).toBe(214);
+    const nativeDescendant = path.win32.relative(first, representativeNativePath);
+    expect(nativeDescendant.length).toBe(215);
     expect(representativeNativePath.length).toBeLessThan(260);
+    const longestAllowedHome = resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      platform: 'win32',
+      shortCacheRoot: `C:\\${'a'.repeat(25)}`,
+    });
+    expect(longestAllowedHome.length).toBe(43);
+    expect(path.win32.join(longestAllowedHome, nativeDescendant).length).toBe(259);
+    expect(() => resolveIsolatedAndroidGradleUserHome(projectRoot, {
+      platform: 'win32',
+      shortCacheRoot: `C:\\${'a'.repeat(26)}`,
+    })).toThrow('POCKET_AI_ANDROID_SHORT_CACHE_ROOT');
     expect(() => resolveIsolatedAndroidGradleUserHome(projectRoot, {
       platform: 'win32',
       shortCacheRoot: 'relative-cache',

@@ -31,6 +31,43 @@ public class AppDelegate: ExpoAppDelegate {
     expect(result.contents).toContain('resourceValues.isExcludedFromBackup = true');
     expect(result.contents.indexOf('excludePocketAiModelDirectoryFromBackup()'))
       .toBeLessThan(result.contents.indexOf('return super.application'));
+    expect(result.contents.indexOf('private func excludePocketAiModelDirectoryFromBackup()'))
+      .toBeLessThan(result.contents.indexOf('public class AppDelegate'));
+  });
+
+  it('keeps the Swift helper in file scope when the generated AppDelegate has a trailing delegate class', () => {
+    const appDelegate = {
+      language: 'swift',
+      contents: `import Expo
+
+@main
+public class AppDelegate: ExpoAppDelegate {
+  public override func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+  ) -> Bool {
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+}
+
+class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
+  override func sourceURL(for bridge: RCTBridge) -> URL? {
+    return bridge.bundleURL
+  }
+}
+`,
+    };
+
+    const result = withIosModelBackupExclusion._internal.applyIosModelBackupExclusionToAppDelegate(appDelegate);
+    const helperIndex = result.contents.indexOf('private func excludePocketAiModelDirectoryFromBackup()');
+    const appDelegateIndex = result.contents.indexOf('@main');
+    const trailingDelegateIndex = result.contents.indexOf('class ReactNativeDelegate');
+
+    expect(helperIndex).toBeGreaterThanOrEqual(0);
+    expect(helperIndex).toBeLessThan(appDelegateIndex);
+    expect(result.contents.indexOf('excludePocketAiModelDirectoryFromBackup()', appDelegateIndex))
+      .toBeLessThan(trailingDelegateIndex);
+    expect(countOccurrences(result.contents, 'private func excludePocketAiModelDirectoryFromBackup()')).toBe(1);
   });
 
   it('injects Objective-C AppDelegate backup exclusion for downloaded models and chat attachments', () => {

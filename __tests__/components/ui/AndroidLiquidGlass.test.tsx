@@ -67,11 +67,17 @@ describe('AndroidLiquidGlass native hosts', () => {
     __setAndroidLiquidGlassNativeViewsForTests(MockNativeView, MockNativeView);
     try {
       const { getByTestId } = render(
-        <AndroidLiquidGlassBackdropProvider testID="provider" active collapsable={false}>
+        <AndroidLiquidGlassBackdropProvider
+          testID="provider"
+          active
+          sceneRevision="glass-dark"
+          collapsable={false}
+        >
           <Text>Scene</Text>
         </AndroidLiquidGlassBackdropProvider>,
       );
       expect(getByTestId('provider').props.active).toBe(true);
+      expect(getByTestId('provider').props.sceneRevision).toBe('glass-dark');
       expect(getByTestId('provider').props.collapsable).toBe(false);
     } finally {
       restore();

@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, render } from '@testing-library/react-native';
+import { act, fireEvent, render } from '@testing-library/react-native';
 import { View } from 'react-native';
 import { ModelsList } from '../../src/components/models/ModelsList';
 import { useModelsCatalogData } from '../../src/hooks/useModelsCatalogData';
@@ -10,9 +10,14 @@ import { buildProjectorArtifactId } from '../../src/utils/modelProjectors';
 import { registry } from '../../src/services/LocalStorageRegistry';
 
 let mockLastFlashListProps: any = null;
+let mockNativeScrollOffset = 0;
+let mockListHeaderHeight = 0;
+const mockScrollToOffset = jest.fn();
+const mockRequestGlassSceneRefresh = jest.fn();
 let mockModelCardPropsLog: any[] = [];
 let mockLastVariantPickerProps: any = null;
 let mockLastProjectorChoiceSheetProps: any = null;
+let mockLastModelsFilterProps: any = null;
 let mockDownloadQueue: ModelMetadata[] = [];
 let mockOpenModelDetails = jest.fn();
 let mockUseModelActionsInput: any = null;
@@ -53,21 +58,49 @@ function hasAncestorWithTestId(node: any, testID: string): boolean {
   return false;
 }
 
-jest.mock('@shopify/flash-list', () => ({
-  FlashList: (props: any) => {
-    mockLastFlashListProps = props;
-    const mockReact = require('react');
-    return mockReact.createElement(
-      mockReact.Fragment,
-      null,
-      props.data?.map((item: any, index: number) => mockReact.createElement(
+jest.mock('@shopify/flash-list', () => {
+  const mockReact = require('react');
+  return { FlashList: mockReact.forwardRef(function MockFlashList(props: any, ref: any) {
+      mockLastFlashListProps = props;
+      mockReact.useImperativeHandle(ref, () => ({
+        scrollToOffset: (options: any) => {
+          mockScrollToOffset(options);
+          mockNativeScrollOffset = options.offset;
+          props.onScroll?.({ nativeEvent: { contentOffset: { x: 0, y: options.offset } } });
+        },
+      }));
+      mockReact.useEffect(() => {
+        // FlashList measures its header before onLoad. Its initial index API adds
+        // the first item offset (padding + header) to the supplied viewOffset.
+        mockNativeScrollOffset = props.initialScrollIndex === 0
+          ? props.contentContainerStyle.paddingTop + mockListHeaderHeight
+            + (props.initialScrollIndexParams?.viewOffset ?? 0)
+          : 0;
+        props.onScroll?.({ nativeEvent: { contentOffset: { x: 0, y: mockNativeScrollOffset } } });
+        props.onLoad?.({ elapsedTimeInMs: 1 });
+      }, []);
+      return mockReact.createElement(
         mockReact.Fragment,
-        { key: props.keyExtractor?.(item, index) ?? index },
-        props.renderItem({ item, index }),
-      )),
-    );
-  },
-}));
+        null,
+        typeof props.ListHeaderComponent === 'function'
+          ? mockReact.createElement(props.ListHeaderComponent)
+          : props.ListHeaderComponent,
+        props.data?.map((item: any, index: number) => mockReact.createElement(
+          mockReact.Fragment,
+          { key: props.keyExtractor?.(item, index) ?? index },
+          props.renderItem({ item, index }),
+        )),
+        props.data?.length === 0
+          ? (typeof props.ListEmptyComponent === 'function'
+            ? mockReact.createElement(props.ListEmptyComponent)
+            : props.ListEmptyComponent)
+          : null,
+        typeof props.ListFooterComponent === 'function'
+          ? mockReact.createElement(props.ListFooterComponent)
+          : props.ListFooterComponent,
+      );
+  }) };
+});
 
 jest.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -76,7 +109,10 @@ jest.mock('react-i18next', () => ({
 }));
 
 jest.mock('../../src/components/models/ModelsFilter', () => ({
-  ModelsFilter: () => null,
+  ModelsFilter: (props: any) => {
+    mockLastModelsFilterProps = props;
+    return null;
+  },
 }));
 
 jest.mock('@/components/ui/box', () => ({
@@ -151,6 +187,7 @@ jest.mock('@/components/ui/ProjectorChoiceSheet', () => ({
 }));
 
 jest.mock('@/components/ui/ScreenShell', () => ({
+  useAndroidLiquidGlassSceneRefresh: () => mockRequestGlassSceneRefresh,
   ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => {
     const mockReact = require('react');
     const { View } = require('react-native');
@@ -301,12 +338,23 @@ function createCatalogData(nextCursor: string | null, handleLoadMore: jest.Mock)
     hasTokenConfigured: false,
     isTokenStateHydrated: true,
     sessionIdentity: `session:${nextCursor ?? 'none'}`,
+    dataSessionIdentity: `session:${nextCursor ?? 'none'}`,
     handleLoadMore,
     handlePullToRefresh: jest.fn(),
     handleCatalogScrollBeginDrag: jest.fn(),
     refreshDownloadedModels: jest.fn(),
     requestCatalogRefresh: jest.fn(),
   };
+}
+
+function createDeferredLoadMore() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
@@ -361,13 +409,13 @@ function createProjectorCandidate(id: string, fileName: string) {
   };
 }
 
-function setModelsStoreState(filters: ModelFilterCriteria = defaultFilters) {
+function setModelsStoreState(filters: ModelFilterCriteria = defaultFilters, discoveryMode: 'full' | 'guided' = 'full') {
   (useModelsStore as unknown as jest.Mock).mockReturnValue({
     tabPreferences: {
       all: {
         filters,
         sort: defaultSort,
-        discoveryMode: 'full',
+        discoveryMode,
       },
       downloaded: {
         filters: {
@@ -399,9 +447,12 @@ describe('ModelsList', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockLastFlashListProps = null;
+    mockNativeScrollOffset = 0;
+    mockListHeaderHeight = 0;
     mockModelCardPropsLog = [];
     mockLastVariantPickerProps = null;
     mockLastProjectorChoiceSheetProps = null;
+    mockLastModelsFilterProps = null;
     mockDownloadQueue = [];
     mockOpenModelDetails = jest.fn();
     mockUseModelActionsInput = null;
@@ -413,6 +464,95 @@ describe('ModelsList', () => {
       mockRegistryModel = model;
     });
     setModelsStoreState();
+  });
+
+  it('refreshes Glass when a populated catalog becomes an empty search result', () => {
+    const catalog = {
+      ...createCatalogData(null, jest.fn()),
+      hasMore: false,
+      models: [createModel()],
+    };
+    mockUseModelsCatalogData.mockReturnValue(catalog as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="" />);
+    mockRequestGlassSceneRefresh.mockClear();
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalog,
+      sessionIdentity: 'empty-search',
+      loading: true,
+    } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="no-match" />);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalled();
+    mockRequestGlassSceneRefresh.mockClear();
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalog,
+      sessionIdentity: 'empty-search',
+      dataSessionIdentity: 'empty-search',
+      models: [],
+    } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="no-match" />);
+    expect(mockLastFlashListProps.data).toEqual([]);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalled();
+  });
+
+  it('guides an empty Downloaded tab to All Models while preserving search and filter hints', () => {
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, jest.fn()),
+      hasMore: false,
+    } as any);
+    const screen = render(<ModelsList activeTab="downloaded" searchQuery="" />);
+    expect(screen.getByText('models.emptyDownloadedTitle')).toBeTruthy();
+    expect(screen.getByText('models.emptyDownloadedHint')).toBeTruthy();
+    expect(screen.queryByText('models.emptySearchHint')).toBeNull();
+
+    screen.rerender(<ModelsList activeTab="downloaded" searchQuery="no-match" />);
+    expect(screen.getByText('models.emptySearchHint')).toBeTruthy();
+    expect(screen.queryByText('models.emptyDownloadedTitle')).toBeNull();
+
+    const store = (useModelsStore as unknown as jest.Mock).mock.results.at(-1)?.value;
+    (useModelsStore as unknown as jest.Mock).mockReturnValue({
+      ...store,
+      tabPreferences: {
+        ...store.tabPreferences,
+        downloaded: {
+          ...store.tabPreferences.downloaded,
+          filters: { ...defaultFilters, fitsInRamOnly: true },
+        },
+      },
+    });
+    screen.rerender(<ModelsList activeTab="downloaded" searchQuery="" />);
+    expect(screen.getByText('models.emptyFiltered')).toBeTruthy();
+    expect(screen.queryByText('models.emptyDownloadedHint')).toBeNull();
+  });
+
+  it('refreshes Glass for locally filtered empty results without refreshing every metadata update', () => {
+    const catalog = {
+      ...createCatalogData(null, jest.fn()),
+      hasMore: false,
+      models: [createModel()],
+    };
+    mockUseModelsCatalogData.mockReturnValue(catalog as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="" />);
+    mockRequestGlassSceneRefresh.mockClear();
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalog,
+      models: [createModel({ downloadProgress: 0.5 })],
+    } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="" />);
+    expect(mockRequestGlassSceneRefresh).not.toHaveBeenCalled();
+
+    setModelsStoreState({ ...defaultFilters, sizeRanges: ['small'] });
+    screen.rerender(<ModelsList activeTab="all" searchQuery="" />);
+    expect(mockLastFlashListProps.data).toEqual([]);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalledTimes(1);
+    mockRequestGlassSceneRefresh.mockClear();
+
+    setModelsStoreState();
+    screen.rerender(<ModelsList activeTab="all" searchQuery="" />);
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalledTimes(1);
   });
 
   it('does not auto-fill filtered catalog results from a network cursor', async () => {
@@ -445,11 +585,334 @@ describe('ModelsList', () => {
     expect(handleLoadMore).toHaveBeenCalledWith('manual');
   });
 
+  it('continues a manual filtered load across network cursors until a visible page is filled', async () => {
+    const firstRequest = createDeferredLoadMore();
+    const secondRequest = createDeferredLoadMore();
+    const handleLoadMore = jest.fn()
+      .mockReturnValueOnce(firstRequest.promise)
+      .mockReturnValueOnce(secondRequest.promise);
+    const sessionIdentity = 'session:fits-in-ram';
+    const createResult = (count: number, nextCursor: string) => ({
+      ...createCatalogData(nextCursor, handleLoadMore),
+      sessionIdentity,
+      dataSessionIdentity: sessionIdentity,
+      models: Array.from({ length: count }, (_, index) => createModel({
+        id: `org/fit-${index + 1}`,
+        name: `Fit ${index + 1}`,
+      })),
+    });
+    mockUseModelsCatalogData.mockReturnValue(createResult(
+      1,
+      'https://huggingface.co/api/models?cursor=page-2',
+    ) as any);
+
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    fireEvent.press(screen.getByTestId('models-load-more'));
+    expect(handleLoadMore).toHaveBeenCalledTimes(1);
+    expect(handleLoadMore).toHaveBeenLastCalledWith('manual');
+
+    mockUseModelsCatalogData.mockReturnValue(createResult(
+      2,
+      'https://huggingface.co/api/models?cursor=page-3',
+    ) as any);
+    await act(async () => {
+      screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      firstRequest.resolve();
+      await Promise.resolve();
+    });
+
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+    expect(handleLoadMore).toHaveBeenLastCalledWith('manual');
+
+    mockUseModelsCatalogData.mockReturnValue(createResult(
+      9,
+      'https://huggingface.co/api/models?cursor=page-4',
+    ) as any);
+    await act(async () => {
+      screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+      secondRequest.resolve();
+      await Promise.resolve();
+    });
+
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+  });
+
+  it('bounds manual filtered network fill when consecutive pages add no matching models', async () => {
+    const requests = Array.from({ length: 4 }, createDeferredLoadMore);
+    const handleLoadMore = jest.fn();
+    requests.forEach((request) => handleLoadMore.mockReturnValueOnce(request.promise));
+    const sessionIdentity = 'session:sparse-fit-results';
+    const fittingModel = createModel({ id: 'org/only-fit', name: 'Only fit' });
+    const createResult = (page: number) => ({
+      ...createCatalogData(`https://huggingface.co/api/models?cursor=page-${page}`, handleLoadMore),
+      sessionIdentity,
+      dataSessionIdentity: sessionIdentity,
+      models: [fittingModel],
+    });
+    mockUseModelsCatalogData.mockReturnValue(createResult(2) as any);
+
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    fireEvent.press(screen.getByTestId('models-load-more'));
+    expect(handleLoadMore).toHaveBeenCalledTimes(1);
+
+    for (let page = 3; page <= 6; page += 1) {
+      mockUseModelsCatalogData.mockReturnValue(createResult(page) as any);
+      await act(async () => {
+        screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+        requests[page - 3].resolve();
+        await Promise.resolve();
+      });
+    }
+
+    expect(handleLoadMore).toHaveBeenCalledTimes(4);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+  });
+
+  it('unlocks retry after a fast failed request without a fetching render, including the same error twice', async () => {
+    const handleLoadMore = jest.fn();
+    let catalogData = {
+      ...createCatalogData('https://huggingface.co/api/models?cursor=page-2', handleLoadMore),
+      loadMoreError: null as string | null,
+    };
+    mockUseModelsCatalogData.mockImplementation(() => catalogData as any);
+    handleLoadMore.mockImplementation(async () => {
+      catalogData = { ...catalogData, loadMoreError: 'Offline' };
+    });
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await act(async () => {
+        fireEvent.press(screen.getByTestId('models-load-more'));
+      });
+      expect(handleLoadMore).toHaveBeenCalledTimes(attempt);
+      expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+      expect(screen.getByText('Retry')).toBeTruthy();
+      expect(catalogData.isFetchingMore).toBe(false);
+    }
+  });
+
+  it('keeps retry pending despite an old error and continues after its own successful request', async () => {
+    const request = createDeferredLoadMore();
+    const nextRequest = createDeferredLoadMore();
+    const handleLoadMore = jest.fn()
+      .mockReturnValueOnce(request.promise)
+      .mockReturnValueOnce(nextRequest.promise);
+    const catalogData = {
+      ...createCatalogData('https://huggingface.co/api/models?cursor=page-2', handleLoadMore),
+      loadMoreError: 'Offline',
+    };
+    mockUseModelsCatalogData.mockReturnValue(catalogData as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    fireEvent.press(screen.getByTestId('models-load-more'));
+    await act(async () => {
+      screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+    });
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBe(true);
+    expect(handleLoadMore).toHaveBeenCalledTimes(1);
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalogData,
+      nextCursor: 'https://huggingface.co/api/models?cursor=page-3',
+      loadMoreError: null,
+    } as any);
+    await act(async () => {
+      request.resolve();
+    });
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBe(true);
+
+    await act(async () => {
+      nextRequest.resolve();
+    });
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+  });
+
+  it.each(['filters', 'tab'] as const)('ignores stale completion after changing %s and starting a new batch', async (change) => {
+    const staleRequest = createDeferredLoadMore();
+    const currentRequest = createDeferredLoadMore();
+    const handleLoadMore = jest.fn()
+      .mockReturnValueOnce(staleRequest.promise)
+      .mockReturnValueOnce(currentRequest.promise);
+    const catalogData = createCatalogData('https://huggingface.co/api/models?cursor=page-2', handleLoadMore);
+    mockUseModelsCatalogData.mockReturnValue(catalogData as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+    fireEvent.press(screen.getByTestId('models-load-more'));
+
+    if (change === 'tab') {
+      mockUseModelsCatalogData.mockReturnValue({
+        ...catalogData,
+        sessionIdentity: 'downloaded-session',
+      } as any);
+      screen.rerender(<ModelsList activeTab="downloaded" searchQuery="phi" />);
+      mockUseModelsCatalogData.mockReturnValue(catalogData as any);
+    } else {
+      setModelsStoreState({ ...defaultFilters, noTokenRequiredOnly: true });
+      mockUseModelsCatalogData.mockReturnValue({
+        ...catalogData,
+        sessionIdentity: 'new-filter-session',
+        dataSessionIdentity: 'new-filter-session',
+      } as any);
+    }
+    screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+    fireEvent.press(screen.getByTestId('models-load-more'));
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      staleRequest.resolve();
+    });
+    expect(handleLoadMore).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBe(true);
+
+    await act(async () => {
+      currentRequest.resolve();
+    });
+    expect(screen.getByTestId('models-load-more').props.accessibilityState.disabled).toBeFalsy();
+  });
+
+  it.each([
+    { savedOffset: 720, headerHeight: 0 },
+    { savedOffset: 720, headerHeight: 120 },
+    { savedOffset: 64, headerHeight: 0 },
+    { savedOffset: 64, headerHeight: 120 },
+  ])('restores absolute offset $savedOffset with list header $headerHeight after visiting Downloaded', ({ savedOffset, headerHeight }) => {
+    mockListHeaderHeight = headerHeight;
+    if (headerHeight > 0) {
+      setModelsStoreState(defaultFilters, 'guided');
+    }
+    const handleLoadMore = jest.fn();
+    const catalogScrollSnapshotRef = { current: null };
+    const allCatalogData = {
+      ...createCatalogData(null, handleLoadMore),
+      sessionIdentity: 'all::phi::fits',
+      dataSessionIdentity: 'all::phi::fits',
+      models: Array.from({ length: 12 }, (_, index) => createModel({
+        id: `org/model-${index + 1}`,
+        name: `Model ${index + 1}`,
+      })),
+    };
+    const downloadedCatalogData = {
+      ...createCatalogData(null, handleLoadMore),
+      sessionIdentity: 'downloaded::phi',
+      dataSessionIdentity: 'downloaded::phi',
+      hasMore: false,
+    };
+    mockUseModelsCatalogData.mockReturnValue(allCatalogData as any);
+
+    const screen = render(
+      <ModelsList
+        activeTab="all"
+        searchQuery="phi"
+        catalogScrollSnapshotRef={catalogScrollSnapshotRef}
+      />,
+    );
+
+    act(() => {
+      mockLastFlashListProps.onScroll({
+        nativeEvent: { contentOffset: { x: 0, y: savedOffset } },
+      });
+    });
+
+    mockUseModelsCatalogData.mockReturnValue(downloadedCatalogData as any);
+    act(() => {
+      screen.rerender(
+        <ModelsList
+          activeTab="downloaded"
+          searchQuery="phi"
+          catalogScrollSnapshotRef={catalogScrollSnapshotRef}
+        />,
+      );
+    });
+
+    mockUseModelsCatalogData.mockReturnValue(allCatalogData as any);
+    act(() => {
+      screen.rerender(
+        <ModelsList
+          activeTab="all"
+          searchQuery="phi"
+          catalogScrollSnapshotRef={catalogScrollSnapshotRef}
+        />,
+      );
+    });
+
+    expect(mockNativeScrollOffset).toBe(savedOffset);
+    expect(mockScrollToOffset).toHaveBeenLastCalledWith({ offset: savedOffset, animated: false });
+    expect(catalogScrollSnapshotRef.current).toEqual({ sessionIdentity: 'all::phi::fits', offset: savedOffset });
+
+    act(() => {
+      mockLastFlashListProps.onLoad({ elapsedTimeInMs: 2 });
+      mockLastFlashListProps.onScroll({ nativeEvent: { contentOffset: { x: 0, y: savedOffset + 50 } } });
+    });
+    expect(mockScrollToOffset).toHaveBeenCalledTimes(1);
+    expect(catalogScrollSnapshotRef.current).toEqual({ sessionIdentity: 'all::phi::fits', offset: savedOffset + 50 });
+
+    mockUseModelsCatalogData.mockReturnValue(downloadedCatalogData as any);
+    screen.rerender(<ModelsList activeTab="downloaded" searchQuery="phi" catalogScrollSnapshotRef={catalogScrollSnapshotRef} />);
+    mockUseModelsCatalogData.mockReturnValue(allCatalogData as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="phi" catalogScrollSnapshotRef={catalogScrollSnapshotRef} />);
+    expect(mockNativeScrollOffset).toBe(savedOffset + 50);
+  });
+
+  it('does not carry an All Models scroll offset into a different catalog session', () => {
+    const handleLoadMore = jest.fn();
+    const createSessionData = (sessionIdentity: string) => ({
+      ...createCatalogData(null, handleLoadMore),
+      sessionIdentity,
+      dataSessionIdentity: sessionIdentity,
+      models: [createModel({ id: `org/${sessionIdentity}` })],
+    });
+    mockUseModelsCatalogData.mockReturnValue(createSessionData('all::phi::fits') as any);
+
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+
+    act(() => {
+      mockLastFlashListProps.onScroll({
+        nativeEvent: { contentOffset: { x: 0, y: 540 } },
+      });
+    });
+
+    mockUseModelsCatalogData.mockReturnValue(createSessionData('downloaded::phi') as any);
+    act(() => {
+      screen.rerender(<ModelsList activeTab="downloaded" searchQuery="phi" />);
+    });
+
+    mockUseModelsCatalogData.mockReturnValue(createSessionData('all::llama::fits') as any);
+    act(() => {
+      screen.rerender(<ModelsList activeTab="all" searchQuery="llama" />);
+    });
+    expect(mockLastFlashListProps.initialScrollIndex).toBeUndefined();
+    expect(mockLastFlashListProps.initialScrollIndexParams).toBeUndefined();
+    expect(mockNativeScrollOffset).toBe(0);
+    expect(mockScrollToOffset).not.toHaveBeenCalled();
+  });
+
+  it('does not render models from the previous tab while the new catalog session is loading', () => {
+    const handleLoadMore = jest.fn();
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, handleLoadMore),
+      sessionIdentity: 'downloaded::',
+      dataSessionIdentity: 'all::',
+      models: [createModel({ id: 'org/previous-all-model' })],
+    } as any);
+
+    render(<ModelsList activeTab="downloaded" searchQuery="" />);
+
+    expect(mockLastFlashListProps).toBeNull();
+    expect(mockModelCardPropsLog).toEqual([]);
+  });
+
   it('keeps Android glass overlays outside the provided full-screen blur target', async () => {
     const handleLoadMore = jest.fn();
     const androidBlurTargetRef = React.createRef<any>();
-    const renderContentContainer = jest.fn((content) => (
-      <View testID="external-catalog-content-container">{content}</View>
+    const renderContentContainer = jest.fn((content, floatingControls) => (
+      <View testID="external-catalog-content-container">
+        {content}
+        {floatingControls}
+      </View>
     ));
     mockUseModelsCatalogData.mockReturnValue({
       ...createCatalogData(null, handleLoadMore),
@@ -468,6 +931,14 @@ describe('ModelsList', () => {
     expect(renderContentContainer).toHaveBeenCalledTimes(1);
     expect(getByTestId('external-catalog-content-container')).toBeTruthy();
     expect(queryByTestId('models-warmup-content-blur-target')).toBeNull();
+    expect(mockLastModelsFilterProps.androidContentBlurTargetRef).toBe(androidBlurTargetRef);
+    expect(getByTestId('models-floating-filter-row').props.className)
+      .toBe('min-h-9');
+    expect(mockLastFlashListProps.contentContainerStyle).toMatchObject({
+      flexGrow: 1,
+      paddingTop: 152,
+    });
+    expect(mockLastFlashListProps.progressViewOffset).toBe(152);
     [
       'models-warmup-banner',
       'models-parameters-sheet',
@@ -744,6 +1215,27 @@ describe('ModelsList', () => {
       visionConfidence: 'trusted',
       selectedProjectorId: secondProjectorId,
     }));
+  });
+
+  it('reveals a retained model under Fits in RAM after deferred metadata completes', () => {
+    const summary = createModel({
+      size: null,
+      fitsInRam: null,
+      memoryFitDecision: undefined,
+      memoryFitConfidence: undefined,
+      variants: undefined,
+      requiresTreeProbe: true,
+      sizeResolutionState: 'resolving',
+    });
+    const catalog = createCatalogData(null, jest.fn());
+    mockUseModelsCatalogData.mockReturnValue({ ...catalog, models: [summary] } as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="phi" />);
+    expect(mockLastFlashListProps.data).toHaveLength(0);
+
+    mockUseModelsCatalogData.mockReturnValue({ ...catalog, models: [createModel()] } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="phi" />);
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockModelCardPropsLog.at(-1)?.model.id).toBe(summary.id);
   });
 
   it('hides a selected variant that no longer satisfies RAM filters', async () => {

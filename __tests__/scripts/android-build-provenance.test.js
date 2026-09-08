@@ -2012,6 +2012,25 @@ describe('Android build provenance routing', () => {
     )).toThrow(/missing required native libraries/);
   });
 
+  it('requires an explicit supported APK target and rejects extra or missing native ABIs', () => {
+    const entries = ANDROID_REQUIRED_NATIVE_LIBRARIES_BY_ABI['arm64-v8a']
+      .map((library) => `lib/arm64-v8a/${library}`);
+    expect(inspectAndroidArtifactNativeEntries(entries, 'apk', { targetAbi: 'arm64-v8a' }))
+      .toEqual({ nativeLibrariesVerified: true, packagedAbis: ['arm64-v8a'] });
+    expect(() => inspectAndroidArtifactNativeEntries(entries, 'apk'))
+      .toThrow(/exactly the canonical Android ABI set/);
+    for (const targetAbi of ['', null, 'x86', 'armeabi-v7a', ['arm64-v8a']]) {
+      expect(() => inspectAndroidArtifactNativeEntries(entries, 'apk', { targetAbi }))
+        .toThrow(/supported target ABI/);
+    }
+    expect(() => inspectAndroidArtifactNativeEntries(entries, 'aab', { targetAbi: 'arm64-v8a' }))
+      .toThrow(/supported target ABI/);
+    expect(() => inspectAndroidArtifactNativeEntries([...entries, 'lib/x86_64/libreactnative.so'], 'apk', { targetAbi: 'arm64-v8a' }))
+      .toThrow(/exactly the target ABI/);
+    expect(() => inspectAndroidArtifactNativeEntries(entries.slice(1), 'apk', { targetAbi: 'arm64-v8a' }))
+      .toThrow(/missing required native libraries/);
+  });
+
   it('records the effective isolated QA application id in public build provenance', () => {
     const projectRoot = createProject();
     fs.writeFileSync(

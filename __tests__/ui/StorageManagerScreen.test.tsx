@@ -1,6 +1,6 @@
 import React from 'react';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
-import { Alert } from 'react-native';
+import { Alert, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StorageManagerScreen } from '../../src/ui/screens/StorageManagerScreen';
 import {
@@ -111,6 +111,14 @@ describe('StorageManagerScreen', () => {
     mockCleanupQuarantinedModelFiles.mockResolvedValue(0);
     mockClearChatHistory.mockReset();
     mockClearChatHistory.mockResolvedValue(0);
+  });
+
+  it('keeps storage content separated from the header', async () => {
+    const screen = await renderScreen();
+
+    expect(StyleSheet.flatten(screen.getByTestId('storage-manager-content').props.style)).toMatchObject({
+      paddingTop: 16,
+    });
   });
 
   it('navigates back when possible', async () => {

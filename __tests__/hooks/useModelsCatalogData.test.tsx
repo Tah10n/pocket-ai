@@ -29,6 +29,8 @@ jest.mock('../../src/services/ModelCatalogService', () => ({
     cancelPendingSearchRequests: jest.fn(),
     subscribeCacheInvalidations: jest.fn(() => jest.fn()),
     subscribeMetadataUpdates: jest.fn(() => jest.fn()),
+    resumeMetadataResolution: jest.fn(),
+    isSearchCursorAvailable: jest.fn(),
   },
 }));
 
@@ -78,15 +80,28 @@ function createModel(id: string): ModelMetadata {
   };
 }
 
-function renderHookHarness() {
+type HookHarnessInput = {
+  activeTab: 'all' | 'downloaded';
+  searchQuery: string;
+  searchSessionKey: number;
+};
+
+function renderHookHarness(initialInput: Partial<HookHarnessInput> = {}) {
   let currentValue: ReturnType<typeof useModelsCatalogData> | null = null;
   const applyDiscoveryPreset = jest.fn();
   const syncDiscoveryTokenState = jest.fn();
+  let input: HookHarnessInput = {
+    activeTab: 'all',
+    searchQuery: 'phi',
+    searchSessionKey: 0,
+    ...initialInput,
+  };
 
-  const Harness = () => {
+  const Harness = ({ inputValue }: { inputValue: HookHarnessInput }) => {
     const value = useModelsCatalogData({
-      activeTab: 'all',
-      searchQuery: 'phi',
+      activeTab: inputValue.activeTab,
+      searchQuery: inputValue.searchQuery,
+      searchSessionKey: inputValue.searchSessionKey,
       filters: baseFilters,
       sort: baseSort,
       serverSort: 'downloads',
@@ -102,10 +117,14 @@ function renderHookHarness() {
     return null;
   };
 
-  const rendered = render(<Harness />);
+  const rendered = render(<Harness inputValue={input} />);
 
   return {
     getCurrentValue: () => currentValue,
+    rerenderHook: (nextInput: Partial<HookHarnessInput>) => {
+      input = { ...input, ...nextInput };
+      rendered.rerender(<Harness inputValue={input} />);
+    },
     applyDiscoveryPreset,
     syncDiscoveryTokenState,
     ...rendered,
@@ -135,6 +154,8 @@ describe('useModelsCatalogData', () => {
     mockTokenService.subscribe.mockReturnValue(jest.fn());
     mockCatalogService.subscribeCacheInvalidations.mockImplementation(() => jest.fn());
     mockCatalogService.subscribeMetadataUpdates.mockImplementation(() => jest.fn());
+    mockCatalogService.resumeMetadataResolution.mockResolvedValue(undefined);
+    mockCatalogService.isSearchCursorAvailable.mockReturnValue(true);
     mockCatalogService.createSearchSession.mockReturnValue(mockCatalogSearchSession);
     mockCatalogService.getLocalModels.mockResolvedValue([]);
     mockCatalogService.getCachedSearchResult.mockReturnValue({
@@ -391,6 +412,329 @@ describe('useModelsCatalogData', () => {
 
     expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
   });
+
+  it('restores multiple appended All Models pages after visiting Downloaded', async () => {
+    mockCatalogService.searchModels
+      .mockResolvedValueOnce({
+        models: [createModel('org/second-model')],
+        hasMore: true,
+        nextCursor: 'https://huggingface.co/api/models?cursor=page-3',
+      })
+      .mockResolvedValueOnce({
+        models: [createModel('org/third-model')],
+        hasMore: true,
+        nextCursor: 'https://huggingface.co/api/models?cursor=page-4',
+      });
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+
+    await act(async () => {
+      getCurrentValue()?.handleLoadMore('manual');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      getCurrentValue()?.handleLoadMore('manual');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual([
+      'org/first-model',
+      'org/second-model',
+      'org/third-model',
+    ]);
+    expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-4');
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rerenderHook({ activeTab: 'downloaded' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([]);
+
+    await act(async () => {
+      rerenderHook({ activeTab: 'all' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual([
+      'org/first-model',
+      'org/second-model',
+      'org/third-model',
+    ]);
+    expect(getCurrentValue()?.hasMore).toBe(true);
+    expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-4');
+    expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(1);
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['rejection', 'warning', 'empty offline fallback', 'populated offline fallback'])(
+    'retries a retained %s when returning to All Models',
+    async (failure) => {
+      mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+      if (failure === 'rejection') {
+        mockCatalogService.searchModels.mockRejectedValueOnce(new Error('Network unavailable'));
+      } else {
+        mockCatalogService.searchModels.mockResolvedValueOnce({
+          models: failure === 'populated offline fallback' ? [createModel('org/offline')] : [],
+          hasMore: false,
+          nextCursor: null,
+          ...(failure === 'warning'
+            ? { warning: Object.assign(new Error('Network unavailable'), { code: 'network' as const }) }
+            : { isFallback: true }),
+        });
+      }
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      await act(async () => { jest.advanceTimersByTime(400); });
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+
+      rerenderHook({ activeTab: 'downloaded' });
+      await flushMicrotasks();
+      rerenderHook({ activeTab: 'all' });
+      await act(async () => { jest.advanceTimersByTime(400); });
+
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+      expect(mockCatalogService.searchModels).toHaveBeenLastCalledWith('phi', expect.objectContaining({
+        cursor: null, forceRefresh: true,
+      }), mockCatalogSearchSession);
+      expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/second-model']);
+      expect(getCurrentValue()?.warningMessage).toBeNull();
+      expect(getCurrentValue()?.hasMore).toBe(true);
+    },
+  );
+
+  it('restores a successful empty result without replaying its search', async () => {
+    mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+    mockCatalogService.searchModels.mockResolvedValueOnce({ models: [], hasMore: false, nextCursor: null });
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+    await act(async () => { jest.advanceTimersByTime(400); });
+    rerenderHook({ activeTab: 'downloaded' });
+    await flushMicrotasks();
+    rerenderHook({ activeTab: 'all' });
+    await act(async () => { jest.advanceTimersByTime(400); });
+
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+    expect(getCurrentValue()?.models).toEqual([]);
+    expect(getCurrentValue()?.hasMore).toBe(false);
+    expect(getCurrentValue()?.warningMessage).toBeNull();
+  });
+
+  it.each(['return from Downloaded', 'load more'])(
+    'refreshes the first page when a buffered cursor expires before %s',
+    async (action) => {
+      const cursor = 'catalog-buffer:anon:0:1';
+      mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+      mockCatalogService.searchModels.mockResolvedValueOnce({
+        models: [createModel('org/old')], hasMore: true, nextCursor: cursor,
+      });
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      await act(async () => { jest.advanceTimersByTime(400); });
+      mockCatalogService.isSearchCursorAvailable.mockReturnValue(false);
+      if (action === 'return from Downloaded') {
+        rerenderHook({ activeTab: 'downloaded' });
+        await flushMicrotasks();
+        rerenderHook({ activeTab: 'all' });
+        await act(async () => { jest.advanceTimersByTime(400); });
+      } else {
+        await act(async () => { await getCurrentValue()?.handleLoadMore(); });
+      }
+
+      expect(mockCatalogService.isSearchCursorAvailable).toHaveBeenCalledWith('phi', {
+        cursor, pageSize: 8, sort: 'downloads', gated: undefined, metadataResolution: 'deferred',
+      });
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+      expect(mockCatalogService.searchModels).toHaveBeenLastCalledWith('phi', expect.objectContaining({
+        cursor: null, forceRefresh: true,
+      }), mockCatalogSearchSession);
+      expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/second-model']);
+      expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-3');
+      expect(getCurrentValue()?.loadMoreError).toBeNull();
+    },
+  );
+
+  it('resumes pending metadata on retained pages and ignores a detached restoration', async () => {
+    const summary = { ...createModel('org/pending'), size: null, fitsInRam: null, requiresTreeProbe: true };
+    const ready = createModel('org/ready-page-2');
+    const enriched = { ...summary, size: 2048, fitsInRam: true, requiresTreeProbe: false };
+    const metadata = createDeferred<void>();
+    mockCatalogService.getCachedSearchResult.mockReturnValue(null);
+    mockCatalogService.searchModels.mockResolvedValueOnce({
+      models: [summary], hasMore: true, nextCursor: 'page-2',
+    }).mockResolvedValueOnce({
+      models: [ready], hasMore: true, nextCursor: 'catalog-buffer:retained-next-page',
+    });
+    mockCatalogService.resumeMetadataResolution.mockReturnValue(metadata.promise);
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+    await act(async () => { jest.advanceTimersByTime(400); });
+    await act(async () => { await getCurrentValue()?.handleLoadMore(); });
+    expect(getCurrentValue()?.models).toEqual([summary, ready]);
+
+    await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+    expect(mockCatalogSearchSession.cancelPendingRequests).toHaveBeenCalledWith('superseded');
+    await act(async () => { rerenderHook({ activeTab: 'all' }); });
+    expect(mockCatalogService.resumeMetadataResolution).toHaveBeenCalledWith(
+      [summary, ready], mockCatalogSearchSession, expect.any(Function),
+    );
+    const staleUpdate = mockCatalogService.resumeMetadataResolution.mock.calls[0][2];
+    expect(getCurrentValue()?.models[0].fitsInRam).toBeNull();
+    expect(getCurrentValue()?.nextCursor).toBe('catalog-buffer:retained-next-page');
+
+    await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+    await act(async () => { rerenderHook({ activeTab: 'all' }); });
+    const currentUpdate = mockCatalogService.resumeMetadataResolution.mock.calls[1][2];
+    await act(async () => {
+      staleUpdate({ models: [enriched], removedModelIds: [ready.id] });
+    });
+    expect(getCurrentValue()?.models).toEqual([summary, ready]);
+    await act(async () => {
+      currentUpdate({ models: [enriched], removedModelIds: [] });
+      metadata.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([enriched, ready]);
+    expect(getCurrentValue()?.models[0].fitsInRam).toBe(true);
+    expect(getCurrentValue()?.nextCursor).toBe('catalog-buffer:retained-next-page');
+    expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['clear', 'refresh'] as const)(
+    'ignores restored metadata updates and errors after a manual %s',
+    async (action) => {
+      const pending = createDeferred<void>();
+      mockCatalogService.resumeMetadataResolution.mockReturnValue(pending.promise);
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+      await act(async () => { rerenderHook({ activeTab: 'all' }); });
+      const update = mockCatalogService.resumeMetadataResolution.mock.calls[0][2];
+      await act(async () => {
+        if (action === 'clear') {
+          mockCatalogService.subscribeCacheInvalidations.mock.calls[0][0](1, 'manual');
+        } else {
+          getCurrentValue()?.handlePullToRefresh();
+        }
+      });
+      const expectedModels = getCurrentValue()?.models;
+      await act(async () => {
+        update({ models: [], removedModelIds: expectedModels!.map((model) => model.id) });
+        pending.reject(new Error('cancelled stale metadata'));
+      });
+      expect(getCurrentValue()?.models).toBe(expectedModels);
+      expect(getCurrentValue()?.warningMessage).toBeNull();
+      expect(getCurrentValue()?.loadMoreError).toBeNull();
+    },
+  );
+
+  it('continues restored metadata enrichment while another page loads', async () => {
+    const pending = createDeferred<void>();
+    mockCatalogService.resumeMetadataResolution.mockReturnValue(pending.promise);
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+    await act(async () => { rerenderHook({ activeTab: 'downloaded' }); });
+    await act(async () => { rerenderHook({ activeTab: 'all' }); });
+    const update = mockCatalogService.resumeMetadataResolution.mock.calls[0][2];
+    await act(async () => { await getCurrentValue()?.handleLoadMore(); });
+    const enriched = { ...createModel('org/first-model'), size: 4096 };
+    await act(async () => {
+      update({ models: [enriched], removedModelIds: [] });
+      pending.resolve();
+    });
+    expect(getCurrentValue()?.models).toEqual([enriched, createModel('org/second-model')]);
+    expect(getCurrentValue()?.nextCursor).toBe('https://huggingface.co/api/models?cursor=page-3');
+  });
+
+  it('does not restore an All Models snapshot into a different search session', async () => {
+    mockCatalogService.getCachedSearchResult.mockImplementation((query) => ({
+      models: [createModel(query === 'llama' ? 'org/llama-model' : 'org/phi-model')],
+      hasMore: false,
+      nextCursor: null,
+    }));
+    const { getCurrentValue, rerenderHook } = renderHookHarness();
+    await flushMicrotasks();
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/phi-model']);
+
+    await act(async () => {
+      rerenderHook({ activeTab: 'downloaded' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rerenderHook({ activeTab: 'all', searchQuery: 'llama', searchSessionKey: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCurrentValue()?.models.map((model) => model.id)).toEqual(['org/llama-model']);
+    expect(mockCatalogService.getCachedSearchResult).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['query', 'token', 'refresh'] as const)(
+    'does not relabel stale results when a %s session is interrupted by Downloaded',
+    async (sessionChange) => {
+      const previousModel = createModel('org/phi-model');
+      const nextModel = createModel('org/current-session-model');
+      mockCatalogService.getCachedSearchResult.mockReturnValueOnce({
+        models: [previousModel],
+        hasMore: true,
+        nextCursor: 'https://huggingface.co/api/models?cursor=old-session-page-2',
+      }).mockReturnValue(null);
+      mockCatalogService.searchModels.mockResolvedValue({
+        models: [nextModel],
+        hasMore: false,
+        nextCursor: null,
+      });
+      const { getCurrentValue, rerenderHook } = renderHookHarness();
+      await flushMicrotasks();
+      expect(getCurrentValue()?.models).toEqual([previousModel]);
+
+      await act(async () => {
+        if (sessionChange === 'query') {
+          rerenderHook({ searchQuery: 'llama', searchSessionKey: 1 });
+        } else if (sessionChange === 'token') {
+          const tokenListener = mockTokenService.subscribe.mock.calls[0][0];
+          tokenListener({ hasToken: true, updatedAt: 1 }, 'mutation');
+        } else {
+          getCurrentValue()?.requestCatalogRefresh();
+        }
+        await Promise.resolve();
+      });
+      expect(getCurrentValue()?.models).toEqual([]);
+      expect(getCurrentValue()?.loading).toBe(true);
+
+      // Leave before the uncached session's debounce fires, then restore the same session.
+      await act(async () => {
+        rerenderHook({ activeTab: 'downloaded' });
+        await Promise.resolve();
+      });
+      await act(async () => {
+        rerenderHook({ activeTab: 'all' });
+        await Promise.resolve();
+      });
+
+      expect(getCurrentValue()?.models).toEqual([]);
+      expect(getCurrentValue()?.nextCursor).toBeNull();
+      expect(getCurrentValue()?.loading).toBe(true);
+
+      await act(async () => {
+        jest.advanceTimersByTime(400);
+        await Promise.resolve();
+      });
+      expect(mockCatalogService.searchModels).toHaveBeenCalledTimes(1);
+      expect(mockCatalogService.searchModels).toHaveBeenCalledWith(
+        sessionChange === 'query' ? 'llama' : 'phi',
+        expect.objectContaining({ cursor: null }),
+        mockCatalogSearchSession,
+      );
+      expect(getCurrentValue()?.models).toEqual([nextModel]);
+    },
+  );
 
   it('blocks repeated auto-load attempts after a load-more error while preserving manual retry', async () => {
     mockCatalogService.searchModels

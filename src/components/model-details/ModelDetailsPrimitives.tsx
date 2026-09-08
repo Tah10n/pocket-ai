@@ -46,19 +46,19 @@ export function DetailValueCard({
     <ScreenSurface
       tone={tone}
       withControlTint
-      className={`px-4 ${compact ? 'py-3' : 'min-w-[148px] flex-1 py-3.5'}`}
+      className={`px-4 py-3 ${compact ? '' : 'min-w-[148px] flex-1'}`.trim()}
     >
-      <Box className="flex-row items-start justify-between gap-3">
+      <Box className="flex-row items-start justify-between gap-2.5">
         <Box className="min-w-0 flex-1">
           <Text colorRole={colorRole} className={composeTextRole('eyebrow')}>
             {label}
           </Text>
-          <Text colorRole="primary" className={composeTextRole(compact ? 'body' : 'sectionTitle', 'mt-2')}>
+          <Text colorRole="primary" className={composeTextRole(compact ? 'body' : 'sectionTitle', 'mt-1.5')}>
             {value}
           </Text>
         </Box>
         {iconName ? (
-          <ScreenIconTile iconName={iconName} tone={tone} className="h-10 w-10 rounded-2xl" />
+          <ScreenIconTile iconName={iconName} tone={tone} />
         ) : null}
       </Box>
     </ScreenSurface>
@@ -71,8 +71,8 @@ export function SectionHeader({
   tone,
 }: SectionHeaderProps) {
   return (
-    <Box className="mb-4 flex-row items-center gap-3">
-      <ScreenIconTile iconName={iconName} tone={tone} size="lg" />
+    <Box className="mb-2.5 flex-row items-center gap-2.5">
+      <ScreenIconTile iconName={iconName} tone={tone} />
       <Text colorRole="primary" className={composeTextRole('sectionTitle')}>
         {title}
       </Text>

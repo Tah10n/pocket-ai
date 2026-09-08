@@ -1,6 +1,6 @@
 # Release Checklist
 
-Last updated: 2026-07-28
+Last updated: 2026-08-25
 
 ## Purpose
 
@@ -11,12 +11,13 @@ Use this checklist before cutting a preview or production release. It is written
 - App display name: `Pocket AI`
 - Expo slug: `pocket-ai`
 - Store-visible version is read from `app.json -> expo.version`
-- The next Android Play upload code is stored in `app.json -> expo.android.versionCode`
+- EAS stores and auto-increments the developer-facing Android and iOS build numbers remotely
+- `app.json -> expo.android.versionCode` remains the local Android build input; it is not the EAS store-build source of truth
 - Deep-link scheme: `pocketai`
 - Android application ID: `com.github.tah10n.pocketai`
 - iOS bundle identifier: `com.github.tah10n.pocketai`
 - Android release signing is loaded from local `keystore.properties` at the app root or `POCKET_AI_UPLOAD_*` environment variables
-- Local Android release builds write the signed AAB to `android/app/build/outputs/bundle/release/app-release.aab`
+- Local Android release builds write a diagnostic signed AAB to `android/app/build/outputs/bundle/release/app-release.aab`; it is not store-upload eligible while EAS remote versioning is authoritative
 - Release provenance is written to `artifacts/android-release/build-provenance-release-universal.json`
 - Universal Android release artifacts contain exactly `arm64-v8a` and `x86_64`, including the required React Native and `llama.rn` libraries for both ABIs
 
@@ -33,7 +34,9 @@ If you're cutting a user-facing store release:
 
 - Merge the Release Please **Release PR** (it updates versions, release state, and changelog).
 - Avoid manual edits to the version, manifest, or changelog files in the normal flow.
-- After the local production build, if `app.json` reserves the next Android `versionCode`, carry that change in a small follow-up commit/PR. Do not expect to add it to the already-merged Release PR.
+- Before the first remote-versioned production build, initialize each platform with `eas build:version:set` using the latest build accepted by its store.
+- Create every App Store and Google Play upload with the EAS production profile: `npm run build:all:eas:production`, `npm run build:android:eas:production`, or `npm run build:ios:eas:production`.
+- Treat `eas build:version:sync` only as a diagnostic way to copy the current remote value into local config. It does not reserve or increment a store build number, so a locally created Android bundle or Xcode archive must not be uploaded.
 
 Notes:
 
@@ -63,7 +66,10 @@ npm run anydoc:test
 npm run typecheck
 npm run lint
 npm test
+node ./scripts/verify-native-config.js
 ```
+
+Release Please is downstream of exact-SHA deterministic release verification, clean Android release compilation, and an unsigned iOS Release simulator build. Stale main-branch runs are cancelled, and the release job verifies that its gated SHA is still the current `main` head immediately before invoking Release Please. A tag or GitHub Release is not created when any gate fails. In PR CI, the required `verify` context aggregates deterministic verification with the conditional native matrix: release PRs and changes to native modules, Glass/material integration, navigation chrome, config plugins, native/release workflows and scripts, app/EAS config, or dependency lockfiles must pass Android API 32/33/34/35 native packs and the iOS compile gate.
 
 If the release affects model loading, chat, downloads, storage, or navigation behavior, also run an Android phone smoke pass with a connected device:
 
@@ -80,11 +86,11 @@ If the release changes shared theme, tab chrome, routed headers, localization fi
 ```bash
 npm run verify:mobile-change
 npm run android:scenarios -- --skip-build --pack dependency-ui
-node ./scripts/android-scenarios.js --skip-build --scenario hf-catalog-hardening
+node ./scripts/android-scenarios.js --skip-build --scenario hf-catalog-hardening --isolated-qa-install
 node ./scripts/android-screen-capture.js --skip-build --screen home,models,settings,conversations,huggingface-token,model-details --output-dir artifacts/android-scenarios/manual-sample
 ```
 
-`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` or `--scenario variant-picker-smoke` for live model-catalog checks, `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization or state behavior, `--pack native` for Expo or native-module changes, and `--pack extended` when you need the broader stable pass without live catalog smoke. The explicit state-mutating cache check is `npm run android:scenarios:storage -- --skip-build`; it is intentionally excluded from `all`. The all-format document gate is `npm run android:scenarios:documents`; it is excluded from `all`, but PR CI can select it explicitly with `android-pack-documents` or the document-pack checkbox. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
+`npm run android:scenarios` defaults to the small core pack (`home-smoke`, `bottom-tabs`, `new-chat-cta`). Use `--pack catalog` for live model-catalog checks; the pack automatically uses the side-by-side `.qa` install because its scenarios clear persisted filters. Direct state-mutating catalog scenarios such as `--scenario variant-picker-smoke` require `--isolated-qa-install`, and they are excluded from `--pack all`. Use `--pack dependency-ui` for shared theme, tab chrome, routed headers, or motion changes, `--pack runtime` for localization or state behavior, `npm run android:scenarios:native` for the isolated release-profile Glass light/dark and foreground-service matrix, and `--pack extended` when you need the broader stable pass without live catalog smoke. Raw `--pack native` is also forced onto the release `.qa` package so it cannot mutate the installed user app. The explicit state-mutating cache check is `npm run android:scenarios:storage -- --skip-build`; it is intentionally excluded from `all`. The all-format document gate is `npm run android:scenarios:documents`; it is excluded from `all`, but PR CI can select it explicitly with `android-pack-documents` or the document-pack checkbox. Keep noisy perf and other optional checks targeted via `--scenario <id>` or `--pack all`.
 
 For a final current-source Android matrix, use fail-closed packs so an unmet precondition is
 reported as a failure instead of a silent pass:
@@ -147,18 +153,21 @@ If Gradle fails with "SDK location not found", make sure the Android SDK is inst
 - set `ANDROID_HOME` / `ANDROID_SDK_ROOT`, or
 - create `android/local.properties` with `sdk.dir=...` (for example `sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk` on Windows)
 
-Create the Play Store Android App Bundle locally:
+Create a local Android release bundle for deterministic QA, provenance inspection, or signing diagnostics:
 
 ```bash
 npm run build:android:production
 ```
 
-This command uses `expo.version` as `versionName`, uses the current
-`expo.android.versionCode` as the upload code, and after a successful build reserves the
-next `versionCode` in `app.json`. It runs in an isolated Gradle user home with task reruns
-forced and both build and configuration caches disabled.
+This command uses `expo.version` as `versionName`, uses the current local
+`expo.android.versionCode`, and after a successful build reserves the next local diagnostic
+code in `app.json`. It runs in an isolated Gradle user home with task reruns forced and both
+build and configuration caches disabled. Because production EAS builds use a remote version
+source, this local AAB is not store-upload eligible even after `eas build:version:sync`.
 
-After a successful build, `app.json` is expected to change (the next `expo.android.versionCode` is reserved). Commit this change in a small follow-up commit/PR so the next upload code is not lost.
+After a successful local build, `app.json` is expected to change so repeated diagnostic
+artifacts remain distinguishable. Do not interpret or commit that local reservation as a
+Google Play build-number reservation. EAS owns and increments the store value.
 
 Only override the version values when recovering from a failed or custom release flow:
 
@@ -168,8 +177,8 @@ npm run build:android:production -- --version-code 2 --version-name 1.0.1
 
 `versionCode` must be between `1` and `2100000000`. For the default auto-bumping bundle
 task, reservation fails before any mutation when the build already uses the maximum; use
-`--no-bump` only when that is an intentional final bundle publication code. The
-assemble-only APK task does not reserve a next code.
+`--no-bump` only for a deliberately fixed diagnostic artifact. The assemble-only APK task
+does not reserve a next local code.
 
 The build script forces `NODE_ENV=production`, accepts only the repository-owned
 `app:bundleRelease`/`:app:bundleRelease` and `app:assembleRelease`/`:app:assembleRelease`

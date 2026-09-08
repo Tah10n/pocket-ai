@@ -650,6 +650,55 @@ describe('chatStore', () => {
     expect(useChatStore.getState().threads[thread.id]).toBeDefined();
   });
 
+  it('preserves completed media and document conversation recency across repeated hydration', async () => {
+    const imageThread = buildThread('thread-older-image', 10);
+    imageThread.messages[0].attachments = [buildStoredAttachment(
+      imageThread.id,
+      imageThread.messages[0].id,
+      'older-image.jpg',
+    )];
+    const documentThread = buildThread('thread-newer-document', 20);
+    documentThread.messages[0].contentParts = [{ type: 'text', text: 'Saved document text' }];
+    const newestThread = buildThread('thread-newest-text', 30);
+    const threads = [imageThread, documentThread, newestThread];
+    threads.forEach((thread) => writeChatThreadRecord(storage, thread, 40));
+    writeChatPersistenceIndex(storage, {
+      schemaVersion: CHAT_PERSISTENCE_SCHEMA_VERSION,
+      activeThreadId: imageThread.id,
+      threadIds: threads.map((thread) => thread.id),
+      updatedAt: 40,
+    });
+    const nowSpy = jest.spyOn(Date, 'now');
+
+    try {
+      for (const now of [100, 200]) {
+        nowSpy.mockReturnValue(now);
+        useChatStore.setState({ threads: {}, activeThreadId: null });
+        await useChatStore.persist.rehydrate();
+
+        expect(useChatStore.getState().getConversationIndex().map(({ id }) => id)).toEqual([
+          newestThread.id, documentThread.id, imageThread.id,
+        ]);
+        expect(useChatStore.getState().activeThreadId).toBe(imageThread.id);
+        threads.forEach((thread) => {
+          expect(useChatStore.getState().threads[thread.id].updatedAt).toBe(thread.updatedAt);
+          expect(readChatThreadRecord(storage, thread.id)).toEqual({
+            ok: true,
+            value: expect.objectContaining({ thread: expect.objectContaining({ updatedAt: thread.updatedAt }) }),
+          });
+        });
+        expect(useChatStore.getState().threads[imageThread.id].messages[0].attachments).toEqual(
+          imageThread.messages[0].attachments,
+        );
+        expect(useChatStore.getState().threads[documentThread.id].messages[0].contentParts).toEqual(
+          documentThread.messages[0].contentParts,
+        );
+      }
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('rolls back in-memory chat state when a persistence write fails', () => {
     const threadId = useChatStore.getState().createThread({
       modelId: 'author/model-q4',

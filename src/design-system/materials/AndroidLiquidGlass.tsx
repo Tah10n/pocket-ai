@@ -6,6 +6,7 @@ import { resolveAndroidGlassCapability } from '../../utils/androidLiquidGlass';
 
 interface ProviderProps extends ViewProps {
   active?: boolean;
+  sceneRevision?: string;
 }
 
 interface SurfaceProps extends ViewProps {

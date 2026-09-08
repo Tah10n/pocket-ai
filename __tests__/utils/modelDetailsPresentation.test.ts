@@ -5,6 +5,7 @@ import {
   buildModelDetailsHeroMetrics,
   buildModelDetailsMetadataMetrics,
   createModelDetailsPlaceholder,
+  formatModelDetailsDescription,
 } from '../../src/utils/modelDetailsPresentation';
 
 const t = (key: string) => (key === 'models.sizeUnknown' ? 'Unknown' : key);
@@ -41,6 +42,66 @@ function createProjectorArtifact(
 }
 
 describe('modelDetailsPresentation', () => {
+  it('keeps readable model prose while removing a collapsed Markdown table', () => {
+    expect(formatModelDetailsDescription(
+      'Fine tune [Qwen3](https://example.com) in our docs. | Model | Notebook | Speed | | Qwen3 | [Start](https://example.com) | 3x |',
+    )).toBe('Fine tune Qwen3 in our docs.');
+  });
+
+  it('turns a table-only description into a short readable summary', () => {
+    expect(formatModelDetailsDescription(
+      '| Model | Notebook | Speed |\n| --- | --- | --- |\n| Qwen3 | Colab | 3x |',
+    )).toBe('Model · Notebook · Speed · Qwen3');
+  });
+
+  it('summarizes a two-column Markdown table without outer pipes', () => {
+    expect(formatModelDetailsDescription([
+      'Feature | Value',
+      '--- | ---',
+      'Context | 32k',
+    ].join('\n'))).toBe('Feature · Value · Context · 32k');
+  });
+
+  it('discards delimiter cells from a three-column table without outer pipes', () => {
+    expect(formatModelDetailsDescription([
+      'Model | Speed | Memory',
+      '--- | --- | ---',
+      'Qwen3 | Fast | Low',
+    ].join('\n'))).toBe('Model · Speed · Memory · Qwen3');
+  });
+
+  it('keeps ordinary prose that uses pipe separators', () => {
+    expect(formatModelDetailsDescription(
+      'Supports A | B | C | D modes.',
+    )).toBe('Supports A | B | C | D modes.');
+  });
+
+  it('preserves comparison text while removing actual HTML tags', () => {
+    expect(formatModelDetailsDescription(
+      'Uses < 4 GB RAM. Quality > baseline. <strong>Fast</strong>.',
+    )).toBe('Uses < 4 GB RAM. Quality > baseline. Fast.');
+  });
+
+  it('preserves Markdown autolinks as readable text', () => {
+    expect(formatModelDetailsDescription(
+      'Docs: <https://example.com/model>. Contact <team@example.com>.',
+    )).toBe('Docs: https://example.com/model. Contact team@example.com.');
+  });
+
+  it('removes a real multiline Markdown table without truncating preceding prose', () => {
+    expect(formatModelDetailsDescription([
+      'Optimized for local chat.',
+      '',
+      'Model | Speed | Memory',
+      '--- | --- | ---',
+      'Qwen3 | Fast | Low',
+    ].join('\n'))).toBe('Optimized for local chat.');
+  });
+
+  it('returns no description for blank remote metadata', () => {
+    expect(formatModelDetailsDescription('   ')).toBeUndefined();
+  });
+
   it('uses the short repo label in placeholder model details', () => {
     const placeholder = createModelDetailsPlaceholder('author/model-q4');
 

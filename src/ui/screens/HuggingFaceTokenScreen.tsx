@@ -100,7 +100,7 @@ export function HuggingFaceTokenScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={{ flex: 1 }}
       >
-        <ScreenContent className="flex-1 pt-3">
+        <ScreenContent testID="hugging-face-token-content" className="flex-1" topSpacing="default">
           <ScrollView
             className="flex-1"
             keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
@@ -153,7 +153,7 @@ export function HuggingFaceTokenScreen() {
           </ScrollView>
         </ScreenContent>
 
-        <ScreenContent className="pt-4" includeBottomSafeArea>
+        <ScreenContent className="pt-4" includeBottomSafeArea respectFloatingHeader={false}>
           <Box className="flex-row gap-3">
             <Button className="flex-1" onPress={() => { void handleSave(); }} disabled={busy !== null || tokenDraft.trim().length === 0}>
               <ButtonText>{busy === 'save' ? t('common.loading') : t('common.save')}</ButtonText>

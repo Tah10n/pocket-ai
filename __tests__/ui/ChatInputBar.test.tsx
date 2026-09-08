@@ -14,6 +14,7 @@ import { copiedDraftImageAttachment } from '../fixtures/chatImageAttachmentFixtu
 import { getInteractiveWorkRevision } from '../../src/utils/idleTask';
 import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
 import { resolveTheme } from '../../src/design-system/themes/resolver';
+import { withMaterialPaintOpacity } from '../../src/design-system/materials/style';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -110,6 +111,34 @@ describe('ChatInputBar', () => {
     expect(getByTestId('chat-primary-action-stop')).toBeTruthy();
   });
 
+  it('keeps the send and stop actions the same size as the attachment action', () => {
+    const actionProps = {
+      draft: 'Ready',
+      imageAttachmentsEnabled: true,
+      onAttachImages: jest.fn(),
+      onSendMessage: jest.fn(),
+    };
+    const { getByTestId, rerender } = render(<ChatInputBar {...actionProps} />);
+    const attachmentClassName = getByTestId('chat-attach-menu-button').props.className as string;
+
+    expect(attachmentClassName).toEqual(expect.stringContaining('h-8 w-8'));
+    expect(getByTestId('chat-primary-action-send').props.className).toEqual(
+      expect.stringContaining('h-8 w-8'),
+    );
+
+    rerender(
+      <ChatInputBar
+        {...actionProps}
+        isSending
+        onStopGeneration={jest.fn()}
+      />,
+    );
+
+    expect(getByTestId('chat-primary-action-stop').props.className).toEqual(
+      expect.stringContaining('h-8 w-8'),
+    );
+  });
+
   it('selects composer chrome from theme presentation without changing the default layout', () => {
     const defaultComposer = render(
       <StaticThemeProvider themeId="default" resolvedMode="light">
@@ -143,7 +172,12 @@ describe('ChatInputBar', () => {
 
     expect(flattenStyle(darkGlassComposer.getByTestId('chat-input-bar-capsule').props.style)).toMatchObject({
       backgroundColor: resolvedGlassTheme.colors.surfaceOverlay,
-      borderColor: resolvedGlassTheme.colors.borderSubtle,
+      borderColor: withMaterialPaintOpacity(resolvedGlassTheme.colors.borderSubtle, 0.16),
+      boxShadow: [{
+        blurRadius: 5,
+        color: withMaterialPaintOpacity(resolvedGlassTheme.colors.borderSubtle, 0.26),
+        inset: true,
+      }],
     });
     expect(flattenStyle(darkGlassComposer.getByTestId('chat-primary-action-send').props.style)).toMatchObject({
       backgroundColor: resolvedGlassTheme.colors.primarySoft,
@@ -916,7 +950,6 @@ describe('ChatInputBar', () => {
   it('keeps attachment controls disabled with every non-ready readiness explanation', () => {
     const restorePlatform = mockPlatformOS('android');
     const readinessKeys = [
-      'chat.visionReadiness.textOnly',
       'chat.visionReadiness.missingProjector',
       'chat.visionReadiness.ambiguousProjector',
       'chat.visionReadiness.projectorDownloading',
@@ -956,6 +989,26 @@ describe('ChatInputBar', () => {
     } finally {
       restorePlatform();
     }
+  });
+
+  it.each([
+    'chat.visionReadiness.ready',
+    'chat.visionReadiness.textOnly',
+  ])('keeps passive image readiness %s out of persistent composer space', (readinessKey) => {
+    const screen = render(
+      <ChatInputBar
+        onSendMessage={jest.fn()}
+        onAttachImages={jest.fn()}
+        imageAttachmentsEnabled={false}
+        imageAttachmentsDisabledReason={readinessKey}
+      />,
+    );
+
+    expect(screen.queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
+
+    fireEvent.press(screen.getByTestId('chat-attach-menu-button'));
+    expect(screen.getByLabelText('chat.attachments.attachImageAccessibilityLabel').props.accessibilityHint)
+      .toBe(readinessKey);
   });
 
   it('shows a busy attachment affordance while the image picker or copy is running', () => {
@@ -1083,7 +1136,7 @@ describe('ChatInputBar', () => {
       ...copiedDraftImageAttachment,
     };
 
-    const { getByPlaceholderText, getByText } = render(
+    const { getByPlaceholderText, queryByTestId } = render(
       <ChatInputBar
         onSendMessage={onSendMessage}
         onAttachImages={jest.fn()}
@@ -1104,7 +1157,7 @@ describe('ChatInputBar', () => {
     await waitFor(() => {
       expect(onSendMessage).toHaveBeenCalledWith('Send text only');
     });
-    expect(getByText('chat.visionReadiness.textOnly')).toBeTruthy();
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
   });
 
@@ -1125,7 +1178,7 @@ describe('ChatInputBar', () => {
       copyStatus: 'copied',
     };
 
-    const { getByPlaceholderText, getByText } = render(
+    const { getByPlaceholderText, queryByTestId } = render(
       <ChatInputBar
         onSendMessage={onSendMessage}
         onAttachImages={jest.fn()}
@@ -1146,7 +1199,7 @@ describe('ChatInputBar', () => {
     await waitFor(() => {
       expect(onSendMessage).toHaveBeenCalledWith('Send text only');
     });
-    expect(getByText('chat.visionReadiness.textOnly')).toBeTruthy();
+    expect(queryByTestId('chat-image-attachment-readiness-text')).toBeNull();
     expect(getByPlaceholderText('chat.inputPlaceholder').props.value).toBe('');
   });
 

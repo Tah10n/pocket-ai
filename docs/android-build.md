@@ -81,7 +81,7 @@ bounded signing state and fingerprints; they do not publish credentials or the k
 path. Expo, Gradle, and plugin processes write raw inherited output, so review that output
 before sharing it.
 
-## Build the production bundle
+## Build a local release bundle for QA
 
 ```bash
 npm run build:android:production
@@ -93,7 +93,7 @@ Use an explicit Gradle clean only when diagnosing generated or Gradle output sta
 npm run build:android:production:clean
 ```
 
-The production command:
+The local release command:
 
 1. forces `NODE_ENV=production` and rejects QA evidence flags in a shipping build;
 2. verifies or cleanly regenerates the native project;
@@ -101,7 +101,13 @@ The production command:
 4. runs the repository-owned `app:bundleRelease` contract;
 5. verifies the AAB contains exactly the supported ABIs and required native libraries;
 6. fingerprints the finished artifact and writes its provenance atomically;
-7. reserves the next Android `versionCode` in `app.json` only after every prior step succeeds.
+7. reserves the next local diagnostic `versionCode` in `app.json` only after every prior step succeeds.
+
+This artifact is for deterministic QA, provenance inspection, and signing diagnostics. It
+must not be uploaded to Google Play while EAS remote versioning is authoritative:
+`eas build:version:sync` copies a value but does not reserve the next one. Create the store
+artifact with `npm run build:android:eas:production`, which atomically consumes the remote
+auto-incremented version source.
 
 The supported release task spellings are deliberately narrow:
 
@@ -117,7 +123,7 @@ also rejected. Use `--version-code` and `--version-name` for the supported recov
 npm run build:android:production -- --version-code 20 --version-name 1.6.1
 ```
 
-Pass `--no-bump` only when the current upload code must not be reserved automatically.
+Pass `--no-bump` only when the current local diagnostic code must not be advanced automatically.
 Android `versionCode` must be a positive integer no greater than `2100000000`. For the
 default auto-bumping bundle task, a build at that limit fails before mutating `app.json`;
 an intentional final-code bundle must use `--no-bump`. The assemble-only APK task does not
@@ -160,9 +166,9 @@ effective public build configuration, Git `HEAD`, tree and dirty identity, and a
 HMAC of non-public local inputs. Inputs are recomputed after Gradle; any change during the
 build invalidates and removes the transaction outputs.
 
-## Artifacts and native-library contract
+## Local artifacts and native-library contract
 
-The production bundle and its manifest are written to:
+The local diagnostic bundle and its manifest are written to:
 
 ```text
 android/app/build/outputs/bundle/release/app-release.aab

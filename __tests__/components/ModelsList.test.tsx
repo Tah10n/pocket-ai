@@ -13,6 +13,7 @@ let mockLastFlashListProps: any = null;
 let mockNativeScrollOffset = 0;
 let mockListHeaderHeight = 0;
 const mockScrollToOffset = jest.fn();
+const mockRequestGlassSceneRefresh = jest.fn();
 let mockModelCardPropsLog: any[] = [];
 let mockLastVariantPickerProps: any = null;
 let mockLastProjectorChoiceSheetProps: any = null;
@@ -89,6 +90,11 @@ jest.mock('@shopify/flash-list', () => {
           { key: props.keyExtractor?.(item, index) ?? index },
           props.renderItem({ item, index }),
         )),
+        props.data?.length === 0
+          ? (typeof props.ListEmptyComponent === 'function'
+            ? mockReact.createElement(props.ListEmptyComponent)
+            : props.ListEmptyComponent)
+          : null,
         typeof props.ListFooterComponent === 'function'
           ? mockReact.createElement(props.ListFooterComponent)
           : props.ListFooterComponent,
@@ -181,6 +187,7 @@ jest.mock('@/components/ui/ProjectorChoiceSheet', () => ({
 }));
 
 jest.mock('@/components/ui/ScreenShell', () => ({
+  useAndroidLiquidGlassSceneRefresh: () => mockRequestGlassSceneRefresh,
   ScreenAndroidContentBlurTarget: ({ children, ...props }: any) => {
     const mockReact = require('react');
     const { View } = require('react-native');
@@ -457,6 +464,95 @@ describe('ModelsList', () => {
       mockRegistryModel = model;
     });
     setModelsStoreState();
+  });
+
+  it('refreshes Glass when a populated catalog becomes an empty search result', () => {
+    const catalog = {
+      ...createCatalogData(null, jest.fn()),
+      hasMore: false,
+      models: [createModel()],
+    };
+    mockUseModelsCatalogData.mockReturnValue(catalog as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="" />);
+    mockRequestGlassSceneRefresh.mockClear();
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalog,
+      sessionIdentity: 'empty-search',
+      loading: true,
+    } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="no-match" />);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalled();
+    mockRequestGlassSceneRefresh.mockClear();
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalog,
+      sessionIdentity: 'empty-search',
+      dataSessionIdentity: 'empty-search',
+      models: [],
+    } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="no-match" />);
+    expect(mockLastFlashListProps.data).toEqual([]);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalled();
+  });
+
+  it('guides an empty Downloaded tab to All Models while preserving search and filter hints', () => {
+    mockUseModelsCatalogData.mockReturnValue({
+      ...createCatalogData(null, jest.fn()),
+      hasMore: false,
+    } as any);
+    const screen = render(<ModelsList activeTab="downloaded" searchQuery="" />);
+    expect(screen.getByText('models.emptyDownloadedTitle')).toBeTruthy();
+    expect(screen.getByText('models.emptyDownloadedHint')).toBeTruthy();
+    expect(screen.queryByText('models.emptySearchHint')).toBeNull();
+
+    screen.rerender(<ModelsList activeTab="downloaded" searchQuery="no-match" />);
+    expect(screen.getByText('models.emptySearchHint')).toBeTruthy();
+    expect(screen.queryByText('models.emptyDownloadedTitle')).toBeNull();
+
+    const store = (useModelsStore as unknown as jest.Mock).mock.results.at(-1)?.value;
+    (useModelsStore as unknown as jest.Mock).mockReturnValue({
+      ...store,
+      tabPreferences: {
+        ...store.tabPreferences,
+        downloaded: {
+          ...store.tabPreferences.downloaded,
+          filters: { ...defaultFilters, fitsInRamOnly: true },
+        },
+      },
+    });
+    screen.rerender(<ModelsList activeTab="downloaded" searchQuery="" />);
+    expect(screen.getByText('models.emptyFiltered')).toBeTruthy();
+    expect(screen.queryByText('models.emptyDownloadedHint')).toBeNull();
+  });
+
+  it('refreshes Glass for locally filtered empty results without refreshing every metadata update', () => {
+    const catalog = {
+      ...createCatalogData(null, jest.fn()),
+      hasMore: false,
+      models: [createModel()],
+    };
+    mockUseModelsCatalogData.mockReturnValue(catalog as any);
+    const screen = render(<ModelsList activeTab="all" searchQuery="" />);
+    mockRequestGlassSceneRefresh.mockClear();
+
+    mockUseModelsCatalogData.mockReturnValue({
+      ...catalog,
+      models: [createModel({ downloadProgress: 0.5 })],
+    } as any);
+    screen.rerender(<ModelsList activeTab="all" searchQuery="" />);
+    expect(mockRequestGlassSceneRefresh).not.toHaveBeenCalled();
+
+    setModelsStoreState({ ...defaultFilters, sizeRanges: ['small'] });
+    screen.rerender(<ModelsList activeTab="all" searchQuery="" />);
+    expect(mockLastFlashListProps.data).toEqual([]);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalledTimes(1);
+    mockRequestGlassSceneRefresh.mockClear();
+
+    setModelsStoreState();
+    screen.rerender(<ModelsList activeTab="all" searchQuery="" />);
+    expect(mockLastFlashListProps.data).toHaveLength(1);
+    expect(mockRequestGlassSceneRefresh).toHaveBeenCalledTimes(1);
   });
 
   it('does not auto-fill filtered catalog results from a network cursor', async () => {

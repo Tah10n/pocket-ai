@@ -24,7 +24,6 @@ const ASSISTANT_MESSAGE_MATERIAL = { role: 'content', variant: 'message', tone: 
 const USER_PRIMARY_MESSAGE_MATERIAL = { role: 'content', variant: 'message', tone: 'primary' } as const;
 const USER_MESSAGE_MATERIAL_BY_TONE = { primary: USER_PRIMARY_MESSAGE_MATERIAL } as const;
 const THOUGHT_CONTENT_MATERIAL = { role: 'content', variant: 'messageThought' } as const;
-const ATTACHMENT_CONTENT_MATERIAL = { role: 'content', variant: 'messageAttachment' } as const;
 const ERROR_CONTENT_MATERIAL = { role: 'content', variant: 'messageError' } as const;
 
 export interface ChatMessageBubbleProps {
@@ -497,11 +496,9 @@ const ChatMessageBubbleComponent = ({
                     };
                     if (!isImageMessageAttachment(attachment) && 'kind' in attachment) {
                       return (
-                        <Surface
+                        <Box
                           key={attachment.id}
                           testID={`message-attachment-${attachment.kind}-${id}-${attachment.id}`}
-                          material={ATTACHMENT_CONTENT_MATERIAL}
-                          shape="md"
                           accessible
                           accessibilityRole="summary"
                           accessibilityLabel={t('chat.attachments.messageFileIndexedAccessibilityLabel', {
@@ -513,14 +510,14 @@ const ChatMessageBubbleComponent = ({
                         >
                           <ScreenIconTile iconName={getAttachmentIconName(attachment)} tone="neutral" size="sm" iconSize="sm" className="h-8 w-8" />
                           <Box className="min-w-0 flex-1">
-                            <Text colorRole="primary" numberOfLines={1} className="text-xs font-semibold  ">
+                            <Text colorRole="onAccent" numberOfLines={1} className="text-xs font-semibold  ">
                               {attachment.fileName}
                             </Text>
-                            <Text colorRole="secondary" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
+                            <Text colorRole="onAccent" numberOfLines={1} className="mt-0.5 text-xs leading-4  ">
                               {getAttachmentLabel(attachment)}
                             </Text>
                           </Box>
-                        </Surface>
+                        </Box>
                       );
                     }
 
@@ -537,22 +534,20 @@ const ChatMessageBubbleComponent = ({
                         className="h-[72px] w-[72px] rounded-lg"
                       />
                     ) : (
-                      <Surface
+                      <Box
                         key={attachment.id}
                         testID={`message-attachment-unavailable-${id}-${attachment.id}`}
-                        material={ATTACHMENT_CONTENT_MATERIAL}
-                        shape="md"
                         accessible
                         accessibilityRole="image"
                         accessibilityLabel={t('chat.attachments.messageUnavailableIndexedAccessibilityLabel', attachmentLabelOptions)}
                         accessibilityState={{ disabled: true }}
                         className="w-36 flex-row items-center gap-1.5 px-2 py-1.5"
                       >
-                        <MaterialSymbols colorRole="secondary" name="broken-image" size="sm" className=" " />
-                        <Text colorRole="secondary" className="min-w-0 flex-1 text-xs leading-4  ">
+                        <MaterialSymbols colorRole="onAccent" name="broken-image" size="sm" className=" " />
+                        <Text colorRole="onAccent" className="min-w-0 flex-1 text-xs leading-4  ">
                           {t('chat.attachments.unavailable')}
                         </Text>
-                      </Surface>
+                      </Box>
                     );
                   })}
                 </Box>

@@ -1995,6 +1995,53 @@ describe('chatPersistence', () => {
     });
   });
 
+  it('returns and persists attachment and content repairs without changing completed conversation recency', () => {
+    const thread: ChatThread = {
+      ...buildThread('thread-completed-repairs'),
+      status: 'idle',
+      messages: [{
+        id: 'user-repairs',
+        role: 'user',
+        content: 'Prompt with an image',
+        createdAt: 1,
+        state: 'complete',
+        attachments: [{ ...copiedImageAttachment, threadId: 'stale-thread' }],
+        contentParts: [{ type: 'text', text: '  Retained document text  ' }],
+      }],
+    };
+
+    const recovered = recoverStaleStreamingThread(thread, 20);
+
+    expect(recovered).not.toBe(thread);
+    expect(recovered.updatedAt).toBe(1);
+    expect(recovered.messages[0].attachments?.[0]).toEqual(expect.objectContaining({
+      threadId: thread.id,
+      messageId: 'user-repairs',
+    }));
+    expect(recovered.messages[0].contentParts).toEqual([{ type: 'text', text: 'Retained document text' }]);
+    writeChatThreadRecord(storage, recovered, 20);
+    expect(parseChatThreadRecord(storage.getString(getChatThreadStorageKey(thread.id)), thread.id)).toEqual({
+      ok: true,
+      value: expect.objectContaining({ thread: recovered }),
+    });
+    expect(recoverStaleStreamingThread(recovered, 30)).toEqual(recovered);
+  });
+
+  it.each(['idle', 'generating'] as const)(
+    'recovers an empty streaming placeholder even when its original thread status is %s',
+    (status) => {
+      const thread = buildThread('thread-empty-streaming');
+      thread.status = status;
+      thread.messages[0].content = '';
+
+      expect(recoverStaleStreamingThread(thread, 20)).toEqual(expect.objectContaining({
+        status: 'idle',
+        updatedAt: 20,
+        messages: [],
+      }));
+    },
+  );
+
   it('recovers cold-hydrated stale streaming messages as stopped without dropping partial content', () => {
     const thread = buildThread('thread-1');
 

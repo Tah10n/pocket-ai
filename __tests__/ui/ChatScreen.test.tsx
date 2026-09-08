@@ -5034,8 +5034,29 @@ describe('ChatScreen', () => {
     const { getByText, queryByText } = render(React.createElement(ChatScreen));
 
     expect(getByText('chat.loadModelWarning')).toBeTruthy();
+    expect(getByText('chat.loadModelDescription')).toBeTruthy();
     expect(queryByText('chat.noMessages')).toBeNull();
+    expect(queryByText('chat.emptyNewThread')).toBeNull();
+    expect(queryByText('chat.emptyExistingThread')).toBeNull();
+    expect(lastChatInputBarProps.disabled).toBe(true);
     expect(lastChatInputBarProps.imageAttachmentsDisabledReason).toBe('chat.visionReadiness.noModel');
+  });
+
+  it.each([false, true])('keeps the typing hint for a ready model in an existing=%s empty chat', (existing) => {
+    if (existing) {
+      useChatStore.setState({
+        threads: {
+          'thread-1': { ...useChatStore.getState().threads['thread-1'], messages: [] },
+        },
+        activeThreadId: 'thread-1',
+      });
+    } else {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+    }
+    const { getByText, queryByText } = render(React.createElement(ChatScreen));
+    expect(getByText(existing ? 'chat.emptyExistingThread' : 'chat.emptyNewThread')).toBeTruthy();
+    expect(queryByText('chat.loadModelDescription')).toBeNull();
+    expect(lastChatInputBarProps.disabled).toBe(false);
   });
 
   it('shows inline warmup progress in the empty chat recovery card', () => {
@@ -5049,9 +5070,11 @@ describe('ChatScreen', () => {
       activeThreadId: null,
     });
 
-    const { getByTestId, getByText, queryByTestId } = render(React.createElement(ChatScreen));
+    const { getByTestId, getByText, queryByTestId, queryByText } = render(React.createElement(ChatScreen));
 
     expect(getByText('chat.warmingUp')).toBeTruthy();
+    expect(queryByText('chat.emptyNewThread')).toBeNull();
+    expect(queryByText('chat.emptyExistingThread')).toBeNull();
     expect(getByText('42%')).toBeTruthy();
     expect(getByTestId('chat-recovery-warmup-progress-fill').props.style).toMatchObject({
       width: '42%',

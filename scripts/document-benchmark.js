@@ -6,6 +6,7 @@ const path = require("path");
 const readline = require("readline");
 const { spawn, spawnSync } = require("child_process");
 const {
+  ANDROID_UNIVERSAL_ABIS,
   inspectAndroidArtifactNativeLibraries,
 } = require("./android-build-provenance");
 const {
@@ -197,10 +198,35 @@ function buildAndroidBenchmarkReport({ scenarioReportPath, artifactPath }) {
   if (!fs.existsSync(artifactPath) || !["apk", "aab"].includes(artifactType)) {
     throw codedError("missing_release_artifact");
   }
-  const nativeInspection = inspectAndroidArtifactNativeLibraries(artifactPath, artifactType);
   const artifactStats = fs.statSync(artifactPath);
+  const artifactSha256 = sha256File(artifactPath);
   const provenance = scenarioReport.provenance || {};
-  const sourceRevision = normalizeSha(provenance.source?.head ?? provenance.source?.commit ?? null);
+  const inspectionOptions = {};
+  if (provenance.abi && provenance.abi !== "universal") {
+    const qaPackage = `${readJsonFile(path.join(projectRoot, "app.json")).expo.android.package}.qa`;
+    if (
+      artifactType !== "apk"
+      || provenance.schemaVersion !== 3
+      || provenance.packageName !== qaPackage
+      || provenance.variant !== "release"
+      || provenance.embeddedBundle !== true
+      || provenance.androidQaEvidence !== true
+      || !ANDROID_UNIVERSAL_ABIS.includes(provenance.abi)
+      || provenance.matchedAbi !== provenance.abi
+      || !Array.isArray(provenance.packagedAbis)
+      || provenance.packagedAbis.length !== 1
+      || provenance.packagedAbis[0] !== provenance.abi
+      || !Array.isArray(provenance.device?.abis)
+      || !provenance.device.abis.includes(provenance.abi)
+      || provenance.apkSha256 !== artifactSha256
+      || provenance.installedApkSha256 !== artifactSha256
+    ) {
+      throw codedError("invalid_targeted_android_provenance");
+    }
+    inspectionOptions.targetAbi = provenance.abi;
+  }
+  const nativeInspection = inspectAndroidArtifactNativeLibraries(artifactPath, artifactType, inspectionOptions);
+  const sourceRevision = normalizeSha(provenance.source?.headSha ?? provenance.source?.head ?? provenance.source?.commit ?? null);
   const report = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
@@ -209,10 +235,10 @@ function buildAndroidBenchmarkReport({ scenarioReportPath, artifactPath }) {
     privacy: DOCUMENT_QA_PRIVACY,
     environment: {
       platform: "android",
-      arch: normalizeSafeLabel(provenance.device?.abis?.[0] || provenance.matchedAbi || "unknown", 64),
+      arch: normalizeSafeLabel(provenance.matchedAbi || provenance.device?.abis?.[0] || "unknown", 64),
       sourceRevision,
       artifactBytes: artifactStats.size,
-      artifactSha256: sha256File(artifactPath),
+      artifactSha256,
       ...(provenance.device?.model
         ? { deviceModel: normalizeSafeLabel(provenance.device.model, 128) }
         : null),

@@ -1681,7 +1681,7 @@ function buildDocumentQaRetrievalPrompt(promptSentinel, sentinelIds) {
 }
 
 function buildTextOnlyFallbackSendPrompt() {
-  return `${TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)}`;
+  return `${TEXT_ONLY_FALLBACK_SEND_PROMPT_PREFIX} ${Date.now()} ${Math.floor(Math.random() * 1_000_000)} Reply with hello only`;
 }
 
 function clearFocusedTextInput(
@@ -2061,6 +2061,8 @@ async function waitForSettledAttachImageAction(adbPath, serial, options = {}) {
     const match = findAttachImageActionInSnapshot(snapshot, { visibleOnly: true });
     menuSurfaceObserved = menuSurfaceObserved || Boolean(match);
     if (match && !isAttachmentActionBusy(match.node)) {
+      // Read related menu evidence from this same settled snapshot before closing it.
+      options.onSettledSnapshot?.(snapshot);
       if (openedAttachmentMenu) {
         dismissMenu(adbPath, serial);
         await wait(options.afterMenuDismissDelayMs ?? 300);
@@ -3267,13 +3269,16 @@ function buildScenarios() {
           NO_MODEL_STATE_LABELS,
           { visibleOnly: true }
         );
-        const fallbackNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
-          { visibleOnly: true, matchMode: "fragment" }
-        );
-        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial);
+        let fallbackNode = null;
+        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial, {
+          onSettledSnapshot: (snapshot) => {
+            fallbackNode = findAnyNodeInSnapshot(
+              snapshot,
+              IMAGE_ATTACHMENT_TEXT_ONLY_FALLBACK_LABELS,
+              { visibleOnly: true, matchMode: "fragment" }
+            );
+          },
+        });
 
         if (noModelNode) {
           assertAttachmentActionBlocked(attachNode, { stateDescription: "no-model chat state" });
@@ -3311,14 +3316,16 @@ function buildScenarios() {
         await ctx.expectAnyText(CHAT_EMPTY_LABELS);
 
         const adbPath = resolveAdbPath();
-        const fallbackNode = await findAnyNodeNow(
-          adbPath,
-          ctx.serial,
-          LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
-          { visibleOnly: true, matchMode: "fragment" }
-        );
-
-        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial);
+        let fallbackNode = null;
+        const attachNode = await waitForSettledAttachImageAction(adbPath, ctx.serial, {
+          onSettledSnapshot: (snapshot) => {
+            fallbackNode = findAnyNodeInSnapshot(
+              snapshot,
+              LOADED_TEXT_ATTACHMENT_FALLBACK_LABELS,
+              { visibleOnly: true, matchMode: "fragment" }
+            );
+          },
+        });
 
         assertAttachmentTextOnlyFallbackState({ fallbackNode, attachNode });
         await sendTextOnlyFallbackSmokeMessage(ctx, adbPath, buildTextOnlyFallbackSendPrompt());
@@ -6218,21 +6225,27 @@ function resolveReasoningAuthoritativeClearConfiguration(snapshot) {
   };
 }
 
-async function disableReasoningForAuthoritativeClear(ctx) {
-  const adbPath = resolveAdbPath();
+async function disableReasoningForAuthoritativeClear(ctx, options = {}) {
+  const adbPath = options.adbPath ?? resolveAdbPath();
+  const tapResource = options.tapVisibleResource ?? tapVisibleResource;
+  const waitForResource = options.waitForResourceId ?? waitForResourceId;
+  const createSnapshot = options.createSnapshot ?? createUiSnapshot;
+  const tap = options.tapBounds ?? tapBounds;
+  const waitForMatch = options.waitForSnapshotMatch ?? waitForSnapshotMatch;
+  const waitForAbsent = options.waitForNoResourceId ?? waitForNoResourceId;
   try {
-    await tapVisibleResource(ctx, "chat-header-model-controls", {
+    await tapResource(ctx, "chat-header-model-controls", {
       timeoutMs: 10_000,
     });
-    await waitForResourceId(adbPath, ctx.serial, "model-parameters-sheet", {
-      timeoutMs: 10_000,
-      visibleOnly: true,
-    });
-    await waitForResourceId(adbPath, ctx.serial, "reasoning-effort-off", {
+    await waitForResource(adbPath, ctx.serial, "model-parameters-sheet", {
       timeoutMs: 10_000,
       visibleOnly: true,
     });
-    const snapshot = createUiSnapshot(adbPath, ctx.serial);
+    await waitForResource(adbPath, ctx.serial, "reasoning-effort-off", {
+      timeoutMs: 10_000,
+      visibleOnly: true,
+    });
+    const snapshot = createSnapshot(adbPath, ctx.serial);
     const configuration = resolveReasoningAuthoritativeClearConfiguration(snapshot);
     if (configuration.requiresSelection) {
       const reasoningOff = findResourceIdInSnapshot(
@@ -6240,8 +6253,8 @@ async function disableReasoningForAuthoritativeClear(ctx) {
         "reasoning-effort-off",
         { visibleOnly: true }
       );
-      tapBounds(adbPath, ctx.serial, reasoningOff.bounds);
-      const { match, snapshot } = await waitForSnapshotMatch(
+      tap(adbPath, ctx.serial, reasoningOff.bounds);
+      const { match, snapshot: settledSnapshot } = await waitForMatch(
         adbPath,
         ctx.serial,
         { timeoutMs: 10_000, pollIntervalMs: 250 },
@@ -6255,13 +6268,13 @@ async function disableReasoningForAuthoritativeClear(ctx) {
         }
       );
       if (!match) {
-        throw new Error(withUiSnapshotSummary(snapshot, "Reasoning-off selection did not settle."));
+        throw new Error(withUiSnapshotSummary(settledSnapshot, "Reasoning-off selection did not settle."));
       }
     }
-    await tapVisibleResource(ctx, "model-parameters-sheet-close-button", {
+    await tapResource(ctx, "model-parameters-sheet-close-button", {
       timeoutMs: 10_000,
     });
-    await waitForNoResourceId(adbPath, ctx.serial, "model-parameters-sheet", {
+    await waitForAbsent(adbPath, ctx.serial, "model-parameters-sheet", {
       timeoutMs: 10_000,
     });
     return configuration.reasoningEffort === "off"
@@ -10912,6 +10925,7 @@ module.exports = {
   resolveBranchRegenerationReplacement,
   resolveDocumentQaPickerSearchToken,
   resolveReasoningAuthoritativeClearConfiguration,
+  disableReasoningForAuthoritativeClear,
   resolveAndroidQaGenerationGateObservation,
   resolveScenarioVerticalSwipeGesture,
   resolveTargetAttachmentIds,

@@ -845,6 +845,8 @@
     "sizeRangeLarge": "> 5 GB",
     "emptyFiltered": "Try clearing one or more filters to broaden the catalog.",
     "emptySearchHint": "Try a different search term or load more results.",
+    "emptyDownloadedTitle": "No downloaded models",
+    "emptyDownloadedHint": "Open All Models to find and download a model.",
     "clearFilters": "Clear filters",
     "searching": "Searching Hugging Face...",
     "paginationLocalSortHint": "This sort is applied on-device. Newly loaded models may appear earlier in the list.",

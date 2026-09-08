@@ -87,6 +87,7 @@
       "./plugins/withAndroidBackgroundActionsForegroundService",
       "./plugins/withAndroidLocalProperties",
       "./plugins/withAndroidMainActivityOrientation",
+      "./plugins/withAndroidHmrCompatibility",
       "./plugins/withAndroidSystemMetrics",
       "./plugins/withAndroidGpuInfo",
       "./plugins/withIosSystemMetrics",

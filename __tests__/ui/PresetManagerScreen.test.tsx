@@ -1,6 +1,6 @@
 import React from 'react';
-import { act, fireEvent, render } from '@testing-library/react-native';
-import { StyleSheet } from 'react-native';
+import { act, fireEvent, render, within } from '@testing-library/react-native';
+import { DeviceEventEmitter, KeyboardAvoidingView, Platform, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { PresetManagerScreen } from '../../src/ui/screens/PresetManagerScreen';
 import { presetManager } from '../../src/services/PresetManager';
@@ -149,6 +149,72 @@ describe('PresetManagerScreen', () => {
 
     expect(mockPresetManager.addPreset).toHaveBeenCalledWith('My Preset', 'Be concise.');
     expect(mockUpdateSettings).toHaveBeenCalledWith({ activePresetId: 'preset-new' });
+  });
+
+  it('resizes the Android editor form and footer together while the keyboard is open', async () => {
+    const platform = jest.replaceProperty(Platform, 'OS', 'android');
+    const screen = await renderScreen();
+    try {
+      fireEvent.press(screen.getByTestId('preset-manager-add-preset'));
+      const boundary = screen.UNSAFE_getByType(KeyboardAvoidingView);
+      expect(boundary.props.behavior).toBe('height');
+      expect(within(boundary).getByTestId('preset-editor-content')).toBeTruthy();
+      expect(within(boundary).getByTestId('preset-editor-save')).toBeTruthy();
+      expect(within(boundary).getByTestId('preset-editor-cancel')).toBeTruthy();
+      expect(screen.getByTestId('preset-editor-scroll').props.keyboardShouldPersistTaps).toBe('handled');
+      expect(screen.getByTestId('preset-editor-scroll').props.keyboardDismissMode).toBe('on-drag');
+
+      await act(async () => {
+        fireEvent(screen.getByTestId('preset-editor-keyboard-boundary'), 'layout', {
+          persist: jest.fn(),
+          nativeEvent: { layout: { x: 0, y: 64, width: 390, height: 780 } },
+        });
+        DeviceEventEmitter.emit('keyboardDidShow', {
+          duration: 0,
+          endCoordinates: { screenX: 0, screenY: 544, width: 390, height: 300 },
+        });
+      });
+      expect(StyleSheet.flatten(screen.getByTestId('preset-editor-keyboard-boundary').props.style))
+        .toMatchObject({ height: 480, flex: 0 });
+
+      await act(async () => {
+        fireEvent(screen.getByTestId('preset-editor-keyboard-boundary'), 'layout', {
+          persist: jest.fn(),
+          nativeEvent: { layout: { x: 0, y: 64, width: 390, height: 480 } },
+        });
+        DeviceEventEmitter.emit('keyboardDidHide', {
+          duration: 0,
+          endCoordinates: { screenX: 0, screenY: 844, width: 390, height: 0 },
+        });
+      });
+      expect(StyleSheet.flatten(screen.getByTestId('preset-editor-keyboard-boundary').props.style))
+        .toMatchObject({ flex: 1 });
+      expect(StyleSheet.flatten(screen.getByTestId('preset-editor-keyboard-boundary').props.style).height)
+        .toBeUndefined();
+      fireEvent.press(screen.getByTestId('preset-editor-cancel'));
+      expect(screen.queryByTestId('preset-editor-save')).toBeNull();
+      expect(mockPresetManager.addPreset).not.toHaveBeenCalled();
+    } finally {
+      screen.unmount();
+      platform.restore();
+    }
+  });
+
+  it('keeps iOS keyboard padding and the footer safe area without a duplicate header inset', async () => {
+    const platform = jest.replaceProperty(Platform, 'OS', 'ios');
+    const screen = await renderScreen();
+    try {
+      fireEvent.press(screen.getByTestId('preset-manager-add-preset'));
+      expect(screen.UNSAFE_getByType(KeyboardAvoidingView).props.behavior).toBe('padding');
+      expect(screen.getByTestId('preset-editor-scroll').props.keyboardDismissMode).toBe('interactive');
+      const footer = screen.UNSAFE_getAllByType(require('../../src/components/ui/ScreenShell').ScreenContent)
+        .find((node) => node.props.testID === 'preset-editor-footer');
+      expect(footer?.props.includeBottomSafeArea).toBe(true);
+      expect(footer?.props.respectFloatingHeader).toBe(false);
+    } finally {
+      screen.unmount();
+      platform.restore();
+    }
   });
 
   it('edits presets when selecting an existing card', async () => {

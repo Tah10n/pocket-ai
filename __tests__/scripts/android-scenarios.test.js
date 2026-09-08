@@ -97,6 +97,7 @@ const {
   recordDocumentQaHostCheckpoint,
   resolveBranchRegenerationReplacement,
   resolveReasoningAuthoritativeClearConfiguration,
+  disableReasoningForAuthoritativeClear,
   resolveAndroidPackageUid,
   resolveNotificationChannelSettingsUi,
   resolveNotificationChannelToggle,
@@ -1301,8 +1302,15 @@ describe('android-scenarios asynchronous interaction settlement', () => {
     `);
   }
 
+  it('accepts the requested short fallback answer while rejecting prompt echoes', () => {
+    const prompt = 'Text fallback smoke 123 456 Reply with hello only';
+    expect(isPreparedAssistantResponseLabel('hello', prompt)).toBe(true);
+    expect(isPreparedAssistantResponseLabel(prompt, prompt)).toBe(false);
+    expect(isPreparedAssistantResponseLabel(`Echo: ${prompt}`, prompt)).toBe(false);
+  });
+
   it('retries the full ADB prompt when the first injected character is lost', async () => {
-    const prompt = 'Text fallback smoke 123 456';
+    const prompt = 'Text fallback smoke 123 456 Reply with hello only';
     let typedValue = '';
     let inputAttempts = 0;
     const runCommand = jest.fn((_adbPath, args) => {
@@ -1362,12 +1370,21 @@ describe('android-scenarios asynchronous interaction settlement', () => {
         <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
       </hierarchy>
     `);
+    const busySnapshot = parseUiSnapshot(`
+      <hierarchy>
+        <node text="" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]" />
+        <node resource-id="chat-attach-image-button" text="" content-desc="Attach an image from the photo library, busy" clickable="false" enabled="false" bounds="[40,1480][1040,1620]" />
+      </hierarchy>
+    `);
     const createSnapshot = jest.fn()
       .mockReturnValueOnce(closedSnapshot)
       .mockReturnValueOnce(closedSnapshot)
+      .mockReturnValueOnce(busySnapshot)
       .mockReturnValue(openSnapshot);
     const tap = jest.fn();
-    const dismissMenu = jest.fn();
+    const events = [];
+    const onSettledSnapshot = jest.fn(() => events.push('settled'));
+    const dismissMenu = jest.fn(() => events.push('dismiss'));
 
     const match = await waitForSettledAttachImageAction('adb', 'device-1', {
       timeoutMs: 1_000,
@@ -1375,6 +1392,7 @@ describe('android-scenarios asynchronous interaction settlement', () => {
       afterMenuOpenDelayMs: 0,
       afterMenuDismissDelayMs: 0,
       createSnapshot,
+      onSettledSnapshot,
       tapBounds: tap,
       dismissAttachmentMenu: dismissMenu,
       delayFn: immediateDelay,
@@ -1383,6 +1401,10 @@ describe('android-scenarios asynchronous interaction settlement', () => {
     expect(match.node.resourceId).toBe('chat-attach-image-button');
     expect(tap).toHaveBeenCalledTimes(1);
     expect(dismissMenu).toHaveBeenCalledTimes(1);
+    expect(createSnapshot).toHaveBeenCalledTimes(4);
+    expect(onSettledSnapshot).toHaveBeenCalledTimes(1);
+    expect(onSettledSnapshot).toHaveBeenCalledWith(openSnapshot);
+    expect(events).toEqual(['settled', 'dismiss']);
   });
 
   it('waits for the model warmup banner to disappear before chat interaction', async () => {
@@ -3302,7 +3324,7 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
-  it('sends a text prompt for current-state loaded fallback smoke', async () => {
+  it('sends a text prompt for current-state loaded fallback smoke with fallback copy only inside the attachment menu', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
     const previousAndroidHome = process.env.ANDROID_HOME;
     const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
@@ -3318,7 +3340,6 @@ describe('android-scenarios pack selection', () => {
         <node text="Pocket AI" content-desc="" clickable="false" enabled="true" bounds="[20,40][420,120]" />
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${prompt || ''}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="${prompt ? 'true' : 'false'}" bounds="[900,1840][1040,1980]" />
@@ -3339,7 +3360,7 @@ describe('android-scenarios pack selection', () => {
         <node text="${prompt || ''}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
         <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-text-fallback" clickable="false" enabled="true" bounds="[40,1360][1040,1560]">
           <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-fallback" clickable="false" enabled="true" bounds="[40,1380][1040,1540]">
-            <node text="Fallback text response is visible." content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
+            <node text="hello" content-desc="" clickable="false" enabled="true" bounds="[60,1400][1020,1520]" />
           </node>
         </node>
       </hierarchy>
@@ -3394,6 +3415,7 @@ describe('android-scenarios pack selection', () => {
           events.push('tap-input');
         }
         if (labels.includes('Send message')) {
+          expect(attachmentMenuOpened).toBe(false);
           events.push('tap-send');
           sendTapped = true;
         }
@@ -3411,7 +3433,10 @@ describe('android-scenarios pack selection', () => {
 
       await scenario.run(ctx);
 
-      expect(prompt).toMatch(/^Text fallback smoke \d+ \d+$/);
+      expect(attachmentMenuOpened).toBe(false);
+
+      expect(prompt).toMatch(/^Text fallback smoke \d+ \d+ Reply with hello only$/);
+      expect(escapeAdbInputText(prompt)).toBe(prompt.replace(/ /g, '%s'));
       expect(prompt).not.toBe('Text fallback smoke');
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
       expect(events).toEqual(expect.arrayContaining([
@@ -3438,7 +3463,7 @@ describe('android-scenarios pack selection', () => {
     }
   });
 
-  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy', async () => {
+  it('runs the text-only attachment fallback scenario against a mocked ADB hierarchy with fallback copy only inside the attachment menu', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-adb-'));
     const previousAndroidHome = process.env.ANDROID_HOME;
     const previousAndroidSdkRoot = process.env.ANDROID_SDK_ROOT;
@@ -3454,7 +3479,6 @@ describe('android-scenarios pack selection', () => {
         <node text="Recent Conversations" content-desc="" clickable="false" enabled="true" bounds="[20,160][720,240]" />
         <node text="Active model" content-desc="" clickable="false" enabled="true" bounds="[20,260][720,340]" />
         <node text="" content-desc="New Chat" clickable="true" enabled="true" bounds="[800,1600][1040,1720]" />
-        <node text="This model supports text chat only." content-desc="" clickable="false" enabled="true" bounds="[40,1720][1040,1800]" />
         <node resource-id="chat-attach-menu-button" text="" content-desc="Attach file" clickable="true" enabled="true" bounds="[40,1840][180,1980]" />
         <node text="${typedPrompt}" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
         <node text="" content-desc="Send message" clickable="true" enabled="true" bounds="[900,1840][1040,1980]" />
@@ -3473,7 +3497,7 @@ describe('android-scenarios pack selection', () => {
         <node text="${typedPrompt}" content-desc="" clickable="false" enabled="true" bounds="[40,1200][1040,1320]" />
         <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-state-complete-text-only" clickable="false" enabled="true" bounds="[40,1330][1040,1540]">
           <node text="" content-desc="" resource-id="com.pocketai:id/assistant-message-content-text-only" clickable="false" enabled="true" bounds="[40,1340][1040,1520]">
-            <node text="Text fallback assistant response" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
+            <node text="hello" content-desc="" clickable="false" enabled="true" bounds="[60,1360][1020,1500]" />
           </node>
         </node>
         <node text="" content-desc="Chat message input" clickable="true" enabled="true" bounds="[200,1840][860,1980]" />
@@ -3520,6 +3544,7 @@ describe('android-scenarios pack selection', () => {
       const scenario = isolatedBuildScenarios().find((candidate) => candidate.id === 'chat-attachment-text-only-fallback');
       const tapAnyText = jest.fn((labels) => {
         if (labels.includes('Send message')) {
+          expect(attachmentMenuOpened).toBe(false);
           sendTapped = true;
         }
         return Promise.resolve();
@@ -3535,11 +3560,14 @@ describe('android-scenarios pack selection', () => {
 
       await scenario.run(ctx);
 
+      expect(attachmentMenuOpened).toBe(false);
+
       expect(ctx.ensureAppVisible).toHaveBeenCalled();
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['New Chat']));
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Chat message input']), expect.anything());
       expect(ctx.tapAnyText).toHaveBeenCalledWith(expect.arrayContaining(['Send message']), expect.anything());
-      expect(typedPrompt).toMatch(/^Text fallback smoke \d+ \d+$/);
+      expect(typedPrompt).toMatch(/^Text fallback smoke \d+ \d+ Reply with hello only$/);
+      expect(escapeAdbInputText(typedPrompt)).toBe(typedPrompt.replace(/ /g, '%s'));
       expect(typedPrompt).not.toBe('Text fallback smoke');
       expect(ctx.tapBottomTab).toHaveBeenCalledWith(expect.arrayContaining(['Home']));
       expect(spawnSync).toHaveBeenCalledWith(
@@ -4966,6 +4994,62 @@ describe('android-scenarios branch-regeneration fixture contract', () => {
         requiresSelection: true,
         verifiedSelected: false,
       }));
+  });
+
+  it.each([false, true])('selects optional Off and verifies it before closing the controls (already selected: %s)', async (alreadySelected) => {
+    const snapshotFor = (selected) => parseUiSnapshot(`
+      <hierarchy bounds="[0,0][1080,2412]">
+        <node resource-id="reasoning-effort-off" enabled="true" selected="${selected}" bounds="[100,100][200,200]" />
+      </hierarchy>
+    `);
+    const initial = snapshotFor(alreadySelected);
+    const settled = snapshotFor(true);
+    const calls = [];
+    const tap = jest.fn((_adb, _serial, bounds) => calls.push(['select-off', bounds]));
+    const waitForMatch = jest.fn(async (_adb, _serial, _options, predicate) => {
+      expect(predicate(snapshotFor(false))).toBeNull();
+      const match = predicate(settled);
+      expect(match.selected).toBe(true);
+      calls.push(['verified-off']);
+      return { match, snapshot: settled };
+    });
+    const result = await disableReasoningForAuthoritativeClear({ serial: 'test-device' }, {
+      adbPath: 'test-adb',
+      tapVisibleResource: async (_ctx, id) => calls.push(['tap', id]),
+      waitForResourceId: jest.fn().mockResolvedValue(undefined),
+      createSnapshot: () => initial,
+      tapBounds: tap,
+      waitForSnapshotMatch: waitForMatch,
+      waitForNoResourceId: async (_adb, _serial, id) => calls.push(['absent', id]),
+    });
+
+    expect(result).toEqual({ reasoningEffort: 'off', verifiedSelected: true, verifiedUnsupported: false });
+    expect(tap).toHaveBeenCalledTimes(alreadySelected ? 0 : 1);
+    expect(waitForMatch).toHaveBeenCalledTimes(alreadySelected ? 0 : 1);
+    expect(calls).toEqual([
+      ['tap', 'chat-header-model-controls'],
+      ...(!alreadySelected ? [['select-off', initial.nodes[0].bounds], ['verified-off']] : []),
+      ['tap', 'model-parameters-sheet-close-button'],
+      ['absent', 'model-parameters-sheet'],
+    ]);
+  });
+
+  it('fails reasoning-clear when the tapped optional Off never becomes selected', async () => {
+    const snapshot = parseUiSnapshot('<hierarchy bounds="[0,0][1080,2412]"><node resource-id="reasoning-effort-off" enabled="true" selected="false" bounds="[100,100][200,200]" /></hierarchy>');
+    const tap = jest.fn();
+    await expect(disableReasoningForAuthoritativeClear({ serial: 'test-device' }, {
+      adbPath: 'test-adb',
+      tapVisibleResource: jest.fn().mockResolvedValue(undefined),
+      waitForResourceId: jest.fn().mockResolvedValue(undefined),
+      createSnapshot: () => snapshot,
+      tapBounds: tap,
+      waitForSnapshotMatch: async (_adb, _serial, _options, predicate) => {
+        expect(predicate(snapshot)).toBeNull();
+        return { match: null, snapshot };
+      },
+      waitForNoResourceId: jest.fn(),
+    })).rejects.toThrow(/Reasoning-off selection did not settle/);
+    expect(tap).toHaveBeenCalledWith('test-adb', 'test-device', snapshot.nodes[0].bounds);
   });
 
   it('still fails reasoning-clear setup when Off is absent for a reasoning-required model', () => {

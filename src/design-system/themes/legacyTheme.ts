@@ -289,7 +289,9 @@ function createLegacyThemeColors(mode: ResolvedThemeMode, useGlassOverrides: boo
     surface: isDark ? withAlpha(background[900], 0.94) : background[50],
     surfaceMuted: isDark ? withAlpha(background[800], 0.92) : background[100],
     surfaceElevated: isDark ? withAlpha(background[800], 0.98) : background[0],
-    surfaceOverlay: isDark ? withAlpha(background[950], 0.9) : withAlpha(background[0], 0.94),
+    // Standard sheets/popovers must obscure the content behind their controls.
+    // Glass supplies its own translucent overlay color below.
+    surfaceOverlay: isDark ? background[950] : background[0],
     text: isDark ? typography[0] : typography[900],
     textSecondary: isDark ? typography[300] : typography[600],
     textTertiary: isDark ? typography[400] : typography[500],

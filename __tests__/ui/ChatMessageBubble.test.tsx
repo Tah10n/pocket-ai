@@ -8,6 +8,7 @@ import { StaticThemeProvider } from '../../src/providers/ThemeProvider';
 import { copiedImageAttachment, secondCopiedImageAttachment } from '../fixtures/chatImageAttachmentFixtures';
 import { MaterialEnvironmentProvider } from '../../src/design-system/materials/MaterialEnvironmentProvider';
 import { createMaterialEnvironment } from '../../src/design-system/materials/environment';
+import type { ChatAttachment } from '../../src/types/attachments';
 
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
@@ -68,7 +69,7 @@ jest.mock('../../src/components/ui/MaterialSymbols', () => {
   const mockReact = require('react');
   const { Text } = require('react-native');
   return {
-    MaterialSymbols: ({ name }: any) => mockReact.createElement(Text, null, name),
+    MaterialSymbols: ({ name, colorRole }: any) => mockReact.createElement(Text, { colorRole }, name),
   };
 });
 
@@ -142,6 +143,56 @@ describe('ChatMessageBubble', () => {
     });
     expect(StyleSheet.flatten(shell.props.style)?.backgroundColor).toMatch(/^rgba/);
     expect(text.props.colorRole).toBe('onAccent');
+  });
+
+  it.each([
+    ['default', 'light'], ['default', 'dark'], ['glass', 'light'], ['glass', 'dark'],
+  ] as const)('keeps attachment labels on the user bubble foreground in %s %s', (themeId, resolvedMode) => {
+    const base = {
+      state: 'ready' as const,
+      threadId: 'thread-attachments',
+      messageId: 'user-files',
+      localUri: 'test-dir/attachment',
+      pathCategory: 'chat_attachment' as const,
+      sizeBytes: 1024,
+      source: 'document_picker' as const,
+      createdAt: 1,
+    };
+    const attachments: ChatAttachment[] = [
+      { ...base, id: 'document', kind: 'document', fileName: 'note.txt', mimeType: 'text/plain', document: { processorId: 'text', processorVersion: 1 } },
+      { ...base, id: 'audio', kind: 'audio', fileName: 'speech.wav', mimeType: 'audio/wav', audio: { format: 'wav' } },
+    ];
+    const { getByTestId, getByText } = render(
+      <StaticThemeProvider themeId={themeId} resolvedMode={resolvedMode}>
+        <ChatMessageBubble id="user-files" isUser content="Attached prompt" attachments={attachments} />
+      </StaticThemeProvider>,
+    );
+
+    for (const attachment of attachments) {
+      const card = getByTestId(`message-attachment-${attachment.kind}-user-files-${attachment.id}`);
+      expect(StyleSheet.flatten(card.props.style)?.backgroundColor).toBeUndefined();
+      expect(getByText(attachment.fileName).props.colorRole).toBe('onAccent');
+      expect(within(card).getByText(attachment.kind === 'document' ? 'Document' : 'Audio').props.colorRole).toBe('onAccent');
+      expect(card.props.accessibilityRole).toBe('summary');
+    }
+    expect(getByText('Attached prompt').props.colorRole).toBe('onAccent');
+  });
+
+  it.each([
+    ['default', 'light'], ['default', 'dark'], ['glass', 'light'], ['glass', 'dark'],
+  ] as const)('keeps a failed image preview on the user bubble foreground in %s %s', (themeId, resolvedMode) => {
+    const { getByTestId, getByText } = render(
+      <StaticThemeProvider themeId={themeId} resolvedMode={resolvedMode}>
+        <ChatMessageBubble id="user-failed-image" isUser content="" attachments={[copiedImageAttachment]} />
+      </StaticThemeProvider>,
+    );
+    fireEvent(getByTestId(`message-attachment-image-user-failed-image-${copiedImageAttachment.id}`), 'error');
+
+    const fallback = getByTestId(`message-attachment-unavailable-user-failed-image-${copiedImageAttachment.id}`);
+    expect(StyleSheet.flatten(fallback.props.style)?.backgroundColor).toBeUndefined();
+    expect(getByText('chat.attachments.unavailable').props.colorRole).toBe('onAccent');
+    expect(getByText('broken-image').props.colorRole).toBe('onAccent');
+    expect(fallback.props.accessibilityState).toEqual({ disabled: true });
   });
 
   it('never mounts a live effect renderer inside a message row', () => {

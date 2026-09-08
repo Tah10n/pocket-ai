@@ -92,6 +92,28 @@ describe('EffectSurface', () => {
     mockResolvedTheme = resolveTheme('glass', 'light');
   });
 
+  it.each(['light', 'dark'] as const)('obscures background content beneath Standard %s sheets and popovers', (mode) => {
+    mockResolvedTheme = resolveTheme('default', mode);
+    const screen = render(
+      <MaterialEnvironmentProvider environment={createMaterialEnvironment('android', {
+        androidSdkVersion: 34,
+        androidLiquidGlassAvailable: true,
+        transparencyState: 'allowed',
+      })}>
+        <EffectSurface testID="standard-sheet" material={{ role: 'chrome', variant: 'sheet' }} />
+        <EffectSurface testID="standard-popover" material={{ role: 'overlay', variant: 'popover' }} />
+      </MaterialEnvironmentProvider>,
+    );
+
+    for (const id of ['standard-sheet', 'standard-popover']) {
+      expect(StyleSheet.flatten(screen.getByTestId(id).props.style).backgroundColor)
+        .toBe(mockResolvedTheme.colors.background);
+    }
+    expect(screen.UNSAFE_getAllByType(View).some((node: any) => (
+      node.props.androidLiquidGlassCaptureExclusion || node.props.glassEffectStyle || node.props.intensity
+    ))).toBe(false);
+  });
+
   it('fails closed to a dense recipe before runtime capabilities are known', () => {
     const screen = render(
       <EffectSurface

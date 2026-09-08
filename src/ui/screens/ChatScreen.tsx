@@ -3254,13 +3254,6 @@ const ChatScreenContent = () => {
                                         <ButtonText>{resolvedModelRecoveryActionLabel}</ButtonText>
                                     </Button>
 
-                                    <Text colorRole="secondary"
-                                        className="mt-4 text-center text-xs leading-5  "
-                                    >
-                                        {activeThread
-                                            ? t('chat.emptyExistingThread')
-                                            : t('chat.emptyNewThread')}
-                                    </Text>
                                 </ScreenCard>
                             </Box>
                         ) : (

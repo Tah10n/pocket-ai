@@ -23,7 +23,7 @@ import { ModelVariantPickerSheet } from '@/components/ui/ModelVariantPickerSheet
 import { MODEL_WARMUP_BANNER_RESERVED_HEIGHT, ModelWarmupBanner } from '@/components/ui/ModelWarmupBanner';
 import { ModelParametersSheet } from '@/components/ui/ModelParametersSheet';
 import { ProjectorChoiceSheet } from '@/components/ui/ProjectorChoiceSheet';
-import { ScreenAndroidContentBlurTarget, ScreenBanner, ScreenCard, ScreenStack } from '@/components/ui/ScreenShell';
+import { ScreenAndroidContentBlurTarget, ScreenBanner, ScreenCard, ScreenStack, useAndroidLiquidGlassSceneRefresh } from '@/components/ui/ScreenShell';
 import { Spinner } from '@/components/ui/spinner';
 import { Text } from '@/components/ui/text';
 import { useErrorReportSheetController, type ErrorReportContext } from '@/hooks/useErrorReportSheetController';
@@ -382,6 +382,7 @@ export const ModelsList = ({
   renderContentContainer,
 }: ModelsListProps) => {
   const { t } = useTranslation();
+  const requestAndroidLiquidGlassSceneRefresh = useAndroidLiquidGlassSceneRefresh();
   const { startDownload, cancelDownload } = useModelDownload();
   const { paddingTop: headerInset, paddingBottom: tabBarInset } = useFloatingScrollInsets();
   const modelsRegistryRevision = useModelRegistryRevision();
@@ -995,17 +996,24 @@ export const ModelsList = ({
     filters.fitsInRamOnly
     || filters.noTokenRequiredOnly
     || filters.sizeRanges.length > 0;
+  const isEmptyDownloadedCatalog = activeTab === 'downloaded'
+    && !hasFilters
+    && searchQuery.trim().length === 0;
 
   const emptyState = useMemo(() => (
     <Box className="flex-1 justify-center py-6">
       <ScreenCard dashed padding="compact" className="items-center">
         <Text colorRole="secondary" className="text-center text-base font-semibold  ">
-          {t('models.noResults', 'No models found')}
+          {isEmptyDownloadedCatalog
+            ? t('models.emptyDownloadedTitle')
+            : t('models.noResults', 'No models found')}
         </Text>
         <Text colorRole="tertiary" className="mt-2 text-center text-sm  ">
           {hasFilters
             ? t('models.emptyFiltered')
-            : t('models.emptySearchHint')}
+            : isEmptyDownloadedCatalog
+              ? t('models.emptyDownloadedHint')
+              : t('models.emptySearchHint')}
         </Text>
         {hasFilters ? (
           <Button size="sm" className="mt-4" onPress={() => clearFilters(activeTab)}>
@@ -1014,7 +1022,7 @@ export const ModelsList = ({
         ) : null}
       </ScreenCard>
     </Box>
-  ), [activeTab, clearFilters, hasFilters, t]);
+  ), [activeTab, clearFilters, hasFilters, isEmptyDownloadedCatalog, t]);
 
   const discoveryBanner = useMemo(() => {
     if (activeTab !== 'all' || discoveryMode !== 'guided') {
@@ -1132,6 +1140,16 @@ export const ModelsList = ({
   const renderFooter = useCallback(() => footer, [footer]);
   const isCatalogInitializing = activeTab === 'all' && !isTokenStateHydrated;
   const isCatalogSessionSwitching = dataSessionIdentity !== sessionIdentity;
+  const isShowingCatalogLoading = isCatalogInitializing
+    || isCatalogSessionSwitching
+    || (loading && models.length === 0);
+
+  useEffect(() => {
+    // Replacing/removing FlashList content can leave native Glass holding the previous
+    // scene even when the viewport size stays fixed. Refresh committed list transitions,
+    // not each card's progress/metadata update or every scroll frame.
+    requestAndroidLiquidGlassSceneRefresh();
+  }, [dataSessionIdentity, filteredModels.length, isShowingCatalogLoading, requestAndroidLiquidGlassSceneRefresh]);
   const isModelWarmingUp = engineState.status === EngineStatus.INITIALIZING;
   const variantPickerModel = useMemo(() => {
     if (!variantPickerModelId) {
@@ -1204,7 +1222,7 @@ export const ModelsList = ({
 
   const catalogListContent = (
     <ScreenStack className="flex-1" gap="compact">
-        {(isCatalogInitializing || isCatalogSessionSwitching || (loading && models.length === 0)) ? (
+        {isShowingCatalogLoading ? (
           <Box
             className="flex-1 items-center justify-center pb-8 pt-6"
             style={{ paddingTop: headerInset + catalogContentTopOffset }}
@@ -1230,6 +1248,7 @@ export const ModelsList = ({
             onRefresh={handlePullToRefresh}
             onScrollBeginDrag={handleCatalogScrollBeginDrag}
             onScroll={handleCatalogScroll}
+            onLoad={requestAndroidLiquidGlassSceneRefresh}
             scrollEventThrottle={100}
             onEndReached={() => handleLoadMore('auto')}
             onEndReachedThreshold={0.6}

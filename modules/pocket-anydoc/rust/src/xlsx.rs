@@ -350,17 +350,17 @@ fn parse_workbook(
         budget.xml_event(&event)?;
         match event {
             Event::Start(event) | Event::Empty(event)
-                if local_name(event.name().as_ref()) == b"workbookPr" =>
+                if local_name(event.name().as_ref()) == "workbookPr" =>
             {
-                date_1904 = attr_bool(&event, b"date1904");
+                date_1904 = attr_bool(&event, "date1904");
             }
             Event::Start(event) | Event::Empty(event)
-                if local_name(event.name().as_ref()) == b"sheet" =>
+                if local_name(event.name().as_ref()) == "sheet" =>
             {
-                let name = attr_string(&event, b"name").ok_or(CoreError::Malformed)?;
-                let relation = attr_string(&event, b"id").ok_or(CoreError::Malformed)?;
+                let name = attr_string(&event, "name").ok_or(CoreError::Malformed)?;
+                let relation = attr_string(&event, "id").ok_or(CoreError::Malformed)?;
                 let hidden = matches!(
-                    attr_string(&event, b"state").as_deref(),
+                    attr_string(&event, "state").as_deref(),
                     Some("hidden" | "veryHidden")
                 );
                 sheets.push(WorkbookSheet {
@@ -392,14 +392,14 @@ fn parse_relationships(
         budget.xml_event(&event)?;
         match event {
             Event::Start(event) | Event::Empty(event)
-                if local_name(event.name().as_ref()) == b"Relationship" =>
+                if local_name(event.name().as_ref()) == "Relationship" =>
             {
-                if attr_string(&event, b"TargetMode").as_deref() == Some("External") {
+                if attr_string(&event, "TargetMode").as_deref() == Some("External") {
                     buffer.clear();
                     continue;
                 }
                 if let (Some(id), Some(target)) =
-                    (attr_string(&event, b"Id"), attr_string(&event, b"Target"))
+                    (attr_string(&event, "Id"), attr_string(&event, "Target"))
                 {
                     relationships.insert(id, target);
                 }
@@ -444,23 +444,23 @@ fn parse_styles(
             Event::Start(event) | Event::Empty(event) => {
                 let qualified = event.name();
                 match local_name(qualified.as_ref()) {
-                    b"cellXfs" => in_cell_xfs = true,
-                    b"numFmt" => {
+                    "cellXfs" => in_cell_xfs = true,
+                    "numFmt" => {
                         if let (Some(id), Some(code)) = (
-                            attr_u32(&event, b"numFmtId"),
-                            attr_string(&event, b"formatCode"),
+                            attr_u32(&event, "numFmtId"),
+                            attr_string(&event, "formatCode"),
                         ) {
                             custom.insert(id, code);
                         }
                     }
-                    b"xf" if in_cell_xfs => {
-                        let id = attr_u32(&event, b"numFmtId").unwrap_or(0);
+                    "xf" if in_cell_xfs => {
+                        let id = attr_u32(&event, "numFmtId").unwrap_or(0);
                         formats.push(classify_format(id, custom.get(&id).map(String::as_str)));
                     }
                     _ => {}
                 }
             }
-            Event::End(event) if local_name(event.name().as_ref()) == b"cellXfs" => {
+            Event::End(event) if local_name(event.name().as_ref()) == "cellXfs" => {
                 in_cell_xfs = false
             }
             Event::Eof => break,
@@ -760,16 +760,16 @@ fn parse_shared_strings(
             .map_err(|_| CoreError::Malformed)?;
         budget.xml_event(&event)?;
         match event {
-            Event::Start(event) if local_name(event.name().as_ref()) == b"si" => {
+            Event::Start(event) if local_name(event.name().as_ref()) == "si" => {
                 in_item = true;
                 current.clear();
             }
-            Event::Start(event) if in_item && local_name(event.name().as_ref()) == b"t" => {
+            Event::Start(event) if in_item && local_name(event.name().as_ref()) == "t" => {
                 in_text = true
             }
             Event::Text(text) if in_item && in_text => current.push_str(&decode_text(&text)?),
-            Event::End(event) if local_name(event.name().as_ref()) == b"t" => in_text = false,
-            Event::End(event) if local_name(event.name().as_ref()) == b"si" => {
+            Event::End(event) if local_name(event.name().as_ref()) == "t" => in_text = false,
+            Event::End(event) if local_name(event.name().as_ref()) == "si" => {
                 strings.push(current.clone());
                 in_item = false;
             }
@@ -807,37 +807,37 @@ fn parse_worksheet(
         budget.xml_event(&event)?;
         match event {
             Event::Start(event) | Event::Empty(event)
-                if local_name(event.name().as_ref()) == b"col" =>
+                if local_name(event.name().as_ref()) == "col" =>
             {
-                if attr_bool(&event, b"hidden") {
-                    let minimum = attr_u32(&event, b"min").unwrap_or(1) as usize;
-                    let maximum = attr_u32(&event, b"max").unwrap_or(minimum as u32) as usize;
+                if attr_bool(&event, "hidden") {
+                    let minimum = attr_u32(&event, "min").unwrap_or(1) as usize;
+                    let maximum = attr_u32(&event, "max").unwrap_or(minimum as u32) as usize;
                     hidden_columns.push((minimum, maximum));
                     hidden_skipped = true;
                 }
             }
-            Event::Start(event) if local_name(event.name().as_ref()) == b"row" => {
-                current_row_hidden = attr_bool(&event, b"hidden");
+            Event::Start(event) if local_name(event.name().as_ref()) == "row" => {
+                current_row_hidden = attr_bool(&event, "hidden");
                 hidden_skipped |= current_row_hidden;
             }
-            Event::End(event) if local_name(event.name().as_ref()) == b"row" => {
+            Event::End(event) if local_name(event.name().as_ref()) == "row" => {
                 current_row_hidden = false
             }
-            Event::Start(event) if local_name(event.name().as_ref()) == b"c" => {
+            Event::Start(event) if local_name(event.name().as_ref()) == "c" => {
                 current_cell = Some(CellState {
-                    reference: attr_string(&event, b"r").unwrap_or_default(),
-                    kind: attr_string(&event, b"t").unwrap_or_default(),
-                    style: attr_u32(&event, b"s").unwrap_or(0) as usize,
+                    reference: attr_string(&event, "r").unwrap_or_default(),
+                    kind: attr_string(&event, "t").unwrap_or_default(),
+                    style: attr_u32(&event, "s").unwrap_or(0) as usize,
                     ..CellState::default()
                 });
             }
             Event::Start(event)
-                if current_cell.is_some() && local_name(event.name().as_ref()) == b"v" =>
+                if current_cell.is_some() && local_name(event.name().as_ref()) == "v" =>
             {
                 capture = Some(Capture::Value)
             }
             Event::Start(event)
-                if current_cell.is_some() && local_name(event.name().as_ref()) == b"t" =>
+                if current_cell.is_some() && local_name(event.name().as_ref()) == "t" =>
             {
                 capture = Some(Capture::Text)
             }
@@ -849,10 +849,10 @@ fn parse_worksheet(
                     }
                 }
             }
-            Event::End(event) if matches!(local_name(event.name().as_ref()), b"v" | b"t") => {
+            Event::End(event) if matches!(local_name(event.name().as_ref()), "v" | "t") => {
                 capture = None
             }
-            Event::End(event) if local_name(event.name().as_ref()) == b"c" => {
+            Event::End(event) if local_name(event.name().as_ref()) == "c" => {
                 if let Some(cell) = current_cell.take() {
                     if current_row_hidden {
                         buffer.clear();
@@ -1061,32 +1061,31 @@ fn cell_reference(reference: &str) -> Option<(usize, usize)> {
     (row > 0 && column > 0).then_some((row, column))
 }
 
-fn attr_string(event: &BytesStart<'_>, key: &[u8]) -> Option<String> {
+fn attr_string(event: &BytesStart<'_>, key: &str) -> Option<String> {
     event
         .attributes()
         .with_checks(false)
         .filter_map(Result::ok)
         .find(|attribute| local_name(attribute.key.as_ref()) == key)
-        .map(|attribute| String::from_utf8_lossy(attribute.value.as_ref()).into_owned())
+        .map(|attribute| attribute.value.into_owned())
 }
 
-fn attr_u32(event: &BytesStart<'_>, key: &[u8]) -> Option<u32> {
+fn attr_u32(event: &BytesStart<'_>, key: &str) -> Option<u32> {
     attr_string(event, key)?.parse().ok()
 }
 
-fn attr_bool(event: &BytesStart<'_>, key: &[u8]) -> bool {
+fn attr_bool(event: &BytesStart<'_>, key: &str) -> bool {
     matches!(attr_string(event, key).as_deref(), Some("1" | "true"))
 }
 
 fn decode_text(text: &quick_xml::events::BytesText<'_>) -> Result<String, CoreError> {
-    let decoded = text.decode().map_err(|_| CoreError::Malformed)?;
-    quick_xml::escape::unescape(&decoded)
+    quick_xml::escape::unescape(text)
         .map(|value| value.into_owned())
         .map_err(|_| CoreError::Malformed)
 }
 
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
 }
 
 fn bounded_name(name: &str) -> String {
@@ -1100,6 +1099,36 @@ fn bounded_name(name: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn string_events_preserve_unicode_and_namespaced_attributes() {
+        let xml = r#"<x:sst xmlns:x="urn:sheet"><x:si><x:t>Привет 世界 🦀</x:t></x:si></x:sst>"#;
+        let cancelled = AtomicBool::new(false);
+        let mut budget = ProjectionBudget::new(&cancelled, usize::MAX);
+        assert_eq!(
+            parse_shared_strings(xml.as_bytes(), &mut budget).unwrap(),
+            vec!["Привет 世界 🦀"]
+        );
+        let event = BytesStart::from_content(r#"x:sheet name="Данные" r:id="rId1""#, 7);
+        assert_eq!(attr_string(&event, "name").as_deref(), Some("Данные"));
+        assert_eq!(attr_string(&event, "id").as_deref(), Some("rId1"));
+    }
+
+    #[test]
+    fn text_decoding_preserves_xml_escapes() {
+        let text = quick_xml::events::BytesText::from_escaped("A &amp; B &lt; C &#x1F980;");
+        assert_eq!(decode_text(&text).unwrap(), "A & B < C 🦀");
+    }
+
+    #[test]
+    fn invalid_utf8_xml_fails_closed() {
+        let cancelled = AtomicBool::new(false);
+        let mut budget = ProjectionBudget::new(&cancelled, usize::MAX);
+        assert!(matches!(
+            parse_shared_strings(b"<sst><si><t>\xff</t></si></sst>", &mut budget),
+            Err(CoreError::Malformed)
+        ));
+    }
 
     #[test]
     fn common_display_formats_are_reconstructed() {

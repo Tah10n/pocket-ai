@@ -18,8 +18,8 @@ function resolvedVersions(packageName) {
 describe('Dependabot resolution contract', () => {
   it('keeps every remediated transitive package on the reviewed secure versions', () => {
     expect(resolvedVersions('@babel/core')).toEqual(['7.29.6']);
-    expect(resolvedVersions('brace-expansion')).toEqual(['1.1.17', '5.0.8']);
-    expect(resolvedVersions('js-yaml')).toEqual(['3.15.0', '4.3.0']);
+    expect(resolvedVersions('brace-expansion')).toEqual(['1.1.18', '5.0.9']);
+    expect(resolvedVersions('js-yaml')).toEqual(['3.15.2', '4.3.2']);
     expect(resolvedVersions('linkify-it')).toEqual(['5.0.2']);
     expect(resolvedVersions('markdown-it')).toEqual(['14.3.0']);
     expect(resolvedVersions('postcss')).toEqual(['8.5.23']);
@@ -28,13 +28,13 @@ describe('Dependabot resolution contract', () => {
 
   it('keeps incompatible major versions scoped instead of forcing global overrides', () => {
     expect(packageJson.overrides['minimatch@3.1.5']).toEqual({
-      'brace-expansion': '1.1.17',
+      'brace-expansion': '1.1.18',
     });
     expect(packageJson.overrides['minimatch@10.2.5']).toEqual({
-      'brace-expansion': '5.0.8',
+      'brace-expansion': '5.0.9',
     });
-    expect(packageJson.overrides['js-yaml@3.14.2']).toBe('3.15.0');
-    expect(packageJson.overrides['js-yaml@4.1.1']).toBe('4.3.0');
+    expect(packageJson.overrides['js-yaml@3.14.2']).toBe('3.15.2');
+    expect(packageJson.overrides['js-yaml@4.1.1']).toBe('4.3.2');
     expect(packageJson.overrides['@xmldom/xmldom']).toBe('0.8.15');
     expect(packageJson.overrides.uuid).toBeUndefined();
   });

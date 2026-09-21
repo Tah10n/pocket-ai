@@ -252,6 +252,8 @@ conclusion” when the available data cannot support one.
 
 ## Explicit Android CPU lifecycle smoke
 
+Recorded result: [llama.rn 0.13 Stage 1 Android acceptance](llama-rn-013-stage1-acceptance.md).
+
 Run `node scripts/android-scenarios.js --emulator --pack inference --isolated-qa-install --fail-on-skip`
 to build and launch a provenance-checked QA Release APK and exercise the real engine and native
 runtime. This pack provisions only the existing commit-pinned, SHA-256-verified public SmolLM2

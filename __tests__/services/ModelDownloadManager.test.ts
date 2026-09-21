@@ -1,3 +1,5 @@
+jest.mock('../../src/services/ModelCatalogService', () => ({ modelCatalogService: {} }));
+
 import {
   getModelDownloadManager,
   runWithIdleModelDownloads,
@@ -108,6 +110,9 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
   registry: {
     getModels: jest.fn().mockReturnValue([]),
     updateModel: jest.fn(),
+    validateRegistry: jest.fn().mockResolvedValue(undefined),
+    getQuarantinedModelFileNames: jest.fn().mockReturnValue([]),
+    deleteQuarantinedModelFiles: jest.fn().mockResolvedValue(0),
   },
 }));
 
@@ -123,6 +128,7 @@ jest.mock('react-native-device-info', () => ({
 
 jest.mock('../../src/services/SystemMetricsService', () => ({
   getSystemMemorySnapshot: jest.fn().mockResolvedValue(null),
+  invalidateAppCacheDirectorySizeMeasurement: jest.fn(),
 }));
 
 jest.mock('../../src/services/storage', () => {
@@ -144,6 +150,7 @@ jest.mock('../../src/services/storage', () => {
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     requestActiveMultimodalReadinessRefresh: jest.fn(),
+    runWithIdleModelResources: jest.fn((operation: () => Promise<unknown>) => operation()),
   },
 }));
 
@@ -280,6 +287,24 @@ describe('ModelDownloadManager Basic', () => {
       progressPercent: 0,
     });
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
+  });
+
+  it('holds downloads through the quarantine inspection/delete await gap', async () => {
+    const { cleanupQuarantinedModelFiles } = require('../../src/services/StorageManagerService');
+    let finishDelete!: (count: number) => void;
+    (mockedRegistry.getQuarantinedModelFileNames as jest.Mock).mockReturnValueOnce(['reused-target.gguf']);
+    (mockedRegistry.deleteQuarantinedModelFiles as jest.Mock).mockImplementationOnce(() => new Promise<number>(resolve => { finishDelete = resolve; }));
+    const cleanup = cleanupQuarantinedModelFiles();
+    for (let i = 0; i < 20 && !finishDelete; i += 1) await Promise.resolve();
+    expect(finishDelete).toBeDefined();
+    useDownloadStore.getState().addToQueue(mockModel);
+    await Promise.resolve();
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    expect(llmEngineService.runWithIdleModelResources).toHaveBeenCalled();
+    useDownloadStore.getState().removeFromQueue(mockModel.id);
+    finishDelete(1);
+    await expect(cleanup).resolves.toBe(1);
+    await expect(runWithIdleModelDownloads(async () => 'available')).resolves.toBe('available');
   });
 
   it('blocks file deletion while another model owns download or verification I/O', async () => {

@@ -1239,43 +1239,45 @@ export async function clearActiveCache() {
 }
 
 export async function cleanupQuarantinedModelFiles() {
-  invalidateDirectorySizeMeasurements();
-  const getCurrentQueuedModelFileNames = () => getQueuedDownloadFileNames();
-  await registry.validateRegistry(getCurrentQueuedModelFileNames());
+  return runWithIdleModelDownloads(() => llmEngineService.runWithIdleModelResources(async () => {
+    invalidateDirectorySizeMeasurements();
+    const getCurrentQueuedModelFileNames = () => getQueuedDownloadFileNames();
+    await registry.validateRegistry(getCurrentQueuedModelFileNames());
 
-  const fileNames = registry.getQuarantinedModelFileNames();
-  let deletedCount = 0;
-  let failedQuarantinedDeletes = 0;
-  let firstError: unknown = null;
+    const fileNames = registry.getQuarantinedModelFileNames();
+    let deletedCount = 0;
+    let failedQuarantinedDeletes = 0;
+    let firstError: unknown = null;
 
-  for (const fileName of fileNames) {
-    try {
-      deletedCount += await registry.deleteQuarantinedModelFiles(
-        [fileName],
-        getCurrentQueuedModelFileNames,
-      );
-    } catch (error) {
-      failedQuarantinedDeletes += 1;
-      firstError ??= error;
+    for (const fileName of fileNames) {
+      try {
+        deletedCount += await registry.deleteQuarantinedModelFiles(
+          [fileName],
+          getCurrentQueuedModelFileNames,
+        );
+      } catch (error) {
+        failedQuarantinedDeletes += 1;
+        firstError ??= error;
+      }
     }
-  }
 
-  if (failedQuarantinedDeletes > 0) {
-    console.warn('[StorageManagerService] Failed to delete quarantined model files', {
-      pathCategory: 'model_storage',
-      scope: 'quarantined_model_cleanup',
-      failedCount: failedQuarantinedDeletes,
-      ...getPrivacySafeErrorLogDetails(firstError),
-    });
-  }
+    if (failedQuarantinedDeletes > 0) {
+      console.warn('[StorageManagerService] Failed to delete quarantined model files', {
+        pathCategory: 'model_storage',
+        scope: 'quarantined_model_cleanup',
+        failedCount: failedQuarantinedDeletes,
+        ...getPrivacySafeErrorLogDetails(firstError),
+      });
+    }
 
-  invalidateDirectorySizeMeasurements();
+    invalidateDirectorySizeMeasurements();
 
-  if (firstError) {
-    throw firstError;
-  }
+    if (firstError) {
+      throw firstError;
+    }
 
-  return deletedCount;
+    return deletedCount;
+  }));
 }
 
 export async function resetAppSettings() {

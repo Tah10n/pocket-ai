@@ -15,6 +15,21 @@ release flow, see the [Release Checklist](./release-checklist.md).
 - Install Rust through `rustup`. The document module pins Rust 1.97.1, Android NDK
   27.1.12297006, Android API 24, and `cargo-ndk` 4.1.2.
 
+`llama.rn` upgrades require a new native binary; Expo OTA updates are explicitly
+disabled. Its postinstall downloads version-specific Android and iOS artifacts
+and verifies their archive SHA-256. If your npm installation gates lifecycle
+scripts, explicitly run the same installer before building:
+
+```bash
+node node_modules/llama.rn/install/download-native-artifacts.js
+npm run verify:native-config
+```
+
+The verifier checks the exact manifest/lock/installed package version, download
+receipts and required payloads. Receipts and JavaScript `BuildInfo` are not proof
+of the embedded binary; retain artifact provenance and native smoke checks.
+Do not reuse an old generated native project after changing the runtime pin.
+
 Prepare and verify the document toolchain once:
 
 ```bash

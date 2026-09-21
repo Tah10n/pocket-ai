@@ -44,6 +44,9 @@ function assertSourceConfig(root = projectRoot) {
   if (backgroundModes.includes('processing')) {
     throw new Error('UIBackgroundModes=processing requires a real BGTaskScheduler implementation and is forbidden.');
   }
+  if (appConfig.expo?.updates?.enabled !== false) {
+    throw new Error('Expo updates must remain explicitly disabled: llama.rn upgrades require a new native binary.');
+  }
   const appCodegenSourceDir = packageConfig.codegenConfig?.jsSrcsDir;
   if (appCodegenSourceDir && findAppCodegenSpecs(root, appCodegenSourceDir).length === 0) {
     throw new Error(
@@ -55,6 +58,66 @@ function assertSourceConfig(root = projectRoot) {
   }
   if (easConfig.build?.production?.autoIncrement !== true) {
     throw new Error('EAS production builds must auto-increment developer-facing build versions.');
+  }
+}
+
+function assertLlamaNativeArtifacts(root = projectRoot) {
+  const packageConfig = JSON.parse(readText(path.join(root, 'package.json'), 'Package config'));
+  const lock = JSON.parse(readText(path.join(root, 'package-lock.json'), 'Package lock'));
+  const llamaRoot = path.join(root, 'node_modules', 'llama.rn');
+  const installed = JSON.parse(readText(path.join(llamaRoot, 'package.json'), 'Installed llama.rn package'));
+  const version = packageConfig.dependencies?.['llama.rn'];
+  if (typeof version !== 'string'
+    || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)
+    || lock.packages?.['']?.dependencies?.['llama.rn'] !== version
+    || lock.packages?.['node_modules/llama.rn']?.version !== version
+    || installed.version !== version) {
+    throw new Error('llama.rn manifest, lockfile and installed package must match one exact version; run npm ci.');
+  }
+  const manifest = JSON.parse(readText(
+    path.join(llamaRoot, 'install', 'native-artifacts.json'), 'llama.rn native artifact manifest',
+  ));
+  const expectedArtifacts = [
+    {
+      name: 'android-jni-libs',
+      relativePath: 'android/src/main/jniLibs',
+      files: ['arm64-v8a/librnllama.so', 'x86_64/librnllama.so'],
+    },
+    {
+      name: 'ios-xcframework',
+      relativePath: 'ios/rnllama.xcframework',
+      files: [
+        'Info.plist',
+        'ios-arm64/rnllama.framework/rnllama',
+        'ios-arm64_x86_64-simulator/rnllama.framework/rnllama',
+      ],
+    },
+  ];
+  for (const expected of expectedArtifacts) {
+    const entries = Array.isArray(manifest.artifacts)
+      ? manifest.artifacts.filter((artifact) => artifact?.name === expected.name)
+      : [];
+    const artifact = entries[0];
+    if (entries.length !== 1
+      || artifact.relativePath !== expected.relativePath
+      || artifact.markerPath !== `${expected.relativePath}/.llama-rn.sha256`
+      || typeof artifact.sha256 !== 'string'
+      || !/^[\da-f]{64}$/iu.test(artifact.sha256)) {
+      throw new Error(`Invalid llama.rn native artifact manifest for ${expected.name}.`);
+    }
+    // The upstream downloader verifies the archive before writing this receipt.
+    // A matching receipt is installation evidence, not a binary checksum or smoke test.
+    const marker = readText(path.join(llamaRoot, artifact.markerPath), `llama.rn ${expected.name} receipt`).trim();
+    if (marker !== artifact.sha256) {
+      throw new Error(`Stale llama.rn ${expected.name} receipt; run npm ci with postinstall enabled.`);
+    }
+    for (const file of expected.files) {
+      const payload = path.join(llamaRoot, expected.relativePath, file);
+      const stat = fs.existsSync(payload) ? fs.statSync(payload) : null;
+      if (!stat?.isFile() || stat.size === 0) {
+        throw new Error(`Missing llama.rn ${expected.name} payload ${file}; run npm ci with postinstall enabled.`);
+      }
+    }
   }
 }
 
@@ -146,6 +209,7 @@ function run(argv = process.argv.slice(2), root = projectRoot) {
   const requireIos = argv.includes('--require-ios');
   const requireAndroid = argv.includes('--require-android');
   assertSourceConfig(root);
+  assertLlamaNativeArtifacts(root);
 
   if (requireIos || fs.existsSync(path.join(root, 'ios'))) {
     assertIosGeneratedConfig(root);
@@ -163,6 +227,7 @@ if (require.main === module) {
 module.exports = {
   assertAndroidGeneratedConfig,
   assertIosGeneratedConfig,
+  assertLlamaNativeArtifacts,
   assertSourceConfig,
   run,
 };

@@ -1,0 +1,84 @@
+{
+  "recordedAt": "2026-09-21T12:45:51.357Z",
+  "sourceCommit": "04415f12bbb4a4ef79e42888758fdbaee1c764b4",
+  "sourceTree": "b91a3278cdafbd70328022b3598177ab7f56f2b2",
+  "apkSha256": "831d4942d0477811081842b52b08f065024190c52ccbad5871b457ca0e755697",
+  "llamaRn": "0.13.0-rc.3",
+  "androidApi": 36,
+  "abi": "x86_64",
+  "modelSha256": "bc64cce8e1c11e4ed870633b557e04af718249c817c4cf8a6784116144ec3e28",
+  "evidence": {
+    "schemaVersion": 1,
+    "status": "passed",
+    "phase": "complete",
+    "requiresForceStop": false,
+    "steps": [
+      {
+        "id": "backend_discovery",
+        "status": "passed",
+        "discoveredDeviceCount": 1
+      },
+      {
+        "id": "cpu_load",
+        "status": "passed",
+        "loadedGpuLayers": 0,
+        "backendMode": "cpu",
+        "actualGpuAccelerated": false
+      },
+      {
+        "id": "generate",
+        "status": "passed",
+        "callbacks": 15,
+        "outputCharacters": 81,
+        "tokensPredicted": 14,
+        "tokensEvaluated": 36,
+        "inputMessages": 2
+      },
+      {
+        "id": "stop_after_token",
+        "status": "passed",
+        "callbacks": 1,
+        "outputCharacters": 3,
+        "inputMessages": 4
+      },
+      {
+        "id": "generate_after_stop",
+        "status": "passed",
+        "callbacks": 15,
+        "outputCharacters": 81,
+        "tokensPredicted": 14,
+        "tokensEvaluated": 91,
+        "inputMessages": 5
+      },
+      {
+        "id": "new_chat_isolation",
+        "status": "passed",
+        "callbacks": 15,
+        "outputCharacters": 81,
+        "tokensPredicted": 15,
+        "tokensEvaluated": 36,
+        "inputMessages": 2
+      },
+      {
+        "id": "unload",
+        "status": "passed"
+      },
+      {
+        "id": "cpu_reload",
+        "status": "passed",
+        "loadedGpuLayers": 0,
+        "backendMode": "cpu",
+        "actualGpuAccelerated": false
+      },
+      {
+        "id": "generate_after_reload",
+        "status": "passed",
+        "callbacks": 15,
+        "outputCharacters": 81,
+        "tokensPredicted": 14,
+        "tokensEvaluated": 71,
+        "inputMessages": 4
+      }
+    ]
+  }
+}

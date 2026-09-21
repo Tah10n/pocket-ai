@@ -3,6 +3,9 @@
     "name": "Pocket AI",
     "slug": "pocket-ai",
     "version": "1.6.3",
+    "updates": {
+      "enabled": false
+    },
     "description": "Offline-first local AI assistant with GGUF model downloads, on-device inference, and persisted chat history.",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",

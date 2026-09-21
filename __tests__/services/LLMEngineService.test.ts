@@ -4861,7 +4861,7 @@ describe('LLMEngineService', () => {
     );
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        stop: expect.arrayContaining(['</s>', '<|custom_stop|>']),
+        stop: expect.arrayContaining(['</s>', '  <|custom_stop|>  ']),
       }),
       expect.any(Function),
     );
@@ -5040,7 +5040,7 @@ describe('LLMEngineService', () => {
 
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        stop: ['<|jinja_stop|>'],
+        stop: ['  <|jinja_stop|>  '],
       }),
       expect.any(Function),
     );
@@ -5053,7 +5053,7 @@ describe('LLMEngineService', () => {
       templateType: 'jinja',
       templateStopCount: 1,
       fallbackStopCount: 0,
-      resolvedStops: ['<|jinja_stop|>'],
+      resolvedStops: ['  <|jinja_stop|>  '],
     }));
   });
 

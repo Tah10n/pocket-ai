@@ -6,6 +6,7 @@ import type {
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import appPackageJson from '../../package.json';
+import { getLlamaRuntimeDiagnostics } from './llamaRnModule';
 import { hardwareListenerService } from './HardwareListenerService';
 import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import {
@@ -2768,7 +2769,6 @@ class LLMEngineService {
       new Set(
         stops
           .filter((stop): stop is string => typeof stop === 'string')
-          .map((stop) => stop.trim())
           .filter((stop) => stop.length > 0),
       ),
     );
@@ -2811,7 +2811,6 @@ class LLMEngineService {
           ...(shouldIncludeFallbackStops ? FALLBACK_STOP_WORDS : []),
           ...templateStops,
         ]
-          .map((stop) => stop.trim())
           .filter((stop) => stop.length > 0),
       ),
     );
@@ -5042,7 +5041,7 @@ class LLMEngineService {
   }
 
   private buildDiagnosticsSnapshot(): NonNullable<EngineState['diagnostics']> {
-    return buildEngineDiagnosticsSnapshot({
+    const diagnostics = buildEngineDiagnosticsSnapshot({
       activeBackendMode: this.activeBackendMode,
       activeBackendDevices: this.activeBackendDevices,
       activeBackendReasonNoGpu: this.activeBackendReasonNoGpu,
@@ -5076,6 +5075,7 @@ class LLMEngineService {
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
       activePromptStateCachePolicy: this.activePromptStateCachePolicy,
     });
+    return { ...diagnostics, runtime: getLlamaRuntimeDiagnostics(this.context) };
   }
 
   private recordRecentMultimodalDiagnostics({

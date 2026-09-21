@@ -3793,6 +3793,51 @@ describe('ChatScreen', () => {
     expect(useChatStore.getState().getActiveThread()?.activeModelId).toBe('author/model-q8');
   });
 
+  it.each([
+    { qaEnabled: true, status: 'running', shouldLoad: false },
+    { qaEnabled: true, status: 'failed', shouldLoad: false },
+    { qaEnabled: true, status: 'passed', shouldLoad: false },
+    { qaEnabled: true, status: 'idle', shouldLoad: true },
+    { qaEnabled: false, status: 'failed', shouldLoad: true },
+  ] as const)('handles an unloaded active chat while QA=$qaEnabled status=$status', async ({
+    qaEnabled, status, shouldLoad,
+  }) => {
+    const qaBootstrap = jest.requireActual('../../src/services/AndroidQaDocumentModelBootstrap');
+    const qaSmoke = jest.requireActual('../../src/services/AndroidQaInferenceSmoke');
+    const qaGateSpy = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled')
+      .mockReturnValue(qaEnabled);
+    const snapshot = { schemaVersion: 1, status, phase: 'unload',
+      requiresForceStop: status === 'failed', steps: [] };
+    const evidenceSpy = jest.spyOn(qaSmoke, 'getAndroidQaInferenceSmokeEvidence')
+      .mockReturnValue(snapshot);
+    registry.saveModels([{
+      id: 'author/model-q4', name: 'Model Q4', author: 'Test', size: 1024,
+      localPath: 'model-q4.gguf', lifecycleStatus: 'downloaded',
+    }]);
+    const view = render(React.createElement(ChatScreen));
+    try {
+      expect(mockLoadModel).not.toHaveBeenCalled();
+      // Match the real unload publication while the same store chat stays active.
+      await act(async () => {
+        mockEngineState = { status: 'idle', loadProgress: 0, activeModelId: null };
+        view.rerender(React.createElement(ChatScreen));
+      });
+      if (shouldLoad) {
+        await waitFor(() => expect(mockLoadModel).toHaveBeenCalledWith(
+          'author/model-q4', expect.objectContaining({ preferLastWorkingProfile: true }),
+        ));
+      } else {
+        expect(mockLoadModel).not.toHaveBeenCalled();
+        expect(mockEngineState.status).toBe('idle');
+      }
+      expect(getThreadActiveModelId(useChatStore.getState().getActiveThread())).toBe('author/model-q4');
+    } finally {
+      view.unmount();
+      evidenceSpy.mockRestore();
+      qaGateSpy.mockRestore();
+    }
+  });
+
   it('blocks input and auto-loads the exact active-thread model without rewriting the thread', async () => {
     registry.saveModels([
       {

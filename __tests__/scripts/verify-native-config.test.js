@@ -4,6 +4,46 @@ const path = require('node:path');
 
 const { run } = require('../../scripts/verify-native-config');
 
+const llamaVersion = '0.13.0-rc.3';
+const llamaDependencies = { 'llama.rn': llamaVersion };
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value));
+}
+
+function createLlamaArtifacts(root) {
+  writeJson(path.join(root, 'package-lock.json'), {
+    packages: {
+      '': { dependencies: llamaDependencies },
+      'node_modules/llama.rn': { version: llamaVersion },
+    },
+  });
+  const llamaRoot = path.join(root, 'node_modules', 'llama.rn');
+  writeJson(path.join(llamaRoot, 'package.json'), { version: llamaVersion });
+  const artifacts = [
+    { name: 'android-jni-libs', relativePath: 'android/src/main/jniLibs', sha256: 'a'.repeat(64) },
+    { name: 'ios-xcframework', relativePath: 'ios/rnllama.xcframework', sha256: 'b'.repeat(64) },
+  ].map((artifact) => ({ ...artifact, markerPath: `${artifact.relativePath}/.llama-rn.sha256` }));
+  writeJson(path.join(llamaRoot, 'install/native-artifacts.json'), { artifacts });
+  for (const artifact of artifacts) {
+    const marker = path.join(llamaRoot, artifact.markerPath);
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, `${artifact.sha256}\n`);
+  }
+  for (const relativePath of [
+    'android/src/main/jniLibs/arm64-v8a/librnllama.so',
+    'android/src/main/jniLibs/x86_64/librnllama.so',
+    'ios/rnllama.xcframework/Info.plist',
+    'ios/rnllama.xcframework/ios-arm64/rnllama.framework/rnllama',
+    'ios/rnllama.xcframework/ios-arm64_x86_64-simulator/rnllama.framework/rnllama',
+  ]) {
+    const file = path.join(llamaRoot, relativePath);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'fixture payload');
+  }
+}
+
 function createProject() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pocket-ai-native-config-'));
   fs.mkdirSync(path.join(root, 'ios', 'pocketai'), { recursive: true });
@@ -16,6 +56,7 @@ function createProject() {
   );
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
     expo: {
+      updates: { enabled: false },
       ios: { infoPlist: {} },
       plugins: [['expo-build-properties', { android: { buildArchs: ['arm64-v8a', 'x86_64'] } }]],
     },
@@ -24,7 +65,8 @@ function createProject() {
     cli: { appVersionSource: 'remote' },
     build: { production: { autoIncrement: true } },
   }));
-  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ private: true }));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ private: true, dependencies: llamaDependencies }));
+  createLlamaArtifacts(root);
   fs.writeFileSync(path.join(root, 'ios', 'pocketai', 'Info.plist'), [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<plist><dict>',
@@ -88,7 +130,7 @@ describe('native configuration contract', () => {
       }));
       expect(() => run([], root)).toThrow(/BGTaskScheduler/);
 
-      fs.writeFileSync(appConfigPath, JSON.stringify({ expo: { ios: { infoPlist: {} } } }));
+      fs.writeFileSync(appConfigPath, JSON.stringify({ expo: { updates: { enabled: false }, ios: { infoPlist: {} } } }));
       fs.writeFileSync(
         path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
         '<manifest><application /></manifest>',
@@ -169,6 +211,7 @@ describe('native configuration contract', () => {
     try {
       fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
         private: true,
+        dependencies: llamaDependencies,
         codegenConfig: {
           name: 'RNAppSpec',
           type: 'all',
@@ -181,6 +224,69 @@ describe('native configuration contract', () => {
 
       fs.writeFileSync(path.join(root, 'src', 'NativePocketAI.ts'), 'export default {};');
       expect(() => run([], root)).not.toThrow();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([undefined, true])('rejects updates.enabled=%s to prevent JS-only runtime upgrades', (enabled) => {
+    const root = createProject();
+    try {
+      writeJson(path.join(root, 'app.json'), { expo: { updates: { enabled } } });
+      expect(() => run([], root)).toThrow(/new native binary/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['manifest', 'lock-root', 'lock-package', 'installed'])('rejects mismatched llama.rn %s identity', (target) => {
+    const root = createProject();
+    try {
+      if (target === 'manifest') {
+        writeJson(path.join(root, 'package.json'), { dependencies: { 'llama.rn': `^${llamaVersion}` } });
+      } else if (target === 'installed') {
+        writeJson(path.join(root, 'node_modules/llama.rn/package.json'), { version: '0.12.9' });
+      } else {
+        const file = path.join(root, 'package-lock.json');
+        const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (target === 'lock-root') lock.packages[''].dependencies['llama.rn'] = '0.12.9';
+        else lock.packages['node_modules/llama.rn'].version = '0.12.9';
+        writeJson(file, lock);
+      }
+      expect(() => run([], root)).toThrow(/match one exact version/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['android/src/main/jniLibs', 'ios/rnllama.xcframework'])('rejects stale %s download receipts', (directory) => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(path.join(root, 'node_modules/llama.rn', directory, '.llama-rn.sha256'), 'c'.repeat(64));
+      expect(() => run([], root)).toThrow(/Stale llama.rn.*receipt/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    'android/src/main/jniLibs/x86_64/librnllama.so',
+    'ios/rnllama.xcframework/ios-arm64/rnllama.framework/rnllama',
+  ])('rejects missing native payload despite a matching receipt: %s', (payload) => {
+    const root = createProject();
+    try {
+      fs.unlinkSync(path.join(root, 'node_modules/llama.rn', payload));
+      expect(() => run([], root)).toThrow(/Missing llama.rn.*payload/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an unconfigured upstream artifact manifest', () => {
+    const root = createProject();
+    try {
+      writeJson(path.join(root, 'node_modules/llama.rn/install/native-artifacts.json'), { artifacts: [] });
+      expect(() => run([], root)).toThrow(/Invalid llama.rn native artifact manifest/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

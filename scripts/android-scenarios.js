@@ -105,6 +105,7 @@ const SCENARIO_PACK_SCENARIOS = {
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
   documents: DOCUMENT_SCENARIOS,
+  inference: ["runtime-inference-lifecycle"],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -3043,6 +3044,47 @@ function buildScenarios() {
       },
     },
     {
+      id: "runtime-inference-lifecycle",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Run real CPU generation, cancellation, chat isolation, and model reload.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        fs.rmSync(path.join(artifactsRoot, "inference-lifecycle-evidence.json"), { force: true });
+        try {
+          await goToHome(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
+            timeoutMs: CHAT_ROUTE_TIMEOUT_MS,
+          });
+          const action = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-inference-smoke", {
+            timeoutMs: 180_000,
+            visibleOnly: true,
+          });
+          if (!action.bounds) throw new Error("Inference QA action is not tappable.");
+          tapBounds(adbPath, ctx.serial, action.bounds);
+          const details = await waitForInferenceSmokeEvidence(() => {
+            const node = findResourceIdInSnapshot(
+              createUiSnapshot(adbPath, ctx.serial), "chat-qa-inference-smoke-evidence"
+            );
+            if (!node) return null;
+            let observed;
+            try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safeEvidence = sanitizeInferenceSmokeEvidence(observed);
+            fs.writeFileSync(path.join(artifactsRoot, "inference-lifecycle-evidence.json"),
+              `${JSON.stringify(safeEvidence, null, 2)}\n`);
+            return safeEvidence;
+          });
+          return { details };
+        } catch (error) {
+          // A timed-out native operation must never be followed by another context.
+          // This scenario requires the isolated package and owns its app launch.
+          forceStopScenarioApp(adbPath, ctx.serial);
+          throw error;
+        }
+      },
+    },
+    {
       id: "native-glass-theme-matrix",
       tier: "critical",
       requiresCurrentHeadProvenance: true,
@@ -5348,10 +5390,87 @@ function requireBranchFixtureState(state, step) {
   }
 }
 
+const INFERENCE_SMOKE_STEP_IDS = ["backend_discovery", "cpu_load", "generate", "stop_after_token",
+  "generate_after_stop", "new_chat_isolation", "unload", "cpu_reload", "generate_after_reload"];
+const INFERENCE_SMOKE_FAILURE_CODES = new Set(["actual_backend", "backend_discovery_unavailable",
+  "chat_model_identity", "completion_failed", "completion_not_drained", "engine_busy", "model_identity",
+  "new_chat_blocked", "new_chat_history", "new_chat_identity", "no_real_generation", "no_real_tokens",
+  "operation_failed", "runtime_policy", "stop_not_during_generation", "timeout", "unload_incomplete",
+  "verified_model_missing"]);
+
+function sanitizeInferenceSmokeEvidence(evidence) {
+  const numericFields = ["callbacks", "outputCharacters", "tokensPredicted", "tokensEvaluated",
+    "inputMessages", "loadedGpuLayers", "discoveredDeviceCount"];
+  return {
+    schemaVersion: evidence?.schemaVersion === 1 ? 1 : null,
+    status: ["idle", "running", "passed", "failed"].includes(evidence?.status) ? evidence.status : "unknown",
+    phase: [...INFERENCE_SMOKE_STEP_IDS, "idle", "preconditions", "complete"].includes(evidence?.phase)
+      ? evidence.phase : "unknown",
+    requiresForceStop: typeof evidence?.requiresForceStop === "boolean" ? evidence.requiresForceStop : null,
+    ...(INFERENCE_SMOKE_FAILURE_CODES.has(evidence?.failureCode)
+      ? { failureCode: evidence.failureCode } : {}),
+    steps: Array.isArray(evidence?.steps) ? evidence.steps.map((step) => ({
+      id: INFERENCE_SMOKE_STEP_IDS.includes(step?.id) ? step.id : "unknown",
+      status: step?.status === "passed" ? "passed" : "unknown",
+      ...Object.fromEntries(numericFields.filter((field) => Number.isSafeInteger(step?.[field]))
+        .map((field) => [field, step[field]])),
+      ...(["cpu", "gpu", "npu", "unknown"].includes(step?.backendMode) ? { backendMode: step.backendMode } : {}),
+      ...(typeof step?.actualGpuAccelerated === "boolean" ? { actualGpuAccelerated: step.actualGpuAccelerated } : {}),
+    })) : [],
+  };
+}
+
+function validateInferenceSmokeEvidence(evidence) {
+  const ids = INFERENCE_SMOKE_STEP_IDS;
+  if (evidence?.schemaVersion !== 1 || evidence.status !== "passed"
+    || evidence.requiresForceStop !== false || evidence.phase !== "complete"
+    || !Array.isArray(evidence.steps) || evidence.steps.length !== ids.length) {
+    throw new Error("Incomplete or failed native inference evidence.");
+  }
+  const positive = (value) => Number.isSafeInteger(value) && value > 0;
+  evidence.steps.forEach((step, index) => {
+    if (step.id !== ids[index] || step.status !== "passed") {
+      throw new Error("Native inference lifecycle sequence is incomplete.");
+    }
+    if (["generate", "generate_after_stop", "new_chat_isolation", "generate_after_reload"].includes(step.id)
+      && ![step.callbacks, step.outputCharacters, step.tokensPredicted, step.tokensEvaluated, step.inputMessages].every(positive)) {
+      throw new Error("Native inference evidence has no real generation.");
+    }
+    if (step.id === "stop_after_token" && ![step.callbacks, step.outputCharacters].every(positive)) {
+      throw new Error("Native cancellation did not follow real token callbacks.");
+    }
+    if (["cpu_load", "cpu_reload"].includes(step.id)
+      && (step.backendMode !== "cpu" || step.loadedGpuLayers !== 0 || step.actualGpuAccelerated !== false)) {
+      throw new Error("Native inference did not verify the actual CPU backend.");
+    }
+    if (step.id === "backend_discovery"
+      && (!Number.isSafeInteger(step.discoveredDeviceCount) || step.discoveredDeviceCount < 0)) {
+      throw new Error("Native backend discovery evidence is missing.");
+    }
+  });
+  return evidence;
+}
+
+async function waitForInferenceSmokeEvidence(readEvidence, options = {}) {
+  const now = options.now || Date.now;
+  const wait = options.wait || delay;
+  const deadline = now() + (options.timeoutMs ?? 900_000);
+  while (now() < deadline) {
+    const evidence = await readEvidence();
+    if (evidence?.status === "failed") {
+      const safeLabel = (value) => typeof value === "string" && /^[a-z_]{1,64}$/.test(value) ? value : "unknown";
+      throw new Error(`Native inference smoke failed: phase=${safeLabel(evidence.phase)}, code=${safeLabel(evidence.failureCode)}.`);
+    }
+    if (evidence?.status === "passed") return validateInferenceSmokeEvidence(evidence);
+    await wait(1000);
+  }
+  throw new Error("Native inference smoke timed out without complete evidence.");
+}
+
 function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenance, env = process.env) {
   if (options.apkVariant) {
     env.ANDROID_SMOKE_APK_VARIANT = options.apkVariant;
-  } else if (["documents", "native"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
+  } else if (["documents", "native", "inference"].includes(options.pack) && !env.ANDROID_SMOKE_APK_VARIANT) {
     // Current-head packs are self-contained and always exercise
     // the embedded release bundle plus the universal native-library contract.
     env.ANDROID_SMOKE_APK_VARIANT = "release";
@@ -5366,7 +5485,7 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (options.pack === "documents") {
+    if (["documents", "inference"].includes(options.pack) || options.scenario === "runtime-inference-lifecycle") {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
@@ -6650,6 +6769,7 @@ function selectScenarios(scenarios, options) {
       ...DOCUMENT_SCENARIOS,
       ...DOCUMENT_BENCHMARK_SCENARIOS,
       ...STATE_MUTATING_CATALOG_SCENARIOS,
+      "runtime-inference-lifecycle",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);
@@ -10833,6 +10953,9 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  sanitizeInferenceSmokeEvidence,
+  validateInferenceSmokeEvidence,
+  waitForInferenceSmokeEvidence,
   BRANCH_REGENERATION_SCENARIOS,
   DOCUMENT_BENCHMARK_SCENARIOS,
   DOCUMENT_EVIDENCE_POLICY,

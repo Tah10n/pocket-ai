@@ -91,6 +91,12 @@ import {
     isAndroidQaGenerationEvidenceEnabled,
     subscribeAndroidQaGenerationEvidence,
 } from '../../services/AndroidQaGenerationEvidence';
+import {
+    getAndroidQaInferenceSmokeEvidence,
+    runAndroidQaInferenceSmoke,
+    subscribeAndroidQaInferenceSmoke,
+} from '../../services/AndroidQaInferenceSmoke';
+import { isAndroidQaDocumentModelBootstrapEnabled } from '../../services/AndroidQaDocumentModelBootstrap';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
 import {
@@ -731,6 +737,11 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     documentDraftCount: number;
     topInset: number;
 }) {
+    const inferenceEvidence = useSyncExternalStore(
+        subscribeAndroidQaInferenceSmoke,
+        getAndroidQaInferenceSmokeEvidence,
+        getAndroidQaInferenceSmokeEvidence,
+    );
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
     >('idle');
@@ -794,6 +805,25 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                 style={styles.androidQaEvidenceMarker}
             />
             <View style={styles.androidQaEvidenceActions}>
+                {isAndroidQaDocumentModelBootstrapEnabled() ? (
+                    <>
+                        <Button
+                            size="xs"
+                            action="secondary"
+                            testID="chat-qa-run-inference-smoke"
+                            onPress={() => void runAndroidQaInferenceSmoke()}
+                        >
+                            <ButtonText>QA inference</ButtonText>
+                        </Button>
+                        <View
+                            accessible
+                            collapsable={false}
+                            testID="chat-qa-inference-smoke-evidence"
+                            accessibilityLabel={JSON.stringify(inferenceEvidence)}
+                            style={styles.androidQaEvidenceMarker}
+                        />
+                    </>
+                ) : null}
                 <Button
                     size="xs"
                     action="secondary"
@@ -2722,6 +2752,12 @@ const ChatScreenContent = () => {
     }, [activeThreadId]);
 
     useEffect(() => {
+        // The explicit QA smoke owns unload/reload until process restart, including
+        // a failed native timeout. Auto-loading here would race its lifecycle proof.
+        if (isAndroidQaDocumentModelBootstrapEnabled()
+            && getAndroidQaInferenceSmokeEvidence().status !== 'idle') {
+            return;
+        }
         if (
             !isScreenFocused
             || !activeThreadId

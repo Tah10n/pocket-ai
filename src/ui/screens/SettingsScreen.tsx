@@ -696,6 +696,20 @@ const SettingsScreenContent = () => {
                                     iconTone="success"
                                     onPress={handleStorageManagerPress}
                                 />
+                                <ScreenCard className="gap-3">
+                                    <Text className="text-lg font-semibold">{t('resources.title')}</Text>
+                                    {(['embedding', 'reranker', 'tts'] as const).map((role) => {
+                                        const binding = settings.auxiliaryModels?.[role];
+                                        return <Box key={role} className="gap-2">
+                                            <Text>{t(`resources.roles.${role}`)}: {binding?.modelId ?? t('resources.notSelected')}</Text>
+                                            <Button size="sm" action="secondary" onPress={() => {
+                                                if (binding) router.push({ pathname: '/model-details', params: { modelId: binding.modelId } });
+                                                else router.push('/(tabs)/models');
+                                            }}><ButtonText>{t(binding ? 'models.details' : 'resources.select')}</ButtonText></Button>
+                                        </Box>;
+                                    })}
+                                    <Text colorRole="secondary">{t('resources.futureFunctions')}</Text>
+                                </ScreenCard>
                                 <SettingsNavCard
                                     title={t('settings.huggingFaceToken')}
                                     description={t('settings.huggingFaceTokenDescription')}

@@ -506,6 +506,35 @@ describe('ModelDetailsScreen', () => {
     expect(lastErrorReportSheetProps?.androidContentBlurTargetRef).toBe(blurTarget);
   });
 
+  it('offers a separate auxiliary selection and hides ordinary chat load for a declared embedding model', async () => {
+    const specialized: ModelMetadata = { ...mockDetailModel, localPath: 'embedding.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, tags: [], architectures: [], modelType: undefined,
+      roleEvidence: [{ role: 'embedding', source: 'pipeline_tag', confidence: 'declared' }] };
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(specialized);
+    modelCatalogService.getModelDetails.mockResolvedValue(specialized);
+    const screen = render(<ModelDetailsScreen />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('resources.select')).toBeTruthy();
+    expect(screen.getByTestId('resource-check-embedding')).toBeTruthy();
+    expect(screen.queryByText('models.load')).toBeNull();
+    expect(mockLoadModel).not.toHaveBeenCalled();
+    expect(screen.getByText('resources.futureFunctions')).toBeTruthy();
+  });
+
+  it('does not call a TTS profile complete merely because its base GGUF is installed', async () => {
+    const specialized: ModelMetadata = { ...mockDetailModel, localPath: 'speech.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, tags: [], architectures: [], modelType: undefined,
+      roleEvidence: [{ role: 'tts', source: 'pipeline_tag', confidence: 'declared' }] };
+    const { modelCatalogService } = jest.requireMock('../../src/services/ModelCatalogService');
+    modelCatalogService.getCachedModel.mockReturnValue(specialized);
+    modelCatalogService.getModelDetails.mockResolvedValue(specialized);
+    const screen = render(<ModelDetailsScreen />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('resources.profileMissing')).toBeTruthy();
+    expect(screen.queryByText('resources.profileReady')).toBeNull();
+  });
+
   it('uses the shared compact rhythm for the details content', async () => {
     render(<ModelDetailsScreen />);
 

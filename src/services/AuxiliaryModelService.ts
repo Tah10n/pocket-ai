@@ -3,7 +3,9 @@ import * as RNFS from 'react-native-fs';
 import { LifecycleStatus, type ModelMetadata } from '../types/models';
 import { getThreadActiveModelId } from '../types/chat';
 import { useChatStore } from '../store/chatStore';
-import { getModelFileIdentity, getModelRoleEvidence } from '../utils/modelRoles';
+import { useDownloadStore } from '../store/downloadStore';
+import { getModelFileIdentity, getModelRoleEvidence, mergeModelRoleEvidence } from '../utils/modelRoles';
+import { isManagedCompanionArtifact, mergeModelArtifacts } from '../utils/modelArtifacts';
 import { fileUriToNativePath, safeJoinModelPath } from '../utils/safeFilePath';
 import { validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
@@ -26,6 +28,33 @@ export class AuxiliaryModelError extends Error {
   constructor(readonly code: AuxiliaryCheckCode) { super(code); this.name = 'AuxiliaryModelError'; }
 }
 
+/** Resolve an explicit resource edit without replacing installed or queued bytes. */
+export function resolveModelForResourceEdit(model: ModelMetadata): ModelMetadata {
+  assertPrivateStorageWritable();
+  if (useDownloadStore.getState().queue.some((entry) => entry.id === model.id)) {
+    throw new AuxiliaryModelError('busy');
+  }
+  const persisted = registry.getModel(model.id);
+  if (!persisted) return model;
+  if (getModelFileIdentity(persisted) === getModelFileIdentity(model)) return persisted;
+  const isUninstalled = (entry: ModelMetadata) => entry.lifecycleStatus === LifecycleStatus.AVAILABLE
+    && !entry.localPath && !entry.resumeData && !entry.downloadProgress && !entry.downloadIntegrity
+    && !entry.downloadedAt && !entry.projectorCandidates?.some((candidate) => candidate.localPath);
+  if (!isUninstalled(persisted) || !isUninstalled(model)) {
+    throw new AuxiliaryModelError('selection_changed');
+  }
+  // Keep retained companion files owned by this record; their old binding stays
+  // inactive until the user explicitly binds them to the new base variant.
+  return {
+    ...persisted, ...model,
+    artifacts: mergeModelArtifacts(model.artifacts ?? [], persisted.artifacts?.filter(isManagedCompanionArtifact), {
+      preservePersistedRuntimeState: true,
+    }),
+    roleEvidence: mergeModelRoleEvidence(model.roleEvidence, persisted.roleEvidence),
+    roleValidation: undefined,
+  };
+}
+
 export function selectAuxiliaryModel(role: AuxiliaryModelRole, model: ModelMetadata | null): void {
   assertPrivateStorageWritable();
   const auxiliaryModels = { ...getSettings().auxiliaryModels };
@@ -35,12 +64,9 @@ export function selectAuxiliaryModel(role: AuxiliaryModelRole, model: ModelMetad
       throw new AuxiliaryModelError('role_unknown');
     }
     // The catalog selection is persisted without changing chat settings or loading a context.
-    const persisted = registry.getModel(model.id);
-    if (persisted && getModelFileIdentity(persisted) !== getModelFileIdentity(model)) {
-      throw new AuxiliaryModelError('selection_changed');
-    }
-    if (!persisted) registry.updateModel(model);
-    auxiliaryModels[role] = { modelId: model.id, fileIdentity: getModelFileIdentity(persisted ?? model) };
+    const selected = resolveModelForResourceEdit(model);
+    if (selected !== registry.getModel(model.id)) registry.updateModel(selected);
+    auxiliaryModels[role] = { modelId: model.id, fileIdentity: getModelFileIdentity(selected) };
   }
   updateSettings({ auxiliaryModels });
 }

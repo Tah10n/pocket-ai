@@ -4624,6 +4624,7 @@ describe('android-scenarios pack selection', () => {
         ...DOCUMENT_BENCHMARK_SCENARIOS,
         ...STATE_MUTATING_CATALOG_SCENARIOS,
         'runtime-inference-lifecycle',
+        'runtime-model-resources',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));

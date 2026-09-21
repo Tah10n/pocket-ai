@@ -10,6 +10,7 @@ import type { SemanticForegroundRole } from '../../design-system/themes/foregrou
 import { MaterialSymbols, type MaterialSymbolName } from './MaterialSymbols';
 import { Text } from './text';
 import { getSelectedMtpDraftArtifact } from '../../utils/modelSpeculativeDecoding';
+import { isChatModelEligible } from '../../utils/modelRoles';
 
 type ModelSpeculativeDraftDownloadStatus = 'queued' | 'downloading' | 'paused' | 'verifying';
 
@@ -517,12 +518,14 @@ export function ModelLifecycleActionRow({
 
       {model.lifecycleStatus === LifecycleStatus.DOWNLOADED ? (
         <>
+          {isChatModelEligible(model) ? (
           <ActionPill
             label={t('models.load')}
             tone="primary"
             onPress={() => onLoad(model.id)}
             className={pillClassName}
           />
+          ) : null}
           <ActionPill
             testID={`settings-${model.id}`}
             label={t('models.settings')}

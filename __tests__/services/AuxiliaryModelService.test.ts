@@ -1,12 +1,14 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as RNFS from 'react-native-fs';
-import { checkAuxiliaryModel, selectAuxiliaryModel, getAuxiliarySelection, estimateAuxiliaryCheckBytes } from '../../src/services/AuxiliaryModelService';
+import { checkAuxiliaryModel, selectAuxiliaryModel, getAuxiliarySelection, estimateAuxiliaryCheckBytes, resolveModelForResourceEdit } from '../../src/services/AuxiliaryModelService';
 import { getSettings, updateSettings, resetSettings, clearAuxiliaryBindingsForModel, storage, SETTINGS_KEY } from '../../src/services/SettingsStore';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { useChatStore } from '../../src/store/chatStore';
+import { useDownloadStore } from '../../src/store/downloadStore';
+import { bindManagedCompanion, getSelectedManagedCompanions } from '../../src/utils/modelArtifacts';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(() => ({ activeModelId: 'chat/a' })),
@@ -32,6 +34,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   resetSettings();
   useChatStore.setState({ threads: {}, activeThreadId: null });
+  useDownloadStore.setState({ queue: [], activeDownloadId: null });
   registry.saveModels([model('chat/a'), model()]);
   updateSettings({ activeModelId: 'chat/a', modelLoadParamsByModelId: { 'chat/a': { contextSize: 2048, gpuLayers: 0, kvCacheType: 'f16' } } });
   engine.getState.mockReturnValue({ status: 'ready' as never, activeModelId: 'chat/a', loadProgress: 1 });
@@ -61,6 +64,51 @@ it('does not overwrite a newer downloaded record with stale catalog runtime fiel
   selectAuxiliaryModel('embedding', { ...model(), localPath: undefined, lifecycleStatus: LifecycleStatus.AVAILABLE });
   expect(registry.getModel('embed/b')?.localPath).toBe('embed-b.gguf');
   expect(() => selectAuxiliaryModel('embedding', { ...model(), sha256: 'b'.repeat(64) })).toThrow('selection_changed');
+});
+
+function availableVariant(fileName: string): ModelMetadata {
+  return { ...model(), lifecycleStatus: LifecycleStatus.AVAILABLE, localPath: undefined, downloadProgress: 0,
+    resolvedFileName: fileName, downloadUrl: `https://huggingface.co/embed/b/resolve/rev/${fileName}` };
+}
+
+it('replaces an explicitly selected available variant without changing the chat selection', () => {
+  registry.saveModels([model('chat/a')]);
+  selectAuxiliaryModel('embedding', availableVariant('v1.gguf'));
+  selectAuxiliaryModel('embedding', availableVariant('v2.gguf'));
+  expect(getAuxiliarySelection('embedding')?.resolvedFileName).toBe('v2.gguf');
+  expect(getSettings().activeModelId).toBe('chat/a');
+});
+
+it('binds companions to the displayed available variant and preserves retained companion files', () => {
+  const old = bindManagedCompanion(availableVariant('v1.gguf'), {
+    kind: 'lora_adapter', downloadUrl: 'https://example.com/lora.gguf', sizeBytes: 1024,
+  });
+  old.artifacts![0] = { ...old.artifacts![0], localPath: 'retained-lora.gguf', installState: 'installed' };
+  registry.saveModels([old]);
+  const next = bindManagedCompanion(resolveModelForResourceEdit(availableVariant('v2.gguf')), {
+    kind: 'tts_codec', downloadUrl: 'https://example.com/codec.gguf', sizeBytes: 2048,
+  });
+  registry.updateModel(next);
+  const persisted = registry.getModel('embed/b')!;
+  expect(persisted.resolvedFileName).toBe('v2.gguf');
+  expect(getSelectedManagedCompanions(persisted).map((artifact) => artifact.kind)).toEqual(['tts_codec']);
+  expect(persisted.artifacts?.find((artifact) => artifact.kind === 'lora_adapter')).toMatchObject({
+    localPath: 'retained-lora.gguf', installState: 'installed',
+  });
+});
+
+it.each([LifecycleStatus.QUEUED, LifecycleStatus.PAUSED, LifecycleStatus.VERIFYING])('does not replace a queued variant (%s)', (status) => {
+  const original = availableVariant('v1.gguf');
+  registry.saveModels([original]);
+  useDownloadStore.setState({ queue: [{ ...original, lifecycleStatus: status }] });
+  expect(() => selectAuxiliaryModel('embedding', availableVariant('v2.gguf'))).toThrow('busy');
+  expect(() => resolveModelForResourceEdit(availableVariant('v2.gguf'))).toThrow('busy');
+  expect(registry.getModel('embed/b')?.resolvedFileName).toBe('v1.gguf');
+});
+
+it('does not replace downloaded bytes when binding a companion from a stale variant', () => {
+  expect(() => resolveModelForResourceEdit(availableVariant('v2.gguf'))).toThrow('selection_changed');
+  expect(registry.getModel('embed/b')?.localPath).toBe('embed-b.gguf');
 });
 
 it('checks actual embedding output only inside the shared engine and preserves chat settings', async () => {

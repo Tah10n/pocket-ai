@@ -17,7 +17,8 @@ const fixture = () => ({
 describe('explicit Android native inference smoke', () => {
   it('requires isolated current-source Release proof and explicit fixture provisioning', () => {
     const selected = selectScenarios(buildScenarios(), { pack: 'inference' });
-    expect(selected).toHaveLength(1);
+    expect(selected.map(scenario => scenario.id)).toEqual(['runtime-inference-lifecycle', 'runtime-model-resources']);
+    expect(selectScenarios(buildScenarios(), { pack: 'all' }).some((scenario) => scenario.id === selected[1].id)).toBe(false);
     expect(selectScenarios(buildScenarios(), { pack: 'all' }).some((scenario) => scenario.id === selected[0].id)).toBe(false);
     expect(selected[0]).toMatchObject({ requiresCurrentHeadProvenance: true, requiresIsolatedQaInstall: true });
     expect(() => validateScenarioExecutionOptions(selected, {})).toThrow(/isolated/);

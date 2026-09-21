@@ -1,6 +1,51 @@
 # llama.rn capability inventory
 
-This inventory covers the public entry point of **llama.rn 0.13.0-rc.3**, pinned exactly in `package.json` and `package-lock.json`. The selected tag's source and installed declarations are the contract; availability in that contract does not establish model support or successful native execution. Stage 1 updates the runtime and existing integration only. Later stages below describe acceptance criteria, not delivered features.
+This inventory covers the public entry point of **llama.rn 0.13.0-rc.3**, pinned exactly in `package.json` and `package-lock.json`. The selected tag's source and installed declarations are the contract; availability in that contract does not establish model support or successful native execution. Stage 1 updates the runtime and existing integration. Stage 2 adds model purposes, companion preparation and exclusive temporary auxiliary loading. Later stages below describe acceptance criteria, not delivered features.
+
+## Stage 2 resource workflow
+
+Model details shows independent purpose evidence for chat, embedding, reranker and TTS.
+Catalog task/model-card declarations and GGUF metadata remain distinct from filename,
+tag and manual hints. None proves native compatibility. Unknown legacy models remain
+available for chat; declared specialized models are excluded from new chat selection.
+Input audio support does not imply speech synthesis. Evidence survives public catalog
+cache, registry hydration and refresh. Native check receipts belong to the exact
+source/revision/path/checksum/size and are invalidated when that file changes.
+
+Auxiliary selections live in encrypted settings separately from the chat selection.
+Model details offers an explicit load check for small CPU embedding/rank profiles;
+the bounded context and workspace reserve use a conservative, low-confidence policy.
+Unknown overhead, including TTS loading in this stage, blocks the check rather than
+assuming zero bytes or applying a chat estimate. Preparing TTS files remains available.
+The selected pooling comes from the model by default; rank checks request rank pooling.
+An explicit QA embedding call validates dimensions and finite values, without exposing
+vectors. It does not implement semantic search or document reranking.
+
+The existing artifact manifest and download queue now manage GGUF `tts_codec` (also
+called vocoder) and `lora_adapter` resources. Users bind a real source URL, published
+file size and optional expected SHA-256, then explicitly prepare or retry the selected
+file. Pause/cancel state survives restart. TTS selects one codec; adapters can have
+multiple selections. Binding follows the base file identity. An optional companion
+failure never makes the installed base chat file corrupt. A size-only check is labelled
+separately from matching a source checksum. Source-identical installed companions can
+be reused after validation; physical paths are counted once and shared files survive
+removal of another owner. No content-addressed store is introduced.
+
+`LLMEngineService` owns one heavy context, including pending initialization, native
+operations and release. Auxiliary loading reserves its existing lifecycle queue,
+refuses an active user response, temporarily releases idle chat A, checks B, releases B
+and restores A only while the chat selection, saved profile, file identity and private
+storage are still current. It never substitutes B for the selected chat model. Errors
+and timeouts keep uncertain native resources blocked; a timer is not a release receipt.
+Deletion uses the same ownership barrier. Restore errors stay visible and do not
+rewrite history or silently choose another model.
+
+File presence, selected-profile completeness, memory admission, loaded context and
+native operation receipts are separate states. TTS synthesis, LoRA application,
+parallel decoding and sessions remain deferred. All contexts retain `n_parallel: 1`,
+`state_cache_budget_mb: 0` and `state_cache_max_checkpoints: 8`.
+See [stage 2 Android acceptance](llama-rn-013-stage2-acceptance.md) for actual native
+results, exact fixtures and independently reported unavailable combinations.
 
 ## Sources and status terminology
 

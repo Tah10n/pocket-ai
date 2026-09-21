@@ -1,4 +1,88 @@
 {
+  "resources": {
+    "profileReady": "Selected profile files ready",
+    "profileMissing": "Selected profile incomplete (TTS requires a selected codec)",
+    "qaCheck": "QA resources",
+    "downloadBytes": "Selected companion download: {{bytes}} bytes",
+    "unknownSize": "unknown",
+    "title": "Model roles and resources",
+    "separation": "Purpose, input support and companion files are independent. A declared purpose does not prove native compatibility.",
+    "unknown": "Purpose unknown. Existing chat selection remains available.",
+    "roles": {
+      "chat": "Chat",
+      "embedding": "Embeddings",
+      "reranker": "Reranking",
+      "tts": "Speech synthesis"
+    },
+    "sources": {
+      "pipeline_tag": "Catalog task",
+      "model_card": "Model card",
+      "gguf_metadata": "GGUF metadata",
+      "architecture": "Architecture",
+      "tag": "Tag hint",
+      "filename": "Filename hint",
+      "manual": "Manual assignment"
+    },
+    "confidence": {
+      "declared": "Declared",
+      "inferred": "Unverified hint"
+    },
+    "selected": "Selected",
+    "notSelected": "Not selected",
+    "filesReady": "Base file installed",
+    "filesMissing": "Base file missing",
+    "loadVerified": "Load checked",
+    "loadUnverified": "Load not checked",
+    "select": "Select for this role",
+    "unselect": "Clear selection",
+    "checkLoad": "Check loading",
+    "checking": "Checking files and loading temporarily…",
+    "checkPassed": "Loading checked. The temporary context was released.",
+    "cancelCheck": "Cancel check",
+    "futureFunctions": "Search, document reranking, speech synthesis and applying LoRA are not implemented in this stage.",
+    "companions": "Companion resources",
+    "companionScope": "Codec: TTS preparation. LoRA: selected adapter configuration. Draft: MTP. Missing optional resources do not block base text chat.",
+    "hashVerified": "Matched expected SHA-256",
+    "hashUnverified": "Source checksum not verified",
+    "prepareRetry": "Prepare / retry",
+    "pause": "Pause",
+    "bindDescription": "Bind a compatible GGUF using its actual HTTPS download URL, preferably pinned to a published revision. Specify the file size and available source checksum. Compatibility remains unverified; files download only after Prepare.",
+    "url": "HTTPS GGUF download URL",
+    "size": "Expected bytes (required for preparation)",
+    "sha": "Expected SHA-256 (optional)",
+    "bindCodec": "Bind TTS codec",
+    "bindLora": "Bind LoRA adapter",
+    "manualDescription": "Advanced: assign an unverified purpose. This does not confirm that llama.rn can load or use the model.",
+    "actionFailed": "The resource action failed. Check the file identity, size and whether the model is in use, then retry.",
+    "kinds": {
+      "tts_codec": "TTS codec / vocoder",
+      "lora_adapter": "LoRA adapter",
+      "speculative_draft": "MTP draft"
+    },
+    "states": {
+      "remote": "Not downloaded",
+      "queued": "Queued",
+      "downloading": "Downloading",
+      "verifying": "Verifying",
+      "installed": "File ready",
+      "failed": "Failed",
+      "missing": "Missing",
+      "paused": "Paused"
+    },
+    "errors": {
+      "selection_missing": "Select a model for this role first.",
+      "selection_changed": "The selection changed. The old chat model was not restored.",
+      "role_unknown": "Assign or resolve the model purpose before checking.",
+      "files_missing": "Download the selected base file first.",
+      "integrity_failed": "The local file failed integrity validation. Download it again.",
+      "memory_unknown": "Memory overhead for this model or role is unknown. Loading is blocked; resource preparation remains available.",
+      "memory_insufficient": "There is not enough safe memory headroom for this check.",
+      "busy": "The engine is busy. Wait for the current response or operation, then retry.",
+      "cancelled": "Check cancelled. Native work is released before the engine becomes available.",
+      "native_failed": "The native load check failed. Retry after the engine has released its resources.",
+      "restore_failed": "The check ended, but the previous chat model could not be restored. Load it manually to retry."
+    }
+  },
   "tabs": {
     "home": "Home",
     "chat": "Chat",

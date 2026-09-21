@@ -53,6 +53,7 @@ import {
   resolveEffectiveSpeculativeDecoding,
 } from '@/utils/modelSpeculativeDecoding';
 import { selectModelProjectorLifecycleState } from '@/store/modelsStore';
+import { ModelResourcesSection } from '@/components/model-details/ModelResourcesSection';
 
 export function ModelDetailsScreen() {
   const router = useRouter();
@@ -229,7 +230,7 @@ export function ModelDetailsScreen() {
                 {t('common.errors.modelLoadFailed')}
               </Text>
               <Text colorRole="danger" selectable className="mt-1 text-sm  ">
-                {engineState.lastError}
+                {engineState.auxiliaryRestoreError ? t('resources.errors.restore_failed') : engineState.lastError}
               </Text>
               <Box className="mt-3 flex-row gap-2">
                 <Button action="secondary" size="sm" onPress={dismissEngineError} className="flex-1">
@@ -361,6 +362,7 @@ export function ModelDetailsScreen() {
                   ) ? (openOnHuggingFaceButton ?? undefined) : undefined}
                 />
 
+                <ModelResourcesSection model={displayModel} />
                 <Box className="flex-row flex-wrap gap-2.5">
                   {heroMetrics.map((item) => (
                     <DetailValueCard

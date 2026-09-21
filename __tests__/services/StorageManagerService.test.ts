@@ -1,3 +1,7 @@
+jest.mock('../../src/services/ModelDownloadManager', () => ({
+  runWithIdleModelDownloads: jest.fn((operation: () => Promise<unknown>) => operation()),
+}));
+
 jest.mock('../../src/store/chatStore', () => ({
   useChatStore: {
     getState: jest.fn(),
@@ -34,6 +38,8 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getContextSize: jest.fn().mockReturnValue(2048),
     interruptActiveCompletion: jest.fn().mockResolvedValue(undefined),
     unload: jest.fn().mockResolvedValue(undefined),
+    assertModelResourcesIdle: jest.fn(),
+    runWithIdleModelResources: jest.fn((operation: () => Promise<unknown>) => operation()),
   },
 }));
 
@@ -71,6 +77,7 @@ jest.mock('../../src/services/SettingsStore', () => ({
   SETTINGS_KEY: 'app_settings',
   clearLegacyChatHistory: jest.fn(),
   resetAllParametersForModel: jest.fn(),
+  clearAuxiliaryBindingsForModel: jest.fn(),
   resetSettings: jest.fn(),
   storage: {
     getAllKeys: jest.fn().mockReturnValue([]),

@@ -1,6 +1,6 @@
 # Privacy & Disclosures
 
-Last updated: 2026-08-25
+Last updated: 2026-09-21
 
 ## Summary
 
@@ -12,7 +12,7 @@ This document summarizes the current behavior of the app as configured in this r
 
 - Chat prompts and generated responses stay on the device during local inference.
 - Chat attachments selected from the device stay on the device during local inference. They are not uploaded to a hosted chat-completion API.
-- Downloaded GGUF files, multimodal projector companions, optional MTP draft companions, and copied chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
+- Downloaded GGUF files, multimodal projector companions, optional MTP draft, TTS codec/vocoder and LoRA adapter companions, and copied chat attachments are stored in app-managed local storage. Android release builds disable OS auto-backup, and iOS release builds mark the downloaded-model and chat-attachment storage directories as excluded from device and iCloud backups.
 - Conversation history is persisted locally on the device and encrypted at rest.
 - While a response is generating, bounded encrypted recovery data for the active partial
   response may also be stored locally so a force-stop or crash can recover the last
@@ -23,6 +23,8 @@ This document summarizes the current behavior of the app as configured in this r
 - Recent first-page Hugging Face catalog results, GGUF variant metadata, and recently opened public model-detail snapshots are stored in a bounded on-device cache so the catalog can reopen quickly on this device.
 - Hugging Face popularity metadata, tag summaries, and routed model-detail state are cached locally only to improve catalog browsing on this device.
 - Storage cleanup controls are available in-app through `Storage Manager` and `All Conversations`, including model removal that can keep or reset saved per-model settings.
+
+Auxiliary role selections, explicit companion source bindings, and local compatibility-check results stay in encrypted app storage. A selected role or installed companion does not establish native compatibility. Embedding/reranker load checks temporarily use the on-device runtime and restore the previous chat model when its selection is still current; these checks do not upload chat content or enable document search, reranking or speech playback.
 
 ## Chat attachments
 
@@ -56,6 +58,7 @@ Pocket AI uses the network only for model-management flows:
 - Hugging Face model catalog search
 - Optional metadata, repository file lists, README summary, and config fetches used for model hints, GGUF variant lists, popularity sorting, size recovery, context-window recovery, and gated-model access checks
 - Model file downloads for the selected GGUF variant and any compatible multimodal projector or optional MTP draft companion from remote hosting endpoints
+- Optional TTS codec/vocoder and LoRA adapter downloads from HTTPS GGUF URLs explicitly supplied by the user. The hosting service receives these file requests. Hugging Face credentials are sent only to trusted Hugging Face resolve URLs, not arbitrary companion hosts.
 - If a Hugging Face access token is configured, the app attaches it to Hugging Face API requests as needed to surface gated or private repositories (including catalog browsing). Some endpoints are still probed anonymously first and retried with auth only when required.
 - When a user taps through to Hugging Face from the token screen or a model detail view, the app opens the public Hugging Face site in the device browser
 - Generated Markdown images are rendered as text labels and are never fetched automatically, including HTTP(S), data, relative, protocol-relative, linked-image, and reference-image syntax. Ordinary HTTP(S) text links open only after a user taps them.
@@ -68,7 +71,8 @@ The current release flow in this repository does not send chat prompts to a host
 
 Users can manage local data directly in the app:
 
-- offload downloaded models and associated multimodal projector or MTP draft companion artifacts while keeping or resetting saved per-model settings
+- offload downloaded models and associated multimodal projector, MTP draft, TTS codec/vocoder or LoRA adapter artifacts while keeping or resetting saved per-model settings
+- prepare, pause, retry, cancel or remove optional companion resources; shared installed files are retained while another resource still owns them
 - unload the active model
 - clear persisted chat history, including active-response recovery artifacts
 - discard attachment drafts and delete messages or conversations, which attempts to remove their associated local attachment files when cleanup runs
@@ -93,7 +97,7 @@ For the release configuration currently committed here:
 
 - Android package name: `com.github.tah10n.pocketai`
 - Android auto-backup is disabled to avoid backing up local chat and model state
-- iOS excludes downloaded model files and multimodal projector or MTP draft companion artifacts under the app-managed `Documents/models/` directory, plus local chat attachments under `Documents/chat-attachments/`, from device and iCloud backups
+- iOS excludes downloaded model files and multimodal projector, MTP draft, TTS codec/vocoder or LoRA adapter artifacts under the app-managed `Documents/models/` directory, plus local chat attachments under `Documents/chat-attachments/`, from device and iCloud backups
 - Android permissions include:
   - `INTERNET` (Hugging Face catalog and model downloads)
   - `VIBRATE` (UI haptics)

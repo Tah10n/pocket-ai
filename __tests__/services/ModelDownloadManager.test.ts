@@ -1,5 +1,6 @@
 import {
   getModelDownloadManager,
+  runWithIdleModelDownloads,
   resetModelDownloadManagerForPrivateStorageReset,
   stopModelDownloadManagerForPrivateStorageBlocked,
 } from '../../src/services/ModelDownloadManager';
@@ -33,6 +34,7 @@ import {
   buildProjectorArtifactId,
 } from '../../src/utils/modelProjectors';
 import { llmEngineService } from '../../src/services/LLMEngineService';
+import { getModelFileIdentity } from '../../src/utils/modelRoles';
 
 let logSpy: jest.SpyInstance;
 let errorSpy: jest.SpyInstance;
@@ -280,6 +282,28 @@ describe('ModelDownloadManager Basic', () => {
     expect(FileSystem.createDownloadResumable).toHaveBeenCalled();
   });
 
+  it('blocks file deletion while another model owns download or verification I/O', async () => {
+    (modelDownloadManager as any).activeJob = { modelId: 'other/model', jobToken: 99, resumable: null, verificationCount: 1 };
+    const remove = jest.fn(async () => undefined);
+    await expect(runWithIdleModelDownloads(remove)).rejects.toMatchObject({ code: 'action_failed' });
+    expect(remove).not.toHaveBeenCalled();
+    (modelDownloadManager as any).activeJob = null;
+  });
+
+  it('holds newly queued downloads until asynchronous deletion finishes and unlocks after failure', async () => {
+    let finishDelete!: () => void;
+    const remove = jest.fn(() => new Promise<void>(resolve => { finishDelete = resolve; }));
+    const deleting = runWithIdleModelDownloads(remove);
+    useDownloadStore.getState().addToQueue(mockModel);
+    await Promise.resolve();
+    expect(FileSystem.createDownloadResumable).not.toHaveBeenCalled();
+    useDownloadStore.getState().removeFromQueue(mockModel.id);
+    finishDelete();
+    await deleting;
+    await expect(runWithIdleModelDownloads(async () => { throw new Error('delete failed'); })).rejects.toThrow('delete failed');
+    await expect(runWithIdleModelDownloads(async () => 'unlocked')).resolves.toBe('unlocked');
+  });
+
   it('downloads and installs a Gemma MTP draft companion after the base model', async () => {
     const draftArtifactId = 'mtp-draft-gemma';
     const mtpModel: ModelMetadata = {
@@ -423,6 +447,140 @@ describe('ModelDownloadManager Basic', () => {
     );
   });
 
+  it('reuses an installed companion with the same source identity owned by another model', async () => {
+    const companion = { id: 'shared-codec', kind: 'tts_codec' as const, requiredFor: [], remoteFileName: 'codec.gguf',
+      downloadUrl: 'https://huggingface.co/audio/codec/resolve/v1/codec.gguf', hfRevision: 'v1', sizeBytes: 1000,
+      installState: 'remote' as const };
+    (mockedRegistry.getModels as jest.Mock).mockReturnValueOnce([{ ...mockModel, id: 'other/owner', artifacts: [{ ...companion, installState: 'installed', localPath: 'shared-codec.gguf' }] }]);
+    expect(await (modelDownloadManager as any).resolveReusableModelArtifactFile(companion, 'test-dir/models/')).toEqual(expect.objectContaining({ fileName: 'shared-codec.gguf' }));
+  });
+
+  it.each(['tts_codec', 'lora_adapter'] as const)('installs an explicitly requested %s without making it a chat requirement', async (kind) => {
+    const artifactId = 'user-selected-' + kind;
+    const model: ModelMetadata = { ...mockModel, artifacts: [{ id: artifactId, kind, requiredFor: [],
+      remoteFileName: 'custom/companion.gguf', downloadUrl: 'https://example.com/custom/companion.gguf',
+      sizeBytes: 1000, installState: 'remote' }] };
+    const jobToken = 196;
+    useDownloadStore.setState({ queue: [{ ...model, lifecycleStatus: LifecycleStatus.QUEUED }], activeDownloadId: model.id });
+    (modelDownloadManager as any).activeJob = { modelId: model.id, jobToken, resumable: null, stopReason: null };
+    await (modelDownloadManager as any).downloadModel(model, jobToken, { companionArtifactId: artifactId });
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(2);
+    const completed = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completed.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(completed.artifacts?.find(item => item.id === artifactId)).toEqual(expect.objectContaining({ kind, requiredFor: [], installState: 'installed', integrity: expect.any(Object) }));
+  });
+
+  it.each([false, true])('keeps native validation only when base bytes were reused: %s', async (reuse) => {
+    const subject: ModelMetadata = { ...mockModel, sha256: undefined, localPath: 'model.gguf',
+      downloadProgress: reuse ? 1 : 0, lifecycleStatus: LifecycleStatus.QUEUED };
+    subject.roleValidation = [{ role: 'embedding', operation: 'load', runtimeVersion: '0.13.0-rc.3',
+      status: 'passed', checkedAt: 100, fileIdentity: getModelFileIdentity(subject) }];
+    (FileSystem.createDownloadResumable as jest.Mock).mockReturnValue({ downloadAsync: jest.fn().mockResolvedValue({ status: 200 }) });
+    await runDownloadModel(subject);
+    const completed = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
+    expect(completed.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
+    expect(completed.roleValidation).toEqual(reuse ? subject.roleValidation : undefined);
+    expect(FileSystem.createDownloadResumable).toHaveBeenCalledTimes(reuse ? 0 : 1);
+  });
+
+  it('holds a cancelled codec hash owner until cleanup finishes before retrying the same file', async () => {
+    const artifactId = 'cancelled-codec';
+    const model: ModelMetadata = { ...mockModel, lifecycleStatus: LifecycleStatus.DOWNLOADED, downloadProgress: 1,
+      localPath: 'model.gguf', artifacts: [{ id: artifactId, kind: 'tts_codec', requiredFor: [],
+        remoteFileName: 'codec.gguf', downloadUrl: 'https://example.com/codec.gguf',
+        sizeBytes: 1000, sha256: VALID_SHA256, installState: 'remote' }] };
+    let resolveHash!: (hash: string) => void;
+    let notifyHashStarted!: () => void;
+    const hashStarted = new Promise<void>(resolve => { notifyHashStarted = resolve; });
+    const deferredHash = new Promise<string>(resolve => { resolveHash = resolve; });
+    (RNFS.hash as jest.Mock).mockImplementationOnce(() => { notifyHashStarted(); return deferredHash; })
+      .mockResolvedValue(VALID_SHA256);
+    const events: string[] = [];
+    let downloads = 0;
+    (FileSystem.createDownloadResumable as jest.Mock).mockImplementation(() => ({
+      downloadAsync: async () => { downloads += 1; events.push(`download-${downloads}`); return { status: 200 }; },
+    }));
+    (FileSystem.deleteAsync as jest.Mock).mockImplementation(async () => { events.push('delete'); });
+    (mockedRegistry.getModels as jest.Mock).mockReturnValue([model]);
+    let notifyRetryInstalled!: () => void;
+    const retryInstalled = new Promise<void>(resolve => { notifyRetryInstalled = resolve; });
+    (mockedRegistry.updateModel as jest.Mock).mockImplementation((updated: ModelMetadata) => {
+      if (updated.artifacts?.some(item => item.id === artifactId && item.installState === 'installed')) notifyRetryInstalled();
+    });
+    const jobToken = 197;
+    useDownloadStore.setState({ queue: [{ ...model, lifecycleStatus: LifecycleStatus.QUEUED }],
+      activeDownloadId: model.id, downloadOptionsByModelId: { [model.id]: { companionArtifactId: artifactId } } });
+    (modelDownloadManager as any).activeJob = { modelId: model.id, jobToken, resumable: null, stopReason: null };
+    (modelDownloadManager as any).isProcessing = true;
+    const firstJob = (modelDownloadManager as any).runDownloadJob(model, jobToken, { companionArtifactId: artifactId });
+    await hashStarted;
+    await modelDownloadManager.cancelDownload(model.id);
+    useDownloadStore.getState().addToQueue(model, { companionArtifactId: artifactId });
+    await (modelDownloadManager as any).processQueue();
+    expect(events).toEqual(['download-1']);
+    expect((modelDownloadManager as any).activeJob?.verificationCount).toBe(1);
+    resolveHash(OTHER_VALID_SHA256);
+    await firstJob;
+    await retryInstalled;
+    expect(events.indexOf('delete')).toBeGreaterThan(events.indexOf('download-1'));
+    expect(events.lastIndexOf('delete')).toBeLessThan(events.indexOf('download-2'));
+    expect(downloads).toBe(2);
+  });
+
+  it('waits for actual file verification before clearing private download state', async () => {
+    let resolveHash!: (hash: string) => void;
+    let notifyHashStarted!: () => void;
+    const started = new Promise<void>(resolve => { notifyHashStarted = resolve; });
+    (RNFS.hash as jest.Mock).mockImplementation(() => {
+      notifyHashStarted();
+      return new Promise<string>(resolve => { resolveHash = resolve; });
+    });
+    const job = { modelId: mockModel.id, jobToken: 198, resumable: null, stopReason: null };
+    (modelDownloadManager as any).activeJob = job;
+    const verification = modelDownloadManager.verifyChecksum({ ...mockModel, sha256: VALID_SHA256 }, 'test-dir/models/model.gguf');
+    await started;
+    let resetFinished = false;
+    const reset = resetModelDownloadManagerForPrivateStorageReset().then(() => { resetFinished = true; });
+    await Promise.resolve();
+    expect(resetFinished).toBe(false);
+    expect((modelDownloadManager as any).activeJob).toBe(job);
+    resolveHash(VALID_SHA256);
+    await verification;
+    await reset;
+    expect((modelDownloadManager as any).activeJob).toBeNull();
+  });
+
+  it('fails private reset closed on verification timeout without declaring the file owner released', async () => {
+    jest.useFakeTimers();
+    let resolveHash!: (hash: string) => void;
+    let notifyHashStarted!: () => void;
+    const started = new Promise<void>(resolve => { notifyHashStarted = resolve; });
+    (RNFS.hash as jest.Mock).mockImplementation(() => {
+      notifyHashStarted();
+      return new Promise<string>(resolve => { resolveHash = resolve; });
+    });
+    const job = { modelId: mockModel.id, jobToken: 199, resumable: null, stopReason: null };
+    (modelDownloadManager as any).activeJob = job;
+    const verification = modelDownloadManager.verifyChecksum({ ...mockModel, sha256: VALID_SHA256 }, 'test-dir/models/model.gguf');
+    try {
+      await started;
+      const resetResult = resetModelDownloadManagerForPrivateStorageReset().catch(error => error);
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(await resetResult).toBeInstanceOf(AppError);
+      expect((modelDownloadManager as any).activeJob).toBe(job);
+      expect((modelDownloadManager as any).activeJob.verificationCount).toBe(1);
+      expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+      resolveHash(VALID_SHA256);
+      await verification;
+      await resetModelDownloadManagerForPrivateStorageReset();
+      expect((modelDownloadManager as any).activeJob).toBeNull();
+    } finally {
+      resolveHash?.(VALID_SHA256);
+      await verification;
+      jest.useRealTimers();
+    }
+  });
+
   it('blocks an unknown-size MTP draft until limited-verification consent is persisted', async () => {
     const draftArtifactId = 'mtp-draft-unknown-size';
     const mtpModel: ModelMetadata = {
@@ -511,7 +669,7 @@ describe('ModelDownloadManager Basic', () => {
     expect(installedDraft?.integrity).toBeUndefined();
   });
 
-  it('keeps the base model downloaded when the optional Gemma MTP draft fails', async () => {
+  it.each(['speculative_draft', 'tts_codec', 'lora_adapter'] as const)('keeps the base model downloaded when optional %s fails', async (kind) => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const draftArtifactId = 'mtp-draft-gemma-failure';
     const mtpModel: ModelMetadata = {
@@ -519,8 +677,8 @@ describe('ModelDownloadManager Basic', () => {
       resolvedFileName: 'gemma-4-12b-it-Q4_K_M.gguf',
       artifacts: [{
         id: draftArtifactId,
-        kind: 'speculative_draft',
-        requiredFor: ['text'],
+        kind,
+        requiredFor: kind === 'speculative_draft' ? ['text'] : [],
         remoteFileName: 'MTP/gemma-4-12b-it-MTP-Q8_0.gguf',
         downloadUrl: 'http://example.com/gemma-4-12b-it-MTP-Q8_0.gguf',
         sizeBytes: 1000,
@@ -552,7 +710,7 @@ describe('ModelDownloadManager Basic', () => {
     };
 
     try {
-      await (modelDownloadManager as any).downloadModel(mtpModel, jobToken);
+      await (modelDownloadManager as any).downloadModel(mtpModel, jobToken, { companionArtifactId: draftArtifactId });
 
       const completedModel = (mockedRegistry.updateModel as jest.Mock).mock.calls.at(-1)?.[0] as ModelMetadata;
       expect(completedModel.lifecycleStatus).toBe(LifecycleStatus.DOWNLOADED);
@@ -4026,7 +4184,7 @@ describe('ModelDownloadManager Basic', () => {
     expect(useDownloadStore.getState().queue[0].projectorCandidates?.[0]).not.toHaveProperty('downloadProgress');
   });
 
-  it('cancels promptly during projector verification and ignores stale verification completion', async () => {
+  it('cancels UI promptly but retains projector verification ownership until native hashing settles', async () => {
     const projectorWithChecksum: ProjectorArtifact = {
       ...mockProjector,
       sha256: VALID_SHA256,
@@ -4117,6 +4275,11 @@ describe('ModelDownloadManager Basic', () => {
       expect(useDownloadStore.getState().activeDownloadId).not.toBe(mockModel.id);
       expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
 
+      expect(nextDownloadAsync).not.toHaveBeenCalled();
+      expect((modelDownloadManager as any).activeJob?.verificationCount).toBe(1);
+      resolveProjectorHash(VALID_SHA256);
+      await downloadPromise;
+
       for (let i = 0; i < 10 && (FileSystem.createDownloadResumable as jest.Mock).mock.calls.length < 3; i++) {
         // eslint-disable-next-line no-await-in-loop
         await new Promise((r) => setTimeout(r, 0));
@@ -4131,9 +4294,6 @@ describe('ModelDownloadManager Basic', () => {
       );
       expect(useDownloadStore.getState().activeDownloadId).toBe(queuedModel.id);
 
-      resolveProjectorHash(VALID_SHA256);
-      await downloadPromise;
-
       expect(mockedRegistry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({ id: mockModel.id }));
       expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
       expect(useDownloadStore.getState().activeDownloadId).toBe(queuedModel.id);
@@ -4144,7 +4304,7 @@ describe('ModelDownloadManager Basic', () => {
     }
   });
 
-  it('cancels promptly while verifying a reusable projector after a fresh base download', async () => {
+  it('retains reusable projector verification ownership after cancellation until hashing settles', async () => {
     const reusableProjector: ProjectorArtifact = {
       ...mockProjector,
       lifecycleStatus: 'downloaded',
@@ -4233,6 +4393,11 @@ describe('ModelDownloadManager Basic', () => {
       expect(useDownloadStore.getState().activeDownloadId).not.toBe(mockModel.id);
       expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);
 
+      expect(nextDownloadAsync).not.toHaveBeenCalled();
+      expect((modelDownloadManager as any).activeJob?.verificationCount).toBe(1);
+      resolveProjectorHash(VALID_SHA256);
+      await downloadPromise;
+
       for (let i = 0; i < 10 && (FileSystem.createDownloadResumable as jest.Mock).mock.calls.length < 2; i += 1) {
         // eslint-disable-next-line no-await-in-loop
         await new Promise((r) => setTimeout(r, 0));
@@ -4246,9 +4411,6 @@ describe('ModelDownloadManager Basic', () => {
         undefined,
       );
       expect(useDownloadStore.getState().activeDownloadId).toBe(queuedModel.id);
-
-      resolveProjectorHash(VALID_SHA256);
-      await downloadPromise;
 
       expect(mockedRegistry.updateModel).not.toHaveBeenCalledWith(expect.objectContaining({ id: mockModel.id }));
       expect(useDownloadStore.getState().queue.some((model) => model.id === mockModel.id)).toBe(false);

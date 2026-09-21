@@ -1,3 +1,4 @@
+import { runWithIdleModelDownloads } from './ModelDownloadManager';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getQueuedDownloadFileNames } from '../store/downloadStore';
 import { storage as appStorage } from '../store/storage';
@@ -11,6 +12,7 @@ import {
   CHAT_HISTORY_PREFIX,
   SETTINGS_KEY,
   resetAllParametersForModel,
+  clearAuxiliaryBindingsForModel,
   resetSettings,
   storage as settingsStorage,
 } from './SettingsStore';
@@ -1131,17 +1133,20 @@ export async function getAppStorageMetrics(options: AppStorageMetricsOptions = {
 }
 
 export async function offloadModel(modelId: string, options?: OffloadModelOptions) {
-  const preserveSettings = options?.preserveSettings !== false;
+  return runWithIdleModelDownloads(async () => {
+    const preserveSettings = options?.preserveSettings !== false;
 
-  if (llmEngineService.getState().activeModelId === modelId) {
-    await llmEngineService.unload();
-  }
+    if (llmEngineService.getState().activeModelId === modelId) {
+      await llmEngineService.unload();
+    }
 
-  await registry.removeModel(modelId);
+    await llmEngineService.runWithIdleModelResources(() => registry.removeModel(modelId));
+    clearAuxiliaryBindingsForModel(modelId);
 
-  if (!preserveSettings) {
-    resetAllParametersForModel(modelId);
-  }
+    if (!preserveSettings) {
+      resetAllParametersForModel(modelId);
+    }
+  });
 }
 
 export async function clearActiveCache() {

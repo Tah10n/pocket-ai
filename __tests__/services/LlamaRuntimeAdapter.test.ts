@@ -49,6 +49,7 @@ describe('LlamaRuntimeAdapter', () => {
     )).resolves.toBeUndefined();
     await expect(initLlamaContext({
       model: 'recurrent-model.gguf',
+      n_parallel: 8,
       state_cache_budget_mb: 64,
       state_cache_max_checkpoints: 4,
     })).resolves.toBeUndefined();
@@ -57,11 +58,13 @@ describe('LlamaRuntimeAdapter', () => {
       model: 'model.gguf',
       state_cache_budget_mb: 0,
       state_cache_max_checkpoints: 8,
+      n_parallel: 1,
     }, onProgress);
     expect(initLlamaMock).toHaveBeenNthCalledWith(2, {
       model: 'recurrent-model.gguf',
       state_cache_budget_mb: 0,
       state_cache_max_checkpoints: 8,
+      n_parallel: 1,
     }, undefined);
   });
 
@@ -69,8 +72,8 @@ describe('LlamaRuntimeAdapter', () => {
     const getFormattedChat = jest.fn().mockResolvedValue({
       type: ' jinja ',
       prompt: 'Formatted prompt',
-      media_paths: [' /tmp/image.png ', 42, ''],
-      additional_stops: [' </s> ', 12, '<|done|>', ''],
+      media_paths: ['/tmp/image.png'],
+      additional_stops: [' </s> ', '<|done|>', ''],
       thinking_start_tag: '<think>',
       thinking_end_tag: '</think>',
       thinking_forced_open: false,
@@ -99,7 +102,7 @@ describe('LlamaRuntimeAdapter', () => {
       prompt: 'Formatted prompt',
       has_media: true,
       media_paths: ['/tmp/image.png'],
-      additional_stops: ['</s>', '<|done|>'],
+      additional_stops: [' </s> ', '<|done|>', ''],
       thinking_start_tag: '<think>',
       thinking_end_tag: '</think>',
       thinking_forced_open: false,

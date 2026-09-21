@@ -4,6 +4,9 @@ import type {
   LlamaContext,
   NativeBackendDeviceInfo,
   NativeCompletionResult,
+  NativeCompletionTokenProb,
+  JinjaFormattedChatResult,
+  ToolCall,
   NativeTokenizeResult,
   RNLlamaMessagePart,
   RNLlamaOAICompatibleMessage,
@@ -18,14 +21,23 @@ export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFor
 export type LlamaContextInitParams = ContextParams;
 export type NativeLogListenerHandle = { remove: () => void };
 export type LlamaMultimodalSupport = { vision: boolean; audio: boolean };
-export type LlamaCompletionResult = Omit<
+// JSICompletion.h emits null for an unnamed tool-call ID, despite the declaration.
+export type LlamaToolCall = Omit<ToolCall, 'id'> & { id?: string | null };
+export type LlamaTokenData = Omit<TokenData, 'tool_calls'> & { tool_calls?: LlamaToolCall[] };
+export type LlamaCompletionResult = Partial<Omit<
   NativeCompletionResult,
-  'content' | 'reasoning_content' | 'text'
-> & {
+  'content' | 'reasoning_content' | 'text' | 'tool_calls' | 'stopped_word' | 'stopped_limit' | 'timings'
+>> & {
   content?: string | null;
   reasoning_content?: string | null;
   text?: string;
   accumulated_text?: string;
+  tool_calls?: LlamaToolCall[];
+  // The selected native bridge emits booleans; retain declared values too.
+  stopped_word?: NativeCompletionResult['stopped_word'] | boolean;
+  stopped_limit?: NativeCompletionResult['stopped_limit'] | boolean;
+  requestId?: number;
+  timings?: Partial<NativeCompletionResult['timings']>;
 };
 export type LlamaMultimodalInitOptions = {
   context: LlamaContext;
@@ -35,22 +47,11 @@ export type LlamaMultimodalInitOptions = {
   imageMaxTokens?: number;
 };
 
-export type LlamaFormattedChatResult = {
+export type LlamaFormattedChatResult = Omit<JinjaFormattedChatResult, 'type' | 'additional_stops'> & {
   type: string | null;
   prompt: string;
   has_media: boolean;
-  media_paths?: string[];
   additional_stops: string[];
-  chat_format?: number;
-  grammar?: string;
-  grammar_lazy?: boolean;
-  grammar_triggers?: { type: number; value: string; token: number }[];
-  generation_prompt?: string;
-  thinking_forced_open?: boolean;
-  thinking_start_tag?: string;
-  thinking_end_tag?: string;
-  preserved_tokens?: string[];
-  chat_parser?: string;
 };
 
 export class LlamaRuntimeFeatureUnavailableError extends Error {
@@ -65,7 +66,49 @@ function getLlamaModule(): LlamaModule {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object';
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function assertFeature(value: unknown, feature: string): void {
+  if (typeof value !== 'function') throw new LlamaRuntimeFeatureUnavailableError(feature);
+}
+
+function readContractArray<T>(value: unknown, guard: (entry: unknown) => entry is T, label: string): T[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every(guard)) {
+    throw new Error(`[LLMEngine] Invalid llama.rn ${label}: unexpected array value`);
+  }
+  // Preserve empty arrays and retain large native outputs without copying them.
+  return value;
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isToolCall(value: unknown): value is LlamaToolCall {
+  return isRecord(value) && value.type === 'function'
+    && (value.id === undefined || value.id === null || isString(value.id))
+    && isRecord(value.function) && isString(value.function.name)
+    && isString(value.function.arguments);
+}
+
+function isTokenProbability(value: unknown): value is NativeCompletionTokenProb {
+  return isRecord(value) && isString(value.content) && Array.isArray(value.probs)
+    && value.probs.every((prob: unknown) => isRecord(prob)
+      && isString(prob.tok_str) && isFiniteNumber(prob.prob));
+}
+
+function readRequestId(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (!isFiniteNumber(value) || !Number.isSafeInteger(value)) {
+    throw new Error('[LLMEngine] Invalid llama.rn requestId: expected a safe integer');
+  }
+  return value;
 }
 
 function readString(value: unknown): string | undefined {
@@ -157,7 +200,7 @@ function readGrammarTriggers(value: unknown): { type: number; value: string; tok
     }];
   });
 
-  return triggers.length > 0 ? triggers : undefined;
+  return triggers;
 }
 
 function assertRecord(value: unknown, label: string): Record<string, unknown> {
@@ -289,8 +332,8 @@ export function normalizeFormattedChatResult(value: unknown): LlamaFormattedChat
   }
 
   const type = readTrimmedString(record.type) ?? null;
-  const mediaPaths = readStringArray(record.media_paths);
-  const additionalStops = readStringArray(record.additional_stops) ?? [];
+  const mediaPaths = readContractArray(record.media_paths, isString, 'media_paths');
+  const additionalStops = readContractArray(record.additional_stops, isString, 'additional_stops') ?? [];
   const chatFormat = readFiniteNumber(record.chat_format);
   const grammar = readString(record.grammar);
   const grammarLazy = readBoolean(record.grammar_lazy);
@@ -299,7 +342,7 @@ export function normalizeFormattedChatResult(value: unknown): LlamaFormattedChat
   const thinkingForcedOpen = readBoolean(record.thinking_forced_open);
   const thinkingStartTag = readString(record.thinking_start_tag);
   const thinkingEndTag = readString(record.thinking_end_tag);
-  const preservedTokens = readStringArray(record.preserved_tokens);
+  const preservedTokens = readContractArray(record.preserved_tokens, isString, 'preserved_tokens');
   const chatParser = readString(record.chat_parser);
 
   return {
@@ -321,23 +364,24 @@ export function normalizeFormattedChatResult(value: unknown): LlamaFormattedChat
   };
 }
 
-export function normalizeTokenData(value: unknown): TokenData {
+export function normalizeTokenData(value: unknown): LlamaTokenData {
   const record = assertRecord(value, 'token data');
   const token = readOptionalStringField(record, 'token', 'token data') ?? '';
   const content = readOptionalStringField(record, 'content', 'token data');
   const reasoningContent = readOptionalStringField(record, 'reasoning_content', 'token data');
   const accumulatedText = readOptionalStringField(record, 'accumulated_text', 'token data');
-  const requestId = readFiniteNumber(record.requestId);
+  const requestId = readRequestId(record.requestId);
+  const toolCalls = readContractArray(record.tool_calls, isToolCall, 'token tool_calls');
+  const probabilities = readContractArray(record.completion_probabilities, isTokenProbability, 'token probabilities');
 
   return {
     token,
     ...(content !== undefined ? { content } : null),
     ...(reasoningContent !== undefined ? { reasoning_content: reasoningContent } : null),
     ...(accumulatedText !== undefined ? { accumulated_text: accumulatedText } : null),
-    ...(requestId !== undefined ? { requestId: Math.round(requestId) } : null),
-    ...(Array.isArray(record.completion_probabilities)
-      ? { completion_probabilities: record.completion_probabilities as TokenData['completion_probabilities'] }
-      : null),
+    ...(requestId !== undefined ? { requestId } : null),
+    ...(toolCalls !== undefined ? { tool_calls: toolCalls } : null),
+    ...(probabilities !== undefined ? { completion_probabilities: probabilities } : null),
   };
 }
 
@@ -378,11 +422,11 @@ export function normalizeCompletionResult(value: unknown): LlamaCompletionResult
     || (typeof accumulatedText === 'string' && accumulatedText.length > 0)
     || (Array.isArray(record.tool_calls) && record.tool_calls.length > 0);
 
-  // llama.rn 0.12.6 always exports raw `text`, but its JSI bridge omits parsed
+  // llama.rn 0.13.0-rc.3 exports raw `text`, but its JSI bridge omits parsed
   // content/reasoning fields when their native strings are empty. Once another
   // parsed field proves parsing succeeded, restore that omission as an explicit
   // clear. With only raw text, absence stays undefined so callers can parse/fallback.
-  const normalized = { ...record };
+  const normalized: LlamaCompletionResult = { ...record };
   if (text === undefined) {
     delete normalized.text;
   }
@@ -401,7 +445,46 @@ export function normalizeCompletionResult(value: unknown): LlamaCompletionResult
     delete normalized.reasoning_content;
   }
 
-  return normalized as unknown as LlamaCompletionResult;
+  // Validate known optional fields without manufacturing omitted values. Keep
+  // extension telemetry in the shallow copy; large arrays are checked only once
+  // on the final result, never copied into text-token events or chat history.
+  for (const key of ['chat_format', 'tokens_predicted', 'tokens_evaluated', 'draft_tokens',
+    'draft_tokens_accepted', 'tokens_cached', 'embedding_dim'] as const) {
+    if (record[key] !== undefined) {
+      const number = readFiniteNumber(record[key]);
+      if (number === undefined) throw new Error(`[LLMEngine] Invalid llama.rn completion result: ${key} must be finite`);
+      normalized[key] = number;
+    }
+  }
+  for (const key of ['truncated', 'stopped_eos', 'context_full', 'interrupted'] as const) {
+    if (record[key] !== undefined) {
+      const flag = readBoolean(record[key]);
+      if (flag === undefined) throw new Error(`[LLMEngine] Invalid llama.rn completion result: ${key} must be boolean`);
+      normalized[key] = flag;
+    }
+  }
+  if (record.stopped_word !== undefined && typeof record.stopped_word !== 'boolean' && typeof record.stopped_word !== 'string') {
+    throw new Error('[LLMEngine] Invalid llama.rn completion result: stopped_word');
+  }
+  if (record.stopped_limit !== undefined && typeof record.stopped_limit !== 'boolean' && !isFiniteNumber(record.stopped_limit)) {
+    throw new Error('[LLMEngine] Invalid llama.rn completion result: stopped_limit');
+  }
+  if (record.stopping_word !== undefined) normalized.stopping_word = readOptionalStringField(record, 'stopping_word', 'completion result');
+  if (record.accumulated_text !== undefined) normalized.accumulated_text = accumulatedText;
+  if (record.requestId !== undefined) normalized.requestId = readRequestId(record.requestId);
+  if (record.tool_calls !== undefined) normalized.tool_calls = readContractArray(record.tool_calls, isToolCall, 'completion tool_calls');
+  if (record.completion_probabilities !== undefined) normalized.completion_probabilities = readContractArray(record.completion_probabilities, isTokenProbability, 'completion probabilities');
+  if (record.audio_tokens !== undefined) normalized.audio_tokens = readContractArray(record.audio_tokens, isFiniteNumber, 'audio_tokens');
+  if (record.embeddings !== undefined) normalized.embeddings = readContractArray(record.embeddings, isFiniteNumber, 'embeddings');
+  if (record.timings !== undefined) {
+    const timings = assertRecord(record.timings, 'timings');
+    // Some interrupted/legacy results contain only a subset of timing counters.
+    // Validate present counters while retaining their original names and values.
+    for (const value of Object.values(timings)) {
+      if (!isFiniteNumber(value)) throw new Error('[LLMEngine] Invalid llama.rn timings: counters must be finite');
+    }
+  }
+  return normalized;
 }
 
 function normalizeBackendDeviceInfo(value: unknown): NativeBackendDeviceInfo | null {
@@ -449,6 +532,7 @@ export async function getFormattedChatFromContext({
   template?: string | null;
   options?: LlamaChatFormatOptions;
 }): Promise<LlamaFormattedChatResult> {
+  assertFeature(context.getFormattedChat, 'getFormattedChat');
   const formatted = await context.getFormattedChat(
     normalizeLlamaMessages(messages),
     template,
@@ -462,10 +546,11 @@ export async function runCompletionOnContext({
   params,
   onToken,
 }: {
-  context: LlamaContext;
+  context: Pick<LlamaContext, 'completion' | 'stopCompletion'>;
   params: CompletionParams;
-  onToken?: (data: TokenData) => void;
+  onToken?: (data: LlamaTokenData) => void;
 }): Promise<LlamaCompletionResult> {
+  assertFeature(context.completion, 'completion');
   const rawMessages = (params as { messages?: unknown }).messages;
   const normalizedParams = shouldNormalizeCompletionMessages(rawMessages)
     ? {
@@ -473,10 +558,35 @@ export async function runCompletionOnContext({
         messages: normalizeLlamaMessages(rawMessages),
       }
     : params;
-  const result = await context.completion(normalizedParams, onToken
-    ? (data) => onToken(normalizeTokenData(data))
-    : undefined);
-  return normalizeCompletionResult(result);
+  let acceptTokens = true;
+  let callbackFailed = false;
+  let callbackError: unknown;
+  let stopPromise: Promise<void> | undefined;
+  try {
+    const result = await context.completion(normalizedParams, onToken
+      ? (data) => {
+          if (!acceptTokens || callbackFailed) return;
+          try {
+            onToken(normalizeTokenData(data));
+          } catch (error) {
+            // Never throw across JSI. Stop this captured context, suppress later
+            // callbacks and drain native completion before surfacing the error.
+            callbackFailed = true;
+            callbackError = error;
+            if (typeof context.stopCompletion === 'function') {
+              stopPromise = Promise.resolve().then(() => context.stopCompletion()).catch(() => undefined);
+            }
+          }
+        }
+      : undefined);
+    if (callbackFailed) throw callbackError;
+    return normalizeCompletionResult(result);
+  } catch (error) {
+    throw callbackFailed ? callbackError : error;
+  } finally {
+    acceptTokens = false;
+    await stopPromise;
+  }
 }
 
 function readMultimodalSupport(value: unknown): LlamaMultimodalSupport {
@@ -553,6 +663,7 @@ export async function tokenizeFormattedPrompt({
   prompt: string;
   mediaPaths?: string[];
 }): Promise<NativeTokenizeResult> {
+  assertFeature(context.tokenize, 'tokenize');
   const tokenized = await context.tokenize(
     prompt,
     mediaPaths && mediaPaths.length > 0 ? { media_paths: mediaPaths } : undefined,
@@ -580,7 +691,9 @@ export function getLlamaBuildInfo(): LlamaModule['BuildInfo'] {
 }
 
 export async function loadLlamaModelInfo(modelPath: string): Promise<Record<string, unknown>> {
-  const result = await getLlamaModule().loadLlamaModelInfo(modelPath);
+  const llama = getLlamaModule();
+  assertFeature(llama.loadLlamaModelInfo, 'loadLlamaModelInfo');
+  const result = await llama.loadLlamaModelInfo(modelPath);
   return assertRecord(result, 'model info');
 }
 
@@ -588,8 +701,10 @@ export async function initLlamaContext(
   params: LlamaContextInitParams,
   onProgress?: (progress: number) => void,
 ): Promise<LlamaContext> {
-  return getLlamaModule().initLlama(
-    applyPromptStateCacheSafetyGate(params),
+  const llama = getLlamaModule();
+  assertFeature(llama.initLlama, 'initLlama');
+  return llama.initLlama(
+    { ...applyPromptStateCacheSafetyGate(params), n_parallel: 1 },
     onProgress,
   );
 }
@@ -597,15 +712,21 @@ export async function initLlamaContext(
 export function addNativeLlamaLogListener(
   listener: (level: string, text: string) => void,
 ): NativeLogListenerHandle {
-  return getLlamaModule().addNativeLogListener(listener);
+  const llama = getLlamaModule();
+  assertFeature(llama.addNativeLogListener, 'addNativeLogListener');
+  return llama.addNativeLogListener(listener);
 }
 
 export async function toggleNativeLlamaLogs(enabled: boolean): Promise<void> {
-  await getLlamaModule().toggleNativeLog(enabled);
+  const llama = getLlamaModule();
+  assertFeature(llama.toggleNativeLog, 'toggleNativeLog');
+  await llama.toggleNativeLog(enabled);
 }
 
 export async function releaseAllLlamaContexts(): Promise<void> {
-  await getLlamaModule().releaseAllLlama();
+  const llama = getLlamaModule();
+  assertFeature(llama.releaseAllLlama, 'releaseAllLlama');
+  await llama.releaseAllLlama();
 }
 
 export async function releaseLlamaContext(context: LlamaContext): Promise<void> {

@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-21T19:05:10.571Z",
+  "source": {
+    "commit": "bfc8362baae8f75cbbb42730e16bdc4426698ca6",
+    "tree": "59fe122cfc2f3b9ae6ed06b818c1ce3341d597f3",
+    "cleanAtBuild": true
+  },
+  "runtime": "llama.rn 0.13.0-rc.3",
+  "apk": {
+    "package": "com.github.tah10n.pocketai.qa",
+    "variant": "release",
+    "versionName": "1.6.3",
+    "versionCode": 22,
+    "bytes": 81843190,
+    "sha256": "3b6443544b4666da75dd454422111de4ad0037baf62ff5b8710ad2e52b729788",
+    "installedSha256": "3b6443544b4666da75dd454422111de4ad0037baf62ff5b8710ad2e52b729788",
+    "embeddedBundle": true
+  },
+  "device": {
+    "model": "sdk_gphone64_x86_64",
+    "android": "16",
+    "api": 36,
+    "abi": "x86_64",
+    "ramMiB": 8192,
+    "backend": "cpu",
+    "gpuLayers": 0
+  },
+  "checks": {
+    "cpuBaseline": "passed",
+    "nativeChatEmbeddingChat": "passed",
+    "embeddingDimensions": 384,
+    "embeddingFinite": true,
+    "chatUnchanged": true,
+    "settingsUnchanged": true,
+    "contextChanged": true,
+    "manualLoadCheck": "passed",
+    "receiptAfterReopen": "passed",
+    "receiptAfterAppRestart": "passed",
+    "visualEN": "passed",
+    "visualRU": "passed"
+  }
+}

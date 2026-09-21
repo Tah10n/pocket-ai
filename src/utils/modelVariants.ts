@@ -303,6 +303,7 @@ export function applyModelVariantSelectionIfAvailable(
       localPath: undefined,
       downloadedAt: undefined,
       downloadIntegrity: undefined,
+      roleValidation: undefined,
       resumeData: undefined,
       downloadErrorAt: undefined,
       downloadErrorCode: undefined,
@@ -423,6 +424,7 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
     ...memoryFitPatch,
     gguf: nextGguf,
     ...(isDifferentFile ? {
+      roleValidation: undefined,
       allowUnknownSizeDownload: false,
       localPath: undefined,
       downloadedAt: undefined,

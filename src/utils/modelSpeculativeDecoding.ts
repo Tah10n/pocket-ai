@@ -250,7 +250,7 @@ export function resolveSpeculativeDecodingWithEnabledOverride(
 export function getConfiguredMtpDraftArtifact(
   model: Pick<ModelMetadata, 'artifacts'> & Partial<Pick<
     ModelMetadata,
-    'activeVariantId' | 'resolvedFileName' | 'variants' | 'speculativeDecoding'
+    'activeVariantId' | 'resolvedFileName' | 'variants' | 'speculativeDecoding' | 'id' | 'downloadUrl' | 'hfRevision' | 'sha256'
   >>,
 ): ModelArtifactMetadata | undefined {
   const config = resolveEffectiveSpeculativeDecoding(model);
@@ -260,6 +260,7 @@ export function getConfiguredMtpDraftArtifact(
 
   return model.artifacts?.find((artifact) => (
     artifact.kind === 'speculative_draft' && artifact.id === config.draftArtifactId
+    && (!artifact.boundToModelIdentity || artifact.boundToModelIdentity === JSON.stringify([model.id, model.downloadUrl, model.hfRevision ?? 'main', model.resolvedFileName ?? '', model.sha256 ?? '']))
   ));
 }
 

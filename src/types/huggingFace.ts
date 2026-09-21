@@ -24,6 +24,7 @@ export type HuggingFaceModelSummary = {
 };
 
 export type HuggingFaceModelCardData = {
+  pipeline_tag?: string;
   model_name?: string;
   model_type?: string;
   base_model?: string | string[];

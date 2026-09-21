@@ -96,6 +96,7 @@ function cloneMultimodalReadinessState(readiness: MultimodalReadinessState): Mul
 function cloneModelVariant(variant: ModelVariant): ModelVariant {
   return {
     ...variant,
+    roleEvidence: variant.roleEvidence?.map((entry) => ({ ...entry })),
     chatModalities: variant.chatModalities ? [...variant.chatModalities] : undefined,
     projectorCandidates: variant.projectorCandidates?.map(cloneProjectorArtifact),
     speculativeDecoding: variant.speculativeDecoding ? { ...variant.speculativeDecoding } : undefined,
@@ -486,6 +487,8 @@ function cloneModelMetadata(model: ModelMetadata): ModelMetadata {
     tags: model.tags ? [...model.tags] : undefined,
     variants: model.variants?.map(cloneModelVariant),
     artifacts: model.artifacts?.map(cloneModelArtifact),
+    roleEvidence: model.roleEvidence?.map((entry) => ({ ...entry })),
+    roleValidation: model.roleValidation?.map((entry) => ({ ...entry })),
     chatModalities: model.chatModalities ? [...model.chatModalities] : undefined,
     inputCapabilities: model.inputCapabilities
       ? cloneInputCapabilities(model.inputCapabilities)
@@ -748,7 +751,7 @@ function resetProjectorDownloadStates(model: ModelMetadata): boolean {
   }
 
   for (const artifact of getCompanionModelArtifacts(model)) {
-    if (artifact.kind === 'speculative_draft') {
+    if (artifact.kind !== 'multimodal_projector') {
       changed = resetProjectorArtifactDownloadState(artifact) || changed;
     }
   }
@@ -1487,6 +1490,23 @@ export class LocalStorageRegistry {
   /**
    * Remove a model from the registry and delete its local files.
    */
+  public async removeCompanion(modelId: string, artifactId: string): Promise<void> {
+    assertPrivateStorageWritable();
+    const model = this.getModel(modelId);
+    const artifact = model?.artifacts?.find(item => item.id === artifactId && item.kind !== 'main_model' && item.kind !== 'multimodal_projector');
+    if (!model || !artifact) return;
+    const updated: ModelMetadata = { ...model, artifacts: model.artifacts?.map(item => item.id === artifactId
+      ? { ...item, selected: false, installState: 'remote', localPath: undefined, integrity: undefined, resumeData: undefined, downloadProgress: 0, errorCode: undefined, errorMessage: undefined }
+      : item) };
+    const modelsDir = getModelsDir();
+    if (modelsDir) {
+      const remaining = this.getModels().filter(item => item.id !== modelId).concat(updated);
+      const files = getModelAssetFilesForRemoval({ ...model, localPath: undefined, projectorCandidates: [], variants: [], artifacts: [artifact] }, remaining);
+      for (const file of files) await this.deleteModelAssetFile(modelsDir, file);
+    }
+    this.updateModel(updated);
+  }
+
   public async removeModel(modelId: string): Promise<void> {
     const normalizedId = normalizeModelId(modelId);
     if (!normalizedId) {

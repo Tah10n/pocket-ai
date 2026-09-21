@@ -1,4 +1,5 @@
 import { estimateFastMemoryFit } from '../memory/estimator';
+import { inferModelRoleEvidence, mergeModelRoleEvidence } from '../utils/modelRoles';
 import {
   LifecycleStatus,
   ModelAccessState,
@@ -25,6 +26,7 @@ import { buildHuggingFaceResolveUrl } from '../utils/huggingFaceUrls';
 import { getShortModelLabel } from '../utils/modelLabel';
 import {
   buildProjectorArtifactId,
+  isManagedCompanionFileName,
   resolveDeterministicProjectorCandidate,
 } from '../utils/modelProjectors';
 import { normalizeSha256Digest } from '../utils/sha256';
@@ -675,7 +677,7 @@ function buildArtifactMetadataPatch(options: {
     size: options.size,
   }, { includeRemoteMain: true });
   const persistedArtifacts = options.persistedArtifacts?.filter((artifact) => (
-    artifact.kind === 'speculative_draft'
+    artifact.kind === 'tts_codec' || artifact.kind === 'lora_adapter' || artifact.kind === 'speculative_draft'
     && (
       options.speculativeDraftArtifact === undefined
       || artifact.id === options.speculativeDraftArtifact.id
@@ -779,6 +781,7 @@ function createTreeProbeCandidate(
     lifecycleStatus: LifecycleStatus.AVAILABLE,
     downloadProgress: 0,
     requiresTreeProbe: true,
+    roleEvidence: inferModelRoleEvidence({}, item),
     hfRevision: item.sha ?? undefined,
     maxContextTokens,
     downloads: item.downloads ?? null,
@@ -795,6 +798,7 @@ function hasOnlyCompanionGgufSiblings(
 
   return ggufEntries.length > 0 && ggufEntries.every((entry) => (
     isProjectorFileName(getFileName(entry)) || isMtpDraftCompanionEntry(entry, siblings)
+      || isManagedCompanionFileName(getFileName(entry))
   ));
 }
 
@@ -945,6 +949,7 @@ export function transformHFResponse(
     // boundaries; running its migration and projector-repair passes here made
     // a 20-card cold catalog render block the JS thread for more than 10s.
     results.push({
+      roleEvidence: inferModelRoleEvidence({ resolvedFileName: fileName }, item),
       id: repoId,
       name: getShortModelLabel(repoId) || repoId,
       author: item.author || repoId.split('/')[0],
@@ -1162,6 +1167,9 @@ export function buildModelMetadataFromPayload(
   return normalizePersistedModelMetadata({
     ...fallbackModel,
     ...localDownloadStatePatch,
+    roleEvidence: mergeModelRoleEvidence(
+      inferModelRoleEvidence({ resolvedFileName, gguf }, payload), fallbackModel.roleEvidence,
+    ),
     id: repoId,
     name: getShortModelLabel(repoId) || repoId,
     author: payload.author || repoId.split('/')[0],
@@ -1209,4 +1217,3 @@ export function buildModelMetadataFromPayload(
     ...artifactMetadata,
   });
 }
-

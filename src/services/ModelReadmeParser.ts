@@ -122,6 +122,8 @@ function mapReadmeFrontMatterToCardData(
   const modelType = getFrontMatterString(frontMatter, 'model_type');
 
   const cardData: Partial<HuggingFaceModelCardData> = {};
+  const pipelineTag = getFrontMatterString(frontMatter, 'pipeline_tag');
+  if (pipelineTag) cardData.pipeline_tag = pipelineTag;
   if (baseModels?.length) {
     cardData.base_model = baseModels.length === 1 ? baseModels[0] : baseModels;
   }

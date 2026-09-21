@@ -11,7 +11,8 @@ import {
   remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { applyEffectiveProjectorState } from './effectiveProjectorState';
-import { mergeModelArtifacts } from './modelArtifacts';
+import { isManagedCompanionArtifact, mergeModelArtifacts } from './modelArtifacts';
+import { mergeModelRoleEvidence, normalizeModelRoleValidation } from './modelRoles';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
@@ -59,12 +60,12 @@ function mergeSpeculativeDraftRuntimeArtifacts(
   model: Pick<ModelMetadata, 'artifacts'>,
   runtimeModel: Pick<ModelMetadata, 'artifacts'>,
 ): ModelMetadata['artifacts'] {
-  const stableArtifacts = model.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? [];
-  const catalogDrafts = model.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft') ?? [];
+  const stableArtifacts = model.artifacts?.filter((artifact) => !isManagedCompanionArtifact(artifact)) ?? [];
+  const catalogDrafts = model.artifacts?.filter((artifact) => isManagedCompanionArtifact(artifact)) ?? [];
   const catalogDraftIds = new Set(catalogDrafts.map((artifact) => artifact.id));
   const runtimeDrafts = runtimeModel.artifacts?.filter((artifact) => (
-    artifact.kind === 'speculative_draft'
-    && (catalogDraftIds.size === 0 || catalogDraftIds.has(artifact.id))
+    isManagedCompanionArtifact(artifact)
+    && (artifact.kind !== 'speculative_draft' || catalogDraftIds.size === 0 || catalogDraftIds.has(artifact.id))
   ));
   const mergedDrafts = mergeModelArtifacts(catalogDrafts, runtimeDrafts, {
     preservePersistedRuntimeState: true,
@@ -509,6 +510,14 @@ function mergeModelWithRuntimeStateUncached(
     }
   }
 
+  mergedModel.roleEvidence = mergeModelRoleEvidence(
+    mergedModel.roleEvidence, localModel?.roleEvidence, queuedItem?.roleEvidence,
+  );
+  mergedModel.roleValidation = normalizeModelRoleValidation([
+    ...(localModel?.roleValidation ?? []),
+    ...(queuedItem?.roleValidation ?? []),
+    ...(mergedModel.roleValidation ?? []),
+  ], mergedModel);
   return mergedModel;
 }
 

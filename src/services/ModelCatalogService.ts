@@ -1,4 +1,5 @@
 import DeviceInfo from 'react-native-device-info';
+import { inferModelRoleEvidence, mergeModelRoleEvidence } from '../utils/modelRoles';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata, type ModelVariant } from '../types/models';
 import type {
   ModelChatModality,
@@ -93,7 +94,7 @@ import {
 } from '../utils/multimodalReadiness';
 import { mergeProjectorCandidatesWithRuntimeStateAndIdMap } from '../utils/projectorRuntimeState';
 import { canonicalizeProjectorCandidateAliases } from '../utils/projectorIdentity';
-import { mergeModelArtifacts } from '../utils/modelArtifacts';
+import { isManagedCompanionArtifact, mergeModelArtifacts } from '../utils/modelArtifacts';
 import {
   getConfiguredMtpDraftArtifact,
   resolveEffectiveSpeculativeDecoding,
@@ -2102,6 +2103,8 @@ export class ModelCatalogService {
         detailedModel = normalizePersistedModelMetadata({
           ...detailedModel,
           description: readmeData.description ?? detailedModel.description,
+          roleEvidence: mergeModelRoleEvidence(detailedModel.roleEvidence,
+            inferModelRoleEvidence(detailedModel, { cardData: readmeData.cardData })),
           maxContextTokens: resolveMergedMaxContextTokens(
             detailedModel.maxContextTokens,
             readmeData.maxContextTokens,
@@ -2690,12 +2693,12 @@ export class ModelCatalogService {
           ? this.clearAudioProjectorArtifactsAfterAuthoritativeTreeMiss(model.artifacts)
           : model.artifacts;
         const persistedSpeculativeDrafts = projectorAwareArtifacts?.filter((artifact) => (
-          artifact.kind === 'speculative_draft'
-          && (
+          isManagedCompanionArtifact(artifact)
+          && (artifact.kind !== 'speculative_draft' || (
             discoveredSpeculativeDraft
               ? artifact.id === discoveredSpeculativeDraft.id
               : !treeResponse.isComplete
-          )
+          ))
         ));
         const speculativeDraftArtifacts = mergeModelArtifacts(
           discoveredSpeculativeDraft ? [discoveredSpeculativeDraft] : [],
@@ -2703,7 +2706,7 @@ export class ModelCatalogService {
           { preferDerivedRuntimeState: true },
         );
         const artifacts = [
-          ...(projectorAwareArtifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+          ...(projectorAwareArtifacts?.filter((artifact) => !isManagedCompanionArtifact(artifact)) ?? []),
           ...speculativeDraftArtifacts,
         ];
         const hasRefreshedVisionSupport = chatModalities.includes('vision');
@@ -4603,7 +4606,7 @@ export class ModelCatalogService {
       .map((projector) => projector.id)
       .filter((projectorId) => !remoteProjectorIds.has(projectorId)));
     const remoteSpeculativeDrafts = remoteModel.artifacts?.filter((artifact) => (
-      artifact.kind === 'speculative_draft'
+      isManagedCompanionArtifact(artifact)
     )) ?? [];
     const remoteSpeculativeDraftIds = new Set(
       remoteSpeculativeDrafts.map((artifact) => artifact.id),
@@ -4611,8 +4614,8 @@ export class ModelCatalogService {
     const localSpeculativeDrafts = shouldResetLocalDownloadState
       ? undefined
       : localModel.artifacts?.filter((artifact) => (
-          artifact.kind === 'speculative_draft'
-          && (remoteSpeculativeDraftIds.size === 0 || remoteSpeculativeDraftIds.has(artifact.id))
+          isManagedCompanionArtifact(artifact)
+          && (artifact.kind !== 'speculative_draft' || remoteSpeculativeDraftIds.size === 0 || remoteSpeculativeDraftIds.has(artifact.id))
         ));
     const speculativeDraftArtifacts = mergeModelArtifacts(
       remoteSpeculativeDrafts,
@@ -4620,12 +4623,12 @@ export class ModelCatalogService {
       { preferDerivedRuntimeState: true },
     );
     const mergedCatalogArtifacts = [
-      ...(remoteModel.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+      ...(remoteModel.artifacts?.filter((artifact) => !isManagedCompanionArtifact(artifact)) ?? []),
       ...speculativeDraftArtifacts,
     ];
     const artifactRequirements = [
-      ...(remoteModel.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
-      ...(localModel.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? []),
+      ...(remoteModel.artifacts?.filter((artifact) => !isManagedCompanionArtifact(artifact)) ?? []),
+      ...(localModel.artifacts?.filter((artifact) => !isManagedCompanionArtifact(artifact)) ?? []),
       ...speculativeDraftArtifacts,
     ];
     const filteredProjectorMetadataPatch = this.filterProjectorMetadataMergeForChatModalities(

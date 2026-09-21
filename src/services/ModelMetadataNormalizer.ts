@@ -58,6 +58,7 @@ import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReaso
 import { normalizeMultimodalReadinessState as normalizeReadinessSupport } from '../utils/multimodalReadiness';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { normalizeModelSpeculativeDecodingConfig } from '../utils/modelSpeculativeDecoding';
+import { filterModelRoleEvidenceForFile, inferModelRoleEvidence, mergeModelRoleEvidence, normalizeModelRoleEvidence, normalizeModelRoleValidation } from '../utils/modelRoles';
 import {
   canonicalizeProjectorCandidateAliases,
   getProjectorExactScopeKey,
@@ -583,6 +584,7 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
   }
 
   const variantId = normalizeNonEmptyString(record.variantId) ?? fileName;
+  const roleEvidence = normalizeModelRoleEvidence(record.roleEvidence);
   const quantizationLabel = normalizeNonEmptyString(record.quantizationLabel) ?? 'GGUF';
   const size = normalizeSize(record.size);
   const sha256 = normalizeSha256Digest(typeof record.sha256 === 'string' ? record.sha256 : undefined);
@@ -603,6 +605,7 @@ function normalizeModelVariant(value: unknown): ModelVariant | null {
 
   return {
     variantId,
+    ...(roleEvidence ? { roleEvidence } : {}),
     fileName,
     quantizationLabel,
     size,
@@ -1164,6 +1167,21 @@ export function normalizePersistedModelMetadata(
   return {
     id: model.id,
     name: normalizedName,
+    roleEvidence: mergeModelRoleEvidence(filterModelRoleEvidenceForFile(model.roleEvidence, {
+      id: model.id, downloadUrl, hfRevision: normalizedRevision,
+      resolvedFileName: normalizedResolvedFileName, sha256: normalizedSha256, size,
+    }), inferModelRoleEvidence({
+      id: model.id, downloadUrl, hfRevision: normalizedRevision,
+      resolvedFileName: normalizedResolvedFileName, sha256: normalizedSha256, size,
+      tags: normalizedTags,
+      architectures: normalizedArchitectures,
+      modelType: normalizedModelType,
+      gguf,
+    })),
+    roleValidation: normalizeModelRoleValidation(model.roleValidation, {
+      id: model.id, downloadUrl, hfRevision: normalizedRevision,
+      resolvedFileName: normalizedResolvedFileName, sha256: normalizedSha256, size,
+    }),
     author: normalizedAuthor,
     size,
     downloadUrl,

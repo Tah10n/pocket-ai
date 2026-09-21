@@ -364,9 +364,19 @@ type MultimodalReadinessRefreshRequest = {
 };
 
 type InternalLoadOptions = {
+  readonly lifecycleOwned?: boolean;
   readonly backgroundReadinessRefresh?: MultimodalReadinessRefreshRequest;
   readonly contextRecoveryAttempt?: number;
 };
+
+export interface AuxiliaryContextRequest {
+  readonly modelId: string;
+  readonly initParams: LlamaContextInitParams;
+  readonly signal?: AbortSignal;
+  readonly beforeInit?: () => Promise<void>;
+  /** Includes chat selection, private-storage generation and artifact identity. */
+  readonly isCurrent: () => boolean;
+}
 
 function getDeviceModelForInitFailureIdentity(): string {
   try {
@@ -1378,6 +1388,10 @@ class LLMEngineService {
   private hwUnsubscribe?: () => void;
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
+  private exclusiveOperationCount = 0;
+  private auxiliaryOperation: { modelId: string; cancelled: boolean } | null = null;
+  private auxiliaryRestoreError: string | undefined;
+  private autotuneReserved = false;
   private contextOperationRunner = new ContextOperationRunner();
   private completionRunner = new ActiveCompletionRunner<LlamaCompletionResult>();
   private isUnloading = false;
@@ -1477,6 +1491,11 @@ class LLMEngineService {
 
   constructor() {
     this.hwUnsubscribe = hardwareListenerService.subscribe((status) => {
+      if (status.isLowMemory && this.auxiliaryOperation) {
+        // B's handle is local to the auxiliary transaction. Invalidate its
+        // result/restore now; the native operation still owns memory until drain.
+        this.invalidateAuxiliaryContextOperation();
+      }
       if (status.isLowMemory && this.context) {
         this.handleLowMemoryUnload();
       }
@@ -2285,6 +2304,7 @@ class LLMEngineService {
   }
 
   private persistActiveModelIdSettingBestEffort(activeModelId: string | null): void {
+    if (this.auxiliaryOperation) return;
     try {
       updateSettings({ activeModelId });
     } catch (error) {
@@ -3509,12 +3529,19 @@ class LLMEngineService {
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
+    if (this.auxiliaryOperation) {
+      throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
+    }
     this.cancelScheduledContextRecovery();
     const retryMarker = options?.retryBlockedCapabilityProbes === true
       ? this.captureThinkingCapabilityProbeBlockedMarker(modelId)
       : null;
     try {
       await this.loadWithProjectorResolutionOperationCache(modelId, options, new Map());
+      if (this.state.status === EngineStatus.READY && this.state.activeModelId === modelId && this.auxiliaryRestoreError) {
+        this.auxiliaryRestoreError = undefined;
+        this.updateState(this.state);
+      }
     } catch (error) {
       // A retry request is transactional: terminal recovery, lifecycle, memory,
       // or initialization failures must not consume the persisted consent gate.
@@ -3544,8 +3571,11 @@ class LLMEngineService {
     if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
       return;
     }
+    if (this.auxiliaryOperation && !internalOptions.lifecycleOwned) {
+      throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
+    }
 
-    await this.runExclusiveOperation(async () => {
+    const loadOperation = async () => {
       if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
         return;
       }
@@ -3726,10 +3756,171 @@ class LLMEngineService {
         options?.retryBlockedCapabilityProbes === true,
       );
       await this.initPromise;
-    });
+    };
+    if (internalOptions.lifecycleOwned) await loadOperation();
+    else await this.runExclusiveOperation(loadOperation);
+  }
+
+  public hasAuxiliaryContextOperation(): boolean {
+    return this.auxiliaryOperation !== null;
+  }
+
+  /** Excludes auxiliary work through autotune's preparation and candidate gaps. */
+  public reserveAutotuneContext(): () => void {
+    this.assertNoOrphanedContextReleasePending();
+    if (this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.isUnloading) {
+      throw new AppError('engine_busy', 'The engine is busy. Retry after the current operation finishes.');
+    }
+    this.autotuneReserved = true;
+    let released = false;
+    return () => {
+      if (!released) { released = true; this.autotuneReserved = false; }
+    };
+  }
+
+  public invalidateAuxiliaryContextOperation(): void {
+    if (this.auxiliaryOperation) this.auxiliaryOperation.cancelled = true;
+  }
+
+  /** File deletion must cross this barrier even while the visible chat is idle. */
+  public assertModelResourcesIdle(_modelId?: string): void {
+    this.assertNoOrphanedContextReleasePending();
+    if (this.context || this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.isUnloading
+      || this.hasActiveCompletion() || this.hasActiveChatBlockingContextOperation()) {
+      throw new AppError('engine_busy', 'Model resources are still in use. Please retry after the operation finishes.');
+    }
+  }
+
+  /** Holds the lifecycle queue until asynchronous file/storage mutation settles. */
+  public async runWithIdleModelResources<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertModelResourcesIdle();
+    // runExclusiveOperation reserves synchronously before its first await. Loads
+    // admitted later queue behind deletion; auxiliary admission sees the lease.
+    return this.runExclusiveOperation(operation);
+  }
+
+  public async runWithAuxiliaryContext<T>(
+    request: AuxiliaryContextRequest,
+    operation: (context: LlamaContext) => Promise<T>,
+  ): Promise<T> {
+    this.assertNoOrphanedContextReleasePending();
+    if (this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.hasActiveCompletion()
+      || this.hasActiveChatBlockingContextOperation() || this.isUnloading) {
+      throw new AppError('engine_busy', 'The engine is busy. Retry after the current operation finishes.');
+    }
+    const owner = { modelId: request.modelId, cancelled: false };
+    this.auxiliaryOperation = owner;
+    this.auxiliaryRestoreError = undefined;
+    this.cancelScheduledContextRecovery();
+    const selectionCurrent = () => !owner.cancelled && request.isCurrent();
+    const isCurrent = () => !request.signal?.aborted && selectionCurrent();
+    const assertCurrent = () => {
+      if (!isCurrent()) throw new AppError('engine_busy', 'The auxiliary model check was cancelled.');
+    };
+    // Notify auto-load observers before detaching A. No native handles are published.
+    this.updateState(this.state);
+    try {
+      return await this.runExclusiveOperation(async () => {
+        assertCurrent();
+        const previousModelId = this.context ? this.state.activeModelId : undefined;
+        // Restore the actual loaded profile, including temporary CPU/context
+        // overrides. Saved defaults can describe a different allocation.
+        const previousLoadParams = previousModelId ? {
+          ...getModelLoadParametersForModel(previousModelId),
+          contextSize: this.activeContextSize,
+          gpuLayers: this.initGpuLayers ?? this.activeGpuLayers,
+          backendPolicy: this.activeBackendMode === 'unknown' ? this.effectiveBackendPolicy ?? undefined : this.activeBackendMode,
+          selectedBackendDevices: this.initDevices,
+          mtpEnabled: this.activeSpeculativeDecoding !== null,
+          ...(this.initCacheTypeK === 'f16' || this.initCacheTypeK === 'q8_0' || this.initCacheTypeK === 'q4_0'
+            ? { kvCacheType: this.initCacheTypeK } : {}),
+          ...(this.initFlashAttnType ? { flashAttention: this.initFlashAttnType } : {}),
+          ...(this.initUseMmap !== null ? { useMmap: this.initUseMmap } : {}),
+          ...(this.initUseMlock !== null ? { useMlock: this.initUseMlock } : {}),
+          cpuThreads: this.initNThreads,
+          cpuMask: this.initCpuMask,
+          ...(this.initCpuStrict !== null ? { cpuStrict: this.initCpuStrict } : {}),
+          nBatch: this.initNBatch,
+          nUbatch: this.initNUbatch,
+          kvUnified: this.initKvUnified,
+          parallelSlots: 1,
+        } satisfies ModelLoadParameters : undefined;
+        let auxiliaryContext: LlamaContext | null = null;
+        let initStarted = false;
+        let result!: T;
+        let operationError: unknown;
+        try {
+          // Completion admission observes auxiliaryOperation synchronously, so no
+          // new user generation can start between this check and the detach.
+          if (this.hasActiveCompletion()) throw new AppError('engine_busy', 'A response is being generated.');
+          if (this.context) await this.unloadInternal();
+          assertCurrent();
+          await request.beforeInit?.();
+          assertCurrent();
+          initStarted = true;
+          auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
+            (progress) => initLlamaContext(request.initParams, progress),
+            () => undefined,
+          );
+          assertCurrent();
+          // Keep ownership until the actual native operation settles. Cancellation
+          // discards its result; it is not evidence that native memory is free.
+          let nativeOperationError: unknown;
+          const nativeOperation = Promise.resolve().then(() => operation(auxiliaryContext!)).then(
+            (value) => { result = value; },
+            (error: unknown) => { nativeOperationError = error; },
+          );
+          const operationDrain = await this.waitForUnloadPromise(nativeOperation, 30_000);
+          if (operationDrain === 'timed_out') {
+            this.scheduleOrphanedContextRelease({
+              activeModelId: null,
+              context: auxiliaryContext,
+              drainPromise: nativeOperation,
+            });
+            auxiliaryContext = null;
+            const timeoutError = this.recordOrphanedContextReleaseTerminalError({
+              message: DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE,
+              reason: 'drain_timeout',
+            });
+            this.beginBoundedOrphanedContextReleaseWatch();
+            throw timeoutError;
+          }
+          if (nativeOperationError) throw nativeOperationError;
+          assertCurrent();
+        } catch (error) {
+          operationError = error;
+        } finally {
+          if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
+          else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
+        }
+        if (previousModelId && selectionCurrent() && !this.orphanedContextReleaseError) {
+          try {
+            await this.loadWithProjectorResolutionOperationCache(previousModelId, {
+              loadParamsOverride: previousLoadParams,
+              preferLastWorkingProfile: true,
+            }, new Map(), { lifecycleOwned: true });
+            if (!selectionCurrent() && this.context) await this.unloadInternal();
+          } catch (error) {
+            if (this.orphanedContextReleaseError) throw error;
+            this.auxiliaryRestoreError = 'The auxiliary check ended, but the previous chat model could not be restored.';
+            this.updateState({ ...this.state, status: EngineStatus.ERROR, lastError: this.auxiliaryRestoreError });
+            throw new AppError('model_load_failed', this.auxiliaryRestoreError);
+          }
+        }
+        if (operationError) throw operationError;
+        return result;
+      });
+    } finally {
+      this.auxiliaryOperation = null;
+      this.updateState(this.state);
+    }
   }
 
   public async unload(): Promise<void> {
+    if (this.auxiliaryOperation) {
+      this.invalidateAuxiliaryContextOperation();
+      throw new AppError('engine_busy', 'An auxiliary model is still using native resources. Retry after it finishes.');
+    }
     this.cancelScheduledContextRecovery();
     await this.waitForOrphanedContextRelease();
     await this.runExclusiveOperation(async () => {
@@ -3751,6 +3942,9 @@ class LLMEngineService {
     onToken,
     params,
   }: LlmChatCompletionOptions): Promise<LlamaCompletionResult> {
+    if (this.auxiliaryOperation) {
+      throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
+    }
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
@@ -5960,9 +6154,37 @@ class LLMEngineService {
 
     this.activeMultimodalContext = null;
     try {
-      await releaseMultimodalFromContext(context);
+      const rawRelease = releaseMultimodalFromContext(context);
+      let releaseFailed = false;
+      let releaseError: unknown;
+      const releaseSettlement = rawRelease.catch((error: unknown) => {
+        releaseFailed = true;
+        releaseError = error;
+      });
+      const outcome = await this.waitForUnloadPromise(releaseSettlement, CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS);
+      if (outcome === 'timed_out') {
+        const timeoutError = this.recordOrphanedContextReleaseTerminalError({
+          message: DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE,
+          reason: 'drain_timeout',
+          activeModelId: activeMultimodal.modelId,
+        });
+        // A late settled projector release permits targeted context cleanup, but
+        // never global release or B initialization while that native call runs.
+        if (this.auxiliaryOperation) {
+          this.auxiliaryRestoreError = 'The previous chat model needs an explicit reload after resource cleanup.';
+        }
+        this.detachCurrentContextAfterTimedOutOperation(activeMultimodal.modelId, timeoutError, {
+          drainPromise: rawRelease.catch(() => undefined),
+          warningMessage: '[LLMEngine] Multimodal release timed out; retaining detached ownership',
+        });
+        throw timeoutError;
+      }
+      // The drain helper reports settlement for both fulfillment and rejection.
+      // A settled native failure must preserve projector ownership/diagnostics.
+      if (releaseFailed) throw releaseError;
       return true;
     } catch (error) {
+      if (this.orphanedContextReleaseError) throw error;
       if (this.context === context && this.state.activeModelId === activeMultimodal.modelId) {
         this.activeMultimodalContext = activeMultimodal;
       }
@@ -5998,12 +6220,20 @@ class LLMEngineService {
       });
     }
 
-    try {
-      await releaseAllLlamaContexts();
-    } catch (cleanupError) {
-      console.warn('[LLMEngine] Failed to release llama contexts after failed initialize', {
-        modelId,
-        ...buildSafeErrorLogDetails(cleanupError),
+    await this.releaseNativeContextsConfirmed();
+  }
+
+  /** A JS timeout never releases native ownership. Failed cleanup stays blocked. */
+  private async releaseNativeContextsConfirmed(context?: LlamaContext): Promise<void> {
+    this.assertNoOrphanedContextReleasePending();
+    let releaseFailed = false;
+    const rawRelease = (context ? releaseLlamaContext(context) : releaseAllLlamaContexts())
+      .catch(() => { releaseFailed = true; });
+    const outcome = await this.waitForUnloadPromise(rawRelease, CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS);
+    if (outcome === 'timed_out' || releaseFailed) {
+      throw this.recordOrphanedContextReleaseTerminalError({
+        message: DETACHED_CONTEXT_RELEASE_FAILURE_MESSAGE,
+        reason: 'release_failed',
       });
     }
   }
@@ -6011,6 +6241,8 @@ class LLMEngineService {
   private updateState(newState: EngineState): void {
     this.state = {
       ...newState,
+      auxiliaryOperation: this.auxiliaryOperation !== null,
+      auxiliaryRestoreError: this.auxiliaryRestoreError,
       diagnostics: this.buildDiagnosticsSnapshot(),
     };
     this.listeners.forEach((listener) => {
@@ -6155,6 +6387,7 @@ class LLMEngineService {
   }
 
   private async runExclusiveOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.exclusiveOperationCount += 1;
     const previousOperation = this.operationQueue;
     let releaseQueue: () => void = () => undefined;
 
@@ -6167,6 +6400,7 @@ class LLMEngineService {
     try {
       return await operation();
     } finally {
+      this.exclusiveOperationCount -= 1;
       releaseQueue();
     }
   }
@@ -7723,7 +7957,7 @@ class LLMEngineService {
               // init; the terminal state already blocks further loading.
               throw error;
             }
-            await releaseAllLlamaContexts().catch(() => undefined);
+            await this.releaseNativeContextsConfirmed();
             speculativeDecodingForLoad = null;
             this.speculativeDecodingFallbackReason = 'initialization_failed';
             initDiagnostics = {
@@ -8206,7 +8440,7 @@ class LLMEngineService {
                 : 'falling back to CPU profile';
               console.warn(`[LLMEngine] ${candidate.toUpperCase()} init returned CPU runtime, ${fallbackLabel}`);
             }
-            await releaseAllLlamaContexts().catch(() => undefined);
+            await this.releaseNativeContextsConfirmed();
             lastBackendInitError = new Error(
               reasonNoGPU || `${candidate.toUpperCase()} acceleration was not enabled.`,
             );
@@ -8253,7 +8487,7 @@ class LLMEngineService {
           gpuInitError = null;
           break;
         } catch (error) {
-          if (this.isModelInitWatchdogTerminalError(error)) {
+          if (this.isModelInitWatchdogTerminalError(error) || this.orphanedContextReleaseError) {
             // Terminal restart-required state: stop the candidate loop without
             // releasing memory a hung native init may still own.
             throw error;
@@ -8266,7 +8500,7 @@ class LLMEngineService {
             gpuInitError = error;
           }
 
-          await releaseAllLlamaContexts().catch(() => undefined);
+          await this.releaseNativeContextsConfirmed();
         }
       }
 
@@ -8495,7 +8729,7 @@ class LLMEngineService {
       }
 
       this.updateState({ ...this.state, status: EngineStatus.READY, loadProgress: 1 });
-      updateSettings({ activeModelId: modelId });
+      if (!this.auxiliaryOperation) updateSettings({ activeModelId: modelId });
 
       const modelForThinkingProbe = registry.getModel(modelId);
       if (retryBlockedCapabilityProbes && modelForThinkingProbe?.thinkingCapability === undefined) {
@@ -8706,9 +8940,14 @@ class LLMEngineService {
             beforeUnloadSnapshot = await getFreshMemorySnapshot(0).catch(() => null);
           }
           await this.releaseActiveMultimodalContext();
-          await releaseAllLlamaContexts();
+          // This is a coordinated global teardown: the lifecycle queue owns the
+          // sole context, and setContext(null) invalidates its generation below.
+          await this.releaseNativeContextsConfirmed();
         }
       }
+    } catch (error) {
+      deferredContextReleaseError = this.orphanedContextReleaseError ?? toAppError(error);
+      throw error;
     } finally {
       if (!deferredContextReleaseError) {
         const calibrationSession = this.activeCalibrationSession;

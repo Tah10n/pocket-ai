@@ -183,20 +183,31 @@ function resolveRestoreLoadParamsOverride(
   };
 }
 
+type AutotuneRequest = {
+  modelId: string;
+  prompt?: string;
+  nPredict?: number;
+  onProgress?: (snapshot: AutotuneProgressSnapshot) => void;
+  signal?: AbortSignal;
+};
+
 class InferenceAutotuneService {
-  public async runBackendAutotune({
+  public async runBackendAutotune(options: AutotuneRequest): Promise<AutotuneResult> {
+    const releaseReservation = llmEngineService.reserveAutotuneContext();
+    try {
+      return await this.runBackendAutotuneInternal(options);
+    } finally {
+      releaseReservation();
+    }
+  }
+
+  private async runBackendAutotuneInternal({
     modelId,
     prompt = 'Write the numbers from 1 to 200, separated by spaces.',
     nPredict = 256,
     onProgress,
     signal,
-  }: {
-    modelId: string;
-    prompt?: string;
-    nPredict?: number;
-    onProgress?: (snapshot: AutotuneProgressSnapshot) => void;
-    signal?: AbortSignal;
-  }): Promise<AutotuneResult> {
+  }: AutotuneRequest): Promise<AutotuneResult> {
     const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
     if (!normalizedModelId) {
       throw new Error('Invalid modelId');

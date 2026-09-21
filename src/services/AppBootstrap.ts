@@ -406,6 +406,7 @@ export function scheduleModelCatalogCacheHydrationAfterFirstFrame(): void {
 
 type BootRestoreSkipReason =
   | 'settings_changed'
+  | 'auxiliary_restore_failed'
   | 'engine_ready_other'
   | 'engine_initializing_other'
   | 'engine_already_target'
@@ -419,6 +420,9 @@ function resolveBootRestoreTarget(requestedModelId: string): { modelId: string |
 
   try {
     const engineState = llmEngineService.getState();
+    if (engineState.auxiliaryRestoreError) {
+      return { modelId: null, reason: 'auxiliary_restore_failed' };
+    }
     if (
       (engineState.status === EngineStatus.READY || engineState.status === EngineStatus.INITIALIZING)
       && engineState.activeModelId
@@ -454,6 +458,25 @@ function scheduleActiveModelRestore(
 
     const restore = async () => {
       try {
+        if (llmEngineService.getState().auxiliaryOperation) {
+          // Startup restoration waits for the actual resource owner to finish,
+          // then rechecks the user's selection below. The timer only abandons
+          // this optional restore; it never releases a native context.
+          const released = await new Promise<boolean>((resolve) => {
+            let unsubscribe = () => {};
+            const timer = setTimeout(() => { unsubscribe(); resolve(false); }, 120_000);
+            unsubscribe = llmEngineService.subscribe((state) => {
+              if (!state.auxiliaryOperation) { clearTimeout(timer); unsubscribe(); resolve(true); }
+            });
+            if (!llmEngineService.getState().auxiliaryOperation) {
+              clearTimeout(timer); unsubscribe(); resolve(true);
+            }
+          });
+          if (!released) {
+            restoreSpan.end({ outcome: 'skipped', reason: 'auxiliary_owner_busy' });
+            return;
+          }
+        }
         const decision = resolveBootRestoreTarget(activeModelId);
         if (!decision.modelId) {
           restoreSpan.end({ outcome: 'skipped', reason: `skipped_stale_restore:${decision.reason ?? 'unknown'}` });

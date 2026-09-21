@@ -20,6 +20,7 @@ jest.mock('../../src/services/InferenceAutotuneStore', () => {
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    reserveAutotuneContext: jest.fn(() => jest.fn()),
     hasActiveCompletion: jest.fn(),
     getState: jest.fn(),
     unload: jest.fn(),
@@ -177,6 +178,32 @@ describe('InferenceAutotuneService', () => {
         selectedBackendDevices: null,
       },
     });
+  });
+
+  it('holds auxiliary exclusion through deferred preparation and releases only after restore', async () => {
+    let resolvePreparation!: (value: any) => void;
+    const release = jest.fn();
+    (llmEngineService.reserveAutotuneContext as jest.Mock).mockReturnValueOnce(release);
+    (llmEngineService.getRecommendedLoadProfile as jest.Mock).mockImplementationOnce(() => new Promise(resolve => { resolvePreparation = resolve; }));
+    const pending = inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' });
+    for (let i = 0; i < 50 && !resolvePreparation; i += 1) await Promise.resolve();
+    expect(resolvePreparation).toBeDefined();
+    expect(release).not.toHaveBeenCalled();
+    resolvePreparation({ recommendedGpuLayers: 0, gpuLayersCeiling: 0 });
+    await pending;
+    expect(llmEngineService.load).toHaveBeenLastCalledWith('prev/model', expect.anything());
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects busy auxiliary ownership before unload and releases the lease after early failure', async () => {
+    (llmEngineService.reserveAutotuneContext as jest.Mock).mockImplementationOnce(() => { throw new Error('engine busy'); });
+    await expect(inferenceAutotuneService.runBackendAutotune({ modelId: 'test/model' })).rejects.toThrow('engine busy');
+    expect(llmEngineService.unload).not.toHaveBeenCalled();
+    expect(autotuneStore.writeAutotuneResult).not.toHaveBeenCalled();
+    const release = jest.fn();
+    (llmEngineService.reserveAutotuneContext as jest.Mock).mockReturnValueOnce(release);
+    await expect(inferenceAutotuneService.runBackendAutotune({ modelId: '' })).rejects.toThrow('Invalid modelId');
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it('throws when the engine is busy generating', async () => {

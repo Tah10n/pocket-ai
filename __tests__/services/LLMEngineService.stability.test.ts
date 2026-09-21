@@ -5,6 +5,7 @@ import { inferenceBackendService } from '../../src/services/InferenceBackendServ
 import { createStorage } from '../../src/services/storage';
 import DeviceInfo from 'react-native-device-info';
 import { initLlama, releaseAllLlama } from 'llama.rn';
+import { updateSettings } from '../../src/services/SettingsStore';
 
 jest.mock('../../src/services/LocalStorageRegistry', () => ({
     registry: {
@@ -109,6 +110,10 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).context = null;
         (llmEngineService as any).initPromise = null;
         (llmEngineService as any).operationQueue = Promise.resolve();
+        (llmEngineService as any).exclusiveOperationCount = 0;
+        (llmEngineService as any).auxiliaryOperation = null;
+        (llmEngineService as any).auxiliaryRestoreError = undefined;
+        (llmEngineService as any).autotuneReserved = false;
         (llmEngineService as any).contextOperationQueue = Promise.resolve();
         (llmEngineService as any).activeCompletionPromise = null;
         (llmEngineService as any).activeCompletionReject = null;
@@ -134,6 +139,255 @@ describe('LLMEngineService Stability', () => {
         (llmEngineService as any).lastLifecycleEvent = null;
         (llmEngineService as any).lastLifecycleError = null;
         hardwareListenerService.resetLowMemoryFlag();
+    });
+
+    const auxiliaryRequest = () => ({
+        modelId: 'repo/embedding',
+        initParams: { model: '/mock/embedding.gguf', embedding: true, n_ctx: 512, n_gpu_layers: 0 },
+        isCurrent: () => true,
+    });
+
+    it('reserves deletion until it settles before queued model initialization', async () => {
+        let finishDelete!: () => void;
+        const remove = jest.fn(() => new Promise<void>(resolve => { finishDelete = resolve; }));
+        const deleting = llmEngineService.runWithIdleModelResources(remove);
+        await waitForMockCall(remove);
+        const loading = llmEngineService.load(mockModel.id);
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true)).rejects.toMatchObject({ code: 'engine_busy' });
+        await Promise.resolve();
+        expect(initLlama).not.toHaveBeenCalled();
+        finishDelete();
+        await deleting;
+        await loading;
+        expect(initLlama).toHaveBeenCalledTimes(1);
+        await llmEngineService.unload();
+    });
+
+    it('releases the deletion lease after filesystem failure', async () => {
+        await expect(llmEngineService.runWithIdleModelResources(async () => { throw new Error('disk failure'); })).rejects.toThrow('disk failure');
+        await llmEngineService.load(mockModel.id);
+        expect(llmEngineService.getState().status).toBe('ready');
+        await llmEngineService.unload();
+    });
+
+    it('temporarily uses B and restores A without writing chat selection settings', async () => {
+        await llmEngineService.load(mockModel.id);
+        (updateSettings as jest.Mock).mockClear();
+        const release = jest.fn().mockResolvedValue(undefined);
+        const aux = { ...createMockContext(), release };
+        (initLlama as jest.Mock).mockImplementation(async (options) => options.embedding ? aux : createMockContext(options));
+        const beforeInit = jest.fn(async () => {
+            expect(llmEngineService.getState().activeModelId).toBeUndefined();
+            expect(releaseAllLlama).toHaveBeenCalledTimes(1);
+        });
+        const result = await llmEngineService.runWithAuxiliaryContext({ ...auxiliaryRequest(), beforeInit }, async context => {
+            expect(context).toBe(aux);
+            expect(llmEngineService.getState().auxiliaryOperation).toBe(true);
+            return { dimensions: 384 };
+        });
+        expect(result).toEqual({ dimensions: 384 });
+        expect(beforeInit).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.getState()).toMatchObject({ activeModelId: mockModel.id, status: 'ready', auxiliaryOperation: false });
+        expect(updateSettings).not.toHaveBeenCalled();
+        await llmEngineService.unload();
+    });
+
+    it('rejects auxiliary work during generation without stopping or releasing chat', async () => {
+        await llmEngineService.load(mockModel.id);
+        const context = (llmEngineService as any).context;
+        (llmEngineService as any).activeCompletionPromise = new Promise(() => undefined);
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true)).rejects.toMatchObject({ code: 'engine_busy' });
+        expect(context.stopCompletion).not.toHaveBeenCalled();
+        expect(releaseAllLlama).not.toHaveBeenCalled();
+        (llmEngineService as any).activeCompletionPromise = null;
+        await llmEngineService.unload();
+    });
+
+    it('reserves the shared lifecycle during pending init and releases late cancelled B before another init', async () => {
+        let resolveInit!: (context: any) => void;
+        (initLlama as jest.Mock).mockImplementation(() => new Promise(resolve => { resolveInit = resolve; }));
+        const abort = new AbortController();
+        const check = jest.fn(async () => true);
+        const pending = llmEngineService.runWithAuxiliaryContext({ ...auxiliaryRequest(), signal: abort.signal }, check);
+        const rejected = expect(pending).rejects.toMatchObject({ code: 'engine_busy' });
+        await waitForMockCall(initLlama as jest.Mock);
+        expect(() => llmEngineService.reserveAutotuneContext()).toThrow();
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), check)).rejects.toMatchObject({ code: 'engine_busy' });
+        await expect(llmEngineService.load(mockModel.id)).rejects.toMatchObject({ code: 'engine_busy' });
+        expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+        abort.abort();
+        expect(llmEngineService.hasAuxiliaryContextOperation()).toBe(true);
+        const release = jest.fn().mockResolvedValue(undefined);
+        resolveInit({ ...createMockContext(), release });
+        await rejected;
+        expect(check).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.hasAuxiliaryContextOperation()).toBe(false);
+        expect(() => llmEngineService.assertModelResourcesIdle()).not.toThrow();
+    });
+
+    it('does not restore A after chat selection or private state changes', async () => {
+        await llmEngineService.load(mockModel.id);
+        let current = true;
+        const release = jest.fn().mockResolvedValue(undefined);
+        (initLlama as jest.Mock).mockClear().mockResolvedValue({ ...createMockContext(), release });
+        await expect(llmEngineService.runWithAuxiliaryContext({ ...auxiliaryRequest(), isCurrent: () => current }, async () => {
+            current = false;
+            return true;
+        })).rejects.toMatchObject({ code: 'engine_busy' });
+        expect(initLlama).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.getState().activeModelId).toBeUndefined();
+        expect(() => llmEngineService.assertModelResourcesIdle()).not.toThrow();
+    });
+
+    it('retains ownership after B release fails and does not restore or allow a new load', async () => {
+        await llmEngineService.load(mockModel.id);
+        const release = jest.fn().mockRejectedValue(new Error('/private/path should not escape'));
+        (initLlama as jest.Mock).mockClear().mockResolvedValue({ ...createMockContext(), release });
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true)).rejects.toMatchObject({ code: 'engine_recovery_required' });
+        expect(initLlama).toHaveBeenCalledTimes(1);
+        await expect(llmEngineService.load(mockModel.id)).rejects.toMatchObject({ code: 'engine_recovery_required' });
+        expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+        expect(JSON.stringify(llmEngineService.getState())).not.toContain('/private/path');
+    });
+
+    it('keeps memory blocked after B release times out even when the release completes late', async () => {
+        jest.useFakeTimers();
+        try {
+            let resolveRelease!: () => void;
+            const release = jest.fn(() => new Promise<void>(resolve => { resolveRelease = resolve; }));
+            (initLlama as jest.Mock).mockResolvedValue({ ...createMockContext(), release });
+            const pending = llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true);
+            const rejected = expect(pending).rejects.toMatchObject({ code: 'engine_recovery_required' });
+            await waitForMockCall(release);
+            await jest.advanceTimersByTimeAsync(60_000);
+            await rejected;
+            expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+            resolveRelease();
+            await Promise.resolve();
+            await expect(llmEngineService.load(mockModel.id)).rejects.toMatchObject({ code: 'engine_recovery_required' });
+            expect(initLlama).toHaveBeenCalledTimes(1);
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
+    it('reports a failed A restore and retains its saved selection', async () => {
+        await llmEngineService.load(mockModel.id);
+        (updateSettings as jest.Mock).mockClear();
+        (initLlama as jest.Mock).mockResolvedValue({ ...createMockContext(), release: jest.fn().mockResolvedValue(undefined) });
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => {
+            (registry.getModel as jest.Mock).mockReturnValue(undefined);
+            return true;
+        })).rejects.toMatchObject({ code: 'model_load_failed' });
+        expect(llmEngineService.getState()).toMatchObject({ status: 'error', auxiliaryRestoreError: expect.any(String) });
+        expect(updateSettings).not.toHaveBeenCalled();
+        (registry.getModel as jest.Mock).mockReturnValue({ ...mockModel, localPath: 'model.gguf', lifecycleStatus: 'downloaded' });
+        await llmEngineService.load(mockModel.id);
+        expect(llmEngineService.getState().auxiliaryRestoreError).toBeUndefined();
+        expect(llmEngineService.getState().status).toBe('ready');
+        await llmEngineService.unload();
+    });
+
+    it('retains ownership until a timed-out multimodal release settles and requires explicit chat retry', async () => {
+        jest.useFakeTimers();
+        try {
+            await llmEngineService.load(mockModel.id);
+            let finishProjectorRelease!: () => void;
+            const releaseMultimodal = jest.fn(() => new Promise<void>(resolve => { finishProjectorRelease = resolve; }));
+            const release = jest.fn().mockResolvedValue(undefined);
+            const context = (llmEngineService as any).context;
+            context.releaseMultimodal = releaseMultimodal;
+            context.release = release;
+            (llmEngineService as any).activeMultimodalContext = { modelId: mockModel.id, projectorId: 'projector' };
+            (initLlama as jest.Mock).mockClear();
+            const pending = llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true);
+            const rejected = expect(pending).rejects.toMatchObject({ code: 'engine_recovery_required' });
+            await waitForMockCall(releaseMultimodal);
+            await jest.advanceTimersByTimeAsync(10_000);
+            await rejected;
+            expect(initLlama).not.toHaveBeenCalled();
+            expect(releaseAllLlama).not.toHaveBeenCalled();
+            expect(release).not.toHaveBeenCalled();
+            expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+            finishProjectorRelease();
+            await waitForMockCall(release);
+            for (let i = 0; i < 30; i += 1) await Promise.resolve();
+            expect(release).toHaveBeenCalledTimes(1);
+            expect(() => llmEngineService.assertModelResourcesIdle()).not.toThrow();
+            expect(llmEngineService.getState().auxiliaryRestoreError).toBeDefined();
+            await llmEngineService.load(mockModel.id);
+            expect(llmEngineService.getState().auxiliaryRestoreError).toBeUndefined();
+            await llmEngineService.unload();
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
+    it('does not initialize B if release of idle A fails', async () => {
+        await llmEngineService.load(mockModel.id);
+        (initLlama as jest.Mock).mockClear();
+        (releaseAllLlama as jest.Mock).mockRejectedValueOnce(new Error('release failed'));
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true)).rejects.toMatchObject({ code: 'engine_recovery_required' });
+        expect(initLlama).not.toHaveBeenCalled();
+        expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+    });
+
+    it('excludes auxiliary loads and file deletion throughout autotune gaps then resumes after lease release', async () => {
+        const release = llmEngineService.reserveAutotuneContext();
+        expect(() => llmEngineService.reserveAutotuneContext()).toThrow();
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true)).rejects.toMatchObject({ code: 'engine_busy' });
+        expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+        expect(initLlama).not.toHaveBeenCalled();
+        release();
+        release();
+        await expect(llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), async () => true)).resolves.toBe(true);
+    });
+
+    it('invalidates B on memory pressure during native init and releases late success without restoring A', async () => {
+        await llmEngineService.load(mockModel.id);
+        let resolveInit!: (context: any) => void;
+        (initLlama as jest.Mock).mockClear().mockImplementation(() => new Promise(resolve => { resolveInit = resolve; }));
+        const operation = jest.fn(async () => true);
+        const pending = llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), operation);
+        const rejected = expect(pending).rejects.toMatchObject({ code: 'engine_busy' });
+        await waitForMockCall(initLlama as jest.Mock);
+        const release = jest.fn().mockResolvedValue(undefined);
+        // @ts-ignore - native warning entry point used by existing low-memory tests.
+        hardwareListenerService.updateStatus({ isLowMemory: true });
+        expect(release).not.toHaveBeenCalled();
+        resolveInit({ ...createMockContext(), release });
+        await rejected;
+        expect(operation).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(initLlama).toHaveBeenCalledTimes(1);
+        expect(llmEngineService.getState().activeModelId).toBeUndefined();
+    });
+
+    it('does not release B under an unsettled native check and only cleans up after the raw operation settles', async () => {
+        jest.useFakeTimers();
+        try {
+            let resolveNative!: (value: boolean) => void;
+            const operation = jest.fn(() => new Promise<boolean>(resolve => { resolveNative = resolve; }));
+            const release = jest.fn().mockResolvedValue(undefined);
+            (initLlama as jest.Mock).mockResolvedValue({ ...createMockContext(), release });
+            const pending = llmEngineService.runWithAuxiliaryContext(auxiliaryRequest(), operation);
+            const rejected = expect(pending).rejects.toMatchObject({ code: 'engine_recovery_required' });
+            await waitForMockCall(operation);
+            await jest.advanceTimersByTimeAsync(30_000);
+            await rejected;
+            expect(release).not.toHaveBeenCalled();
+            expect(() => llmEngineService.assertModelResourcesIdle()).toThrow();
+            resolveNative(true);
+            await waitForMockCall(release);
+            for (let i = 0; i < 20; i += 1) await Promise.resolve();
+            expect(release).toHaveBeenCalledTimes(1);
+            expect(() => llmEngineService.assertModelResourcesIdle()).not.toThrow();
+        } finally {
+            jest.useRealTimers();
+        }
     });
 
     it('loads a model even when total-memory resolution fails', async () => {

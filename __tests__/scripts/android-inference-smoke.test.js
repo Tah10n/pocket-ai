@@ -1,6 +1,7 @@
 const {
   buildScenarios, selectScenarios, configureScenarioBuildEnvironment,
   validateScenarioExecutionOptions, validateInferenceSmokeEvidence, waitForInferenceSmokeEvidence,
+  sanitizeInferenceSmokeEvidence,
 } = require('../../scripts/android-scenarios');
 
 const fixture = () => ({
@@ -26,6 +27,17 @@ describe('explicit Android native inference smoke', () => {
   });
   it('accepts a complete real-generation lifecycle record', () => {
     expect(validateInferenceSmokeEvidence(fixture()).status).toBe('passed');
+  });
+  it('retains partial native counts but excludes content and paths from failure evidence', () => {
+    const value = fixture();
+    value.status = 'failed'; value.phase = 'unload'; value.failureCode = 'unload_incomplete';
+    value.prompt = 'private prompt'; value.steps[2].text = 'private response';
+    value.steps[2].modelPath = '/private/model'; value.steps = value.steps.slice(0, 6);
+    const safe = sanitizeInferenceSmokeEvidence(value);
+    expect(safe).toMatchObject({ status: 'failed', phase: 'unload', failureCode: 'unload_incomplete' });
+    expect(safe.steps[2].tokensPredicted).toBe(2);
+    expect(JSON.stringify(safe)).not.toContain('private');
+    expect(sanitizeInferenceSmokeEvidence({ ...value, failureCode: 'private_prompt' }).failureCode).toBeUndefined();
   });
   it.each([null, {}, { ...fixture(), steps: [] }, { ...fixture(), requiresForceStop: true }])(
     'rejects missing or incomplete evidence', (value) => {

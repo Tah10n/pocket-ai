@@ -3051,6 +3051,7 @@ function buildScenarios() {
       description: "Run real CPU generation, cancellation, chat isolation, and model reload.",
       run: async (ctx) => {
         const adbPath = resolveAdbPath();
+        fs.rmSync(path.join(artifactsRoot, "inference-lifecycle-evidence.json"), { force: true });
         try {
           await goToHome(ctx);
           await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, {
@@ -3067,7 +3068,12 @@ function buildScenarios() {
               createUiSnapshot(adbPath, ctx.serial), "chat-qa-inference-smoke-evidence"
             );
             if (!node) return null;
-            try { return JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            let observed;
+            try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safeEvidence = sanitizeInferenceSmokeEvidence(observed);
+            fs.writeFileSync(path.join(artifactsRoot, "inference-lifecycle-evidence.json"),
+              `${JSON.stringify(safeEvidence, null, 2)}\n`);
+            return safeEvidence;
           });
           return { details };
         } catch (error) {
@@ -5384,9 +5390,38 @@ function requireBranchFixtureState(state, step) {
   }
 }
 
+const INFERENCE_SMOKE_STEP_IDS = ["backend_discovery", "cpu_load", "generate", "stop_after_token",
+  "generate_after_stop", "new_chat_isolation", "unload", "cpu_reload", "generate_after_reload"];
+const INFERENCE_SMOKE_FAILURE_CODES = new Set(["actual_backend", "backend_discovery_unavailable",
+  "chat_model_identity", "completion_failed", "completion_not_drained", "engine_busy", "model_identity",
+  "new_chat_blocked", "new_chat_history", "new_chat_identity", "no_real_generation", "no_real_tokens",
+  "operation_failed", "runtime_policy", "stop_not_during_generation", "timeout", "unload_incomplete",
+  "verified_model_missing"]);
+
+function sanitizeInferenceSmokeEvidence(evidence) {
+  const numericFields = ["callbacks", "outputCharacters", "tokensPredicted", "tokensEvaluated",
+    "inputMessages", "loadedGpuLayers", "discoveredDeviceCount"];
+  return {
+    schemaVersion: evidence?.schemaVersion === 1 ? 1 : null,
+    status: ["idle", "running", "passed", "failed"].includes(evidence?.status) ? evidence.status : "unknown",
+    phase: [...INFERENCE_SMOKE_STEP_IDS, "idle", "preconditions", "complete"].includes(evidence?.phase)
+      ? evidence.phase : "unknown",
+    requiresForceStop: typeof evidence?.requiresForceStop === "boolean" ? evidence.requiresForceStop : null,
+    ...(INFERENCE_SMOKE_FAILURE_CODES.has(evidence?.failureCode)
+      ? { failureCode: evidence.failureCode } : {}),
+    steps: Array.isArray(evidence?.steps) ? evidence.steps.map((step) => ({
+      id: INFERENCE_SMOKE_STEP_IDS.includes(step?.id) ? step.id : "unknown",
+      status: step?.status === "passed" ? "passed" : "unknown",
+      ...Object.fromEntries(numericFields.filter((field) => Number.isSafeInteger(step?.[field]))
+        .map((field) => [field, step[field]])),
+      ...(["cpu", "gpu", "npu", "unknown"].includes(step?.backendMode) ? { backendMode: step.backendMode } : {}),
+      ...(typeof step?.actualGpuAccelerated === "boolean" ? { actualGpuAccelerated: step.actualGpuAccelerated } : {}),
+    })) : [],
+  };
+}
+
 function validateInferenceSmokeEvidence(evidence) {
-  const ids = ["backend_discovery", "cpu_load", "generate", "stop_after_token",
-    "generate_after_stop", "new_chat_isolation", "unload", "cpu_reload", "generate_after_reload"];
+  const ids = INFERENCE_SMOKE_STEP_IDS;
   if (evidence?.schemaVersion !== 1 || evidence.status !== "passed"
     || evidence.requiresForceStop !== false || evidence.phase !== "complete"
     || !Array.isArray(evidence.steps) || evidence.steps.length !== ids.length) {
@@ -10918,6 +10953,7 @@ function sleepSync(ms) {
 }
 
 module.exports = {
+  sanitizeInferenceSmokeEvidence,
   validateInferenceSmokeEvidence,
   waitForInferenceSmokeEvidence,
   BRANCH_REGENERATION_SCENARIOS,

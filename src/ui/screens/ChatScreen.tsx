@@ -2752,6 +2752,12 @@ const ChatScreenContent = () => {
     }, [activeThreadId]);
 
     useEffect(() => {
+        // The explicit QA smoke owns unload/reload until process restart, including
+        // a failed native timeout. Auto-loading here would race its lifecycle proof.
+        if (isAndroidQaDocumentModelBootstrapEnabled()
+            && getAndroidQaInferenceSmokeEvidence().status !== 'idle') {
+            return;
+        }
         if (
             !isScreenFocused
             || !activeThreadId

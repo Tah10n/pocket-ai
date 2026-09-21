@@ -347,7 +347,25 @@ export type EngineBackendInitAttempt = {
   reasonNoGPU?: string;
 };
 
+/** Method shape only: does not prove native bindings, model support, resources, or device validation. */
+export interface LlamaRuntimeDiagnostics {
+  packageVersion: string;
+  moduleLoadState: 'not_loaded' | 'loaded' | 'load_failed' | 'unavailable_on_web';
+  buildInfoSource: 'js_package';
+  buildInfo?: { number?: string; commit?: string };
+  nativeBinaryVersion: 'unverified';
+  moduleApiShape: {
+    status: 'not_checked' | 'available' | 'missing_methods';
+    missingMethods: string[];
+  };
+  activeContextApiShape: {
+    status: 'no_active_context' | 'available' | 'missing_methods';
+    missingMethods: string[];
+  };
+}
+
 export interface EngineDiagnostics {
+  runtime?: LlamaRuntimeDiagnostics;
   backendMode: EngineBackendMode;
   backendDevices: string[];
   backendDeviceCount?: number;

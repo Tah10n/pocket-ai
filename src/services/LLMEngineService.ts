@@ -6,6 +6,7 @@ import type {
 import DeviceInfo from 'react-native-device-info';
 import { Platform } from 'react-native';
 import appPackageJson from '../../package.json';
+import { getLlamaRuntimeDiagnostics } from './llamaRnModule';
 import { hardwareListenerService } from './HardwareListenerService';
 import { exactPromptTokenCache } from './ExactPromptTokenCache';
 import {
@@ -5042,7 +5043,7 @@ class LLMEngineService {
   }
 
   private buildDiagnosticsSnapshot(): NonNullable<EngineState['diagnostics']> {
-    return buildEngineDiagnosticsSnapshot({
+    const diagnostics = buildEngineDiagnosticsSnapshot({
       activeBackendMode: this.activeBackendMode,
       activeBackendDevices: this.activeBackendDevices,
       activeBackendReasonNoGpu: this.activeBackendReasonNoGpu,
@@ -5076,6 +5077,7 @@ class LLMEngineService {
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
       activePromptStateCachePolicy: this.activePromptStateCachePolicy,
     });
+    return { ...diagnostics, runtime: getLlamaRuntimeDiagnostics(this.context) };
   }
 
   private recordRecentMultimodalDiagnostics({

@@ -167,6 +167,7 @@ an ordered, destructive recovery matrix:
 npm run android:scenarios:runtime -- --fail-on-skip
 npm run android:scenarios:attachments -- --fail-on-skip
 npm run android:scenarios:native
+node scripts/android-scenarios.js --emulator --pack inference --isolated-qa-install --fail-on-skip
 npm run android:scenarios:documents
 npm run android:scenarios:branch-regeneration -- --fail-on-skip
 ```
@@ -176,6 +177,10 @@ side-by-side `.qa` application ID, preserves the installed user app, verifies Gl
 Chat, Models, and Settings in light and dark modes, and exercises foreground-service behavior
 with notification permission granted, denied, and the background-actions channel blocked.
 It restores the isolated package's original theme, notification permission, and channel state.
+
+The explicit inference pack uses a verified public model to check CPU generation, stop/retry,
+fresh-chat isolation, and unload/reload with real native token counters. See
+[runtime device validation](docs/runtime-hardening-device-validation.md#explicit-android-cpu-lifecycle-smoke).
 
 The document pack uses checked-in synthetic fixtures, requires a loaded local model, and
 verifies exact source/build/install provenance. See

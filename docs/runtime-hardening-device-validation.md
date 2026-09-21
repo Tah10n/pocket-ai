@@ -250,6 +250,22 @@ valid only when correctness is unchanged and model artifact, backend, sampling p
 context size, prompt, device state, and build are comparable. Report “no measurable
 conclusion” when the available data cannot support one.
 
+## Explicit Android CPU lifecycle smoke
+
+Run `node scripts/android-scenarios.js --emulator --pack inference --isolated-qa-install --fail-on-skip`
+to build and launch a provenance-checked QA Release APK and exercise the real engine and native
+runtime. This pack provisions only the existing commit-pinned, SHA-256-verified public SmolLM2
+135M Q8 fixture. It never provisions models in a production build. The fixed QA action performs
+backend discovery, CPU load, generation, stop after a token, another generation, fresh-chat
+isolation, unload/reload, and a final generation. Successful requests require callbacks, output,
+and positive native evaluation/prediction counters; exact response wording is not asserted.
+
+Each native operation has a 120-second deadline and cancellation has a 15-second drain deadline.
+A failure ends the scenario and force-stops only its isolated QA package; no new context starts
+after an uncertain native timeout. Results contain counts and lifecycle states, not prompt or
+response text. Unit tests validate failure handling but do not establish native execution.
+The `native` and `runtime` packs remain distinct UI/build checks and do not replace this smoke.
+
 ## Result template
 
 | Field | Result |

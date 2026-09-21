@@ -2769,7 +2769,6 @@ class LLMEngineService {
       new Set(
         stops
           .filter((stop): stop is string => typeof stop === 'string')
-          .map((stop) => stop.trim())
           .filter((stop) => stop.length > 0),
       ),
     );
@@ -2812,7 +2811,6 @@ class LLMEngineService {
           ...(shouldIncludeFallbackStops ? FALLBACK_STOP_WORDS : []),
           ...templateStops,
         ]
-          .map((stop) => stop.trim())
           .filter((stop) => stop.length > 0),
       ),
     );

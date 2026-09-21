@@ -86,6 +86,12 @@ function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
 
+function readFormattedStrings(value: unknown): string[] | undefined {
+  // Keep tolerant formatter metadata handling without changing valid strings.
+  // A bad entry must not discard the remaining template-specific stop tokens.
+  return Array.isArray(value) ? value.filter(isString) : undefined;
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -332,8 +338,8 @@ export function normalizeFormattedChatResult(value: unknown): LlamaFormattedChat
   }
 
   const type = readTrimmedString(record.type) ?? null;
-  const mediaPaths = readContractArray(record.media_paths, isString, 'media_paths');
-  const additionalStops = readContractArray(record.additional_stops, isString, 'additional_stops') ?? [];
+  const mediaPaths = readFormattedStrings(record.media_paths);
+  const additionalStops = readFormattedStrings(record.additional_stops) ?? [];
   const chatFormat = readFiniteNumber(record.chat_format);
   const grammar = readString(record.grammar);
   const grammarLazy = readBoolean(record.grammar_lazy);
@@ -342,7 +348,7 @@ export function normalizeFormattedChatResult(value: unknown): LlamaFormattedChat
   const thinkingForcedOpen = readBoolean(record.thinking_forced_open);
   const thinkingStartTag = readString(record.thinking_start_tag);
   const thinkingEndTag = readString(record.thinking_end_tag);
-  const preservedTokens = readContractArray(record.preserved_tokens, isString, 'preserved_tokens');
+  const preservedTokens = readFormattedStrings(record.preserved_tokens);
   const chatParser = readString(record.chat_parser);
 
   return {

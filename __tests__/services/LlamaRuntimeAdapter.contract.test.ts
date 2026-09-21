@@ -67,7 +67,8 @@ describe('installed llama.rn result contracts', () => {
 
   it('preserves every formatted field, including whitespace and empty stop sequences', () => {
     expect(normalizeFormattedChatResult(formatFixture)).toEqual(formatFixture);
-    expect(() => normalizeFormattedChatResult({ prompt: '', additional_stops: [1] })).toThrow('additional_stops');
+    expect(normalizeFormattedChatResult({ prompt: '', additional_stops: [1, ' stop ', ''] }).additional_stops)
+      .toEqual([' stop ', '']);
   });
 
   it('preserves final telemetry and nontext arrays without allocating copies', () => {

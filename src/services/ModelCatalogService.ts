@@ -4705,6 +4705,10 @@ export class ModelCatalogService {
     return normalizePersistedModelMetadata({
       ...remoteModel,
       ...localDownloadStatePatch,
+      roleEvidence: mergeModelRoleEvidence(remoteModel.roleEvidence, localModel.roleEvidence),
+      // Native receipts belong to the current registry record, never a catalog
+      // snapshot. The normalizer below retains only the final exact file identity.
+      roleValidation: localModel.roleValidation,
       size: resolvedSize,
       hfRevision: remoteModel.hfRevision ?? localModel.hfRevision,
       resolvedFileName: remoteModel.resolvedFileName ?? localModel.resolvedFileName,

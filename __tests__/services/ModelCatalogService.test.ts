@@ -17,6 +17,7 @@ import { CATALOG_SEARCH_VARIANT_LIMIT } from '../../src/services/ModelCatalogFil
 import { ModelCatalogCacheStore } from '../../src/services/ModelCatalogCacheStore';
 import { createStorage } from '../../src/services/storage';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
+import { getModelFileIdentity } from '../../src/utils/modelRoles';
 
 jest.mock('../../src/services/HardwareListenerService', () => ({
   hardwareListenerService: {
@@ -219,6 +220,53 @@ describe('ModelCatalogService', () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (DeviceInfo.getFreeDiskStorage as jest.Mock).mockResolvedValue(50 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+  });
+
+  it.each((['load', 'embedding'] as const).flatMap((operation) => (
+    (['unchanged', 'sha256', 'revision'] as const).map((change) => ({ operation, change }))
+  )))('restores $operation native receipts through cached/details registry refresh ($change)', async ({ operation, change }) => {
+    const id = `org/resource-receipt-${operation}-${change}`;
+    const fileName = 'model.Q8_0.gguf';
+    const revision = 'revision-a';
+    const size = 25_008_064;
+    let persisted: ModelMetadata = {
+      ...makeLocalModel(id), size, hfRevision: revision, resolvedFileName: fileName,
+      downloadUrl: `https://huggingface.co/${id}/resolve/${revision}/${fileName}`,
+      sha256: TREE_SHA256, metadataTrust: 'trusted_remote',
+      roleEvidence: [{ role: 'embedding', source: 'manual', confidence: 'inferred' }],
+    };
+    const receipt = { role: 'embedding' as const, fileIdentity: getModelFileIdentity(persisted),
+      runtimeVersion: '0.13.0-rc.3', checkedAt: 1234, operation, status: 'passed' as const };
+    persisted.roleValidation = [receipt];
+    mockedRegistry.getModel.mockImplementation((modelId) => modelId === id ? persisted : undefined);
+    mockedRegistry.updateModel.mockImplementation((updated) => { persisted = updated; });
+    const cache = new ModelCatalogCacheStore();
+    cache.putModelSnapshots([{ ...persisted, roleEvidence: undefined }], 'anon');
+    expect(cache.getModelSnapshot(id, 'anon', Number.POSITIVE_INFINITY)?.roleValidation).toBeUndefined();
+    const service = new ModelCatalogService();
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => String(input).endsWith('/README.md')
+      ? { ok: false, status: 404, text: async () => '' }
+      : { ok: true, json: async () => ({ id, sha: change === 'revision' ? 'revision-b' : revision,
+        pipeline_tag: 'feature-extraction', siblings: [{ rfilename: fileName, size,
+          lfs: { sha256: change === 'sha256' ? OTHER_TREE_SHA256 : TREE_SHA256 } }] }) }) as jest.Mock;
+    try {
+      const cached = service.getCachedModel(id);
+      expect(cached?.roleValidation).toEqual([receipt]);
+      expect(cached?.roleEvidence).toEqual(persisted.roleEvidence);
+      const detailed = await service.getModelDetails(id);
+      expect(mockedRegistry.updateModel).toHaveBeenCalled();
+      const expectedReceipt = change === 'unchanged' ? [receipt] : undefined;
+      expect(detailed.roleValidation).toEqual(expectedReceipt);
+      expect(persisted.roleValidation).toEqual(expectedReceipt);
+      expect(persisted.roleEvidence).toContainEqual({ role: 'embedding', source: 'manual', confidence: 'inferred' });
+      expect(service.getCachedModel(id)?.roleValidation).toEqual(expectedReceipt);
+      // Reopening details must neither drop a valid receipt nor resurrect an old one.
+      expect((await service.getModelDetails(id)).roleValidation).toEqual(expectedReceipt);
+      expect(persisted.roleValidation).toEqual(expectedReceipt);
+    } finally {
+      service.dispose();
+      mockedRegistry.updateModel.mockReset();
+    }
   });
 
   it('preserves an installed Gemma MTP drafter across a compatible catalog refresh', () => {

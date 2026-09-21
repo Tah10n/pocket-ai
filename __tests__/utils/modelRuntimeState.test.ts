@@ -1,4 +1,5 @@
 import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
+import { getModelFileIdentity } from '../../src/utils/modelRoles';
 import {
   LifecycleStatus,
   ModelAccessState,
@@ -63,6 +64,26 @@ function makeMtpDraft(overrides: Partial<ModelArtifactMetadata> = {}): ModelArti
 }
 
 describe('modelRuntimeState', () => {
+  it.each((['load', 'embedding'] as const).flatMap((operation) => (
+    (['route', 'queue', 'both'] as const).map((source) => ({ operation, source }))
+  )))('does not resurrect a cleared $operation receipt from stale $source state for the same file identity', ({ operation, source }) => {
+    const current = makeModel({ size: 1024, resolvedFileName: 'model.gguf', localPath: 'model.gguf',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, downloadProgress: 1 });
+    // A fresh download from a mutable URL may have the same size and no expected
+    // hash. Only the current registry knows that these bytes have not been checked.
+    const stale = { ...current, roleValidation: [{ role: 'embedding' as const, operation,
+      fileIdentity: getModelFileIdentity(current), runtimeVersion: '0.13.0-rc.3', checkedAt: 1234,
+      status: 'passed' as const }] };
+    const route = source === 'queue' ? current : stale;
+    const queuedItem = source === 'route' ? undefined : stale;
+    const beforeDownload = mergeModelWithRuntimeState(route, { localModel: stale, queuedItem });
+    expect(beforeDownload.roleValidation).toBeDefined();
+    const afterDownload = mergeModelWithRuntimeState(route, { localModel: current, queuedItem });
+    expect(afterDownload.localPath).toBe(current.localPath);
+    expect(getModelFileIdentity(afterDownload)).toBe(getModelFileIdentity(stale));
+    expect(afterDownload.roleValidation).toBeUndefined();
+  });
+
   it('preserves incoming runtime fields when no local model is present', () => {
     const merged = mergeModelWithRuntimeState(
       makeModel({

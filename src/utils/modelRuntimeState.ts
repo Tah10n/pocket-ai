@@ -513,11 +513,9 @@ function mergeModelWithRuntimeStateUncached(
   mergedModel.roleEvidence = mergeModelRoleEvidence(
     mergedModel.roleEvidence, localModel?.roleEvidence, queuedItem?.roleEvidence,
   );
-  mergedModel.roleValidation = normalizeModelRoleValidation([
-    ...(localModel?.roleValidation ?? []),
-    ...(queuedItem?.roleValidation ?? []),
-    ...(mergedModel.roleValidation ?? []),
-  ], mergedModel);
+  // Checks are committed to the registry. Its absence of a receipt is also
+  // authoritative: stale route/queue snapshots must not revalidate fresh bytes.
+  mergedModel.roleValidation = normalizeModelRoleValidation(localModel?.roleValidation, mergedModel);
   return mergedModel;
 }
 

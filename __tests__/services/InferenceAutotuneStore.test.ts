@@ -35,6 +35,19 @@ function clearAutotuneStorage() {
   mockStorage.clearAll();
 }
 
+it('does not promote autotune evidence from a different allocation profile', () => {
+  const selection = { modelId: 'allocation-test', contextSize: 1024, kvCacheType: 'f16' };
+  const result = { ...selection, createdAtMs: Date.now(), candidates: [],
+    bestStable: { backendMode: 'cpu' as const, nGpuLayers: 0 } };
+  writeAutotuneResult(result);
+  expect(readAutotuneResult({ ...selection, allocationIdentity: 'advanced' })).toBeNull();
+  expect(readAutotuneResult(selection)).not.toBeNull();
+  writeAutotuneResult({ ...result, allocationIdentity: 'advanced' });
+  expect(readAutotuneResult({ ...selection, allocationIdentity: 'advanced' })?.allocationIdentity).toBe('advanced');
+  expect(readAutotuneResult(selection)).toBeNull();
+  expect(readBestStableAutotuneProfile({ ...selection, allocationIdentity: 'advanced' })?.backendMode).toBe('cpu');
+});
+
 function createMockStorage() {
   const values = new Map<string, unknown>();
 

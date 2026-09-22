@@ -10,7 +10,8 @@ import {
   getThreadInferenceWindow,
   resolveThreadInferenceWindowOptions,
 } from '../utils/inferenceWindow';
-import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
+import { applyAdvancedReasoningConfig, resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
+import { freezeGenerationParameters, generationFormattingIdentity } from '../utils/generationControls';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { AppError } from '../services/AppError';
 import {
@@ -144,11 +145,11 @@ export function useTruncationTracking(
   let activeThreadResponseReserveTokens: number | undefined;
   if (activeThread && activeThreadModelId) {
     const capability = resolveModelReasoningCapability(activeThreadModel, activeThreadModelId, activeThreadModel?.name);
-    const runtimeConfig = resolveReasoningRuntimeConfig({
+    const runtimeConfig = applyAdvancedReasoningConfig(resolveReasoningRuntimeConfig({
       reasoningEffort: activeThread.paramsSnapshot.reasoningEffort,
       capability,
       maxTokens: activeThread.paramsSnapshot.maxTokens,
-    });
+    }), activeThread.paramsSnapshot, activeThread.paramsSnapshot.maxTokens);
     activeThreadReasoningEnabled = runtimeConfig.enableThinking;
     activeThreadReasoningFormat = runtimeConfig.reasoningFormat;
     activeThreadResponseReserveTokens = runtimeConfig.responseReserveTokens;
@@ -180,6 +181,7 @@ export function useTruncationTracking(
         promptContextIdentity,
         readinessIdentity,
         modelRegistryRevision,
+        generationFormattingIdentity(activeThread.paramsSnapshot),
       ])
     : null;
   currentAccurateIdentityRef.current = accurateIdentity;
@@ -267,6 +269,7 @@ export function useTruncationTracking(
       enable_thinking: input.reasoningEnabled,
       reasoning_format: input.reasoningFormat,
     };
+    const generation = freezeGenerationParameters(input.thread.paramsSnapshot);
 
     const throwIfCancelled = () => {
       if (isCancelled || currentAccurateIdentityRef.current !== cacheKey) {
@@ -292,11 +295,13 @@ export function useTruncationTracking(
         enableThinking: tokenCountParams.enable_thinking,
         reasoningFormat: tokenCountParams.reasoning_format,
         allowMediaFallback: true,
+        formattingIdentity: generationFormattingIdentity(generation),
       });
       const lookup = exactPromptTokenCache.getOrCreate(promptTokenCacheKey, () => {
         throwIfCancelled();
         return llmEngineService.countPromptTokens({
           messages: sanitizedMessages,
+          generation,
           params: tokenCountParams,
           multimodalReadiness: input.multimodalReadiness,
           expectedModelId: input.modelId,

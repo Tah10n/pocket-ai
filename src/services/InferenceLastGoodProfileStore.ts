@@ -27,6 +27,7 @@ export function getCurrentNativeModuleVersion(): string {
 export type LastGoodBackendMode = 'cpu' | 'gpu' | 'npu';
 
 export type LastGoodInferenceProfile = {
+  allocationIdentity?: string;
   schemaVersion?: number;
   createdAtMs: number;
   modelId: string;
@@ -58,6 +59,7 @@ export type ModelInitFailureBoundSpeculativeIdentity = {
 };
 
 export type ModelInitFailureBoundIdentity = {
+  allocationIdentity?: string;
   modelId: string;
   modelFileSizeBytes?: number | null;
   modelSha256?: string | null;
@@ -206,9 +208,11 @@ export function buildLastGoodInferenceProfileIdentity(
     | 'stateCacheBudgetMb'
     | 'stateCacheMaxCheckpoints'
     | 'stateCachePolicyVersion'
+    | 'allocationIdentity'
   >,
 ): string {
   return JSON.stringify({
+    ...(profile.allocationIdentity !== undefined ? { allocationIdentity: profile.allocationIdentity } : {}),
     modelId: normalizeIdentityText(profile.modelId),
     contextSize: normalizeIdentityInteger(profile.contextSize, 1),
     kvCacheType: normalizeIdentityText(profile.kvCacheType, 'auto').toLowerCase(),
@@ -267,6 +271,7 @@ function buildModelInitFailureBoundIdentityKey(identity: ModelInitFailureBoundId
       nativeRuntimeBuild: normalizeIdentityText(identity.nativeRuntimeBuild, 'unknown'),
     },
     profile: {
+      ...(identity.allocationIdentity !== undefined ? { allocationIdentity: identity.allocationIdentity } : {}),
       backendMode: identity.backendMode,
       devices: normalizeIdentityStringList(identity.devices, true),
       contextSize: normalizeIdentityInteger(identity.contextSize, 1),
@@ -371,6 +376,7 @@ function pruneModelInitFailureBounds(nowMs: number): void {
 }
 
 export function readLastGoodInferenceProfile({
+  allocationIdentity,
   modelId,
   contextSize,
   kvCacheType,
@@ -379,6 +385,7 @@ export function readLastGoodInferenceProfile({
   expectedNativeModuleVersion = getCurrentNativeModuleVersion(),
   maxAgeMs = DEFAULT_LAST_GOOD_PROFILE_MAX_AGE_MS,
 }: {
+  allocationIdentity?: string;
   modelId: string;
   contextSize: number;
   kvCacheType: string;
@@ -410,6 +417,7 @@ export function readLastGoodInferenceProfile({
     if (typeof parsed.modelId !== 'string' || parsed.modelId.trim() !== modelId.trim()) {
       return clearAndReturnNull();
     }
+    if (parsed.allocationIdentity !== allocationIdentity) return null;
     if (parsed.backendMode !== 'cpu' && parsed.backendMode !== 'gpu' && parsed.backendMode !== 'npu') {
       return clearAndReturnNull();
     }
@@ -470,6 +478,7 @@ export function readLastGoodInferenceProfile({
       ? normalizeIdentityInteger(parsed.stateCachePolicyVersion)
       : 0;
     const normalizedProfile: LastGoodInferenceProfile = {
+      ...(allocationIdentity !== undefined ? { allocationIdentity } : {}),
       schemaVersion: isCurrentSchema ? LAST_GOOD_PROFILE_SCHEMA_VERSION : 1,
       createdAtMs: typeof parsed.createdAtMs === 'number' && Number.isFinite(parsed.createdAtMs)
         ? parsed.createdAtMs
@@ -534,6 +543,7 @@ export function writeLastGoodInferenceProfile(profile: LastGoodInferenceProfile)
   const devices = normalizedBackendMode === 'npu' ? sanitizeDevices(profile.devices) : undefined;
 
   const persistableWithoutIdentity: LastGoodInferenceProfile = {
+    ...(profile.allocationIdentity !== undefined ? { allocationIdentity: profile.allocationIdentity } : {}),
     schemaVersion: LAST_GOOD_PROFILE_SCHEMA_VERSION,
     createdAtMs: typeof profile.createdAtMs === 'number' && Number.isFinite(profile.createdAtMs)
       ? profile.createdAtMs

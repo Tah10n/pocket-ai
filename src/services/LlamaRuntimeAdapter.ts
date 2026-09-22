@@ -16,6 +16,7 @@ import type { LlmChatMessage } from '../types/chat';
 import { hasEquivalentLlmTextContentPart } from '../utils/llmMessageText';
 import { requireLlamaModule, type LlamaModule } from './llamaRnModule';
 import { applyPromptStateCacheSafetyGate } from './PromptStateCachePolicy';
+import type { StructuredOutputValidation } from '../utils/structuredOutput';
 
 export type LlamaChatFormatOptions = NonNullable<Parameters<LlamaContext['getFormattedChat']>[2]>;
 export type LlamaContextInitParams = ContextParams;
@@ -38,6 +39,8 @@ export type LlamaCompletionResult = Partial<Omit<
   stopped_limit?: NativeCompletionResult['stopped_limit'] | boolean;
   requestId?: number;
   timings?: Partial<NativeCompletionResult['timings']>;
+  structuredOutput?: StructuredOutputValidation;
+  probabilitiesSummary?: { requested: number; retainedTokens: number; totalTokens: number; truncated: boolean };
 };
 export type LlamaMultimodalInitOptions = {
   context: LlamaContext;

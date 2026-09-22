@@ -181,7 +181,9 @@ It restores the isolated package's original theme, notification permission, and 
 The explicit inference pack uses verified public models to check CPU generation, stop/retry,
 fresh-chat isolation, and unload/reload with real native token counters. It then prepares a
 pinned MiniLM embedding model through the download manager, checks it through the production
-resource owner, restores the chat model, and generates another response. See
+resource owner, restores the chat model, and generates another response. It then removes
+the unused embedding fixture, verifies that the chat context and history were retained,
+and generates again without reloading the chat model. See
 [model resource acceptance](docs/llama-rn-013-stage2-acceptance.md) and
 [runtime device validation](docs/runtime-hardening-device-validation.md#explicit-android-cpu-lifecycle-smoke).
 

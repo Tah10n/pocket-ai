@@ -6,6 +6,10 @@ import type {
 import type { InferenceCompletionTelemetry } from './models';
 import type { ChatAttachment, ChatDocumentAttachmentDraft, ChatMediaAttachmentDraft } from './attachments';
 import { normalizeReasoningEffort, type ReasoningEffort } from './reasoning';
+import { sanitizeAdvancedGenerationParameters, type AdvancedGenerationParameters } from '../utils/generationControls';
+import type { StructuredOutputValidation } from '../utils/structuredOutput';
+import { sanitizeLoraProfileAdapters, type LoraProfileAdapter } from '../utils/advancedLoadProfile';
+import type { ModelLoadParameters } from '../services/SettingsStore';
 
 export type ChatMessageRole = 'system' | 'user' | 'assistant';
 export type ChatMessageState = 'complete' | 'streaming' | 'stopped' | 'error';
@@ -14,7 +18,7 @@ export type ChatThreadStatus = 'idle' | 'generating' | 'stopped' | 'error';
 
 export const DOCUMENT_ATTACHMENT_MESSAGE_PLACEHOLDER = '[Document attachment]';
 
-export interface GenerationParamsSnapshot {
+export interface GenerationParamsSnapshot extends AdvancedGenerationParameters {
   temperature: number;
   topP: number;
   topK?: number;
@@ -47,6 +51,9 @@ export interface ChatMessage {
   state: ChatMessageState;
   tokensPerSec?: number;
   inferenceMetrics?: InferenceCompletionTelemetry;
+  generationSnapshot?: GenerationParamsSnapshot;
+  loadProfileSnapshot?: ModelLoadParameters;
+  structuredOutput?: StructuredOutputValidation;
   errorCode?: string;
   errorMessage?: string;
   regeneratesMessageId?: string;
@@ -67,6 +74,7 @@ export interface ChatThread {
   presetId: string | null;
   presetSnapshot: PresetSnapshot;
   paramsSnapshot: GenerationParamsSnapshot;
+  loraSnapshot?: LoraProfileAdapter[];
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
@@ -121,6 +129,7 @@ export type LlmContentPart =
 
 export interface LlmChatCompletionOptions {
   messages: LlmChatMessage[];
+  generation?: AdvancedGenerationParameters;
   /**
    * Model identity that must still own the native context when completion
    * starts. Chat callers pass the thread model so the service can enforce the
@@ -228,14 +237,14 @@ export function toConversationIndexItem(thread: ChatThread): ConversationIndexIt
     if (isModelSwitchMessage(message)) {
       continue;
     }
-    if (getVisibleMessageContent(message.role, message.content).trim().length > 0) {
+    if (getVisibleMessageContent(message.role, message.content, message.structuredOutput?.mode).trim().length > 0) {
       lastMessage = message;
       break;
     }
   }
 
   const lastMessagePreview = lastMessage
-    ? getVisibleMessageContent(lastMessage.role, lastMessage.content)
+    ? getVisibleMessageContent(lastMessage.role, lastMessage.content, lastMessage.structuredOutput?.mode)
     : undefined;
 
   return {
@@ -360,11 +369,13 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     ...thread,
     modelId: baseModelId,
     activeModelId,
+    loraSnapshot: sanitizeLoraProfileAdapters(thread.loraSnapshot),
     presetSnapshot: thread.presetSnapshot ?? {
       ...DEFAULT_PRESET_SNAPSHOT,
       id: thread.presetId ?? null,
     },
     paramsSnapshot: {
+      ...sanitizeAdvancedGenerationParameters(thread.paramsSnapshot),
       temperature: thread.paramsSnapshot.temperature,
       topP: thread.paramsSnapshot.topP,
       topK: thread.paramsSnapshot.topK ?? 40,

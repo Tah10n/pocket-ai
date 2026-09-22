@@ -46,6 +46,8 @@ export interface MemoryFitResult {
 }
 
 export interface CalibrationKey {
+  /** Canonical allocation/ordered adapter identity; absent only for legacy profiles. */
+  allocationIdentity?: string;
   deviceModel: string;
   osMajor: string;
   architecture: string;
@@ -78,6 +80,8 @@ export interface CalibrationRecord {
 }
 
 export interface EstimatorInput {
+  /** Verified resident adapter bytes. Null means selected resources have unknown size. */
+  loraSizeBytes?: number | null;
   modelSizeBytes: number | null;
   verifiedFileSizeBytes?: number;
   multimodalSizeBytes?: number;

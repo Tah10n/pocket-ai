@@ -48,6 +48,20 @@ describe('PresetManager', () => {
         expect(all.some(p => p.id === preset.id)).toBe(true);
     });
 
+    it('persists isolated generation settings and can remove them without changing legacy presets', () => {
+        const generation = { ...getGenerationParametersForModel(null), nProbs: 0, stop: [],
+            template: { jinja: false, prefillText: '  prefix ' }, output: { mode: 'json_object' as const } };
+        const saved = presetManager.addPreset('Structured', 'Be precise.', generation);
+        const read = presetManager.getPreset(saved.id)!;
+        expect(read.generationParameters).toEqual(generation);
+        read.generationParameters!.template!.prefillText = 'changed';
+        expect(presetManager.getPreset(saved.id)!.generationParameters!.template!.prefillText).toBe('  prefix ');
+        presetManager.updatePreset(saved.id, { name: 'Renamed' });
+        expect(presetManager.getPreset(saved.id)!.generationParameters).toEqual(generation);
+        presetManager.updatePreset(saved.id, { generationParameters: undefined });
+        expect(presetManager.getPreset(saved.id)!.generationParameters).toBeUndefined();
+    });
+
     it('allows deleting default seeded presets', () => {
         presetManager.deletePreset('code-expert');
         expect(presetManager.getPreset('code-expert')).toBeUndefined();

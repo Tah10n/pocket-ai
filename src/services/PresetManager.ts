@@ -1,5 +1,6 @@
 import type { MMKV } from 'react-native-mmkv';
 import { assertPrivateStorageWritable, createStorage } from './storage';
+import { sanitizeGenerationParameters, type GenerationParameters } from './SettingsStore';
 
 let storageInstance: MMKV | null = null;
 
@@ -23,6 +24,7 @@ export interface SystemPromptPreset {
     name: string;
     systemPrompt: string;
     isBuiltIn: boolean;
+    generationParameters?: GenerationParameters;
 }
 
 const PRESETS_KEY = 'system_prompt_presets';
@@ -107,7 +109,8 @@ const STARTER_PRESETS: SystemPromptPreset[] = [
 ];
 
 function clonePreset(preset: SystemPromptPreset): SystemPromptPreset {
-    return { ...preset };
+    return { ...preset, ...(preset.generationParameters
+        ? { generationParameters: sanitizeGenerationParameters(preset.generationParameters) } : {}) };
 }
 
 function clonePresets(presets: SystemPromptPreset[]): SystemPromptPreset[] {
@@ -220,6 +223,8 @@ function sanitizePresetArray(rawPresets: unknown[]): { presets: SystemPromptPres
             name,
             systemPrompt,
             isBuiltIn: false,
+            ...(isRecord(rawPreset.generationParameters)
+                ? { generationParameters: sanitizeGenerationParameters(rawPreset.generationParameters) } : {}),
         };
 
         if (
@@ -322,7 +327,7 @@ class PresetManager {
         return this.getPresets().find(p => p.id === id);
     }
 
-    addPreset(name: string, systemPrompt: string): SystemPromptPreset {
+    addPreset(name: string, systemPrompt: string, generationParameters?: GenerationParameters): SystemPromptPreset {
         const presets = this.getPresets();
         const existingIds = new Set(presets.map((preset) => preset.id));
         const normalizedName = normalizePresetText(name, MAX_PRESET_NAME_LENGTH);
@@ -336,18 +341,23 @@ class PresetManager {
             name: normalizedName,
             systemPrompt: normalizedSystemPrompt,
             isBuiltIn: false,
+            ...(generationParameters ? { generationParameters: sanitizeGenerationParameters(generationParameters) } : {}),
         };
         presets.push(preset);
         this.savePresets(presets);
         return preset;
     }
 
-    updatePreset(id: string, updates: Partial<Pick<SystemPromptPreset, 'name' | 'systemPrompt'>>) {
+    updatePreset(id: string, updates: Partial<Pick<SystemPromptPreset, 'name' | 'systemPrompt' | 'generationParameters'>>) {
         const presets = this.getPresets();
         const index = presets.findIndex(p => p.id === id);
         if (index === -1) throw new Error(`Preset ${id} not found`);
 
-        const normalizedUpdates: Partial<Pick<SystemPromptPreset, 'name' | 'systemPrompt'>> = {};
+        const normalizedUpdates: Partial<Pick<SystemPromptPreset, 'name' | 'systemPrompt' | 'generationParameters'>> = {};
+        if (Object.prototype.hasOwnProperty.call(updates, 'generationParameters')) {
+            normalizedUpdates.generationParameters = updates.generationParameters
+                ? sanitizeGenerationParameters(updates.generationParameters) : undefined;
+        }
         if (Object.prototype.hasOwnProperty.call(updates, 'name')) {
             const normalizedName = normalizePresetText(updates.name, MAX_PRESET_NAME_LENGTH);
             if (!normalizedName) {

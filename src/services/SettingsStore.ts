@@ -5,6 +5,8 @@ import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from '../design-system/them
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
 import type { ModelRole } from '../types/modelRoles';
+import { ADVANCED_GENERATION_KEYS, sanitizeAdvancedGenerationParameters, type AdvancedGenerationParameters } from '../utils/generationControls';
+import { sanitizeAdvancedLoadParameters, type AdvancedLoadParameters } from '../utils/advancedLoadProfile';
 
 export type AuxiliaryModelRole = Exclude<ModelRole, 'chat'>;
 export type AuxiliaryModelBinding = { modelId: string; fileIdentity: string };
@@ -60,7 +62,7 @@ export const storage: SettingsStorageFacade = {
     getAllKeys: () => getSettingsStorage().getAllKeys(),
 };
 
-export interface GenerationParameters {
+export interface GenerationParameters extends AdvancedGenerationParameters {
     temperature: number;
     topP: number;
     topK: number;
@@ -74,7 +76,7 @@ export interface GenerationParameters {
 export type BackendPolicy = 'auto' | 'cpu' | 'gpu' | 'npu';
 export type FlashAttentionPolicy = 'auto' | 'on' | 'off';
 
-export interface ModelLoadParameters {
+export interface ModelLoadParameters extends AdvancedLoadParameters {
     contextSize: number;
     gpuLayers: number | null;
     kvCacheType: 'auto' | 'f16' | 'q8_0' | 'q4_0';
@@ -99,7 +101,7 @@ export interface ModelLoadParameters {
 
 export type ModelLoadProfileField = 'contextSize' | 'gpuLayers' | 'kvCacheType' | 'backendPolicy';
 
-export interface AppSettings {
+export interface AppSettings extends AdvancedGenerationParameters {
     temperature: number;
     topP: number;
     topK: number;
@@ -277,7 +279,7 @@ function normalizeChatRetentionDays(value: unknown): number | null {
     return Math.round(normalized);
 }
 
-function sanitizeGenerationParameters(input: Partial<GenerationParameters> | undefined): GenerationParameters {
+export function sanitizeGenerationParameters(input: Partial<GenerationParameters> | undefined): GenerationParameters {
     const rawSeed: unknown = (input as { seed?: unknown } | undefined)?.seed;
     const legacyReasoningEnabled = (input as { reasoningEnabled?: unknown } | undefined)?.reasoningEnabled;
     const seedCandidate = rawSeed == null
@@ -298,6 +300,7 @@ function sanitizeGenerationParameters(input: Partial<GenerationParameters> | und
         })();
 
     return {
+        ...sanitizeAdvancedGenerationParameters(input),
         temperature: clampNumber(input?.temperature, 0, 2, DEFAULT_GENERATION_PARAMETERS.temperature),
         topP: clampNumber(input?.topP, 0, 1, DEFAULT_GENERATION_PARAMETERS.topP),
         topK: Math.round(clampNumber(input?.topK, 0, 200, DEFAULT_GENERATION_PARAMETERS.topK)),
@@ -325,7 +328,7 @@ function sanitizeModelParamsByModelId(input: unknown): Record<string, Generation
     }, {});
 }
 
-function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undefined): ModelLoadParameters {
+export function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undefined): ModelLoadParameters {
     const rawGpuLayers = input?.gpuLayers;
     const normalizedGpuLayers =
         rawGpuLayers == null
@@ -438,6 +441,7 @@ function sanitizeModelLoadParameters(input: Partial<ModelLoadParameters> | undef
                 : null;
 
     const sanitized: ModelLoadParameters = {
+        ...sanitizeAdvancedLoadParameters(input),
         contextSize: Math.round(clampNumber(
             input?.contextSize,
             512,
@@ -523,6 +527,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
     const generationDefaults = sanitizeGenerationParameters(input);
 
     return {
+        ...sanitizeAdvancedGenerationParameters(generationDefaults),
         temperature: generationDefaults.temperature,
         topP: generationDefaults.topP,
         topK: generationDefaults.topK,
@@ -633,6 +638,7 @@ export function resetSettingsRuntimeForPrivateStorageReset(): AppSettings {
 
 export function resetParameters() {
     return updateSettings({
+        ...Object.fromEntries(ADVANCED_GENERATION_KEYS.map(key => [key, undefined])),
         temperature: DEFAULT_GENERATION_PARAMETERS.temperature,
         topP: DEFAULT_GENERATION_PARAMETERS.topP,
         topK: DEFAULT_GENERATION_PARAMETERS.topK,
@@ -671,7 +677,7 @@ export function updateGenerationParametersForModel(
     });
 
     if (!normalizedModelId) {
-        return updateSettings(nextParams);
+        return updateSettings({ ...Object.fromEntries(ADVANCED_GENERATION_KEYS.map(key => [key, undefined])), ...nextParams });
     }
 
     return updateSettings({
@@ -687,7 +693,7 @@ export function resetGenerationParametersForModel(modelId: string | null | undef
     const currentSettings = getSettings();
 
     if (!normalizedModelId) {
-        return updateSettings(DEFAULT_GENERATION_PARAMETERS);
+        return resetParameters();
     }
 
     const nextModelParamsByModelId = { ...currentSettings.modelParamsByModelId };

@@ -58,6 +58,54 @@ import {
 
 const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
 
+it.each(['json_schema', 'gbnf'] as const)('recovers exact interrupted %s content and its immutable configuration from the progress journal', (mode) => {
+  const thread = buildThread(`structured-progress-${mode}`);
+  const generationSnapshot = { ...thread.paramsSnapshot, nProbs: 0,
+    output: mode === 'gbnf' ? { mode, grammar: 'root ::= "<think>x</think>"' }
+      : { mode, schema: '{"type":"object"}' },
+    template: { now: 1234, prefillText: '' } };
+  const loadProfileSnapshot = { contextSize: 2048, gpuLayers: null, kvCacheType: 'auto' as const, loraAdapters: [] };
+  const progress = buildProgress(thread.id, {
+    messageId: thread.messages[0].id, createdAt: 1,
+    content: mode === 'gbnf' ? '<think>x</think>' : '{"value":"<think>x</think>"',
+    thoughtContent: undefined, generationSnapshot, loadProfileSnapshot,
+    structuredOutput: { mode, status: 'incomplete', error: 'interrupted' },
+  });
+  expect(writeChatStreamingProgressRecord(storage, progress).status).toBe('written');
+  const readback = readChatStreamingProgressRecord(storage, thread.id);
+  expect(readback.ok).toBe(true);
+  if (!readback.ok) { throw new Error('Progress missing'); }
+  const recovered = recoverChatThreadFromStreamingProgress(thread, 1, readback.value, 30);
+  expect(recovered).toMatchObject({ outcome: 'recovered', thread: { status: 'stopped', messages: [
+    { content: progress.content, state: 'stopped', generationSnapshot,
+      loadProfileSnapshot, structuredOutput: { mode, status: 'incomplete', error: 'interrupted' } },
+  ] } });
+  const serialize = jest.spyOn(JSON, 'stringify');
+  try {
+    expect(writeChatStreamingProgressRecord(storage, { ...progress, revision: 4, persistedAt: 21,
+      content: progress.content + ' ' }).status).toBe('written');
+    // Immutable snapshots are stored once in the operation record. Subsequent
+    // flushes compare retained references and serialize only content deltas.
+    expect(serialize.mock.calls.some(([value]) => value === generationSnapshot || value === loadProfileSnapshot
+      || value === progress.structuredOutput || (value && typeof value === 'object' && 'generationSnapshot' in value))).toBe(false);
+  } finally { serialize.mockRestore(); }
+  expect(writeChatStreamingProgressRecord(storage, { ...progress, revision: 4, persistedAt: 21,
+    generationSnapshot: { ...generationSnapshot, nProbs: 1 } })).toEqual({ status: 'stale' });
+});
+
+it('preserves stopped status when sanitizing a response configuration snapshot', () => {
+  const thread = buildThread('stopped-snapshot');
+  thread.status = 'stopped';
+  thread.messages[0] = { ...thread.messages[0], state: 'stopped',
+    generationSnapshot: { ...thread.paramsSnapshot, nProbs: -1 },
+    structuredOutput: { mode: 'json_object', status: 'incomplete', error: 'interrupted' } };
+  const sanitized = sanitizeChatThreadForPersistence(thread);
+  expect(sanitized.status).toBe('stopped');
+  expect(sanitized.messages[0]).toMatchObject({ content: 'Partial response', state: 'stopped',
+    structuredOutput: { mode: 'json_object', status: 'incomplete', error: 'interrupted' } });
+  expect(sanitized.messages[0].generationSnapshot?.nProbs).toBe(0);
+});
+
 function buildThread(id: string): ChatThread {
   return {
     id,

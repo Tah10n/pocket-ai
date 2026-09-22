@@ -1,12 +1,15 @@
 import {
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
   getModelLoadParametersForModel,
+  getGenerationParametersForModel,
   getSettings,
   getSettingsStorage,
   resetSettingsRuntimeForPrivateStorageReset,
   resetSettings,
+  resetGenerationParametersForModel,
   subscribeSettings,
   updateModelLoadParametersForModel,
+  updateGenerationParametersForModel,
   updateSettings,
 } from '../src/services/SettingsStore';
 
@@ -18,6 +21,38 @@ describe('SettingsStore', () => {
 
   it('defaults allowCellularDownloads to false', () => {
     expect(getSettings().allowCellularDownloads).toBe(false);
+  });
+
+  it.each([null, 'test/model'])('clears optional generation fields explicitly for %s without changing unrelated values', (modelId) => {
+    updateGenerationParametersForModel(modelId, { temperature: 0, nProbs: 3, stop: [' END '],
+      template: { jinja: false }, output: { mode: 'json_object' } });
+    updateGenerationParametersForModel(modelId, { nProbs: undefined, stop: undefined, template: undefined, output: undefined });
+    const params = getGenerationParametersForModel(modelId);
+    expect(params.temperature).toBe(0);
+    expect(params.nProbs).toBeUndefined();
+    expect(params.stop).toBeUndefined();
+    expect(params.template).toBeUndefined();
+    expect(params.output).toBeUndefined();
+  });
+
+  it('clears independent cache overrides while preserving the legacy cache and meaningful zero false or empty values', () => {
+    updateModelLoadParametersForModel('test/model', { kvCacheType: 'q8_0', cacheTypeK: 'f32', cacheTypeV: 'f16',
+      ropeFreqScale: 0, noExtraBufts: false, loraAdapters: [] });
+    updateModelLoadParametersForModel('test/model', { cacheTypeK: undefined, cacheTypeV: undefined });
+    expect(getModelLoadParametersForModel('test/model')).toMatchObject({ kvCacheType: 'q8_0',
+      ropeFreqScale: 0, noExtraBufts: false, loraAdapters: [] });
+    expect(getModelLoadParametersForModel('test/model').cacheTypeK).toBeUndefined();
+    expect(getModelLoadParametersForModel('test/model').cacheTypeV).toBeUndefined();
+  });
+
+  it('clears advanced global fields on reset and preserves explicit zero false and empty arrays before reset', () => {
+    updateSettings({ nProbs: 0, stop: [], template: { jinja: false }, output: { mode: 'json_object' } });
+    expect(getSettings()).toMatchObject({ nProbs: 0, stop: [], template: { jinja: false } });
+    resetGenerationParametersForModel(null);
+    expect(getSettings().nProbs).toBeUndefined();
+    expect(getSettings().stop).toBeUndefined();
+    expect(getSettings().template).toBeUndefined();
+    expect(getSettings().output).toBeUndefined();
   });
 
   it('persists allowCellularDownloads changes', () => {

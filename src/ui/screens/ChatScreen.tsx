@@ -97,6 +97,8 @@ import {
     subscribeAndroidQaInferenceSmoke,
 } from '../../services/AndroidQaInferenceSmoke';
 import { isAndroidQaDocumentModelBootstrapEnabled } from '../../services/AndroidQaDocumentModelBootstrap';
+import { isChatModelEligible } from '../../utils/modelRoles';
+import { getAndroidQaModelResourcesEvidence, subscribeAndroidQaModelResources, runAndroidQaModelResources } from '../../services/AndroidQaModelResources';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
 import {
@@ -737,10 +739,14 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     documentDraftCount: number;
     topInset: number;
 }) {
+    const { t } = useTranslation();
     const inferenceEvidence = useSyncExternalStore(
         subscribeAndroidQaInferenceSmoke,
         getAndroidQaInferenceSmokeEvidence,
         getAndroidQaInferenceSmokeEvidence,
+    );
+    const resourceEvidence = useSyncExternalStore(
+        subscribeAndroidQaModelResources, getAndroidQaModelResourcesEvidence, getAndroidQaModelResourcesEvidence,
     );
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
@@ -811,6 +817,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             size="xs"
                             action="secondary"
                             testID="chat-qa-run-inference-smoke"
+                            disabled={resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaInferenceSmoke()}
                         >
                             <ButtonText>QA inference</ButtonText>
@@ -822,6 +829,13 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             accessibilityLabel={JSON.stringify(inferenceEvidence)}
                             style={styles.androidQaEvidenceMarker}
                         />
+                        <Button size="xs" action="secondary" testID="chat-qa-run-model-resources"
+                            disabled={resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            onPress={() => void runAndroidQaModelResources()}>
+                            <ButtonText>{t('resources.qaCheck')}</ButtonText>
+                        </Button>
+                        <View accessible collapsable={false} testID="chat-qa-model-resources-evidence"
+                            accessibilityLabel={JSON.stringify(resourceEvidence)} style={styles.androidQaEvidenceMarker} />
                     </>
                 ) : null}
                 <Button
@@ -1091,6 +1105,7 @@ const ChatScreenContent = () => {
         void modelRegistryRevision;
 
         return registry.getModels()
+            .filter(isChatModelEligible)
             .filter((model) => (
                 model.lifecycleStatus === LifecycleStatus.DOWNLOADED
                 || model.lifecycleStatus === LifecycleStatus.ACTIVE
@@ -2759,6 +2774,9 @@ const ChatScreenContent = () => {
             return;
         }
         if (
+            engineState.auxiliaryOperation
+            || engineState.auxiliaryRestoreError
+            ||
             !isScreenFocused
             || !activeThreadId
             || !currentChatActiveModelId
@@ -2833,6 +2851,8 @@ const ChatScreenContent = () => {
         activeThreadId,
         currentChatActiveModelId,
         engineState.activeModelId,
+        engineState.auxiliaryOperation,
+        engineState.auxiliaryRestoreError,
         engineState.status,
         executeThreadModelLoad,
         isGenerationBusy,

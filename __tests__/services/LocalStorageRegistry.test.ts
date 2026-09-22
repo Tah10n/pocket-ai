@@ -12,6 +12,7 @@ import DeviceInfo from 'react-native-device-info';
 import { getSystemMemorySnapshot } from '../../src/services/SystemMetricsService';
 import { assertPrivateStorageWritable, createStorage } from '../../src/services/storage';
 import { UNKNOWN_PROJECTOR_MEMORY_FIT_FALLBACK_BYTES } from '../../src/utils/modelSize';
+import { getModelFileIdentity, isChatModelEligible } from '../../src/utils/modelRoles';
 
 const mockStorage = {
   getString: jest.fn(),
@@ -156,6 +157,27 @@ describe('LocalStorageRegistry', () => {
     (registry as any).cachedCalibrationRecordsByKey = null;
   });
 
+  it('hydrates role declarations and exact-file native results without aliasing returned records', () => {
+    const subject = createMockModel({
+      roleEvidence: [{ role: 'embedding', source: 'pipeline_tag', confidence: 'declared' }],
+    });
+    subject.roleValidation = [{ role: 'embedding', operation: 'embedding', status: 'passed',
+      runtimeVersion: '0.13.0-rc.3', checkedAt: 10, fileIdentity: getModelFileIdentity(subject) }];
+    mockStorage.getString.mockImplementation((key: string) => {
+      if (key === 'models-registry:index-v1') return JSON.stringify([subject.id]);
+      if (key === 'models-registry:model-v1:test%2Fmodel') return JSON.stringify(subject);
+      return null;
+    });
+    const restored = registry.getModel(subject.id)!;
+    expect(restored.roleValidation).toEqual(subject.roleValidation);
+    expect(isChatModelEligible(restored)).toBe(false);
+    restored.roleEvidence![0].role = 'chat';
+    restored.roleValidation![0].status = 'passed';
+    restored.roleValidation![0].checkedAt = 99;
+    expect(registry.getModel(subject.id)?.roleEvidence).toEqual(subject.roleEvidence);
+    expect(registry.getModel(subject.id)?.roleValidation).toEqual(subject.roleValidation);
+  });
+
   it('should remove model and delete file', async () => {
     const model = createMockModel();
     mockStorage.getString.mockImplementation((key: string) => {
@@ -175,6 +197,19 @@ describe('LocalStorageRegistry', () => {
     expect(FileSystem.deleteAsync).toHaveBeenCalled();
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:model-v1:test%2Fmodel');
     expect(mockStorage.remove).toHaveBeenCalledWith('models-registry:index-v1');
+  });
+
+  it.each([false, true])('removes an optional resource while preserving base and shared ownership (%s)', async (shared) => {
+    const model = createMockModel({ artifacts: [{ id: 'codec', kind: 'tts_codec', requiredFor: [], selected: true,
+      remoteFileName: 'codec.gguf', downloadUrl: 'https://example.com/codec.gguf', sizeBytes: 1000,
+      localPath: shared ? 'model.gguf' : 'codec.gguf', installState: 'installed' }] });
+    mockStorage.getString.mockImplementation((key: string) => key === 'models-registry:index-v1' ? JSON.stringify([model.id])
+      : key === 'models-registry:model-v1:test%2Fmodel' ? JSON.stringify(model) : null);
+    await registry.removeCompanion(model.id, 'codec');
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith('test-dir/models/model.gguf');
+    if (!shared) expect(FileSystem.deleteAsync).toHaveBeenCalledWith('test-dir/models/codec.gguf');
+    expect(registry.getModel(model.id)?.artifacts?.find(item => item.id === 'codec')).toMatchObject({ installState: 'remote', selected: false });
+    expect(registry.getModel(model.id)?.localPath).toBe('model.gguf');
   });
 
   it('removes downloaded projector files with the owning model', async () => {

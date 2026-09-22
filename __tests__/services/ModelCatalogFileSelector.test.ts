@@ -144,13 +144,17 @@ describe('ModelCatalogFileSelector', () => {
     })).toBe(true);
   });
 
-  it('still excludes GGUF catalog summaries with non-vision unsupported tags', () => {
+  it('allows TTS resources in the catalog while still excluding audio classifiers', () => {
     expect(isCatalogSummarySupported({
       id: 'test-org/audio-model',
       tags: ['gguf', 'text-to-audio'],
       siblings: [
         { rfilename: 'model.Q4_K_M.gguf', size: largeFileSize },
       ],
+    })).toBe(true);
+    expect(isCatalogSummarySupported({
+      id: 'test-org/audio-classifier', tags: ['gguf', 'audio-classification'],
+      siblings: [{ rfilename: 'model.gguf', size: largeFileSize }],
     })).toBe(false);
   });
 

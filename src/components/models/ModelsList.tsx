@@ -1199,7 +1199,7 @@ export const ModelsList = ({
             {t('common.errors.modelLoadFailed')}
           </Text>
           <Text colorRole="danger" selectable className="mt-1 text-sm  ">
-            {engineState.lastError}
+            {engineState.auxiliaryRestoreError ? t('resources.errors.restore_failed') : engineState.lastError}
           </Text>
           <Box className="mt-3 flex-row gap-2">
             <Button action="secondary" size="sm" onPress={handleDismissEngineError} className="flex-1">

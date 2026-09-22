@@ -8,6 +8,7 @@ import type {
   VisionCapabilitySource,
 } from './multimodal';
 import type { ModelInputCapabilitySnapshot } from './modelInputCapabilities';
+import type { ModelRoleEvidence, ModelRoleValidation } from './modelRoles';
 
 export enum LifecycleStatus {
   AVAILABLE = 'available',
@@ -130,6 +131,7 @@ export interface ModelCapabilitySnapshot {
 }
 
 export interface ModelVariant {
+  roleEvidence?: ModelRoleEvidence[];
   variantId: string;
   fileName: string;
   quantizationLabel: string;
@@ -184,7 +186,9 @@ export interface ModelFileIntegrityMarker {
 export type ModelArtifactKind =
   | 'main_model'
   | 'multimodal_projector'
-  | 'speculative_draft';
+  | 'speculative_draft'
+  | 'tts_codec'
+  | 'lora_adapter';
 
 export type ModelArtifactRequiredInput = 'text' | 'image' | 'audio';
 
@@ -193,6 +197,7 @@ export type ModelArtifactInstallState =
   | 'queued'
   | 'downloading'
   | 'verifying'
+  | 'paused'
   | 'installed'
   | 'failed'
   | 'missing';
@@ -201,6 +206,9 @@ export interface ModelArtifactMetadata {
   id: string;
   kind: ModelArtifactKind;
   requiredFor: ModelArtifactRequiredInput[];
+  /** Explicit optional-feature selection; never required for text. */
+  selected?: boolean;
+  boundToModelIdentity?: string;
   hfRevision?: string;
   remoteFileName: string;
   downloadUrl: string;
@@ -217,6 +225,8 @@ export interface ModelArtifactMetadata {
 }
 
 export interface ModelMetadata {
+  roleEvidence?: ModelRoleEvidence[];
+  roleValidation?: ModelRoleValidation[];
   id: string;
   name: string;
   author: string;
@@ -410,6 +420,8 @@ export interface EngineDiagnostics {
 }
 
 export interface EngineState {
+  auxiliaryOperation?: boolean;
+  auxiliaryRestoreError?: string;
   status: EngineStatus;
   activeModelId?: string;
   loadProgress: number;

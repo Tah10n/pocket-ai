@@ -95,6 +95,19 @@ export function isProjectorFileName(fileName: string): boolean {
     && PROJECTOR_FILE_NAME_PATTERN.test(normalized);
 }
 
+/** Filename evidence identifies a possible companion, not native compatibility.
+ * Keep merged model names eligible: a LoRA-trained full model is still a model.
+ */
+export function isManagedCompanionFileName(fileName: string): boolean {
+  const normalized = normalizeFileName(fileName);
+  if (!GGUF_EXTENSION_PATTERN.test(normalized)) return false;
+  const stem = normalized.replace(GGUF_EXTENSION_PATTERN, '')
+    .replace(/[._-](?:q\d(?:_[a-z0-9]+)*|iq\d(?:_[a-z0-9]+)*|f16|fp16|bf16|f32)$/iu, '');
+  return /^(?:adapter(?:[-_]model)?|lora(?:[-_]adapter)?|(?:tts[-_]|audio[-_])?codec|vocoder)$/u.test(stem)
+    || /(?:^|[-_.])(?:adapter[-_]model|lora[-_]adapter|codec|vocoder)$/u.test(stem)
+    || /^(?:wavtokenizer|encodec)(?:[-_.]|$)/u.test(stem);
+}
+
 export function resolveModelArtifactRole(fileName: string): ModelArtifactRole {
   return isProjectorFileName(fileName) ? 'projector_companion' : 'primary_chat_model';
 }

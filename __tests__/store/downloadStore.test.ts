@@ -1442,3 +1442,18 @@ describe('downloadStore', () => {
     expect(queuedFileNames).not.toContain('../bad-local-MTP.gguf');
   });
 });
+
+
+describe('managed companion persistence', () => {
+  it.each(['tts_codec', 'lora_adapter'] as const)('retains paused and recovers interrupted %s with resume ownership', kind => {
+    const model = buildQueuedModel('test/managed', LifecycleStatus.DOWNLOADING);
+    model.artifacts = [{ id: 'managed', kind, requiredFor: [], remoteFileName: 'nested/companion.gguf',
+      downloadUrl: 'https://example.com/nested/companion.gguf', sizeBytes: 100, installState: 'downloading',
+      localPath: 'managed.gguf', resumeData: 'resume-token', downloadProgress: 0.5 }];
+    const [restored] = normalizePersistedDownloadQueue([model]);
+    expect(restored.artifacts?.find(item => item.id === 'managed')).toMatchObject({ installState: 'queued', resumeData: 'resume-token', localPath: 'managed.gguf' });
+    const [paused] = normalizePersistedDownloadQueue([{ ...model, lifecycleStatus: LifecycleStatus.PAUSED,
+      artifacts: [{ ...model.artifacts[0], installState: 'paused' }] }]);
+    expect(paused.artifacts?.find(item => item.id === 'managed')?.installState).toBe('paused');
+  });
+});

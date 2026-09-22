@@ -17,7 +17,7 @@ import { registry } from './LocalStorageRegistry';
 import { getModelsDir } from './FileSystemSetup';
 import { AppError, toAppError } from './AppError';
 import { huggingFaceTokenService } from './HuggingFaceTokenService';
-import { isHuggingFaceUrl } from '../utils/huggingFaceUrls';
+import { isHuggingFaceUrl, resolveHuggingFaceResolveIdentity } from '../utils/huggingFaceUrls';
 import {
   getCandidateCompanionArtifactDownloadFileNames,
   getCandidateModelDownloadFileNames,
@@ -35,10 +35,9 @@ import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPriv
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
-import {
+import { getCompanionSourceIdentity, getManagedCompanionArtifacts, isManagedCompanionArtifact, getCompanionBindingIdentity,
   deriveArtifactsFromLegacyModel,
   getProjectorArtifacts,
-  getSpeculativeDraftArtifacts,
 } from '../utils/modelArtifacts';
 import {
   getConfiguredMtpDraftArtifact,
@@ -206,6 +205,9 @@ type ActiveDownloadJob = {
   activeModelArtifactId?: string;
   activeModelArtifact?: ModelArtifactMetadata;
   stopReason: 'pause' | 'cancel' | null;
+  /** Native file reads/hashing cannot be cancelled by dropping queue state. */
+  verificationCount?: number;
+  verificationSettled?: Promise<void>;
   deferredCancelCleanupFileNames?: string[];
 };
 
@@ -416,6 +418,7 @@ const REQUIRED_DOWNLOAD_BUFFER_BYTES = DECIMAL_GIGABYTE; // 1 GB
 
 export class ModelDownloadManager {
   private static instance: ModelDownloadManager | undefined;
+  private static modelFileMutationCount = 0;
   private activeJob: ActiveDownloadJob | null = null;
   private nextJobToken = 0;
   private isProcessing = false;
@@ -453,6 +456,21 @@ export class ModelDownloadManager {
     });
     // Initial check
     void this.processQueue();
+  }
+
+  public static async runWithIdleModelDownloads<T>(operation: () => Promise<T>): Promise<T> {
+    const instance = ModelDownloadManager.instance;
+    if (ModelDownloadManager.modelFileMutationCount > 0 || instance?.activeJob || instance?.isProcessing
+      || (instance?.queueProcessingHoldCount ?? 0) > 0) {
+      throw new AppError('action_failed', 'Model files are in use by another operation. Retry after it finishes.');
+    }
+    ModelDownloadManager.modelFileMutationCount += 1;
+    try {
+      return await operation();
+    } finally {
+      ModelDownloadManager.modelFileMutationCount -= 1;
+      void ModelDownloadManager.instance?.processQueue();
+    }
   }
 
   public static getInstance(): ModelDownloadManager {
@@ -524,6 +542,10 @@ export class ModelDownloadManager {
     model: ModelMetadata,
     downloadOptions?: ModelDownloadRequestOptions,
   ): ModelArtifactMetadata | null {
+    if (downloadOptions?.companionArtifactId) {
+      const artifact = getManagedCompanionArtifacts(model).find(item => item.id === downloadOptions.companionArtifactId);
+      return artifact ? { ...artifact } : null;
+    }
     if (downloadOptions?.includeOptionalMtpDraft === true) {
       const configuredArtifact = getConfiguredMtpDraftArtifact(model);
       return configuredArtifact ? { ...configuredArtifact } : null;
@@ -612,7 +634,7 @@ export class ModelDownloadManager {
         }
       }
 
-      for (const artifact of getSpeculativeDraftArtifacts(model)) {
+      for (const artifact of getManagedCompanionArtifacts(model)) {
         const isExcludedArtifact = options.excludeModelArtifact
           && model.id === options.excludeModelArtifact.ownerModelId
           && artifact.id === options.excludeModelArtifact.id;
@@ -656,7 +678,7 @@ export class ModelDownloadManager {
   ): Partial<ModelMetadata> {
     let didUpdate = false;
     const artifacts = model.artifacts?.map((artifact) => {
-      if (artifact.id !== artifactId || artifact.kind !== 'speculative_draft') {
+      if (artifact.id !== artifactId || !isManagedCompanionArtifact(artifact)) {
         return artifact;
       }
 
@@ -856,6 +878,9 @@ export class ModelDownloadManager {
       size: downloadedSize ?? null,
       metadataTrust,
       downloadIntegrity: strongestDownloadIntegrity,
+      // A mutable source can return different bytes of the same size without a
+      // published digest. Only reuse retains a previous native operation check.
+      roleValidation: preserveExistingVerifiedLocalMetadata ? model.roleValidation : undefined,
       gguf: shouldCarryForwardGgufMetadata && hasPositiveDownloadedSize
         ? {
           ...(ggufMetadata ?? {}),
@@ -1044,11 +1069,27 @@ export class ModelDownloadManager {
   private async stopActiveJobForPrivateStorageReset(options: { clearQueue: boolean }): Promise<void> {
     const job = this.activeJob;
 
+    this.queueProcessingHoldCount += 1;
     this.isProcessing = true;
 
     try {
       if (job) {
         job.stopReason = 'cancel';
+      }
+
+      if ((job?.verificationCount ?? 0) > 0 && job?.verificationSettled) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            job.verificationSettled,
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => reject(new AppError('action_failed',
+                'Model file verification is still running. Retry storage reset after it finishes.')), 10_000);
+            }),
+          ]);
+        } finally {
+          if (timeout !== undefined) clearTimeout(timeout);
+        }
       }
 
       this.nextJobToken += 1;
@@ -1093,6 +1134,7 @@ export class ModelDownloadManager {
         });
       }
     } finally {
+      this.queueProcessingHoldCount = Math.max(0, this.queueProcessingHoldCount - 1);
       if (!job || this.activeJob !== job) {
         this.isProcessing = false;
       }
@@ -1103,7 +1145,7 @@ export class ModelDownloadManager {
    * Check the queue and start next download if idle.
    */
   private async processQueue() {
-    if (this.queueProcessingHoldCount > 0) return;
+    if (ModelDownloadManager.modelFileMutationCount > 0 || this.queueProcessingHoldCount > 0) return;
     if (this.isProcessing) return;
 
     if (!isPrivateStorageWritable()) {
@@ -1347,7 +1389,7 @@ export class ModelDownloadManager {
     const { updateModelInQueue, removeFromQueue, setActiveDownload } = useDownloadStore.getState();
     let resumable: ActiveDownloadJob['resumable'] = null;
     const modelsDir = getModelsDir();
-    const selectedProjector = this.resolveProjectorForDownload(model);
+    const selectedProjector = downloadOptions?.companionArtifactId ? null : this.resolveProjectorForDownload(model);
     const selectedSpeculativeDraft = this.resolveSpeculativeDraftForDownload(model, downloadOptions);
     let reusableModelFile: ReusableModelDownloadFile | null = null;
     let reusableProjectorFile: ReusableProjectorDownloadFile | null = null;
@@ -1443,7 +1485,7 @@ export class ModelDownloadManager {
           throw new AppError('download_size_unknown', 'MODEL_SIZE_UNKNOWN', {
             details: {
               modelId: model.id,
-              artifactKind: 'speculative_draft',
+              artifactKind: selectedSpeculativeDraft?.kind ?? 'speculative_draft',
               artifactId: selectedSpeculativeDraft.id,
             },
           });
@@ -1527,12 +1569,14 @@ export class ModelDownloadManager {
           const reportedArtifactKind = preflightError.details?.artifactKind;
           const failedArtifactKind = reportedArtifactKind === 'projector'
             || reportedArtifactKind === 'speculative_draft'
+            || reportedArtifactKind === 'tts_codec'
+            || reportedArtifactKind === 'lora_adapter'
             ? reportedArtifactKind
             : undefined;
           const failedProjectorId = failedArtifactKind === 'projector'
             ? selectedProjector?.id
             : undefined;
-          const failedSpeculativeDraftId = failedArtifactKind === 'speculative_draft'
+          const failedSpeculativeDraftId = (failedArtifactKind === 'speculative_draft' || failedArtifactKind === 'tts_codec' || failedArtifactKind === 'lora_adapter')
             ? selectedSpeculativeDraft?.id
             : undefined;
           const currentFailedProjector = failedProjectorId
@@ -1540,7 +1584,7 @@ export class ModelDownloadManager {
               .find((projector) => projector.id === failedProjectorId)
             : undefined;
           const currentFailedSpeculativeDraft = failedSpeculativeDraftId
-            ? getSpeculativeDraftArtifacts(currentModel)
+            ? getManagedCompanionArtifacts(currentModel)
               .find((artifact) => artifact.id === failedSpeculativeDraftId)
             : undefined;
           const modelResumeDataForFailure = modelResumeDiskPlanning
@@ -1948,7 +1992,11 @@ export class ModelDownloadManager {
             selectedSpeculativeDraft,
             modelsDir,
             jobToken,
-            await this.buildDownloadOptions(model, selectedSpeculativeDraft.downloadUrl, model.id),
+            await this.buildDownloadOptions(
+              { ...model, accessState: ModelAccessState.AUTH_REQUIRED },
+              selectedSpeculativeDraft.downloadUrl,
+              resolveHuggingFaceResolveIdentity(selectedSpeculativeDraft.downloadUrl)?.repoId ?? model.id,
+            ),
             reusableSpeculativeDraftFile,
             speculativeDraftResumeDiskPlanning,
           );
@@ -1987,7 +2035,7 @@ export class ModelDownloadManager {
           });
           console.warn('[ModelDownloadManager] Speculative draft unavailable; keeping the base model text-ready', {
             modelId: model.id,
-            artifactKind: 'speculative_draft',
+            artifactKind: selectedSpeculativeDraft?.kind ?? 'speculative_draft',
             ...summarizeErrorForLog(draftError),
           });
         }
@@ -1997,7 +2045,7 @@ export class ModelDownloadManager {
       const normalizedProjectorMemoryFitSize = projectorResult
         ? normalizePositiveByteSize(projectorResult.sizeBytes)
         : null;
-      const normalizedSpeculativeDraftMemoryFitSize = speculativeDraftResult
+      const normalizedSpeculativeDraftMemoryFitSize = speculativeDraftResult?.artifact.kind === 'speculative_draft'
         ? normalizePositiveByteSize(speculativeDraftResult.sizeBytes)
         : null;
       const memoryFitInputSize = typeof downloadedSize === 'number'
@@ -2005,10 +2053,10 @@ export class ModelDownloadManager {
           modelSizeBytes: downloadedSize,
           projectorSizeBytes: projectorResult ? normalizedProjectorMemoryFitSize : undefined,
           hasUnknownSizeProjector: projectorResult !== null && normalizedProjectorMemoryFitSize === null,
-          speculativeDraftSizeBytes: speculativeDraftResult
+          speculativeDraftSizeBytes: speculativeDraftResult?.artifact.kind === 'speculative_draft'
             ? normalizedSpeculativeDraftMemoryFitSize
             : undefined,
-          hasUnknownSizeSpeculativeDraft: speculativeDraftResult !== null
+          hasUnknownSizeSpeculativeDraft: speculativeDraftResult?.artifact.kind === 'speculative_draft'
             && normalizedSpeculativeDraftMemoryFitSize === null,
         }) ?? downloadedSize
         : downloadedSize;
@@ -2256,7 +2304,7 @@ export class ModelDownloadManager {
       throw new AppError('download_disk_space_low', 'DISK_SPACE_LOW', {
         details: {
           modelId: model.id,
-          artifactKind: 'speculative_draft',
+          artifactKind: artifact.kind,
           freeSpace,
           requiredBytes,
         },
@@ -2398,7 +2446,7 @@ export class ModelDownloadManager {
               if (!handled) {
                 console.warn('[ModelDownloadManager] Failed to persist speculative draft progress', {
                   modelId: model.id,
-                  artifactKind: 'speculative_draft',
+                  artifactKind: artifact.kind,
                   ...summarizeErrorForLog(error),
                 });
               }
@@ -2422,11 +2470,13 @@ export class ModelDownloadManager {
     artifact: ModelArtifactMetadata,
     modelsDir: string,
   ): Promise<ReusableModelArtifactDownloadFile | null> {
-    if (artifact.installState !== 'installed' || !isValidLocalFileName(artifact.localPath)) {
-      return null;
-    }
+    const sourceIdentity = getCompanionSourceIdentity(artifact);
+    const reusable = artifact.installState === 'installed' && isValidLocalFileName(artifact.localPath) ? artifact
+      : registry.getModels().flatMap(getManagedCompanionArtifacts).find(candidate => candidate.installState === 'installed'
+        && isValidLocalFileName(candidate.localPath) && getCompanionSourceIdentity(candidate) === sourceIdentity);
+    if (!reusable || !isValidLocalFileName(reusable.localPath)) return null;
 
-    const localUri = safeJoinModelPath(modelsDir, artifact.localPath);
+    const localUri = safeJoinModelPath(modelsDir, reusable.localPath);
     if (!localUri) {
       return null;
     }
@@ -2437,7 +2487,7 @@ export class ModelDownloadManager {
     }
 
     return {
-      fileName: artifact.localPath,
+      fileName: reusable.localPath,
       sizeBytes: normalizePositiveByteSize(info.size) ?? normalizePositiveByteSize(artifact.sizeBytes),
     };
   }
@@ -2482,7 +2532,7 @@ export class ModelDownloadManager {
     }
 
     throw new AppError('download_file_missing', 'No safe speculative draft download target is available', {
-      details: { modelId, artifactKind: 'speculative_draft', candidateCount: candidates.length },
+      details: { modelId, artifactKind: artifact.kind, candidateCount: candidates.length },
     });
   }
 
@@ -2518,6 +2568,7 @@ export class ModelDownloadManager {
         const verification = await this.verifyChecksum(verificationTarget, reusableLocalUri, {
           cleanupProtection,
         });
+        if (!this.isCurrentJob(model.id, jobToken) || this.getStopReason(model.id, jobToken)) return null;
         const installedArtifact: ModelArtifactMetadata = {
           ...artifact,
           localPath: reusableArtifactFile.fileName,
@@ -2591,7 +2642,7 @@ export class ModelDownloadManager {
     }
     if (result.status && result.status >= 400) {
       throw new AppError('download_http_error', `Speculative draft download failed with HTTP status ${result.status}`, {
-        details: { modelId: model.id, artifactKind: 'speculative_draft', status: result.status },
+        details: { modelId: model.id, artifactKind: artifact.kind, status: result.status },
       });
     }
 
@@ -2890,6 +2941,17 @@ export class ModelDownloadManager {
     options: VerifyChecksumOptions = {},
   ): Promise<DownloadVerificationResult> {
     const cleanupProtection = options.cleanupProtection ?? { excludeModelId: model.id };
+    const verificationOwnerId = cleanupProtection.excludeProjector?.ownerModelId
+      ?? cleanupProtection.excludeModelArtifact?.ownerModelId ?? model.id;
+    const verificationJob = this.activeJob?.modelId === verificationOwnerId ? this.activeJob : null;
+    let releaseVerification: (() => void) | undefined;
+    if (verificationJob) {
+      verificationJob.verificationCount = (verificationJob.verificationCount ?? 0) + 1;
+      const currentVerification = new Promise<void>((resolve) => { releaseVerification = resolve; });
+      verificationJob.verificationSettled = Promise.all([
+        verificationJob.verificationSettled, currentVerification,
+      ]).then(() => undefined);
+    }
     try {
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       if (!fileInfo.exists) {
@@ -2969,6 +3031,9 @@ export class ModelDownloadManager {
       return { integrity: 'sha256', sha256: actualHash, sizeBytes: downloadedSize };
     } catch (error) {
       throw toSanitizedDownloadAppError(error, 'download_verification_failed');
+    } finally {
+      if (verificationJob) verificationJob.verificationCount = Math.max(0, (verificationJob.verificationCount ?? 1) - 1);
+      releaseVerification?.();
     }
   }
 
@@ -2994,6 +3059,35 @@ export class ModelDownloadManager {
         Authorization: `Bearer ${token}`,
       },
     };
+  }
+
+  /** Explicit preparation also serves as retry/resume; the existing queue owns lifecycle. */
+  public prepareCompanion(model: ModelMetadata, artifactId: string): void {
+    const artifact = getManagedCompanionArtifacts(model).find(item => item.id === artifactId);
+    if (!artifact || (artifact.boundToModelIdentity && artifact.boundToModelIdentity !== getCompanionBindingIdentity(model))) {
+      throw new AppError('action_failed', 'Companion binding does not match this model');
+    }
+    const persistedBase = registry.getModel(model.id);
+    const installedBase = persistedBase && getCompanionBindingIdentity(persistedBase) === getCompanionBindingIdentity(model)
+      ? persistedBase : model;
+    if (!installedBase.localPath || (installedBase.lifecycleStatus !== LifecycleStatus.DOWNLOADED && installedBase.lifecycleStatus !== LifecycleStatus.ACTIVE)) {
+      throw new AppError('action_failed', 'Download the base model before preparing optional resources');
+    }
+    const queued = useDownloadStore.getState().queue.find(item => item.id === model.id);
+    if (queued && [LifecycleStatus.DOWNLOADING, LifecycleStatus.VERIFYING, LifecycleStatus.QUEUED].includes(queued.lifecycleStatus)) {
+      throw new AppError('action_failed', 'A resource download is already in progress');
+    }
+    useDownloadStore.getState().addToQueue(model, { companionArtifactId: artifactId });
+  }
+
+  public async removeCompanion(modelId: string, artifactId: string): Promise<void> {
+    if (this.activeJob?.modelId === modelId || useDownloadStore.getState().queue.some(item => item.id === modelId)) {
+      throw new AppError('action_failed', 'Cancel the resource download before removing it');
+    }
+    await ModelDownloadManager.runWithIdleModelDownloads(() => {
+      const paths = registry.getModelResourcePathsForRemoval(modelId, artifactId);
+      return llmEngineService.runWithIdleModelResources(() => registry.removeCompanion(modelId, artifactId, paths), paths);
+    });
   }
 
   public async pauseDownload(modelId: string) {
@@ -3095,7 +3189,7 @@ export class ModelDownloadManager {
             latestQueuedModel,
             activeModelArtifact?.id ?? activeModelArtifactId,
             {
-              installState: 'queued',
+              installState: activeModelArtifact?.kind === 'speculative_draft' ? 'queued' : 'paused',
               resumeData,
             },
           ));
@@ -3112,6 +3206,7 @@ export class ModelDownloadManager {
   public async cancelDownload(modelId: string) {
     const { queue, removeFromQueue, activeDownloadId, setActiveDownload } = useDownloadStore.getState();
     const queuedModel = queue.find((model) => model.id === modelId);
+    const companionArtifactId = useDownloadStore.getState().downloadOptionsByModelId[modelId]?.companionArtifactId;
     let shouldProcessAfterCleanup = false;
     let shouldDeletePartialFiles = false;
     let safeToDeletePartialFiles = true;
@@ -3130,9 +3225,20 @@ export class ModelDownloadManager {
         : null;
       cancelJob = job;
       cancelActiveArtifact = job?.activeArtifact;
-      const canInvalidateActiveJobImmediately = job !== null && job.resumable === null;
+      const hasPendingVerification = (job?.verificationCount ?? 0) > 0;
+      const canInvalidateActiveJobImmediately = job !== null && job.resumable === null && !hasPendingVerification;
       if (job) {
         job.stopReason = 'cancel';
+        if (hasPendingVerification) {
+          // Keep the file owner until native hashing and any verification cleanup
+          // settle. A retry must not reuse a path still read by this generation.
+          shouldWaitForActiveJobToSettle = true;
+          safeToDeletePartialFiles = false;
+          job.deferredCancelCleanupFileNames = this.getCancelCleanupFileNameCandidates(queuedModel, modelId, {
+            activeArtifact: job.activeArtifact, companionArtifactId,
+          });
+          this.isProcessing = true;
+        }
       }
 
       if (job?.resumable) {
@@ -3185,6 +3291,7 @@ export class ModelDownloadManager {
           await this.deleteDownloadFiles(
             this.getCancelCleanupFileNameCandidates(queuedModel, modelId, {
               activeArtifact: cancelActiveArtifact,
+              companionArtifactId,
             }),
             modelId,
           );
@@ -3216,7 +3323,7 @@ export class ModelDownloadManager {
   private getCancelCleanupFileNameCandidates(
     queuedModel: ModelMetadata | undefined,
     modelId: string,
-    options?: { activeArtifact?: ActiveDownloadJob['activeArtifact'] },
+    options?: { activeArtifact?: ActiveDownloadJob['activeArtifact']; companionArtifactId?: string },
   ): string[] {
     const modelCandidates = queuedModel
       ? this.getDownloadFileNameCandidates(queuedModel)
@@ -3233,7 +3340,7 @@ export class ModelDownloadManager {
     // preference. Otherwise switching MTP off after pausing/canceling a draft
     // could leave its partial file orphaned.
     const configuredSpeculativeDraft = queuedModel
-      ? getConfiguredMtpDraftArtifact(queuedModel) ?? null
+      ? this.resolveSpeculativeDraftForDownload(queuedModel, options?.companionArtifactId ? { companionArtifactId: options.companionArtifactId } : useDownloadStore.getState().downloadOptionsByModelId[modelId]) ?? getConfiguredMtpDraftArtifact(queuedModel) ?? null
       : null;
     const speculativeDraftCandidates = configuredSpeculativeDraft
       ? this.getCompanionArtifactDownloadFileNameCandidates(modelId, configuredSpeculativeDraft)
@@ -3300,7 +3407,7 @@ export class ModelDownloadManager {
               && artifact.id === options.excludeProjector.id
             ))
             .map((artifact) => artifact.localPath),
-          ...getSpeculativeDraftArtifacts(model)
+          ...getManagedCompanionArtifacts(model)
             .filter((artifact) => artifact.installState === 'installed')
             .filter((artifact) => !(
               options.excludeModelArtifact
@@ -3516,4 +3623,9 @@ export async function resetModelDownloadManagerForPrivateStorageReset(): Promise
 
 export async function stopModelDownloadManagerForPrivateStorageBlocked(): Promise<void> {
   await ModelDownloadManager.stopRuntimeForPrivateStorageBlocked();
+}
+
+/** Serializes model-file removal against downloads, including shared companion verification. */
+export function runWithIdleModelDownloads<T>(operation: () => Promise<T>): Promise<T> {
+  return ModelDownloadManager.runWithIdleModelDownloads(operation);
 }

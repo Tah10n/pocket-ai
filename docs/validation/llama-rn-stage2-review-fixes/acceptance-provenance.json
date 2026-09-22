@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-22T09:09:30.507Z",
+  "source": {
+    "commit": "2af4ddb31a2afbce5060560cd3ee1b5c7d1eb12c",
+    "tree": "3fb353a55c6df7f74de08d0702ba0ef387f844a3",
+    "cleanAtBuild": true
+  },
+  "runtime": "llama.rn 0.13.0-rc.3",
+  "apk": {
+    "package": "com.github.tah10n.pocketai.qa",
+    "variant": "release",
+    "versionName": "1.6.3",
+    "versionCode": 22,
+    "bytes": 81849330,
+    "sha256": "79e9cebdaf9537300e45a4ef284947789fb39b6b59d42e05cda71b3a67517c54",
+    "installedSha256": "79e9cebdaf9537300e45a4ef284947789fb39b6b59d42e05cda71b3a67517c54",
+    "embeddedBundle": true
+  },
+  "device": {
+    "model": "sdk_gphone64_x86_64",
+    "abi": "x86_64",
+    "configuredRamMiB": 8192,
+    "backend": "cpu",
+    "gpuLayers": 0
+  },
+  "checks": {
+    "cpuBaseline": "passed",
+    "nativeChatEmbeddingChat": "passed",
+    "embeddingDimensions": 384,
+    "embeddingFinite": true,
+    "unusedModelOffload": "passed",
+    "fileRemoved": true,
+    "chatUnchanged": true,
+    "settingsUnchanged": true,
+    "contextUnchangedAcrossOffloadAndNextAnswer": true,
+    "tokensPredictedAfterOffload": 20,
+    "tokensEvaluatedAfterOffload": 118,
+    "callbacksAfterOffload": 21
+  },
+  "verifyRelease": {
+    "status": "passed",
+    "suites": 221,
+    "tests": 4744
+  }
+}

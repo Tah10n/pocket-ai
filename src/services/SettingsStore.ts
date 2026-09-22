@@ -4,6 +4,26 @@ import { DEFAULT_REASONING_EFFORT, normalizeReasoningEffort, type ReasoningEffor
 import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from '../design-system/themes/registry';
 import { MAX_CONTEXT_WINDOW_TOKENS } from '../utils/contextWindow';
 import { UNKNOWN_MODEL_GPU_LAYERS_CEILING } from '../utils/modelLimits';
+import type { ModelRole } from '../types/modelRoles';
+
+export type AuxiliaryModelRole = Exclude<ModelRole, 'chat'>;
+export type AuxiliaryModelBinding = { modelId: string; fileIdentity: string };
+export type AuxiliaryModelBindings = Partial<Record<AuxiliaryModelRole, AuxiliaryModelBinding>>;
+
+function sanitizeAuxiliaryModels(value: unknown): AuxiliaryModelBindings {
+    const result: AuxiliaryModelBindings = {};
+    if (!value || typeof value !== 'object') return result;
+    for (const role of ['embedding', 'reranker', 'tts'] as const) {
+        const binding = (value as Record<string, unknown>)[role];
+        if (!binding || typeof binding !== 'object') continue;
+        const { modelId, fileIdentity } = binding as Record<string, unknown>;
+        if (typeof modelId === 'string' && modelId.trim() && modelId.length <= 512
+            && typeof fileIdentity === 'string' && fileIdentity.length > 0 && fileIdentity.length <= 4096) {
+            result[role] = { modelId, fileIdentity };
+        }
+    }
+    return result;
+}
 
 export { UNKNOWN_MODEL_GPU_LAYERS_CEILING };
 
@@ -95,6 +115,7 @@ export interface AppSettings {
     showAdvancedInferenceControls?: boolean;
     activePresetId: string | null;
     activeModelId: string | null;
+    auxiliaryModels?: AuxiliaryModelBindings;
     chatRetentionDays: number | null;
     modelParamsByModelId: Record<string, GenerationParameters>;
     modelLoadParamsByModelId: Record<string, ModelLoadParameters>;
@@ -133,6 +154,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     showAdvancedInferenceControls: false,
     activePresetId: null,
     activeModelId: null,
+    auxiliaryModels: {},
     chatRetentionDays: 90,
     modelParamsByModelId: {},
     modelLoadParamsByModelId: {},
@@ -141,6 +163,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 export function getDefaultSettings(): AppSettings {
     return {
         ...DEFAULT_SETTINGS,
+        auxiliaryModels: {},
         modelParamsByModelId: {},
         modelLoadParamsByModelId: {},
     };
@@ -519,6 +542,7 @@ function sanitizeSettings(input: Partial<AppSettings>): AppSettings {
             : DEFAULT_SETTINGS.showAdvancedInferenceControls,
         activePresetId: typeof input.activePresetId === 'string' ? input.activePresetId : null,
         activeModelId: typeof input.activeModelId === 'string' ? input.activeModelId : null,
+        auxiliaryModels: sanitizeAuxiliaryModels(input.auxiliaryModels),
         chatRetentionDays: normalizeChatRetentionDays(input.chatRetentionDays),
         modelParamsByModelId: sanitizeModelParamsByModelId(input.modelParamsByModelId),
         modelLoadParamsByModelId: sanitizeModelLoadParamsByModelId(input.modelLoadParamsByModelId),
@@ -590,6 +614,14 @@ export function resetSettings() {
     const defaults = getDefaultSettings();
     notifySettingsListeners(defaults);
     return defaults;
+}
+
+export function clearAuxiliaryBindingsForModel(modelId: string): void {
+    const auxiliaryModels = { ...getSettings().auxiliaryModels };
+    for (const role of ['embedding', 'reranker', 'tts'] as const) {
+        if (auxiliaryModels[role]?.modelId === modelId) delete auxiliaryModels[role];
+    }
+    updateSettings({ auxiliaryModels });
 }
 
 export function resetSettingsRuntimeForPrivateStorageReset(): AppSettings {

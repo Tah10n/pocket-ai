@@ -6,6 +6,7 @@ import { ScreenBadge, ScreenCard, ScreenIconButton } from './ScreenShell';
 import { Text, composeTextRole } from './text';
 import { ValueSelectorRow } from './ValueSelectorRow';
 import { ModelAccessState, type ModelMetadata } from '../../types/models';
+import { getModelRoleEvidence } from '../../utils/modelRoles';
 import type { ProjectorArtifact } from '../../types/multimodal';
 import {
   getModelAudioCapabilityBadgePresentation,
@@ -135,6 +136,9 @@ const ModelCardComponent = ({
       </Box>
 
       <Box className="mt-2 flex-row flex-wrap gap-1.5">
+        {[...new Set(getModelRoleEvidence(model).map((entry) => entry.role))].map((role) => (
+          <ScreenBadge key={role} tone="neutral" size="micro">{t(`resources.roles.${role}`)}</ScreenBadge>
+        ))}
         {accessBadge ? (
           <ScreenBadge tone={accessBadge.tone} size="micro">
             {accessBadge.text}

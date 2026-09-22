@@ -893,6 +893,20 @@ function sanitizeCatalogModelArtifacts(
   }
 
   for (const artifact of model.artifacts ?? []) {
+    // Explicit resource bindings (including signed source URLs embedded in IDs)
+    // are private registry state, never anonymous catalog-cache metadata.
+    if (artifact.boundToModelIdentity !== undefined || artifact.selected !== undefined) continue;
+    if (artifact.kind === 'tts_codec' || artifact.kind === 'lora_adapter') {
+      const identity = resolveHuggingFaceResolveIdentity(artifact.downloadUrl);
+      if (identity && normalizeHuggingFaceFilePath(artifact.remoteFileName) === identity.filePath
+        && resolveHuggingFaceRevision(artifact.hfRevision) === identity.revision
+        && identity.filePath.toLowerCase().endsWith('.gguf')) {
+        artifacts.push({ id: artifact.id, kind: artifact.kind, requiredFor: [], hfRevision: identity.revision,
+          remoteFileName: identity.filePath, downloadUrl: buildHuggingFaceResolveUrl(identity.repoId, identity.filePath, identity.revision),
+          sizeBytes: artifact.sizeBytes, ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}), installState: 'remote' });
+      }
+      continue;
+    }
     if (artifact.kind === 'speculative_draft') {
       const artifactIdentity = resolveCatalogProjectorArtifactIdentity(artifact);
       const owningRepoId = normalizeHuggingFaceRepoId(model.id);
@@ -1347,6 +1361,7 @@ export function sanitizeCatalogModelRuntimeState(
     // artifact identity cross into anonymous catalog/search persistence.
     thinkingProbeBlocked: undefined,
     downloadedAt: undefined,
+    roleValidation: undefined,
     downloadIntegrity: undefined,
     resumeData: undefined,
     downloadErrorAt: undefined,

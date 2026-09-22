@@ -11,7 +11,8 @@ import {
   remapProjectorIdToEffectiveCandidate,
 } from './modelCapabilities';
 import { applyEffectiveProjectorState } from './effectiveProjectorState';
-import { mergeModelArtifacts } from './modelArtifacts';
+import { isManagedCompanionArtifact, mergeModelArtifacts } from './modelArtifacts';
+import { filterModelRoleEvidenceForFile, hasStaleModelGgufRoleEvidence, mergeModelRoleEvidence, normalizeModelRoleValidation, withoutModelGgufRoleMetadata } from './modelRoles';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
@@ -59,12 +60,12 @@ function mergeSpeculativeDraftRuntimeArtifacts(
   model: Pick<ModelMetadata, 'artifacts'>,
   runtimeModel: Pick<ModelMetadata, 'artifacts'>,
 ): ModelMetadata['artifacts'] {
-  const stableArtifacts = model.artifacts?.filter((artifact) => artifact.kind !== 'speculative_draft') ?? [];
-  const catalogDrafts = model.artifacts?.filter((artifact) => artifact.kind === 'speculative_draft') ?? [];
+  const stableArtifacts = model.artifacts?.filter((artifact) => !isManagedCompanionArtifact(artifact)) ?? [];
+  const catalogDrafts = model.artifacts?.filter((artifact) => isManagedCompanionArtifact(artifact)) ?? [];
   const catalogDraftIds = new Set(catalogDrafts.map((artifact) => artifact.id));
   const runtimeDrafts = runtimeModel.artifacts?.filter((artifact) => (
-    artifact.kind === 'speculative_draft'
-    && (catalogDraftIds.size === 0 || catalogDraftIds.has(artifact.id))
+    isManagedCompanionArtifact(artifact)
+    && (artifact.kind !== 'speculative_draft' || catalogDraftIds.size === 0 || catalogDraftIds.has(artifact.id))
   ));
   const mergedDrafts = mergeModelArtifacts(catalogDrafts, runtimeDrafts, {
     preservePersistedRuntimeState: true,
@@ -509,6 +510,19 @@ function mergeModelWithRuntimeStateUncached(
     }
   }
 
+  // Runtime fallback can fill a missing digest, size or revision after variant
+  // selection. Invalidate raw purpose before discarding its old scope marker,
+  // or role resolution would immediately bind it to that new identity again.
+  if (hasStaleModelGgufRoleEvidence(mergedModel.roleEvidence, mergedModel)) {
+    mergedModel.gguf = withoutModelGgufRoleMetadata(mergedModel.gguf);
+  }
+  mergedModel.roleEvidence = mergeModelRoleEvidence(
+    ...[mergedModel.roleEvidence, localModel?.roleEvidence, queuedItem?.roleEvidence]
+      .map((evidence) => filterModelRoleEvidenceForFile(evidence, mergedModel)),
+  );
+  // Checks are committed to the registry. Its absence of a receipt is also
+  // authoritative: stale route/queue snapshots must not revalidate fresh bytes.
+  mergedModel.roleValidation = normalizeModelRoleValidation(localModel?.roleValidation, mergedModel);
   return mergedModel;
 }
 

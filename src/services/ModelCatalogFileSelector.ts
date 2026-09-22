@@ -7,6 +7,7 @@ import type {
 } from '../types/huggingFace';
 import {
   isProjectorFileName,
+  isManagedCompanionFileName,
 } from '../utils/modelProjectors';
 import {
   buildEmbeddedMtpConfig,
@@ -18,6 +19,9 @@ import { normalizeSha256Digest } from '../utils/sha256';
 export { isProjectorFileName } from '../utils/modelProjectors';
 
 const MIN_GGUF_BYTES = 50 * 1024 * 1024;
+// Small embedding/auxiliary models are valid standalone GGUF resources.
+// Size is only a catalog plausibility filter; downloads validate the container.
+const MIN_RESOURCE_GGUF_BYTES = 1024 * 1024;
 
 // Default catalog policy: prefer balanced mobile-friendly K-quants, then
 // smaller low-bit files, and leave full-precision files as explicit choices.
@@ -87,6 +91,7 @@ const MULTIMODAL_CHAT_PIPELINE_TAGS = new Set([
   'audio-text-to-text',
   'automatic-speech-recognition',
   'video-text-to-text',
+  'text-to-audio',
 ]);
 
 const EXCLUDED_CATALOG_SIGNAL_EXACT_MATCHES = new Set([
@@ -126,12 +131,14 @@ export function isCatalogSummarySupported(item: HuggingFaceModelSummary): boolea
 }
 
 export function isCatalogModelSupported(model: ModelMetadata): boolean {
+  if (model.resolvedFileName && isManagedCompanionFileName(model.resolvedFileName)) return false;
   return !hasUnsupportedCatalogSignals({
     identifiers: [model.id, model.name, model.resolvedFileName, model.activeVariantId],
     tags: model.tags,
     modelTypes: [model.modelType],
     architectures: model.architectures,
     ggufMetadata: model.gguf,
+    allowMultimodalChatPipelineTag: Boolean(model.resolvedFileName?.toLowerCase().endsWith('.gguf')),
   });
 }
 
@@ -404,6 +411,7 @@ export function isSupportedGgufFileName(fileName: string): boolean {
   const normalized = fileName.trim();
   return normalized.toLowerCase().endsWith('.gguf')
     && !isProjectorFileName(normalized)
+    && !isManagedCompanionFileName(normalized)
     && !isMtpDraftCompanionFileName(normalized);
 }
 
@@ -461,7 +469,7 @@ export function isEligibleGgufEntry(
   }
 
   const size = getFileSize(entry);
-  return size === null || size >= MIN_GGUF_BYTES;
+  return size === null || size >= MIN_RESOURCE_GGUF_BYTES;
 }
 
 export function getFileName(entry: HuggingFaceSibling | HuggingFaceTreeEntry): string {

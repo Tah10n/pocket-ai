@@ -4295,3 +4295,17 @@ describe('ModelCatalogCacheStore', () => {
     }
   });
 });
+
+
+it('keeps explicit companion source bindings out of the anonymous catalog cache', () => {
+  const sourceModel = buildModel({ downloadUrl: 'https://huggingface.co/org/model/resolve/main/model.gguf',
+    resolvedFileName: 'model.gguf', size: 1000, lifecycleStatus: LifecycleStatus.DOWNLOADED,
+    artifacts: [{ id: 'tts_codec:https://huggingface.co/private/codecs/resolve/main/codec.gguf?token=private-token',
+      kind: 'tts_codec', requiredFor: [], selected: true, boundToModelIdentity: 'private-binding',
+      downloadUrl: 'https://huggingface.co/private/codecs/resolve/main/codec.gguf?token=private-token',
+      remoteFileName: 'codec.gguf', sizeBytes: 100, installState: 'remote' }] });
+  const cached = sanitizeCatalogModelRuntimeState(sourceModel);
+  expect(cached.artifacts?.some(artifact => artifact.kind === 'tts_codec')).not.toBe(true);
+  expect(JSON.stringify(cached)).not.toContain('private-token');
+  expect(JSON.stringify(cached)).not.toContain('private-binding');
+});

@@ -25,7 +25,7 @@ import {
   mapModelProjectorCandidates,
 } from '../utils/effectiveProjectorState';
 import { normalizeDownloadResumeData } from '../utils/downloadResumeData';
-import { getSpeculativeDraftArtifacts, mergeModelArtifacts } from '../utils/modelArtifacts';
+import { isManagedCompanionArtifact, getManagedCompanionArtifacts, mergeModelArtifacts } from '../utils/modelArtifacts';
 import { createInstrumentedStateStorage } from './persistStateStorage';
 import { assertPrivateStorageWritable } from '../services/storage';
 
@@ -212,11 +212,11 @@ function getEffectiveMultimodalReadiness(
 
 function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata): ModelMetadata {
   const canPreserveResumeState = hasCompatibleQueuedFileIdentity(existing, model);
-  const incomingSpeculativeDrafts = getSpeculativeDraftArtifacts(model);
+  const incomingSpeculativeDrafts = getManagedCompanionArtifacts(model);
   const incomingSpeculativeDraftIds = new Set(incomingSpeculativeDrafts.map((artifact) => artifact.id));
   const existingSpeculativeDrafts = canPreserveResumeState
-    ? getSpeculativeDraftArtifacts(existing).filter((artifact) => (
-        incomingSpeculativeDraftIds.size === 0 || incomingSpeculativeDraftIds.has(artifact.id)
+    ? getManagedCompanionArtifacts(existing).filter((artifact) => (
+        artifact.kind !== 'speculative_draft' || incomingSpeculativeDraftIds.size === 0 || incomingSpeculativeDraftIds.has(artifact.id)
       ))
     : undefined;
   const speculativeDraftArtifacts = canPreserveResumeState
@@ -225,7 +225,7 @@ function buildRetryableQueueEntry(existing: ModelMetadata, model: ModelMetadata)
       })
     : incomingSpeculativeDrafts;
   const stableArtifacts = (model.artifacts ?? existing.artifacts)?.filter((artifact) => (
-    artifact.kind !== 'speculative_draft'
+    !isManagedCompanionArtifact(artifact)
   )) ?? [];
   const artifacts = [...stableArtifacts, ...speculativeDraftArtifacts];
   const incomingActiveVariantIds = getEffectiveActiveVariantKeys(model);
@@ -350,7 +350,7 @@ function getQueuedProjectorFileNames(model: ModelMetadata): string[] {
 }
 
 function getQueuedSpeculativeDraftFileNames(model: ModelMetadata): string[] {
-  return getSpeculativeDraftArtifacts(model).flatMap((artifact) => (
+  return getManagedCompanionArtifacts(model).flatMap((artifact) => (
     getCandidateCompanionArtifactDownloadFileNames(model.id, artifact)
   ));
 }
@@ -358,7 +358,7 @@ function getQueuedSpeculativeDraftFileNames(model: ModelMetadata): string[] {
 function normalizePersistedModelArtifactDownloadState(
   artifact: ModelArtifactMetadata,
 ): ModelArtifactMetadata {
-  if (artifact.kind !== 'speculative_draft') {
+  if (!isManagedCompanionArtifact(artifact)) {
     return artifact;
   }
 
@@ -500,9 +500,9 @@ function normalizeDownloadRequestOptions(value: unknown): ModelDownloadRequestOp
     return undefined;
   }
 
-  return (value as ModelDownloadRequestOptions).includeOptionalMtpDraft === true
-    ? { includeOptionalMtpDraft: true }
-    : undefined;
+  const options = value as ModelDownloadRequestOptions;
+  const companionArtifactId = typeof options.companionArtifactId === 'string' && options.companionArtifactId.trim() ? options.companionArtifactId : undefined;
+  return companionArtifactId ? { companionArtifactId } : options.includeOptionalMtpDraft === true ? { includeOptionalMtpDraft: true } : undefined;
 }
 
 function updateDownloadRequestOptions(

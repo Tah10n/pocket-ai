@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { sanitizeModelResourcesEvidence, waitForModelResourcesEvidence } = require("./lib/model-resources-evidence");
 const { spawnSync } = require("child_process");
 const {
   buildGradleAssembleArgs,
@@ -105,7 +106,7 @@ const SCENARIO_PACK_SCENARIOS = {
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
   documents: DOCUMENT_SCENARIOS,
-  inference: ["runtime-inference-lifecycle"],
+  inference: ["runtime-inference-lifecycle", "runtime-model-resources"],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -3085,6 +3086,40 @@ function buildScenarios() {
       },
     },
     {
+      id: "runtime-model-resources",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Generate with chat A, prepare and check embedding B, restore A, and generate again.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const evidencePath = path.join(artifactsRoot, "model-resources-evidence.json");
+        fs.rmSync(evidencePath, { force: true });
+        try {
+          await goToHome(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const action = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-model-resources", {
+            timeoutMs: 180_000, visibleOnly: true,
+          });
+          if (!action.bounds) throw new Error("Model resource QA action is not tappable.");
+          tapBounds(adbPath, ctx.serial, action.bounds);
+          const details = await waitForModelResourcesEvidence(() => {
+            const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), "chat-qa-model-resources-evidence");
+            if (!node) return null;
+            let observed;
+            try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safeEvidence = sanitizeModelResourcesEvidence(observed);
+            fs.writeFileSync(evidencePath, `${JSON.stringify(safeEvidence, null, 2)}\n`);
+            return safeEvidence;
+          });
+          return { details };
+        } catch (error) {
+          forceStopScenarioApp(adbPath, ctx.serial);
+          throw error;
+        }
+      },
+    },
+    {
       id: "native-glass-theme-matrix",
       tier: "critical",
       requiresCurrentHeadProvenance: true,
@@ -5485,7 +5520,7 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference"].includes(options.pack) || options.scenario === "runtime-inference-lifecycle") {
+    if (["documents", "inference"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
@@ -6770,6 +6805,7 @@ function selectScenarios(scenarios, options) {
       ...DOCUMENT_BENCHMARK_SCENARIOS,
       ...STATE_MUTATING_CATALOG_SCENARIOS,
       "runtime-inference-lifecycle",
+      "runtime-model-resources",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);

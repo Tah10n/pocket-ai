@@ -62,6 +62,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     ensurePersistedCapabilitySnapshot: jest.fn().mockReturnValue(null),
     getState: jest.fn(),
     load: jest.fn().mockResolvedValue(undefined),
+    unload: jest.fn().mockResolvedValue(undefined),
     subscribe: jest.fn().mockReturnValue(jest.fn()),
   },
 }));
@@ -156,7 +157,7 @@ import { useChatStore } from '../../src/store/chatStore';
 import { getQueuedDownloadFileNames, useDownloadStore } from '../../src/store/downloadStore';
 import { useModelsStore } from '../../src/store/modelsStore';
 import * as FileSystem from 'expo-file-system/legacy';
-import { EngineStatus } from '../../src/types/models';
+import { EngineStatus, type EngineState } from '../../src/types/models';
 
 function buildPrivateStorageHealth(
   overrides: Partial<PrivateStorageHealthSnapshot> = {},
@@ -480,6 +481,87 @@ describe('AppBootstrap', () => {
       await Promise.resolve();
 
       expect(llmEngineService.load).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it.each(['unchanged', 'changed', 'already_restored', 'restore_failed'] as const)(
+    'waits for the auxiliary owner and rechecks %s chat selection before startup load', async (selection) => {
+      jest.useFakeTimers();
+      const listeners = new Set<(state: EngineState) => void>();
+      const unsubscribe = jest.fn();
+      let engineState: EngineState = { status: EngineStatus.IDLE, loadProgress: 0, auxiliaryOperation: true };
+      const settings = { language: 'en', activePresetId: null, activeModelId: 'author/model-a',
+        temperature: 0.7, topP: 0.9, maxTokens: 2048, theme: 'system', chatRetentionDays: null };
+      (getSettings as jest.Mock).mockImplementation(() => settings);
+      (registry.getModel as jest.Mock).mockReturnValue({ id: 'author/model-a', localPath: 'model-a.gguf' });
+      (llmEngineService.getState as jest.Mock).mockImplementation(() => engineState);
+      (llmEngineService.subscribe as jest.Mock).mockImplementation((listener: (state: EngineState) => void) => {
+        listeners.add(listener);
+        listener(engineState);
+        return () => { listeners.delete(listener); unsubscribe(); };
+      });
+      try {
+        await bootstrapAppCritical();
+        await jest.advanceTimersByTimeAsync(0);
+        expect(listeners.size).toBe(1);
+        await jest.advanceTimersByTimeAsync(60_000);
+        expect(llmEngineService.load).not.toHaveBeenCalled();
+        expect(llmEngineService.unload).not.toHaveBeenCalled();
+        if (selection === 'changed') settings.activeModelId = 'author/model-c';
+        engineState = selection === 'already_restored'
+          ? { status: EngineStatus.READY, loadProgress: 1, activeModelId: 'author/model-a', auxiliaryOperation: false }
+          : selection === 'restore_failed'
+            ? { status: EngineStatus.ERROR, loadProgress: 0, auxiliaryOperation: false, auxiliaryRestoreError: 'explicit reload required' }
+            : { status: EngineStatus.IDLE, loadProgress: 0, auxiliaryOperation: false };
+        [...listeners].forEach(listener => listener(engineState));
+        await jest.advanceTimersByTimeAsync(0);
+        if (selection === 'unchanged') {
+          expect(llmEngineService.load).toHaveBeenCalledTimes(1);
+          expect(llmEngineService.load).toHaveBeenCalledWith('author/model-a', { preferLastWorkingProfile: true });
+        } else {
+          expect(llmEngineService.load).not.toHaveBeenCalled();
+        }
+        expect(listeners.size).toBe(0);
+        expect(unsubscribe).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(0);
+        expect(updateSettings).not.toHaveBeenCalledWith({ activeModelId: null });
+      } finally {
+        jest.useRealTimers();
+      }
+    },
+  );
+
+  it('abandons timed-out startup restoration without releasing the auxiliary owner or reacting to its late completion', async () => {
+    jest.useFakeTimers();
+    const listeners = new Set<(state: EngineState) => void>();
+    let engineState: EngineState = { status: EngineStatus.IDLE, loadProgress: 0, auxiliaryOperation: true };
+    (getSettings as jest.Mock).mockReturnValue({ language: 'en', activePresetId: null, activeModelId: 'author/model-a',
+      temperature: 0.7, topP: 0.9, maxTokens: 2048, theme: 'system', chatRetentionDays: null });
+    (registry.getModel as jest.Mock).mockReturnValue({ id: 'author/model-a', localPath: 'model-a.gguf' });
+    (llmEngineService.getState as jest.Mock).mockImplementation(() => engineState);
+    const unsubscribe = jest.fn();
+    (llmEngineService.subscribe as jest.Mock).mockImplementation((listener: (state: EngineState) => void) => {
+      listeners.add(listener);
+      listener(engineState);
+      return () => { listeners.delete(listener); unsubscribe(); };
+    });
+    try {
+      await bootstrapAppCritical();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(listeners.size).toBe(1);
+      await jest.advanceTimersByTimeAsync(120_000);
+      expect(llmEngineService.load).not.toHaveBeenCalled();
+      expect(llmEngineService.unload).not.toHaveBeenCalled();
+      expect(engineState.auxiliaryOperation).toBe(true);
+      expect(listeners.size).toBe(0);
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      engineState = { ...engineState, auxiliaryOperation: false };
+      [...listeners].forEach(listener => listener(engineState));
+      await jest.advanceTimersByTimeAsync(0);
+      expect(llmEngineService.load).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
     } finally {
       jest.useRealTimers();
     }

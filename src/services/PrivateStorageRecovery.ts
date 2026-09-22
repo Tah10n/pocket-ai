@@ -11,6 +11,7 @@ import { invalidateAutotuneStorageForPrivateReset } from './InferenceAutotuneSto
 import { registry } from './LocalStorageRegistry';
 import {
   resetModelDownloadManagerForPrivateStorageReset,
+  runWithIdleModelDownloads,
   stopModelDownloadManagerForPrivateStorageBlocked,
 } from './ModelDownloadManager';
 import {
@@ -22,6 +23,7 @@ import { resetDownloadStoreForPrivateStorageReset } from '../store/downloadStore
 import { resetModelsStoreForPrivateStorageReset } from '../store/modelsStore';
 import { chatAttachmentStorageService } from './ChatAttachmentStorageService';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
+import { llmEngineService } from './LLMEngineService';
 
 export function invalidatePrivateStorageRuntimeHandles(): void {
   invalidateAppStorageForPrivateReset();
@@ -41,6 +43,7 @@ export function resetPrivatePersistedRuntimeStateForStorageReset(): void {
 }
 
 export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
+  llmEngineService.invalidateAuxiliaryContextOperation();
   await Promise.all([
     stopModelDownloadManagerForPrivateStorageBlocked(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
@@ -49,40 +52,44 @@ export async function stopPrivateRuntimeWorkForStorageBlocked(): Promise<void> {
 }
 
 export async function resetPrivateAppStorageAndRuntimeStateAfterConfirmation(): Promise<PrivateStorageHealthSnapshot> {
+  llmEngineService.invalidateAuxiliaryContextOperation();
   await Promise.all([
     resetModelDownloadManagerForPrivateStorageReset(),
     stopActiveChatGenerationForPrivateStorageBlocked(),
   ]);
   await documentSessionContextCache.clearAll();
-  await registry.preserveExistingModelFilesForPrivateStorageReset();
-  invalidatePrivateStorageRuntimeHandles();
+  await llmEngineService.unload();
+  return runWithIdleModelDownloads(() => llmEngineService.runWithIdleModelResources(async () => {
+    await registry.preserveExistingModelFilesForPrivateStorageReset();
+    invalidatePrivateStorageRuntimeHandles();
 
-  const storageHealth = await resetPrivateAppStorageAfterConfirmation();
+    const storageHealth = await resetPrivateAppStorageAfterConfirmation();
 
-  if (storageHealth.status !== 'blocked') {
-    let attachmentCleanupFailed = false;
-    try {
-      await chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset();
-    } catch (error) {
-      console.warn('[PrivateStorageRecovery] Failed to clean chat attachments during private storage reset', {
-        pathCategory: 'chat_attachment',
-        context: 'private_storage_reset_attachment_cleanup',
-        ...(error instanceof Error
-          ? { errorName: error.name || 'Error' }
-          : { errorType: typeof error }),
-      });
+    if (storageHealth.status !== 'blocked') {
+      let attachmentCleanupFailed = false;
+      try {
+        await chatAttachmentStorageService.deleteAllAttachmentFilesForPrivateStorageReset();
+      } catch (error) {
+        console.warn('[PrivateStorageRecovery] Failed to clean chat attachments during private storage reset', {
+          pathCategory: 'chat_attachment',
+          context: 'private_storage_reset_attachment_cleanup',
+          ...(error instanceof Error
+            ? { errorName: error.name || 'Error' }
+            : { errorType: typeof error }),
+        });
 
-      attachmentCleanupFailed = true;
-    } finally {
-      resetPrivatePersistedRuntimeStateForStorageReset();
-      invalidatePrivateStorageRuntimeHandles();
-      registry.invalidatePrivateStorageRuntimeState();
+        attachmentCleanupFailed = true;
+      } finally {
+        resetPrivatePersistedRuntimeStateForStorageReset();
+        invalidatePrivateStorageRuntimeHandles();
+        registry.invalidatePrivateStorageRuntimeState();
+      }
+
+      if (attachmentCleanupFailed) {
+        return blockPrivateStorageAfterResetFailure();
+      }
     }
 
-    if (attachmentCleanupFailed) {
-      return blockPrivateStorageAfterResetFailure();
-    }
-  }
-
-  return storageHealth;
+    return storageHealth;
+  }));
 }

@@ -63,6 +63,8 @@ type StableModelArtifactMetadata = Pick<
   | 'id'
   | 'kind'
   | 'requiredFor'
+  | 'selected'
+  | 'boundToModelIdentity'
   | 'hfRevision'
   | 'remoteFileName'
   | 'downloadUrl'
@@ -103,6 +105,7 @@ function normalizeArtifactInstallState(value: unknown): ModelArtifactInstallStat
     || value === 'queued'
     || value === 'downloading'
     || value === 'verifying'
+    || value === 'paused'
     || value === 'installed'
     || value === 'failed'
     || value === 'missing'
@@ -433,6 +436,8 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
     const kind: ModelArtifactMetadata['kind'] | undefined = record.kind === 'main_model'
       || record.kind === 'multimodal_projector'
       || record.kind === 'speculative_draft'
+      || record.kind === 'tts_codec'
+      || record.kind === 'lora_adapter'
       ? record.kind
       : undefined;
     const remoteFileName = normalizeOptionalString(record.remoteFileName);
@@ -445,7 +450,7 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
       || !remoteFileName
       || !downloadUrl
       || !installState
-      || requiredFor.length === 0
+      || (requiredFor.length === 0 && kind !== 'tts_codec' && kind !== 'lora_adapter' && kind !== 'speculative_draft')
       || (kind !== 'multimodal_projector' && seen.has(id))
     ) {
       return [];
@@ -461,7 +466,9 @@ export function normalizePersistedModelArtifacts(value: unknown): ModelArtifactM
     const artifact: ModelArtifactMetadata = {
       id,
       kind,
-      requiredFor,
+      requiredFor: kind === 'tts_codec' || kind === 'lora_adapter' ? [] : requiredFor,
+      ...(typeof record.selected === 'boolean' ? { selected: record.selected } : {}),
+      ...(normalizeOptionalString(record.boundToModelIdentity) ? { boundToModelIdentity: normalizeOptionalString(record.boundToModelIdentity) } : {}),
       ...(normalizeOptionalString(record.hfRevision) ? { hfRevision: normalizeOptionalString(record.hfRevision) } : {}),
       remoteFileName,
       downloadUrl,
@@ -538,6 +545,8 @@ function getStableArtifactMetadata(artifact: ModelArtifactMetadata): StableModel
     id: artifact.id,
     kind: artifact.kind,
     requiredFor: artifact.requiredFor,
+    selected: artifact.selected,
+    boundToModelIdentity: artifact.boundToModelIdentity,
     ...(artifact.hfRevision !== undefined ? { hfRevision: artifact.hfRevision } : {}),
     remoteFileName: artifact.remoteFileName,
     downloadUrl: artifact.downloadUrl,
@@ -552,7 +561,7 @@ function normalizeArtifactFileIdentity(artifact: ModelArtifactMetadata): string 
   }
 
   const normalizedPath = artifact.remoteFileName.trim().replace(/\\/gu, '/');
-  return (normalizedPath.split('/').filter(Boolean).pop() ?? normalizedPath).trim().toLowerCase();
+  return normalizedPath;
 }
 
 function normalizeArtifactRevision(value: string | undefined): string {
@@ -809,4 +818,77 @@ export function syncLegacyMainArtifactFields(model: ModelMetadata): ModelMetadat
     resumeData: mainArtifact.resumeData,
     downloadProgress: mainArtifact.downloadProgress ?? model.downloadProgress,
   };
+}
+
+/** Generic companion ownership excludes projectors, which retain their existing pipeline. */
+export function isManagedCompanionArtifact(artifact: Pick<ModelArtifactMetadata, 'kind'>): boolean {
+  return artifact.kind === 'speculative_draft' || artifact.kind === 'tts_codec' || artifact.kind === 'lora_adapter';
+}
+export function getManagedCompanionArtifacts(model: Pick<ModelMetadata, 'artifacts'>): ModelArtifactMetadata[] {
+  return model.artifacts?.filter(isManagedCompanionArtifact) ?? [];
+}
+export function getCompanionBindingIdentity(model: Pick<ModelMetadata, 'id' | 'downloadUrl' | 'hfRevision' | 'resolvedFileName' | 'sha256'>): string {
+  return JSON.stringify([model.id, model.downloadUrl, model.hfRevision ?? 'main', model.resolvedFileName ?? '', model.sha256 ?? '']);
+}
+export function getSelectedManagedCompanions(model: ModelMetadata): ModelArtifactMetadata[] {
+  const identity = getCompanionBindingIdentity(model);
+  return getManagedCompanionArtifacts(model).filter(artifact => artifact.selected === true && artifact.boundToModelIdentity === identity);
+}
+export function bindManagedCompanion(model: ModelMetadata, input: {
+  kind: 'tts_codec' | 'lora_adapter' | 'speculative_draft';
+  downloadUrl: string; sizeBytes?: number | null; sha256?: string;
+}): ModelMetadata {
+  const url = new URL(input.downloadUrl.trim());
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+    throw new Error('Companion must use an HTTPS GGUF URL without credentials or fragment');
+  }
+  const identity = resolveHuggingFaceResolveIdentity(url.toString());
+  const remoteFileName = identity?.filePath ?? decodeURIComponent(url.pathname).replace(/^\/+/, '');
+  if (!remoteFileName.toLowerCase().endsWith('.gguf') || remoteFileName.split('/').some(part => part === '..' || part === '.')) {
+    throw new Error('Select a GGUF companion file');
+  }
+  const sha256 = normalizeSha256Digest(input.sha256);
+  if (input.sha256 && !sha256) throw new Error('Invalid SHA-256 digest');
+  const id = input.kind + ':' + url.toString() + ':' + (sha256 ?? '');
+  const existing = model.artifacts?.find(artifact => artifact.id === id);
+  const sizeBytes = normalizePositiveSize(input.sizeBytes) ?? existing?.sizeBytes ?? null;
+  const sizeChanged = existing !== undefined && existing.sizeBytes !== null && sizeBytes !== existing.sizeBytes;
+  const artifact: ModelArtifactMetadata = {
+    ...existing, id, kind: input.kind, requiredFor: [], selected: true,
+    boundToModelIdentity: getCompanionBindingIdentity(model),
+    remoteFileName, downloadUrl: url.toString(), hfRevision: identity?.revision,
+    sizeBytes, sha256, installState: sizeChanged ? 'remote' : existing?.installState ?? 'remote',
+    ...(sizeChanged ? { integrity: undefined, resumeData: undefined, downloadProgress: 0, errorCode: undefined, errorMessage: undefined } : {}),
+  };
+  const draftConfig = { type: 'mtp' as const, mode: 'draft_model' as const, enabled: false, maxDraftTokens: 3, draftArtifactId: id };
+  return { ...model, ...(input.kind === 'speculative_draft' ? { speculativeDecoding: draftConfig, variants: model.variants?.map(variant => variant.variantId === model.activeVariantId || variant.fileName === model.resolvedFileName ? { ...variant, speculativeDecoding: draftConfig } : variant) } : {}), artifacts: [...(model.artifacts ?? []).filter(item => item.id !== id).map(item => (
+    (input.kind === 'tts_codec' && item.kind === 'tts_codec') || (item.kind === input.kind && item.downloadUrl === url.toString()) ? { ...item, selected: false } : item
+  )), artifact] };
+}
+
+/** Unknown sizes remain unknown; neither disk admission nor UI may treat them as zero. */
+export function getManagedCompanionDiskPlan(model: ModelMetadata): {
+  installedBytes: number;
+  selectedDownloadBytes: number | null;
+  unknownSizeCount: number;
+} {
+  const selected = getSelectedManagedCompanions(model);
+  const installedSources = new Set(getManagedCompanionArtifacts(model).filter(artifact => artifact.installState === 'installed' && artifact.localPath).map(getCompanionSourceIdentity));
+  const seen = new Set<string>();
+  let knownBytes = 0;
+  let unknownSizeCount = 0;
+  for (const artifact of selected) {
+    const key = getCompanionSourceIdentity(artifact);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (artifact.installState === 'installed' || installedSources.has(key)) continue;
+    const size = normalizePositiveSize(artifact.sizeBytes);
+    if (size === null) unknownSizeCount += 1;
+    else knownBytes += size;
+  }
+  return { installedBytes: getTotalInstalledModelBytes(model), selectedDownloadBytes: unknownSizeCount ? null : knownBytes, unknownSizeCount };
+}
+
+export function getCompanionSourceIdentity(artifact: ModelArtifactMetadata): string {
+  return JSON.stringify([artifact.downloadUrl, artifact.hfRevision ?? 'main', artifact.remoteFileName, artifact.sha256 ?? '', artifact.sizeBytes]);
 }

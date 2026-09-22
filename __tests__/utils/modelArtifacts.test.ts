@@ -4,7 +4,7 @@ import {
   type ModelArtifactMetadata,
   type ModelMetadata,
 } from '../../src/types/models';
-import {
+import { getManagedCompanionDiskPlan, bindManagedCompanion, getSelectedManagedCompanions,
   buildMainModelArtifactId,
   deriveArtifactsFromLegacyModel,
   getInstalledArtifactLocalPaths,
@@ -806,4 +806,51 @@ describe('modelArtifacts', () => {
       downloadProgress: 1,
     }));
   });
+});
+
+
+describe('explicit managed companions', () => {
+  it('persists an optional codec with revision/subpath/source identity and feature selection', () => {
+    const model = bindManagedCompanion(makeModel(), { kind: 'tts_codec', downloadUrl: 'https://huggingface.co/audio/codecs/resolve/v2/nested/Codec.gguf', sizeBytes: 123 });
+    const artifact = model.artifacts![0];
+    expect(artifact).toMatchObject({ kind: 'tts_codec', requiredFor: [], remoteFileName: 'nested/Codec.gguf', hfRevision: 'v2', selected: true });
+    expect(normalizePersistedModelArtifacts(model.artifacts)).toEqual(model.artifacts);
+    expect(getSelectedManagedCompanions(model)).toEqual([artifact]);
+    expect(getRequiredDownloadArtifacts(model)).toEqual([]);
+    expect(getSelectedManagedCompanions({ ...model, resolvedFileName: 'different.gguf' })).toEqual([]);
+  });
+  it('keeps one selected codec and multiple adapters without inventing source URLs', () => {
+    let model = bindManagedCompanion(makeModel(), { kind: 'tts_codec', downloadUrl: 'https://example.com/one.gguf' });
+    model = bindManagedCompanion(model, { kind: 'tts_codec', downloadUrl: 'https://example.com/two.gguf' });
+    model = bindManagedCompanion(model, { kind: 'lora_adapter', downloadUrl: 'https://example.com/adapter.gguf' });
+    expect(getSelectedManagedCompanions(model).map(item => item.downloadUrl)).toEqual(['https://example.com/two.gguf', 'https://example.com/adapter.gguf']);
+    expect(() => bindManagedCompanion(model, { kind: 'lora_adapter', downloadUrl: 'file:///private/adapter.gguf' })).toThrow();
+    expect(() => bindManagedCompanion(model, { kind: 'lora_adapter', downloadUrl: 'https://user:pass@example.com/adapter.gguf' })).toThrow();
+    expect(() => bindManagedCompanion(model, { kind: 'tts_codec', downloadUrl: 'https://example.com/model.bin' })).toThrow();
+  });
+  it('does not reuse a companion file when the case-sensitive source subpath changes', () => {
+    const artifact = bindManagedCompanion(makeModel(), { kind: 'lora_adapter', downloadUrl: 'https://example.com/A/adapter.gguf' }).artifacts![0];
+    const merged = mergeModelArtifacts([{ ...artifact, remoteFileName: 'B/adapter.gguf' }], [{ ...artifact, installState: 'installed', localPath: 'adapter.gguf' }], { preservePersistedRuntimeState: true });
+    expect(merged[0].installState).toBe('remote');
+    expect(merged[0].localPath).toBeUndefined();
+  });
+});
+
+
+it('deduplicates selected companion disk sources and retains unknown size', () => {
+  let model = bindManagedCompanion(makeModel(), { kind: 'tts_codec', downloadUrl: 'https://example.com/shared.gguf', sizeBytes: 100 });
+  model = bindManagedCompanion(model, { kind: 'lora_adapter', downloadUrl: 'https://example.com/shared.gguf', sizeBytes: 100 });
+  expect(getManagedCompanionDiskPlan(model)).toMatchObject({ selectedDownloadBytes: 100, unknownSizeCount: 0 });
+  model = bindManagedCompanion(model, { kind: 'lora_adapter', downloadUrl: 'https://example.com/unknown.gguf' });
+  expect(getManagedCompanionDiskPlan(model)).toMatchObject({ selectedDownloadBytes: null, unknownSizeCount: 1 });
+});
+
+
+it('normalizes checksum identities and invalidates changed expected sizes', () => {
+  let model = bindManagedCompanion(makeModel(), { kind: 'lora_adapter', downloadUrl: 'https://example.com/a.gguf', sha256: 'A'.repeat(64), sizeBytes: 100 });
+  model.artifacts![0] = { ...model.artifacts![0], installState: 'installed', localPath: 'adapter.gguf', integrity: { kind: 'sha256', sha256: 'a'.repeat(64), checkedAt: 1, sizeBytes: 100 } };
+  model = bindManagedCompanion(model, { kind: 'lora_adapter', downloadUrl: 'https://example.com/a.gguf', sha256: 'a'.repeat(64), sizeBytes: 200 });
+  expect(model.artifacts).toHaveLength(1);
+  expect(model.artifacts![0].installState).toBe('remote');
+  expect(model.artifacts![0].integrity).toBeUndefined();
 });

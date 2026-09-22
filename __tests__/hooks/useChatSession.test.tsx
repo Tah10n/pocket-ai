@@ -692,6 +692,107 @@ describe('useChatSession', () => {
     }
   });
 
+  it('persists exact validated JSON separately from reasoning and keeps formatting constraints through regeneration', async () => {
+    const output = { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}' };
+    const generation = { ...getGenerationParametersForModel('author/model-q4'), output,
+      stop: [' END '], template: { chatTemplate: 'custom template', jinja: false, now: 0, kwargs: { count: 0, enabled: false }, prefillText: ' ' } };
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue(generation);
+    const raw = '  {"value":"<think>literal</think>"}\n';
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(async ({ onToken }: LlmChatCompletionOptions) => {
+      onToken?.({ token: '', reasoningContent: 'private reasoning', accumulatedText: '<think>private reasoning</think>' });
+      onToken?.({ token: raw, content: raw, contentMode: 'snapshot' });
+      return { content: raw, text: '<think>private reasoning</think>' + raw, reasoning_content: 'private reasoning',
+        structuredOutput: { mode: 'json_schema', status: 'valid' } };
+    });
+    const getSession = renderHookHarness();
+    await act(async () => { await getSession()?.appendUserMessage('Return a JSON object'); });
+    const thread = useChatStore.getState().getActiveThread()!;
+    const response = thread.messages.at(-1)!;
+    expect(response).toMatchObject({ content: raw, state: 'complete', structuredOutput: { mode: 'json_schema', status: 'valid' },
+      generationSnapshot: { output, stop: [' END '], template: generation.template } });
+    expect(response.thoughtContent).toBeUndefined();
+    expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.content).toBe(raw);
+    await act(async () => { await getSession()?.regenerateLastResponse(); });
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2);
+    for (const [request] of (llmEngineService.chatCompletion as jest.Mock).mock.calls) {
+      expect(request.generation).toMatchObject({ output, stop: [' END '], template: generation.template });
+    }
+    const exactCountRequests = (llmEngineService.countPromptTokens as jest.Mock).mock.calls
+      .map(([request]) => request).filter(request => request.chatBlocking !== false);
+    expect(exactCountRequests.length).toBeGreaterThan(0);
+    exactCountRequests.forEach(request => expect(request.generation).toMatchObject({ output, template: generation.template }));
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)?.content).toBe(raw);
+  });
+
+  it.each([
+    { status: 'invalid' as const, state: 'error', content: '{"wrong":true}', error: 'schema_mismatch' },
+    { status: 'incomplete' as const, state: 'stopped', content: '{"ok":', error: 'interrupted' },
+  ])('keeps $status structured output without claiming native completion is success, then allows text', async result => {
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...getGenerationParametersForModel('author/model-q4'), output: { mode: 'json_object' } });
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(async ({ onToken }: LlmChatCompletionOptions) => {
+      onToken?.(result.content);
+      return { content: result.content, text: result.content,
+        structuredOutput: { mode: 'json_object', status: result.status, error: result.error } };
+    });
+    const getSession = renderHookHarness();
+    await act(async () => { await getSession()?.appendUserMessage('Return JSON'); });
+    const thread = useChatStore.getState().getActiveThread()!;
+    expect(thread.messages.at(-1)).toMatchObject({ content: result.content, state: result.state,
+      structuredOutput: { status: result.status } });
+    if (result.status === 'invalid') expect(thread.messages.at(-1)?.errorCode).toBe('structured_output_invalid');
+    expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.state).toBe(result.state);
+    act(() => { useChatStore.getState().updateThreadParamsSnapshot(thread.id, { ...thread.paramsSnapshot, output: { mode: 'text' } }); });
+    await act(async () => { await getSession()?.appendUserMessage('Now answer normally'); });
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toMatchObject({ content: 'Hello back', state: 'complete' });
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(expect.objectContaining({ generation: expect.objectContaining({ output: { mode: 'text' } }) }));
+  });
+
+  it('marks cancelled streaming JSON incomplete and ignores the late native result', async () => {
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...getGenerationParametersForModel('author/model-q4'), output: { mode: 'json_object' } });
+    const pending = createDeferred<{ content: string; structuredOutput: { mode: 'json_object'; status: 'valid' } }>();
+    let emit: LlmChatCompletionOptions['onToken'];
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(({ onToken }: LlmChatCompletionOptions) => { emit = onToken; return pending.promise; });
+    const getSession = renderHookHarness();
+    let send: Promise<void> | undefined;
+    await act(async () => { send = getSession()?.appendUserMessage('Return JSON'); });
+    await act(async () => { emit?.('{"ok":'); });
+    await act(async () => {
+      await getSession()?.stopGeneration();
+      emit?.('true}');
+      pending.resolve({ content: '{"ok":true}', structuredOutput: { mode: 'json_object', status: 'valid' } });
+      await send;
+    });
+    const thread = useChatStore.getState().getActiveThread()!;
+    expect(thread.messages.at(-1)).toMatchObject({ content: '{"ok":', state: 'stopped',
+      structuredOutput: { mode: 'json_object', status: 'incomplete' } });
+    expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.content).toBe('{"ok":');
+  });
+
+  it('uses each chat output snapshot after changing defaults and switching back to regenerate', async () => {
+    const base = getGenerationParametersForModel('author/model-q4');
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...base, output: { mode: 'json_object' }, stop: [] });
+    (llmEngineService.chatCompletion as jest.Mock).mockImplementation(async ({ generation }: LlmChatCompletionOptions) => ({
+      content: generation?.output?.mode === 'json_object' ? '{"ok":true}' : '<think>literal</think>',
+      structuredOutput: { mode: generation?.output?.mode, status: generation?.output?.mode === 'json_object' ? 'valid' : 'not_applicable' },
+    }));
+    const getSession = renderHookHarness();
+    await act(async () => { await getSession()?.appendUserMessage('First format'); });
+    const first = useChatStore.getState().getActiveThread()!;
+    act(() => { getSession()?.startNewChat(); });
+    (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...base, output: { mode: 'gbnf', grammar: 'root ::= "<think>literal</think>"' }, stop: [' END '] });
+    await act(async () => { await getSession()?.appendUserMessage('Second format'); });
+    const second = useChatStore.getState().getActiveThread()!;
+    expect(second.id).not.toBe(first.id);
+    expect(second.messages.at(-1)?.content).toBe('<think>literal</think>');
+    act(() => { useChatStore.getState().setActiveThread(first.id); });
+    await act(async () => { await getSession()?.regenerateLastResponse(); });
+    expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(expect.objectContaining({
+      generation: expect.objectContaining({ output: { mode: 'json_object' }, stop: [] }),
+    }));
+    expect(useChatStore.getState().threads[second.id].messages).toBe(second.messages);
+    expect(useChatStore.getState().threads[second.id].paramsSnapshot.output?.mode).toBe('gbnf');
+  });
+
   it('persists native MTP completion telemetry on the assistant message', async () => {
     const telemetry = {
       tokensPredicted: 100,
@@ -5406,6 +5507,10 @@ describe('useChatSession', () => {
       state: 'stopped',
     }));
     expect(persistedAssistant?.content).not.toContain('late token');
+    expect(persistedAssistant?.generationSnapshot).toMatchObject({
+      temperature: thread?.paramsSnapshot.temperature,
+      maxTokens: thread?.paramsSnapshot.maxTokens,
+    });
   });
 
   it('stops active generation when private storage becomes blocked', async () => {

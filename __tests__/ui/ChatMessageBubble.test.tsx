@@ -99,6 +99,65 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatMessageBubble', () => {
+  it('displays and copies exact JSON without stripping literal thinking tags or whitespace', async () => {
+    const raw = '  {"value":"<think>literal</think>", "ok": true}\n';
+    const view = render(<ChatMessageBubble id="json-exact" isUser={false} content={raw}
+      thoughtContent="Separate reasoning" structuredOutput={{ mode: 'json_schema', status: 'valid' }} />);
+    expect(view.getByTestId('structured-output-content-json-exact').props.children).toBe(raw);
+    expect(view.getByTestId('structured-output-content-json-exact').props.selectable).toBe(true);
+    expect(view.queryByTestId('markdown-renderer')).toBeNull();
+    expect(view.getByTestId('structured-output-status-json-exact').props.children).toBe('structuredOutput.valid');
+    fireEvent.press(view.getByTestId('copy-message-json-exact'));
+    await waitFor(() => expect(Clipboard.setStringAsync).toHaveBeenCalledWith(raw));
+  });
+
+  it('renders incomplete streaming JSON and never presents it as validated', () => {
+    const view = render(<ChatMessageBubble id="json-stream" isUser={false} content={'{"value":'} isStreaming
+      structuredOutput={{ mode: 'json_object', status: 'valid' }} />);
+    expect(view.getByTestId('structured-output-status-json-stream').props.children).toBe('structuredOutput.streaming');
+    expect(view.getByTestId('structured-output-content-json-stream').props.children).toBe('{"value":');
+    expect(view.queryByTestId('copy-message-json-stream')).toBeNull();
+    view.rerender(<ChatMessageBubble id="json-stream" isUser={false} content={'{"value":'} messageState="stopped"
+      structuredOutput={{ mode: 'json_object', status: 'incomplete', error: 'interrupted' }} />);
+    expect(view.getByTestId('structured-output-status-json-stream').props.children).toBe('structuredOutput.incomplete');
+    expect(view.getByTestId('copy-message-json-stream')).toBeTruthy();
+  });
+
+  it.each([undefined, 'Separate reasoning'])('preserves literal GBNF content and exact copy with explicit thought=%s', async thoughtContent => {
+    const raw = '  <think>x</think>\n';
+    const view = render(<ChatMessageBubble id="gbnf-exact" isUser={false} content={raw}
+      thoughtContent={thoughtContent} structuredOutput={{ mode: 'gbnf', status: 'not_applicable' }} />);
+    expect(view.getByTestId('structured-output-content-gbnf-exact').props.children).toBe(raw);
+    expect(view.getByTestId('structured-output-content-gbnf-exact').props.selectable).toBe(true);
+    expect(view.queryByTestId('markdown-renderer')).toBeNull();
+    expect(view.queryByTestId('structured-output-status-gbnf-exact')).toBeNull();
+    fireEvent.press(view.getByTestId('copy-message-gbnf-exact'));
+    await waitFor(() => expect(Clipboard.setStringAsync).toHaveBeenCalledWith(raw));
+  });
+
+  it('updates validation status without changing content and localizes the structured error', () => {
+    const raw = '{"ok": false}';
+    const view = render(<ChatMessageBubble id="json-invalid" isUser={false} content={raw}
+      structuredOutput={{ mode: 'json_schema', status: 'valid' }} />);
+    view.rerender(<ChatMessageBubble id="json-invalid" isUser={false} content={raw} messageState="error"
+      errorCode="structured_output_invalid" errorMessage="generic error"
+      structuredOutput={{ mode: 'json_schema', status: 'invalid', error: 'schema_mismatch' }} />);
+    expect(view.getByTestId('structured-output-status-json-invalid').props.children).toBe('structuredOutput.invalid');
+    expect(view.getByText('structuredOutput.validationFailed')).toBeTruthy();
+    expect(view.queryByText('generic error')).toBeNull();
+    expect(view.getByTestId('structured-output-content-json-invalid').props.children).toBe(raw);
+  });
+
+  it('keeps ordinary text and user JSON-looking messages on their existing presentation paths', () => {
+    const view = render(<ChatMessageBubble id="legacy-json" isUser={false} content={'{"ok": true}'} />);
+    expect(view.getByTestId('markdown-renderer')).toBeTruthy();
+    expect(view.queryByTestId('structured-output-status-legacy-json')).toBeNull();
+    view.rerender(<ChatMessageBubble id="legacy-json" isUser content={'{"ok": true}'}
+      structuredOutput={{ mode: 'json_object', status: 'valid' }} />);
+    expect(view.queryByTestId('structured-output-status-legacy-json')).toBeNull();
+    expect(view.queryByTestId('markdown-renderer')).toBeNull();
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     reactI18nextMock.__resetTranslations();

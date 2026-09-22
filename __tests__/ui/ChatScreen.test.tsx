@@ -4,6 +4,8 @@ import { Alert, Keyboard, Platform, StyleSheet } from 'react-native';
 import type { ProjectorArtifact } from '../../src/types/multimodal';
 import { getThreadActiveModelId } from '../../src/types/chat';
 import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
+import type { ModelLoadParameters } from '../../src/services/SettingsStore';
+import type { LoadModelOptions } from '../../src/services/LLMEngineService';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -118,6 +120,7 @@ const mockGetRecommendedLoadProfile = jest.fn<Promise<{ recommendedGpuLayers: nu
   })),
 );
 const mockLoadModel = jest.fn().mockResolvedValue(undefined);
+let mockEffectiveLoadParams: ModelLoadParameters | null = null;
 const mockRetryThinkingCapabilityDetection = jest.fn().mockResolvedValue(undefined);
 const mockGetTotalMemory = jest.fn().mockResolvedValue(8 * 1024 * 1024 * 1024);
 const mockRefreshModelMetadata = jest.fn((model) => Promise.resolve(model));
@@ -201,6 +204,8 @@ jest.mock('../../src/hooks/useLLMEngine', () => ({
     state: mockEngineState,
     loadModel: async (modelId: string, options?: any) => {
       await mockLoadModel(modelId, options);
+      const { getModelLoadParametersForModel } = jest.requireActual('../../src/services/SettingsStore');
+      mockEffectiveLoadParams = { ...getModelLoadParametersForModel(modelId), ...options?.loadParamsOverride };
       mockEngineState = {
         ...mockEngineState,
         activeModelId: modelId,
@@ -240,8 +245,23 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getRecommendedLoadProfile: (modelId: string | null) => mockGetRecommendedLoadProfile(modelId),
     getRecommendedGpuLayers: () => mockGetRecommendedGpuLayers(),
     getState: () => mockEngineState,
+    getEffectiveLoadParameters: () => {
+      const { getModelLoadParametersForModel } = jest.requireActual('../../src/services/SettingsStore');
+      return mockEffectiveLoadParams ?? getModelLoadParametersForModel(mockEngineState.activeModelId);
+    },
+    applyLoadProfileTransaction: async (modelId: string, options: LoadModelOptions, isCurrent: () => boolean) => {
+      if (!isCurrent()) throw new Error('Stale load profile selection');
+      await mockLoadModel(modelId, options);
+      if (!isCurrent()) throw new Error('Stale load profile selection');
+      const { getModelLoadParametersForModel } = jest.requireActual('../../src/services/SettingsStore');
+      mockEffectiveLoadParams = { ...getModelLoadParametersForModel(modelId), ...options.loadParamsOverride };
+      mockEngineState = { ...mockEngineState, activeModelId: modelId, status: 'ready' };
+      return mockEffectiveLoadParams;
+    },
     load: async (modelId: string, options?: any) => {
       await mockLoadModel(modelId, options);
+      const { getModelLoadParametersForModel } = jest.requireActual('../../src/services/SettingsStore');
+      mockEffectiveLoadParams = { ...getModelLoadParametersForModel(modelId), ...options?.loadParamsOverride };
       mockEngineState = {
         ...mockEngineState,
         activeModelId: modelId,
@@ -1021,6 +1041,7 @@ describe('ChatScreen', () => {
     mockIsStoppingGeneration = false;
     mockIsPreparingDocuments = false;
     mockLoadModel.mockReset();
+    mockEffectiveLoadParams = null;
     mockLoadModel.mockResolvedValue(undefined);
     mockRetryThinkingCapabilityDetection.mockReset();
     mockRetryThinkingCapabilityDetection.mockResolvedValue(undefined);
@@ -1110,6 +1131,45 @@ describe('ChatScreen', () => {
       activeThreadId: 'thread-1',
       newThreadRevision: 0,
     });
+  });
+
+  it('edits advanced generation settings without contaminating another chat snapshot or history', async () => {
+    const first = useChatStore.getState().threads['thread-1'];
+    const second = { ...first, id: 'thread-2', paramsSnapshot: { ...first.paramsSnapshot, temperature: 0.2 } };
+    useChatStore.setState({ threads: { 'thread-1': first, 'thread-2': second } });
+    const { getByTestId, rerender } = render(React.createElement(ChatScreen));
+    await act(async () => { fireEvent.press(getByTestId('model-controls-button')); });
+    await act(async () => {
+      lastModelParametersSheetProps.onChangeParams({ nProbs: 0, stop: [], template: { jinja: false }, output: { mode: 'json_object' } });
+    });
+    expect(useChatStore.getState().threads['thread-1'].paramsSnapshot).toMatchObject({ nProbs: 0, stop: [], template: { jinja: false }, output: { mode: 'json_object' } });
+    expect(useChatStore.getState().threads['thread-2'].paramsSnapshot).toEqual(second.paramsSnapshot);
+    expect(useChatStore.getState().threads['thread-1'].messages).toBe(first.messages);
+    await act(async () => {
+      useChatStore.setState({ activeThreadId: 'thread-2' });
+      rerender(React.createElement(ChatScreen));
+    });
+    expect(lastModelParametersSheetProps.params.temperature).toBe(0.2);
+    expect(lastModelParametersSheetProps.params.output).toBeUndefined();
+    await act(async () => { lastModelParametersSheetProps.onChangeParams({ output: { mode: 'gbnf', grammar: 'root ::= "yes"' } }); });
+    expect(useChatStore.getState().threads['thread-1'].paramsSnapshot.output?.mode).toBe('json_object');
+    expect(useChatStore.getState().threads['thread-2'].paramsSnapshot.output?.mode).toBe('gbnf');
+  });
+
+  it('reloads a matching base model when the active chat requires a different LoRA scale', async () => {
+    const first = useChatStore.getState().threads['thread-1'];
+    const adapter = { artifactId: 'adapter', artifactIdentity: 'revision', baseModelIdentity: 'base', sizeBytes: 64, scale: 0.5 };
+    useChatStore.setState({ threads: { 'thread-1': { ...first, loraSnapshot: [adapter] } } });
+    mockEffectiveLoadParams = { contextSize: 4096, gpuLayers: 0, kvCacheType: 'f16', loraAdapters: [{ ...adapter, scale: 1 }] };
+    registry.saveModels([{ id: 'author/model-q4', name: 'Q4', author: 'Test', size: 1024,
+      localPath: 'base.gguf', lifecycleStatus: 'downloaded' }]);
+    render(React.createElement(ChatScreen));
+    await waitFor(() => expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', expect.objectContaining({
+      loadParamsOverride: expect.objectContaining({ loraAdapters: [adapter] }),
+    })));
+    await waitFor(() => expect(lastChatInputBarProps.disabled).toBe(false));
+    expect(useChatStore.getState().threads['thread-1'].messages).toBe(first.messages);
+    expect(mockEffectiveLoadParams?.loraAdapters).toEqual([adapter]);
   });
 
   it('exposes a stable stopped-thread banner for relaunch verification', () => {
@@ -5862,6 +5922,7 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: 12,
       kvCacheType: 'auto',
+      loraAdapters: [],
     });
   });
 
@@ -6024,6 +6085,7 @@ describe('ChatScreen', () => {
       contextSize: 4096,
       gpuLayers: 100,
       kvCacheType: 'auto',
+      loraAdapters: [],
     });
   });
 
@@ -6106,6 +6168,7 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: null,
       kvCacheType: 'auto',
+      loraAdapters: [],
     });
   });
 
@@ -6328,6 +6391,7 @@ describe('ChatScreen', () => {
         contextSize: 8192,
         gpuLayers: 6,
         kvCacheType: 'f16',
+        loraAdapters: [],
       });
     });
   });
@@ -6365,6 +6429,7 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: null,
       kvCacheType: 'auto',
+      loraAdapters: [],
     });
   });
 

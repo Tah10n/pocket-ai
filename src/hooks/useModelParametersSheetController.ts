@@ -5,10 +5,11 @@ import { useTranslation } from 'react-i18next';
 import { llmEngineService, type LoadModelOptions } from '@/services/LLMEngineService';
 import { backgroundTaskService } from '@/services/BackgroundTaskService';
 import { notificationService } from '@/services/NotificationService';
-import { toAppError } from '@/services/AppError';
+import { AppError, toAppError } from '@/services/AppError';
 import { inferenceAutotuneService, type AutotuneProgressSnapshot } from '@/services/InferenceAutotuneService';
 import { readAutotuneResult, type AutotuneResult } from '@/services/InferenceAutotuneStore';
 import { registry } from '@/services/LocalStorageRegistry';
+import { applyActiveModelLoadProfile, captureModelProfileSelection } from '@/services/ModelLoadProfileTransactionService';
 import { modelCatalogService } from '@/services/ModelCatalogService';
 import { useLLMEngine } from '@/hooks/useLLMEngine';
 import {
@@ -37,6 +38,7 @@ import {
   resolveModelReasoningCapability,
 } from '@/utils/modelReasoningCapabilities';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
+import { getAdvancedLoadProfileIdentity, getOptionalAdvancedLoadProfileIdentity, getLoraAdapterMemoryBytes } from '@/utils/advancedLoadProfile';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import {
   getConfiguredMtpDraftArtifact,
@@ -51,6 +53,7 @@ interface UseModelParametersSheetControllerOptions {
   canApplyReload?: boolean;
   modelLabelOverride?: string;
   paramsOverride?: GenerationParameters;
+  loraOverride?: ModelLoadParameters['loraAdapters'];
   defaultParamsOverride?: GenerationParameters;
   onChangeParams?: (modelId: string | null, partial: Partial<GenerationParameters>) => void;
   onResetParamField?: (modelId: string | null, field: keyof GenerationParameters) => void;
@@ -148,6 +151,7 @@ function resolveModelContextWindowCeiling({
   gpuLayers,
   kvCacheType,
   fallbackGpuLayers,
+  advancedProfile,
 }: {
   modelSizeBytes: number | null | undefined;
   modelMaxContextTokens: number | undefined;
@@ -158,12 +162,14 @@ function resolveModelContextWindowCeiling({
   gpuLayers: ModelLoadParameters['gpuLayers'];
   kvCacheType: ModelLoadParameters['kvCacheType'];
   fallbackGpuLayers: number;
+  advancedProfile: ModelLoadParameters;
 }): number {
   return resolveContextWindowCeiling({
     modelMaxContextTokens,
     totalMemoryBytes,
     input: {
       modelSizeBytes: modelSizeBytes ?? null,
+      loraSizeBytes: getLoraAdapterMemoryBytes(advancedProfile.loraAdapters),
       verifiedFileSizeBytes: modelMetadataTrust === 'verified_local'
         ? modelGgufMetadata?.totalBytes ?? modelSizeBytes ?? undefined
         : undefined,
@@ -173,6 +179,8 @@ function resolveModelContextWindowCeiling({
         gpuLayers: gpuLayers ?? fallbackGpuLayers,
         ...resolveKvCacheTypes({
           kvCacheType,
+          cacheTypeK: advancedProfile.cacheTypeK,
+          cacheTypeV: advancedProfile.cacheTypeV,
           requestedContextTokens: contextSize,
           totalMemoryBytes,
         }),
@@ -192,6 +200,7 @@ export function useModelParametersSheetController({
   canApplyReload = true,
   modelLabelOverride,
   paramsOverride,
+  loraOverride,
   defaultParamsOverride,
   onChangeParams,
   onResetParamField,
@@ -202,7 +211,7 @@ export function useModelParametersSheetController({
   const { state: engineState } = useLLMEngine();
   const [isOpen, setOpen] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  const [, setSettingsRevision] = useState(0);
+  const [settingsRevision, setSettingsRevision] = useState(0);
   const [recommendedGpuLayers, setRecommendedGpuLayers] = useState(0);
   const [gpuLayersCeiling, setGpuLayersCeiling] = useState(UNKNOWN_MODEL_GPU_LAYERS_CEILING);
   const [measuredContextWindowCeiling, setMeasuredContextWindowCeiling] = useState<number | null>(null);
@@ -317,7 +326,10 @@ export function useModelParametersSheetController({
     () => normalizeReasoningPreference(defaultParams, reasoningCapability),
     [defaultParams, reasoningCapability],
   );
-  const currentLoadParams = getModelLoadParametersForModel(configurableModelId);
+  const currentLoadParams = useMemo(() => {
+    void settingsRevision;
+    return { ...getModelLoadParametersForModel(configurableModelId), ...(loraOverride !== undefined ? { loraAdapters: loraOverride } : {}) };
+  }, [configurableModelId, settingsRevision, loraOverride]);
   const defaultLoadParams = getModelLoadParametersForModel(null);
   const persistedMtp = persistedConfigurableModel
     ? resolveEffectiveSpeculativeDecoding(persistedConfigurableModel)
@@ -375,6 +387,7 @@ export function useModelParametersSheetController({
     gpuLayers: currentGpuLayers,
     kvCacheType: currentKvCacheType,
     fallbackGpuLayers: recommendedGpuLayers,
+    advancedProfile: currentLoadParams,
   }), [
     heuristicModelGgufMetadata,
     heuristicModelMaxContextTokens,
@@ -385,6 +398,7 @@ export function useModelParametersSheetController({
     currentKvCacheType,
     deviceTotalMemoryBytes,
     recommendedGpuLayers,
+    currentLoadParams,
   ]);
   const contextWindowCeiling = measuredContextWindowCeiling ?? baseContextWindowCeiling;
   const isNpuBackendKnownUnavailable = backendAvailability.npuBackendAvailable === false;
@@ -404,6 +418,7 @@ export function useModelParametersSheetController({
     return policy;
   }, [isNpuBackendKnownUnavailable]);
   const effectiveCurrentLoadParams = {
+    ...currentLoadParams,
     contextSize: clampContextWindowTokens(currentLoadParams.contextSize, contextWindowCeiling),
     gpuLayers: currentLoadParams.gpuLayers,
     kvCacheType: currentLoadParams.kvCacheType,
@@ -411,6 +426,7 @@ export function useModelParametersSheetController({
     backendPolicy: normalizeBackendPolicy(currentLoadParams.backendPolicy),
   };
   const effectiveDefaultLoadParams = {
+    ...defaultLoadParams,
     contextSize: clampContextWindowTokens(defaultLoadParams.contextSize, contextWindowCeiling),
     gpuLayers: defaultLoadParams.gpuLayers,
     kvCacheType: defaultLoadParams.kvCacheType,
@@ -451,6 +467,7 @@ export function useModelParametersSheetController({
       persistedMtpEnabled,
       persistedLoadParams: normalizedPersistedLoadParams,
     })
+    || getAdvancedLoadProfileIdentity(draftLoadParams) !== getAdvancedLoadProfileIdentity(currentLoadParams)
     || isApplyingModelProfile
   );
   const canRunAutotune = Boolean(configurableModelId)
@@ -570,6 +587,7 @@ export function useModelParametersSheetController({
           kvCacheType: currentKvCacheType,
           modelFileSizeBytes: autotuneModelFileSizeBytes,
           modelSha256: autotuneModelSha256,
+          allocationIdentity: getOptionalAdvancedLoadProfileIdentity(currentLoadParams),
         })
       : null);
     llmEngineService.ensurePersistedCapabilitySnapshot(refreshTargetModel);
@@ -644,6 +662,7 @@ export function useModelParametersSheetController({
             gpuLayers: currentGpuLayers,
             kvCacheType: currentKvCacheType,
             fallbackGpuLayers: 0,
+            advancedProfile: currentLoadParams,
           }));
         }
 
@@ -663,6 +682,7 @@ export function useModelParametersSheetController({
                 gpuLayers: currentGpuLayers,
                 kvCacheType: currentKvCacheType,
                 fallbackGpuLayers: recommendation.recommendedGpuLayers,
+                advancedProfile: currentLoadParams,
               }));
             }
           })
@@ -689,6 +709,7 @@ export function useModelParametersSheetController({
     currentKvCacheType,
     isOpen,
     stableGpuLayersCeiling,
+    currentLoadParams,
   ]);
 
   useEffect(() => {
@@ -752,7 +773,8 @@ export function useModelParametersSheetController({
       const clampedNextGpuLayers = clampGpuLayers(nextGpuLayers, gpuLayersCeiling);
 
       if (
-        current.contextSize === nextContextSize
+        !shouldInitializeDraft
+        && current.contextSize === nextContextSize
         && current.gpuLayers === clampedNextGpuLayers
         && current.kvCacheType === nextKvCacheType
         && current.backendPolicy === nextBackendPolicy
@@ -762,6 +784,7 @@ export function useModelParametersSheetController({
       }
 
       return {
+        ...(shouldInitializeDraft ? currentLoadParams : current),
         contextSize: nextContextSize,
         gpuLayers: clampedNextGpuLayers,
         kvCacheType: nextKvCacheType,
@@ -772,7 +795,7 @@ export function useModelParametersSheetController({
   }, [
     configurableModelId,
     contextWindowCeiling,
-    currentLoadParams.gpuLayers,
+    currentLoadParams,
     effectiveCurrentLoadParams.contextSize,
     effectiveCurrentLoadParams.kvCacheType,
     effectiveCurrentLoadParams.mtpEnabled,
@@ -793,6 +816,7 @@ export function useModelParametersSheetController({
 
     setDidSaveLoadProfile(false);
     setApplyingModelProfile(true);
+    const selectionIsCurrent = captureModelProfileSelection(configurableModelId);
 
     try {
       const nextContextSize = clampContextWindowTokens(
@@ -827,8 +851,10 @@ export function useModelParametersSheetController({
         && clampedNextGpuLayers === null
         && nextKvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
         && (!mtpSupported || draftLoadParams.mtpEnabled === undefined)
-        && normalizedNextBackendPolicy === undefined;
+        && normalizedNextBackendPolicy === undefined
+        && getAdvancedLoadProfileIdentity(draftLoadParams) === '{}';
       const nextLoadParams: ModelLoadParameters = {
+        ...draftLoadParams,
         contextSize: nextContextSize,
         gpuLayers: clampedNextGpuLayers,
         kvCacheType: nextKvCacheType,
@@ -839,6 +865,10 @@ export function useModelParametersSheetController({
       const commitLoadProfile = () => {
         if (didCommitLoadProfile) {
           return;
+        }
+
+        if (!selectionIsCurrent()) {
+          throw new AppError('engine_busy', 'The load settings change was cancelled because the model selection changed.');
         }
 
         didCommitLoadProfile = true;
@@ -857,10 +887,10 @@ export function useModelParametersSheetController({
       }
 
       if (isActiveModel) {
-        await llmEngineService.load(configurableModelId, {
+        await applyActiveModelLoadProfile(configurableModelId, {
           forceReload: true,
           loadParamsOverride: nextLoadParams,
-        });
+        }, selectionIsCurrent);
         commitLoadProfile();
 
         const effectiveLoadedContextSize = llmEngineService.getContextSize();
@@ -893,6 +923,7 @@ export function useModelParametersSheetController({
       const appError = toAppError(error);
 
       const nextLoadParams: ModelLoadParameters = {
+        ...draftLoadParams,
         contextSize: clampContextWindowTokens(
           draftLoadParams.contextSize,
           contextWindowCeiling,
@@ -926,11 +957,16 @@ export function useModelParametersSheetController({
         && nextLoadParams.gpuLayers === null
         && nextLoadParams.kvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
         && nextLoadParams.mtpEnabled === undefined
-        && nextLoadParams.backendPolicy === undefined;
+        && nextLoadParams.backendPolicy === undefined
+        && getAdvancedLoadProfileIdentity(nextLoadParams) === '{}';
       let didCommitLoadProfile = false;
       const commitLoadProfile = () => {
         if (didCommitLoadProfile) {
           return;
+        }
+
+        if (!selectionIsCurrent()) {
+          throw new AppError('engine_busy', 'The load settings change was cancelled because the model selection changed.');
         }
 
         didCommitLoadProfile = true;
@@ -947,7 +983,7 @@ export function useModelParametersSheetController({
       const retryLoad = (loadOptions: LoadModelOptions) => {
         void (async () => {
           try {
-            await llmEngineService.load(configurableModelId, loadOptions);
+            await applyActiveModelLoadProfile(configurableModelId, loadOptions, selectionIsCurrent);
             commitLoadProfile();
             await Promise.resolve(onAfterActiveModelReload?.(configurableModelId));
           } catch (retryError) {
@@ -985,11 +1021,7 @@ export function useModelParametersSheetController({
     contextWindowCeiling,
     currentLoadParams.gpuLayers,
     currentLoadParams.kvCacheType,
-    draftLoadParams.backendPolicy,
-    draftLoadParams.contextSize,
-    draftLoadParams.gpuLayers,
-    draftLoadParams.kvCacheType,
-    draftLoadParams.mtpEnabled,
+    draftLoadParams,
     effectiveCurrentLoadParams.backendPolicy,
     effectiveDefaultLoadParams.gpuLayers,
     effectiveDefaultLoadParams.kvCacheType,
@@ -1347,6 +1379,7 @@ export function useModelParametersSheetController({
       isApplyingReload: isApplyingModelProfile,
       showApplyReload,
       mtpSupported,
+      hasSpeculativeDraft: configuredMtp?.mode === 'draft_model',
       mtpArtifactReady,
       mtpEnabled: draftMtpEnabled ?? false,
       mtpHasPendingChange: mtpSupported && draftMtpEnabled !== persistedMtpEnabled,

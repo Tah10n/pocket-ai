@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "metadataVerifiedOn": "2026-09-22",
+  "runtimeVersion": "0.13.0-rc.3",
+  "nativeAcceptance": {
+    "status": "not_run",
+    "reason": "Published identities have been checked; byte verification, adapter tensor compatibility and controlled native probability measurements have not yet been run."
+  },
+  "base": {
+    "repository": "Mungert/SmolLM2-135M-Instruct-GGUF",
+    "revision": "980b4318b34b2f20e60c89d8f8a98283ec83cbd6",
+    "filename": "SmolLM2-135M-Instruct-q8_0.gguf",
+    "sizeBytes": 144811552,
+    "sha256": "bc64cce8e1c11e4ed870633b557e04af718249c817c4cf8a6784116144ec3e28",
+    "downloadUrl": "https://huggingface.co/Mungert/SmolLM2-135M-Instruct-GGUF/resolve/980b4318b34b2f20e60c89d8f8a98283ec83cbd6/SmolLM2-135M-Instruct-q8_0.gguf?download=true",
+    "license": "Apache-2.0",
+    "existingStage1And2Fixture": true
+  },
+  "adapter": {
+    "repository": "unileon-robotics/SmolLM2-135M-Instruct-BehaviorTree-LoRA-GGUF",
+    "revision": "e211f41133cf7c6da0ae80b3a08f0ffbfd0653e9",
+    "filename": "f16.gguf",
+    "sizeBytes": 4899520,
+    "sha256": "4c171a4599f159dc85dd904ea5fd73e91db11e1052e9106783fdd044b521b653",
+    "downloadUrl": "https://huggingface.co/unileon-robotics/SmolLM2-135M-Instruct-BehaviorTree-LoRA-GGUF/resolve/e211f41133cf7c6da0ae80b3a08f0ffbfd0653e9/f16.gguf?download=true",
+    "license": "Apache-2.0",
+    "declaredBaseModel": "HuggingFaceTB/SmolLM2-135M-Instruct",
+    "declaredBaseModelRelation": "adapter",
+    "declaredArchitecture": "llama",
+    "declaredParameterCount": 2442240,
+    "declaredTrainingDataset": "ArtemLykov/LLM_BRAIn_dataset"
+  },
+  "trainingDataset": {
+    "repository": "ArtemLykov/LLM_BRAIn_dataset",
+    "revision": "7887242340a94db90d77b387db286acdd2afec12",
+    "license": "CC-BY-4.0",
+    "authors": ["Artem Lykov", "Dzmitry Tsetserukou"],
+    "sourceUrl": "https://huggingface.co/datasets/ArtemLykov/LLM_BRAIn_dataset",
+    "paperUrl": "https://arxiv.org/abs/2305.19352"
+  },
+  "probabilityProbe": {
+    "status": "not_run",
+    "purpose": "Compare the same first-token distribution for a robot behavior-tree task before application, at two nonzero scales, and after removal.",
+    "nPredict": 1,
+    "nProbs": 10,
+    "temperature": 1,
+    "topK": 0,
+    "topP": 1,
+    "minP": 0,
+    "repeatPenalty": 1,
+    "seed": 42,
+    "scales": [1, 0.5],
+    "repeatBaseline": true,
+    "requiredEvidence": [
+      "Verified file bytes and native acceptance of adapter tensors",
+      "Actually loaded adapter list and scales",
+      "Finite first-token top-10 probabilities and repeat-baseline numerical variation",
+      "Nonzero-scale probability changes larger than baseline numerical variation",
+      "Baseline distribution restored after adapter removal",
+      "Completion and A+LoRA to embedding B to A restoration",
+      "Deletion of the applied adapter rejected"
+    ]
+  }
+}

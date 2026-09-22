@@ -183,6 +183,36 @@ describe('ModelParametersSheet', () => {
     ).toBeTruthy();
   });
 
+  it('shows the last runtime generation independently of newly selected controls', () => {
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.format', '{{mode}} / {{source}} / {{formatter}}');
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.probabilities', 'Candidates {{count}}');
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.retained', 'Retained {{count}} {{suffix}}');
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.tokens', 'Prompt {{prompt}}, generated {{generated}}');
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.promptSpeed', 'Prompt {{speed}} tokens/s');
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.generationSpeed', 'Generation {{speed}} tokens/s');
+    reactI18nextMock.__setTranslationOverride('generationDiagnostics.ttft', 'First token {{milliseconds}} ms');
+    const screen = renderSheet({ params: { ...baseGenerationParams, nProbs: 0, output: { mode: 'text' } },
+      engineDiagnostics: { backendMode: 'cpu', backendDevices: [], generation: {
+        outputMode: 'json_schema', templateSource: 'custom', formatter: 'jinja', nProbs: 10,
+        prefill: false, hasPrefillText: true, probabilities: { retainedTokens: 128, truncated: true },
+        timings: { tokensEvaluated: 33, tokensPredicted: 140, promptPerSecond: 21.5, predictedPerSecond: 0, timeToFirstTokenMs: 0 },
+      } } });
+    expect(screen.getByTestId('generation-runtime-format')).toHaveTextContent('advancedGeneration.choices.json_schema / generationDiagnostics.source.custom / generationDiagnostics.formatter.jinja');
+    expect(screen.getByTestId('generation-runtime-probabilities')).toHaveTextContent('Candidates 10');
+    expect(screen.getByTestId('generation-runtime-retained')).toHaveTextContent('Retained 128 generationDiagnostics.truncated');
+    expect(screen.getByTestId('generation-runtime-tokens')).toHaveTextContent('Prompt 33, generated 140');
+    expect(screen.getByTestId('generation-runtime-prompt-speed')).toHaveTextContent('Prompt 21.50 tokens/s');
+    expect(screen.getByTestId('generation-runtime-generation-speed')).toHaveTextContent('Generation 0.00 tokens/s');
+    expect(screen.getByTestId('generation-runtime-ttft')).toHaveTextContent('First token 0 ms');
+    expect(screen.getByRole('header', { name: 'generationDiagnostics.title' })).toBeTruthy();
+  });
+
+  it('does not infer completed runtime diagnostics from selected generation controls', () => {
+    const screen = renderSheet({ params: { ...baseGenerationParams, nProbs: 10, output: { mode: 'json_object' } },
+      engineDiagnostics: { backendMode: 'cpu', backendDevices: [] } });
+    expect(screen.queryByTestId('generation-runtime-diagnostics')).toBeNull();
+  });
+
   it('shows the MTP control only for supported models and forwards On/Off changes', () => {
     const onChangeMtpEnabled = jest.fn();
     const screen = renderSheet({

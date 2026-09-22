@@ -4,7 +4,7 @@ import { DeviceEventEmitter, KeyboardAvoidingView, Platform, StyleSheet } from '
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { PresetManagerScreen } from '../../src/ui/screens/PresetManagerScreen';
 import { presetManager } from '../../src/services/PresetManager';
-import { getSettings, updateSettings } from '../../src/services/SettingsStore';
+import { getGenerationParametersForModel, getSettings, updateSettings } from '../../src/services/SettingsStore';
 
 const mockBack = jest.fn();
 const mockReplace = jest.fn();
@@ -48,6 +48,7 @@ jest.mock('../../src/services/PresetManager', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  getGenerationParametersForModel: jest.fn(),
   getSettings: jest.fn(),
   subscribeSettings: jest.fn(() => jest.fn()),
   updateSettings: jest.fn(),
@@ -147,8 +148,24 @@ describe('PresetManagerScreen', () => {
       await Promise.resolve();
     });
 
-    expect(mockPresetManager.addPreset).toHaveBeenCalledWith('My Preset', 'Be concise.');
+    expect(mockPresetManager.addPreset).toHaveBeenCalledWith('My Preset', 'Be concise.', undefined);
     expect(mockUpdateSettings).toHaveBeenCalledWith({ activePresetId: 'preset-new' });
+  });
+
+  it.each([false, true])('captures optional generation settings and can explicitly clear them before save (clear=%s)', async clear => {
+    const generation = { temperature: 0.7, topP: 0.9, topK: 40, minP: 0.05, repetitionPenalty: 1,
+      maxTokens: 512, reasoningEffort: 'auto' as const, seed: null, nProbs: 0, stop: [],
+      template: { jinja: false }, output: { mode: 'json_object' as const } };
+    jest.mocked(getGenerationParametersForModel).mockReturnValue(generation);
+    const screen = await renderScreen();
+    fireEvent.press(screen.getByTestId('preset-manager-add-preset'));
+    fireEvent.changeText(screen.getByTestId('preset-editor-name'), 'Captured');
+    fireEvent.changeText(screen.getByTestId('preset-editor-prompt'), 'Be concise.');
+    fireEvent.press(screen.getByTestId('preset-capture-generation'));
+    expect(screen.getByTestId('preset-clear-generation')).toBeTruthy();
+    if (clear) fireEvent.press(screen.getByTestId('preset-clear-generation'));
+    await act(async () => { fireEvent.press(screen.getByTestId('preset-editor-save')); });
+    expect(mockPresetManager.addPreset).toHaveBeenCalledWith('Captured', 'Be concise.', clear ? undefined : generation);
   });
 
   it('resizes the Android editor form and footer together while the keyboard is open', async () => {

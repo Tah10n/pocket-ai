@@ -8,6 +8,7 @@ import { getModelsDir } from './FileSystemSetup';
 import { normalizePersistedModelMetadata } from './ModelMetadataNormalizer';
 import { estimateFastMemoryFit } from '../memory/estimator';
 import { isValidLocalFileName, safeJoinModelPath } from '../utils/safeFilePath';
+import { AppError } from './AppError';
 import { GgufValidationError, validateGgufFileHeader } from '../utils/ggufValidation';
 import { normalizeSha256Digest } from '../utils/sha256';
 import type { CalibrationRecord } from '../memory/types';
@@ -1237,6 +1238,7 @@ export class LocalStorageRegistry {
   private async deleteModelAssetFile(
     modelsDir: string,
     file: ModelAssetFileForRemoval,
+    isStillRemovable: () => boolean,
   ): Promise<void> {
     try {
       const fileUri = safeJoinModelPath(modelsDir, file.fileName);
@@ -1250,7 +1252,7 @@ export class LocalStorageRegistry {
 
       const info = await FileSystem.getInfoAsync(fileUri);
       if (info.exists && !isFileSystemDirectory(info)) {
-        await FileSystem.deleteAsync(fileUri);
+        if (isStillRemovable()) await FileSystem.deleteAsync(fileUri);
       } else if (info.exists) {
         console.warn('[LocalStorageRegistry] Model asset localPath points to a directory, skipping file deletion', {
           ...getModelStorageLogDetails('model_asset_delete'),
@@ -1263,6 +1265,7 @@ export class LocalStorageRegistry {
         fileKind: file.kind,
         ...getSanitizedRegistryErrorDetails(e),
       });
+      throw e;
     }
   }
 
@@ -1487,10 +1490,30 @@ export class LocalStorageRegistry {
     return changed;
   }
 
-  /**
-   * Remove a model from the registry and delete its local files.
-   */
-  public async removeCompanion(modelId: string, artifactId: string): Promise<void> {
+  /** Snapshot the shared-owner-filtered files before taking the engine lease. */
+  public getModelResourcePathsForRemoval(modelId: string, artifactId?: string): readonly string[] {
+    const model = this.getModel(modelId);
+    const modelsDir = getModelsDir();
+    if (!model || !modelsDir) return [];
+    const remaining = this.getModels().filter(item => item.id !== model.id);
+    let target = model;
+    if (artifactId !== undefined) {
+      const artifact = model.artifacts?.find(item => item.id === artifactId && item.kind !== 'main_model' && item.kind !== 'multimodal_projector');
+      if (!artifact) return [];
+      target = { ...model, localPath: undefined, projectorCandidates: [], variants: [], artifacts: [artifact] };
+      remaining.push({ ...model, artifacts: model.artifacts?.filter(item => item.id !== artifactId) });
+    }
+    return Object.freeze(getModelAssetFilesForRemoval(target, remaining)
+      .map(file => safeJoinModelPath(modelsDir, file.fileName)!));
+  }
+
+  private assertRemovalPathsUnchanged(files: ModelAssetFileForRemoval[], modelsDir: string, expectedPaths?: readonly string[]): void {
+    if (expectedPaths && files.some(file => !expectedPaths.includes(safeJoinModelPath(modelsDir, file.fileName)!))) {
+      throw new AppError('engine_busy', 'Model resource ownership changed. Please retry the removal.');
+    }
+  }
+
+  public async removeCompanion(modelId: string, artifactId: string, expectedPaths?: readonly string[]): Promise<void> {
     assertPrivateStorageWritable();
     const model = this.getModel(modelId);
     const artifact = model?.artifacts?.find(item => item.id === artifactId && item.kind !== 'main_model' && item.kind !== 'multimodal_projector');
@@ -1502,12 +1525,24 @@ export class LocalStorageRegistry {
     if (modelsDir) {
       const remaining = this.getModels().filter(item => item.id !== modelId).concat(updated);
       const files = getModelAssetFilesForRemoval({ ...model, localPath: undefined, projectorCandidates: [], variants: [], artifacts: [artifact] }, remaining);
-      for (const file of files) await this.deleteModelAssetFile(modelsDir, file);
+      this.assertRemovalPathsUnchanged(files, modelsDir, expectedPaths);
+      for (const file of files) await this.deleteModelAssetFile(modelsDir, file,
+        () => this.getModelResourcePathsForRemoval(modelId, artifactId).includes(safeJoinModelPath(modelsDir, file.fileName)!));
     }
-    this.updateModel(updated);
+    const currentModel = this.getModel(modelId);
+    if (currentModel) {
+      // Keep metadata/other companions refreshed during disk IO.
+      const currentArtifact = currentModel.artifacts?.find(item => item.id === artifactId);
+      if (currentArtifact?.localPath !== artifact.localPath) {
+        throw new AppError('engine_busy', 'Model resource ownership changed. Please retry the removal.');
+      }
+      this.updateModel({ ...currentModel, artifacts: currentModel.artifacts?.map(item => item.id === artifactId
+        ? { ...item, selected: false, installState: 'remote', localPath: undefined, integrity: undefined, resumeData: undefined, downloadProgress: 0, errorCode: undefined, errorMessage: undefined }
+        : item) });
+    }
   }
 
-  public async removeModel(modelId: string): Promise<void> {
+  public async removeModel(modelId: string, expectedPaths?: readonly string[]): Promise<void> {
     const normalizedId = normalizeModelId(modelId);
     if (!normalizedId) {
       return;
@@ -1516,21 +1551,27 @@ export class LocalStorageRegistry {
     assertPrivateStorageWritable();
     const state = this.getCachedModelsState();
     const model = state.modelsById.get(normalizedId);
-    const nextModelsById = new Map(state.modelsById);
-    const nextIds = state.ids.filter((id) => id !== normalizedId);
-    nextModelsById.delete(normalizedId);
 
     const modelsDir = getModelsDir();
     if (model && modelsDir) {
-      const remainingModels = Array.from(nextModelsById.values());
+      const remainingModels = Array.from(state.modelsById.values()).filter(item => item.id !== normalizedId);
       const filesForRemoval = getModelAssetFilesForRemoval(model, remainingModels);
+      this.assertRemovalPathsUnchanged(filesForRemoval, modelsDir, expectedPaths);
 
       for (const file of filesForRemoval) {
-        await this.deleteModelAssetFile(modelsDir, file);
+        await this.deleteModelAssetFile(modelsDir, file,
+          () => this.getModelResourcePathsForRemoval(modelId).includes(safeJoinModelPath(modelsDir, file.fileName)!));
       }
     }
 
-    const hadCompletedLocalFile = model ? hasCompletedLocalModelFile(model) : false;
+    // Unrelated registry refreshes may complete while disk IO is pending.
+    // Remove only this entry from the latest state, preserving their owners.
+    const currentState = this.getCachedModelsState();
+    const currentModel = currentState.modelsById.get(normalizedId);
+    const hadCompletedLocalFile = currentModel ? hasCompletedLocalModelFile(currentModel) : false;
+    const nextModelsById = new Map(currentState.modelsById);
+    const nextIds = currentState.ids.filter((id) => id !== normalizedId);
+    nextModelsById.delete(normalizedId);
 
     this.getStorage().remove(getModelStorageKey(normalizedId));
     this.persistModelsIndex(nextIds);

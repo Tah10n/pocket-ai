@@ -4,7 +4,7 @@ const { STEP_IDS, IDENTITIES, sanitizeModelResourcesEvidence, validateModelResou
 const fixture = () => ({ schemaVersion: 1, status: 'passed', phase: 'complete', requiresForceStop: false,
   ...IDENTITIES, steps: STEP_IDS.map(id => ({ id, status: 'passed', callbacks: 2, tokensPredicted: 2,
     tokensEvaluated: 12, outputCharacters: 8, dimensions: 384, finite: true,
-    chatUnchanged: true, settingsUnchanged: true, contextChanged: true })) });
+    chatUnchanged: true, settingsUnchanged: true, contextChanged: true, contextUnchanged: true, fileRemoved: true })) });
 describe('stage 2 native resource evidence', () => {
   it('accepts complete A-B-A evidence with the pinned specialized model', () => {
     expect(validateModelResourcesEvidence(fixture()).status).toBe('passed');
@@ -12,7 +12,7 @@ describe('stage 2 native resource evidence', () => {
   it.each(['auxiliaryModelSha256', 'auxiliaryRevision', 'chatModelSha256'])('rejects a changed %s', field => {
     expect(() => validateModelResourcesEvidence({ ...fixture(), [field]: 'unverified' })).toThrow(/identities/);
   });
-  it.each(['dimensions', 'finite', 'chatUnchanged', 'settingsUnchanged', 'contextChanged', 'callbacks'])(
+  it.each(['dimensions', 'finite', 'chatUnchanged', 'settingsUnchanged', 'contextChanged', 'contextUnchanged', 'fileRemoved', 'callbacks'])(
     'does not infer missing %s from a passed label', field => {
       const value = fixture();
       value.steps.forEach(step => { delete step[field]; });
@@ -24,6 +24,16 @@ describe('stage 2 native resource evidence', () => {
     value.steps[3].vector = [1, 2]; value.steps[3].path = '/private/model';
     const safe = JSON.stringify(sanitizeModelResourcesEvidence(value));
     expect(safe).not.toMatch(/PRIVATE|private|vector/);
+  });
+  it.each([
+    ['offload_unused_embedding', 'fileRemoved'],
+    ['offload_unused_embedding', 'contextUnchanged'],
+    ['generate_after_offload', 'tokensPredicted'],
+    ['confirm_context_retained', 'contextUnchanged'],
+  ])('requires %s.%s independently', (id, field) => {
+    const value = fixture();
+    delete value.steps.find(step => step.id === id)[field];
+    expect(() => validateModelResourcesEvidence(value)).toThrow();
   });
   it('stops bounded polling on failed and never accepts a partial sequence', async () => {
     await expect(waitForModelResourcesEvidence(async () => ({ ...fixture(), status: 'failed', failureCode: 'timeout' }))).rejects.toThrow(/timeout/);

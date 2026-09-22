@@ -12,6 +12,7 @@ import { normalizeSha256Digest } from '../utils/sha256';
 import { resolveConservativeAvailableMemoryBudget } from '../memory/budget';
 import { registry } from './LocalStorageRegistry';
 import { llmEngineService } from './LLMEngineService';
+import { runWithIdleModelDownloads } from './ModelDownloadManager';
 import { getModelsDir } from './FileSystemSetup';
 import { getSystemMemorySnapshot } from './SystemMetricsService';
 import { assertPrivateStorageWritable, isPrivateStorageWritable } from './storage';
@@ -147,7 +148,11 @@ export async function checkAuxiliaryModel(
     })];
   const isCurrent = () => !invalidated && isPrivateStorageWritable();
   try {
-    const path = await validateAuxiliaryFile(model);
+    // Reading/hash verification owns files too. Keep the loaded chat intact,
+    // while excluding native lifecycle changes and download/deletion mutations.
+    const path = await runWithIdleModelDownloads(() => llmEngineService.runWithIdleModelResources(
+      () => validateAuxiliaryFile(model), [],
+    ));
     if (!isCurrent()) throw new AuxiliaryModelError('selection_changed');
     const result = await llmEngineService.runWithAuxiliaryContext({
       modelId: model.id,
@@ -194,7 +199,7 @@ export async function checkAuxiliaryModel(
     if (llmEngineService.getState().auxiliaryRestoreError) throw new AuxiliaryModelError('restore_failed');
     // Native diagnostics can contain paths or input; expose only a bounded error category.
     const code = (error as { code?: string })?.code;
-    throw new AuxiliaryModelError(code === 'engine_busy' ? 'busy' : 'native_failed');
+    throw new AuxiliaryModelError(code === 'engine_busy' || code === 'action_failed' ? 'busy' : 'native_failed');
   } finally {
     unsubscribers.forEach((unsubscribe) => unsubscribe());
   }

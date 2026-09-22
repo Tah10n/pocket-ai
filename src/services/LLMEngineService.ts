@@ -4,6 +4,7 @@ import type {
   NativeBackendDeviceInfo,
 } from 'llama.rn';
 import DeviceInfo from 'react-native-device-info';
+import { fileUriToNativePath } from '../utils/safeFilePath';
 import { Platform } from 'react-native';
 import appPackageJson from '../../package.json';
 import { getLlamaRuntimeDiagnostics } from './llamaRnModule';
@@ -1400,6 +1401,7 @@ class LLMEngineService {
   private activeMultimodalContext: ActiveMultimodalContext | null = null;
   private configuredSpeculativeDecoding: ModelSpeculativeDecodingConfig | null = null;
   private activeSpeculativeDecoding: ModelSpeculativeDecodingConfig | null = null;
+  private activeSpeculativeDraftPath: string | null = null;
   private speculativeDecodingFallbackReason: MtpFallbackReason | null = null;
   private speculativeDraftSizeBytes: number | null = null;
   private speculativeMemorySession: SpeculativeMemorySession | null = null;
@@ -1530,6 +1532,7 @@ class LLMEngineService {
     if (this.context !== context) {
       this.activeMultimodalContext = null;
       this.activeSpeculativeDecoding = null;
+      this.activeSpeculativeDraftPath = null;
       this.pendingMultimodalReadinessRefresh = null;
       this.loadedContextDisablesContextShiftForMultimodal = false;
     }
@@ -3783,17 +3786,30 @@ class LLMEngineService {
   }
 
   /** File deletion must cross this barrier even while the visible chat is idle. */
-  public assertModelResourcesIdle(_modelId?: string): void {
+  public assertModelResourcesIdle(resourcePaths?: readonly string[]): void {
     this.assertNoOrphanedContextReleasePending();
-    if (this.context || this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.isUnloading
-      || this.hasActiveCompletion() || this.hasActiveChatBlockingContextOperation()) {
+    let contextOwnsResources = Boolean(this.context);
+    if (this.context && resourcePaths !== undefined) {
+      // Compare native consumers' original paths, not mutable registry metadata.
+      const main = this.loadedArtifactIdentity?.resolvedPath;
+      const projector = this.activeMultimodalContext?.projectorResolvedPath;
+      const draft = this.activeSpeculativeDraftPath;
+      const unknownOwnership = !main
+        || (this.activeMultimodalContext !== null && !projector)
+        || (this.activeSpeculativeDecoding?.mode === 'draft_model' && !draft);
+      const heldPaths = [main, projector, draft].filter((path): path is string => Boolean(path))
+        .map(fileUriToNativePath);
+      contextOwnsResources = unknownOwnership || resourcePaths.some(path => heldPaths.includes(fileUriToNativePath(path)));
+    }
+    if (contextOwnsResources || this.initPromise || this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.isUnloading
+      || this.hasActiveCompletion() || this.hasActiveContextOperation()) {
       throw new AppError('engine_busy', 'Model resources are still in use. Please retry after the operation finishes.');
     }
   }
 
   /** Holds the lifecycle queue until asynchronous file/storage mutation settles. */
-  public async runWithIdleModelResources<T>(operation: () => Promise<T>): Promise<T> {
-    this.assertModelResourcesIdle();
+  public async runWithIdleModelResources<T>(operation: () => Promise<T>, resourcePaths?: readonly string[]): Promise<T> {
+    this.assertModelResourcesIdle(resourcePaths);
     // runExclusiveOperation reserves synchronously before its first await. Loads
     // admitted later queue behind deletion; auxiliary admission sees the lease.
     return this.runExclusiveOperation(operation);
@@ -8483,6 +8499,8 @@ class LLMEngineService {
           this.activeSpeculativeDecoding = speculativeDecodingForLoad
             ? { ...speculativeDecodingForLoad }
             : null;
+          this.activeSpeculativeDraftPath = speculativeDecodingForLoad?.mode === 'draft_model'
+            ? speculativeDraftPath ?? null : null;
           this.loadedContextDisablesContextShiftForMultimodal = shouldDisableContextShiftForMultimodal;
           gpuInitError = null;
           break;

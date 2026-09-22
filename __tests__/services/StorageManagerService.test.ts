@@ -58,6 +58,7 @@ jest.mock('../../src/services/LocalStorageRegistry', () => ({
     getModels: jest.fn().mockReturnValue([]),
     getModel: jest.fn(),
     removeModel: jest.fn(),
+    getModelResourcePathsForRemoval: jest.fn().mockReturnValue([]),
     validateRegistry: jest.fn().mockResolvedValue(undefined),
     getQuarantinedModelFileNames: jest.fn().mockReturnValue([]),
     deleteQuarantinedModelFiles: jest.fn().mockResolvedValue(0),
@@ -1808,14 +1809,14 @@ describe('StorageManagerService', () => {
   it('preserves persisted per-model settings by default when offloading a model', async () => {
     await expect(offloadModel('org/model')).resolves.toBeUndefined();
 
-    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model');
+    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model', []);
     expect(resetAllParametersForModel).not.toHaveBeenCalled();
   });
 
   it('can clear persisted per-model settings while offloading a model', async () => {
     await expect(offloadModel('org/model', { preserveSettings: false })).resolves.toBeUndefined();
 
-    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model');
+    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model', []);
     expect(resetAllParametersForModel).toHaveBeenCalledWith('org/model');
   });
 
@@ -1826,7 +1827,7 @@ describe('StorageManagerService', () => {
     await expect(offloadModel('org/model', { preserveSettings: false })).resolves.toBeUndefined();
 
     expect(llmEngineService.unload).toHaveBeenCalledTimes(1);
-    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model');
+    expect(mockedRegistry.removeModel).toHaveBeenCalledWith('org/model', []);
     expect(resetAllParametersForModel).toHaveBeenCalledWith('org/model');
     expect((llmEngineService.unload as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
       mockedRegistry.removeModel.mock.invocationCallOrder[0],

@@ -3081,12 +3081,13 @@ export class ModelDownloadManager {
   }
 
   public async removeCompanion(modelId: string, artifactId: string): Promise<void> {
-    llmEngineService.assertModelResourcesIdle(modelId);
     if (this.activeJob?.modelId === modelId || useDownloadStore.getState().queue.some(item => item.id === modelId)) {
       throw new AppError('action_failed', 'Cancel the resource download before removing it');
     }
-    await ModelDownloadManager.runWithIdleModelDownloads(() =>
-      llmEngineService.runWithIdleModelResources(() => registry.removeCompanion(modelId, artifactId)));
+    await ModelDownloadManager.runWithIdleModelDownloads(() => {
+      const paths = registry.getModelResourcePathsForRemoval(modelId, artifactId);
+      return llmEngineService.runWithIdleModelResources(() => registry.removeCompanion(modelId, artifactId, paths), paths);
+    });
   }
 
   public async pauseDownload(modelId: string) {

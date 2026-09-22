@@ -13,6 +13,7 @@ import { bindManagedCompanion, getSelectedManagedCompanions } from '../../src/ut
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   getState: jest.fn(() => ({ activeModelId: 'chat/a' })),
   hasAuxiliaryContextOperation: jest.fn(() => false), runWithAuxiliaryContext: jest.fn(),
+  runWithIdleModelResources: jest.fn((operation: () => Promise<unknown>) => operation()),
 } }));
 jest.mock('../../src/services/SystemMetricsService', () => ({ getSystemMemorySnapshot: jest.fn() }));
 jest.mock('../../src/services/FileSystemSetup', () => ({ getModelsDir: () => 'file:///models/' }));

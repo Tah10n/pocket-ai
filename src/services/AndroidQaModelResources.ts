@@ -1,9 +1,11 @@
+import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
 import { useDownloadStore } from '../store/downloadStore';
 import { createChatId, DEFAULT_PRESET_SNAPSHOT } from '../types/chat';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../types/models';
 import { getThreadInferenceWindow } from '../utils/inferenceWindow';
 import { getModelFileIdentity } from '../utils/modelRoles';
+import { safeJoinModelPath } from '../utils/safeFilePath';
 import { checkAuxiliaryModel, selectAuxiliaryModel } from './AuxiliaryModelService';
 import { ANDROID_QA_DOCUMENT_MODEL_ID, ANDROID_QA_DOCUMENT_MODEL_SHA256,
   isAndroidQaDocumentModelBootstrapEnabled } from './AndroidQaDocumentModelBootstrap';
@@ -12,6 +14,8 @@ import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { getModelDownloadManager } from './ModelDownloadManager';
 import { getSettings, updateSettings } from './SettingsStore';
+import { getModelsDir } from './FileSystemSetup';
+import { offloadModel } from './StorageManagerService';
 
 export const ANDROID_QA_EMBEDDING_REPO = 'second-state/All-MiniLM-L6-v2-Embedding-GGUF';
 export const ANDROID_QA_EMBEDDING_REVISION = '544f204f2eaa2d71361ffc74d6df7170285b286a';
@@ -21,7 +25,8 @@ export const ANDROID_QA_EMBEDDING_SIZE = 25_008_064;
 
 type ResourceStep = { id: string; status: 'passed'; callbacks?: number; tokensPredicted?: number;
   tokensEvaluated?: number; outputCharacters?: number; dimensions?: number; finite?: boolean;
-  chatUnchanged?: boolean; settingsUnchanged?: boolean; contextChanged?: boolean };
+  chatUnchanged?: boolean; settingsUnchanged?: boolean; contextChanged?: boolean;
+  contextUnchanged?: boolean; fileRemoved?: boolean };
 export type AndroidQaModelResourcesEvidence = {
   schemaVersion: 1; status: 'idle' | 'running' | 'passed' | 'failed'; phase: string;
   requiresForceStop: boolean; failureCode?: string; steps: ResourceStep[];
@@ -182,6 +187,41 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     check(llmEngineService.getPromptContextIdentity() !== generationBefore, 'context_not_replaced');
     pass({ id: 'restore_chat', chatUnchanged: true, settingsUnchanged: true, contextChanged: true });
     await generate('generate_after');
+    // Only the pinned fixture in the explicitly isolated QA package is removed.
+    // Keep the original A -> B -> A sequence above intact, then exercise offload
+    // through the same production entry point used by storage management.
+    phase('offload_unused_embedding');
+    const installed = registry.getModel(ANDROID_QA_EMBEDDING_REPO);
+    const modelsDir = getModelsDir();
+    const fileUri = modelsDir && installed?.localPath
+      ? safeJoinModelPath(modelsDir, installed.localPath) : null;
+    check(fileUri && installed && getModelFileIdentity(installed) === getModelFileIdentity(model)
+      && installed.downloadIntegrity?.sha256 === ANDROID_QA_EMBEDDING_SHA256, 'fixture_identity_conflict');
+    check((await FileSystem.getInfoAsync(fileUri)).exists, 'fixture_file_missing');
+    const contextBeforeOffload = llmEngineService.getPromptContextIdentity();
+    const threadBeforeOffload = JSON.stringify(useChatStore.getState().threads[ownedThread]);
+    const settingsBeforeOffload = chatSettings();
+    await bounded(offloadModel(installed.id), operationTimeoutMs);
+    assertCpu();
+    check(llmEngineService.getPromptContextIdentity() === contextBeforeOffload, 'context_changed_on_offload');
+    check(useChatStore.getState().activeThreadId === ownedThread
+      && JSON.stringify(useChatStore.getState().threads[ownedThread]) === threadBeforeOffload, 'chat_changed');
+    check(chatSettings() === settingsBeforeOffload, 'settings_changed');
+    check(!registry.getModel(installed.id)?.localPath && !(await FileSystem.getInfoAsync(fileUri)).exists, 'fixture_not_removed');
+    pass({ id: 'offload_unused_embedding', chatUnchanged: true, settingsUnchanged: true, contextUnchanged: true, fileRemoved: true });
+    const messagesBeforeNextAnswer = useChatStore.getState().threads[ownedThread].messages;
+    const retainedMessageCount = messagesBeforeNextAnswer.length;
+    const retainedMessagesSnapshot = JSON.stringify(messagesBeforeNextAnswer);
+    await generate('generate_after_offload');
+    assertCpu();
+    check(llmEngineService.getPromptContextIdentity() === contextBeforeOffload, 'context_changed_on_offload');
+    check(chatSettings() === settingsBeforeOffload, 'settings_changed');
+    const threadAfterNextAnswer = useChatStore.getState().threads[ownedThread];
+    check(useChatStore.getState().activeThreadId === ownedThread && threadAfterNextAnswer
+      && threadAfterNextAnswer.messages.length === retainedMessageCount + 2
+      && JSON.stringify(threadAfterNextAnswer.messages.slice(0, retainedMessageCount))
+        === retainedMessagesSnapshot, 'chat_changed');
+    pass({ id: 'confirm_context_retained', contextUnchanged: true });
     publish({ status: 'passed', phase: 'complete' });
   } catch (error) {
     abort.abort();

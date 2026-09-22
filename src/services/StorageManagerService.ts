@@ -1140,7 +1140,8 @@ export async function offloadModel(modelId: string, options?: OffloadModelOption
       await llmEngineService.unload();
     }
 
-    await llmEngineService.runWithIdleModelResources(() => registry.removeModel(modelId));
+    const paths = registry.getModelResourcePathsForRemoval(modelId);
+    await llmEngineService.runWithIdleModelResources(() => registry.removeModel(modelId, paths), paths);
     clearAuxiliaryBindingsForModel(modelId);
 
     if (!preserveSettings) {

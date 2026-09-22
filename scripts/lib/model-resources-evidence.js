@@ -1,8 +1,10 @@
-const STEP_IDS = ["cpu_load", "generate_before", "prepare_embedding", "embedding_check", "restore_chat", "generate_after"];
+const STEP_IDS = ["cpu_load", "generate_before", "prepare_embedding", "embedding_check", "restore_chat", "generate_after",
+  "offload_unused_embedding", "generate_after_offload", "confirm_context_retained"];
 const FAILURE_CODES = ["timeout", "baseline_not_passed", "engine_busy", "verified_chat_missing",
   "chat_model_identity", "runtime_policy", "new_chat_blocked", "no_real_generation", "fixture_identity_conflict",
   "download_failed", "download_paused", "download_timeout", "embedding_invalid", "release_incomplete",
-  "chat_changed", "settings_changed", "context_not_replaced", "operation_failed"];
+  "chat_changed", "settings_changed", "context_not_replaced", "operation_failed",
+  "fixture_file_missing", "fixture_not_removed", "context_changed_on_offload"];
 const IDENTITIES = {
   chatModelSha256: "bc64cce8e1c11e4ed870633b557e04af718249c817c4cf8a6784116144ec3e28",
   auxiliaryModelSha256: "263215c3cadd6e16740741a7624ab4cbb6c8e777688bd5331ecfbf5681c2f8ed",
@@ -10,7 +12,7 @@ const IDENTITIES = {
 };
 function sanitizeModelResourcesEvidence(input) {
   const numericFields = ["callbacks", "tokensPredicted", "tokensEvaluated", "outputCharacters", "dimensions"];
-  const booleanFields = ["finite", "chatUnchanged", "settingsUnchanged", "contextChanged"];
+  const booleanFields = ["finite", "chatUnchanged", "settingsUnchanged", "contextChanged", "contextUnchanged", "fileRemoved"];
   return {
     schemaVersion: input?.schemaVersion === 1 ? 1 : null,
     status: ["idle", "running", "passed", "failed"].includes(input?.status) ? input.status : "unknown",
@@ -35,12 +37,19 @@ function validateModelResourcesEvidence(input) {
   }
   evidence.steps.forEach((step, index) => {
     if (step.id !== STEP_IDS[index] || step.status !== "passed") throw new Error("Resource lifecycle sequence is incomplete.");
-    if (["generate_before", "generate_after"].includes(step.id)
+    if (["generate_before", "generate_after", "generate_after_offload"].includes(step.id)
       && ![step.callbacks, step.tokensPredicted, step.tokensEvaluated, step.outputCharacters]
         .every(value => Number.isSafeInteger(value) && value > 0)) throw new Error("No real chat generation evidence.");
     if (step.id === "embedding_check" && (step.dimensions !== 384 || step.finite !== true)) throw new Error("Specialized embedding evidence is missing.");
     if (step.id === "restore_chat" && (step.chatUnchanged !== true || step.settingsUnchanged !== true || step.contextChanged !== true)) {
       throw new Error("Chat restoration identity was not preserved.");
+    }
+    if (step.id === "offload_unused_embedding"
+      && (step.chatUnchanged !== true || step.settingsUnchanged !== true || step.contextUnchanged !== true || step.fileRemoved !== true)) {
+      throw new Error("Unused resource removal did not preserve the loaded chat context.");
+    }
+    if (step.id === "confirm_context_retained" && step.contextUnchanged !== true) {
+      throw new Error("Chat context was replaced after resource removal.");
     }
   });
   return evidence;

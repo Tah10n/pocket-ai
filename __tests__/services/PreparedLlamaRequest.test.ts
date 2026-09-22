@@ -78,7 +78,25 @@ describe('one prepared llama request for counting and completion', () => {
     const { cache, request } = setup();
     const grammar = 'root ::= "ok"\n';
     const prepared = await cache.prepare({ ...request, generation: freezeGenerationParameters({ output: { mode: 'gbnf', grammar } }, 1) });
-    expect(prepared.completion).toMatchObject({ grammar, grammar_lazy: false, grammar_triggers: [], preserved_tokens: [], chat_parser: 'parser' });
+    expect(prepared.completion).toMatchObject({ grammar, grammar_lazy: false, grammar_triggers: [], preserved_tokens: [],
+      chat_parser: '', chat_format: 0, generation_prompt: '', prefill_text: '', thinking_forced_open: false });
+    expect(prepared.formatted.chat_parser).toBe('parser');
+  });
+
+  it('keeps GBNF protocol-looking literals as content instead of sending them through the template parser', async () => {
+    const { cache, getFormattedChat, request } = setup();
+    const literal = '<|open|>think<|sep|>x<|close|>think<|sep|>';
+    const grammar = `root ::= ${JSON.stringify(literal)}`;
+    getFormattedChat.mockResolvedValue({ type: 'jinja', prompt: 'history<assistant>',
+      generation_prompt: '<assistant>', chat_parser: 'kimi-protocol-parser', chat_format: 24,
+      thinking_forced_open: true, thinking_start_tag: '<|open|>think<|sep|>', thinking_end_tag: '<|close|>think<|sep|>' });
+    const prepared = await cache.prepare({ ...request, generation: freezeGenerationParameters({ output: { mode: 'gbnf', grammar } }, 1) });
+    expect(prepared.completion).toMatchObject({ prompt: 'history<assistant>', grammar,
+      chat_parser: '', chat_format: 0, generation_prompt: '', prefill_text: '',
+      thinking_forced_open: false, thinking_start_tag: '', thinking_end_tag: '' });
+    expect(prepared.formatted.chat_parser).toBe('kimi-protocol-parser');
+    // Empty native parser captures p.rest() as content, with no framing prefix.
+    expect((prepared.completion.generation_prompt ?? '') + (prepared.completion.prefill_text ?? '') + literal).toBe(literal);
   });
 
   it('makes explicit JSON constraints win over template grammar and disables incompatible thinking', async () => {

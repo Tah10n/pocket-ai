@@ -1972,7 +1972,7 @@ const ChatScreenContent = () => {
     });
 
     const runDiagnostic = async (kind: 'prefill' | 'tokens') => {
-        if (!currentChatActiveModelId || diagnosticAbortRef.current) return;
+        if (!currentChatActiveModelId || !isCurrentChatModelReady || diagnosticAbortRef.current) return;
         const controller = new AbortController();
         diagnosticAbortRef.current = controller;
         setDiagnosticBusy(true);

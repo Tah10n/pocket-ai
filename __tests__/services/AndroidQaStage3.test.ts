@@ -1,5 +1,6 @@
 import fixture from '../../docs/validation/llama-rn-stage3/lora-fixture.json';
-import { getAndroidQaStage3Evidence, resetAndroidQaStage3ForTests, runAndroidQaStage3 } from '../../src/services/AndroidQaStage3';
+import { getAndroidQaEffectiveProfileIdentity, getAndroidQaStage3Evidence, resetAndroidQaStage3ForTests, runAndroidQaStage3 } from '../../src/services/AndroidQaStage3';
+import type { ModelLoadParameters } from '../../src/services/SettingsStore';
 
 const mockEnabled = jest.fn(() => true);
 const mockStage1 = jest.fn(() => ({ status: 'passed' }));
@@ -35,6 +36,22 @@ describe('Stage 3 QA lifecycle contract (unit tests are not native acceptance)',
     mockGetModel.mockReturnValue({ id: 'qa-chat', downloadIntegrity: { sha256: fixture.base.sha256 } });
   });
   afterEach(() => jest.useRealTimers());
+  it('compares the complete applied profile across auxiliary restore, preserving values and adapter order', () => {
+    const adapter = { artifactId: 'qa', artifactIdentity: 'source', baseModelIdentity: 'base', scale: 0.5, sizeBytes: 64 };
+    const profile: ModelLoadParameters = { contextSize: 512, gpuLayers: 0, kvCacheType: 'f16', backendPolicy: 'cpu',
+      cpuThreads: 4, nBatch: 128, selectedBackendDevices: [], noExtraBufts: false, loraAdapters: [adapter, { ...adapter, artifactId: 'second' }] };
+    const identity = getAndroidQaEffectiveProfileIdentity(profile);
+    expect(getAndroidQaEffectiveProfileIdentity({ ...profile, cpuMask: undefined,
+      loraAdapters: [{ sizeBytes: 64, scale: 0.5, baseModelIdentity: 'base', artifactIdentity: 'source', artifactId: 'qa' }, { ...adapter, artifactId: 'second' }] })).toBe(identity);
+    const changes: Partial<ModelLoadParameters>[] = [
+      { contextSize: 1024 }, { gpuLayers: 1 }, { backendPolicy: 'gpu' }, { cpuThreads: 2 }, { nBatch: 64 },
+      { selectedBackendDevices: null }, { noExtraBufts: undefined }, { noExtraBufts: true },
+      { loraAdapters: [{ ...adapter, scale: 1 }, { ...adapter, artifactId: 'second' }] },
+      { loraAdapters: [{ ...adapter, artifactId: 'second' }, adapter] },
+    ];
+    for (const change of changes) expect(getAndroidQaEffectiveProfileIdentity({ ...profile, ...change })).not.toBe(identity);
+    expect(() => getAndroidQaEffectiveProfileIdentity(null)).toThrow('assertion');
+  });
   it('is inert outside the isolated QA gate', async () => {
     mockEnabled.mockReturnValue(false);
     await runAndroidQaStage3();

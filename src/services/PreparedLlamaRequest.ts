@@ -18,6 +18,15 @@ export type PreparedLlamaRequest = {
 const MAX_CACHE_ENTRIES = 8;
 const MAX_CACHE_CHARS = 512 * 1024;
 
+function pureContentParsing(generationPrompt: string): Pick<PreparedCompletionParams,
+  'generation_prompt' | 'prefill_text' | 'chat_parser' | 'chat_format'
+  | 'thinking_forced_open' | 'thinking_start_tag' | 'thinking_end_tag'> {
+  return {
+    generation_prompt: generationPrompt, prefill_text: '', chat_parser: '', chat_format: 0,
+    thinking_forced_open: false, thinking_start_tag: '', thinking_end_tag: '',
+  };
+}
+
 /** Owned by the engine; all calls remain under its native operation reservation. */
 export class PreparedLlamaRequestCache {
   private context: LlamaContext | null = null;
@@ -119,6 +128,9 @@ export class PreparedLlamaRequestCache {
       completion.grammar_lazy = false;
       completion.grammar_triggers = [];
       completion.preserved_tokens = [];
+      // Native template parsers can consume protocol literals even when reasoning
+      // extraction is disabled. An explicit user grammar owns the entire output.
+      Object.assign(completion, pureContentParsing(''));
     } else if (output.responseFormat) {
       // Native explicitly gives grammar priority over json_schema. Clear a
       // template grammar so the user's selected schema cannot silently weaken.
@@ -133,13 +145,7 @@ export class PreparedLlamaRequestCache {
       // content-only path to reconstruct prefix + generated suffix exactly once.
       // prefill_text would prepend it a second time; retain original formatter
       // metadata separately in prepared.formatted for stops/identity/diagnostics.
-      completion.generation_prompt = prefill;
-      completion.prefill_text = '';
-      completion.chat_parser = '';
-      completion.chat_format = 0;
-      completion.thinking_forced_open = false;
-      completion.thinking_start_tag = '';
-      completion.thinking_end_tag = '';
+      Object.assign(completion, pureContentParsing(prefill));
     }
     const prepared = { formatted, output, completion };
     const chars = key.length + JSON.stringify(prepared).length;

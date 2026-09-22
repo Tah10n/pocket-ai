@@ -4,6 +4,8 @@ import { useChatStore } from '../store/chatStore';
 import { AppError } from './AppError';
 import { beginChatGenerationWork, registerActiveChatGenerationStop } from './ChatGenerationService';
 import { llmEngineService } from './LLMEngineService';
+import { isThreadLoraProfileReady } from '../utils/chatLoraProfile';
+import { getThreadActiveModelId } from '../types/chat';
 
 /** Explicit, local diagnostics. Neither operation creates or mutates a chat message. */
 export async function runPromptDiagnostic(input: {
@@ -31,6 +33,14 @@ export async function runPromptDiagnostic(input: {
     const current = useChatStore.getState();
     if (cancelled || current.activeThreadId !== threadId || current.inferenceRevision !== revision) {
       throw new AppError('action_failed', 'The diagnostic was cancelled.');
+    }
+    const thread = threadId ? current.threads[threadId] : undefined;
+    if (thread) {
+      const effectiveProfile = llmEngineService.getEffectiveLoadParameters();
+      if (getThreadActiveModelId(thread) !== input.modelId || !effectiveProfile
+        || !isThreadLoraProfileReady(thread, effectiveProfile)) {
+        throw new AppError('engine_busy', 'Wait for the conversation model configuration to be restored.');
+      }
     }
   };
   try {

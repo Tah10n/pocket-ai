@@ -129,8 +129,10 @@ fences, reasoning, prose or invalid fields to manufacture valid JSON. It receive
 only the user-content channel. Native GBNF parsing remains responsible for grammar
 syntax; GBNF results do not acquire a JSON-validation success label.
 
-Explicit JSON modes use the native content-only parser (`chat_format: 0`, empty
-`chat_parser`). In this pinned runtime `generation_prompt` advances an
+All explicit constraints (JSON and GBNF) use the native content-only parser
+(`chat_format: 0`, empty `chat_parser`) so template parsers cannot consume literal
+protocol or reasoning markers required by the selected grammar. GBNF uses empty
+parser prefixes. In this pinned runtime `generation_prompt` advances an
 output-format grammar and also prefixes parser input. Preparation supplies only
 the configured JSON content prefix there, leaves `prefill_text` empty, and keeps
 the template's assistant protocol prefix out of the bare JSON grammar. This

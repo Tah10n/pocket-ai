@@ -4,18 +4,54 @@ import { DEFAULT_GENERATION_PARAMETERS } from '../../src/services/SettingsStore'
 import { useChatStore } from '../../src/store/chatStore';
 import { hasActiveChatGenerationWork } from '../../src/services/ChatGenerationService';
 import { getPreparedTemplateNow } from '../../src/utils/generationControls';
+import type { LoraProfileAdapter } from '../../src/utils/advancedLoadProfile';
 
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
   inspectTokens: jest.fn(), countPromptTokens: jest.fn().mockResolvedValue(12),
   prefillPrompt: jest.fn().mockResolvedValue({ text: '' }), getContextSize: () => 1024,
   hasActiveCompletion: () => true, stopCompletion: jest.fn().mockResolvedValue(undefined),
+  getEffectiveLoadParameters: jest.fn(),
 } }));
 
 const input = { kind: 'prefill' as const, modelId: 'base', text: 'Unsent text', systemPrompt: 'System',
   generation: { ...DEFAULT_GENERATION_PARAMETERS, template: { prefillText: '{', kwargs: { locale: 'en' } } } };
 
 describe('explicit prompt diagnostics', () => {
-  beforeEach(() => jest.clearAllMocks());
+  const adapter: LoraProfileAdapter = { artifactId: 'adapter', artifactIdentity: 'revision', baseModelIdentity: 'base', scale: 0.5, sizeBytes: 64 };
+  const profile = { contextSize: 1024, gpuLayers: 0, kvCacheType: 'f16' as const, loraAdapters: [adapter] };
+  const createChat = () => useChatStore.getState().createThread({ modelId: 'base', presetId: null,
+    presetSnapshot: { id: null, name: 'Default', systemPrompt: 'System' },
+    paramsSnapshot: DEFAULT_GENERATION_PARAMETERS, loraSnapshot: [adapter] });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    jest.mocked(llmEngineService.getEffectiveLoadParameters).mockReturnValue(profile);
+  });
+
+  it.each(['prefill', 'tokens'] as const)('blocks %s before native when the same base model has another LoRA scale', async kind => {
+    createChat();
+    jest.mocked(llmEngineService.getEffectiveLoadParameters).mockReturnValue({ ...profile, loraAdapters: [{ ...adapter, scale: 1 }] });
+    await expect(runPromptDiagnostic({ ...input, kind })).rejects.toMatchObject({ code: 'engine_busy' });
+    expect(llmEngineService.countPromptTokens).not.toHaveBeenCalled();
+    expect(llmEngineService.prefillPrompt).not.toHaveBeenCalled();
+    expect(llmEngineService.inspectTokens).not.toHaveBeenCalled();
+    expect(hasActiveChatGenerationWork()).toBe(false);
+  });
+
+  it('checks LoRA readback again after deferred token counting before starting prefill', async () => {
+    const threadId = createChat();
+    const before = useChatStore.getState().threads[threadId];
+    let resolveCount!: (count: number) => void;
+    jest.mocked(llmEngineService.countPromptTokens).mockImplementationOnce(() => new Promise(resolve => { resolveCount = resolve; }));
+    const pending = runPromptDiagnostic(input);
+    expect(llmEngineService.countPromptTokens).toHaveBeenCalledTimes(1);
+    jest.mocked(llmEngineService.getEffectiveLoadParameters).mockReturnValue({ ...profile, loraAdapters: [] });
+    resolveCount(12);
+    await expect(pending).rejects.toMatchObject({ code: 'engine_busy' });
+    expect(llmEngineService.prefillPrompt).not.toHaveBeenCalled();
+    expect(useChatStore.getState().threads[threadId]).toBe(before);
+    expect(hasActiveChatGenerationWork()).toBe(false);
+  });
 
   it('uses one frozen template for exact count and prefill, creating no chat or assistant', async () => {
     const before = useChatStore.getState();

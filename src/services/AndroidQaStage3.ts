@@ -13,7 +13,7 @@ import { checkAuxiliaryModel, selectAuxiliaryModel } from './AuxiliaryModelServi
 import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { getModelDownloadManager } from './ModelDownloadManager';
-import { getSettings, updateSettings } from './SettingsStore';
+import { getSettings, updateSettings, type ModelLoadParameters } from './SettingsStore';
 import type { LlamaCompletionResult } from './LlamaRuntimeAdapter';
 
 export const ANDROID_QA_STAGE3_STEPS = [
@@ -56,6 +56,21 @@ class Stage3Failure extends Error {
   constructor(readonly code: NonNullable<AndroidQaStage3Evidence['failureCode']>, readonly requiresForceStop = false) { super(code); }
 }
 function check(value: unknown): asserts value { if (!value) throw new Stage3Failure('assertion'); }
+
+/** Private comparison only; never export profile values or this identity in QA evidence. */
+export function getAndroidQaEffectiveProfileIdentity(profile: ModelLoadParameters | null): string {
+  check(profile);
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([key, item]) => [key, canonical(item)]));
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(profile));
+}
 async function bounded<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -257,10 +272,10 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     phase('prepare_embedding'); const embedding = await prepareAndroidQaEmbeddingFixture(downloadTimeoutMs); pass({ id: 'prepare_embedding' });
     await apply([{ ...adapter, scale: 0.5 }]);
     phase('lora_auxiliary_restore'); selectAuxiliaryModel('embedding', embedding);
-    const before = getAdvancedLoadProfileIdentity(llmEngineService.getEffectiveLoadParameters());
+    const before = getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters());
     const history = JSON.stringify(useChatStore.getState().threads[ownedThread]);
     const auxiliary = await bounded(checkAuxiliaryModel('embedding', { signal: abort.signal, verifyEmbedding: true }), operationTimeoutMs);
-    check(auxiliary.dimensions === 384 && before === getAdvancedLoadProfileIdentity(llmEngineService.getEffectiveLoadParameters()));
+    check(auxiliary.dimensions === 384 && before === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters()));
     check(history === JSON.stringify(useChatStore.getState().threads[ownedThread])); assertCpu();
     const afterAuxiliary = await probabilityProbe();
     const auxiliaryRestored = compareProbabilityDistributions(half, afterAuxiliary);

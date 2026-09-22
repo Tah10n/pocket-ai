@@ -12,7 +12,7 @@ import {
 } from './modelCapabilities';
 import { applyEffectiveProjectorState } from './effectiveProjectorState';
 import { isManagedCompanionArtifact, mergeModelArtifacts } from './modelArtifacts';
-import { mergeModelRoleEvidence, normalizeModelRoleValidation } from './modelRoles';
+import { filterModelRoleEvidenceForFile, hasStaleModelGgufRoleEvidence, mergeModelRoleEvidence, normalizeModelRoleValidation, withoutModelGgufRoleMetadata } from './modelRoles';
 
 interface MergeModelWithRuntimeStateOptions {
   activeModelId?: string;
@@ -510,8 +510,15 @@ function mergeModelWithRuntimeStateUncached(
     }
   }
 
+  // Runtime fallback can fill a missing digest, size or revision after variant
+  // selection. Invalidate raw purpose before discarding its old scope marker,
+  // or role resolution would immediately bind it to that new identity again.
+  if (hasStaleModelGgufRoleEvidence(mergedModel.roleEvidence, mergedModel)) {
+    mergedModel.gguf = withoutModelGgufRoleMetadata(mergedModel.gguf);
+  }
   mergedModel.roleEvidence = mergeModelRoleEvidence(
-    mergedModel.roleEvidence, localModel?.roleEvidence, queuedItem?.roleEvidence,
+    ...[mergedModel.roleEvidence, localModel?.roleEvidence, queuedItem?.roleEvidence]
+      .map((evidence) => filterModelRoleEvidenceForFile(evidence, mergedModel)),
   );
   // Checks are committed to the registry. Its absence of a receipt is also
   // authoritative: stale route/queue snapshots must not revalidate fresh bytes.

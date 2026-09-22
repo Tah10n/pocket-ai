@@ -1,6 +1,6 @@
 import type { HuggingFaceModelSummary } from '../types/huggingFace';
 import type { ModelRole, ModelRoleEvidence, ModelRoleValidation } from '../types/modelRoles';
-import type { ModelMetadata } from '../types/models';
+import type { ModelGgufMetadata, ModelMetadata } from '../types/models';
 import { resolveActiveModelVariant } from './activeModelVariant';
 import { resolveHuggingFaceResolveIdentity } from './huggingFaceUrls';
 import { normalizeSha256Digest } from './sha256';
@@ -10,6 +10,7 @@ export const MODEL_ROLES: readonly ModelRole[] = ['chat', 'embedding', 'reranker
 const sources = new Set<ModelRoleEvidence['source']>([
   'pipeline_tag', 'model_card', 'gguf_metadata', 'architecture', 'tag', 'filename', 'manual',
 ]);
+const fileSources = new Set<ModelRoleEvidence['source']>(['filename', 'gguf_metadata']);
 
 export function normalizeModelRoleEvidence(value: unknown): ModelRoleEvidence[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -22,24 +23,29 @@ export function normalizeModelRoleEvidence(value: unknown): ModelRoleEvidence[] 
     // User choices and name/tag matches must never acquire metadata authority.
     const confidence = ['manual', 'filename', 'tag'].includes(entry.source)
       ? 'inferred' : entry.confidence;
-    const key = `${entry.role}:${entry.source}:${confidence}`;
+    const fileIdentity = typeof entry.fileIdentity === 'string' && entry.fileIdentity.trim()
+      && entry.fileIdentity.length <= 4096 ? entry.fileIdentity : undefined;
+    // Legacy file evidence has no provable scope. Recompute from current file
+    // data instead of promoting it to repository evidence or rebinding it.
+    if (fileSources.has(entry.source) && !fileIdentity) continue;
+    const key = `${entry.role}:${entry.source}:${confidence}:${fileIdentity ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push({ role: entry.role, source: entry.source, confidence,
-      ...(typeof entry.fileIdentity === 'string' && entry.fileIdentity.length <= 4096
-        ? { fileIdentity: entry.fileIdentity } : {}),
+      ...(fileIdentity ? { fileIdentity } : {}),
       ...(typeof entry.value === 'string' ? { value: entry.value.slice(0, 160) } : {}) });
   }
   return result.length ? result : undefined;
 }
 
 export function mergeModelRoleEvidence(...values: unknown[]): ModelRoleEvidence[] | undefined {
-  const seenSources = new Set<ModelRoleEvidence['source']>();
+  const seenSources = new Set<string>();
   const merged: ModelRoleEvidence[] = [];
   for (const value of values) {
     const entries = normalizeModelRoleEvidence(value) ?? [];
-    merged.push(...entries.filter((entry) => !seenSources.has(entry.source)));
-    entries.forEach((entry) => seenSources.add(entry.source));
+    const scopeKey = (entry: ModelRoleEvidence) => `${entry.source}:${entry.fileIdentity ?? ''}`;
+    merged.push(...entries.filter((entry) => !seenSources.has(scopeKey(entry))));
+    entries.forEach((entry) => seenSources.add(scopeKey(entry)));
   }
   return normalizeModelRoleEvidence(merged);
 }
@@ -87,6 +93,18 @@ export function filterModelRoleEvidenceForFile(
   )));
 }
 
+export function hasStaleModelGgufRoleEvidence(
+  value: unknown, model: Parameters<typeof getModelFileIdentity>[0],
+): boolean {
+  if (!Array.isArray(value)) return false;
+  // Inspect legacy entries before normalization drops missing identities. Raw
+  // metadata beside those entries has no stronger provenance than the entries.
+  const entries = value.filter((entry) => entry && typeof entry === 'object'
+    && entry.source === 'gguf_metadata');
+  const identity = getModelFileIdentity(model);
+  return entries.length > 0 && !entries.some((entry) => entry.fileIdentity === identity);
+}
+
 function taskRole(value: string): ModelRole | undefined {
   switch (value.toLowerCase()) {
     case 'text-generation': case 'conversational': return 'chat';
@@ -95,6 +113,22 @@ function taskRole(value: string): ModelRole | undefined {
     case 'text-to-speech': case 'text-to-audio': case 'tts': return 'tts';
     default: return undefined;
   }
+}
+
+function nameRole(value: string): ModelRole | undefined {
+  return /rerank/iu.test(value) ? 'reranker'
+    : /embed|sentence[-_ ]?transformer/iu.test(value) ? 'embedding'
+      : /(?:^|[-_ ])tts(?:[-_ .]|$)|texttospeech/iu.test(value) ? 'tts' : undefined;
+}
+
+/** Preserve unrelated GGUF metadata without recycling file-specific purpose. */
+export function withoutModelGgufRoleMetadata(gguf: ModelGgufMetadata | undefined): ModelGgufMetadata | undefined {
+  if (!gguf) return undefined;
+  return Object.fromEntries(Object.entries(gguf).filter(([key, value]) => (
+    key !== 'general.task' && key !== 'general.finetune' && !key.endsWith('.pooling_type')
+    && !((key === 'architecture' || key === 'general.architecture')
+      && typeof value === 'string' && nameRole(value))
+  )));
 }
 
 export function inferModelRoleEvidence(
@@ -126,13 +160,11 @@ export function inferModelRoleEvidence(
     [model.resolvedFileName, 'filename'],
     ...((summary?.config?.architectures ?? model.architectures ?? []).map((name) => [name, 'architecture'] as [string, 'architecture'])),
     [summary?.cardData?.model_type ?? model.modelType, 'model_card'],
-    [architecture, 'architecture'],
+    [architecture, 'gguf_metadata'],
   ];
   for (const [value, source] of names) {
     if (typeof value !== 'string') continue;
-    const role = /rerank/iu.test(value) ? 'reranker'
-      : /embed|sentence[-_ ]?transformer/iu.test(value) ? 'embedding'
-        : /(?:^|[-_ ])tts(?:[-_ .]|$)|texttospeech/iu.test(value) ? 'tts' : undefined;
+    const role = nameRole(value);
     if (role) evidence.push({ role, source, confidence: 'inferred', value });
   }
   const fileIdentity = model.id && model.downloadUrl ? getModelFileIdentity({

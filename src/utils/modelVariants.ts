@@ -4,6 +4,7 @@ import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormal
 import { isSupportedGgufFileName } from '../services/ModelCatalogFileSelector';
 import { dedupeModelVariantsByIdentity } from './modelVariantIdentity';
 import { resolveActiveModelVariant } from './activeModelVariant';
+import { getModelFileIdentity, withoutModelGgufRoleMetadata } from './modelRoles';
 
 type ModelVariantSelectionSource = Pick<ModelMetadata, 'activeVariantId' | 'resolvedFileName'> & Partial<Pick<
   ModelMetadata,
@@ -394,7 +395,13 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
     return model;
   }
 
-  const { totalBytes: _staleTotalBytes, ...existingGguf } = model.gguf ?? {};
+  const hasSameRoleIdentity = getModelFileIdentity(model) === getModelFileIdentity({
+    ...model, resolvedFileName: variant.fileName, downloadUrl: nextDownloadUrl,
+    sha256: nextSha256, size: nextSize,
+  });
+  const { totalBytes: _staleTotalBytes, ...existingGguf } = (
+    hasSameRoleIdentity ? model.gguf : withoutModelGgufRoleMetadata(model.gguf)
+  ) ?? {};
   const nextGguf = isDifferentFile
     ? {
         sizeLabel: variant.quantizationLabel,

@@ -58,7 +58,7 @@ import { sanitizeMultimodalFailureReason } from '../utils/multimodalFailureReaso
 import { normalizeMultimodalReadinessState as normalizeReadinessSupport } from '../utils/multimodalReadiness';
 import { resolveActiveModelVariant } from '../utils/activeModelVariant';
 import { normalizeModelSpeculativeDecodingConfig } from '../utils/modelSpeculativeDecoding';
-import { filterModelRoleEvidenceForFile, inferModelRoleEvidence, mergeModelRoleEvidence, normalizeModelRoleEvidence, normalizeModelRoleValidation } from '../utils/modelRoles';
+import { filterModelRoleEvidenceForFile, hasStaleModelGgufRoleEvidence, inferModelRoleEvidence, mergeModelRoleEvidence, normalizeModelRoleEvidence, normalizeModelRoleValidation, withoutModelGgufRoleMetadata } from '../utils/modelRoles';
 import {
   canonicalizeProjectorCandidateAliases,
   getProjectorExactScopeKey,
@@ -864,7 +864,12 @@ export function normalizePersistedModelMetadata(
     : rawMetadataTrust;
   const memoryFitDecision = shouldClearVerifiedLocalTrust ? undefined : normalizedMemoryFitDecision;
   const memoryFitConfidence = shouldClearVerifiedLocalTrust ? undefined : normalizedMemoryFitConfidence;
-  const gguf = shouldClearVerifiedLocalTrust ? undefined : normalizedGguf;
+  const hasStaleGgufRoleMetadata = hasStaleModelGgufRoleEvidence(model.roleEvidence, {
+    id: model.id, downloadUrl, hfRevision: normalizedRevision,
+    resolvedFileName: normalizedResolvedFileName, sha256: normalizedSha256, size,
+  });
+  const gguf = shouldClearVerifiedLocalTrust ? undefined
+    : hasStaleGgufRoleMetadata ? withoutModelGgufRoleMetadata(normalizedGguf) : normalizedGguf;
   const normalizedMaxContextTokens = typeof model.maxContextTokens === 'number' && Number.isFinite(model.maxContextTokens)
     ? Math.round(model.maxContextTokens)
     : undefined;

@@ -84,7 +84,8 @@ describe('model purposes across catalog and persistence', () => {
     const restored = model({ roleEvidence: [{ role: 'chat', source: 'pipeline_tag', confidence: 'declared' }],
       activeVariantId: 'model.gguf', variants: [{ variantId: 'model.gguf', fileName: 'model.gguf',
         quantizationLabel: 'F16', size: 1024,
-        roleEvidence: [{ role: 'embedding', source: 'gguf_metadata', confidence: 'declared' }] }] });
+        roleEvidence: [{ role: 'embedding', source: 'gguf_metadata', confidence: 'declared',
+          fileIdentity: getModelFileIdentity(model()) }] }] });
     expect(isChatModelEligible(restored)).toBe(false);
   });
 

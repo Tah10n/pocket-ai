@@ -1,5 +1,5 @@
 import { estimateFastMemoryFit } from '../memory/estimator';
-import { inferModelRoleEvidence, mergeModelRoleEvidence } from '../utils/modelRoles';
+import { filterModelRoleEvidenceForFile, getModelFileIdentity, hasStaleModelGgufRoleEvidence, inferModelRoleEvidence, mergeModelRoleEvidence, withoutModelGgufRoleMetadata } from '../utils/modelRoles';
 import {
   LifecycleStatus,
   ModelAccessState,
@@ -949,7 +949,10 @@ export function transformHFResponse(
     // boundaries; running its migration and projector-repair passes here made
     // a 20-card cold catalog render block the JS thread for more than 10s.
     results.push({
-      roleEvidence: inferModelRoleEvidence({ resolvedFileName: fileName }, item),
+      roleEvidence: inferModelRoleEvidence({
+        id: repoId, downloadUrl, hfRevision, resolvedFileName: fileName,
+        sha256: getFileSha(ggufSibling), size, gguf,
+      }, item),
       id: repoId,
       name: getShortModelLabel(repoId) || repoId,
       author: item.author || repoId.split('/')[0],
@@ -1072,6 +1075,20 @@ export function buildModelMetadataFromPayload(
   const size = shouldPreserveFallbackVerifiedLocal
     ? fallbackModel.size ?? remotePayloadSize ?? null
     : remotePayloadSize ?? (canUseFallbackVerifiedDerivedMetadata ? fallbackModel.size : null);
+  const downloadUrl = resolvedFileName
+    ? buildHuggingFaceResolveUrl(repoId, resolvedFileName, hfRevision)
+    : fallbackModel.downloadUrl;
+  const sha256 = selectedEntry
+    ? selectedEntrySha256 ?? (shouldPreserveFallbackVerifiedLocal ? fallbackShaCompatibility.localVerifiedSha256 : undefined)
+    : canUseFallbackVerifiedDerivedMetadata ? fallbackSha256 : undefined;
+  const fileIdentity = { id: repoId, downloadUrl, hfRevision, resolvedFileName, sha256, size };
+  // Raw GGUF declarations describe the previous bytes too. Dropping only their
+  // derived evidence would let normalization recreate them for a new revision.
+  const canPreserveFallbackGguf = canUseFallbackVerifiedDerivedMetadata
+    && getModelFileIdentity(fileIdentity) === getModelFileIdentity(fallbackModel)
+    && !hasStaleModelGgufRoleEvidence(fallbackModel.roleEvidence, fileIdentity);
+  const fallbackGguf = canPreserveFallbackGguf
+    ? fallbackModel.gguf : withoutModelGgufRoleMetadata(fallbackModel.gguf);
   const metadataTrustFromPayload = shouldPreserveFallbackVerifiedLocal
     ? 'verified_local' as const
     : typeof selectedEntrySize === 'number' && Number.isFinite(selectedEntrySize) && selectedEntrySize > 0
@@ -1103,13 +1120,13 @@ export function buildModelMetadataFromPayload(
     ? shouldPreserveFallbackVerifiedLocal
       ? {
         ...ggufFromPayload,
-        ...(fallbackModel.gguf ?? {}),
+        ...(fallbackGguf ?? {}),
       }
       : {
-        ...(canUseFallbackVerifiedDerivedMetadata ? (fallbackModel.gguf ?? {}) : {}),
+        ...(canUseFallbackVerifiedDerivedMetadata ? (fallbackGguf ?? {}) : {}),
         ...ggufFromPayload,
       }
-    : canUseFallbackVerifiedDerivedMetadata ? fallbackModel.gguf : undefined;
+    : canUseFallbackVerifiedDerivedMetadata ? fallbackGguf : undefined;
   const speculativeDecoding = resolveSelectedSpeculativeDecoding(
     variants,
     resolvedFileName ?? fallbackModel.activeVariantId,
@@ -1141,9 +1158,6 @@ export function buildModelMetadataFromPayload(
   const requiresTreeProbe = selectedEntry
     ? selectedEntrySize === null
     : fallbackModel.requiresTreeProbe === true;
-  const downloadUrl = resolvedFileName
-    ? buildHuggingFaceResolveUrl(repoId, resolvedFileName, hfRevision)
-    : fallbackModel.downloadUrl;
   const artifactMetadata = buildArtifactMetadataPatch({
     id: repoId,
     downloadUrl,
@@ -1155,9 +1169,7 @@ export function buildModelMetadataFromPayload(
     projectorCandidates,
     resolvedFileName,
     selectedProjectorId: fallbackModel.selectedProjectorId,
-    sha256: selectedEntry
-      ? selectedEntrySha256 ?? (shouldPreserveFallbackVerifiedLocal ? fallbackShaCompatibility.localVerifiedSha256 : undefined)
-      : canUseFallbackVerifiedDerivedMetadata ? fallbackSha256 : undefined,
+    sha256,
     size,
     speculativeDraftArtifact,
     persistedArtifacts: canPreserveFallbackSpeculativeDecoding
@@ -1168,7 +1180,8 @@ export function buildModelMetadataFromPayload(
     ...fallbackModel,
     ...localDownloadStatePatch,
     roleEvidence: mergeModelRoleEvidence(
-      inferModelRoleEvidence({ resolvedFileName, gguf }, payload), fallbackModel.roleEvidence,
+      inferModelRoleEvidence({ ...fileIdentity, gguf }, payload),
+      filterModelRoleEvidenceForFile(fallbackModel.roleEvidence, fileIdentity),
     ),
     id: repoId,
     name: getShortModelLabel(repoId) || repoId,
@@ -1188,9 +1201,7 @@ export function buildModelMetadataFromPayload(
     isPrivate: payload.private === true,
     requiresTreeProbe,
     parameterSizeLabel: resolveStringMetadata(fallbackModel.parameterSizeLabel, payload.gguf?.size_label),
-    sha256: selectedEntry
-      ? selectedEntrySha256 ?? (shouldPreserveFallbackVerifiedLocal ? fallbackShaCompatibility.localVerifiedSha256 : undefined)
-      : canUseFallbackVerifiedDerivedMetadata ? fallbackSha256 : undefined,
+    sha256,
     downloadIntegrity: fallbackShaCompatibility.canPreserveDownloadIntegrity
       ? fallbackModel.downloadIntegrity
       : undefined,

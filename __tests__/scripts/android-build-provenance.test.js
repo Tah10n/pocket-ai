@@ -122,6 +122,27 @@ const git = {
 };
 
 describe('Android build content provenance', () => {
+  it('binds verified SDK content to the build without publishing private roots', () => {
+    const root = createProject();
+    const sdk = require('../../scripts/llama-hexagon-sdk');
+    const identity = { version: '6.4.0.2', archiveSha256: 'a'.repeat(64), requiredFilesDigest: 'b'.repeat(64) };
+    const verify = jest.spyOn(sdk, 'verifyLlamaHexagonSdk').mockReturnValue({ status: 'verified',
+      env: { HEXAGON_SDK_ROOT: '/private/sdk' }, identity });
+    try {
+      fs.mkdirSync(path.join(root, 'scripts'));
+      fs.writeFileSync(path.join(root, 'scripts', 'llama-hexagon-sdk-manifest.json'), '{}');
+      const options = { abi: 'universal', env: {}, git: { headSha: 'test' }, toolchains: {},
+        userGradlePropertiesPath: path.join(root, 'absent.properties') };
+      const first = collectBuildProvenance(root, options);
+      expect(first.llamaHexagon).toEqual(identity);
+      expect(JSON.stringify(first)).not.toContain('/private/sdk');
+      verify.mockReturnValue({ status: 'verified', env: {}, identity: { ...identity, requiredFilesDigest: 'c'.repeat(64) } });
+      expect(collectBuildProvenance(root, options).digest).not.toBe(first.digest);
+      verify.mockImplementation(() => { throw new Error('SDK mismatch'); });
+      expect(() => collectBuildProvenance(root, options)).toThrow('SDK mismatch');
+    } finally { verify.mockRestore(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('ignores mtime changes but detects equal-size content replacements', () => {
     const projectRoot = createProject();
     const inputPath = path.join(projectRoot, 'plugins', 'withFixture.js');
@@ -1721,6 +1742,30 @@ describe('Android build provenance routing', () => {
     } finally {
       fs.rmSync(projectRoot, { force: true, recursive: true });
     }
+  });
+
+  it.each(['arm64-v8a', 'universal'])('prevents external backend narrowing for %s while allowing CPU QA', abi => {
+    const root = createProject();
+    try {
+      const options = { env: { ORG_GRADLE_PROJECT_rnllamaVariants: 'rnllama' }, userGradlePropertiesPath: path.join(root, 'absent.properties') };
+      expect(() => assertAndroidBuildOverrideContract(root, { ...options, abi })).toThrow(/preserve all llama.rn backend variants/);
+      expect(() => assertAndroidBuildOverrideContract(root, { ...options, abi: 'x86_64' })).not.toThrow();
+      fs.writeFileSync(path.join(root, 'android', 'gradle.properties'), 'rnllamaVariants=rnllama\n');
+      expect(() => assertAndroidBuildOverrideContract(root, { ...options, env: {}, abi })).toThrow(/preserve all llama.rn backend variants/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('binds private SDK roots without exposing them in public provenance', () => {
+    const root = createProject();
+    try {
+      const options = { userGradlePropertiesPath: path.join(root, 'absent.properties'), hmacKeyPath: path.join(root, 'hmac.key') };
+      const first = collectAndroidPrivateBuildReuseDigest(root, { ...options, env: { HEXAGON_SDK_ROOT: '/private/a', HEXAGON_TOOLS_ROOT: '/private/a/tools' } });
+      const second = collectAndroidPrivateBuildReuseDigest(root, { ...options, env: { HEXAGON_SDK_ROOT: '/private/b', HEXAGON_TOOLS_ROOT: '/private/a/tools' } });
+      const third = collectAndroidPrivateBuildReuseDigest(root, { ...options, env: { HEXAGON_SDK_ROOT: '/private/a', HEXAGON_TOOLS_ROOT: '/private/b/tools' } });
+      expect(first).not.toBe(second);
+      expect(first).not.toBe(third);
+      expect(first).toMatch(/^[a-f0-9]{64}$/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it('rejects every externally injected Android artifact override channel', () => {

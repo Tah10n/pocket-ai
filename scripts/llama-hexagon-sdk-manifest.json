@@ -1,0 +1,311 @@
+{
+  "version": "6.4.0.2",
+  "toolsVersion": "19.0.04",
+  "sourceUrl": "https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.4.0.2/hexagon-sdk-v6.4.0.2-amd64-lnx.tar.xz",
+  "archiveBytes": 706737852,
+  "archiveSha256": "b4a57a774795cf12da19a777a5d306e970905bf9758a4c4765e5e4593428ae0b",
+  "requiredFilesDigest": "4ad59676ec7b4d5218bf0a22b88e92bde7318e38bdc6964067222e9c1658ef71",
+  "notices": "Host subset only. Preserve Qualcomm proprietary notices and the rpcmem BSD-3-Clause terms, readme, and authentic tools NOTICE/RELEASE_NOTES. Embedded SDK metadata reports 6.4.0.0; identity is pinned to the 6.4.0.2 release archive. No DSP compiler is installed or executed.",
+  "files": [
+    {
+      "path": "6.4.0.2/hexagon_sdk.json",
+      "size": 1783,
+      "sha256": "68a891593f65c401905e2df1ad3620509f0864a8826e25c5b5a7cbe568b5c87d"
+    },
+    {
+      "path": "6.4.0.2/incs/adsp_mmap.h",
+      "size": 503,
+      "sha256": "3bb02cfabded3c9dd12a09cb03a4c58016fe4aaecdbd37b33e96f11caa404857"
+    },
+    {
+      "path": "6.4.0.2/incs/apps_mem.h",
+      "size": 1539,
+      "sha256": "bedf39a5139bbd7893c67a3c4764506bec07010c9246cee14becd385b0eff1bd"
+    },
+    {
+      "path": "6.4.0.2/incs/domain.h",
+      "size": 252,
+      "sha256": "37b60a0a14a340c4810d19bcea9a9f0859102409e97d93ec2619ac422709a8d4"
+    },
+    {
+      "path": "6.4.0.2/incs/domain_default.h",
+      "size": 484,
+      "sha256": "070fb2cc78734678d7d7a207c78e8bd4b516e8a64fee6b47bca96c70360d36e5"
+    },
+    {
+      "path": "6.4.0.2/incs/dspqueue.h",
+      "size": 27858,
+      "sha256": "416e548cc56aac1097819028c5f84646d71cedacadf22b6d04472db68c7a9091"
+    },
+    {
+      "path": "6.4.0.2/incs/dspqueue.md",
+      "size": 1347,
+      "sha256": "4f209e468af0be5eaa00f4dce04936902b1a7635a3b5854cee2975361bf1179a"
+    },
+    {
+      "path": "6.4.0.2/incs/dynsymbols.lst",
+      "size": 18521,
+      "sha256": "ba7ff0b29bd76efa2da236442f02004208dee72fd50cae0d45595818847cc940"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_chipinfo.h",
+      "size": 1961,
+      "sha256": "91b36251f101253c54c7c4418a8853f9131b583abd0dbed7f47aaf482a1df4b8"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_compute_res.h",
+      "size": 71874,
+      "sha256": "9cb414978ea8cbe0a5bdc5f998f1ca8c32bed083850695020ee281d57625e6e4"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_compute_res.md",
+      "size": 29899,
+      "sha256": "7036ae03342fcc1ebf76a16cf4271b0034b9c9795b341e512645357971f438eb"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_compute_res_extended.h",
+      "size": 8172,
+      "sha256": "dae28eccb9d5d10b35770007d13f35f2edd032bb166e8e4d100a1cef755bdec4"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_dcvs.h",
+      "size": 11609,
+      "sha256": "d95ec7a73ce5e3dcd50a04aa11f7cb389c3406ace60543c3cf11a2a1edc6def5"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_dcvs.md",
+      "size": 7828,
+      "sha256": "bf28d3c908845078e3bcb941f18b13bd472af0d478027daf1579d8390e23564c"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_debug.h",
+      "size": 2780,
+      "sha256": "b53e57f887480eabea2f2b75a2136cac6d014fa0ebfc3a607b117c5fab14aafe"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_etm_config.h",
+      "size": 3159,
+      "sha256": "528561c078683e3b63fb2fe36b6a8e6e36d89e777de92b116d63269c02c2eaa1"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_etm_config.md",
+      "size": 1167,
+      "sha256": "61aed89e2118bf5bc52ca7e848cba32ac2ed284cb6377928cc2a28b0c95484d0"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_farf.h",
+      "size": 6855,
+      "sha256": "2b77dde180c17136b6c47d3a75bfc373a57f8fd9250ad53d8556fda3440d424f"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_farf.md",
+      "size": 759,
+      "sha256": "388a0f209a6a035b93f0ed610d92a34cc0428eadc35f702a4ae75c17eab3cc45"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_mem.h",
+      "size": 16692,
+      "sha256": "4056cff8017393cb4aef7e2ec07540f2466003ec74a66a53000d2562697d5eaf"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_mem.md",
+      "size": 5828,
+      "sha256": "b10893e66c8d4853780c2d8b717abe0c4673fa8c6f1184fa67f2f289b14557e9"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_pd_dtor.h",
+      "size": 1769,
+      "sha256": "bf55c9d830a84b9111ed1b0437fe161c734b0cd29fbbcdf640cab2b124d8505a"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_perf.h",
+      "size": 3290,
+      "sha256": "08aeb931b149cf0f1d951cf8d332f133b73a90f56a2a4e25e02c949208c8cf06"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_perf.md",
+      "size": 588,
+      "sha256": "2ef73330a9c1e3be5ad5e26eb9e7f75e8d447282efdc552c16d1dc0d1b260866"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_power.h",
+      "size": 40553,
+      "sha256": "4769a4e7c344db913321c93e6b8bccf483ef8a72f5d493d1b5a81acc602639d0"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_power.md",
+      "size": 58206,
+      "sha256": "633d4155b983f4475a3fee4eba51cc1d1f976b383482620c8fa4c3679e7ce031"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_process.h",
+      "size": 943,
+      "sha256": "1cb1b4d7b31ff67eb731344151d2db9ae8dcd1a1959f46487fe9d7bff27f7ea9"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_ps.h",
+      "size": 6534,
+      "sha256": "43ffaa84af2165139d0148930706782c7deae0da80c4e4e217f0745675407f90"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_ps.md",
+      "size": 1955,
+      "sha256": "1f619bf02e0bf406713db3633cdcf54503939d5c41ade4b3dd40bc77c3f2cfb2"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_traceme.h",
+      "size": 773,
+      "sha256": "c8e52f8ff70e697bde2602313608dd21294cb5686f660265d98a219fc7b57c38"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_user_pmu.h",
+      "size": 6987,
+      "sha256": "3a6c86dce46e114cc1e2908e2a13072db833884831aa393771a9bafa0dbf45d2"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_user_pmu.md",
+      "size": 1106,
+      "sha256": "54ed02e9e8e97b4a5c8586d90b2ec6403ddb0dfdfb83e0288e6fe77b84d00b13"
+    },
+    {
+      "path": "6.4.0.2/incs/HAP_vtcm_mgr.h",
+      "size": 2007,
+      "sha256": "8f46f0e9fea71f14dd16975c8256d2a8e2ed68a5e5d7977b75639d2f36fab7c7"
+    },
+    {
+      "path": "6.4.0.2/incs/qtest_stdlib.h",
+      "size": 4192,
+      "sha256": "24d6f473850c7161846e4225fc2b60210818acf90c26cf5d1cf63514bdb0a591"
+    },
+    {
+      "path": "6.4.0.2/incs/remote.h",
+      "size": 60497,
+      "sha256": "f61e1f92c88dbc642d17df3855dd6ff9d5e605d442a5de73b8a7e023c225bc0d"
+    },
+    {
+      "path": "6.4.0.2/incs/remote.idl",
+      "size": 1419,
+      "sha256": "cd7cce7388d556a7ad07d3bc31f9891e72b938ec5af341831c19dff8acfd5caf"
+    },
+    {
+      "path": "6.4.0.2/incs/remote.md",
+      "size": 6296,
+      "sha256": "b05fc9770e665a66f167e2acff392f6cb13d81d67b99548146dab4301dd55a04"
+    },
+    {
+      "path": "6.4.0.2/incs/remote64.h",
+      "size": 329,
+      "sha256": "e9bc561f914ccdc81e9257b04116e3e37c0eaf0185cce896e1e9d2d5c1b3bef9"
+    },
+    {
+      "path": "6.4.0.2/incs/stddef/AEEStd.md",
+      "size": 595,
+      "sha256": "665015fbf35b07392ae7a9b1eb83ac899a6fbe897b20e2d2d7b0d6245170c4b6"
+    },
+    {
+      "path": "6.4.0.2/incs/stddef/AEEStdDef.h",
+      "size": 12690,
+      "sha256": "fe535419618f30025e05cd9a35c14de105534060e0ffc6be520f48a5c2e355d9"
+    },
+    {
+      "path": "6.4.0.2/incs/stddef/AEEStdDef.idl",
+      "size": 3448,
+      "sha256": "0779a289a081b67dccaf48a9403bf33215017b3d6f4cc636318bd584072e1835"
+    },
+    {
+      "path": "6.4.0.2/incs/stddef/AEEStdErr.h",
+      "size": 23065,
+      "sha256": "f211c27792cbcdd7ac0e80ff2786ac100af65b683eabcc3d75ab424ccfde0ef8"
+    },
+    {
+      "path": "6.4.0.2/incs/stddef/AEEStdErr.idl",
+      "size": 7253,
+      "sha256": "d14903198cdc9e733bdf2566bc6b74b989440a6f0e3f7aa814a3226578396438"
+    },
+    {
+      "path": "6.4.0.2/incs/stddef/AEEVaList.h",
+      "size": 4189,
+      "sha256": "8892448bc7ea9fe9940bc80af11a5fd950e4f972296f3203326542104ca3c121"
+    },
+    {
+      "path": "6.4.0.2/incs/stringl.h",
+      "size": 21472,
+      "sha256": "7061fe88cefdd009c4e84317d09b5be53fb779f0843c430e6791abc401771770"
+    },
+    {
+      "path": "6.4.0.2/incs/stringl.md",
+      "size": 787,
+      "sha256": "56dba0eab54e1fcc350f9b3b34bcc966e99f8a70f729537833b75a3074bc0f95"
+    },
+    {
+      "path": "6.4.0.2/incs/synx.md",
+      "size": 1440,
+      "sha256": "6fa94e7ad9e2e35bb47fb26405d62a0d0f8aecd664990f03d0d579288fe5200e"
+    },
+    {
+      "path": "6.4.0.2/incs/sysmon_cachelock.h",
+      "size": 3397,
+      "sha256": "7640626b106cdc3fa3dce4e5150eee4b20dc8ac36d8a8110d1d26f420c9e27f2"
+    },
+    {
+      "path": "6.4.0.2/incs/sysmon_cachelock.md",
+      "size": 1018,
+      "sha256": "aa8f47267f13d9147c41e03db5a9543d0b15c5ec011c43f7fdda53dc1bbbbe91"
+    },
+    {
+      "path": "6.4.0.2/incs/sysmon_marker.h",
+      "size": 1208,
+      "sha256": "8f729bce89dab4f42a5639e58e69785a60ff4eff5de6b2b71b9539468398c414"
+    },
+    {
+      "path": "6.4.0.2/incs/sysmon_marker.md",
+      "size": 1863,
+      "sha256": "37129035737856fc0767b8f21cf93e389261e6ff2ad0c2771a70b36fc8d2bfdc"
+    },
+    {
+      "path": "6.4.0.2/incs/utils.h",
+      "size": 280,
+      "sha256": "604fe8e3c153aeb5372777ddbadf9d947dc5526cd3072092457342d6e89efb97"
+    },
+    {
+      "path": "6.4.0.2/incs/verify.h",
+      "size": 4607,
+      "sha256": "b781af6664b8b85316371e295c41423e7f02acbadc56186de631345af156e2b2"
+    },
+    {
+      "path": "6.4.0.2/incs/version.h",
+      "size": 2280,
+      "sha256": "69ada028089e54c5955b914a1b2ad1de5e4a5aaf2445a3cf79f354ed5449343d"
+    },
+    {
+      "path": "6.4.0.2/incs/version_note.h",
+      "size": 755,
+      "sha256": "4787f6586725c67fa8c9f486b6201c9cec34839457b46cf9149cd6546e6fb1af"
+    },
+    {
+      "path": "6.4.0.2/ipc/fastrpc/remote/ship/android_aarch64/libcdsprpc.so",
+      "size": 30920,
+      "sha256": "57765d97eb59d5da3224811be5fa07657974df6c104f537083fe425020d9ac1e"
+    },
+    {
+      "path": "6.4.0.2/ipc/fastrpc/rpcmem/inc/rpcmem.h",
+      "size": 7652,
+      "sha256": "a8493baacaa1198208d4e2421fee36387bf39246372f89c26a391978989b1a59"
+    },
+    {
+      "path": "6.4.0.2/readme.txt",
+      "size": 584,
+      "sha256": "b1ee1f182f71be54535e7885701d2c4352b2ac5533db733214cb4b078ac50cb2"
+    },
+    {
+      "path": "6.4.0.2/tools/HEXAGON_Tools/19.0.04/NOTICE.txt",
+      "size": 120810,
+      "sha256": "ef4827e1b322af42d37ba3a269582a8af86c65da75dded66b62de0380c362664"
+    },
+    {
+      "path": "6.4.0.2/tools/HEXAGON_Tools/19.0.04/RELEASE_NOTES.txt",
+      "size": 10252,
+      "sha256": "246973679c04b1fd5e2c9b0c3db6d59fa77ca8563265472ce45d8b04df148c0c"
+    }
+  ]
+}

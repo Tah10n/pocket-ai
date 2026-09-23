@@ -5,7 +5,7 @@ const path = require('node:path');
 const { run } = require('../../scripts/verify-native-config');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
 
-const { PODFILE_PREFIX } = require('../../plugins/withLlamaSourceBuild')._internal;
+const { PODFILE_PREFIX, HEXAGON_GUARD } = require('../../plugins/withLlamaSourceBuild')._internal;
 
 const llamaVersion = '0.13.0-rc.3';
 const llamaDependencies = { 'llama.rn': llamaVersion };
@@ -58,6 +58,7 @@ function createProject() {
     path.join(root, 'android', 'gradle.properties'),
     'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m\nrnllamaBuildFromSource=true\n',
   );
+  fs.writeFileSync(path.join(root, 'android', 'build.gradle'), HEXAGON_GUARD);
   fs.writeFileSync(path.join(root, 'ios', 'Podfile'), PODFILE_PREFIX + "require 'expo/scripts/autolinking'\n");
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
     expo: {

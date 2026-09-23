@@ -89,6 +89,7 @@
     "verify:documents": "npm run anydoc:qa:verify && npm run anydoc:verify && node ./node_modules/jest/bin/jest.js --runInBand __tests__/services/DocumentContextService.test.ts __tests__/services/ChatAttachmentProcessorRegistry.test.ts __tests__/hooks/useChatSession.test.tsx __tests__/utils/chatAttachments.test.ts __tests__/utils/pdfTextExtraction.test.ts",
     "verify:documents:android": "npm run anydoc:setup -- --platform=android && npm run verify:documents && npm run anydoc:build:android",
     "verify:documents:ios": "npm run anydoc:setup -- --platform=ios && npm run verify:documents && npm run anydoc:build:ios",
+    "eas-build-post-install": "node ./scripts/eas-llama-build-setup.js",
     "eas-build-pre-install": "node ./modules/pocket-anydoc/scripts/eas-build-pre-install.mjs",
     "verify:mobile-change": "npm run anydoc:verify && npm run typecheck && npm run lint && npm test",
     "verify:mobile-change:android": "npm run verify:mobile-change && npm run android:scenarios:runtime",

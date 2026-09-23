@@ -17,6 +17,9 @@ const BASE_BUILD_INPUTS = [
   "package-lock.json",
   "npm-shrinkwrap.json",
   "patches",
+  "scripts/llama-hexagon-sdk.js",
+  "scripts/llama-hexagon-sdk-manifest.json",
+  "scripts/eas-llama-build-setup.js",
   "plugins",
   "modules",
   "android",
@@ -30,6 +33,9 @@ const PREBUILD_INPUTS = [
   "package-lock.json",
   "npm-shrinkwrap.json",
   "patches",
+  "scripts/llama-hexagon-sdk.js",
+  "scripts/llama-hexagon-sdk-manifest.json",
+  "scripts/eas-llama-build-setup.js",
   "plugins",
   "modules",
 ];
@@ -1112,6 +1118,14 @@ function assertAndroidBuildOverrideContract(projectRoot, options = {}) {
       `Android ${variant} builds reject external rnllamaBuildFromSource overrides from ${llamaSourceBuildOverride.source}; use the repository-owned native source-build setting.`
     );
   }
+  if (abi !== "x86_64") {
+    const variantsOverride = findGradleProjectPropertyOverride(projectRoot, "rnllamaVariants", {
+      ...options, includeProject: true,
+    });
+    if (variantsOverride) {
+      throw new Error("Android ARM64 builds must preserve all llama.rn backend variants.");
+    }
+  }
   if (abi === "universal") {
     const architectureOverride = findGradleProjectPropertyOverride(
       projectRoot,
@@ -1446,6 +1460,8 @@ function collectAndroidPrivateBuildReuseDigest(projectRoot, options = {}) {
         // cannot reuse an APK built from different effective inputs.
         || key.startsWith("ORG_GRADLE_PROJECT_")
         || key.startsWith("EXPO_")
+        || key === "HEXAGON_SDK_ROOT"
+        || key === "HEXAGON_TOOLS_ROOT"
         || key === "_JAVA_OPTIONS"
         || key === "GRADLE_OPTS"
         || key === "JDK_JAVA_OPTIONS"
@@ -1975,10 +1991,15 @@ function collectBuildProvenance(projectRoot, options = {}) {
     ...(options.buildContext || {}),
     privateInputHmac: collectAndroidPrivateBuildReuseDigest(projectRoot, options),
   };
+  const hexagonManifestExists = fs.existsSync(path.join(projectRoot, "scripts", "llama-hexagon-sdk-manifest.json"));
+  const llamaHexagon = hexagonManifestExists
+    ? require("./llama-hexagon-sdk").verifyLlamaHexagonSdk(projectRoot, { abi, env: options.env || process.env }).identity
+    : null;
   const manifest = {
     schemaVersion: BUILD_PROVENANCE_SCHEMA_VERSION,
     variant,
     abi,
+    ...(hexagonManifestExists ? { llamaHexagon } : {}),
     embeddedBundle: includeBundleInputs,
     buildContext,
     toolchains: options.toolchains || collectToolchainVersions(projectRoot, options),

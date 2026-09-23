@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 
-const { PODFILE_PREFIX, ensurePodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
+const { PODFILE_PREFIX, HEXAGON_GUARD, ensurePodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
 const projectRoot = path.resolve(__dirname, '..');
 
 function readText(filePath, label) {
@@ -206,6 +206,8 @@ function assertAndroidGeneratedConfig(root = projectRoot) {
   if (!service || !/android:foregroundServiceType="dataSync"/u.test(service)) {
     throw new Error('RNBackgroundActionsTask must declare foregroundServiceType=dataSync.');
   }
+  const projectBuildGradle = readText(path.join(root, 'android', 'build.gradle'), 'Generated Android build.gradle').replace(/\r\n/gu, '\n');
+  if (!projectBuildGradle.includes(HEXAGON_GUARD)) throw new Error('Android must verify the pinned llama.rn host SDK before building.');
   const sourceBuildFlags = gradleProperties.split(/\r?\n/u).filter(line => /^\s*rnllamaBuildFromSource\s*=/u.test(line));
   if (sourceBuildFlags.length !== 1 || !/^\s*rnllamaBuildFromSource\s*=\s*true\s*$/u.test(sourceBuildFlags[0])) {
     throw new Error('Android must compile the corrected llama.rn core from source.');

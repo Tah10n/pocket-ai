@@ -10089,6 +10089,7 @@ function collectCurrentQaBuildProvenance(provenance, currentGit, options = {}) {
     process.env,
     { NODE_ENV: nodeEnv }
   );
+  Object.assign(env, require("./llama-hexagon-sdk").verifyLlamaHexagonSdk(projectRoot, { abi, env }).env);
   const assembleTask = `app:assemble${variant[0].toUpperCase()}${variant.slice(1)}`;
   const gradleArgs = buildGradleAssembleArgs(assembleTask, abi, {
     applicationId: appPackageName,

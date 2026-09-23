@@ -251,6 +251,12 @@ function ensureReleasePrebuild() {
   return verifiedInputState;
 }
 
+const sdkSetup = spawnSync(process.execPath, [path.join(projectRoot, "scripts", "llama-hexagon-sdk.js"), "setup", "--abi", "universal"], {
+  cwd: projectRoot, env: releaseBuildEnvironment, encoding: "utf8", timeout: 35 * 60 * 1000,
+});
+if (sdkSetup.error || sdkSetup.status !== 0) throw new Error("Pinned llama.rn host SDK setup failed.");
+Object.assign(releaseBuildEnvironment, JSON.parse(sdkSetup.stdout).env);
+
 const verifiedPrebuildInputState = ensureReleasePrebuild();
 assertAndroidBuildOverrideContract(projectRoot, {
   abi: "universal",

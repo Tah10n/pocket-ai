@@ -1,4 +1,4 @@
-const { ensureGradleSourceBuild, ensurePodfileSourceBuild, PODFILE_PREFIX } = require('../../plugins/withLlamaSourceBuild')._internal;
+const { ensureGradleSourceBuild, ensurePodfileSourceBuild, ensureAndroidHexagonGuard, HEXAGON_GUARD, PODFILE_PREFIX } = require('../../plugins/withLlamaSourceBuild')._internal;
 
 describe('pinned llama.rn source build', () => {
   it('sets the real Android property and removes conflicting duplicate values', () => {
@@ -16,6 +16,21 @@ describe('pinned llama.rn source build', () => {
     const result = ensurePodfileSourceBuild(input);
     expect(result.replace(/\r\n/gu, '\n')).toBe(PODFILE_PREFIX + input.replace(/\r\n/gu, '\n'));
     expect(ensurePodfileSourceBuild(result)).toBe(result);
+  });
+
+  it.each(['\n', '\r\n'])('guards direct Gradle/EAS builds without modifying unrelated code (%j)', newline => {
+    const input = `buildscript { }${newline}`;
+    const result = ensureAndroidHexagonGuard(input);
+    expect(result.replace(/\r\n/gu, '\n')).toBe('buildscript { }\n\n' + HEXAGON_GUARD + '\n');
+    expect(ensureAndroidHexagonGuard(result)).toBe(result);
+    expect(() => ensureAndroidHexagonGuard('// @generated pocket-ai llama source-build guard')).toThrow(/Incomplete/);
+  });
+
+  it('requires the same explicit SDK environment that the upstream module consumes', () => {
+    expect(HEXAGON_GUARD).toContain('!System.getenv("HEXAGON_SDK_ROOT") || !System.getenv("HEXAGON_TOOLS_ROOT")');
+    expect(HEXAGON_GUARD).toContain('!new File(System.getenv("HEXAGON_SDK_ROOT")).isAbsolute()');
+    expect(HEXAGON_GUARD).toContain('!new File(System.getenv("HEXAGON_TOOLS_ROOT")).isAbsolute()');
+    expect(HEXAGON_GUARD.indexOf('!System.getenv("HEXAGON_SDK_ROOT")')).toBeLessThan(HEXAGON_GUARD.indexOf('def pocketLlamaSdkCheck = exec'));
   });
 
   it('rejects a later Podfile assignment which could silently select the unpatched core', () => {

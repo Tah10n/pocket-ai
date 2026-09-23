@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { BUILD_FILES, SOURCE_PATCHES, applyReplacements } = require('../../patches/llama-rn-0.13.0-rc.3');
 
-// Copy the three pinned patch inputs and their source/build contracts only,
+// Copy the pinned patch inputs and their source/build contracts only,
 // never binaries or the dependency tree. Reversal also accepts partial installs.
 function copyLlamaPatchSources(root, { pristine = false } = {}) {
   const installed = path.resolve(__dirname, '../../node_modules/llama.rn');

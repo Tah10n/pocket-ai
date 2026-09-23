@@ -1,4 +1,4 @@
-// Narrow corrections for the pinned release; the clock fix requires a source-core build.
+// Narrow corrections for the pinned release; core fixes require a source-core build.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -84,18 +84,176 @@ const PARAMS_REPLACEMENTS = [
 ];
 const CLOCK_SOURCE = 'cpp/common/chat.cpp';
 const CLOCK_BEFORE_SHA256 = 'a7e0aeaf40a7f9ac94093c2554d1086d430cade04a6a03e0001b711643338e34';
-const CLOCK_AFTER_SHA256 = 'ad51d8e0db5e98d2f5ae3c7aa56ad6c82664cb00204d3c4a5b74b4b8df743c24';
+const CLOCK_AFTER_SHA256 = '2184f18ae06502e17060e1bcbbccd0faa12416d8ecbc129e1f0b503e014d66f5';
+const CLOCK_PREVIOUS_SHA256 = 'ad51d8e0db5e98d2f5ae3c7aa56ad6c82664cb00204d3c4a5b74b4b8df743c24';
 const CLOCK_BEFORE = '    jinja::context ctx(tmpl.source());\n';
 const CLOCK_AFTER = `${CLOCK_BEFORE}    ctx.current_time = std::chrono::system_clock::to_time_t(inputs.now);\n`;
+const CLOCK_PRIVACY_REPLACEMENTS = [
+  [
+    "            LOG_ERR(\"%s: failed to apply template: %s\\n\", __func__, e.what());",
+    "            LOG_ERR(\"%s: failed to apply template\\n\", __func__);"
+  ],
+  [
+    "        LOG_ERR(\"%s: error: %s\\n\", __func__, e.what());",
+    "        LOG_ERR(\"%s: template initialization failed\\n\", __func__);"
+  ],
+  [
+    "            LOG_ERR(\"%s: failed to parse tool use chat template (ignoring it): %s\\n\", __func__, e.what());",
+    "            LOG_ERR(\"%s: failed to parse tool use chat template (ignoring it)\\n\", __func__);"
+  ],
+  [
+    "        LOG_DBG(\"%s: generated parser:\\n%s\\n\\nparser generation prompt: %s\\n\", __func__, arena.dump(arena.root()).c_str(), auto_params.generation_prompt.c_str());",
+    "        LOG_DBG(\"%s: generated parser\\n\", __func__);"
+  ],
+  [
+    "        LOG_WRN(\"%s: unparsed %s output: %s\\n\", __func__, common_chat_format_name(params.format), effective_input.substr(result.end).c_str());",
+    "        LOG_WRN(\"%s: output did not match %s parser\\n\", __func__, common_chat_format_name(params.format));"
+  ],
+  [
+    "        LOG_DBG(\"%s: full %s output triggering error:\\n=== BEGIN ===\\n%s\\n=== END ===\\n\", __func__, common_chat_format_name(params.format), effective_input.c_str());",
+    "        LOG_DBG(\"%s: output parser failed\\n\", __func__);"
+  ],
+  [
+    "        LOG_DBG(\"Parsed message: %s\\n\", common_chat_msgs_to_json_oaicompat({ msg }).at(0).dump().c_str());",
+    "        LOG_DBG(\"Parsed complete message\\n\");"
+  ],
+  [
+    "            LOG_INF(\"Skipping tool without function: %s\", tool.dump(2).c_str());",
+    "            LOG_INF(\"Skipping tool without function\");"
+  ],
+  [
+    "                LOG_ERR(\"Tool call mismatch: prev='%s' new='%s'\\n\", pref.name.c_str(), newf.name.c_str());",
+    "                LOG_ERR(\"Tool call name mismatch\\n\");"
+  ]
+];
+const COMPLETION_SOURCE = 'cpp/rn-completion.cpp';
+const COMPLETION_BEFORE_SHA256 = '4563b4a65e98e7022d4ae38014f12acd2241a0911fc2201f5da465679df82087';
+const COMPLETION_AFTER_SHA256 = 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d';
+const COMPLETION_REPLACEMENTS = [
+  [
+    `    if (ctx_sampling != nullptr) {
+        common_sampler_free(ctx_sampling);
+    }
+    ctx_sampling = common_sampler_init(parent_ctx->model, parent_ctx->params.sampling);`,
+    `    if (ctx_sampling != nullptr) {
+        common_sampler_free(ctx_sampling);
+        ctx_sampling = nullptr;
+    }
+    ctx_sampling = common_sampler_init(parent_ctx->model, parent_ctx->params.sampling);`
+  ]
+];
+const SAMPLING_SOURCE = 'cpp/common/sampling.cpp';
+const SAMPLING_BEFORE_SHA256 = 'e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5';
+const SAMPLING_AFTER_SHA256 = '942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c';
+const SAMPLING_REPLACEMENTS = [
+  [
+    `    llama_sampler * grmr = nullptr;
+    llama_sampler * rbudget = nullptr;
+    llama_sampler * chain = llama_sampler_chain_init(lparams);
+
+    std::vector<llama_sampler *> samplers;`,
+    `    llama_sampler * grmr = nullptr;
+    llama_sampler * rbudget = nullptr;
+    llama_sampler * chain = nullptr;
+
+    std::vector<llama_sampler *> samplers;
+    struct sampler_init_guard {
+        llama_sampler * & grmr;
+        llama_sampler * & rbudget;
+        llama_sampler * & chain;
+        std::vector<llama_sampler *> & pending;
+        bool released = false;
+        ~sampler_init_guard() {
+            if (released) {
+                return;
+            }
+            for (auto * smpl : pending) {
+                llama_sampler_free(smpl);
+            }
+            llama_sampler_free(grmr);
+            llama_sampler_free(rbudget);
+            llama_sampler_free(chain);
+        }
+    } guard { grmr, rbudget, chain, samplers };
+    chain = llama_sampler_chain_init(lparams);
+    samplers.reserve(params.samplers.size() + 3);`
+  ],
+  [
+    `    for (auto * smpl : samplers) {
+        llama_sampler_chain_add(chain, smpl);
+    }`,
+    `    for (auto * & smpl : samplers) {
+        llama_sampler_chain_add(chain, smpl);
+        smpl = nullptr;
+    }`
+  ],
+  [
+    `    return result;
+}
+
+void common_sampler_free`,
+    `    guard.released = true;
+    return result;
+}
+
+void common_sampler_free`
+  ],
+  [
+    "            LOG_DBG(\"%s: prefill token: %d = %s\\n\", __func__, tokens[i], piece.c_str());",
+    "            LOG_DBG(\"%s: prepared prefill token\\n\", __func__);"
+  ],
+  [
+    "                LOG_DBG(\"%s: grammar accepted prefill token (%d)\\n\", __func__, token);",
+    "                LOG_DBG(\"%s: grammar accepted prefill token\\n\", __func__);"
+  ],
+  [
+    "            LOG_ERR(\"%s: error initializing grammar sampler for grammar:\\n%s\\n\\nGeneration prompt:\\n'%s'\\n\", __func__,\n                common_grammar_value(params.grammar).c_str(), params.generation_prompt.c_str());",
+    "            LOG_ERR(\"%s: grammar sampler rejected generation prefill\\n\", __func__);"
+  ],
+  [
+    "            LOG_DBG(\"%s: reasoning-budget accepted prefill token (%d)\\n\", __func__, token);",
+    "            LOG_DBG(\"%s: reasoning-budget accepted prefill token\\n\", __func__);"
+  ]
+];
+const GRAMMAR_SOURCE = 'cpp/llama-grammar.cpp';
+const GRAMMAR_BEFORE_SHA256 = '7f1d1912560a81254674f713cd82da1872c4a83ebf1eca80ae90558373283939';
+const GRAMMAR_AFTER_SHA256 = 'b14101f01415a702662ee9a746f0831ee14518e3c7f3796aa42ab810f5f17d33';
+const GRAMMAR_REPLACEMENTS = [
+  [
+    "    } catch (const std::exception & err) {\n        fprintf(stderr, \"%s: error parsing grammar: %s\\n\\n%s\\n\", __func__, err.what(), src);",
+    "    } catch (const std::exception &) {\n        fprintf(stderr, \"%s: grammar parsing failed\\n\", __func__);"
+  ],
+  [
+    "            LLAMA_LOG_DEBUG(\"Grammar triggered on token %u (`%s`)\", token, piece.c_str());",
+    "            LLAMA_LOG_DEBUG(\"Grammar triggered on token\");"
+  ],
+  [
+    "                    auto constrained_str = grammar.trigger_buffer.substr(start);\n                    grammar.trigger_buffer.clear();\n                    grammar.trigger_buffer_positions.clear();",
+    "                    grammar.trigger_buffer.clear();\n                    grammar.trigger_buffer_positions.clear();"
+  ],
+  [
+    "                    LLAMA_LOG_DEBUG(\"Grammar triggered on regex: '%s'\\n\", constrained_str.c_str());",
+    "                    LLAMA_LOG_DEBUG(\"Grammar triggered on regex\\n\");"
+  ],
+  [
+    "            LLAMA_LOG_DEBUG(\"Grammar still awaiting trigger after token %d (`%s`)\\n\", token, piece.c_str());",
+    "            LLAMA_LOG_DEBUG(\"Grammar still awaiting trigger\\n\");"
+  ]
+];
 const SOURCE_PATCHES = [
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
-  { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER]] },
+  { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
+  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, replacements: COMPLETION_REPLACEMENTS },
+  { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, replacements: SAMPLING_REPLACEMENTS },
+  { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
 ];
-// JSI fixes are compiled locally in every mode. The clock fix is in the core:
+// JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.
 // Exact fingerprints protect source inclusion and the request-clock data contract.
 const BUILD_FILES = Object.freeze({
+  'cpp/common/sampling.h': '92a10833fc729a5a8eff065d269a88ceb21b81d77c2eba5942a3450fe1a0d2d1',
+  'cpp/llama-sampler.cpp': '38999ce7ce5fdba6a9cd29b775a81cee918ab6d1a3e0f0d71d35c9158d629c0f',
   'android/src/main/CMakeLists.txt': '286375df7159c18c674e30ef8e324c964c4d7304f451f07abffa4a2f279eb2b6',
   'llama-rn.podspec': 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55',
   'cpp/rn-completion.h': 'a827a43b7452ecb6130f821fc20dc1c3c30bd9c8c3fa7dfc450bc8cae185b182',
@@ -147,11 +305,12 @@ function patchLlamaBridge(root = path.resolve(__dirname, '..'), { check = false 
     const sourceHash = hashSource(source);
     sources[patch.source] = patch.afterSha256;
     if (sourceHash === patch.afterSha256) continue;
-    if (sourceHash !== patch.beforeSha256) {
+    const intermediate = patch.intermediates?.find(entry => entry.sha256 === sourceHash);
+    if (sourceHash !== patch.beforeSha256 && !intermediate) {
       throw new Error('llama.rn bridge patch source fingerprint mismatch: ' + patch.source + '; review upstream before changing this patch.');
     }
     if (check) throw new Error('llama.rn bridge patch is missing; run npm ci with postinstall enabled and rebuild the native app.');
-    const patched = applyReplacements(source, patch.replacements);
+    const patched = applyReplacements(source, intermediate?.replacements || patch.replacements);
     if (hashSource(patched) !== patch.afterSha256) throw new Error('llama.rn bridge patch output fingerprint mismatch.');
     writes.push({ sourcePath, text: source.includes('\r\n') ? patched.replace(/\n/gu, '\r\n') : patched, sha256: patch.afterSha256 });
   }
@@ -171,4 +330,4 @@ if (require.main === module) {
   console.log(`llama.rn ${VERSION} bridge patch: ${result.status}; sources ${JSON.stringify(result.sources)}`);
 }
 
-module.exports = { AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_BEFORE_SHA256, PARAMS_AFTER_SHA256, CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, hashSource, applyReplacements, patchLlamaBridge };
+module.exports = { AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_BEFORE_SHA256, PARAMS_AFTER_SHA256, CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, CLOCK_PREVIOUS_SHA256, CLOCK_PRIVACY_REPLACEMENTS, COMPLETION_SOURCE, COMPLETION_BEFORE_SHA256, COMPLETION_AFTER_SHA256, SAMPLING_SOURCE, SAMPLING_BEFORE_SHA256, SAMPLING_AFTER_SHA256, GRAMMAR_SOURCE, GRAMMAR_BEFORE_SHA256, GRAMMAR_AFTER_SHA256, hashSource, applyReplacements, patchLlamaBridge };

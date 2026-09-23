@@ -4,7 +4,9 @@ const path = require('node:path');
 const {
   AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
   hashSource, patchLlamaBridge, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_AFTER_SHA256, applyReplacements,
-  CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER,
+  CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, CLOCK_PREVIOUS_SHA256, CLOCK_PRIVACY_REPLACEMENTS,
+  GRAMMAR_SOURCE, GRAMMAR_BEFORE_SHA256, GRAMMAR_AFTER_SHA256,
+  COMPLETION_SOURCE, COMPLETION_AFTER_SHA256, SAMPLING_SOURCE, SAMPLING_AFTER_SHA256,
 } = require('../../patches/llama-rn-0.13.0-rc.3');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
 const { collectPrebuildInputState } = require('../../scripts/android-build-provenance');
@@ -121,7 +123,9 @@ describe('pinned serial sampling and template clock corrections', () => {
     patchLlamaBridge(root);
     const patched = fs.readFileSync(clockPath, 'utf8');
     expect(hashSource(patched)).toBe(CLOCK_AFTER_SHA256);
-    expect(patched.replace(CLOCK_AFTER, CLOCK_BEFORE)).toBe(original);
+    let restored = patched;
+    for (const [before, after] of [...CLOCK_PRIVACY_REPLACEMENTS].reverse()) restored = restored.replace(after, before);
+    expect(restored.replace(CLOCK_AFTER, CLOCK_BEFORE)).toBe(original);
     expect(patched.split(CLOCK_AFTER)).toHaveLength(2);
     expect(patched.indexOf(CLOCK_AFTER)).toBeLessThan(patched.indexOf('jinja::global_from_json(ctx, inp, inputs.mark_input)'));
     const read = (file) => fs.readFileSync(path.join(root, 'node_modules/llama.rn', file), 'utf8');
@@ -131,7 +135,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(patched).toContain('params.now                   = inputs.now');
   });
 
-  it('preflights the last core source before writing either earlier bridge source', () => {
+  it('preflights clock source before writing either earlier bridge source', () => {
     const clockPath = path.join(root, 'node_modules/llama.rn', CLOCK_SOURCE);
     fs.appendFileSync(clockPath, '\n// clock source drift\n');
     expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
@@ -155,6 +159,120 @@ describe('pinned serial sampling and template clock corrections', () => {
     const cmake = fs.readFileSync(path.join(root, 'node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt'), 'utf8');
     expect(cmake).toContain('file(GLOB COMMON_FILES CONFIGURE_DEPENDS ${RNLLAMA_LIB_DIR}/common/*.cpp)');
     expect(cmake).toContain('${COMMON_FILES}');
+  });
+
+  it('clears the released completion owner before the next initialization can throw', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn', COMPLETION_SOURCE), 'utf8');
+    expect(hashSource(source)).toBe(COMPLETION_AFTER_SHA256);
+    const init = source.slice(source.indexOf('bool llama_rn_context_completion::initSampling()'));
+    expect(init).toMatch(/common_sampler_free\(ctx_sampling\);\s+ctx_sampling = nullptr;\s+\}\s+ctx_sampling = common_sampler_init/u);
+  });
+
+  it('owns partially initialized samplers until successful aggregate construction', () => {
+    patchLlamaBridge(root);
+    const read = (file) => fs.readFileSync(path.join(root, 'node_modules/llama.rn', file), 'utf8');
+    const source = read(SAMPLING_SOURCE);
+    expect(hashSource(source)).toBe(SAMPLING_AFTER_SHA256);
+    const init = source.slice(source.indexOf('struct common_sampler * common_sampler_init('), source.indexOf('void common_sampler_free('));
+    const guard = init.slice(init.indexOf('struct sampler_init_guard'), init.indexOf('} guard { grmr, rbudget, chain, samplers };'));
+    expect(guard).toMatch(/if \(released\) \{\s+return;/u);
+    expect(guard).toMatch(/for \(auto \* smpl : pending\) \{\s+llama_sampler_free\(smpl\);/u);
+    for (const owned of ['grmr', 'rbudget', 'chain']) expect(guard).toContain(`llama_sampler_free(${owned});`);
+    expect(init.indexOf('} guard {')).toBeLessThan(init.indexOf('chain = llama_sampler_chain_init(lparams)'));
+    expect(init.indexOf('samplers.reserve(params.samplers.size() + 3)')).toBeLessThan(init.indexOf('throw std::runtime_error("failed to parse grammar")'));
+    expect(init.indexOf('} guard {')).toBeLessThan(init.indexOf('llama_sampler_accept(grmr, token)'));
+    // A chain owns only entries whose insertion returned successfully. Pending entries
+    // remain owned by the guard if chain insertion or result construction throws.
+    expect(init).toMatch(/for \(auto \* & smpl : samplers\) \{\s+llama_sampler_chain_add\(chain, smpl\);\s+smpl = nullptr;/u);
+    expect(init).toMatch(/auto \* result = new common_sampler \{[\s\S]*?\};\s+guard.released = true;\s+return result;/u);
+    expect(init.split('guard.released = true')).toHaveLength(2);
+    const sampler = read('cpp/llama-sampler.cpp');
+    expect(sampler).toMatch(/void llama_sampler_free\(struct llama_sampler \* smpl\) \{\s+if \(smpl == nullptr\) \{\s+return;/u);
+    expect(sampler).toMatch(/p->samplers.push_back\(\{\s+\/\* .is_backend = \*\/ false,\s+\/\* .ptr        = \*\/ smpl,/u);
+  });
+
+  it('keeps sampler initialization diagnostics free of grammar, prompt and token payloads', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn', SAMPLING_SOURCE), 'utf8');
+    const init = source.slice(source.indexOf('struct common_sampler * common_sampler_init('), source.indexOf('void common_sampler_free('));
+    const logs = init.match(/LOG_(?:DBG|ERR|WRN)\([\s\S]*?\);/gu);
+    expect(logs).toHaveLength(6);
+    for (const log of logs) {
+      expect(log).toMatch(/, __func__\);$/u);
+      expect(log).not.toMatch(/c_str\(|tokens\[|, token|%d|Generation prompt/u);
+      expect(log.match(/%s/gu)).toHaveLength(1);
+    }
+    expect(init).toContain('grammar sampler rejected generation prefill');
+    expect(init).toContain('throw e;');
+  });
+
+  it('preflights sampler drift before writing any other source and upgrades the earlier three fixes', () => {
+    const last = SOURCE_PATCHES.find((patch) => patch.source === SAMPLING_SOURCE);
+    const file = path.join(root, 'node_modules/llama.rn', last.source);
+    const original = fs.readFileSync(file, 'utf8');
+    fs.appendFileSync(file, '\n// unexpected sampler ownership drift\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
+    for (const patch of SOURCE_PATCHES.filter((entry) => entry !== last)) {
+      expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
+    }
+    fs.writeFileSync(file, original);
+    const previous = SOURCE_PATCHES.slice(0, 3).map((patch) => {
+      const target = path.join(root, 'node_modules/llama.rn', patch.source);
+      const text = applyReplacements(fs.readFileSync(target, 'utf8'), patch.replacements);
+      fs.writeFileSync(target, text);
+      return [target, text];
+    });
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    for (const [target, text] of previous) expect(fs.readFileSync(target, 'utf8')).toBe(text);
+    expect(patchLlamaBridge(root, { check: true }).sources[SAMPLING_SOURCE]).toBe(SAMPLING_AFTER_SHA256);
+  });
+
+  it('removes grammar parser exception/input and lazy trigger payloads without changing print utilities', () => {
+    const file = path.join(root, 'node_modules/llama.rn', GRAMMAR_SOURCE);
+    const original = fs.readFileSync(file, 'utf8');
+    expect(hashSource(original)).toBe(GRAMMAR_BEFORE_SHA256);
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(file, 'utf8');
+    expect(hashSource(source)).toBe(GRAMMAR_AFTER_SHA256);
+    const parser = source.slice(0, source.indexOf('void llama_grammar_parser::print(FILE * file)'));
+    expect(parser).toContain('fprintf(stderr, "%s: grammar parsing failed\\n", __func__);');
+    expect(parser).not.toContain('err.what()');
+    const trigger = source.slice(source.indexOf('void llama_grammar_accept_impl('));
+    const logs = trigger.match(/LLAMA_LOG_DEBUG\([^;]*?\);/gu);
+    expect(logs).toHaveLength(3);
+    for (const log of logs) expect(log).not.toMatch(/%[sdu]|c_str\(|, token|constrained_str/u);
+    expect(trigger).not.toContain('auto constrained_str =');
+    const print = text => text.slice(text.indexOf('void llama_grammar_parser::print(FILE * file)'), text.indexOf('void llama_grammar_accept_impl('));
+    expect(print(source)).toBe(print(original));
+  });
+
+  it('preflights sixth-source drift before changing any of the five earlier sources', () => {
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn', GRAMMAR_SOURCE), '\n// drift\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
+    for (const patch of SOURCE_PATCHES.slice(0, 5)) {
+      expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
+    }
+  });
+
+  it('migrates only the exact clock-only core fingerprint and strips active formatter payload diagnostics', () => {
+    const file = path.join(root, 'node_modules/llama.rn', CLOCK_SOURCE);
+    const old = fs.readFileSync(file, 'utf8').replace(CLOCK_BEFORE, CLOCK_AFTER);
+    expect(hashSource(old)).toBe(CLOCK_PREVIOUS_SHA256);
+    patchLlamaBridge(root);
+    fs.writeFileSync(file, old);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/);
+    expect(fs.readFileSync(file, 'utf8')).toBe(old);
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(file, 'utf8');
+    expect(hashSource(source)).toBe(CLOCK_AFTER_SHA256);
+    for (const [before, after] of CLOCK_PRIVACY_REPLACEMENTS) {
+      expect(source).not.toContain(before);
+      expect(source).toContain(after);
+    }
+    // Undocumented intermediate states still fail closed.
+    fs.writeFileSync(file, old + '\n// drift\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
   });
 
   it('targets the JSI source compiled with prebuilt cores on Android and iOS', () => {

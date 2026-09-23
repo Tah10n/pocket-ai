@@ -18,9 +18,15 @@ export function firstTokenProbabilityDistribution(payload: NativeCompletionToken
 }
 
 /** Compare shared tokens, never ranks, and never invent zero for an absent top-k token. */
-export function compareProbabilityDistributions(left: ReadonlyMap<string, number>, right: ReadonlyMap<string, number>): {
-  sharedTokens: number; maxDelta: number;
+export function compareProbabilityDistributions(left: ReadonlyMap<string, number>, right: ReadonlyMap<string, number>,
+  { requireSameSupport = false }: { requireSameSupport?: boolean } = {}): {
+  sharedTokens: number; maxDelta: number; supportMatched?: true;
 } {
+  // Baseline/recovery claims require the complete observed top-n support. Effect
+  // probes may compare only shared tokens, without inventing missing probabilities.
+  if (requireSameSupport && (left.size !== right.size || [...left.keys()].some(token => !right.has(token)))) {
+    throw new Error('probability_support_mismatch');
+  }
   let sharedTokens = 0;
   let maxDelta = 0;
   for (const [token, probability] of left) {
@@ -30,5 +36,5 @@ export function compareProbabilityDistributions(left: ReadonlyMap<string, number
     maxDelta = Math.max(maxDelta, Math.abs(probability - other));
   }
   if (sharedTokens < 3) throw new Error('probability_overlap_insufficient');
-  return { sharedTokens, maxDelta };
+  return { sharedTokens, maxDelta, ...(requireSameSupport ? { supportMatched: true as const } : {}) };
 }

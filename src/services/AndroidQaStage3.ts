@@ -34,7 +34,8 @@ type Step = { id: StepId; status: 'passed' | 'failed' | 'not_run';
   hasContent?: boolean; hasReasoning?: boolean; stoppedLimit?: boolean; stoppedEos?: boolean; stoppedWord?: boolean;
   interrupted?: boolean; truncated?: boolean; contextFull?: boolean; completionDrained?: boolean; exactConstraintMatch?: boolean;
   valid?: boolean; stopped?: boolean; historyUnchanged?: boolean; profileRestored?: boolean;
-  loadedListConfirmed?: boolean; deletionRejected?: boolean; finite?: boolean };
+  loadedListConfirmed?: boolean; deletionRejected?: boolean; finite?: boolean; probabilitiesValidated?: boolean;
+  structuredIncomplete?: boolean; supportMatched?: boolean };
 export type AndroidQaStage3Evidence = {
   schemaVersion: 1; status: 'idle' | 'running' | 'passed' | 'failed'; phase: StepId | 'idle' | 'preconditions' | 'complete';
   requiresForceStop: boolean; failureCode?: 'timeout' | 'precondition' | 'assertion' | 'download' | 'operation_failed' | 'cleanup_failed';
@@ -83,6 +84,32 @@ export function assertAndroidQaGeneratedReceipt(receipt: Omit<Step, 'id' | 'stat
   // predicted counter. Real callbacks and output prove generation, not counter+1.
   check(Number.isSafeInteger(receipt.tokensPredicted) && receipt.tokensPredicted! >= 0
     && (receipt.callbacks ?? 0) > 0 && (receipt.outputCharacters ?? 0) > 0 && receipt.completionDrained === true);
+}
+
+/** A final native probability record proves a sample even when STOP_PARTIAL withheld streaming. */
+export function assertAndroidQaProbabilityReceipt(result: LlamaCompletionResult, callbacks: number,
+  completionDrained: boolean): Omit<Step, 'id' | 'status'> {
+  const receipt = { ...getAndroidQaCompletionReceipt(result, callbacks, completionDrained),
+    sampledTokens: result.completion_probabilities?.length ?? 0 };
+  check(Number.isSafeInteger(receipt.tokensPredicted) && receipt.tokensPredicted! >= 0 && receipt.tokensPredicted! <= 1
+    && Number.isSafeInteger(callbacks) && callbacks >= 0 && receipt.completionDrained === true
+    && result.probabilitiesSummary?.requested === 10 && result.probabilitiesSummary.retainedTokens === 1
+    && result.probabilitiesSummary.totalTokens === 1 && result.probabilitiesSummary.truncated === false
+    && receipt.sampledTokens === 1 && receipt.stoppedLimit === true && receipt.stoppedEos === false && receipt.stoppedWord === false
+    && receipt.interrupted === false && receipt.truncated === false && receipt.contextFull === false);
+  const distribution = firstTokenProbabilityDistribution(result.completion_probabilities);
+  check([...distribution.values()].some(probability => probability > 0));
+  return { ...receipt, probabilitiesValidated: true };
+}
+
+/** Cancellation evidence must come from a settled native result, never an arbitrary rejection. */
+export function assertAndroidQaCancelledReceipt(result: LlamaCompletionResult | null, callbacks: number,
+  completionDrained: boolean, structured: boolean): Omit<Step, 'id' | 'status'> {
+  check(result);
+  const receipt = getAndroidQaCompletionReceipt(result, callbacks, completionDrained);
+  check(callbacks > 0 && receipt.interrupted === true && receipt.completionDrained === true);
+  if (structured) check(result.structuredOutput?.mode === 'json_schema' && result.structuredOutput.status === 'incomplete');
+  return { ...receipt, ...(structured ? { structuredIncomplete: true } : {}) };
 }
 
 /** Private comparison only; never export profile values or this identity in QA evidence. */
@@ -192,7 +219,9 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     let firstToken: () => void = () => undefined;
     const started = new Promise<void>(resolve => { firstToken = resolve; });
     const operation = llmEngineService.chatCompletion({ ...request(structured
-      ? { output: { mode: 'gbnf', grammar: 'root ::= "[" "0,"{128} "0]"' } } : {}, 256,
+      ? { output: { mode: 'json_schema', schema: JSON.stringify({ type: 'object',
+        properties: { story: { type: 'string', minLength: 64, maxLength: 512 } },
+        required: ['story'], additionalProperties: false }) } } : {}, 256,
     'Write a very long detailed story about a dog. Continue for many paragraphs.'),
     onToken: token => { if ((typeof token === 'string' ? token : token.token).length > 0) { callbacks += 1; firstToken(); } },
     }).then(result => { settled = true; return result; }, () => { settled = true; return null; });
@@ -204,8 +233,10 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
       if (Date.now() >= deadline) throw new Stage3Failure('timeout', true);
       await new Promise<void>(resolve => setTimeout(resolve, 25));
     }
-    if (structured && result?.structuredOutput) check(result.structuredOutput.status !== 'valid');
-    pass({ id, callbacks, stopped: true });
+    pendingStepReceipt = result ? getAndroidQaCompletionReceipt(result, callbacks, !llmEngineService.hasActiveCompletion())
+      : { callbacks, completionDrained: !llmEngineService.hasActiveCompletion() };
+    pendingStepReceipt = assertAndroidQaCancelledReceipt(result, callbacks, !llmEngineService.hasActiveCompletion(), structured);
+    pass({ id, ...pendingStepReceipt, stopped: true });
   };
   const probabilityRequest = (overrides: LlmChatCompletionOptions['generation'] = {}) => {
     const options = request({ nProbs: fixture.probabilityProbe.nProbs, template: { now: 1700000000 }, ...overrides }, 1,
@@ -221,10 +252,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     }), operationTimeoutMs);
     pendingStepReceipt = { ...getAndroidQaCompletionReceipt(result, callbacks, !llmEngineService.hasActiveCompletion()),
       sampledTokens: result.completion_probabilities?.length ?? 0 };
-    assertAndroidQaGeneratedReceipt(pendingStepReceipt);
-    check((result.tokens_predicted ?? -1) <= 1 && result.probabilitiesSummary?.requested === 10
-      && pendingStepReceipt.sampledTokens === 1 && pendingStepReceipt.stoppedLimit === true
-      && pendingStepReceipt.interrupted === false && pendingStepReceipt.truncated === false && pendingStepReceipt.contextFull === false);
+    pendingStepReceipt = assertAndroidQaProbabilityReceipt(result, callbacks, !llmEngineService.hasActiveCompletion());
     return { distribution: firstTokenProbabilityDistribution(result.completion_probabilities), receipt: { ...pendingStepReceipt } };
   };
   const apply = async (profile: LoraProfileAdapter[]) => {
@@ -301,7 +329,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     phase('prepare_adapter'); const adapter = await prepareAdapter(downloadTimeoutMs); pass({ id: 'prepare_adapter' });
     phase('probability_baseline');
     const baseline = await probabilityProbe(); const repeated = await probabilityProbe();
-    const baselineComparison = compareProbabilityDistributions(baseline.distribution, repeated.distribution);
+    const baselineComparison = compareProbabilityDistributions(baseline.distribution, repeated.distribution, { requireSameSupport: true });
     const threshold = Math.max(1e-6, baselineComparison.maxDelta * 10);
     pass({ id: 'probability_baseline', ...baseline.receipt, repeatedTokensPredicted: repeated.receipt.tokensPredicted,
       repeatedSampledTokens: repeated.receipt.sampledTokens, ...baselineComparison, baselineDelta: baselineComparison.maxDelta, threshold, finite: true });
@@ -342,7 +370,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     const resetEos = await bounded(llmEngineService.chatCompletion(probabilityRequest({ logitBias: [[eos.tokens[0], 100]] })), operationTimeoutMs);
     check(resetEos.stopped_eos === true && resetEos.interrupted === false && !llmEngineService.hasActiveCompletion());
     const samplingReset = await probabilityProbe();
-    const resetComparison = compareProbabilityDistributions(baseline.distribution, samplingReset.distribution);
+    const resetComparison = compareProbabilityDistributions(baseline.distribution, samplingReset.distribution, { requireSameSupport: true });
     check(resetComparison.maxDelta <= Math.max(1e-6, baselineComparison.maxDelta * 3));
     pass({ id: 'sampling_reset', ...samplingReset.receipt, ...resetComparison, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3), resetEosConfirmed: true, valid: true });
     phase('lora_apply'); await apply([adapter]);
@@ -356,7 +384,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     pass({ id: 'lora_scale', ...half.receipt, ...halfChange, scaleDelta: scaleChange.maxDelta, threshold, adapterCount: 1, scale: 0.5, loadedListConfirmed: true });
     phase('lora_remove'); await apply([]); pass({ id: 'lora_remove', adapterCount: 0, loadedListConfirmed: true });
     phase('lora_restore_baseline'); const removed = await probabilityProbe();
-    const restored = compareProbabilityDistributions(baseline.distribution, removed.distribution);
+    const restored = compareProbabilityDistributions(baseline.distribution, removed.distribution, { requireSameSupport: true });
     check(restored.maxDelta <= Math.max(1e-6, baselineComparison.maxDelta * 3));
     pass({ id: 'lora_restore_baseline', ...removed.receipt, ...restored, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3) });
     phase('prepare_embedding'); const embedding = await prepareAndroidQaEmbeddingFixture(downloadTimeoutMs); pass({ id: 'prepare_embedding' });
@@ -368,7 +396,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     check(auxiliary.dimensions === 384 && before === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters()));
     check(history === JSON.stringify(useChatStore.getState().threads[ownedThread])); assertCpu();
     const afterAuxiliary = await probabilityProbe();
-    const auxiliaryRestored = compareProbabilityDistributions(half.distribution, afterAuxiliary.distribution);
+    const auxiliaryRestored = compareProbabilityDistributions(half.distribution, afterAuxiliary.distribution, { requireSameSupport: true });
     check(auxiliaryRestored.maxDelta <= Math.max(1e-6, baselineComparison.maxDelta * 3));
     pass({ id: 'lora_auxiliary_restore', ...afterAuxiliary.receipt, ...auxiliaryRestored, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3),
       dimensions: 384, profileRestored: true, historyUnchanged: true });

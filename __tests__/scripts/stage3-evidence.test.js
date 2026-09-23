@@ -8,9 +8,11 @@ const fixture = () => ({ schemaVersion: 1, status: 'passed', phase: 'complete', 
     historyUnchanged: true, profileRestored: true, loadedListConfirmed: true, deletionRejected: true,
     valid: true, stopped: true, adapterCount: 0, sharedTokens: 10, maxDelta: 0, baselineDelta: 0, threshold: 1e-6,
     completionDrained: true, exactConstraintMatch: true, stoppedLimit: id !== 'gbnf', interrupted: false, truncated: false, contextFull: false,
+    probabilitiesValidated: true, structuredIncomplete: true, supportMatched: true,
     sampledTokens: 1, repeatedTokensPredicted: 1, repeatedSampledTokens: 1,
     templateGenerationTokensEvaluated: 12, templateGenerationCallbacks: 1, templateGenerationOutputCharacters: 4,
-    probabilityBefore: 0.1, probabilityAfter: 0.999, eosConfirmed: true, resetEosConfirmed: true, stoppedEos: false,
+    probabilityBefore: 0.1, probabilityAfter: 0.999, eosConfirmed: true, resetEosConfirmed: true, stoppedEos: false, stoppedWord: false,
+    ...(['stop', 'structured_cancel'].includes(id) ? { interrupted: true } : {}),
     ...(id === 'template_prefill' ? { tokensPredicted: 0 } : {}),
     ...(['lora_apply', 'lora_scale'].includes(id) ? { adapterCount: 1, scale: id === 'lora_apply' ? 1 : 0.5, maxDelta: 0.01, scaleDelta: 0.005 } : {}),
   })) });
@@ -26,6 +28,22 @@ describe('Stage 3 native evidence boundary', () => {
     value.steps.find(step => step.id === 'probability_baseline').repeatedTokensPredicted = 0;
     expect(validateStage3Evidence(value).steps.find(step => step.id === 'lora_apply').tokensPredicted).toBe(0);
   });
+  it('accepts a native probability sample without a visible callback, but never ordinary text without streaming', () => {
+    const value = fixture(); const step = value.steps.find(item => item.id === 'lora_apply');
+    step.callbacks = 0; step.outputCharacters = 0;
+    expect(validateStage3Evidence(value).status).toBe('passed');
+    step.probabilitiesValidated = false;
+    expect(() => validateStage3Evidence(value)).toThrow(/unproven/);
+    const text = fixture(); text.steps.find(item => item.id === 'text').callbacks = 0;
+    expect(() => validateStage3Evidence(text)).toThrow(/generation/);
+  });
+  it('rejects claimed stop without native interruption and claimed restore with changed support', () => {
+    for (const [id, field] of [['stop', 'interrupted'], ['structured_cancel', 'completionDrained'],
+      ['structured_cancel', 'structuredIncomplete'], ['lora_restore_baseline', 'supportMatched']]) {
+      const value = fixture(); value.steps.find(step => step.id === id)[field] = false;
+      expect(() => validateStage3Evidence(value)).toThrow();
+    }
+  });
   it.each(Object.keys(IDENTITIES))('rejects changed %s', field => {
     expect(() => validateStage3Evidence({ ...fixture(), [field]: 'unknown' })).toThrow(/identities/);
   });
@@ -38,7 +56,10 @@ describe('Stage 3 native evidence boundary', () => {
     ['lora_auxiliary_restore', 'maxDelta'], ['lora_delete_guard', 'deletionRejected'], ['cleanup', 'loadedListConfirmed'],
     ['gbnf', 'callbacks'], ['gbnf', 'exactConstraintMatch'], ['gbnf', 'stoppedLimit'], ['gbnf', 'interrupted'],
     ['gbnf', 'completionDrained'], ['truncated_json', 'stoppedLimit'], ['lora_apply', 'sampledTokens'],
-    ['lora_apply', 'callbacks'], ['probability_baseline', 'repeatedSampledTokens'],
+    ['lora_apply', 'callbacks'], ['lora_apply', 'probabilitiesValidated'], ['lora_apply', 'stoppedEos'], ['lora_apply', 'stoppedWord'],
+    ['stop', 'interrupted'], ['stop', 'completionDrained'], ['structured_cancel', 'structuredIncomplete'],
+    ['probability_baseline', 'supportMatched'], ['sampling_reset', 'supportMatched'],
+    ['lora_restore_baseline', 'supportMatched'], ['lora_auxiliary_restore', 'supportMatched'], ['probability_baseline', 'repeatedSampledTokens'],
     ['template_prefill', 'templateGenerationTokensEvaluated'], ['template_prefill', 'templateGenerationCallbacks'],
     ['template_prefill', 'templateGenerationOutputCharacters'],
     ['logit_bias', 'probabilityBefore'], ['logit_bias', 'probabilityAfter'], ['ignore_eos', 'eosConfirmed'],
@@ -76,7 +97,7 @@ describe('Stage 3 native evidence boundary', () => {
     value.steps[1].status = 'not_run'; value.steps[1].maxDelta = Infinity;
     const safe = sanitizeStage3Evidence(value);
     expect(safe.steps[0].status).toBe('failed'); expect(safe.steps[1].status).toBe('not_run');
-    expect(JSON.stringify(safe)).not.toMatch(/PRIVATE|probabilities|Infinity/);
+    expect(JSON.stringify(safe)).not.toMatch(/PRIVATE|"probabilities":|Infinity/);
   });
   it('does not interpret pending or a timeout as acceptance', async () => {
     let time = 0;

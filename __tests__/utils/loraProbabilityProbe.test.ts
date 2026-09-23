@@ -16,6 +16,21 @@ describe('LoRA controlled first-token probability comparison', () => {
     const right = new Map(result); right.delete('token-0'); right.set('not-in-left', 0.5);
     expect(compareProbabilityDistributions(result, right)).toEqual({ sharedTokens: 8, maxDelta: 0 });
   });
+  it('does not call seven changed top-n tokens restored just because three unchanged tokens overlap', () => {
+    const baseline = firstTokenProbabilityDistribution(payload());
+    const changed = new Map([...baseline].map(([token, probability], index) => [index < 3 ? token : `changed-${token}`, probability]));
+    expect(compareProbabilityDistributions(baseline, changed)).toEqual({ sharedTokens: 3, maxDelta: 0 });
+    expect(() => compareProbabilityDistributions(baseline, changed, { requireSameSupport: true })).toThrow('probability_support_mismatch');
+  });
+  it('requires complete support for baseline and restore while ignoring rank order', () => {
+    const baseline = firstTokenProbabilityDistribution(payload());
+    const reordered = new Map([...baseline].reverse());
+    expect(compareProbabilityDistributions(baseline, reordered, { requireSameSupport: true })).toEqual({ sharedTokens: 10, maxDelta: 0, supportMatched: true });
+    reordered.set('token-1', 0.05);
+    expect(compareProbabilityDistributions(baseline, reordered, { requireSameSupport: true }).maxDelta).toBeCloseTo(0.03);
+    reordered.delete('token-0');
+    expect(() => compareProbabilityDistributions(baseline, reordered, { requireSameSupport: true })).toThrow('probability_support_mismatch');
+  });
   it('requires enough shared tokens to draw a conclusion', () => {
     expect(() => compareProbabilityDistributions(new Map([['a', 0.1], ['b', 0.2]]), new Map([['a', 0.3], ['b', 0.2]]))).toThrow(/overlap/);
   });

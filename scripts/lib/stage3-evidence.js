@@ -11,7 +11,7 @@ const NUMERIC_FIELDS = ['callbacks', 'tokensPredicted', 'tokensEvaluated', 'outp
   'sharedTokens', 'maxDelta', 'baselineDelta', 'threshold', 'scaleDelta', 'tokenCount', 'dimensions',
   'contentCharacters', 'sampledTokens', 'repeatedTokensPredicted', 'repeatedSampledTokens',
   'templateGenerationTokensEvaluated', 'templateGenerationCallbacks', 'templateGenerationOutputCharacters', 'probabilityBefore', 'probabilityAfter'];
-const BOOLEAN_FIELDS = ['valid', 'stopped', 'historyUnchanged', 'profileRestored', 'loadedListConfirmed', 'deletionRejected', 'finite',
+const BOOLEAN_FIELDS = ['probabilitiesValidated', 'structuredIncomplete', 'supportMatched', 'valid', 'stopped', 'historyUnchanged', 'profileRestored', 'loadedListConfirmed', 'deletionRejected', 'finite',
   'hasContent', 'hasReasoning', 'stoppedLimit', 'stoppedEos', 'stoppedWord', 'interrupted', 'truncated', 'contextFull', 'completionDrained', 'exactConstraintMatch', 'eosConfirmed', 'resetEosConfirmed'];
 function sanitizeStage3Evidence(input) {
   return {
@@ -40,8 +40,10 @@ function validateStage3Evidence(input) {
   const nonnegative = value => Number.isSafeInteger(value) && value >= 0;
   const realOutput = step => nonnegative(step.tokensPredicted) && positive(step.callbacks)
     && positive(step.outputCharacters) && step.completionDrained === true;
-  const sampledOnce = step => realOutput(step) && step.tokensPredicted <= 1 && step.sampledTokens === 1
-    && step.stoppedLimit === true && step.interrupted === false && step.truncated === false && step.contextFull === false;
+  const sampledOnce = step => nonnegative(step.tokensPredicted) && step.tokensPredicted <= 1 && step.sampledTokens === 1
+    && nonnegative(step.callbacks) && step.completionDrained === true && step.probabilitiesValidated === true
+    && step.stoppedLimit === true && step.stoppedEos === false && step.stoppedWord === false
+    && step.interrupted === false && step.truncated === false && step.contextFull === false;
   const distribution = step => Number.isSafeInteger(step.sharedTokens) && step.sharedTokens >= 3 && step.sharedTokens <= 10
     && Number.isFinite(step.maxDelta) && step.maxDelta >= 0 && step.maxDelta <= 1
     && Number.isFinite(step.threshold) && step.threshold >= 1e-6;
@@ -60,7 +62,12 @@ function validateStage3Evidence(input) {
     if (['json_object', 'json_schema', 'gbnf', 'invalid_schema', 'invalid_grammar', 'truncated_json', 'token_diagnostics'].includes(step.id)) {
       requireValue(step.valid === true, 'Missing independent output or rejection validation.');
     }
-    if (['stop', 'structured_cancel'].includes(step.id)) requireValue(positive(step.callbacks) && step.stopped === true, 'Missing real cancellation evidence.');
+    if (['stop', 'structured_cancel'].includes(step.id)) requireValue(positive(step.callbacks) && step.stopped === true
+      && step.interrupted === true && step.completionDrained === true, 'Missing real cancellation evidence.');
+    if (step.id === 'structured_cancel') requireValue(step.structuredIncomplete === true, 'Missing incomplete JSON Schema cancellation evidence.');
+    if (['probability_baseline', 'sampling_reset', 'lora_restore_baseline', 'lora_auxiliary_restore'].includes(step.id)) {
+      requireValue(step.supportMatched === true, 'Complete probability support was not restored.');
+    }
     if (step.id === 'gbnf') requireValue(step.exactConstraintMatch === true && step.stoppedLimit === false
       && step.interrupted === false, 'GBNF exact constraint completion is unproven.');
     if (step.id === 'truncated_json') requireValue(step.stoppedLimit === true, 'Missing token-limit structured output evidence.');

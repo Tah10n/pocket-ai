@@ -1,5 +1,5 @@
 import fixture from '../../docs/validation/llama-rn-stage3/lora-fixture.json';
-import { assertAndroidQaGeneratedReceipt, getAndroidQaCompletionReceipt, getAndroidQaEffectiveProfileIdentity,
+import { assertAndroidQaCancelledReceipt, assertAndroidQaGeneratedReceipt, assertAndroidQaProbabilityReceipt, getAndroidQaCompletionReceipt, getAndroidQaEffectiveProfileIdentity,
   getAndroidQaStage3Evidence, resetAndroidQaStage3ForTests, runAndroidQaStage3 } from '../../src/services/AndroidQaStage3';
 import type { ModelLoadParameters } from '../../src/services/SettingsStore';
 import type { LlmChatCompletionOptions } from '../../src/types/chat';
@@ -58,6 +58,78 @@ describe('Stage 3 QA lifecycle contract (unit tests are not native acceptance)',
     expect(missingFlags.contextFull).toBeUndefined();
     for (const invalid of [{ callbacks: 0 }, { outputCharacters: 0 }, { tokensPredicted: -1 }, { tokensPredicted: undefined }, { completionDrained: false }]) {
       expect(() => assertAndroidQaGeneratedReceipt({ ...receipt, ...invalid })).toThrow('assertion');
+    }
+  });
+  const probabilityResult = (): LlamaCompletionResult => ({
+    text: '<', content: '<', tokens_predicted: 0, tokens_evaluated: 59,
+    stopped_limit: true, stopped_eos: false, stopped_word: false, interrupted: false, truncated: false, context_full: false,
+    probabilitiesSummary: { requested: 10, retainedTokens: 1, totalTokens: 1, truncated: false },
+    completion_probabilities: [{ content: '<', probs: Array.from({ length: 10 }, (_, index) => ({ tok_str: `PRIVATE-${index}`, prob: 0.05 })) }],
+  });
+  it('accepts a real final one-token distribution without a visible callback only in probability diagnostics', () => {
+    const result = probabilityResult();
+    const receipt = assertAndroidQaProbabilityReceipt(result, 0, true);
+    expect(receipt).toMatchObject({ callbacks: 0, tokensPredicted: 0, sampledTokens: 1, stoppedLimit: true, completionDrained: true, probabilitiesValidated: true });
+    expect(JSON.stringify(receipt)).not.toContain('PRIVATE');
+    expect(getAndroidQaCompletionReceipt(result, 0, true).probabilitiesValidated).toBeUndefined();
+    expect(() => assertAndroidQaGeneratedReceipt(receipt)).toThrow('assertion');
+    expect(() => assertAndroidQaProbabilityReceipt({ ...result, text: '', content: '', tokens_predicted: 1 }, 0, true)).not.toThrow();
+    expect(() => assertAndroidQaProbabilityReceipt(result, 0, false)).toThrow('assertion');
+  });
+  it('rejects missing, stale, malformed or non-finite native probability samples even with visible output', () => {
+    const result = probabilityResult();
+    for (const completion_probabilities of [undefined, [], [...result.completion_probabilities!, ...result.completion_probabilities!]]) {
+      expect(() => assertAndroidQaProbabilityReceipt({ ...result, completion_probabilities }, 1, true)).toThrow();
+    }
+    for (const probability of [NaN, Infinity, -0.1, 1.1, 0]) {
+      const invalid = probabilityResult();
+      invalid.completion_probabilities![0].probs = invalid.completion_probabilities![0].probs.map(item => ({ ...item, prob: probability }));
+      expect(() => assertAndroidQaProbabilityReceipt(invalid, 0, true)).toThrow();
+    }
+    const incomplete = probabilityResult(); incomplete.completion_probabilities![0].probs.pop();
+    expect(() => assertAndroidQaProbabilityReceipt(incomplete, 0, true)).toThrow();
+    for (const probabilitiesSummary of [undefined,
+      { requested: 0, retainedTokens: 1, totalTokens: 1, truncated: false },
+      { requested: 10, retainedTokens: 0, totalTokens: 1, truncated: false },
+      { requested: 10, retainedTokens: 1, totalTokens: 2, truncated: false },
+      { requested: 10, retainedTokens: 1, totalTokens: 1, truncated: true }]) {
+      expect(() => assertAndroidQaProbabilityReceipt({ ...result, probabilitiesSummary }, 0, true)).toThrow();
+    }
+  });
+  it('requires the exact native terminal flags and bounded raw prediction counter for probability proof', () => {
+    const result = probabilityResult();
+    for (const tokens_predicted of [undefined, -1, 2, 0.5, NaN, Infinity]) {
+      expect(() => assertAndroidQaProbabilityReceipt({ ...result, tokens_predicted }, 0, true)).toThrow('assertion');
+    }
+    for (const key of ['stopped_limit', 'stopped_eos', 'stopped_word', 'interrupted', 'truncated', 'context_full'] as const) {
+      expect(() => assertAndroidQaProbabilityReceipt({ ...result, [key]: !result[key] }, 0, true)).toThrow('assertion');
+      expect(() => assertAndroidQaProbabilityReceipt({ ...result, [key]: undefined }, 0, true)).toThrow('assertion');
+    }
+  });
+  it('requires native interruption and drained ownership instead of treating normal completion or errors as cancellation', () => {
+    const result: LlamaCompletionResult = { text: 'PRIVATE PARTIAL', tokens_predicted: 0, interrupted: true,
+      structuredOutput: { mode: 'json_schema', status: 'incomplete', error: 'interrupted' } };
+    const receipt = assertAndroidQaCancelledReceipt(result, 1, true, true);
+    expect(receipt).toMatchObject({ interrupted: true, completionDrained: true, callbacks: 1, tokensPredicted: 0, structuredIncomplete: true });
+    expect(JSON.stringify(receipt)).not.toContain('PRIVATE');
+    expect(assertAndroidQaCancelledReceipt(result, 1, true, false).structuredIncomplete).toBeUndefined();
+    expect(getAndroidQaCompletionReceipt(result, 1, true).structuredIncomplete).toBeUndefined();
+    expect(() => assertAndroidQaCancelledReceipt(null, 1, true, true)).toThrow('assertion');
+    for (const interrupted of [false, undefined]) {
+      expect(() => assertAndroidQaCancelledReceipt({ ...result, interrupted }, 1, true, false)).toThrow('assertion');
+      expect(() => assertAndroidQaCancelledReceipt({ ...result, interrupted }, 1, true, true)).toThrow('assertion');
+    }
+    expect(() => assertAndroidQaCancelledReceipt(result, 0, true, true)).toThrow('assertion');
+    expect(() => assertAndroidQaCancelledReceipt(result, 1, false, true)).toThrow('assertion');
+  });
+  it('requires incomplete JSON Schema validation for structured cancellation, never missing or GBNF metadata', () => {
+    const result: LlamaCompletionResult = { text: 'PARTIAL', tokens_predicted: 0, interrupted: true };
+    expect(() => assertAndroidQaCancelledReceipt(result, 1, true, true)).toThrow('assertion');
+    for (const structuredOutput of [
+      { mode: 'json_schema', status: 'valid' }, { mode: 'json_schema', status: 'invalid' },
+      { mode: 'gbnf', status: 'not_applicable' }, { mode: 'json_object', status: 'incomplete' },
+    ] as const) {
+      expect(() => assertAndroidQaCancelledReceipt({ ...result, structuredOutput }, 1, true, true)).toThrow('assertion');
     }
   });
   it('retains zero-counter failure receipts before refusing a completion without callbacks', async () => {

@@ -1,4 +1,4 @@
-// Narrow correction for the pinned release; no dependency upgrade or core rebuild.
+// Narrow corrections for the pinned release; the clock fix requires a source-core build.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -82,16 +82,30 @@ const PARAMS_REPLACEMENTS = [
         }`
   ]
 ];
+const CLOCK_SOURCE = 'cpp/common/chat.cpp';
+const CLOCK_BEFORE_SHA256 = 'a7e0aeaf40a7f9ac94093c2554d1086d430cade04a6a03e0001b711643338e34';
+const CLOCK_AFTER_SHA256 = 'ad51d8e0db5e98d2f5ae3c7aa56ad6c82664cb00204d3c4a5b74b4b8df743c24';
+const CLOCK_BEFORE = '    jinja::context ctx(tmpl.source());\n';
+const CLOCK_AFTER = `${CLOCK_BEFORE}    ctx.current_time = std::chrono::system_clock::to_time_t(inputs.now);\n`;
 const SOURCE_PATCHES = [
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
+  { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER]] },
 ];
-// Both prebuilt-core and source-core builds compile this JSI wrapper locally.
-// Exact build-file fingerprints fail closed if that inclusion contract changes.
+// JSI fixes are compiled locally in every mode. The clock fix is in the core:
+// source-build configuration must also be enforced by the native config verifier.
+// Exact fingerprints protect source inclusion and the request-clock data contract.
 const BUILD_FILES = Object.freeze({
   'android/src/main/CMakeLists.txt': '286375df7159c18c674e30ef8e324c964c4d7304f451f07abffa4a2f279eb2b6',
   'llama-rn.podspec': 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55',
   'cpp/rn-completion.h': 'a827a43b7452ecb6130f821fc20dc1c3c30bd9c8c3fa7dfc450bc8cae185b182',
+  'android/build.gradle': '841f2514b2f6540a6f118b9fc024690ea238e17b23151c421a52a3105fb16583',
+  'android/src/main/rnllama/CMakeLists.txt': 'f58142de643017b3145767553add3353a411a9ae2accfff1cc0bc6cc6a710364',
+  'cpp/common/jinja/runtime.h': '89c8efc60ad287f49089fbcf7f028d1b88b32d41a2e859f1b68af5a574816a3f',
+  'cpp/common/jinja/value.cpp': '9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411',
+  'cpp/common/chat-auto-parser.h': 'c774fcc02980529671793e110118ecfccb1e3c48eac52c852ce354922f599b52',
+  'cpp/common/chat.h': 'e6d106744146668453d38fa3db725b630a438eb982c74effd094f30cd3ed4d65',
+  'cpp/rn-llama.cpp': 'e33948572e199c90a74f1ecb4d27be791924fe4954737f0d83c96b2a18ad0d1c',
 });
 
 function hashSource(text) {
@@ -157,4 +171,4 @@ if (require.main === module) {
   console.log(`llama.rn ${VERSION} bridge patch: ${result.status}; sources ${JSON.stringify(result.sources)}`);
 }
 
-module.exports = { AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_BEFORE_SHA256, PARAMS_AFTER_SHA256, hashSource, applyReplacements, patchLlamaBridge };
+module.exports = { AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_BEFORE_SHA256, PARAMS_AFTER_SHA256, CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER, hashSource, applyReplacements, patchLlamaBridge };

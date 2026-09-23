@@ -1102,6 +1102,16 @@ function assertAndroidBuildOverrideContract(projectRoot, options = {}) {
       "Android provenance-aware builds reject Gradle user-home init scripts."
     );
   }
+  const llamaSourceBuildOverride = findGradleProjectPropertyOverride(
+    projectRoot,
+    "rnllamaBuildFromSource",
+    options
+  );
+  if (llamaSourceBuildOverride) {
+    throw new Error(
+      `Android ${variant} builds reject external rnllamaBuildFromSource overrides from ${llamaSourceBuildOverride.source}; use the repository-owned native source-build setting.`
+    );
+  }
   if (abi === "universal") {
     const architectureOverride = findGradleProjectPropertyOverride(
       projectRoot,

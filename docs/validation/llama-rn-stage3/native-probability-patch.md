@@ -1,4 +1,4 @@
-# Pinned native bridge corrections
+# Pinned native runtime corrections
 
 The runtime remains exactly `llama.rn 0.13.0-rc.3`. A local one-line correction clears `generated_token_probs` immediately after `ctx->completion->rewind()` in `cpp/jsi/RNLlamaJSI.cpp`, before parsing the next completion's parameters. The pinned serial completion implementation appends probability records but does not clear this vector in `rewind()`. Without the correction, repeated requests return previous requests' probability records and retain an increasing native allocation.
 
@@ -6,7 +6,7 @@ The existing `throwIfContextBusy` guard precedes the reset on both platforms. Th
 
 ## Installation and verification
 
-`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks both complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
+`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all three complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
 
 Run `node patches/llama-rn-0.13.0-rc.3.js --check` to verify without writing. `npm run verify:native-config` includes this check. Fingerprints use SHA-256 after normalizing CRLF to LF:
 
@@ -17,7 +17,7 @@ Run `node patches/llama-rn-0.13.0-rc.3.js --check` to verify without writing. `n
 
 ## Native build and evidence boundary
 
-Android's `android/src/main/CMakeLists.txt` always includes this file in `JNI_SOURCE_FILES`, linked into `librnllama_jni` and its selected variants. The iOS podspec compiles `cpp/jsi/**/*.{h,cpp}` even with its default vendored framework; source-core builds also include the file. The exact CMake, podspec and public completion-header fingerprints are checked by the patch. Default vendor core binaries remain unchanged. Patching only `cpp/rn-completion.cpp` would not fix the default prebuilt-core builds.
+Android's `android/src/main/CMakeLists.txt` always includes this file in `JNI_SOURCE_FILES`, linked into `librnllama_jni` and its selected variants. The iOS podspec compiles `cpp/jsi/**/*.{h,cpp}` even with its default vendored framework; source-core builds also include the file. The exact CMake, podspec and public completion-header fingerprints are checked by the patch. These two JSI corrections also work with unchanged vendor core binaries; the clock correction below additionally requires building the core from source. Patching only `cpp/rn-completion.cpp` would not fix the default prebuilt-core builds.
 
 The executable patch lives in `patches/`, which the existing Android build and prebuild provenance includes in its content fingerprints. A new native binary is required; a JavaScript bundle update cannot apply this correction. Source checks prove the installation and build inclusion contract, not device execution or an iOS build. Native acceptance must use the rebuilt APK and record its identity. The Stage 3 probability probe requires exactly one actual probability record in each repeated one-token completion, including after LoRA apply, scale change, remove and auxiliary-model restoration. Native iOS behavior remains `not_run` until separately built and tested.
 
@@ -27,4 +27,16 @@ The same pinned patch corrects `cpp/jsi/JSIParams.cpp`, also compiled locally on
 
 Duplicate user token entries use the last value, rather than accidentally adding biases. `ignore_eos` defaults to false for each request. When enabled it overrides user biases for every model EOG token (including EOS and end-of-turn tokens), using the core precomputed EOG list. Each override replaces an existing entry or appends one unique entry. This avoids relying on duplicate handling, which differs between the core sampler aligned and fallback candidate paths. Model-defined suppress tokens remain governed by the unchanged core sampler.
 
-The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. Both source inputs are validated before either is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
+The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All three source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
+
+## Fixed request clock in Jinja
+
+The pinned core forwards `now` from `rn-llama.cpp` to `autoparser::generation_params`, but `common_chat_template_direct_apply_impl` creates its Jinja context with the wall-clock default. It never assigns the supplied timestamp. Templates using `strftime_now` therefore ignore both explicit `now` and the app's frozen request clock. A fixed 2023 test timestamp was rejected by the template guard on the 2026 Android QA run; that APK did not pass the template/prefill acceptance scenario.
+
+The correction adds exactly `ctx.current_time = std::chrono::system_clock::to_time_t(inputs.now);` immediately after constructing the context in `cpp/common/chat.cpp`. Nested contexts already inherit `current_time`. Existing native local-time formatting remains unchanged; the patch does not change timezone semantics. Both explicit and automatically frozen request timestamps now use the same value throughout formatting.
+
+Original `cpp/common/chat.cpp` SHA-256: `a7e0aeaf40a7f9ac94093c2554d1086d430cade04a6a03e0001b711643338e34`. Corrected SHA-256: `ad51d8e0db5e98d2f5ae3c7aa56ad6c82664cb00204d3c4a5b74b4b8df743c24`. The patch also fingerprints the Jinja clock consumer, context inheritance, request types, bridge clock forwarding, and Android core-source inclusion. It preflights every source before writes and accepts an earlier installation with the two bridge corrections already applied.
+
+This function belongs to the prebuilt core, so changing the source file alone does not fix a default vendor binary. Android must use `rnllamaBuildFromSource=true`; iOS must set `RNLLAMA_BUILD_FROM_SOURCE=1` before CocoaPods evaluates the podspec. These are upstream switches in the same pinned rc.3, with no toolchain or dependency update. `plugins/withLlamaSourceBuild.js` sets these switches during Expo prebuild; native configuration verification rejects missing or conflicting generated settings. The Android build wrapper also rejects external Gradle overrides of the source-build property. An isolated x86_64 CPU QA build can limit `reactNativeArchitectures=x86_64` and `rnllamaVariants=rnllama,rnllama_x86_64` to avoid compiling unrelated CPU-feature variants; this does not establish other-backend coverage.
+
+The fixed source and installation checks are not behavioral acceptance. Rebuilt Android execution of the fixed-clock template, matching exact count and prefill, and the full regression packs remain required. iOS is `not_run` until separately built and tested.

@@ -5,6 +5,8 @@ const path = require('node:path');
 const { run } = require('../../scripts/verify-native-config');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
 
+const { PODFILE_PREFIX } = require('../../plugins/withLlamaSourceBuild')._internal;
+
 const llamaVersion = '0.13.0-rc.3';
 const llamaDependencies = { 'llama.rn': llamaVersion };
 
@@ -54,13 +56,14 @@ function createProject() {
   fs.mkdirSync(path.join(root, 'android', 'app', 'src', 'main'), { recursive: true });
   fs.writeFileSync(
     path.join(root, 'android', 'gradle.properties'),
-    'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m\n',
+    'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m\nrnllamaBuildFromSource=true\n',
   );
+  fs.writeFileSync(path.join(root, 'ios', 'Podfile'), PODFILE_PREFIX + "require 'expo/scripts/autolinking'\n");
   fs.writeFileSync(path.join(root, 'app.json'), JSON.stringify({
     expo: {
       updates: { enabled: false },
       ios: { infoPlist: {} },
-      plugins: [['expo-build-properties', { android: { buildArchs: ['arm64-v8a', 'x86_64'] } }]],
+      plugins: ['./plugins/withLlamaSourceBuild', ['expo-build-properties', { android: { buildArchs: ['arm64-v8a', 'x86_64'] } }]],
     },
   }));
   fs.writeFileSync(path.join(root, 'eas.json'), JSON.stringify({
@@ -142,7 +145,7 @@ describe('native configuration contract', () => {
       }));
       expect(() => run([], root)).toThrow(/BGTaskScheduler/);
 
-      fs.writeFileSync(appConfigPath, JSON.stringify({ expo: { updates: { enabled: false }, ios: { infoPlist: {} } } }));
+      fs.writeFileSync(appConfigPath, JSON.stringify({ expo: { updates: { enabled: false }, ios: { infoPlist: {} }, plugins: ['./plugins/withLlamaSourceBuild'] } }));
       fs.writeFileSync(
         path.join(root, 'android', 'app', 'src', 'main', 'AndroidManifest.xml'),
         '<manifest><application /></manifest>',
@@ -172,10 +175,44 @@ describe('native configuration contract', () => {
     try {
       fs.writeFileSync(
         path.join(root, 'android', 'gradle.properties'),
-        'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m\n',
+        'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m\nrnllamaBuildFromSource=true\n',
       );
 
       expect(() => run(['--require-android'], root)).toThrow(/reserve 1024 MiB of Metaspace/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['', 'rnllamaBuildFromSource=false\n', 'rnllamaBuildFromSource=true\nrnllamaBuildFromSource=false\n'])('rejects an uncorrected Android core configuration: %j', flag => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(path.join(root, 'android', 'gradle.properties'),
+        'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m\n' + flag);
+      expect(() => run(['--require-android'], root)).toThrow(/corrected llama.rn core from source/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['', PODFILE_PREFIX + "ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '0'\n"])('rejects an uncorrected iOS core configuration: %j', podfile => {
+    const root = createProject();
+    try {
+      fs.writeFileSync(path.join(root, 'ios', 'Podfile'), podfile);
+      expect(() => run(['--require-ios'], root)).toThrow(/core from source|Conflicting/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects source configuration without the corrected core build plugin', () => {
+    const root = createProject();
+    try {
+      const file = path.join(root, 'app.json');
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.expo.plugins = [];
+      writeJson(file, config);
+      expect(() => run([], root)).toThrow(/source-build Expo plugin/);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

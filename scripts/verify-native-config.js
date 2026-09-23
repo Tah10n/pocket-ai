@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 
+const { PODFILE_PREFIX, ensurePodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
 const projectRoot = path.resolve(__dirname, '..');
 
 function readText(filePath, label) {
@@ -47,6 +48,9 @@ function assertSourceConfig(root = projectRoot) {
   }
   if (appConfig.expo?.updates?.enabled !== false) {
     throw new Error('Expo updates must remain explicitly disabled: llama.rn upgrades require a new native binary.');
+  }
+  if (!appConfig.expo?.plugins?.some(plugin => plugin === './plugins/withLlamaSourceBuild')) {
+    throw new Error('Pinned llama.rn core corrections require the source-build Expo plugin.');
   }
   const appCodegenSourceDir = packageConfig.codegenConfig?.jsSrcsDir;
   if (appCodegenSourceDir && findAppCodegenSpecs(root, appCodegenSourceDir).length === 0) {
@@ -123,6 +127,9 @@ function assertLlamaNativeArtifacts(root = projectRoot) {
 }
 
 function assertIosGeneratedConfig(root = projectRoot) {
+  const podfile = readText(path.join(root, 'ios', 'Podfile'), 'Generated iOS Podfile').replace(/\r\n/gu, '\n');
+  if (!podfile.startsWith(PODFILE_PREFIX)) throw new Error('iOS must compile the corrected llama.rn core from source.');
+  ensurePodfileSourceBuild(podfile);
   const plist = readText(path.join(root, 'ios', 'pocketai', 'Info.plist'), 'Generated iOS Info.plist');
   const entitlements = readText(
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),
@@ -198,6 +205,10 @@ function assertAndroidGeneratedConfig(root = projectRoot) {
   const service = manifest.match(/<service\b[^>]*RNBackgroundActionsTask[^>]*>/u)?.[0] ?? '';
   if (!service || !/android:foregroundServiceType="dataSync"/u.test(service)) {
     throw new Error('RNBackgroundActionsTask must declare foregroundServiceType=dataSync.');
+  }
+  const sourceBuildFlags = gradleProperties.split(/\r?\n/u).filter(line => /^\s*rnllamaBuildFromSource\s*=/u.test(line));
+  if (sourceBuildFlags.length !== 1 || !/^\s*rnllamaBuildFromSource\s*=\s*true\s*$/u.test(sourceBuildFlags[0])) {
+    throw new Error('Android must compile the corrected llama.rn core from source.');
   }
   if (!/^org\.gradle\.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m$/mu.test(gradleProperties)) {
     throw new Error(

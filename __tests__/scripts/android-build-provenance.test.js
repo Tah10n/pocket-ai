@@ -1672,6 +1672,57 @@ describe('Android build provenance routing', () => {
     }
   });
 
+  it.each([
+    ['project argument', { gradleArgs: ['-PrnllamaBuildFromSource=false'] }],
+    ['long project argument', { gradleArgs: ['--project-prop', 'rnllamaBuildFromSource=false'] }],
+    ['system argument', { gradleArgs: ['-Dorg.gradle.project.rnllamaBuildFromSource=false'] }],
+    ['nested JVM argument', { gradleArgs: ['-Dorg.gradle.jvmargs=-Dorg.gradle.project.rnllamaBuildFromSource=false'] }],
+    ['project environment', { env: { ORG_GRADLE_PROJECT_rnllamaBuildFromSource: 'false' } }],
+    ...['_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JAVA_OPTS', 'GRADLE_OPTS']
+      .map(key => [key, { env: { [key]: '-Dorg.gradle.project.rnllamaBuildFromSource=false' } }]),
+    ['user Gradle property', { userProperties: 'rnllamaBuildFromSource=false\n' }],
+    ['user Gradle system property', { userProperties: 'systemProp.org.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['user Gradle JVM property', { userProperties: 'org.gradle.jvmargs=-Dorg.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['project Gradle system property', { projectProperties: 'systemProp.org.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['project Gradle JVM property', { projectProperties: 'org.gradle.jvmargs=-Dorg.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['external true value', { gradleArgs: ['-PrnllamaBuildFromSource=true'] }],
+    ['external empty value', { env: { ORG_GRADLE_PROJECT_rnllamaBuildFromSource: '' } }],
+  ])('rejects external llama native source-build override from %s', (_name, override) => {
+    const projectRoot = createProject();
+    const userGradlePropertiesPath = path.join(projectRoot, 'private-gradle', 'gradle.properties');
+    fs.mkdirSync(path.dirname(userGradlePropertiesPath), { recursive: true });
+    fs.writeFileSync(userGradlePropertiesPath, override.userProperties || '');
+    fs.writeFileSync(path.join(projectRoot, 'android', 'gradle.properties'), [
+      'rnllamaBuildFromSource=true',
+      override.projectProperties || '',
+    ].join('\n'));
+    try {
+      for (const [variant, abi] of [['debug', 'x86_64'], ['release', 'universal']]) {
+        expect(() => assertAndroidBuildOverrideContract(projectRoot, {
+          variant, abi, env: override.env || {}, gradleArgs: override.gradleArgs || [],
+          userGradlePropertiesPath,
+        })).toThrow(/reject external rnllamaBuildFromSource overrides/);
+      }
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('allows the repository-owned llama native source-build property without external overrides', () => {
+    const projectRoot = createProject();
+    const userGradlePropertiesPath = path.join(projectRoot, 'private-gradle', 'gradle.properties');
+    fs.writeFileSync(path.join(projectRoot, 'android', 'gradle.properties'), 'rnllamaBuildFromSource=true\n');
+    try {
+      for (const [variant, abi] of [['debug', 'x86_64'], ['release', 'universal']]) {
+        expect(() => assertAndroidBuildOverrideContract(projectRoot, {
+          variant, abi, env: {}, userGradlePropertiesPath,
+        })).not.toThrow();
+      }
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
   it('rejects every externally injected Android artifact override channel', () => {
     const projectRoot = createProject();
     const userGradlePropertiesPath = path.join(projectRoot, 'private-gradle', 'gradle.properties');

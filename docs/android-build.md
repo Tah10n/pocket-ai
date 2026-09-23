@@ -22,6 +22,7 @@ scripts, explicitly run the same installer before building:
 
 ```bash
 node node_modules/llama.rn/install/download-native-artifacts.js
+node patches/llama-rn-0.13.0-rc.3.js
 npm run verify:native-config
 ```
 
@@ -29,6 +30,12 @@ The verifier checks the exact manifest/lock/installed package version, download
 receipts and required payloads. Receipts and JavaScript `BuildInfo` are not proof
 of the embedded binary; retain artifact provenance and native smoke checks.
 Do not reuse an old generated native project after changing the runtime pin.
+
+The pinned rc.3 includes [local native corrections](./validation/llama-rn-stage3/native-probability-patch.md).
+The Expo source-build plugin generates `rnllamaBuildFromSource=true`, so Gradle
+compiles the corrected core instead of packaging the vendor core. The build wrapper
+rejects external overrides of this property. A clean first build takes longer;
+reuse the same build directory and cache for subsequent verification.
 
 Prepare and verify the document toolchain once:
 

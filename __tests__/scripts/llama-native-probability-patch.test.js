@@ -4,6 +4,7 @@ const path = require('node:path');
 const {
   AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
   hashSource, patchLlamaBridge, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_AFTER_SHA256, applyReplacements,
+  CLOCK_SOURCE, CLOCK_BEFORE_SHA256, CLOCK_AFTER_SHA256, CLOCK_BEFORE, CLOCK_AFTER,
 } = require('../../patches/llama-rn-0.13.0-rc.3');
 const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
 const { collectPrebuildInputState } = require('../../scripts/android-build-provenance');
@@ -13,7 +14,7 @@ function writeJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value));
 }
 
-describe('pinned serial probability reset patch', () => {
+describe('pinned serial sampling and template clock corrections', () => {
   let root;
   let sourcePath;
   beforeEach(() => {
@@ -100,7 +101,7 @@ describe('pinned serial probability reset patch', () => {
     expect(params.indexOf('token >= llama_vocab_n_tokens(vocab)')).toBeLessThan(params.indexOf('const llama_token tok = static_cast<llama_token>(token)'));
   });
 
-  it('validates both sources before mutation and resumes an earlier probability-only installation', () => {
+  it('validates every source before mutation and resumes an earlier probability-only installation', () => {
     const paramsPath = path.join(root, 'node_modules/llama.rn', PARAMS_SOURCE);
     const paramsOriginal = fs.readFileSync(paramsPath, 'utf8');
     fs.appendFileSync(paramsPath, '\n// unexpected drift\n');
@@ -111,6 +112,49 @@ describe('pinned serial probability reset patch', () => {
     fs.writeFileSync(sourcePath, applyReplacements(fs.readFileSync(sourcePath, 'utf8'), probabilityPatch.replacements));
     expect(patchLlamaBridge(root).status).toBe('applied');
     expect(patchLlamaBridge(root, { check: true }).sources[PARAMS_SOURCE]).toBe(PARAMS_AFTER_SHA256);
+  });
+
+  it('passes the request clock to the actual Jinja context with exactly one core assignment', () => {
+    const clockPath = path.join(root, 'node_modules/llama.rn', CLOCK_SOURCE);
+    const original = fs.readFileSync(clockPath, 'utf8');
+    expect(hashSource(original)).toBe(CLOCK_BEFORE_SHA256);
+    patchLlamaBridge(root);
+    const patched = fs.readFileSync(clockPath, 'utf8');
+    expect(hashSource(patched)).toBe(CLOCK_AFTER_SHA256);
+    expect(patched.replace(CLOCK_AFTER, CLOCK_BEFORE)).toBe(original);
+    expect(patched.split(CLOCK_AFTER)).toHaveLength(2);
+    expect(patched.indexOf(CLOCK_AFTER)).toBeLessThan(patched.indexOf('jinja::global_from_json(ctx, inp, inputs.mark_input)'));
+    const read = (file) => fs.readFileSync(path.join(root, 'node_modules/llama.rn', file), 'utf8');
+    expect(read('cpp/common/jinja/runtime.h')).toContain('current_time = parent.current_time');
+    expect(read('cpp/common/jinja/value.cpp')).toContain('std::localtime(&args.ctx.current_time)');
+    expect(read('cpp/rn-llama.cpp')).toContain('inputs.now = std::chrono::system_clock::from_time_t(timestamp)');
+    expect(patched).toContain('params.now                   = inputs.now');
+  });
+
+  it('preflights the last core source before writing either earlier bridge source', () => {
+    const clockPath = path.join(root, 'node_modules/llama.rn', CLOCK_SOURCE);
+    fs.appendFileSync(clockPath, '\n// clock source drift\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
+    for (const patch of SOURCE_PATCHES.slice(0, 2)) {
+      expect(hashSource(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
+    }
+  });
+
+  it('adds the core fix to an already-corrected bridge installation without changing bridge bytes', () => {
+    const bridgeBytes = SOURCE_PATCHES.slice(0, 2).map((patch) => {
+      const file = path.join(root, 'node_modules/llama.rn', patch.source);
+      const text = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
+      fs.writeFileSync(file, text);
+      return text;
+    });
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    SOURCE_PATCHES.slice(0, 2).forEach((patch, index) => {
+      expect(fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8')).toBe(bridgeBytes[index]);
+    });
+    expect(patchLlamaBridge(root, { check: true }).sources[CLOCK_SOURCE]).toBe(CLOCK_AFTER_SHA256);
+    const cmake = fs.readFileSync(path.join(root, 'node_modules/llama.rn/android/src/main/rnllama/CMakeLists.txt'), 'utf8');
+    expect(cmake).toContain('file(GLOB COMMON_FILES CONFIGURE_DEPENDS ${RNLLAMA_LIB_DIR}/common/*.cpp)');
+    expect(cmake).toContain('${COMMON_FILES}');
   });
 
   it('targets the JSI source compiled with prebuilt cores on Android and iOS', () => {

@@ -84,6 +84,7 @@
           "enableOpenCLAndHexagon": true
         }
       ],
+      "./plugins/withLlamaSourceBuild",
       "./plugins/withAndroidGradleJvmMemory",
       "./plugins/withAndroidGradlePluginManagement",
       "./plugins/withAndroidReleaseConfig",

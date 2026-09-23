@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -210,6 +211,7 @@ function run(argv = process.argv.slice(2), root = projectRoot) {
   const requireAndroid = argv.includes('--require-android');
   assertSourceConfig(root);
   assertLlamaNativeArtifacts(root);
+  patchLlamaBridge(root, { check: true });
 
   if (requireIos || fs.existsSync(path.join(root, 'ios'))) {
     assertIosGeneratedConfig(root);

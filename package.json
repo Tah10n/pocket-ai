@@ -38,6 +38,7 @@
     "open-source"
   ],
   "scripts": {
+    "postinstall": "node ./patches/llama-rn-0.13.0-rc.3.js",
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "node ./scripts/run-android-dev.js",

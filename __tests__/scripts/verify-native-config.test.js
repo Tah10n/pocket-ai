@@ -3,6 +3,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { run } = require('../../scripts/verify-native-config');
+const { copyLlamaPatchSources } = require('../fixtures/llama-native-patch');
 
 const llamaVersion = '0.13.0-rc.3';
 const llamaDependencies = { 'llama.rn': llamaVersion };
@@ -21,6 +22,7 @@ function createLlamaArtifacts(root) {
   });
   const llamaRoot = path.join(root, 'node_modules', 'llama.rn');
   writeJson(path.join(llamaRoot, 'package.json'), { version: llamaVersion });
+  copyLlamaPatchSources(root);
   const artifacts = [
     { name: 'android-jni-libs', relativePath: 'android/src/main/jniLibs', sha256: 'a'.repeat(64) },
     { name: 'ios-xcframework', relativePath: 'ios/rnllama.xcframework', sha256: 'b'.repeat(64) },
@@ -112,6 +114,16 @@ function createProject() {
 }
 
 describe('native configuration contract', () => {
+  it('rejects an unpatched installed wrapper even when vendor artifact receipts match', () => {
+    const root = createProject();
+    try {
+      copyLlamaPatchSources(root, { pristine: true });
+      expect(() => run([], root)).toThrow(/bridge patch is missing/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('accepts the generated iOS and Android release contract', () => {
     const root = createProject();
     try {

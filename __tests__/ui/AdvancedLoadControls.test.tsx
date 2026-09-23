@@ -1,5 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
+import { Button } from 'react-native';
 import { AdvancedLoadControls } from '../../src/components/ui/AdvancedLoadControls';
 import type { ModelLoadParameters } from '../../src/services/SettingsStore';
 
@@ -20,6 +21,45 @@ function edit(view: ReturnType<typeof setup>, field: string, text: string) {
   fireEvent(view.getByTestId(`load-${field}`), 'endEditing', { nativeEvent: { text } });
 }
 describe('AdvancedLoadControls', () => {
+  it('honors an external load reset while editing without republishing stale native text', () => {
+    const view = setup({ value: { ...base, ropeFreqScale: 0 } });
+    fireEvent.press(view.getByTestId('load-section-memory'));
+    fireEvent.changeText(view.getByTestId('load-ropeFreqScale'), '1.');
+    view.rerender(<AdvancedLoadControls value={{ ...base, ropeFreqScale: 1 }} onChange={view.onChange} />);
+    expect(view.getByTestId('load-ropeFreqScale').props.value).toBe('1.');
+    view.onChange.mockClear();
+    view.rerender(<AdvancedLoadControls value={{ ...base, ropeFreqScale: 0 }} onChange={view.onChange} />);
+    expect(view.getByTestId('load-ropeFreqScale').props.value).toBe('0');
+    fireEvent(view.getByTestId('load-ropeFreqScale'), 'endEditing', { nativeEvent: { text: '1.' } });
+    expect(view.onChange).not.toHaveBeenCalled();
+    fireEvent.changeText(view.getByTestId('load-ropeFreqScale'), '0.5');
+    expect(view.onChange).toHaveBeenLastCalledWith({ ropeFreqScale: 0.5 });
+  });
+
+  it('applies the latest valid numeric draft without waiting for native endEditing', () => {
+    const onApply = jest.fn();
+    function Profile() {
+      const [draft, setDraft] = React.useState<ModelLoadParameters>({ ...base, ropeFreqScale: 1 });
+      return <>
+        <AdvancedLoadControls value={draft} onChange={partial => setDraft(previous => ({ ...previous, ...partial }))} />
+        <Button testID="apply-profile" title="Apply" onPress={() => onApply(draft)} />
+      </>;
+    }
+    const view = render(<Profile />);
+    fireEvent.press(view.getByTestId('load-advanced-toggle'));
+    fireEvent.press(view.getByTestId('load-section-memory'));
+    fireEvent.changeText(view.getByTestId('load-ropeFreqScale'), '0.5');
+    fireEvent.press(view.getByTestId('apply-profile'));
+    expect(onApply).toHaveBeenLastCalledWith({ ...base, ropeFreqScale: 0.5 });
+    for (const invalid of ['-', '1e', '-1', '1000001']) {
+      fireEvent.changeText(view.getByTestId('load-ropeFreqScale'), invalid);
+      fireEvent.press(view.getByTestId('apply-profile'));
+      expect(onApply).toHaveBeenLastCalledWith({ ...base, ropeFreqScale: 0.5 });
+    }
+    fireEvent(view.getByTestId('load-ropeFreqScale'), 'endEditing', { nativeEvent: { text: '-1' } });
+    expect(view.getByRole('alert')).toBeTruthy();
+  });
+
   it('edits independent K/V while default clears only that side', () => {
     const view = setup({ value: { ...base, cacheTypeK: 'q8_0', cacheTypeV: 'f32' } });
     fireEvent.press(view.getByTestId('load-section-cache'));

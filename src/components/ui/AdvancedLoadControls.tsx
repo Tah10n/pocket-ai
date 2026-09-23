@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ModelLoadParameters } from '../../services/SettingsStore';
 import type { EngineDiagnostics } from '../../types/models';
@@ -32,16 +32,51 @@ function NumericField({ field, value, disabled, hint, onCommit }: {
   const { t } = useTranslation();
   const [text, setText] = useState(value === undefined ? '' : String(value));
   const [invalid, setInvalid] = useState(false);
-  useEffect(() => { setText(value === undefined ? '' : String(value)); setInvalid(false); }, [value]);
+  const committed = useRef(text);
+  const pendingValue = useRef<string | undefined>(undefined);
+  const receivedValue = useRef(value);
+  const ignoreEndEditing = useRef(false);
+  useEffect(() => {
+    if (value === receivedValue.current) return;
+    receivedValue.current = value;
+    const next = value === undefined ? '' : String(value);
+    if (next === pendingValue.current) {
+      pendingValue.current = undefined;
+      return;
+    }
+    pendingValue.current = undefined;
+    setText(next);
+    committed.current = next;
+    ignoreEndEditing.current = true;
+    setInvalid(false);
+  }, [value]);
+  const commit = (next: string, showInvalid: boolean) => {
+    if (disabled) return;
+    try {
+      if (next !== committed.current) {
+        pendingValue.current = next.trim() ? String(Number(next)) : '';
+        onCommit(next);
+        committed.current = next;
+      }
+      setInvalid(false);
+    } catch {
+      pendingValue.current = undefined;
+      setInvalid(showInvalid);
+    }
+  };
   return <Box className="gap-2">
     <Text className="text-sm font-semibold">{t(`advancedLoad.fields.${field}`)}</Text>
     <Text colorRole="secondary" className="text-xs">{hint}</Text>
     <ScreenInlineInput testID={`load-${field}`} value={text} editable={!disabled} maxLength={24}
       accessibilityLabel={t(`advancedLoad.fields.${field}`)} accessibilityHint={hint} accessibilityState={{ disabled }}
       autoCapitalize="none" autoCorrect={false} placeholder={t('advancedLoad.default')}
-      onChangeText={next => { setText(next); setInvalid(false); }} onEndEditing={event => {
-        if (disabled) return;
-        try { onCommit(event.nativeEvent?.text ?? text); setInvalid(false); } catch { setInvalid(true); }
+      onChangeText={next => {
+        ignoreEndEditing.current = false;
+        setText(next);
+        commit(next, false);
+      }} onEndEditing={event => {
+        if (ignoreEndEditing.current) return;
+        commit(event.nativeEvent?.text ?? text, true);
       }} />
     {invalid ? <Text accessibilityRole="alert" colorRole="danger" className="text-xs">{t('advancedLoad.invalid')}</Text> : null}
   </Box>;

@@ -1,5 +1,6 @@
 import React from 'react';
 import { fireEvent, render } from '@testing-library/react-native';
+import { View } from 'react-native';
 import { AdvancedGenerationControls } from '../../src/components/ui/AdvancedGenerationControls';
 import type { GenerationParameters } from '../../src/services/SettingsStore';
 
@@ -25,6 +26,90 @@ function edit(view: ReturnType<typeof setup>, field: string, text: string) {
 }
 
 describe('AdvancedGenerationControls', () => {
+  it('preserves fractional typing acknowledgements but honors external reset and chat replacement', () => {
+    const onChange = jest.fn();
+    const controls = (value: number, owner = 'chat-a') => <View><AdvancedGenerationControls key={owner}
+      params={{ ...base, frequencyPenalty: value }} supportsReasoning onChange={onChange} /></View>;
+    const view = render(controls(0));
+    fireEvent.press(view.getByTestId('generation-advanced-toggle'));
+    fireEvent.press(view.getByTestId('generation-section-sampling'));
+    fireEvent.changeText(view.getByTestId('generation-frequencyPenalty'), '1.');
+    view.rerender(controls(1));
+    expect(view.getByTestId('generation-frequencyPenalty').props.value).toBe('1.');
+    onChange.mockClear();
+    view.rerender(controls(0));
+    expect(view.getByTestId('generation-frequencyPenalty').props.value).toBe('0');
+    fireEvent(view.getByTestId('generation-frequencyPenalty'), 'endEditing', { nativeEvent: { text: '1.' } });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.changeText(view.getByTestId('generation-frequencyPenalty'), '2.');
+    onChange.mockClear();
+    view.rerender(controls(3, 'chat-b'));
+    fireEvent.press(view.getByTestId('generation-advanced-toggle'));
+    fireEvent.press(view.getByTestId('generation-section-sampling'));
+    expect(view.getByTestId('generation-frequencyPenalty').props.value).toBe('3');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('keeps a valid GBNF edit when the sheet closes before native endEditing', () => {
+    const onChange = jest.fn();
+    function Sheet({ visible }: { visible: boolean }) {
+      const [params, setParams] = React.useState<GenerationParameters>({
+        ...base, output: { mode: 'gbnf', grammar: 'root ::= "yes" | "no"' },
+      });
+      return visible ? <AdvancedGenerationControls params={params} supportsReasoning onChange={partial => {
+        onChange(partial);
+        setParams(previous => ({ ...previous, ...partial }));
+      }} /> : null;
+    }
+    const view = render(<Sheet visible />);
+    fireEvent.press(view.getByTestId('generation-advanced-toggle'));
+    fireEvent.press(view.getByTestId('generation-section-output'));
+    fireEvent.changeText(view.getByTestId('generation-grammar'), 'root ::= "yes"');
+    // Android modal dismissal can remove the input without delivering endEditing.
+    view.rerender(<Sheet visible={false} />);
+    view.rerender(<Sheet visible />);
+    fireEvent.press(view.getByTestId('generation-advanced-toggle'));
+    fireEvent.press(view.getByTestId('generation-section-output'));
+    expect(view.getByTestId('generation-grammar').props.value).toBe('root ::= "yes"');
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith({ output: { mode: 'gbnf', grammar: 'root ::= "yes"' } });
+  });
+
+  it.each([
+    { field: 'schema', group: 'output', initial: { output: { mode: 'json_schema', schema: '{}' } },
+      valid: '{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}',
+      invalid: '{"$ref":"https://example.com/schema"}' },
+    { field: 'kwargs', group: 'template', initial: { template: { kwargs: {} } },
+      valid: '{"enable_thinking":false}', invalid: '{"nested":{"value":1}}' },
+  ] as const)('retains the last valid $field draft across close and rejects invalid edits', ({ field, group, initial, valid, invalid }) => {
+    const onChange = jest.fn();
+    function Sheet({ visible }: { visible: boolean }) {
+      const [params, setParams] = React.useState<GenerationParameters>({ ...base, ...initial });
+      return visible ? <AdvancedGenerationControls params={params} supportsReasoning onChange={partial => {
+        onChange(partial);
+        setParams(previous => ({ ...previous, ...partial }));
+      }} /> : null;
+    }
+    const view = render(<Sheet visible />);
+    const open = () => {
+      fireEvent.press(view.getByTestId('generation-advanced-toggle'));
+      fireEvent.press(view.getByTestId(`generation-section-${group}`));
+    };
+    open();
+    fireEvent.changeText(view.getByTestId(`generation-${field}`), valid);
+    fireEvent(view.getByTestId(`generation-${field}`), 'endEditing', { nativeEvent: { text: valid } });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    fireEvent.changeText(view.getByTestId(`generation-${field}`), invalid);
+    fireEvent(view.getByTestId(`generation-${field}`), 'endEditing', { nativeEvent: { text: invalid } });
+    expect(view.getByRole('alert')).toBeTruthy();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    view.rerender(<Sheet visible={false} />);
+    view.rerender(<Sheet visible />);
+    open();
+    expect(view.getByTestId(`generation-${field}`).props.value).toBe(valid);
+    expect(view.queryByRole('alert')).toBeNull();
+  });
+
   it('starts compact and shows one group at a time', () => {
     const view = render(<AdvancedGenerationControls params={base} supportsReasoning onChange={jest.fn()} />);
     expect(view.queryByTestId('generation-section-sampling')).toBeNull();
@@ -75,14 +160,51 @@ describe('AdvancedGenerationControls', () => {
     expect(view.getByTestId('generation-frequencyPenalty').props.editable).toBe(false);
     expect(view.getByTestId('generation-thinkingBudgetTokens').props.value).toBe('0');
   });
-  it('cannot enable unsafe rc3 options and can clear imported unsupported values', () => {
-    const view = setup({ ignoreEos: true, logitBias: [[1, 2]] });
+  it('defaults ignore EOS off and allows explicit text-mode changes', () => {
+    const view = setup();
     fireEvent.press(view.getByTestId('generation-section-sampling'));
+    expect(view.getByTestId('generation-ignoreEos-off').props.accessibilityState.selected).toBe(true);
+    fireEvent.press(view.getByTestId('generation-ignoreEos-on'));
+    expect(view.onChange).toHaveBeenLastCalledWith({ ignoreEos: true });
+    fireEvent.press(view.getByTestId('generation-ignoreEos-off'));
+    expect(view.onChange).toHaveBeenLastCalledWith({ ignoreEos: false });
+  });
+  it.each([
+    { mode: 'json_object' }, { mode: 'json_schema', schema: '{}' },
+    { mode: 'gbnf', grammar: 'root ::= "yes"' },
+  ] as const)('prevents enabling ignore EOS for $mode but permits clearing imported true', output => {
+    const view = setup({ output, ignoreEos: true });
+    fireEvent.press(view.getByTestId('generation-section-sampling'));
+    expect(view.getByTestId('generation-ignoreEos-on').props.accessibilityState).toMatchObject({ selected: true, disabled: true });
     fireEvent.press(view.getByTestId('generation-ignoreEos-on'));
     expect(view.onChange).not.toHaveBeenCalled();
+    fireEvent.press(view.getByTestId('generation-ignoreEos-off'));
+    expect(view.onChange).toHaveBeenLastCalledWith({ ignoreEos: false });
+  });
+  it('validates numeric logit-bias JSON and preserves zero, canonical duplicates and explicit []', () => {
+    const view = setup();
+    fireEvent.press(view.getByTestId('generation-section-sampling'));
+    edit(view, 'logitBias', '[[9, 1], [0, 0], [9, -100], [2147483647, 100]]');
+    expect(view.onChange).toHaveBeenLastCalledWith({ logitBias: [[0, 0], [9, -100], [2147483647, 100]] });
+    view.onChange.mockClear();
+    for (const invalid of ['[["1",2]]', '[[1,false]]', '[[1.5,2]]', '[[-1,0]]', '[[2147483648,0]]', '[[1,101]]', '[[1,1e999]]', '{}', '', JSON.stringify(Array.from({ length: 129 }, (_, id) => [id, 0]))]) {
+      edit(view, 'logitBias', invalid);
+    }
+    expect(view.onChange).not.toHaveBeenCalled();
+    expect(view.getByRole('alert')).toBeTruthy();
+    edit(view, 'logitBias', '[]');
+    expect(view.onChange).toHaveBeenLastCalledWith({ logitBias: [] });
+    expect(view.queryByRole('alert')).toBeNull();
+  });
+  it('disables both controls while the caller disallows changes', () => {
+    const onChange = jest.fn();
+    const view = render(<AdvancedGenerationControls params={base} supportsReasoning disabled onChange={onChange} />);
+    fireEvent.press(view.getByTestId('generation-advanced-toggle'));
+    fireEvent.press(view.getByTestId('generation-section-sampling'));
+    fireEvent.press(view.getByTestId('generation-ignoreEos-on'));
+    fireEvent.changeText(view.getByTestId('generation-logitBias'), '[[0,1]]');
     expect(view.getByTestId('generation-logitBias').props.editable).toBe(false);
-    fireEvent.press(view.getByTestId('generation-clear-unsupported'));
-    expect(view.onChange).toHaveBeenCalledWith({ ignoreEos: false, logitBias: [] });
+    expect(onChange).not.toHaveBeenCalled();
   });
   it('preserves false, zero, empty kwargs and parser whitespace without native passthrough', () => {
     const view = setup({ template: { chatTemplate: 'local template' } });

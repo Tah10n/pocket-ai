@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { GenerationParameters } from '../../services/SettingsStore';
 import {
   ADVANCED_GENERATION_RANGES,
   sanitizeAdvancedGenerationParameters,
   sanitizeChatTemplate,
+  sanitizeLogitBias,
   type ChatTemplateSettings,
 } from '../../utils/generationControls';
 import { prepareStructuredOutput, type StructuredOutputOptions } from '../../utils/structuredOutput';
@@ -31,7 +32,7 @@ const numericDefaults: Record<NumericKey, number> = {
   topNSigma: -1, nProbs: 0, thinkingBudgetTokens: 0,
 };
 
-/** Drafts stay local until a complete value passes its typed field contract. */
+/** Valid edits are published before a sheet close can unmount the native input. */
 function DraftField({ id, value, hint, disabled = false, multiline = false, maxLength = 32768,
   placeholder, onCommit }: {
   id: string; value: string; hint: string; disabled?: boolean; multiline?: boolean;
@@ -40,7 +41,41 @@ function DraftField({ id, value, hint, disabled = false, multiline = false, maxL
   const { t } = useTranslation();
   const [draft, setDraft] = useState(value);
   const [invalid, setInvalid] = useState(false);
-  useEffect(() => { setDraft(value); setInvalid(false); }, [value]);
+  const committed = useRef(value);
+  const pendingValue = useRef<string | undefined>(undefined);
+  const receivedValue = useRef(value);
+  const ignoreEndEditing = useRef(false);
+  useEffect(() => {
+    if (value === receivedValue.current) return;
+    receivedValue.current = value;
+    if (value === pendingValue.current) {
+      pendingValue.current = undefined;
+      return;
+    }
+    pendingValue.current = undefined;
+    setDraft(value);
+    committed.current = value;
+    ignoreEndEditing.current = true;
+    setInvalid(false);
+  }, [value]);
+  const commit = (text: string, showInvalid: boolean) => {
+    if (disabled) return;
+    try {
+      if (text !== committed.current) {
+        pendingValue.current = Object.prototype.hasOwnProperty.call(ADVANCED_GENERATION_RANGES, id)
+          ? (text.trim() ? String(Number(text)) : '')
+          : id === 'logitBias' ? JSON.stringify(sanitizeLogitBias(JSON.parse(text)))
+          : ['kwargs', 'stop', 'drySequenceBreakers'].includes(id)
+            ? (text.trim() ? JSON.stringify(JSON.parse(text)) : '') : text;
+        onCommit(text);
+        committed.current = text;
+      }
+      setInvalid(false);
+    } catch {
+      pendingValue.current = undefined;
+      setInvalid(showInvalid);
+    }
+  };
   const label = t(`advancedGeneration.fields.${id}`);
   return <Box className="gap-2">
     <Text className="text-sm font-semibold">{label}</Text>
@@ -49,11 +84,15 @@ function DraftField({ id, value, hint, disabled = false, multiline = false, maxL
       accessibilityHint={hint} accessibilityState={{ disabled }} editable={!disabled}
       value={draft} placeholder={placeholder} multiline={multiline} maxLength={maxLength}
       autoCapitalize="none" autoCorrect={false}
-      onChangeText={text => { setDraft(text); setInvalid(false); }}
+      onChangeText={text => {
+        ignoreEndEditing.current = false;
+        setDraft(text);
+        commit(text, false);
+      }}
       onEndEditing={event => {
-        if (disabled) return;
+        if (ignoreEndEditing.current) return;
         const text = event.nativeEvent?.text ?? draft;
-        try { onCommit(text); setInvalid(false); } catch { setInvalid(true); }
+        commit(text, true);
       }} />
     {invalid ? <Text accessibilityRole="alert" colorRole="danger" className="text-xs">
       {t('advancedGeneration.invalid')}
@@ -148,13 +187,29 @@ export function AdvancedGenerationControls({ params, supportsReasoning, disabled
           <DraftField id="thinkingBudgetMessage" value={params.thinkingBudgetMessage ?? ''} multiline maxLength={1024}
             disabled={disabled || reasoningInactive} hint={t('advancedGeneration.thinkingMessageHint')}
             onCommit={value => onChange({ thinkingBudgetMessage: value })} />
-          <Choice id="ignoreEos" value="off" options={['off', 'on']} disabled onChange={() => undefined} />
-          <DraftField id="logitBias" value={JSON.stringify(params.logitBias ?? [])} disabled hint={t('advancedGeneration.blockedRuntime')} onCommit={() => undefined} />
-          <Text colorRole="secondary" className="text-xs">{t('advancedGeneration.blockedRuntime')}</Text>
-          {params.ignoreEos === true || (params.logitBias?.length ?? 0) > 0 ? <Button action="secondary" disabled={disabled}
-            testID="generation-clear-unsupported" onPress={() => onChange({ ignoreEos: false, logitBias: [] })}>
-            <ButtonText>{t('advancedGeneration.clearUnsupported')}</ButtonText>
-          </Button> : null}
+          <Box className="gap-2">
+            <Text className="text-sm font-semibold">{t('advancedGeneration.fields.ignoreEos')}</Text>
+            <Text colorRole="secondary" className="text-xs">{t('advancedGeneration.ignoreEosHint')}</Text>
+            <Box className="flex-row gap-2">
+              {(['off', 'on'] as const).map(key => {
+                const blocked = disabled || (key === 'on' && output.mode !== 'text');
+                const selected = (params.ignoreEos === true) === (key === 'on');
+                return <Button key={key} size="sm" action={selected ? 'primary' : 'secondary'} disabled={blocked}
+                  testID={`generation-ignoreEos-${key}`} accessibilityRole="radio"
+                  accessibilityLabel={`${t('advancedGeneration.fields.ignoreEos')}: ${t(`advancedGeneration.choices.${key}`)}`}
+                  accessibilityHint={t('advancedGeneration.ignoreEosHint')} accessibilityState={{ selected, disabled: blocked }}
+                  onPress={() => { if (!blocked) onChange({ ignoreEos: key === 'on' }); }}>
+                  <ButtonText>{t(`advancedGeneration.choices.${key}`)}</ButtonText>
+                </Button>;
+              })}
+            </Box>
+          </Box>
+          <DraftField id="logitBias" value={JSON.stringify(params.logitBias ?? [])} multiline maxLength={8192}
+            disabled={disabled} hint={t('advancedGeneration.logitBiasHint')} placeholder="[]" onCommit={text => {
+              const value = sanitizeLogitBias(JSON.parse(text));
+              if (value === undefined) throw new Error('invalid');
+              onChange({ logitBias: value });
+            }} />
         </Box> : null}
         {section === group && group === 'template' ? <Box className="gap-4">
           <Text colorRole="secondary" className="text-xs">{t('advancedGeneration.templateHint')}</Text>

@@ -11,6 +11,7 @@ import { registry } from '../../src/services/LocalStorageRegistry';
 import { writeAutotuneResult } from '../../src/services/InferenceAutotuneStore';
 import * as inferenceLastGoodStore from '../../src/services/InferenceLastGoodProfileStore';
 import * as loraProfileResolver from '../../src/services/LoraProfileResolver';
+import * as safeLoadPolicy from '../../src/services/LLMEngineService.safeLoadPolicy';
 import { createStorage } from '../../src/services/storage';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
@@ -9727,8 +9728,60 @@ describe('LLMEngineService', () => {
         }
       });
     expect(lowMemoryCalibrationLookup).toBeDefined();
+    expect(JSON.parse(JSON.parse(lowMemoryCalibrationLookup!).allocationIdentity).noExtraBufts).toBe(true);
 
     getCalibrationRecordSpy.mockRestore();
+  });
+
+  it('does not reuse a forced no-extra-buffer calibration for an otherwise identical ordinary allocation', async () => {
+    const originalPolicy = safeLoadPolicy.resolveSafeLoadPolicyOrThrow;
+    let useLowMemoryBuffers = true;
+    const safeCandidateKeys: string[] = [];
+    const policySpy = jest.spyOn(safeLoadPolicy, 'resolveSafeLoadPolicyOrThrow').mockImplementation(input => {
+      if (useLowMemoryBuffers) {
+        const beforeSafeProfile = lookup.mock.calls.length;
+        input.computeSafeProfile();
+        safeCandidateKeys.push(...lookup.mock.calls.slice(beforeSafeProfile).map(([key]) => key));
+      }
+      return { ...originalPolicy(input), shouldUseLowMemoryContextParams: useLowMemoryBuffers };
+    });
+    const lookup = jest.spyOn(registry, 'getCalibrationRecord');
+    const service = llmEngineService as unknown as { activeCalibrationSession: { calibrationKey: string } | null };
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1_000_000_000 });
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(), platform: 'android', totalBytes: 8_000_000_000,
+      availableBytes: 4_000_000_000, freeBytes: 4_000_000_000, usedBytes: 4_000_000_000,
+      appUsedBytes: 250_000_000, lowMemory: false, pressureLevel: 'normal', thresholdBytes: 0,
+    });
+    try {
+      const requested = { contextSize: 2048, backendPolicy: 'cpu' as const, gpuLayers: 0, noExtraBufts: false };
+      await llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true, loadParamsOverride: requested });
+      const firstInit = (llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0] as { n_batch: number; n_ubatch: number; no_extra_bufts: boolean };
+      expect(firstInit.no_extra_bufts).toBe(true);
+      expect(safeCandidateKeys.length).toBeGreaterThan(0);
+      expect(safeCandidateKeys.every(key => JSON.parse(JSON.parse(key).allocationIdentity).noExtraBufts === true)).toBe(true);
+      const forcedKey = service.activeCalibrationSession?.calibrationKey;
+      expect(forcedKey).toBeDefined();
+      expect(JSON.parse(JSON.parse(forcedKey!).allocationIdentity).noExtraBufts).toBe(true);
+      // Unload legitimately updates the old record; observe only the next load.
+      await llmEngineService.unload();
+      useLowMemoryBuffers = false;
+      lookup.mockClear();
+      await llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true,
+        loadParamsOverride: { ...requested, nBatch: firstInit.n_batch, nUbatch: firstInit.n_ubatch } });
+      expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+        no_extra_bufts: false, n_batch: firstInit.n_batch, n_ubatch: firstInit.n_ubatch,
+      }));
+      const ordinaryKey = service.activeCalibrationSession?.calibrationKey;
+      expect(ordinaryKey).toBeDefined();
+      expect(ordinaryKey).not.toBe(forcedKey);
+      expect(JSON.parse(JSON.parse(ordinaryKey!).allocationIdentity).noExtraBufts).toBe(false);
+      expect(lookup.mock.calls.some(([key]) => key === forcedKey)).toBe(false);
+    } finally {
+      lookup.mockRestore();
+      policySpy.mockRestore();
+    }
   });
 
   it('separates load-time memory calibration keys for downloaded multimodal projectors', async () => {

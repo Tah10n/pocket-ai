@@ -7018,6 +7018,15 @@ class LLMEngineService {
         specDraftCacheTypeV: speculativeDraftCacheTypeV,
       });
 
+      const allocationIdentityForBuffers = (noExtraBufts: boolean) => getEffectiveAdvancedLoadProfileIdentity(
+        advancedLoadParams, {
+          ...advancedLoadParams, cacheTypeK, cacheTypeV,
+          specDraftCacheTypeK: speculativeDraftCacheTypeK,
+          specDraftCacheTypeV: speculativeDraftCacheTypeV,
+          noExtraBufts,
+        },
+      );
+
       const lastGoodProfile = preferLastWorkingProfile
         ? readLastGoodInferenceProfile({
             allocationIdentity,
@@ -7277,7 +7286,7 @@ class LLMEngineService {
           configuredContextCeilingTokens,
           modelContextCeilingTokens,
           computeSafeProfile: () => this.resolveMaxSafeLoadProfile({
-            allocationIdentity,
+            allocationIdentity: allocationIdentityForBuffers(true),
             loraSizeBytes,
             ggufMetadata,
             resolvedModelSizeBytes,
@@ -7397,7 +7406,8 @@ class LLMEngineService {
       }
       let calibrationKeyForLoad = verifiedFileSizeBytes !== null
         ? this.buildCalibrationKeyString({
-          allocationIdentity,
+          allocationIdentity: allocationIdentityForBuffers(advancedLoadParams.noExtraBufts === true
+            || (shouldUseLowMemoryContextParams && effectiveBatchParams !== null)),
           ggufMetadata,
           verifiedFileSizeBytes,
           contextTokens: finalContextSize,
@@ -7787,7 +7797,7 @@ class LLMEngineService {
         const normalizedLayers = Math.max(0, Math.round(layers));
         const calibrationKey = verifiedFileSizeBytes !== null
           ? this.buildCalibrationKeyString({
-              allocationIdentity,
+              allocationIdentity: allocationIdentityForBuffers(profileUsesNoExtraBufts(profile)),
               ggufMetadata,
               verifiedFileSizeBytes,
               contextTokens: finalContextSize,
@@ -7866,25 +7876,26 @@ class LLMEngineService {
       const applyCalibrationForGpuLayers = (
         nextGpuLayers: number,
         promptStateCachePolicy: PromptStateCachePolicy,
+        profile: InitInferenceProfile,
       ) => {
         const normalized = Math.max(0, Math.round(nextGpuLayers));
         resolvedGpuLayers = normalized;
         calibrationKeyForLoad = verifiedFileSizeBytes !== null
           ? this.buildCalibrationKeyString({
-              allocationIdentity,
+              allocationIdentity: allocationIdentityForBuffers(profileUsesNoExtraBufts(profile)),
               ggufMetadata,
               verifiedFileSizeBytes,
               contextTokens: finalContextSize,
               gpuLayers: normalized,
               cacheTypeK,
               cacheTypeV,
-              useMmap: requestedUseMmap,
+              useMmap: profile.useMmap,
               hasMmproj: hasLoadTimeMmproj,
               stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
               stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
               stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
-              nBatch: effectiveBatchParams?.nBatch,
-              nUbatch: effectiveBatchParams?.nUbatch,
+              nBatch: profile.nBatch,
+              nUbatch: profile.nUbatch,
             })
           : null;
         calibrationRecordForLoad = calibrationKeyForLoad
@@ -7904,14 +7915,10 @@ class LLMEngineService {
                 ...requestedEstimatorInput.runtimeParams,
                 contextTokens: finalContextSize,
                 gpuLayers: normalized,
-                useMmap: requestedUseMmap,
+                useMmap: profile.useMmap,
                 stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
-                ...(effectiveBatchParams
-                  ? {
-                      nBatch: effectiveBatchParams.nBatch,
-                      nUbatch: effectiveBatchParams.nUbatch,
-                    }
-                  : null),
+                nBatch: profile.nBatch,
+                nUbatch: profile.nUbatch,
               },
               calibrationRecord: calibrationRecordForLoad,
             },
@@ -8190,7 +8197,7 @@ class LLMEngineService {
               initAttemptGuard.recordProbableOom(identity);
               const calibrationKey = verifiedFileSizeBytes !== null
                 ? this.buildCalibrationKeyString({
-                    allocationIdentity,
+                    allocationIdentity: allocationIdentityForBuffers(profileUsesNoExtraBufts(profile)),
                     ggufMetadata,
                     verifiedFileSizeBytes,
                     contextTokens: finalContextSize,
@@ -8326,7 +8333,7 @@ class LLMEngineService {
           if (result.status === 'skipped') {
             return null;
           }
-          applyCalibrationForGpuLayers(0, result.promptStateCachePolicy);
+          applyCalibrationForGpuLayers(0, result.promptStateCachePolicy, profile);
           return {
             context: result.context,
             resolvedGpuLayers: 0,
@@ -8372,6 +8379,7 @@ class LLMEngineService {
             applyCalibrationForGpuLayers(
               normalizedLayers,
               result.promptStateCachePolicy,
+              profile,
             );
             return {
               context: result.context,
@@ -8423,6 +8431,7 @@ class LLMEngineService {
             applyCalibrationForGpuLayers(
               candidateLayers,
               result.promptStateCachePolicy,
+              profile,
             );
             return {
               context: result.context,
@@ -8808,9 +8817,9 @@ class LLMEngineService {
             : null;
 
           if (!actualGpu) {
-            applyCalibrationForGpuLayers(0, promptStateCachePolicy);
+            applyCalibrationForGpuLayers(0, promptStateCachePolicy, profile);
           } else if (candidateGpuLayers !== resolvedGpuLayers) {
-            applyCalibrationForGpuLayers(candidateGpuLayers, promptStateCachePolicy);
+            applyCalibrationForGpuLayers(candidateGpuLayers, promptStateCachePolicy, profile);
           }
 
           this.setContext(context);

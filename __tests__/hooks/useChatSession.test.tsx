@@ -84,6 +84,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getPromptContextIdentity: jest.fn(),
     getContextSize: jest.fn(),
     getLastCompletionTelemetry: jest.fn(),
+    getEffectiveLoadParameters: jest.fn(),
     beginPromptPreparation: jest.fn(() => jest.fn()),
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
@@ -100,6 +101,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
 
 jest.mock('../../src/services/SettingsStore', () => ({
   sanitizeGenerationParameters: jest.requireActual('../../src/services/SettingsStore').sanitizeGenerationParameters,
+  sanitizeModelLoadParameters: jest.requireActual('../../src/services/SettingsStore').sanitizeModelLoadParameters,
   clearLegacyChatHistory: jest.fn().mockReturnValue(0),
   getSettings: jest.fn(),
   getGenerationParametersForModel: jest.fn(),
@@ -492,6 +494,7 @@ describe('useChatSession', () => {
     );
     (llmEngineService.getContextSize as jest.Mock).mockReturnValue(2048);
     (llmEngineService.getLastCompletionTelemetry as jest.Mock).mockReturnValue(null);
+    (llmEngineService.getEffectiveLoadParameters as jest.Mock).mockReturnValue(null);
     (llmEngineService.beginPromptPreparation as jest.Mock).mockImplementation(() => jest.fn());
     (llmEngineService.chatCompletion as jest.Mock).mockImplementation(
       async ({ onToken }: { onToken?: (token: string) => void }) => {
@@ -8559,11 +8562,7 @@ describe('useChatSession', () => {
       );
       expect(useChatStore.getState().threads[prepared.threadId].paramsSnapshot.temperature).toBe(0.7);
       expect(useChatStore.getState().getThread(prepared.threadId)?.paramsSnapshot).toEqual(
-        expect.objectContaining({
-          temperature: 0.35,
-          maxTokens: 768,
-          reasoningEffort: 'medium',
-        }),
+        prepared.rawThread.paramsSnapshot,
       );
       expect(writtenKeys).not.toContain(getChatThreadStorageKey(prepared.threadId));
       expect(writtenKeys).not.toContain(CHAT_PERSISTENCE_PENDING_INDEX_COMMIT_KEY);
@@ -9190,6 +9189,80 @@ describe('useChatSession', () => {
     });
   });
 
+  it.each(['edited user', 'trailing model switch'] as const)(
+    'keeps chat constraints and LoRA when regenerating a %s branch after another chat changes defaults',
+    async (branchKind) => {
+      const getSession = renderHookHarness();
+      let firstThreadId: string;
+      let userMessageId: string;
+      if (branchKind === 'trailing model switch') {
+        const prepared = await prepareTrailingModelSwitchRegeneration(getSession);
+        firstThreadId = prepared.threadId;
+        userMessageId = prepared.targetUserMessageId;
+      } else {
+        await act(async () => { await getSession()?.appendUserMessage('Original branch prompt'); });
+        const initial = useChatStore.getState().getActiveThread()!;
+        firstThreadId = initial.id;
+        userMessageId = initial.messages.find(message => message.role === 'user')!.id;
+      }
+      const first = useChatStore.getState().getThread(firstThreadId)!;
+      const modelId = first.activeModelId ?? first.modelId;
+      const ownedParameters = {
+        ...first.paramsSnapshot,
+        output: { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}' },
+        template: { chatTemplate: 'chat A template', jinja: true, kwargs: { label: 'A' }, now: 123, prefillText: '{"value":' },
+        frequencyPenalty: 0.25,
+        stop: [' END A '],
+      };
+      const lora = [{ artifactId: 'adapter-a', artifactIdentity: 'adapter-a-sha', baseModelIdentity: modelId, scale: 0.5 }];
+      const otherParameters = {
+        ...first.paramsSnapshot, output: { mode: 'text' as const },
+        template: { chatTemplate: 'chat B template', jinja: true, kwargs: { label: 'B' }, now: 456 },
+        frequencyPenalty: 0.75,
+      };
+      let secondThreadId = '';
+      act(() => {
+        useChatStore.getState().updateThreadParamsSnapshot(firstThreadId, ownedParameters);
+        useChatStore.getState().updateThreadLoraSnapshot(firstThreadId, lora);
+        secondThreadId = useChatStore.getState().createThread({
+          modelId, presetId: first.presetId, presetSnapshot: first.presetSnapshot,
+          paramsSnapshot: otherParameters, loraSnapshot: [],
+        });
+        useChatStore.getState().setActiveThread(firstThreadId);
+      });
+      const otherBefore = useChatStore.getState().threads[secondThreadId];
+      (getGenerationParametersForModel as jest.Mock).mockReturnValue(otherParameters);
+      (llmEngineService.getEffectiveLoadParameters as jest.Mock).mockReturnValue({ loraAdapters: lora });
+      (llmEngineService.countPromptTokens as jest.Mock).mockClear();
+      (llmEngineService.chatCompletion as jest.Mock).mockClear();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(async ({ onToken }: LlmChatCompletionOptions) => {
+        onToken?.({ token: '', content: '{"value":"A"}', contentMode: 'cumulative' });
+        return { content: '{"value":"A"}', text: '{"value":"A"}', structuredOutput: { mode: 'json_schema', status: 'valid' } };
+      });
+      await act(async () => {
+        const result = branchKind === 'edited user'
+          ? await getSession()?.regenerateFromUserMessage(userMessageId, 'Edited branch prompt')
+          : await getSession()?.regenerateLastResponse();
+        expect(result).toBe(true);
+      });
+      const expectedGeneration = expect.objectContaining({
+        output: ownedParameters.output, template: ownedParameters.template,
+        frequencyPenalty: 0.25, stop: [' END A '],
+      });
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(expect.objectContaining({ generation: expectedGeneration }));
+      expect(llmEngineService.chatCompletion).toHaveBeenLastCalledWith(expect.objectContaining({ generation: expectedGeneration }));
+      const regenerated = useChatStore.getState().getThread(firstThreadId)!;
+      expect(regenerated.paramsSnapshot).toMatchObject(ownedParameters);
+      expect(regenerated.loraSnapshot).toEqual(lora);
+      expect(regenerated.messages.at(-1)).toMatchObject({
+        content: '{"value":"A"}', state: 'complete',
+        structuredOutput: { mode: 'json_schema', status: 'valid' },
+        generationSnapshot: ownedParameters, loadProfileSnapshot: { loraAdapters: lora },
+      });
+      expect(useChatStore.getState().threads[secondThreadId]).toBe(otherBefore);
+    },
+  );
+
   it('branch prompt uses edited user content and clears stale summary', async () => {
     const getSession = renderHookHarness();
     await act(async () => {
@@ -9413,7 +9486,7 @@ describe('useChatSession', () => {
 
     expect(regenerated).toBe(true);
     expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
-    expect(getGenerationParametersForModel).toHaveBeenCalled();
+    expect(getGenerationParametersForModel).not.toHaveBeenCalled();
     expect(useChatStore.getState().activeThreadId).toBe(originalThread.id);
     expect(useChatStore.getState().getThread(originalThread.id)?.status).toBe('idle');
     expectNoStreamingProgressArtifacts(originalThread.id);

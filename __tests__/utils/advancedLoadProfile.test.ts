@@ -1,7 +1,7 @@
 import type { ContextParams } from 'llama.rn';
 import {
   assertAdvancedLoadParameterCombinations, buildAdvancedNativeLoadParams,
-  getAdvancedLoadProfileIdentity, getLoraAdapterMemoryBytes, sanitizeAdvancedLoadParameters,
+  getAdvancedLoadProfileIdentity, getEffectiveAdvancedLoadProfileIdentity, getLoraAdapterMemoryBytes, sanitizeAdvancedLoadParameters,
   type LoraProfileAdapter,
 } from '../../src/utils/advancedLoadProfile';
 import { resolveKvCacheTypes } from '../../src/utils/kvCache';
@@ -13,6 +13,15 @@ const adapter: LoraProfileAdapter = {
 };
 
 describe('advanced load profile', () => {
+  it('separates forced buffer allocations while retaining the default legacy identity', () => {
+    expect(getEffectiveAdvancedLoadProfileIdentity({}, { noExtraBufts: false })).toBeUndefined();
+    expect(getEffectiveAdvancedLoadProfileIdentity({}, { noExtraBufts: true })).toBe('{"noExtraBufts":true}');
+    expect(getEffectiveAdvancedLoadProfileIdentity({ noExtraBufts: false }, { noExtraBufts: true }))
+      .toBe(getEffectiveAdvancedLoadProfileIdentity({ noExtraBufts: true }, { noExtraBufts: true }));
+    expect(getEffectiveAdvancedLoadProfileIdentity({ noExtraBufts: false }, { noExtraBufts: false }))
+      .not.toBe(getEffectiveAdvancedLoadProfileIdentity({ noExtraBufts: false }, { noExtraBufts: true }));
+  });
+
   it('keeps legacy settings absent and preserves meaningful zero, false and empty arrays', () => {
     expect(sanitizeAdvancedLoadParameters({ contextSize: 1024 })).toEqual({});
     const value = { ropeFreqBase: 0, ropeFreqScale: 0, noExtraBufts: false, swaFull: false,

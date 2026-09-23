@@ -67,7 +67,7 @@ import {
   getVisibleAssistantContent,
 } from '../utils/chatPresentation';
 import { applyAdvancedReasoningConfig, resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
-import { syncThreadParameters } from '../utils/chatThreadParameters';
+import { resolveThreadGenerationParameters, syncThreadParameters } from '../utils/chatThreadParameters';
 import { freezeGenerationParameters, generationFormattingIdentity, getPreparedTemplateNow, sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
 import { prepareStructuredOutput, StructuredOutputConfigurationError } from '../utils/structuredOutput';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
@@ -5086,7 +5086,7 @@ export const useChatSession = () => {
         throw new Error('The conversation changed while selecting regeneration context. Try again.');
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
-      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
+      const branchParamsSnapshot = resolveThreadGenerationParameters(activeThread);
 
       const assistantMessageId = replaceBranchFromUserMessage(
         activeThread.id,
@@ -5334,7 +5334,7 @@ export const useChatSession = () => {
         throw new Error('The conversation changed while selecting regeneration context. Try again.');
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
-      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
+      const branchParamsSnapshot = resolveThreadGenerationParameters(activeThread);
 
       const lastAssistantMessageIndex = (() => {
         for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {

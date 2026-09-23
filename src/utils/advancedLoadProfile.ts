@@ -120,6 +120,9 @@ export function getEffectiveAdvancedLoadProfileIdentity(requested: unknown, effe
   const applied = sanitizeAdvancedLoadParameters(effective);
   const projected: Record<string, unknown> = {};
   for (const key of Object.keys(selected) as (keyof AdvancedLoadParameters)[]) projected[key] = applied[key];
+  // A forced allocation change is evidence even when the legacy request omitted it.
+  // The ordinary legacy false/default path keeps its original absent identity.
+  if (selected.noExtraBufts === undefined && applied.noExtraBufts === true) projected.noExtraBufts = true;
   return getOptionalAdvancedLoadProfileIdentity(projected);
 }
 

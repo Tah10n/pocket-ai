@@ -111,6 +111,17 @@ export function sanitizeChatTemplate(value: unknown): ChatTemplateSettings | und
   return result;
 }
 
+/** Numeric public contract only; the native bridge checks the loaded vocabulary. */
+export function sanitizeLogitBias(value: unknown): [number, number][] | undefined {
+  if (!Array.isArray(value) || value.length > 128
+    || !value.every((pair): pair is [number, number] => Array.isArray(pair) && pair.length === 2
+      && Number.isInteger(pair[0]) && pair[0] >= 0 && pair[0] <= 2147483647
+      && typeof pair[1] === 'number' && Number.isFinite(pair[1]) && Math.abs(pair[1]) <= 100)) return undefined;
+  // The core adds duplicate biases. Canonicalize before persistence and mapping:
+  // the last entry wins, and order cannot create different equivalent identities.
+  return [...new Map(value).entries()].sort(([left], [right]) => left - right);
+}
+
 export function sanitizeAdvancedGenerationParameters(value: unknown): AdvancedGenerationParameters {
   const input = record(value);
   if (!input) return {};
@@ -128,12 +139,8 @@ export function sanitizeAdvancedGenerationParameters(value: unknown): AdvancedGe
     const strings = boundedStrings(input[key]);
     if (strings !== undefined) result[key] = strings;
   }
-  if (Array.isArray(input.logitBias) && input.logitBias.length <= 128
-    && input.logitBias.every((pair): pair is [number, number] => Array.isArray(pair) && pair.length === 2
-      && Number.isInteger(pair[0]) && pair[0] >= 0 && pair[0] <= 2147483647
-      && typeof pair[1] === 'number' && Number.isFinite(pair[1]) && Math.abs(pair[1]) <= 100)) {
-    result.logitBias = input.logitBias.map(([token, bias]) => [token, bias]);
-  }
+  const logitBias = sanitizeLogitBias(input.logitBias);
+  if (logitBias !== undefined) result.logitBias = logitBias;
   if (input.reasoningFormat === 'none' || input.reasoningFormat === 'auto' || input.reasoningFormat === 'deepseek') {
     result.reasoningFormat = input.reasoningFormat;
   }
@@ -162,9 +169,8 @@ export type SamplingRequest = Pick<CompletionParams,
 
 export function resolveAdvancedSampling(input: AdvancedGenerationParameters): SamplingRequest {
   const params = sanitizeAdvancedGenerationParameters(input);
-  // rc.3 JSIParams indexes a cleared std::vector here. Never enter that native path.
-  if (params.ignoreEos === true || (params.logitBias?.length ?? 0) > 0) {
-    throw new Error('This runtime cannot safely apply ignore_eos or nonempty logit_bias.');
+  if (params.ignoreEos && params.output && params.output.mode !== 'text') {
+    throw new Error('Ignoring EOS cannot be combined with structured output constraints.');
   }
   // The native sampler reuses previous values for omitted fields. Reset every field
   // on every request so another chat cannot inherit probabilities or samplers.
@@ -184,8 +190,8 @@ export function resolveAdvancedSampling(input: AdvancedGenerationParameters): Sa
     dry_penalty_last_n: params.dryPenaltyLastN ?? -1,
     dry_sequence_breakers: [...(params.drySequenceBreakers ?? ['\n', ':', '"', '*'])],
     top_n_sigma: params.topNSigma ?? -1,
-    ignore_eos: false,
-    logit_bias: [],
+    ignore_eos: params.ignoreEos ?? false,
+    logit_bias: params.logitBias ?? [],
     n_probs: params.nProbs ?? 0,
     thinking_budget_message: params.thinkingBudgetMessage ?? '',
   } satisfies SamplingRequest;

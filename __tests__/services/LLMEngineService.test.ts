@@ -574,14 +574,37 @@ describe('LLMEngineService', () => {
     expect(completion.mock.calls.at(-1)?.[0].grammar).toBeUndefined();
   });
 
-  it('rejects invalid schema and known unsafe native sampler paths before touching native', async () => {
+  it('rejects invalid schema and conflicting EOS suppression before touching native', async () => {
     await llmEngineService.load('test/model');
     const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
-    for (const generation of [{ output: { mode: 'json_schema' as const, schema: '{' } }, { ignoreEos: true }, { logitBias: [[1, 0] as [number, number]] }]) {
+    for (const generation of [{ output: { mode: 'json_schema' as const, schema: '{' } }, { ignoreEos: true, output: { mode: 'gbnf' as const, grammar: 'root ::= "yes"' } }]) {
       await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation })).rejects.toThrow();
     }
     expect(getFormattedChatMock()).not.toHaveBeenCalled();
     expect(completion).not.toHaveBeenCalled();
+  });
+
+  it('maps patched numeric biases and EOS suppression, then resets both for the next request', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], params: { n_predict: 1 },
+      generation: { ignoreEos: true, logitBias: [[5, 10], [0, 0], [5, -100]] } });
+    expect(completion.mock.calls[0][0]).toMatchObject({ n_predict: 1, ignore_eos: true, logit_bias: [[0, 0], [5, -100]] });
+    completion.mockRejectedValueOnce(new Error('logit_bias token is outside the loaded vocabulary'));
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }],
+      generation: { logitBias: [[2147483647, 1]] } })).rejects.toThrow('outside the loaded vocabulary');
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'C' }] })).resolves.toEqual({ text: 'Hello back' });
+    expect(completion.mock.calls.at(-1)?.[0]).toMatchObject({ ignore_eos: false, logit_bias: [] });
+  });
+
+  it('refuses EOS suppression when the formatter introduces a grammar and then permits ordinary text', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValueOnce({ type: 'jinja', prompt: 'formatted', grammar: 'root ::= "yes"' });
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation: { ignoreEos: true } }))
+      .rejects.toThrow('template output grammar');
+    expect(completion).not.toHaveBeenCalled();
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }] })).resolves.toEqual({ text: 'Hello back' });
   });
 
   it('evaluates prefill with n_predict=0 without inventing an assistant response', async () => {
@@ -593,6 +616,28 @@ describe('LLMEngineService', () => {
     expect(completion.mock.calls[0][0].n_predict).toBe(0);
     expect(llmEngineService.hasActiveCompletion()).toBe(false);
     expect(llmEngineService.getState().diagnostics?.generation).toMatchObject({ prefill: true, nProbs: 0 });
+  });
+
+  it.each([0, 10])('rejects unbounded or invalid native token budgets before formatting with nProbs=%s', async nProbs => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    for (const nPredict of [-2, -1, 0.5, NaN, Infinity, -Infinity, 16_385, Number.MAX_SAFE_INTEGER]) {
+      await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }],
+        params: { n_predict: nPredict }, generation: { nProbs } })).rejects.toMatchObject({ code: 'action_failed' });
+    }
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+  });
+
+  it('preserves bounded visible-plus-reasoning and default prediction budgets', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }],
+      params: { n_predict: 16_384, enable_thinking: true }, generation: { nProbs: 10, thinkingBudgetTokens: 8192 } });
+    expect(completion.mock.calls[0][0]).toMatchObject({ n_predict: 16_384, n_probs: 10, thinking_budget_tokens: 8192 });
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }] });
+    expect(completion.mock.calls[1][0].n_predict).toBe(512);
   });
 
   it('bounds probabilities once at finalization and exposes their count without correctness claims', async () => {

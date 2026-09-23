@@ -9,7 +9,7 @@ import {
   exactPromptTokenCache,
 } from '../services/ExactPromptTokenCache';
 import { performanceMonitor } from '../services/PerformanceMonitor';
-import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
+import { GenerationParameters, getGenerationParametersForModel, getSettings, sanitizeGenerationParameters } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
 import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
@@ -364,6 +364,12 @@ interface ActiveGenerationState {
 }
 
 export type AppendUserMessageOptions = {
+  newThreadParameters?: {
+    modelId: string;
+    presetId: string | null;
+    revision: number;
+    paramsSnapshot: GenerationParameters;
+  };
   attachmentDrafts?: readonly AttachmentDraft[];
   documentAttachmentDrafts?: readonly ChatDocumentAttachmentDraft[];
   mediaAttachmentDrafts?: readonly ChatMediaAttachmentDraft[];
@@ -4146,7 +4152,15 @@ export const useChatSession = () => {
       ? getThreadActiveModelId(existingThreadAtStart)
       : settings.activeModelId?.trim() ?? '';
     const selectedPreset = settings.activePresetId ? presetManager.getPreset(settings.activePresetId) : undefined;
-    const newThreadModelParams = selectedPreset?.generationParameters ?? getGenerationParametersForModel(targetModelId);
+    const draftParameters = !existingThreadAtStart ? options.newThreadParameters : undefined;
+    if (draftParameters && (draftParameters.modelId !== targetModelId
+      || draftParameters.presetId !== settings.activePresetId
+      || draftParameters.revision !== interactiveStateAtStart.newThreadRevision)) {
+      throw new AppError('action_failed', 'The new conversation settings changed before sending. Please retry.');
+    }
+    const newThreadModelParams = draftParameters
+      ? sanitizeGenerationParameters(draftParameters.paramsSnapshot)
+      : selectedPreset?.generationParameters ?? getGenerationParametersForModel(targetModelId);
 
     if (existingThreadAtStart) {
       ensureThreadCanGenerate(existingThreadAtStart, 'sending another message');

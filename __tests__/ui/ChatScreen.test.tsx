@@ -6,6 +6,7 @@ import { getThreadActiveModelId } from '../../src/types/chat';
 import type { ChatDocumentAttachmentDraft } from '../../src/types/attachments';
 import type { ModelLoadParameters } from '../../src/services/SettingsStore';
 import type { LoadModelOptions } from '../../src/services/LLMEngineService';
+import { presetManager } from '../../src/services/PresetManager';
 
 jest.mock('react-native-css-interop', () => {
   const mockReact = require('react');
@@ -1131,6 +1132,39 @@ describe('ChatScreen', () => {
       activeThreadId: 'thread-1',
       newThreadRevision: 0,
     });
+  });
+
+  it('shows preset generation seeds, sends explicit draft edits, and resets them for a new draft', async () => {
+    const presetParameters = { ...getGenerationParametersForModel('author/model-q4'), temperature: 0.2,
+      output: { mode: 'json_object' as const }, template: { jinja: true, prefillText: '{' }, stop: [' END '] };
+    const presetSpy = jest.spyOn(presetManager, 'getPreset').mockReturnValue({ id: 'preset-1', name: 'Custom',
+      systemPrompt: 'System', isBuiltIn: false, generationParameters: presetParameters });
+    try {
+      useChatStore.setState({ activeThreadId: null });
+      const { getByTestId } = render(React.createElement(ChatScreen));
+      await act(async () => { fireEvent.press(getByTestId('model-controls-button')); });
+      expect(lastModelParametersSheetProps.params).toMatchObject(presetParameters);
+      await act(async () => { lastModelParametersSheetProps.onChangeParams({
+        output: { mode: 'gbnf', grammar: 'root ::= "yes"' }, template: { jinja: false }, stop: [],
+      }); });
+      expect(lastModelParametersSheetProps.params).toMatchObject({ temperature: 0.2,
+        output: { mode: 'gbnf', grammar: 'root ::= "yes"' }, template: { jinja: false }, stop: [] });
+      await act(async () => { await lastChatInputBarProps.onSendMessage('Reply'); });
+      expect(mockAppendUserMessage).toHaveBeenLastCalledWith('Reply', expect.objectContaining({ newThreadParameters: {
+        modelId: 'author/model-q4', presetId: 'preset-1', revision: useChatStore.getState().newThreadRevision,
+        paramsSnapshot: lastModelParametersSheetProps.params,
+      } }));
+      expect(presetParameters.output.mode).toBe('json_object');
+      expect(presetParameters.stop).toEqual([' END ']);
+      await act(async () => { lastModelParametersSheetProps.onResetParamField('temperature'); });
+      expect(lastModelParametersSheetProps.params.temperature).toBe(getGenerationParametersForModel(null).temperature);
+      expect(lastModelParametersSheetProps.params.output.mode).toBe('gbnf');
+      await act(async () => { useChatStore.setState({ newThreadRevision: useChatStore.getState().newThreadRevision + 1 }); });
+      expect(lastModelParametersSheetProps.params).toMatchObject(presetParameters);
+      await act(async () => { lastModelParametersSheetProps.onReset(); });
+      expect(lastModelParametersSheetProps.params.output).toBeUndefined();
+      expect(lastModelParametersSheetProps.params.temperature).toBe(getGenerationParametersForModel(null).temperature);
+    } finally { presetSpy.mockRestore(); }
   });
 
   it('edits advanced generation settings without contaminating another chat snapshot or history', async () => {

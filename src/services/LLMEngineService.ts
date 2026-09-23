@@ -266,6 +266,9 @@ const BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE = 'A background model operati
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const LOW_MEMORY_UNLOAD_FAILURE_MESSAGE = 'Failed to unload the model after a low-memory warning';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
+// Existing product budgets allow 8192 visible + 8192 reasoning tokens. Bound
+// every native request, including probability buffers, while preserving prefill.
+const MAX_COMPLETION_PREDICT_TOKENS = 16_384;
 const FALLBACK_STOP_WORDS = [
   '</s>',
   '<|end|>',
@@ -3851,6 +3854,10 @@ class LLMEngineService {
     params,
     generation,
   }: LlmChatCompletionOptions): Promise<LlamaCompletionResult> {
+    const predictTokens = params?.n_predict === undefined ? 512 : params.n_predict;
+    if (!Number.isSafeInteger(predictTokens) || predictTokens < 0 || predictTokens > MAX_COMPLETION_PREDICT_TOKENS) {
+      throw new AppError('action_failed', 'The completion token budget must be an integer from 0 to 16384.');
+    }
     const requestGeneration = freezeGenerationParameters(generation);
     const sampling = resolveAdvancedSampling(requestGeneration);
     const output = prepareStructuredOutput(requestGeneration.output);
@@ -4022,6 +4029,9 @@ class LLMEngineService {
               CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE,
             ),
           });
+          if (sampling.ignore_eos && (prepared.completion.grammar || prepared.completion.json_schema)) {
+            throw new AppError('action_failed', 'Ignoring EOS cannot be combined with a template output grammar.');
+          }
           const templateStopResolution: TemplateAdditionalStopWordsResolution = {
             stopWords: this.normalizeAdditionalStopWords(prepared.formatted.additional_stops),
             strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(prepared.formatted),
@@ -4036,7 +4046,7 @@ class LLMEngineService {
           const completionParams: CompletionParams = {
             ...prepared.completion,
             ...sampling,
-            n_predict: params?.n_predict ?? 512,
+            n_predict: predictTokens,
             temperature: params?.temperature ?? 0.7,
             top_p: params?.top_p ?? 0.9,
             top_k: params?.top_k ?? 40,

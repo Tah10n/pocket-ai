@@ -7,6 +7,7 @@ import {
   resolveAdvancedSampling,
   sanitizeAdvancedGenerationParameters,
   sanitizeChatTemplate,
+  sanitizeLogitBias,
 } from '../../src/utils/generationControls';
 
 describe('generation controls for llama.rn 0.13.0-rc.3', () => {
@@ -47,6 +48,20 @@ describe('generation controls for llama.rn 0.13.0-rc.3', () => {
       .toEqual([[0, -100], [5, 0]]);
   });
 
+  it('canonicalizes numeric bias pairs with last duplicate winning and independent storage', () => {
+    const pairs = [[7, 2], [0, -100], [7, 0], [2, 100]];
+    expect(sanitizeLogitBias(pairs)).toEqual([[0, -100], [2, 100], [7, 0]]);
+    expect(advancedGenerationIdentity({ logitBias: pairs }))
+      .toBe(advancedGenerationIdentity({ logitBias: [[7, 0], [2, 100], [0, -100]] }));
+    expect(pairs).toEqual([[7, 2], [0, -100], [7, 0], [2, 100]]);
+    expect(sanitizeLogitBias([])).toEqual([]);
+    expect(sanitizeLogitBias([[2147483647, 0]])).toEqual([[2147483647, 0]]);
+    for (const value of [[[0.5, 1]], [[2147483648, 1]], [[0, 100.1]], [[0, -100.1]],
+      [[0, NaN]], [[0, '1']], Array.from({ length: 129 }, () => [0, 1])]) {
+      expect(sanitizeLogitBias(value)).toBeUndefined();
+    }
+  });
+
   it('does not coerce null, booleans or strings into native numbers', () => {
     expect(sanitizeAdvancedGenerationParameters({ nProbs: true, penaltyLastN: null, typicalP: '0.8',
       mirostat: 3, dryMultiplier: NaN, ignoreEos: 'false' })).toEqual({});
@@ -67,10 +82,20 @@ describe('generation controls for llama.rn 0.13.0-rc.3', () => {
       .toMatchObject({ dry_sequence_breakers: [], penalty_last_n: 0 });
   });
 
-  it('blocks known unsafe native vector writes instead of silently dropping requested settings', () => {
-    expect(() => resolveAdvancedSampling({ ignoreEos: true })).toThrow('cannot safely');
-    expect(() => resolveAdvancedSampling({ logitBias: [[0, 1]] })).toThrow('cannot safely');
-    expect(() => resolveAdvancedSampling({ ignoreEos: false, logitBias: [] })).not.toThrow();
+  it('rejects EOS suppression with explicit output constraints before native grammar exhaustion', () => {
+    for (const output of [{ mode: 'json_object' as const }, { mode: 'json_schema' as const, schema: '{}' },
+      { mode: 'gbnf' as const, grammar: 'root ::= "yes"' }]) {
+      expect(() => resolveAdvancedSampling({ ignoreEos: true, output })).toThrow('structured output constraints');
+    }
+  });
+
+  it('maps EOS suppression and canonical numeric biases to the patched pinned bridge', () => {
+    const input = { ignoreEos: true, logitBias: [[5, 10], [0, -100], [5, 0]] as [number, number][] };
+    const request: CompletionParams = resolveAdvancedSampling(input);
+    expect(request).toMatchObject({ ignore_eos: true, logit_bias: [[0, -100], [5, 0]] });
+    request.logit_bias![0][1] = 99;
+    expect(input.logitBias).toEqual([[5, 10], [0, -100], [5, 0]]);
+    expect(resolveAdvancedSampling({})).toMatchObject({ ignore_eos: false, logit_bias: [] });
   });
 
   it('accepts bounded template data only without changing content', () => {

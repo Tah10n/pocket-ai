@@ -73,6 +73,7 @@ import { getChatHardwareBannerInputs, hardwareListenerService } from '../../serv
 import { llmEngineService } from '../../services/LLMEngineService';
 import { performanceMonitor } from '../../services/PerformanceMonitor';
 import { registry } from '../../services/LocalStorageRegistry';
+import { presetManager } from '../../services/PresetManager';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import { AppError, getErrorMessage, getReportedErrorMessage, toAppError } from '../../services/AppError';
@@ -81,6 +82,7 @@ import {
     getModelLoadParametersForModel,
     getSettings,
     resetGenerationParametersForModel,
+    sanitizeGenerationParameters,
     subscribeSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
@@ -1032,6 +1034,10 @@ const ChatScreenContent = () => {
         attachments: ChatMessage['attachments'];
     } | null>(null);
     const newThreadRevision = useChatStore((state) => state.newThreadRevision);
+    const [draftParameters, setDraftParameters] = useState<{
+        owner: string;
+        params: GenerationParamsSnapshot;
+    } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
@@ -1277,7 +1283,12 @@ const ChatScreenContent = () => {
 
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
-    const rawCurrentParams = getGenerationParametersForModel(configurableModelId);
+    const draftParametersOwner = JSON.stringify([configurableModelId, settings.activePresetId, newThreadRevision]);
+    useEffect(() => { setDraftParameters(null); }, [draftParametersOwner, activeThread?.id]);
+    const presetGeneration = !activeThread && settings.activePresetId
+        ? presetManager.getPreset(settings.activePresetId)?.generationParameters : undefined;
+    const rawCurrentParams = !activeThread && draftParameters?.owner === draftParametersOwner
+        ? draftParameters.params : presetGeneration ?? getGenerationParametersForModel(configurableModelId);
     const currentParams = {
         ...rawCurrentParams,
         topK: rawCurrentParams.topK ?? FALLBACK_TOP_K,
@@ -1936,7 +1947,7 @@ const ChatScreenContent = () => {
         onChangeParams: (modelId, partial) => {
             const nextParams = {
                 ...(activeThread && getThreadActiveModelId(activeThread) === modelId
-                    ? activeThread.paramsSnapshot : getGenerationParametersForModel(modelId)),
+                    ? activeThread.paramsSnapshot : currentParams),
                 ...partial,
             };
 
@@ -1944,6 +1955,8 @@ const ChatScreenContent = () => {
 
             if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, nextParams);
+            } else if (!activeThread && modelId === configurableModelId) {
+                setDraftParameters({ owner: draftParametersOwner, params: sanitizeGenerationParameters(nextParams) });
             }
         },
         onResetParamField: (modelId, field) => {
@@ -1951,7 +1964,7 @@ const ChatScreenContent = () => {
             const partial = { [field]: resetParams[field] } as Partial<typeof resetParams>;
             const nextParams = {
                 ...(activeThread && getThreadActiveModelId(activeThread) === modelId
-                    ? activeThread.paramsSnapshot : getGenerationParametersForModel(modelId)),
+                    ? activeThread.paramsSnapshot : currentParams),
                 ...partial,
             };
 
@@ -1959,6 +1972,8 @@ const ChatScreenContent = () => {
 
             if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, nextParams);
+            } else if (!activeThread && modelId === configurableModelId) {
+                setDraftParameters({ owner: draftParametersOwner, params: sanitizeGenerationParameters(nextParams) });
             }
         },
         onResetAllParams: (modelId) => {
@@ -1967,6 +1982,8 @@ const ChatScreenContent = () => {
 
             if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, resetParams);
+            } else if (!activeThread && modelId === configurableModelId) {
+                setDraftParameters({ owner: draftParametersOwner, params: resetParams });
             }
         },
     });
@@ -2557,6 +2574,10 @@ const ChatScreenContent = () => {
                 await appendUserMessage(
                     content,
                     {
+                        ...(!activeThread && configurableModelId ? {
+                            newThreadParameters: { modelId: configurableModelId, presetId: settings.activePresetId,
+                                revision: newThreadRevision, paramsSnapshot: sanitizeGenerationParameters(paramsSource) },
+                        } : {}),
                         ...(hasSendableAttachmentDrafts
                             ? {
                                 attachmentDrafts,

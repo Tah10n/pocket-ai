@@ -23,6 +23,8 @@ They are snapshotted into chat threads so history remains reproducible and stabl
 
 Opening, sending or regenerating an existing chat preserves its own snapshot. Changing one control merges into that chat's snapshot; it does not replace unrelated fields with another chat's model defaults. Presets can capture generation settings, including template and output mode, to seed new chats. Legacy presets without these settings keep the existing default behavior. Completed/stopped/error assistant messages retain their generation and actual load-profile snapshots; changing settings does not rewrite earlier messages.
 
+Before the first send, the parameter sheet shows the selected preset's generation seed, or model defaults when the preset has none. Explicit edits and resets override that seed for the current draft and become the first thread snapshot. Changing the draft's model or preset, or starting another chat, discards its local overrides.
+
 ### Advanced generation controls
 
 The sheet groups sampling, templates and output under Advanced. Fields are optional, strictly typed and bounded by `generationControls.ts`. Zero, false and empty arrays remain distinct from absence. The adapter explicitly resets mutable native sampler values for every request because native completion state is reused.
@@ -39,11 +41,13 @@ The sheet groups sampling, templates and output under Advanced. Fields are optio
 | `stop` | `stop` | at most 32 strings, each 1..256 characters; significant whitespace retained; snapshot arrays are never mutated |
 | `nProbs` | `n_probs` | 0..10; default 0. Probability is token likelihood, not answer correctness |
 | `reasoningFormat`, `thinkingBudgetTokens`, `thinkingBudgetMessage` | `reasoning_format`, `thinking_budget_tokens`, `thinking_budget_message` | format none/auto/deepseek; budget 0..8192 tokens. Capability/effort and context fit still apply. Structured modes disable reasoning |
-| `ignoreEos`, `logitBias` | `ignore_eos`, `logit_bias` | **Blocked** for true/nonempty values in the pinned runtime; see below |
+| `ignoreEos`, `logitBias` | `ignore_eos`, `logit_bias` | default false / empty; at most 128 numeric pairs, token ID 0..2147483647, bias -100..100; loaded-vocabulary bounds checked natively |
 
 `nProbs` retains at most 64 token positions × 10 candidates, truncating token strings to 256 characters in diagnostic payloads. The limit is applied once at completion; growing probability arrays are not copied each token or persisted into every message.
 
-The rc.3 TypeScript declaration accepts numeric `[tokenId, bias]` pairs only. Its string/false documentation is not the bridge contract. More seriously, `cpp/jsi/JSIParams.cpp` clears a vector and then indexes it for both EOS suppression and token bias. The app rejects `ignoreEos=true` and nonempty `logitBias` before native execution, and shows these controls as unavailable. It does not cast other forms or silently emulate them. Normal responses remain bounded by `maxTokens`; no infinite-generation mode is enabled.
+The app uses only the rc.3 public numeric `[tokenId, bias]` contract; string token names and boolean biases are unsupported. Token IDs belong to the loaded model's vocabulary. Duplicate IDs use the last value, then pairs are stored in token-ID order; zero biases and empty lists remain explicit. The [pinned bridge correction](validation/llama-rn-stage3/native-probability-patch.md) replaces upstream invalid vector indexing with checked entries and rejects IDs outside the loaded vocabulary before sampling. `ignoreEos=true` suppresses every end-of-generation token, overriding any finite bias for those tokens. Model-defined suppressed tokens remain suppressed.
+
+EOS suppression cannot be combined with an explicit structured output mode or a grammar supplied by the template: an exhausted grammar could otherwise have no permitted termination token. The request is rejected without dropping its constraint. Every completion has a finite integer `n_predict` budget, at most 16384 total visible and reasoning tokens; zero is reserved for explicit prefill. Normal responses remain bounded by `maxTokens`. These mapping and safety checks require a native rebuild containing the pinned correction; device acceptance is reported separately.
 
 ### Templates, exact counts and prefill
 
@@ -52,6 +56,8 @@ The rc.3 TypeScript declaration accepts numeric `[tokenId, bias]` pairs only. It
 One frozen `now` and one bounded prepared-request cache feed token counting, context selection, completion and role-normalization retry. Completion receives the prepared `prompt`, avoiding upstream `completion(messages)` reformatting and grammar replacement. Parser, grammar, thinking tags and template stops come from that same formatter result. Explicit output constraints take priority. Special-token count adjustment follows the pinned native tokenizer metadata; an unknown tokenizer cannot be reported as an exact count.
 
 Prefill text is appended once to the formatted prompt and supplied to the parser. JSON modes use a content-only parser and advance the output grammar with that same content prefix, without feeding the template's assistant protocol prefix into a bare JSON grammar. GBNF with nonempty prefill is rejected because this runtime does not advance user grammar with the prefix. An explicit matching final assistant continuation already present in the formatted prompt is reused. The saved transcript is not modified. The advanced diagnostic action evaluates the unsent composer text with `n_predict=0`, without creating an assistant message. Cancellation waits for actual native settlement. Token diagnostics expose a bounded tokenize/detokenize preview; special/media tokens are not promised to round-trip byte for byte.
+
+The raw rc.3 `tokens_predicted` counter excludes the first output token sampled after a multi-token prompt batch. A completed one-token response can therefore report zero; prefill is identified by the requested `n_predict=0`, not by this counter.
 
 ### Structured output
 

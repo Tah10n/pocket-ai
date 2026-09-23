@@ -7,12 +7,24 @@ const fixture = () => ({ schemaVersion: 1, status: 'passed', phase: 'complete', 
     tokensEvaluated: 12, tokenCount: 12, outputCharacters: 8, dimensions: 384, finite: true,
     historyUnchanged: true, profileRestored: true, loadedListConfirmed: true, deletionRejected: true,
     valid: true, stopped: true, adapterCount: 0, sharedTokens: 10, maxDelta: 0, baselineDelta: 0, threshold: 1e-6,
+    completionDrained: true, exactConstraintMatch: true, stoppedLimit: id !== 'gbnf', interrupted: false, truncated: false, contextFull: false,
+    sampledTokens: 1, repeatedTokensPredicted: 1, repeatedSampledTokens: 1,
+    templateGenerationTokensEvaluated: 12, templateGenerationCallbacks: 1, templateGenerationOutputCharacters: 4,
+    probabilityBefore: 0.1, probabilityAfter: 0.999, eosConfirmed: true, resetEosConfirmed: true, stoppedEos: false,
     ...(id === 'template_prefill' ? { tokensPredicted: 0 } : {}),
     ...(['lora_apply', 'lora_scale'].includes(id) ? { adapterCount: 1, scale: id === 'lora_apply' ? 1 : 0.5, maxDelta: 0.01, scaleDelta: 0.005 } : {}),
   })) });
 describe('Stage 3 native evidence boundary', () => {
   it('accepts complete identities, constraints and independently measured LoRA changes', () => {
     expect(validateStage3Evidence(fixture()).status).toBe('passed');
+  });
+  it('accepts a real first sample with the unmodified native zero predicted counter', () => {
+    const value = fixture();
+    for (const id of ['gbnf', 'truncated_json', 'probability_baseline', 'lora_apply', 'lora_scale', 'lora_restore_baseline', 'lora_auxiliary_restore']) {
+      value.steps.find(step => step.id === id).tokensPredicted = 0;
+    }
+    value.steps.find(step => step.id === 'probability_baseline').repeatedTokensPredicted = 0;
+    expect(validateStage3Evidence(value).steps.find(step => step.id === 'lora_apply').tokensPredicted).toBe(0);
   });
   it.each(Object.keys(IDENTITIES))('rejects changed %s', field => {
     expect(() => validateStage3Evidence({ ...fixture(), [field]: 'unknown' })).toThrow(/identities/);
@@ -24,6 +36,13 @@ describe('Stage 3 native evidence boundary', () => {
     ['lora_scale', 'scaleDelta'], ['lora_scale', 'scale'], ['lora_remove', 'adapterCount'],
     ['lora_restore_baseline', 'tokensPredicted'], ['lora_auxiliary_restore', 'profileRestored'],
     ['lora_auxiliary_restore', 'maxDelta'], ['lora_delete_guard', 'deletionRejected'], ['cleanup', 'loadedListConfirmed'],
+    ['gbnf', 'callbacks'], ['gbnf', 'exactConstraintMatch'], ['gbnf', 'stoppedLimit'], ['gbnf', 'interrupted'],
+    ['gbnf', 'completionDrained'], ['truncated_json', 'stoppedLimit'], ['lora_apply', 'sampledTokens'],
+    ['lora_apply', 'callbacks'], ['probability_baseline', 'repeatedSampledTokens'],
+    ['template_prefill', 'templateGenerationTokensEvaluated'], ['template_prefill', 'templateGenerationCallbacks'],
+    ['template_prefill', 'templateGenerationOutputCharacters'],
+    ['logit_bias', 'probabilityBefore'], ['logit_bias', 'probabilityAfter'], ['ignore_eos', 'eosConfirmed'],
+    ['ignore_eos', 'stoppedEos'], ['invalid_logit_bias', 'valid'], ['sampling_reset', 'maxDelta'], ['sampling_reset', 'resetEosConfirmed'],
   ])('requires %s.%s rather than trusting passed', (id, field) => {
     const value = fixture(); delete value.steps.find(step => step.id === id)[field];
     expect(() => validateStage3Evidence(value)).toThrow();
@@ -37,6 +56,10 @@ describe('Stage 3 native evidence boundary', () => {
       const value = fixture(); value.steps.find(step => step.id === id).maxDelta = 0.01;
       expect(() => validateStage3Evidence(value)).toThrow();
     }
+  });
+  it.each([0, 2])('rejects %s probability samples instead of exactly one', count => {
+    const value = fixture(); value.steps.find(step => step.id === 'lora_apply').sampledTokens = count;
+    expect(() => validateStage3Evidence(value)).toThrow(/unproven/);
   });
   it('rejects missing, duplicated, extra and not-run CPU steps and undisclosed backends', () => {
     const missing = fixture(); missing.steps.pop();

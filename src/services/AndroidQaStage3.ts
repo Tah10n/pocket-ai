@@ -19,7 +19,8 @@ import type { LlamaCompletionResult } from './LlamaRuntimeAdapter';
 export const ANDROID_QA_STAGE3_STEPS = [
   'cpu_load', 'text', 'stop', 'json_object', 'json_schema', 'gbnf', 'template_prefill',
   'token_diagnostics', 'invalid_schema', 'invalid_grammar', 'truncated_json', 'structured_cancel', 'ordinary_after_failure',
-  'prepare_adapter', 'probability_baseline', 'lora_apply', 'lora_scale', 'lora_remove',
+  'prepare_adapter', 'probability_baseline', 'logit_bias', 'ignore_eos', 'invalid_logit_bias', 'sampling_reset',
+  'lora_apply', 'lora_scale', 'lora_remove',
   'lora_restore_baseline', 'prepare_embedding', 'lora_auxiliary_restore', 'lora_delete_guard', 'cleanup',
 ] as const;
 type StepId = typeof ANDROID_QA_STAGE3_STEPS[number];
@@ -27,6 +28,11 @@ type Step = { id: StepId; status: 'passed' | 'failed' | 'not_run';
   callbacks?: number; tokensPredicted?: number; tokensEvaluated?: number; outputCharacters?: number;
   adapterCount?: number; scale?: number; sharedTokens?: number; maxDelta?: number; baselineDelta?: number;
   threshold?: number; scaleDelta?: number; tokenCount?: number; dimensions?: number;
+  templateGenerationTokensEvaluated?: number; templateGenerationCallbacks?: number; templateGenerationOutputCharacters?: number;
+  probabilityBefore?: number; probabilityAfter?: number; eosConfirmed?: boolean; resetEosConfirmed?: boolean;
+  contentCharacters?: number; sampledTokens?: number; repeatedTokensPredicted?: number; repeatedSampledTokens?: number;
+  hasContent?: boolean; hasReasoning?: boolean; stoppedLimit?: boolean; stoppedEos?: boolean; stoppedWord?: boolean;
+  interrupted?: boolean; truncated?: boolean; contextFull?: boolean; completionDrained?: boolean; exactConstraintMatch?: boolean;
   valid?: boolean; stopped?: boolean; historyUnchanged?: boolean; profileRestored?: boolean;
   loadedListConfirmed?: boolean; deletionRejected?: boolean; finite?: boolean };
 export type AndroidQaStage3Evidence = {
@@ -56,6 +62,28 @@ class Stage3Failure extends Error {
   constructor(readonly code: NonNullable<AndroidQaStage3Evidence['failureCode']>, readonly requiresForceStop = false) { super(code); }
 }
 function check(value: unknown): asserts value { if (!value) throw new Stage3Failure('assertion'); }
+
+export function getAndroidQaCompletionReceipt(result: LlamaCompletionResult, callbacks: number, completionDrained: boolean): Omit<Step, 'id' | 'status'> {
+  return {
+    callbacks, tokensPredicted: result.tokens_predicted, tokensEvaluated: result.tokens_evaluated,
+    outputCharacters: typeof result.text === 'string' ? result.text.length : 0,
+    contentCharacters: typeof result.content === 'string' ? result.content.length : 0,
+    hasContent: typeof result.content === 'string', hasReasoning: Boolean(result.reasoning_content),
+    stoppedLimit: typeof result.stopped_limit === 'boolean' ? result.stopped_limit : undefined,
+    stoppedEos: typeof result.stopped_eos === 'boolean' ? result.stopped_eos : undefined,
+    stoppedWord: typeof result.stopped_word === 'boolean' ? result.stopped_word : undefined,
+    interrupted: typeof result.interrupted === 'boolean' ? result.interrupted : undefined,
+    truncated: typeof result.truncated === 'boolean' ? result.truncated : undefined,
+    contextFull: typeof result.context_full === 'boolean' ? result.context_full : undefined, completionDrained,
+  };
+}
+
+export function assertAndroidQaGeneratedReceipt(receipt: Omit<Step, 'id' | 'status'>): void {
+  // rc.3 excludes the first sample after multi-token prompt evaluation from its
+  // predicted counter. Real callbacks and output prove generation, not counter+1.
+  check(Number.isSafeInteger(receipt.tokensPredicted) && receipt.tokensPredicted! >= 0
+    && (receipt.callbacks ?? 0) > 0 && (receipt.outputCharacters ?? 0) > 0 && receipt.completionDrained === true);
+}
 
 /** Private comparison only; never export profile values or this identity in QA evidence. */
 export function getAndroidQaEffectiveProfileIdentity(profile: ModelLoadParameters | null): string {
@@ -127,8 +155,9 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
   let ownedThread: string | undefined;
   let touchedContext = false;
   let completed = false;
+  let pendingStepReceipt: Omit<Step, 'id' | 'status'> = {};
   const abort = new AbortController();
-  const phase = (id: StepId) => publish({ phase: id });
+  const phase = (id: StepId) => { pendingStepReceipt = {}; publish({ phase: id }); };
   const pass = (step: Omit<Step, 'status'>) => publish({ steps: [...evidence.steps, { ...step, status: 'passed' }] });
   const assertCpu = () => {
     const state = llmEngineService.getState();
@@ -149,12 +178,13 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     const result = await bounded(llmEngineService.chatCompletion({ ...options,
       onToken: token => { if ((typeof token === 'string' ? token : token.token).length > 0) callbacks += 1; },
     }), operationTimeoutMs);
-    check((result.tokens_predicted ?? 0) > 0 && typeof result.text === 'string' && result.text.length > 0
-      && !llmEngineService.hasActiveCompletion());
+    pendingStepReceipt = { ...getAndroidQaCompletionReceipt(result, callbacks, !llmEngineService.hasActiveCompletion()),
+      ...(id === 'gbnf' ? { exactConstraintMatch: (result.content ?? result.text) === 'yes' } : {}),
+      ...(tokenCount !== undefined ? { tokenCount } : {}) };
+    assertAndroidQaGeneratedReceipt(pendingStepReceipt);
     validate?.(result);
     if (tokenCount !== undefined) check(result.tokens_evaluated === tokenCount);
-    pass({ id, callbacks, tokensPredicted: result.tokens_predicted, tokensEvaluated: result.tokens_evaluated,
-      outputCharacters: result.text.length, ...(tokenCount !== undefined ? { tokenCount } : {}), ...(validate ? { valid: true } : {}) });
+    pass({ id, ...pendingStepReceipt, ...(validate ? { valid: true } : {}) });
     return result;
   };
   const cancelGeneration = async (id: 'stop' | 'structured_cancel', structured: boolean) => {
@@ -177,13 +207,25 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     if (structured && result?.structuredOutput) check(result.structuredOutput.status !== 'valid');
     pass({ id, callbacks, stopped: true });
   };
-  const probabilityProbe = async () => {
-    const options = request({ nProbs: fixture.probabilityProbe.nProbs }, 1,
+  const probabilityRequest = (overrides: LlmChatCompletionOptions['generation'] = {}) => {
+    const options = request({ nProbs: fixture.probabilityProbe.nProbs, template: { now: 1700000000 }, ...overrides }, 1,
       'Create an XML behavior tree for a robot that finds a cup, grasps it and places it on a table. Return only the behavior tree.');
     options.params = { ...options.params, temperature: fixture.probabilityProbe.temperature };
-    const result = await bounded(llmEngineService.chatCompletion(options), operationTimeoutMs);
-    check(result.tokens_predicted === 1 && result.probabilitiesSummary?.requested === 10);
-    return firstTokenProbabilityDistribution(result.completion_probabilities);
+    return options;
+  };
+  const probabilityProbe = async (overrides: LlmChatCompletionOptions['generation'] = {}) => {
+    const options = probabilityRequest(overrides);
+    let callbacks = 0;
+    const result = await bounded(llmEngineService.chatCompletion({ ...options,
+      onToken: token => { if ((typeof token === 'string' ? token : token.token).length > 0) callbacks += 1; },
+    }), operationTimeoutMs);
+    pendingStepReceipt = { ...getAndroidQaCompletionReceipt(result, callbacks, !llmEngineService.hasActiveCompletion()),
+      sampledTokens: result.completion_probabilities?.length ?? 0 };
+    assertAndroidQaGeneratedReceipt(pendingStepReceipt);
+    check((result.tokens_predicted ?? -1) <= 1 && result.probabilitiesSummary?.requested === 10
+      && pendingStepReceipt.sampledTokens === 1 && pendingStepReceipt.stoppedLimit === true
+      && pendingStepReceipt.interrupted === false && pendingStepReceipt.truncated === false && pendingStepReceipt.contextFull === false);
+    return { distribution: firstTokenProbabilityDistribution(result.completion_probabilities), receipt: { ...pendingStepReceipt } };
   };
   const apply = async (profile: LoraProfileAdapter[]) => {
     const loaded = await bounded(llmEngineService.applyLoraConfiguration(ANDROID_QA_DOCUMENT_MODEL_ID, profile,
@@ -216,8 +258,8 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
       const parsed = JSON.parse(result.content ?? result.text ?? '');
       check(parsed && ['yes', 'no'].includes(parsed.answer) && Object.keys(parsed).length === 1);
     });
-    await generate('gbnf', request({ output: { mode: 'gbnf', grammar: 'root ::= "yes"' } }, 32, 'Reply yes.'),
-      result => check((result.content ?? result.text) === 'yes' && !result.stopped_limit && !result.interrupted));
+    await generate('gbnf', request({ output: { mode: 'gbnf', grammar: 'root ::= "yes"' } }, 32, 'Reply no.'),
+      result => check((result.content ?? result.text) === 'yes' && result.stopped_limit === false && result.interrupted === false));
     phase('template_prefill');
     const historyBefore = JSON.stringify(useChatStore.getState().threads[ownedThread]);
     const templateRequest = request({ template: {
@@ -228,9 +270,16 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     const prefill = await bounded(llmEngineService.prefillPrompt(templateRequest), operationTimeoutMs);
     check(tokenCount > 0 && prefill.tokens_predicted === 0 && prefill.tokens_evaluated === tokenCount);
     check(JSON.stringify(useChatStore.getState().threads[ownedThread]) === historyBefore);
-    const templateCompletion = await bounded(llmEngineService.chatCompletion(templateRequest), operationTimeoutMs);
-    check((templateCompletion.tokens_predicted ?? 0) > 0);
-    pass({ id: 'template_prefill', tokenCount, tokensEvaluated: prefill.tokens_evaluated, tokensPredicted: 0, historyUnchanged: true });
+    let templateCallbacks = 0;
+    const templateCompletion = await bounded(llmEngineService.chatCompletion({ ...templateRequest,
+      onToken: token => { if ((typeof token === 'string' ? token : token.token).length > 0) templateCallbacks += 1; },
+    }), operationTimeoutMs);
+    pendingStepReceipt = { tokenCount, tokensEvaluated: prefill.tokens_evaluated, tokensPredicted: prefill.tokens_predicted,
+      templateGenerationTokensEvaluated: templateCompletion.tokens_evaluated, templateGenerationCallbacks: templateCallbacks,
+      templateGenerationOutputCharacters: templateCompletion.text?.length ?? 0, historyUnchanged: true };
+    assertAndroidQaGeneratedReceipt(getAndroidQaCompletionReceipt(templateCompletion, templateCallbacks, !llmEngineService.hasActiveCompletion()));
+    check(templateCompletion.tokens_evaluated === tokenCount);
+    pass({ id: 'template_prefill', ...pendingStepReceipt });
     phase('token_diagnostics');
     const tokens = await bounded(llmEngineService.inspectTokens('A friendly dog.', ANDROID_QA_DOCUMENT_MODEL_ID), operationTimeoutMs);
     check(tokens.tokenCount > 0 && tokens.tokens.length === tokens.tokenCount && !tokens.truncated && tokens.detokenized.length > 0);
@@ -245,30 +294,71 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     await generate('truncated_json', request({ output: { mode: 'json_schema', schema: JSON.stringify({
       type: 'object', properties: { answer: { type: 'string', enum: ['definitely'] } }, required: ['answer'], additionalProperties: false,
     }) } }, 1, 'Return the required JSON object.'), result => {
-      check(result.structuredOutput?.status !== 'valid' && result.stopped_limit === true);
+      check(result.structuredOutput?.status === 'incomplete' && result.stopped_limit === true);
     });
     await cancelGeneration('structured_cancel', true);
     await generate('ordinary_after_failure');
     phase('prepare_adapter'); const adapter = await prepareAdapter(downloadTimeoutMs); pass({ id: 'prepare_adapter' });
     phase('probability_baseline');
     const baseline = await probabilityProbe(); const repeated = await probabilityProbe();
-    const baselineComparison = compareProbabilityDistributions(baseline, repeated);
+    const baselineComparison = compareProbabilityDistributions(baseline.distribution, repeated.distribution);
     const threshold = Math.max(1e-6, baselineComparison.maxDelta * 10);
-    pass({ id: 'probability_baseline', ...baselineComparison, baselineDelta: baselineComparison.maxDelta, threshold, finite: true });
+    pass({ id: 'probability_baseline', ...baseline.receipt, repeatedTokensPredicted: repeated.receipt.tokensPredicted,
+      repeatedSampledTokens: repeated.receipt.sampledTokens, ...baselineComparison, baselineDelta: baselineComparison.maxDelta, threshold, finite: true });
+    phase('logit_bias');
+    let biasTarget: { token: string; id: number; probability: number } | undefined;
+    for (const [token, probability] of baseline.distribution) {
+      if (probability <= 1e-6 || probability >= 0.9) continue;
+      const inspected = await bounded(llmEngineService.inspectTokens(token, ANDROID_QA_DOCUMENT_MODEL_ID), operationTimeoutMs);
+      if (inspected.tokens.length === 1 && !inspected.truncated && inspected.detokenized === token) {
+        biasTarget = { token, id: inspected.tokens[0], probability }; break;
+      }
+    }
+    check(biasTarget);
+    const biased = await probabilityProbe({ logitBias: [[biasTarget.id, 100]] });
+    const biasedProbability = biased.distribution.get(biasTarget.token);
+    check(biasedProbability !== undefined && biasedProbability > 0.99 && biasedProbability - biasTarget.probability > threshold);
+    pass({ id: 'logit_bias', ...biased.receipt, probabilityBefore: biasTarget.probability, probabilityAfter: biasedProbability, threshold, valid: true });
+    phase('ignore_eos');
+    // Confirm the pinned model's special end-of-turn token actually stops native
+    // generation before proving ignore_eos wins over an explicit positive bias.
+    const eos = await bounded(llmEngineService.inspectTokens('<|im_end|>', ANDROID_QA_DOCUMENT_MODEL_ID), operationTimeoutMs);
+    check(eos.tokens.length === 1 && !eos.truncated && eos.detokenized === '<|im_end|>');
+    const forcedEos = await bounded(llmEngineService.chatCompletion(probabilityRequest({ logitBias: [[eos.tokens[0], 100]] })), operationTimeoutMs);
+    check(forcedEos.stopped_eos === true && forcedEos.interrupted === false && !llmEngineService.hasActiveCompletion());
+    const suppressedEos = await probabilityProbe({ ignoreEos: true, logitBias: [[eos.tokens[0], 100]] });
+    check(suppressedEos.receipt.stoppedEos === false);
+    pass({ id: 'ignore_eos', ...suppressedEos.receipt, eosConfirmed: true, valid: true });
+    phase('invalid_logit_bias');
+    let rejectedBias = false;
+    try { await bounded(llmEngineService.chatCompletion(probabilityRequest({ logitBias: [[2_147_483_647, 1]] })), operationTimeoutMs); }
+    catch (error) {
+      if (error instanceof Stage3Failure && error.requiresForceStop) throw error;
+      rejectedBias = error instanceof Error && error.message.includes('logit_bias token is outside the loaded vocabulary');
+    }
+    check(rejectedBias && !llmEngineService.hasActiveCompletion());
+    pass({ id: 'invalid_logit_bias', valid: true });
+    phase('sampling_reset');
+    const resetEos = await bounded(llmEngineService.chatCompletion(probabilityRequest({ logitBias: [[eos.tokens[0], 100]] })), operationTimeoutMs);
+    check(resetEos.stopped_eos === true && resetEos.interrupted === false && !llmEngineService.hasActiveCompletion());
+    const samplingReset = await probabilityProbe();
+    const resetComparison = compareProbabilityDistributions(baseline.distribution, samplingReset.distribution);
+    check(resetComparison.maxDelta <= Math.max(1e-6, baselineComparison.maxDelta * 3));
+    pass({ id: 'sampling_reset', ...samplingReset.receipt, ...resetComparison, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3), resetEosConfirmed: true, valid: true });
     phase('lora_apply'); await apply([adapter]);
-    const adapted = await probabilityProbe(); const change = compareProbabilityDistributions(baseline, adapted);
+    const adapted = await probabilityProbe(); const change = compareProbabilityDistributions(baseline.distribution, adapted.distribution);
     check(change.maxDelta > threshold);
-    pass({ id: 'lora_apply', ...change, threshold, adapterCount: 1, scale: 1, loadedListConfirmed: true, tokensPredicted: 1 });
+    pass({ id: 'lora_apply', ...adapted.receipt, ...change, threshold, adapterCount: 1, scale: 1, loadedListConfirmed: true });
     phase('lora_scale'); await apply([{ ...adapter, scale: 0.5 }]);
-    const half = await probabilityProbe(); const halfChange = compareProbabilityDistributions(baseline, half);
-    const scaleChange = compareProbabilityDistributions(adapted, half);
+    const half = await probabilityProbe(); const halfChange = compareProbabilityDistributions(baseline.distribution, half.distribution);
+    const scaleChange = compareProbabilityDistributions(adapted.distribution, half.distribution);
     check(halfChange.maxDelta > threshold && scaleChange.maxDelta > threshold);
-    pass({ id: 'lora_scale', ...halfChange, scaleDelta: scaleChange.maxDelta, threshold, adapterCount: 1, scale: 0.5, loadedListConfirmed: true, tokensPredicted: 1 });
+    pass({ id: 'lora_scale', ...half.receipt, ...halfChange, scaleDelta: scaleChange.maxDelta, threshold, adapterCount: 1, scale: 0.5, loadedListConfirmed: true });
     phase('lora_remove'); await apply([]); pass({ id: 'lora_remove', adapterCount: 0, loadedListConfirmed: true });
     phase('lora_restore_baseline'); const removed = await probabilityProbe();
-    const restored = compareProbabilityDistributions(baseline, removed);
+    const restored = compareProbabilityDistributions(baseline.distribution, removed.distribution);
     check(restored.maxDelta <= Math.max(1e-6, baselineComparison.maxDelta * 3));
-    pass({ id: 'lora_restore_baseline', ...restored, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3), tokensPredicted: 1 });
+    pass({ id: 'lora_restore_baseline', ...removed.receipt, ...restored, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3) });
     phase('prepare_embedding'); const embedding = await prepareAndroidQaEmbeddingFixture(downloadTimeoutMs); pass({ id: 'prepare_embedding' });
     await apply([{ ...adapter, scale: 0.5 }]);
     phase('lora_auxiliary_restore'); selectAuxiliaryModel('embedding', embedding);
@@ -278,10 +368,10 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     check(auxiliary.dimensions === 384 && before === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters()));
     check(history === JSON.stringify(useChatStore.getState().threads[ownedThread])); assertCpu();
     const afterAuxiliary = await probabilityProbe();
-    const auxiliaryRestored = compareProbabilityDistributions(half, afterAuxiliary);
+    const auxiliaryRestored = compareProbabilityDistributions(half.distribution, afterAuxiliary.distribution);
     check(auxiliaryRestored.maxDelta <= Math.max(1e-6, baselineComparison.maxDelta * 3));
-    pass({ id: 'lora_auxiliary_restore', ...auxiliaryRestored, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3),
-      dimensions: 384, profileRestored: true, historyUnchanged: true, tokensPredicted: 1 });
+    pass({ id: 'lora_auxiliary_restore', ...afterAuxiliary.receipt, ...auxiliaryRestored, threshold: Math.max(1e-6, baselineComparison.maxDelta * 3),
+      dimensions: 384, profileRestored: true, historyUnchanged: true });
     phase('lora_delete_guard'); let rejected = false;
     try { await getModelDownloadManager().removeCompanion(ANDROID_QA_DOCUMENT_MODEL_ID, adapter.artifactId); }
     catch (error) { rejected = error !== null && typeof error === 'object' && 'code' in error && error.code === 'engine_busy'; }
@@ -297,7 +387,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     const failedPhase = evidence.phase;
     publish({ status: 'failed', failureCode: error instanceof Stage3Failure ? error.code : 'operation_failed', requiresForceStop,
       steps: [...evidence.steps, ...ANDROID_QA_STAGE3_STEPS.filter(id => !completed.has(id)).map(id => ({ id,
-        status: id === failedPhase ? 'failed' as const : 'not_run' as const }))] });
+        ...(id === failedPhase ? pendingStepReceipt : {}), status: id === failedPhase ? 'failed' as const : 'not_run' as const }))] });
     if (failedPhase === 'prepare_adapter') await getModelDownloadManager().cancelDownload(ANDROID_QA_DOCUMENT_MODEL_ID).catch(() => undefined);
     if (failedPhase === 'prepare_embedding') await getModelDownloadManager().cancelDownload(ANDROID_QA_EMBEDDING_REPO).catch(() => undefined);
   } finally {

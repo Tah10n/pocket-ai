@@ -330,6 +330,27 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(fs.readFileSync(sourcePath)).toEqual(before);
   });
 
+  it.each(['cpp/common/jinja/value.cpp', 'cpp/common/jinja/caps.cpp', 'cpp/jsi/JSINativeHeaders.h'])('resolves the common JSON API relative to %s, independent of dependency header maps', (relative) => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8');
+    expect(source).not.toContain('#include "json.h"');
+    const include = relative.startsWith('cpp/jsi/') ? '../common/json.h' : '../json.h';
+    expect(source).toContain(`#include "${include}"`);
+    if (relative.startsWith('cpp/jsi/')) expect(source).toContain('#include <rnllama/json.h>');
+    const installed = path.resolve(__dirname, '../../node_modules/llama.rn');
+    const header = path.resolve(installed, path.dirname(relative), include);
+    expect(header).toBe(path.join(installed, 'cpp/common/json.h'));
+    expect(fs.readFileSync(header, 'utf8')).toContain('class common_json');
+    if (!relative.startsWith('cpp/jsi/')) expect(source).toContain('common_json');
+  });
+
+  it.each(['cpp/common/jinja/value.cpp', 'cpp/common/jinja/caps.cpp', 'cpp/jsi/JSINativeHeaders.h'])('rejects drift in %s before any write', (relative) => {
+    const before = fs.readFileSync(sourcePath);
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn', relative), '\n// unexpected source change\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/u);
+    expect(fs.readFileSync(sourcePath)).toEqual(before);
+  });
+
   it('is installed by the package hook and participates in existing native provenance', () => {
     const projectRoot = path.resolve(__dirname, '../..');
     const relative = 'patches/llama-rn-0.13.0-rc.3.js';

@@ -6,7 +6,7 @@ The existing `throwIfContextBusy` guard precedes the reset on both platforms. Th
 
 ## Installation and verification
 
-`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all seven complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
+`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all ten complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
 
 Run `node patches/llama-rn-0.13.0-rc.3.js --check` to verify without writing. `npm run verify:native-config` includes this check. Fingerprints use SHA-256 after normalizing CRLF to LF:
 
@@ -27,7 +27,7 @@ The same pinned patch corrects `cpp/jsi/JSIParams.cpp`, also compiled locally on
 
 Duplicate user token entries use the last value, rather than accidentally adding biases. `ignore_eos` defaults to false for each request. When enabled it overrides user biases for every model EOG token (including EOS and end-of-turn tokens), using the core precomputed EOG list. Each override replaces an existing entry or appends one unique entry. This avoids relying on duplicate handling, which differs between the core sampler aligned and fallback candidate paths. Model-defined suppress tokens remain governed by the unchanged core sampler.
 
-The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All seven source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
+The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All ten source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
 
 ## Fixed request clock in Jinja
 
@@ -54,7 +54,7 @@ The initializer also allocates its chain before rejecting malformed grammar and 
 | Original `cpp/common/sampling.cpp` | `e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5` |
 | Patched `cpp/common/sampling.cpp` | `942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c` |
 
-Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All seven patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
+Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All ten patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
 
 ## Grammar parser and lazy-trigger diagnostic privacy
 
@@ -69,3 +69,11 @@ The formatter core also uses static error categories instead of template excepti
 The seventh guarded correction narrows iOS sources to the package root and compiles C/C++/Objective-C/assembly files without exporting internal C++ headers. Internal headers remain preserved on disk; explicit JSON, CPU, codec and mtmd search paths resolve the source-build includes without relying on flattened header maps. Existing exclusions, Metal assembly inputs, backend flags and the prebuilt-framework branch are unchanged. This prevents CocoaPods from copying bundled XCFramework headers and flattening unrelated `common.h` files into the same framework output.
 
 Original podspec SHA-256: `af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55`. Corrected SHA-256: `0074a4cddbe0f46352067174cdc89362dde6512625eea29a0fcd3b444d648f50`. The first iOS compile attempt failed with duplicate header output commands before compilation. Source-contract tests cover the corrected inclusion boundary; they do not establish a successful iOS build or inference.
+
+## Jinja JSON header resolution
+
+The two Jinja translation units that import the common JSON API now use `../json.h`; the JSI source branch uses `../common/json.h` and preserves the prebuilt-framework imports. Bare `json.h` is ambiguous under dependency header maps. The failed build found a header but not `common_json`; the log does not identify the competing header. Relative imports preserve the intended header on Android and iOS. The preceding iOS attempt reached C++ compilation and failed at this unresolved type; it is not successful iOS acceptance.
+
+- `cpp/common/jinja/value.cpp`: original SHA-256 `9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411`; corrected `48c3eaad040ccdc3cbc278b5648aa79a25ae83656a483f56269470a5ded5f22f`.
+- `cpp/common/jinja/caps.cpp`: original SHA-256 `cc497360610e81359fa843656fa8352a917dd37926737cfc9d888cf6f7d1baa0`; corrected `329b9a013dba2d19f974a4af1e8733c0c91de1dfa942bf733aae9f7ad7b6bfe1`.
+- `cpp/jsi/JSINativeHeaders.h`: original SHA-256 `100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053`; corrected `2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d`.

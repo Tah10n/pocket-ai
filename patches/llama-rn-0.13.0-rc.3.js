@@ -261,6 +261,9 @@ const SOURCE_PATCHES = [
       "# Keep internal headers for compilation without exporting duplicate basenames.\n  s.preserve_paths = \"cpp/**/*.{h,hpp}\""
     ]
   ] },
+  { source: 'cpp/common/jinja/value.cpp', beforeSha256: '9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411', afterSha256: '48c3eaad040ccdc3cbc278b5648aa79a25ae83656a483f56269470a5ded5f22f', replacements: [["#include \"json.h\"", "#include \"../json.h\""]] },
+  { source: 'cpp/common/jinja/caps.cpp', beforeSha256: 'cc497360610e81359fa843656fa8352a917dd37926737cfc9d888cf6f7d1baa0', afterSha256: '329b9a013dba2d19f974a4af1e8733c0c91de1dfa942bf733aae9f7ad7b6bfe1', replacements: [["#include \"json.h\"", "#include \"../json.h\""]] },
+  { source: 'cpp/jsi/JSINativeHeaders.h', beforeSha256: '100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053', afterSha256: '2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d', replacements: [["#include \"json.h\"", "#include \"../common/json.h\""]] },
 ];
 // JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.
@@ -273,7 +276,6 @@ const BUILD_FILES = Object.freeze({
   'android/build.gradle': '841f2514b2f6540a6f118b9fc024690ea238e17b23151c421a52a3105fb16583',
   'android/src/main/rnllama/CMakeLists.txt': 'f58142de643017b3145767553add3353a411a9ae2accfff1cc0bc6cc6a710364',
   'cpp/common/jinja/runtime.h': '89c8efc60ad287f49089fbcf7f028d1b88b32d41a2e859f1b68af5a574816a3f',
-  'cpp/common/jinja/value.cpp': '9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411',
   'cpp/common/chat-auto-parser.h': 'c774fcc02980529671793e110118ecfccb1e3c48eac52c852ce354922f599b52',
   'cpp/common/chat.h': 'e6d106744146668453d38fa3db725b630a438eb982c74effd094f30cd3ed4d65',
   'cpp/rn-llama.cpp': 'e33948572e199c90a74f1ecb4d27be791924fe4954737f0d83c96b2a18ad0d1c',

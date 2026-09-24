@@ -351,7 +351,7 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(fs.readFileSync(sourcePath)).toEqual(before);
   });
 
-  it('gives only source-build quoted includes priority over dependency header maps', () => {
+  it('adds source-build quote directories without changing prebuilt includes', () => {
     patchLlamaBridge(root);
     const podspec = fs.readFileSync(path.join(root, 'node_modules/llama.rn/llama-rn.podspec'), 'utf8');
     const branch = podspec.split('if ENV["RNLLAMA_BUILD_FROM_SOURCE"] == "1"')[1].split('  else');
@@ -387,6 +387,47 @@ describe('pinned serial sampling and template clock corrections', () => {
     try {
       copyLlamaPatchSources(root, { pristine: true });
       expect(hashSource(read(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  const commonConsumers = ['cpp/rn-completion.h', 'cpp/rn-llama.h', 'cpp/rn-slot-manager.h', 'cpp/rn-slot.h', 'cpp/rn-tts.cpp', 'cpp/jsi/JSINativeHeaders.h'];
+  it.each(commonConsumers)('resolves the runtime common API locally in %s', (relative) => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn', relative), 'utf8');
+    const include = relative.startsWith('cpp/jsi/') ? '../common/common.h' : 'common/common.h';
+    expect(source).not.toContain('#include "common.h"');
+    expect(source).toContain(`#include "${include}"`);
+    const installed = path.resolve(__dirname, '../../node_modules/llama.rn');
+    expect(path.resolve(installed, path.dirname(relative), include)).toBe(path.join(installed, 'cpp/common/common.h'));
+    expect(fs.readFileSync(path.join(installed, 'cpp/common/common.h'), 'utf8')).toContain('struct common_params');
+    if (relative.startsWith('cpp/jsi/')) expect(source).toContain('#include <rnllama/common.h>');
+  });
+
+  it.each(commonConsumers)('rejects common consumer drift before any write: %s', (relative) => {
+    const before = fs.readFileSync(sourcePath);
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn', relative), '\n// drift\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/u);
+    expect(fs.readFileSync(sourcePath)).toEqual(before);
+  });
+
+  it('upgrades the exact earlier JSI JSON correction and preserves framework imports', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === 'cpp/jsi/JSINativeHeaders.h');
+    const file = path.join(root, 'node_modules/llama.rn', patch.source);
+    const pristine = fs.readFileSync(file, 'utf8');
+    const previous = pristine.replace('#include "json.h"', '#include "../common/json.h"');
+    expect(hashSource(previous)).toBe(patch.intermediates[0].sha256);
+    fs.writeFileSync(file, previous);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+    const installed = path.resolve(__dirname, '../../node_modules/llama.rn', patch.source);
+    const read = fs.readFileSync;
+    const spy = jest.spyOn(fs, 'readFileSync').mockImplementation((file, ...args) => path.resolve(String(file)) === installed ? previous : read(file, ...args));
+    try {
+      copyLlamaPatchSources(root, { pristine: true });
+      expect(read(file, 'utf8')).toBe(pristine);
     } finally {
       spy.mockRestore();
     }

@@ -6,7 +6,7 @@ The existing `throwIfContextBusy` guard precedes the reset on both platforms. Th
 
 ## Installation and verification
 
-`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all ten complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
+`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all fifteen complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
 
 Run `node patches/llama-rn-0.13.0-rc.3.js --check` to verify without writing. `npm run verify:native-config` includes this check. Fingerprints use SHA-256 after normalizing CRLF to LF:
 
@@ -27,7 +27,7 @@ The same pinned patch corrects `cpp/jsi/JSIParams.cpp`, also compiled locally on
 
 Duplicate user token entries use the last value, rather than accidentally adding biases. `ignore_eos` defaults to false for each request. When enabled it overrides user biases for every model EOG token (including EOS and end-of-turn tokens), using the core precomputed EOG list. Each override replaces an existing entry or appends one unique entry. This avoids relying on duplicate handling, which differs between the core sampler aligned and fallback candidate paths. Model-defined suppress tokens remain governed by the unchanged core sampler.
 
-The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All ten source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
+The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All fifteen source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
 
 ## Fixed request clock in Jinja
 
@@ -54,7 +54,7 @@ The initializer also allocates its chain before rejecting malformed grammar and 
 | Original `cpp/common/sampling.cpp` | `e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5` |
 | Patched `cpp/common/sampling.cpp` | `942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c` |
 
-Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All ten patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
+Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All fifteen patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
 
 ## Grammar parser and lazy-trigger diagnostic privacy
 
@@ -76,10 +76,18 @@ The two Jinja translation units that import the common JSON API now use `../json
 
 - `cpp/common/jinja/value.cpp`: original SHA-256 `9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411`; corrected `48c3eaad040ccdc3cbc278b5648aa79a25ae83656a483f56269470a5ded5f22f`.
 - `cpp/common/jinja/caps.cpp`: original SHA-256 `cc497360610e81359fa843656fa8352a917dd37926737cfc9d888cf6f7d1baa0`; corrected `329b9a013dba2d19f974a4af1e8733c0c91de1dfa942bf733aae9f7ad7b6bfe1`.
-- `cpp/jsi/JSINativeHeaders.h`: original SHA-256 `100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053`; corrected `2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d`.
+- `cpp/jsi/JSINativeHeaders.h`: original SHA-256 `100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053`; corrected `1915df1b29ee735d8344a8bd9b974dc6dbb1dba974abaacb6d92dfafe4643ba4`.
 
 ## Quoted headers before dependency header maps
 
-The iOS source-build pod adds `-iquote` for the same explicit runtime header directories, in their existing order, before ordinary dependency header maps. Local headers retain precedence; angle/framework imports and prebuilt mode are unchanged. This fixes the confirmed `rn-slot.h` to Reanimated `common.h` collision without exporting internal headers. The patch also accepts the exact prior corrected podspec fingerprint when upgrading an existing installation.
+The iOS source-build pod adds `-iquote` for the same explicit runtime header directories, in their existing order, before ordinary dependency header maps. Local headers retain precedence; angle/framework imports and prebuilt mode are unchanged. The subsequent Xcode build still selected Reanimated’s `common.h` from `rn-slot.h`; these quote flags alone did not fix that collision. The patch also accepts the exact prior corrected podspec fingerprint when upgrading an existing installation.
 
 A small Clang 18.0.2 preprocessing fixture reproduced a conflicting header map with paths containing spaces: ordinary `-I` lookup selected the wrong header and failed; the same command with `-iquote` selected the intended runtime header and passed. This checks compiler search semantics, not Xcode application compilation or iOS inference. See [Clang's quote search group](https://clang.llvm.org/doxygen/HeaderSearchOptions_8h_source.html) and [the `-iquote` option](https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-iquote).
+
+## Explicit common runtime includes
+
+Five runtime consumers (`rn-completion.h`, `rn-llama.h`, `rn-slot-manager.h`, `rn-slot.h` and `rn-tts.cpp`) now include `common/common.h` relative to their own directory. The JSI source branch uses `../common/common.h`; its prebuilt framework import is unchanged. These paths resolve before search directories and avoid the observed Reanimated basename collision even when a dependency map is already in the quote search group. Local CPU, AMX and Metal `common.h` imports are unchanged.
+
+Each complete input has a pinned before/after fingerprint. The existing JSI JSON-only correction is accepted as an exact intermediate. Tests cover relative resolution, all-input preflight rejection, idempotence and intermediate fixture normalization. The prior Xcode failures remain failed build attempts; successful local preprocessing is not an iOS application build or inference result.
+
+A second Clang 18.0.2 fixture placed the conflicting map earlier in the quote group (`-iquote map` before the runtime directories). The bare include failed despite the later runtime `-iquote`; the explicit relative include passed, including paths with spaces. This reproduces a search order consistent with the Xcode failure; the CI log does not expose the exact response-file contents.

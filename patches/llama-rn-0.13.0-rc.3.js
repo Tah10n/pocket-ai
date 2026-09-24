@@ -263,7 +263,12 @@ const SOURCE_PATCHES = [
   ], intermediates: [{ sha256: '0074a4cddbe0f46352067174cdc89362dde6512625eea29a0fcd3b444d648f50', replacements: [["    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'", "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'\n    # Resolve quoted runtime headers before dependency header maps.\n    header_search_paths.drop(1).each do |include_path|\n      base_compiler_flags += \" -iquote #{include_path}\"\n    end"]] }] },
   { source: 'cpp/common/jinja/value.cpp', beforeSha256: '9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411', afterSha256: '48c3eaad040ccdc3cbc278b5648aa79a25ae83656a483f56269470a5ded5f22f', replacements: [["#include \"json.h\"", "#include \"../json.h\""]] },
   { source: 'cpp/common/jinja/caps.cpp', beforeSha256: 'cc497360610e81359fa843656fa8352a917dd37926737cfc9d888cf6f7d1baa0', afterSha256: '329b9a013dba2d19f974a4af1e8733c0c91de1dfa942bf733aae9f7ad7b6bfe1', replacements: [["#include \"json.h\"", "#include \"../json.h\""]] },
-  { source: 'cpp/jsi/JSINativeHeaders.h', beforeSha256: '100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053', afterSha256: '2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d', replacements: [["#include \"json.h\"", "#include \"../common/json.h\""]] },
+  {"source": "cpp/jsi/JSINativeHeaders.h", "beforeSha256": "100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053", "afterSha256": "1915df1b29ee735d8344a8bd9b974dc6dbb1dba974abaacb6d92dfafe4643ba4", "replacements": [["#include \"json.h\"", "#include \"../common/json.h\""], ["#include \"common.h\"", "#include \"../common/common.h\""]], "intermediates": [{"sha256": "2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d", "replacements": [["#include \"common.h\"", "#include \"../common/common.h\""]]}]},
+  {"source": "cpp/rn-completion.h", "beforeSha256": "a827a43b7452ecb6130f821fc20dc1c3c30bd9c8c3fa7dfc450bc8cae185b182", "afterSha256": "bdc0fe895be630ab6cb301d08f66bae4287dd3b9d3417662d270e86bcf280588", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
+  {"source": "cpp/rn-llama.h", "beforeSha256": "2ede73fed4a0a28a697001133ed67ad51525a8059f23582867138ba6c6971105", "afterSha256": "2094b3bc9350c7138dbd7d2152b44580700293ab0146496d081a9bafe8ee392d", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
+  {"source": "cpp/rn-slot-manager.h", "beforeSha256": "76b457c59ae574134094e203c38d411f1dc7243b6616c4fd13d32d3c80b88dce", "afterSha256": "882150b9bb69c8b4cb4da71b1433b42adf161caa256e6c7c4dc058731ead2c3e", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
+  {"source": "cpp/rn-slot.h", "beforeSha256": "6c44d5d937212addb9e31ec629953937e77be26ba0427047190992e2bf2794d2", "afterSha256": "cd89f60afb06a0c819fac99f8f8a036c83826484e2a03276d7b151848151c7a0", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
+  {"source": "cpp/rn-tts.cpp", "beforeSha256": "2e02fd6d1acaeac7a7f321baeb6ea99dac4503ba78b70439ee2c9de8effe488c", "afterSha256": "147e5c43104da96b104cad76841c2639338b33628d5bdad74696b84fc9be541f", "replacements": [["#include \"common.h\"", "#include \"common/common.h\""]]},
 ];
 // JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.
@@ -272,7 +277,6 @@ const BUILD_FILES = Object.freeze({
   'cpp/common/sampling.h': '92a10833fc729a5a8eff065d269a88ceb21b81d77c2eba5942a3450fe1a0d2d1',
   'cpp/llama-sampler.cpp': '38999ce7ce5fdba6a9cd29b775a81cee918ab6d1a3e0f0d71d35c9158d629c0f',
   'android/src/main/CMakeLists.txt': '286375df7159c18c674e30ef8e324c964c4d7304f451f07abffa4a2f279eb2b6',
-  'cpp/rn-completion.h': 'a827a43b7452ecb6130f821fc20dc1c3c30bd9c8c3fa7dfc450bc8cae185b182',
   'android/build.gradle': '841f2514b2f6540a6f118b9fc024690ea238e17b23151c421a52a3105fb16583',
   'android/src/main/rnllama/CMakeLists.txt': 'f58142de643017b3145767553add3353a411a9ae2accfff1cc0bc6cc6a710364',
   'cpp/common/jinja/runtime.h': '89c8efc60ad287f49089fbcf7f028d1b88b32d41a2e859f1b68af5a574816a3f',

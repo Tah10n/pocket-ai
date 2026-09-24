@@ -457,6 +457,36 @@ describe('Android build content provenance', () => {
     }
   });
 
+  it('hashes the imported Stage 3 fixture without recursively including validation documents', () => {
+    const projectRoot = createProject();
+    const fixtureRelativePath = 'docs/validation/llama-rn-stage3/lora-fixture.json';
+    const fixturePath = path.join(projectRoot, fixtureRelativePath);
+    const reportPath = path.join(path.dirname(fixturePath), 'acceptance.md');
+    const collect = (options = {}) => collectBuildProvenance(projectRoot, {
+      variant: 'debug', abi: 'x86_64', toolchains, git, ...options,
+    });
+    try {
+      fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
+      fs.writeFileSync(fixturePath, '{"probabilityProbe":{"nProbs":10}}');
+      fs.writeFileSync(reportPath, 'First acceptance report');
+      const debug = collect();
+      const embedded = collect({ includeBundleInputs: true });
+      const release = collect({ variant: 'release' });
+      expect(embedded.entries.some(entry => entry.path === fixtureRelativePath)).toBe(true);
+      expect(release.entries.some(entry => entry.path === fixtureRelativePath)).toBe(true);
+      expect(debug.entries.some(entry => entry.path === fixtureRelativePath)).toBe(false);
+      expect(embedded.entries.some(entry => entry.path.endsWith('acceptance.md'))).toBe(false);
+      fs.writeFileSync(reportPath, 'Updated acceptance report');
+      expect(collect({ includeBundleInputs: true }).digest).toBe(embedded.digest);
+      fs.writeFileSync(fixturePath, '{"probabilityProbe":{"nProbs":5}}');
+      expect(collect({ includeBundleInputs: true }).digest).not.toBe(embedded.digest);
+      expect(collect({ variant: 'release' }).digest).not.toBe(release.digest);
+      expect(collect().digest).toBe(debug.digest);
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
   it('binds the manifest digest to variant, ABI, toolchains, git state, and embedded sources', () => {
     const projectRoot = createProject();
     fs.mkdirSync(path.join(projectRoot, 'src'), { recursive: true });

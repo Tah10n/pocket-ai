@@ -11,6 +11,8 @@ function copyLlamaPatchSources(root, { pristine = false } = {}) {
     let text = fs.readFileSync(path.join(installed, relative), 'utf8').replace(/\r\n/gu, '\n');
     const patch = SOURCE_PATCHES.find((entry) => entry.source === relative);
     if (patch) {
+      const intermediate = patch.intermediates?.find(entry => entry.sha256 === hashSource(text));
+      if (intermediate) text = applyReplacements(text, intermediate.replacements);
       if (hashSource(text) !== patch.beforeSha256) {
         for (const [before, after] of [...patch.replacements].reverse()) text = text.replace(after, before);
       }

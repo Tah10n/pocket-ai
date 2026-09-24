@@ -351,6 +351,47 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(fs.readFileSync(sourcePath)).toEqual(before);
   });
 
+  it('gives only source-build quoted includes priority over dependency header maps', () => {
+    patchLlamaBridge(root);
+    const podspec = fs.readFileSync(path.join(root, 'node_modules/llama.rn/llama-rn.podspec'), 'utf8');
+    const branch = podspec.split('if ENV["RNLLAMA_BUILD_FROM_SOURCE"] == "1"')[1].split('  else');
+    expect(branch[0]).toContain('header_search_paths.drop(1).each do |include_path|\n      base_compiler_flags += " -iquote #{include_path}"\n    end');
+    expect(branch[1]).not.toContain('-iquote');
+    expect(podspec).toContain("header_search_paths = ['$(inherited)']");
+    expect(branch[0].indexOf('cpp/tools/mtmd')).toBeLessThan(branch[0].indexOf('header_search_paths.drop(1)'));
+  });
+
+  it('upgrades the exact earlier podspec correction without changing native source bytes', () => {
+    patchLlamaBridge(root);
+    const patch = SOURCE_PATCHES.find(entry => entry.source === 'llama-rn.podspec');
+    const file = path.join(root, 'node_modules/llama.rn', patch.source);
+    let previous = fs.readFileSync(file, 'utf8');
+    for (const [before, after] of patch.intermediates[0].replacements) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(patch.intermediates[0].sha256);
+    fs.writeFileSync(file, previous);
+    const native = fs.readFileSync(sourcePath);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/u);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
+    expect(fs.readFileSync(sourcePath)).toEqual(native);
+  });
+
+  it('normalizes the known intermediate podspec when copying pristine test fixtures', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === 'llama-rn.podspec');
+    const original = fs.readFileSync(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8');
+    let intermediate = applyReplacements(original, patch.replacements);
+    for (const [before, after] of patch.intermediates[0].replacements) intermediate = intermediate.replace(after, before);
+    const installed = path.resolve(__dirname, '../../node_modules/llama.rn', patch.source);
+    const read = fs.readFileSync;
+    const spy = jest.spyOn(fs, 'readFileSync').mockImplementation((file, ...args) => path.resolve(String(file)) === installed ? intermediate : read(file, ...args));
+    try {
+      copyLlamaPatchSources(root, { pristine: true });
+      expect(hashSource(read(path.join(root, 'node_modules/llama.rn', patch.source), 'utf8'))).toBe(patch.beforeSha256);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('is installed by the package hook and participates in existing native provenance', () => {
     const projectRoot = path.resolve(__dirname, '../..');
     const relative = 'patches/llama-rn-0.13.0-rc.3.js';

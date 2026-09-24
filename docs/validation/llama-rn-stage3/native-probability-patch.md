@@ -68,7 +68,7 @@ The formatter core also uses static error categories instead of template excepti
 
 The seventh guarded correction narrows iOS sources to the package root and compiles C/C++/Objective-C/assembly files without exporting internal C++ headers. Internal headers remain preserved on disk; explicit JSON, CPU, codec and mtmd search paths resolve the source-build includes without relying on flattened header maps. Existing exclusions, Metal assembly inputs, backend flags and the prebuilt-framework branch are unchanged. This prevents CocoaPods from copying bundled XCFramework headers and flattening unrelated `common.h` files into the same framework output.
 
-Original podspec SHA-256: `af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55`. Corrected SHA-256: `0074a4cddbe0f46352067174cdc89362dde6512625eea29a0fcd3b444d648f50`. The first iOS compile attempt failed with duplicate header output commands before compilation. Source-contract tests cover the corrected inclusion boundary; they do not establish a successful iOS build or inference.
+Original podspec SHA-256: `af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55`. Corrected SHA-256: `e539fba083a63e6edda56d27780c7d14194542cabb3b99919a4fe81a609adbff`. The first iOS compile attempt failed with duplicate header output commands before compilation. Source-contract tests cover the corrected inclusion boundary; they do not establish a successful iOS build or inference.
 
 ## Jinja JSON header resolution
 
@@ -77,3 +77,9 @@ The two Jinja translation units that import the common JSON API now use `../json
 - `cpp/common/jinja/value.cpp`: original SHA-256 `9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411`; corrected `48c3eaad040ccdc3cbc278b5648aa79a25ae83656a483f56269470a5ded5f22f`.
 - `cpp/common/jinja/caps.cpp`: original SHA-256 `cc497360610e81359fa843656fa8352a917dd37926737cfc9d888cf6f7d1baa0`; corrected `329b9a013dba2d19f974a4af1e8733c0c91de1dfa942bf733aae9f7ad7b6bfe1`.
 - `cpp/jsi/JSINativeHeaders.h`: original SHA-256 `100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053`; corrected `2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d`.
+
+## Quoted headers before dependency header maps
+
+The iOS source-build pod adds `-iquote` for the same explicit runtime header directories, in their existing order, before ordinary dependency header maps. Local headers retain precedence; angle/framework imports and prebuilt mode are unchanged. This fixes the confirmed `rn-slot.h` to Reanimated `common.h` collision without exporting internal headers. The patch also accepts the exact prior corrected podspec fingerprint when upgrading an existing installation.
+
+A small Clang 18.0.2 preprocessing fixture reproduced a conflicting header map with paths containing spaces: ordinary `-I` lookup selected the wrong header and failed; the same command with `-iquote` selected the intended runtime header and passed. This checks compiler search semantics, not Xcode application compilation or iOS inference. See [Clang's quote search group](https://clang.llvm.org/doxygen/HeaderSearchOptions_8h_source.html) and [the `-iquote` option](https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-iquote).

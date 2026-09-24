@@ -247,20 +247,20 @@ const SOURCE_PATCHES = [
   { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, replacements: COMPLETION_REPLACEMENTS },
   { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, replacements: SAMPLING_REPLACEMENTS },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
-  { source: 'llama-rn.podspec', beforeSha256: 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55', afterSha256: '0074a4cddbe0f46352067174cdc89362dde6512625eea29a0fcd3b444d648f50', replacements: [
+  { source: 'llama-rn.podspec', beforeSha256: 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55', afterSha256: 'e539fba083a63e6edda56d27780c7d14194542cabb3b99919a4fe81a609adbff', replacements: [
     [
       "s.source_files = \"ios/**/*.{h,m,mm}\", \"cpp/**/*.{h,cpp,hpp,c,m,mm,s}\"",
       "s.source_files = \"ios/*.{h,m,mm}\", \"cpp/**/*.{cpp,c,m,mm,s}\""
     ],
     [
       "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/hash\"'",
-      "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/hash\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/nlohmann\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/ggml-cpu\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/codec/include\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/codec/common\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'"
+      "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/hash\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/nlohmann\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/ggml-cpu\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/codec/include\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/codec/common\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'\n    # Resolve quoted runtime headers before dependency header maps.\n    header_search_paths.drop(1).each do |include_path|\n      base_compiler_flags += \" -iquote #{include_path}\"\n    end"
     ],
     [
       "# Header-only JSON dependency needed by JSI when using the prebuilt xcframework\n  s.preserve_paths = \"cpp/nlohmann/**/*.{h,hpp}\"",
       "# Keep internal headers for compilation without exporting duplicate basenames.\n  s.preserve_paths = \"cpp/**/*.{h,hpp}\""
     ]
-  ] },
+  ], intermediates: [{ sha256: '0074a4cddbe0f46352067174cdc89362dde6512625eea29a0fcd3b444d648f50', replacements: [["    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'", "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'\n    # Resolve quoted runtime headers before dependency header maps.\n    header_search_paths.drop(1).each do |include_path|\n      base_compiler_flags += \" -iquote #{include_path}\"\n    end"]] }] },
   { source: 'cpp/common/jinja/value.cpp', beforeSha256: '9e9ee66217afe97e555f9423be6152fd69f8c1776740f002a9cd12681a76a411', afterSha256: '48c3eaad040ccdc3cbc278b5648aa79a25ae83656a483f56269470a5ded5f22f', replacements: [["#include \"json.h\"", "#include \"../json.h\""]] },
   { source: 'cpp/common/jinja/caps.cpp', beforeSha256: 'cc497360610e81359fa843656fa8352a917dd37926737cfc9d888cf6f7d1baa0', afterSha256: '329b9a013dba2d19f974a4af1e8733c0c91de1dfa942bf733aae9f7ad7b6bfe1', replacements: [["#include \"json.h\"", "#include \"../json.h\""]] },
   { source: 'cpp/jsi/JSINativeHeaders.h', beforeSha256: '100fe22ecc52e4979d370cfb62986a2fd2b0abe6b9b98cf594610b9dad94e053', afterSha256: '2a79c573ef863ed015ed35413ee44618486aa714fbafd2324913f7000fc7659d', replacements: [["#include \"json.h\"", "#include \"../common/json.h\""]] },

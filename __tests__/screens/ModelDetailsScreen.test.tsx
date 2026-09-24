@@ -409,6 +409,7 @@ jest.mock('../../src/services/StorageManagerService', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  sanitizeModelLoadParameters: jest.requireActual('../../src/services/SettingsStore').sanitizeModelLoadParameters,
   DEFAULT_MODEL_LOAD_PARAMETERS: {
     contextSize: 4096,
     gpuLayers: null,

@@ -575,6 +575,40 @@ describe('LLMEngineService', () => {
     expect(completion.mock.calls.at(-1)?.[0].grammar).toBeUndefined();
   });
 
+  it('rejects the unsupported llguidance directive before native completion and permits the next request', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'Private request' }],
+      generation: { output: { mode: 'gbnf', grammar: '%llguidance' } } })).rejects.toThrow();
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'Next request' }] }))
+      .resolves.toEqual({ text: 'Hello back' });
+    expect(completion).toHaveBeenCalledTimes(1);
+    expect(completion.mock.calls[0][0].grammar).toBeUndefined();
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'Literal request' }],
+      generation: { output: { mode: 'gbnf', grammar: 'root ::= "%llguidance"' } } });
+    expect(completion.mock.calls[1][0].grammar).toBe('root ::= "%llguidance"');
+  });
+
+  it('keeps rejected llguidance grammar and prompt out of technical logs and performance exports', async () => {
+    const prompt = 'PRIVATE_GRAMMAR_PROMPT_SENTINEL';
+    const grammar = '%llguidance\nPRIVATE_GRAMMAR_BODY_SENTINEL';
+    performanceMonitor.setEnabled(true);
+    try {
+      await llmEngineService.load('test/model');
+      await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: prompt }],
+        generation: { output: { mode: 'gbnf', grammar } } })).rejects.toThrow('Invalid structured output configuration');
+      const technicalOutput = JSON.stringify([
+        consoleWarnSpy.mock.calls, consoleErrorSpy.mock.calls, buildPerformanceExportJson({ pretty: false }),
+      ]);
+      expect(technicalOutput).not.toContain(prompt);
+      expect(technicalOutput).not.toContain('PRIVATE_GRAMMAR_BODY_SENTINEL');
+    } finally {
+      performanceMonitor.setEnabled(false);
+    }
+  });
+
   it('rejects invalid schema and conflicting EOS suppression before touching native', async () => {
     await llmEngineService.load('test/model');
     const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;

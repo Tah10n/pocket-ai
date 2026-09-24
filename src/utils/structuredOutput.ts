@@ -300,6 +300,8 @@ export function prepareStructuredOutput(options: StructuredOutputOptions = { mod
     case 'gbnf':
       if (typeof options.grammar !== 'string' || options.grammar.length > STRUCTURED_OUTPUT_LIMITS.grammarChars) fail('size');
       if (!options.grammar.trim()) fail('syntax');
+      // Match the pinned native backend selector, not text inside GBNF terminals.
+      if (options.grammar.startsWith('%llguidance')) fail('unsupported');
       return { mode: 'gbnf', grammar: options.grammar };
     default: return fail('shape');
   }

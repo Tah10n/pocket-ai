@@ -221,6 +221,17 @@ describe('AdvancedGenerationControls', () => {
     edit(view, 'kwargs', '{"nested": {"value": 1}}');
     expect(view.onChange).not.toHaveBeenCalled();
   });
+  it('rejects the unsupported llguidance directive in the editor but accepts a GBNF string terminal', () => {
+    const view = setup({ output: { mode: 'gbnf', grammar: 'root ::= "yes"' } });
+    fireEvent.press(view.getByTestId('generation-section-output'));
+    edit(view, 'grammar', '%llguidance');
+    expect(view.onChange).not.toHaveBeenCalled();
+    expect(view.getByRole('alert')).toBeTruthy();
+    edit(view, 'grammar', 'root ::= "%llguidance"');
+    expect(view.onChange).toHaveBeenLastCalledWith({ output: { mode: 'gbnf', grammar: 'root ::= "%llguidance"' } });
+    expect(view.queryByRole('alert')).toBeNull();
+  });
+
   it('validates schema drafts locally and switching to text clears the constraint', () => {
     const view = setup({ output: { mode: 'json_schema', schema: '{"type":"object"}' } });
     fireEvent.press(view.getByTestId('generation-section-output'));

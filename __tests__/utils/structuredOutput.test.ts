@@ -8,6 +8,17 @@ const prepare = (schema: object) => prepareStructuredOutput({ mode: 'json_schema
 const check = (schema: object, value: unknown) => validateStructuredOutputResult(prepare(schema), { content: JSON.stringify(value) });
 
 describe('structured output schema subset', () => {
+  it.each(['%llguidance', '%llguidance {}', '%llguidance\nstart: "secret"'])
+  ('rejects unsupported backend directives before native (%#)', (grammar) => {
+    expect(() => prepareStructuredOutput({ mode: 'gbnf', grammar }))
+      .toThrow(new StructuredOutputConfigurationError('unsupported'));
+  });
+
+  it('preserves a GBNF terminal that contains the backend name', () => {
+    const grammar = 'root ::= "%llguidance"';
+    expect(prepareStructuredOutput({ mode: 'gbnf', grammar })).toEqual({ mode: 'gbnf', grammar });
+  });
+
   const schema = {
     $schema: 'http://json-schema.org/draft-07/schema#',
     type: 'object',

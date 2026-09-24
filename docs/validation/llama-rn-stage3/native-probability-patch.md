@@ -99,3 +99,25 @@ The next iOS attempt passed compilation and failed at x86_64 linking: `lm_ggml_v
 Four complete files (ARM/x86 `quants.c` and `repack.cpp`) now have outer compile-target guards matching the architecture macros in `arch-fallback.h`, also excluding `LM_GGML_CPU_GENERIC`. Their original bodies are unchanged; generic aliases, quantization algorithms, CPU feature files and backend settings are unchanged. Both ARM and x86 remain supported. Exact source fingerprints, byte-preservation tests and drift rejection cover these guards. This correction requires a new iOS build; the failed link is not acceptance evidence.
 
 A Clang 18.0.2 check compiled the complete math translation units for Android ARM64 and x86_64. Matching implementations had identical preprocessed output after accounting for the wrapper line offset and outer blank lines; other-architecture and generic-mode guarded files were empty. Relocatable linking with generic `quants.c` succeeded for each target, with the public Q2 symbol defined and no unresolved Q2 generic reference. This is compiler/linker evidence for these units, not an Apple SDK application build or iOS inference.
+
+## Unsupported grammar backend recovery
+
+The application now rejects a leading `%llguidance` selector in the shared
+`prepareStructuredOutput` boundary before native formatting or completion. The
+same validation is used by the editor, saved configurations and regeneration.
+A GBNF string terminal such as `root ::= "%llguidance"` remains valid input.
+
+The pinned native disabled-backend branch previously called `LM_GGML_ABORT`.
+The source patch replaces only that branch with a static `std::runtime_error`:
+`Unsupported grammar backend: llguidance is not enabled`. Existing sampler
+ownership cleanup remains active during exception unwinding. No backend is enabled
+and no output constraint is removed.
+
+The new `cpp/common/sampling.cpp` SHA-256 is
+`d68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2`.
+The earlier `942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c`
+source is accepted only as an explicitly fingerprinted migration input; unknown
+sources still fail before writes. Postinstall is idempotent. Build provenance
+includes the patch file, so this correction requires a newly built binary.
+Historical APK identities and results above continue to describe their original
+binaries; they do not verify this new branch correction.

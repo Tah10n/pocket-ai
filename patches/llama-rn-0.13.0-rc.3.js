@@ -144,8 +144,11 @@ const COMPLETION_REPLACEMENTS = [
 ];
 const SAMPLING_SOURCE = 'cpp/common/sampling.cpp';
 const SAMPLING_BEFORE_SHA256 = 'e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5';
-const SAMPLING_AFTER_SHA256 = '942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c';
+const SAMPLING_AFTER_SHA256 = 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2';
+const SAMPLING_PREVIOUS_SHA256 = '942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c';
+const LLGUIDANCE_REPLACEMENTS = [["        LM_GGML_ABORT(\"llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled\");", "        throw std::runtime_error(\"Unsupported grammar backend: llguidance is not enabled\");"]];
 const SAMPLING_REPLACEMENTS = [
+  ...LLGUIDANCE_REPLACEMENTS,
   [
     `    llama_sampler * grmr = nullptr;
     llama_sampler * rbudget = nullptr;
@@ -245,7 +248,7 @@ const SOURCE_PATCHES = [
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
   { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, replacements: COMPLETION_REPLACEMENTS },
-  { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, replacements: SAMPLING_REPLACEMENTS },
+  { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: LLGUIDANCE_REPLACEMENTS }], replacements: SAMPLING_REPLACEMENTS },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
   { source: 'llama-rn.podspec', beforeSha256: 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55', afterSha256: 'e539fba083a63e6edda56d27780c7d14194542cabb3b99919a4fe81a609adbff', replacements: [
     [

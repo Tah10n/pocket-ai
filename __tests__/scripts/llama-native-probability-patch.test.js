@@ -162,6 +162,42 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(cmake).toContain('${COMMON_FILES}');
   });
 
+  it('migrates only the fingerprinted previous sampler patch and remains idempotent', () => {
+    patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn', SAMPLING_SOURCE);
+    const patch = SOURCE_PATCHES.find(entry => entry.source === SAMPLING_SOURCE);
+    const previous = patch.intermediates[0];
+    let source = fs.readFileSync(file, 'utf8');
+    for (const [before, after] of previous.replacements) source = source.replace(after, before);
+    expect(hashSource(source)).toBe(previous.sha256);
+    fs.writeFileSync(file, source);
+    expect(() => patchLlamaBridge(root, { check: true })).toThrow(/patch is missing/);
+    expect(patchLlamaBridge(root).status).toBe('applied');
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(SAMPLING_AFTER_SHA256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it.each(['pristine', 'applied'])('rejects unknown %s sampler source without partial writes', state => {
+    if (state === 'applied') patchLlamaBridge(root);
+    const file = path.join(root, 'node_modules/llama.rn', SAMPLING_SOURCE);
+    fs.appendFileSync(file, '\n// unknown sampler source\n');
+    const sampler = fs.readFileSync(file);
+    const bridge = fs.readFileSync(sourcePath);
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/);
+    expect(fs.readFileSync(file)).toEqual(sampler);
+    expect(fs.readFileSync(sourcePath)).toEqual(bridge);
+  });
+
+  it('rejects disabled llguidance with a recoverable private error under sampler ownership', () => {
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn', SAMPLING_SOURCE), 'utf8');
+    const branch = source.slice(source.indexOf('if (grammar_str.compare(0, 11, "%llguidance")'), source.indexOf('#endif // LLAMA_USE_LLGUIDANCE'));
+    expect(branch).not.toContain('LM_GGML_ABORT');
+    expect(branch).toContain('throw std::runtime_error("Unsupported grammar backend: llguidance is not enabled");');
+    expect(source.indexOf('} guard {')).toBeLessThan(source.indexOf('Unsupported grammar backend:'));
+    expect(branch.slice(branch.indexOf('#else'))).not.toContain('grammar_str.c_str()');
+    expect(branch).not.toContain('generation_prompt');
+  });
   it('clears the released completion owner before the next initialization can throw', () => {
     patchLlamaBridge(root);
     const source = fs.readFileSync(path.join(root, 'node_modules/llama.rn', COMPLETION_SOURCE), 'utf8');

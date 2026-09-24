@@ -831,6 +831,49 @@ describe('useChatSession', () => {
     expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.content).toBe('{"ok":');
   });
 
+  it.each(['append', 'regenerate'] as const)('rejects hydrated unsupported llguidance on %s and permits the next ordinary request', async operation => {
+    const getSession = renderHookHarness();
+    await act(async () => { await getSession()?.appendUserMessage('Original question'); });
+    const original = useChatStore.getState().getActiveThread()!;
+    act(() => {
+      useChatStore.getState().updateThreadParamsSnapshot(original.id, {
+        ...original.paramsSnapshot, output: { mode: 'gbnf', grammar: '%llguidance' },
+      });
+      flushPendingChatPersistenceWrites('background');
+    });
+    await act(async () => {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      useChatStore.getState().setActiveThread(original.id);
+    });
+    const hydrated = useChatStore.getState().getActiveThread()!;
+    expect(hydrated.paramsSnapshot.output).toEqual({ mode: 'gbnf', grammar: '%llguidance' });
+    (llmEngineService.chatCompletion as jest.Mock).mockClear();
+    await act(async () => {
+      const request = operation === 'regenerate'
+        ? getSession()!.regenerateLastResponse()
+        : getSession()!.appendUserMessage('Rejected question');
+      await expect(request).rejects.toThrow('Invalid structured output configuration');
+    });
+    // The hook invokes the real shared preflight before the mocked engine boundary.
+    expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
+    const afterRejection = useChatStore.getState().getActiveThread()!;
+    expect(afterRejection.messages.slice(0, hydrated.messages.length)).toEqual(hydrated.messages);
+    if (operation === 'append') {
+      expect(afterRejection.messages.at(-1)).toMatchObject({
+        state: 'error', errorMessage: 'Invalid structured output configuration (unsupported).',
+      });
+    }
+    act(() => {
+      useChatStore.getState().updateThreadParamsSnapshot(original.id, {
+        ...hydrated.paramsSnapshot, output: { mode: 'text' },
+      });
+    });
+    await act(async () => { await getSession()?.appendUserMessage('Next ordinary request'); });
+    expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toMatchObject({ content: 'Hello back', state: 'complete' });
+  });
+
   it('uses each chat output snapshot after changing defaults and switching back to regenerate', async () => {
     const base = getGenerationParametersForModel('author/model-q4');
     (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...base, output: { mode: 'json_object' }, stop: [] });

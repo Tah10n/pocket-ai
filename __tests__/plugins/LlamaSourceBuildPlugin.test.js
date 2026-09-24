@@ -1,4 +1,4 @@
-const { ensureGradleSourceBuild, ensurePodfileSourceBuild, ensureAndroidHexagonGuard, HEXAGON_GUARD, PODFILE_PREFIX } = require('../../plugins/withLlamaSourceBuild')._internal;
+const { ensureGradleSourceBuild, ensurePodfileSourceBuild, assertPodfileSourceBuild, ensureAndroidHexagonGuard, HEXAGON_GUARD, PODFILE_PREFIX } = require('../../plugins/withLlamaSourceBuild')._internal;
 
 describe('pinned llama.rn source build', () => {
   it('sets the real Android property and removes conflicting duplicate values', () => {
@@ -31,6 +31,31 @@ describe('pinned llama.rn source build', () => {
     expect(HEXAGON_GUARD).toContain('!new File(System.getenv("HEXAGON_SDK_ROOT")).isAbsolute()');
     expect(HEXAGON_GUARD).toContain('!new File(System.getenv("HEXAGON_TOOLS_ROOT")).isAbsolute()');
     expect(HEXAGON_GUARD.indexOf('!System.getenv("HEXAGON_SDK_ROOT")')).toBeLessThan(HEXAGON_GUARD.indexOf('def pocketLlamaSdkCheck = exec'));
+  });
+
+  it.each(['\n', '\r\n'])('accepts the expo-router preamble and reapplies idempotently (%j)', newline => {
+    const router = "# Set by expo-router. This enables Fabric-only features from react-native-screens\nENV['RNS_GAMMA_ENABLED'] ||= '1'\n";
+    const body = "require 'expo/scripts/autolinking'\n";
+    const generated = (router + PODFILE_PREFIX + body).replace(/\n/gu, newline);
+    expect(() => assertPodfileSourceBuild(generated)).not.toThrow();
+    const reapplied = ensurePodfileSourceBuild(generated);
+    expect(reapplied.replace(/\r\n/gu, '\n')).toBe(PODFILE_PREFIX + router + body);
+    expect(ensurePodfileSourceBuild(reapplied)).toBe(reapplied);
+  });
+
+  it.each([
+    "require 'expo/scripts/autolinking'\n",
+    "target 'PocketAI' do\n",
+    "ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '0'\n",
+    "ENV['RNS_GAMMA_ENABLED'] ||= compute_value()\n",
+  ])('rejects a guard after executable or conflicting Podfile content: %j', preamble => {
+    expect(() => assertPodfileSourceBuild(preamble + PODFILE_PREFIX)).toThrow(/core from source/);
+  });
+
+  it('rejects missing, duplicate and conflicting source-build guards', () => {
+    expect(() => assertPodfileSourceBuild("require 'json'\n")).toThrow(/core from source/);
+    expect(() => assertPodfileSourceBuild(PODFILE_PREFIX + PODFILE_PREFIX)).toThrow(/Conflicting/);
+    expect(() => assertPodfileSourceBuild(PODFILE_PREFIX + "ENV['RNLLAMA_BUILD_FROM_SOURCE'] = '0'\n")).toThrow(/Conflicting/);
   });
 
   it('rejects a later Podfile assignment which could silently select the unpatched core', () => {

@@ -50,12 +50,27 @@ function ensureGradleSourceBuild(properties) {
 
 function ensurePodfileSourceBuild(contents) {
   const normalized = contents.replace(/\r\n/gu, '\n');
-  const body = normalized.startsWith(PODFILE_PREFIX) ? normalized.slice(PODFILE_PREFIX.length) : normalized;
+  const body = normalized.replace(PODFILE_PREFIX, '');
   if (/ENV\[\s*['"]RNLLAMA_BUILD_FROM_SOURCE['"]\s*\]\s*(?:\|\|)?=/u.test(body)) {
     throw new Error('Conflicting llama.rn source-build assignment in Podfile.');
   }
   const result = PODFILE_PREFIX + body;
   return contents.includes('\r\n') ? result.replace(/\n/gu, '\r\n') : result;
+}
+
+function assertPodfileSourceBuild(contents) {
+  const normalized = contents.replace(/\r\n/gu, '\n');
+  const index = normalized.indexOf(PODFILE_PREFIX);
+  // expo-router prepends this literal feature switch after our Podfile mod.
+  // Allow its harmless preamble, but never accept the guard after Ruby/Pods evaluation.
+  const preamble = index < 0 ? [] : normalized.slice(0, index).split('\n');
+  const safePreamble = preamble.every(line => {
+    const value = line.trim();
+    return !value || value.startsWith('#')
+      || /^ENV\[['"]RNS_GAMMA_ENABLED['"]\]\s*\|\|=\s*['"]1['"]$/u.test(value);
+  });
+  if (index < 0 || !safePreamble) throw new Error('iOS must compile the corrected llama.rn core from source before pod resolution.');
+  ensurePodfileSourceBuild(normalized);
 }
 
 module.exports = function withLlamaSourceBuild(config) {
@@ -73,4 +88,4 @@ module.exports = function withLlamaSourceBuild(config) {
   });
 };
 
-module.exports._internal = { PROPERTY, PODFILE_PREFIX, HEXAGON_GUARD, ensureAndroidHexagonGuard, ensureGradleSourceBuild, ensurePodfileSourceBuild };
+module.exports._internal = { PROPERTY, PODFILE_PREFIX, HEXAGON_GUARD, ensureAndroidHexagonGuard, ensureGradleSourceBuild, ensurePodfileSourceBuild, assertPodfileSourceBuild };

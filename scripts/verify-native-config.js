@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { patchLlamaBridge } = require('../patches/llama-rn-0.13.0-rc.3');
 
-const { PODFILE_PREFIX, HEXAGON_GUARD, ensurePodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
+const { HEXAGON_GUARD, assertPodfileSourceBuild } = require('../plugins/withLlamaSourceBuild')._internal;
 const projectRoot = path.resolve(__dirname, '..');
 
 function readText(filePath, label) {
@@ -128,8 +128,7 @@ function assertLlamaNativeArtifacts(root = projectRoot) {
 
 function assertIosGeneratedConfig(root = projectRoot) {
   const podfile = readText(path.join(root, 'ios', 'Podfile'), 'Generated iOS Podfile').replace(/\r\n/gu, '\n');
-  if (!podfile.startsWith(PODFILE_PREFIX)) throw new Error('iOS must compile the corrected llama.rn core from source.');
-  ensurePodfileSourceBuild(podfile);
+  assertPodfileSourceBuild(podfile);
   const plist = readText(path.join(root, 'ios', 'pocketai', 'Info.plist'), 'Generated iOS Info.plist');
   const entitlements = readText(
     path.join(root, 'ios', 'pocketai', 'pocketai.entitlements'),

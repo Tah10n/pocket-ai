@@ -142,6 +142,21 @@ Stage 3 also carries `ropeFreqBase`, `ropeFreqScale`, `noExtraBufts`, `swaFull`,
 
 All advanced allocation settings participate in reload, last-good, autotune and calibration identities. Old successful profiles do not certify a new allocation. Applying the active profile reserves context ownership, confirms native initialization before persisting the request, and restores the previous complete effective profile on a settled failure. A changed chat/variant cancels restoration; uncertain native ownership cannot publish READY. Safe fallback retains requested/effective diagnostics.
 
+### Reset and partial changes
+
+`Reset all` replaces the complete load draft. After `Apply & reload` succeeds,
+advanced overrides (including independent K/V caches, RoPE, memory flags, MoE,
+speculative draft options and LoRA) are removed from the applied and saved profile.
+Changing a basic value after Reset retains that value without restoring old advanced
+options. Inactive models save the replacement for their next load. Reopening or
+restarting uses that confirmed profile.
+
+For the current chat, a confirmed Reset also clears its LoRA snapshot together with
+the model-default adapter configuration. Ordinary edits preserve the distinction
+between the chat's adapter snapshot and the model default. Other chats, other models
+and old message snapshots remain unchanged. A partial programmatic update preserves
+untouched fields; an explicit `undefined` clears an optional override. Failed or
+cancelled reloads do not persist the replacement.
 ### LoRA profiles
 
 The existing Resources card selects one or more installed `lora_adapter` artifacts and individual scales (-16..16, including 0), then explicitly applies or removes them. Selection, local download and native-confirmed application are separate states. No editor accepts filesystem paths. Resolver checks exact base/variant and artifact identities, managed paths, size, GGUF header, SHA-256 and architecture/adapter metadata; native loading remains the final tensor compatibility check.

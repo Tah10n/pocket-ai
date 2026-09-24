@@ -255,7 +255,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
       await mockLoadModel(modelId, options);
       if (!isCurrent()) throw new Error('Stale load profile selection');
       const { getModelLoadParametersForModel } = jest.requireActual('../../src/services/SettingsStore');
-      mockEffectiveLoadParams = { ...getModelLoadParametersForModel(modelId), ...options.loadParamsOverride };
+      mockEffectiveLoadParams = { ...(options.loadParamsMode === 'replace' ? getModelLoadParametersForModel(null) : getModelLoadParametersForModel(modelId)), ...options.loadParamsOverride };
       mockEngineState = { ...mockEngineState, activeModelId: modelId, status: 'ready' };
       return mockEffectiveLoadParams;
     },
@@ -5956,7 +5956,6 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: 12,
       kvCacheType: 'auto',
-      loraAdapters: [],
     });
   });
 
@@ -6119,7 +6118,6 @@ describe('ChatScreen', () => {
       contextSize: 4096,
       gpuLayers: 100,
       kvCacheType: 'auto',
-      loraAdapters: [],
     });
   });
 
@@ -6202,7 +6200,6 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: null,
       kvCacheType: 'auto',
-      loraAdapters: [],
     });
   });
 
@@ -6235,6 +6232,7 @@ describe('ChatScreen', () => {
 
     expect(mockLoadModel).toHaveBeenCalledWith('author/model-q4', {
       forceReload: true,
+      loadParamsMode: 'replace',
       loadParamsOverride: expect.objectContaining({
         contextSize: 8192,
         gpuLayers: null,
@@ -6317,6 +6315,7 @@ describe('ChatScreen', () => {
 
     expect(mockLoadModel).toHaveBeenNthCalledWith(1, 'author/model-q4', {
       forceReload: true,
+      loadParamsMode: 'replace',
       loadParamsOverride: expect.objectContaining({ mtpEnabled: false }),
     });
     expect(getSettings().modelLoadParamsByModelId['author/model-q4']?.mtpEnabled).toBeUndefined();
@@ -6327,6 +6326,7 @@ describe('ChatScreen', () => {
 
     expect(mockLoadModel).toHaveBeenNthCalledWith(2, 'author/model-q4', {
       forceReload: true,
+      loadParamsMode: 'replace',
       loadParamsOverride: expect.objectContaining({ mtpEnabled: false }),
     });
     expect(getSettings().modelLoadParamsByModelId['author/model-q4']?.mtpEnabled).toBe(false);
@@ -6380,6 +6380,7 @@ describe('ChatScreen', () => {
 
     expect(mockLoadModel).toHaveBeenNthCalledWith(1, 'author/model-q4', {
       forceReload: true,
+      loadParamsMode: 'replace',
       loadParamsOverride: expect.objectContaining({
         contextSize: 8192,
         gpuLayers: 6,
@@ -6425,8 +6426,7 @@ describe('ChatScreen', () => {
         contextSize: 8192,
         gpuLayers: 6,
         kvCacheType: 'f16',
-        loraAdapters: [],
-      });
+        });
     });
   });
 
@@ -6463,7 +6463,6 @@ describe('ChatScreen', () => {
       contextSize: 8192,
       gpuLayers: null,
       kvCacheType: 'auto',
-      loraAdapters: [],
     });
   });
 

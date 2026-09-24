@@ -42,6 +42,7 @@ import {
 } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import {
+  DEFAULT_MODEL_LOAD_PARAMETERS,
   getModelLoadParametersForModel,
   type ModelLoadParameters,
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
@@ -202,6 +203,8 @@ export interface LoadModelOptions {
   forceReload?: boolean;
   allowUnsafeMemoryLoad?: boolean;
   loadParamsOverride?: Partial<ModelLoadParameters>;
+  /** Replace the complete requested profile; omitted fields use runtime defaults. */
+  loadParamsMode?: 'patch' | 'replace';
   preferLastWorkingProfile?: boolean;
   /**
    * Explicit user retry from the separately named thinking-detection action.
@@ -3485,7 +3488,7 @@ class LLMEngineService {
       const allowUnsafeMemoryLoad = options?.allowUnsafeMemoryLoad === true;
       const persistedLoadParams = getModelLoadParametersForModel(modelId);
       const resolvedLoadParams = options?.loadParamsOverride
-        ? { ...persistedLoadParams, ...options.loadParamsOverride }
+        ? { ...(options.loadParamsMode === 'replace' ? DEFAULT_MODEL_LOAD_PARAMETERS : persistedLoadParams), ...options.loadParamsOverride }
         : persistedLoadParams;
       const advancedProfileChanged = this.requestedLoadParameters !== null
         && getAdvancedLoadProfileIdentity(resolvedLoadParams) !== getAdvancedLoadProfileIdentity(this.requestedLoadParameters);
@@ -3736,8 +3739,7 @@ class LLMEngineService {
         // Restore the actual loaded profile, including temporary CPU/context
         // overrides. Saved defaults can describe a different allocation.
         const previousLoadParams = previousModelId ? {
-          ...getModelLoadParametersForModel(previousModelId),
-          ...this.getEffectiveLoadParameters(),
+          ...(this.getEffectiveLoadParameters() ?? getModelLoadParametersForModel(previousModelId)),
           contextSize: this.activeContextSize,
           gpuLayers: this.initGpuLayers ?? this.activeGpuLayers,
           backendPolicy: this.activeBackendMode === 'unknown' ? this.effectiveBackendPolicy ?? undefined : this.activeBackendMode,
@@ -3807,7 +3809,7 @@ class LLMEngineService {
         if (previousModelId && selectionCurrent() && !this.orphanedContextReleaseError) {
           try {
             await this.loadWithProjectorResolutionOperationCache(previousModelId, {
-              loadParamsOverride: previousLoadParams,
+              loadParamsOverride: previousLoadParams, loadParamsMode: 'replace',
               preferLastWorkingProfile: true,
             }, new Map(), { lifecycleOwned: true });
             if (!selectionCurrent() && this.context) await this.unloadInternal();
@@ -4319,7 +4321,9 @@ class LLMEngineService {
         if (!selectionCurrent()) throw staleError();
         try {
           await this.loadWithProjectorResolutionOperationCache(modelId, {
-            ...options, forceReload: true, loadParamsOverride: { ...previous, ...options.loadParamsOverride },
+            ...options, forceReload: true, loadParamsMode: 'replace',
+            loadParamsOverride: options.loadParamsMode === 'replace'
+              ? options.loadParamsOverride : { ...previous, ...options.loadParamsOverride },
           }, new Map(), { lifecycleOwned: true });
         } catch (loadError) {
           if (this.orphanedContextReleaseError || this.orphanedContextReleasePromise) {
@@ -4331,7 +4335,7 @@ class LLMEngineService {
           }
           try {
             await this.loadWithProjectorResolutionOperationCache(modelId, {
-              forceReload: true, loadParamsOverride: previous, preferLastWorkingProfile: false,
+              forceReload: true, loadParamsOverride: previous, loadParamsMode: 'replace', preferLastWorkingProfile: false,
             }, new Map(), { lifecycleOwned: true });
           } catch {
             this.updateState({ ...this.state, status: EngineStatus.ERROR,
@@ -4448,7 +4452,7 @@ class LLMEngineService {
             await this.unloadInternal();
             if (isCurrent()) {
               await this.loadWithProjectorResolutionOperationCache(modelId, {
-                forceReload: true, loadParamsOverride: previousProfile, preferLastWorkingProfile: false,
+                forceReload: true, loadParamsOverride: previousProfile, loadParamsMode: 'replace', preferLastWorkingProfile: false,
               }, new Map(), { lifecycleOwned: true });
               if (!isCurrent() && this.context) await this.unloadInternal();
             }

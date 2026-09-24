@@ -1,4 +1,4 @@
-import type { ModelLoadParameters } from '../services/SettingsStore';
+import { sanitizeModelLoadParameters, type ModelLoadParameters } from '../services/SettingsStore';
 
 interface PersistedLoadProfileDiffOptions {
   draftContextSize: number;
@@ -42,4 +42,12 @@ export function hasPersistedLoadProfileChanges({
     || nextBackendPolicy !== persistedBackendPolicy
     || draftMtpEnabled !== persistedMtpEnabled
   );
+}
+
+/** Options outside the basic controls, including legacy thread/memory flags. */
+export function getExtendedLoadProfileIdentity(profile: Partial<ModelLoadParameters>): string {
+  return JSON.stringify(sanitizeModelLoadParameters({
+    ...profile, contextSize: undefined, gpuLayers: null, kvCacheType: 'auto',
+    backendPolicy: undefined, mtpEnabled: undefined,
+  }));
 }

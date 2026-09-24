@@ -722,6 +722,7 @@ export function getModelLoadParametersForModel(modelId: string | null | undefine
 export function updateModelLoadParametersForModel(
     modelId: string | null | undefined,
     partial: Partial<ModelLoadParameters>,
+    mode: 'patch' | 'replace' = 'patch',
 ) {
     const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
     if (!normalizedModelId) {
@@ -730,7 +731,7 @@ export function updateModelLoadParametersForModel(
 
     const currentSettings = getSettings();
     const nextParams = sanitizeModelLoadParameters({
-        ...getModelLoadParametersForModel(normalizedModelId),
+        ...(mode === 'replace' ? DEFAULT_MODEL_LOAD_PARAMETERS : getModelLoadParametersForModel(normalizedModelId)),
         ...partial,
     });
 

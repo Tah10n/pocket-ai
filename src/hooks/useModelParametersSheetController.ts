@@ -1,3 +1,5 @@
+import { useChatStore } from '@/store/chatStore';
+import { getThreadActiveModelId } from '@/types/chat';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 import DeviceInfo from 'react-native-device-info';
@@ -20,6 +22,7 @@ import {
   getSettings,
   resetGenerationParametersForModel,
   resetModelLoadParametersForModel,
+  sanitizeModelLoadParameters,
   subscribeSettings,
   updateGenerationParametersForModel,
   updateModelLoadParametersForModel,
@@ -30,7 +33,7 @@ import {
 import { EngineStatus, LifecycleStatus, type ModelMetadata, type ModelMetadataTrust } from '@/types/models';
 import { clampContextWindowTokens, resolveContextWindowCeiling } from '@/utils/contextWindow';
 import { resolveModelCapabilitySnapshot } from '@/utils/modelCapabilities';
-import { hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
+import { getExtendedLoadProfileIdentity, hasPersistedLoadProfileChanges } from '@/utils/modelLoadProfile';
 import { handleModelLoadMemoryPolicyError } from '@/utils/modelLoadMemoryPolicyPrompt';
 import {
   clampReasoningEffort,
@@ -38,7 +41,7 @@ import {
   resolveModelReasoningCapability,
 } from '@/utils/modelReasoningCapabilities';
 import { resolveKvCacheTypes } from '@/utils/kvCache';
-import { getAdvancedLoadProfileIdentity, getOptionalAdvancedLoadProfileIdentity, getLoraAdapterMemoryBytes } from '@/utils/advancedLoadProfile';
+import { getOptionalAdvancedLoadProfileIdentity, getLoraAdapterMemoryBytes } from '@/utils/advancedLoadProfile';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import {
   getConfiguredMtpDraftArtifact,
@@ -326,6 +329,7 @@ export function useModelParametersSheetController({
     () => normalizeReasoningPreference(defaultParams, reasoningCapability),
     [defaultParams, reasoningCapability],
   );
+  const resetLoadProfileRef = useRef(false);
   const currentLoadParams = useMemo(() => {
     void settingsRevision;
     return { ...getModelLoadParametersForModel(configurableModelId), ...(loraOverride !== undefined ? { loraAdapters: loraOverride } : {}) };
@@ -467,7 +471,7 @@ export function useModelParametersSheetController({
       persistedMtpEnabled,
       persistedLoadParams: normalizedPersistedLoadParams,
     })
-    || getAdvancedLoadProfileIdentity(draftLoadParams) !== getAdvancedLoadProfileIdentity(currentLoadParams)
+    || getExtendedLoadProfileIdentity(draftLoadParams) !== getExtendedLoadProfileIdentity(currentLoadParams)
     || isApplyingModelProfile
   );
   const canRunAutotune = Boolean(configurableModelId)
@@ -721,6 +725,7 @@ export function useModelParametersSheetController({
     const shouldInitializeDraft = loadDraftSeedRef.current !== seedKey;
 
     if (shouldInitializeDraft) {
+      resetLoadProfileRef.current = false;
       loadDraftSourceRef.current = {
         contextSize: 'current',
         gpuLayers: 'current',
@@ -817,6 +822,7 @@ export function useModelParametersSheetController({
     setDidSaveLoadProfile(false);
     setApplyingModelProfile(true);
     const selectionIsCurrent = captureModelProfileSelection(configurableModelId);
+    const resetLoadProfile = resetLoadProfileRef.current;
 
     try {
       const nextContextSize = clampContextWindowTokens(
@@ -852,7 +858,8 @@ export function useModelParametersSheetController({
         && nextKvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
         && (!mtpSupported || draftLoadParams.mtpEnabled === undefined)
         && normalizedNextBackendPolicy === undefined
-        && getAdvancedLoadProfileIdentity(draftLoadParams) === '{}';
+        && JSON.stringify(sanitizeModelLoadParameters({ ...draftLoadParams, gpuLayers: clampedNextGpuLayers }))
+          === JSON.stringify(sanitizeModelLoadParameters(DEFAULT_MODEL_LOAD_PARAMETERS));
       const nextLoadParams: ModelLoadParameters = {
         ...draftLoadParams,
         contextSize: nextContextSize,
@@ -872,10 +879,23 @@ export function useModelParametersSheetController({
         }
 
         didCommitLoadProfile = true;
-        if (isResetToDefaultProfile) {
+        if (isResetToDefaultProfile && (loraOverride === undefined || resetLoadProfile)) {
           resetModelLoadParametersForModel(configurableModelId);
         } else {
-          updateModelLoadParametersForModel(configurableModelId, nextLoadParams);
+          updateModelLoadParametersForModel(configurableModelId, {
+            ...nextLoadParams,
+            // A chat snapshot must not silently become the model default.
+            ...(loraOverride !== undefined && !resetLoadProfile
+              ? { loraAdapters: getModelLoadParametersForModel(configurableModelId).loraAdapters } : {}),
+          }, 'replace');
+        }
+        if (resetLoadProfile) {
+          const state = useChatStore.getState();
+          const thread = state.activeThreadId ? state.threads[state.activeThreadId] : undefined;
+          if (thread && getThreadActiveModelId(thread) === configurableModelId) {
+            state.updateThreadLoraSnapshot(thread.id, []);
+          }
+          resetLoadProfileRef.current = false;
         }
       };
 
@@ -890,6 +910,7 @@ export function useModelParametersSheetController({
         await applyActiveModelLoadProfile(configurableModelId, {
           forceReload: true,
           loadParamsOverride: nextLoadParams,
+          loadParamsMode: 'replace',
         }, selectionIsCurrent);
         commitLoadProfile();
 
@@ -958,7 +979,8 @@ export function useModelParametersSheetController({
         && nextLoadParams.kvCacheType === DEFAULT_MODEL_LOAD_PARAMETERS.kvCacheType
         && nextLoadParams.mtpEnabled === undefined
         && nextLoadParams.backendPolicy === undefined
-        && getAdvancedLoadProfileIdentity(nextLoadParams) === '{}';
+        && JSON.stringify(sanitizeModelLoadParameters(nextLoadParams))
+          === JSON.stringify(sanitizeModelLoadParameters(DEFAULT_MODEL_LOAD_PARAMETERS));
       let didCommitLoadProfile = false;
       const commitLoadProfile = () => {
         if (didCommitLoadProfile) {
@@ -970,15 +992,29 @@ export function useModelParametersSheetController({
         }
 
         didCommitLoadProfile = true;
-        if (shouldResetLoadProfile) {
+        if (shouldResetLoadProfile && (loraOverride === undefined || resetLoadProfile)) {
           resetModelLoadParametersForModel(configurableModelId);
         } else {
-          updateModelLoadParametersForModel(configurableModelId, nextLoadParams);
+          updateModelLoadParametersForModel(configurableModelId, {
+            ...nextLoadParams,
+            // A chat snapshot must not silently become the model default.
+            ...(loraOverride !== undefined && !resetLoadProfile
+              ? { loraAdapters: getModelLoadParametersForModel(configurableModelId).loraAdapters } : {}),
+          }, 'replace');
+        }
+        if (resetLoadProfile) {
+          const state = useChatStore.getState();
+          const thread = state.activeThreadId ? state.threads[state.activeThreadId] : undefined;
+          if (thread && getThreadActiveModelId(thread) === configurableModelId) {
+            state.updateThreadLoraSnapshot(thread.id, []);
+          }
+          resetLoadProfileRef.current = false;
         }
       };
       const baseLoadOptions: LoadModelOptions = {
         forceReload: true,
         loadParamsOverride: nextLoadParams,
+        loadParamsMode: 'replace',
       };
       const retryLoad = (loadOptions: LoadModelOptions) => {
         void (async () => {
@@ -1016,6 +1052,7 @@ export function useModelParametersSheetController({
     }
   }, [
     applyReloadErrorScope,
+    loraOverride,
     mtpSupported,
     configurableModelId,
     contextWindowCeiling,
@@ -1315,6 +1352,7 @@ export function useModelParametersSheetController({
   ]);
 
   const handleResetAll = useCallback(() => {
+    resetLoadProfileRef.current = true;
     loadDraftSourceRef.current = {
       contextSize: 'default',
       gpuLayers: 'default',

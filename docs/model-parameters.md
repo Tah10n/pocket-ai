@@ -1,6 +1,6 @@
 # Model parameters
 
-This document describes how Pocket AI stores and applies generation parameters and model load profiles with llama.rn **0.13.0-rc.3**. Stage 3 implementation and unit coverage do not imply device acceptance: see the [capability inventory](llama-rn-capabilities.md) and [pinned native fixture](validation/llama-rn-stage3/lora-fixture.md).
+This document describes how Pocket AI stores and applies generation parameters and model load profiles with llama.rn **0.13.0-rc.3**. The [Android CPU acceptance](llama-rn-013-stage3-acceptance.md) verifies structured output, shared template/count/prefill, probabilities and LoRA application/restoration on pinned fixtures. The [capability inventory](llama-rn-capabilities.md) separates that evidence from typed mapping and still-unverified model/backend combinations.
 
 ## Categories
 

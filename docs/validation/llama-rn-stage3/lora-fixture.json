@@ -3,8 +3,9 @@
   "metadataVerifiedOn": "2026-09-22",
   "runtimeVersion": "0.13.0-rc.3",
   "nativeAcceptance": {
-    "status": "not_run",
-    "reason": "Published identities have been checked; byte verification, adapter tensor compatibility and controlled native probability measurements have not yet been run."
+    "status": "passed",
+    "scope": "Android x86_64 CPU on 2026-09-24; see ../../llama-rn-013-stage3-acceptance.md",
+    "apkSha256": "53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571"
   },
   "base": {
     "repository": "Mungert/SmolLM2-135M-Instruct-GGUF",
@@ -39,7 +40,7 @@
     "paperUrl": "https://arxiv.org/abs/2305.19352"
   },
   "probabilityProbe": {
-    "status": "not_run",
+    "status": "passed",
     "purpose": "Compare the same first-token distribution for a robot behavior-tree task before application, at two nonzero scales, and after removal.",
     "nPredict": 1,
     "nProbs": 10,

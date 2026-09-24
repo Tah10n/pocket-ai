@@ -12,6 +12,7 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
 - [`llama-rn-capabilities.md`](./llama-rn-capabilities.md): pinned runtime API inventory, application integration boundaries, compatibility exceptions, and staged verification criteria
+- [`llama-rn-013-stage3-acceptance.md`](./llama-rn-013-stage3-acceptance.md): Android CPU structured-output and LoRA evidence, reproducible identities, earlier failures, and untested boundaries
 - [`multimodal-attachments.md`](./multimodal-attachments.md): runtime media payload contracts, local attachment lifecycle boundaries, and privacy constraints
 - [`document-processing.md`](./document-processing.md): offline document formats, native parser boundary, session-only retrieval, resource limits, and update procedure
 - [`document-qa-benchmarks.md`](./document-qa-benchmarks.md): all-format synthetic Android scenarios, session-reuse proof, sentinel-only evidence, and reproducible host/device benchmark reports

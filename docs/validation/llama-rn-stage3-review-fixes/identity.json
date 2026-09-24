@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "publicAppTree": "5fecb7c4d78005d4849e88845db870431036ec4d",
+  "apkSha256": "48508d4338366589193cd3215cfad3496af48eb80a971ad7a6634494634e35c7",
+  "installedApkSha256": "48508d4338366589193cd3215cfad3496af48eb80a971ad7a6634494634e35c7",
+  "apkSizeBytes": 81978382,
+  "provenanceDigest": "5e6193d42afe14a5f9c53d3d4f36b06ed85f7279f06e7025042183dd9c4ddc9c",
+  "packageName": "com.github.tah10n.pocketai.qa",
+  "variant": "release",
+  "abi": "x86_64",
+  "embeddedBundle": true,
+  "deviceModel": "sdk_gphone64_x86_64",
+  "backend": "cpu",
+  "scenarios": [
+    {
+      "id": "runtime-inference-lifecycle",
+      "status": "passed",
+      "durationMs": 31065
+    },
+    {
+      "id": "runtime-model-resources",
+      "status": "passed",
+      "durationMs": 72566
+    },
+    {
+      "id": "runtime-stage3",
+      "status": "passed",
+      "durationMs": 78254
+    }
+  ]
+}

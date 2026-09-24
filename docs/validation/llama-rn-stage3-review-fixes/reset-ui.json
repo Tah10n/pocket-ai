@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "apkSha256": "48508d4338366589193cd3215cfad3496af48eb80a971ad7a6634494634e35c7",
+  "scope": "Manual Reset all and Apply user path; requested/effective diagnostics plus runtime init readback",
+  "observations": [
+    {
+      "capture": "final-overrides-cache",
+      "sourceXmlSha256": "76c9a0c571dc260787ae966d70b2d5cf586d4ca2c30fa84a0fe5184ff92def85",
+      "readback": {
+        "load-effective-cacheTypeK": "Draft: f32 · requested at load: f32 · effective: f32",
+        "load-effective-cacheTypeV": "Draft: f16 · requested at load: f16 · effective: f16"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-overrides-memory",
+      "sourceXmlSha256": "fc40021f83484e480fda69137f4506afa79f42418c922ec3035774ab217d2787",
+      "readback": {
+        "load-effective-ropeFreqBase": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-ropeFreqScale": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-noExtraBufts": "Draft: On · requested at load: On · effective: On"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-reset-cache",
+      "sourceXmlSha256": "691de6a39722a62fe665e51e742d9908ba61e9e21eac2697014f56e9d44c8dda",
+      "readback": {
+        "load-effective-cacheTypeK": "Draft: Default · requested at load: Default · effective: f16",
+        "load-effective-cacheTypeV": "Draft: Default · requested at load: Default · effective: f16"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-reset-memory",
+      "sourceXmlSha256": "fb1961b2ba9f039c814ebb3bb95ccbcee16aa1d7ee30c056323f16fd79bb5b64",
+      "readback": {
+        "load-effective-ropeFreqBase": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-ropeFreqScale": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-noExtraBufts": "Draft: Default · requested at load: Default · effective: Off"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-reset-context-runtime",
+      "sourceXmlSha256": "9552cd9bcb11b879199505b203a9ae953a19345163693f442f529cb11fbb9ae7",
+      "readback": {},
+      "runtime": [
+        "512 tok • 0 GPU layers",
+        "KV cache: K=f16, V=f16"
+      ],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-reset-context-cache",
+      "sourceXmlSha256": "d4450db45367f123ba11c972a9d157f78a869bbf06f2e9d8c38ecf5fcd159c4d",
+      "readback": {
+        "load-effective-cacheTypeK": "Draft: Default · requested at load: Default · effective: f16",
+        "load-effective-cacheTypeV": "Draft: Default · requested at load: Default · effective: f16"
+      },
+      "runtime": [
+        "512 tok • 0 GPU layers"
+      ],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-reset-context-memory",
+      "sourceXmlSha256": "3b00253257a8f5a705acb25534f07092a697f8cbb7d240e189de17f7a423e294",
+      "readback": {
+        "load-effective-ropeFreqBase": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-ropeFreqScale": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-noExtraBufts": "Draft: Default · requested at load: Default · effective: Off",
+        "load-effective-swaFull": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-nCpuMoe": "Draft: Default · requested at load: Default · effective: Default"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-cold-cache",
+      "sourceXmlSha256": "7e6d0d4cdd89a3eb7864d889e54fe9e2fadce1d2302fa6aa6f6448bf77893e15",
+      "readback": {
+        "load-effective-cacheTypeK": "Draft: Default · requested at load: Default · effective: f16",
+        "load-effective-cacheTypeV": "Draft: Default · requested at load: Default · effective: f16"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-cold-memory",
+      "sourceXmlSha256": "5104f999a8f7f26880b628a40e51d14c1ad83a30f2b38bb0f3330dae67c5bfb0",
+      "readback": {
+        "load-effective-ropeFreqBase": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-ropeFreqScale": "Draft: Default · requested at load: Default · effective: Default",
+        "load-effective-noExtraBufts": "Draft: Default · requested at load: Default · effective: Off",
+        "load-effective-swaFull": "Draft: Default · requested at load: Default · effective: Default"
+      },
+      "runtime": [],
+      "applyFooterPresent": false
+    },
+    {
+      "capture": "final-cold-runtime",
+      "sourceXmlSha256": "38f7baac08a6ae9ae2c5cb9bd5bad9392e60f730bb484e79cb42dd328d4936f5",
+      "readback": {},
+      "runtime": [
+        "512 tok • 0 GPU layers"
+      ],
+      "applyFooterPresent": false
+    }
+  ],
+  "editorRecovery": "passed; see editor-recovery-receipt.json",
+  "assertions": {
+    "overridesConfirmed": true,
+    "resetDefaultsConfirmed": true,
+    "resetContext512Confirmed": true,
+    "coldRestartDefaultsConfirmed": true,
+    "staleApplyFooterAbsent": true,
+    "ropeOverrideNativeTested": false
+  }
+}

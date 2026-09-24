@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "phase": "complete",
+  "requiresForceStop": false,
+  "chatModelSha256": "bc64cce8e1c11e4ed870633b557e04af718249c817c4cf8a6784116144ec3e28",
+  "auxiliaryModelSha256": "263215c3cadd6e16740741a7624ab4cbb6c8e777688bd5331ecfbf5681c2f8ed",
+  "auxiliaryRevision": "544f204f2eaa2d71361ffc74d6df7170285b286a",
+  "steps": [
+    {
+      "id": "cpu_load",
+      "status": "passed"
+    },
+    {
+      "id": "generate_before",
+      "status": "passed",
+      "callbacks": 21,
+      "tokensPredicted": 20,
+      "tokensEvaluated": 36,
+      "outputCharacters": 107
+    },
+    {
+      "id": "prepare_embedding",
+      "status": "passed"
+    },
+    {
+      "id": "embedding_check",
+      "status": "passed",
+      "dimensions": 384,
+      "finite": true
+    },
+    {
+      "id": "restore_chat",
+      "status": "passed",
+      "chatUnchanged": true,
+      "settingsUnchanged": true,
+      "contextChanged": true
+    },
+    {
+      "id": "generate_after",
+      "status": "passed",
+      "callbacks": 21,
+      "tokensPredicted": 20,
+      "tokensEvaluated": 77,
+      "outputCharacters": 107
+    },
+    {
+      "id": "offload_unused_embedding",
+      "status": "passed",
+      "chatUnchanged": true,
+      "settingsUnchanged": true,
+      "contextUnchanged": true,
+      "fileRemoved": true
+    },
+    {
+      "id": "generate_after_offload",
+      "status": "passed",
+      "callbacks": 21,
+      "tokensPredicted": 20,
+      "tokensEvaluated": 118,
+      "outputCharacters": 107
+    },
+    {
+      "id": "confirm_context_retained",
+      "status": "passed",
+      "contextUnchanged": true
+    }
+  ]
+}

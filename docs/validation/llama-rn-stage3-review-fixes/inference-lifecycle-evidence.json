@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "phase": "complete",
+  "requiresForceStop": false,
+  "steps": [
+    {
+      "id": "backend_discovery",
+      "status": "passed",
+      "discoveredDeviceCount": 1
+    },
+    {
+      "id": "cpu_load",
+      "status": "passed",
+      "loadedGpuLayers": 0,
+      "backendMode": "cpu",
+      "actualGpuAccelerated": false
+    },
+    {
+      "id": "generate",
+      "status": "passed",
+      "callbacks": 21,
+      "outputCharacters": 107,
+      "tokensPredicted": 20,
+      "tokensEvaluated": 36,
+      "inputMessages": 2
+    },
+    {
+      "id": "stop_after_token",
+      "status": "passed",
+      "callbacks": 1,
+      "outputCharacters": 1,
+      "inputMessages": 4
+    },
+    {
+      "id": "generate_after_stop",
+      "status": "passed",
+      "callbacks": 21,
+      "outputCharacters": 107,
+      "tokensPredicted": 20,
+      "tokensEvaluated": 97,
+      "inputMessages": 5
+    },
+    {
+      "id": "new_chat_isolation",
+      "status": "passed",
+      "callbacks": 21,
+      "outputCharacters": 107,
+      "tokensPredicted": 21,
+      "tokensEvaluated": 36,
+      "inputMessages": 2
+    },
+    {
+      "id": "unload",
+      "status": "passed"
+    },
+    {
+      "id": "cpu_reload",
+      "status": "passed",
+      "loadedGpuLayers": 0,
+      "backendMode": "cpu",
+      "actualGpuAccelerated": false
+    },
+    {
+      "id": "generate_after_reload",
+      "status": "passed",
+      "callbacks": 21,
+      "outputCharacters": 107,
+      "tokensPredicted": 20,
+      "tokensEvaluated": 77,
+      "inputMessages": 4
+    }
+  ]
+}

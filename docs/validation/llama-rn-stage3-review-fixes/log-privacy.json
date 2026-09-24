@@ -1,0 +1,13 @@
+{
+  "apkSha256": "48508d4338366589193cd3215cfad3496af48eb80a971ad7a6634494634e35c7",
+  "scope": "isolated QA application logcat; literal input checks",
+  "counts": {
+    "root ::=": 0,
+    "%llguidance": 0,
+    "A friendly dog": 0,
+    "Resource compatibility check.": 0,
+    "generation_prompt:": 0
+  },
+  "numericTokenIdsPresent": true,
+  "status": "passed"
+}

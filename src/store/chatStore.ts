@@ -1,3 +1,4 @@
+import { sanitizeAdvancedGenerationParameters, advancedGenerationIdentity } from '../utils/generationControls';
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 import { getAppStorage, mmkvStorage } from '../store/storage';
@@ -124,6 +125,7 @@ interface ChatStoreHydrationResult {
 }
 
 interface CreateThreadInput {
+  loraSnapshot?: ChatThread['loraSnapshot'];
   modelId: string;
   presetId: string | null;
   presetSnapshot: PresetSnapshot;
@@ -136,7 +138,7 @@ type AssistantMessagePatch = Partial<
 >;
 
 type AssistantTurnTerminalFields = Partial<
-  Pick<ChatMessage, 'content' | 'tokensPerSec' | 'inferenceMetrics'>
+  Pick<ChatMessage, 'content' | 'tokensPerSec' | 'inferenceMetrics' | 'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput'>
 > & {
   thoughtContent?: string | null;
 };
@@ -205,10 +207,12 @@ interface ChatStoreState {
   }) => ThreadActivationCommitResult;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
+  updateThreadLoraSnapshot: (threadId: string, adapters: ChatThread['loraSnapshot']) => void;
   commitThreadModelSelection: (input: {
     threadId: string;
     expectedCurrentModelId: string;
     nextModelId: string;
+    loraSnapshot?: ChatThread['loraSnapshot'];
     paramsSnapshot: GenerationParamsSnapshot;
     at?: number;
   }) => ThreadModelSelectionCommitResult;
@@ -268,6 +272,7 @@ function normalizeThreadParamsSnapshot(
   paramsSnapshot: GenerationParamsSnapshot,
 ): GenerationParamsSnapshot {
   return {
+    ...sanitizeAdvancedGenerationParameters(paramsSnapshot),
     temperature: paramsSnapshot.temperature,
     topP: paramsSnapshot.topP,
     topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
@@ -289,6 +294,7 @@ function areThreadParamsSnapshotsEqual(
 ): boolean {
   return (
     left.temperature === right.temperature
+    && advancedGenerationIdentity(left) === advancedGenerationIdentity(right)
     && left.topP === right.topP
     && (left.topK ?? FALLBACK_TOP_K) === (right.topK ?? FALLBACK_TOP_K)
     && (left.minP ?? FALLBACK_MIN_P) === (right.minP ?? FALLBACK_MIN_P)
@@ -2619,6 +2625,9 @@ function createStreamingProgressRecord(
     content: message.content,
     thoughtContent: message.thoughtContent,
     tokensPerSec: message.tokensPerSec,
+    generationSnapshot: message.generationSnapshot,
+    loadProfileSnapshot: message.loadProfileSnapshot,
+    structuredOutput: message.structuredOutput,
     state: 'streaming',
     persistedAt,
     revision: runtime.progressRevision,
@@ -2774,7 +2783,7 @@ export const useChatStore = create<ChatStoreState>()(
         streamingRevision: 0,
         inferenceRevision: 0,
 
-        createThread: ({ modelId, presetId, presetSnapshot, paramsSnapshot, title }) => {
+        createThread: ({ modelId, presetId, presetSnapshot, paramsSnapshot, loraSnapshot, title }) => {
         const id = createChatId('thread');
         const now = Date.now();
         const thread: ChatThread = {
@@ -2783,6 +2792,7 @@ export const useChatStore = create<ChatStoreState>()(
           titleSource: title ? 'manual' : 'derived',
           modelId,
           activeModelId: modelId,
+          loraSnapshot: loraSnapshot?.map(adapter => ({ ...adapter })),
           presetId,
           presetSnapshot: {
             id: presetSnapshot.id,
@@ -2790,7 +2800,8 @@ export const useChatStore = create<ChatStoreState>()(
             systemPrompt: presetSnapshot.systemPrompt,
           },
           paramsSnapshot: {
-            temperature: paramsSnapshot.temperature,
+            ...sanitizeAdvancedGenerationParameters(paramsSnapshot),
+    temperature: paramsSnapshot.temperature,
             topP: paramsSnapshot.topP,
             topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
             minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
@@ -3052,6 +3063,16 @@ export const useChatStore = create<ChatStoreState>()(
           });
         },
 
+        updateThreadLoraSnapshot: (threadId, adapters) => {
+          setWhenPrivateStorageWritable((state) => {
+            const thread = state.threads[threadId];
+            if (!thread || thread.status === 'generating' || getActiveBranchReplacementRuntime(thread)) return state;
+            return { threads: { ...state.threads, [threadId]: updateThreadMetadata({
+              ...thread, loraSnapshot: adapters?.map(adapter => ({ ...adapter })) ?? [],
+            }) }, inferenceRevision: state.inferenceRevision + 1 };
+          });
+        },
+
         updateThreadParamsSnapshot: (threadId, paramsSnapshot) => {
           if (getActiveBranchReplacementRuntime(get().threads[threadId])) {
             return;
@@ -3068,7 +3089,8 @@ export const useChatStore = create<ChatStoreState>()(
               [threadId]: updateThreadMetadata({
                 ...existingThread,
                 paramsSnapshot: {
-                  temperature: paramsSnapshot.temperature,
+                  ...sanitizeAdvancedGenerationParameters(paramsSnapshot),
+    temperature: paramsSnapshot.temperature,
                   topP: paramsSnapshot.topP,
                   topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
                   minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
@@ -3091,6 +3113,7 @@ export const useChatStore = create<ChatStoreState>()(
           threadId,
           expectedCurrentModelId,
           nextModelId,
+          loraSnapshot,
           paramsSnapshot,
           at,
         }) => {
@@ -3137,8 +3160,10 @@ export const useChatStore = create<ChatStoreState>()(
               const nextThread: ChatThread = {
                 ...existingThread,
                 activeModelId: nextModelId,
+                loraSnapshot: loraSnapshot?.map(adapter => ({ ...adapter })) ?? [],
                 paramsSnapshot: {
-                  temperature: paramsSnapshot.temperature,
+                  ...sanitizeAdvancedGenerationParameters(paramsSnapshot),
+    temperature: paramsSnapshot.temperature,
                   topP: paramsSnapshot.topP,
                   topK: paramsSnapshot.topK ?? FALLBACK_TOP_K,
                   minP: paramsSnapshot.minP ?? FALLBACK_MIN_P,
@@ -3337,6 +3362,9 @@ export const useChatStore = create<ChatStoreState>()(
                 thoughtContent: terminalThoughtContent,
                 tokensPerSec: finalization.tokensPerSec ?? currentMessage.tokensPerSec,
                 inferenceMetrics: finalization.inferenceMetrics ?? currentMessage.inferenceMetrics,
+                generationSnapshot: finalization.generationSnapshot ?? currentMessage.generationSnapshot,
+                loadProfileSnapshot: finalization.loadProfileSnapshot ?? currentMessage.loadProfileSnapshot,
+                structuredOutput: finalization.structuredOutput ?? currentMessage.structuredOutput,
               };
               const hasRecoverableOutput = terminalFields.content.trim().length > 0
                 || (terminalFields.thoughtContent?.trim().length ?? 0) > 0;

@@ -39,6 +39,21 @@ const {
   recordModelInitFailureBound,
   writeLastGoodInferenceProfile,
 } = lastGoodStore;
+
+it('does not reuse last-good or OOM bounds across advanced allocation identities', () => {
+  const selection = { modelId: 'allocation-test', contextSize: 1024, kvCacheType: 'f16' };
+  writeLastGoodInferenceProfile({ ...selection, createdAtMs: Date.now(), backendMode: 'cpu', nGpuLayers: 0 });
+  expect(readLastGoodInferenceProfile({ ...selection, allocationIdentity: 'lora:a:1' })).toBeNull();
+  expect(readLastGoodInferenceProfile(selection)).not.toBeNull();
+  writeLastGoodInferenceProfile({ ...selection, createdAtMs: Date.now(), backendMode: 'cpu', nGpuLayers: 0, allocationIdentity: 'lora:a:1' });
+  expect(readLastGoodInferenceProfile({ ...selection, allocationIdentity: 'lora:a:1' })?.allocationIdentity).toBe('lora:a:1');
+  expect(readLastGoodInferenceProfile({ ...selection, allocationIdentity: 'lora:a:0' })).toBeNull();
+  expect(readLastGoodInferenceProfile(selection)).toBeNull();
+  const identity = createFailureBoundIdentity({ allocationIdentity: 'lora:a:1' });
+  recordModelInitFailureBound(identity, 10);
+  expect(readModelInitFailureBound(identity)).not.toBeNull();
+  expect(readModelInitFailureBound({ ...identity, allocationIdentity: 'lora:a:0' })).toBeNull();
+});
 type LastGoodInferenceProfile = import('../../src/services/InferenceLastGoodProfileStore').LastGoodInferenceProfile;
 type ModelInitFailureBoundIdentity = import('../../src/services/InferenceLastGoodProfileStore').ModelInitFailureBoundIdentity;
 

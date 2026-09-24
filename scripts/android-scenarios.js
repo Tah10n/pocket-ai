@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { sanitizeModelResourcesEvidence, waitForModelResourcesEvidence } = require("./lib/model-resources-evidence");
+const { sanitizeStage3Evidence, waitForStage3Evidence } = require("./lib/stage3-evidence");
 const { spawnSync } = require("child_process");
 const {
   buildGradleAssembleArgs,
@@ -106,7 +107,7 @@ const SCENARIO_PACK_SCENARIOS = {
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
   documents: DOCUMENT_SCENARIOS,
-  inference: ["runtime-inference-lifecycle", "runtime-model-resources"],
+  inference: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3"],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -3120,6 +3121,41 @@ function buildScenarios() {
       },
     },
     {
+      id: "runtime-stage3",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Validate structured generation, exact prefill and real LoRA probability changes after the Stage 1 and 2 CPU pack.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const evidencePath = path.join(artifactsRoot, "stage3-evidence.json");
+        fs.rmSync(evidencePath, { force: true });
+        try {
+          await goToHome(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const action = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-stage3", {
+            timeoutMs: 180_000, visibleOnly: true,
+          });
+          if (!action.bounds) throw new Error("Stage 3 QA action is not tappable.");
+          tapBounds(adbPath, ctx.serial, action.bounds);
+          const details = await waitForStage3Evidence(() => {
+            const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), "chat-qa-stage3-evidence");
+            if (!node) return null;
+            let observed;
+            try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safeEvidence = sanitizeStage3Evidence(observed);
+            fs.writeFileSync(evidencePath, `${JSON.stringify(safeEvidence, null, 2)}\n`);
+            return safeEvidence;
+          });
+          return { details };
+        } catch (error) {
+          // Timeout is not native completion. This isolated launch must end before another scenario.
+          forceStopScenarioApp(adbPath, ctx.serial);
+          throw error;
+        }
+      },
+    },
+    {
       id: "native-glass-theme-matrix",
       tier: "critical",
       requiresCurrentHeadProvenance: true,
@@ -5520,7 +5556,7 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources"].includes(options.scenario)) {
+    if (["documents", "inference"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
@@ -6806,6 +6842,7 @@ function selectScenarios(scenarios, options) {
       ...STATE_MUTATING_CATALOG_SCENARIOS,
       "runtime-inference-lifecycle",
       "runtime-model-resources",
+      "runtime-stage3",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);
@@ -10052,6 +10089,7 @@ function collectCurrentQaBuildProvenance(provenance, currentGit, options = {}) {
     process.env,
     { NODE_ENV: nodeEnv }
   );
+  Object.assign(env, require("./llama-hexagon-sdk").verifyLlamaHexagonSdk(projectRoot, { abi, env }).env);
   const assembleTask = `app:assemble${variant[0].toUpperCase()}${variant.slice(1)}`;
   const gradleArgs = buildGradleAssembleArgs(assembleTask, abi, {
     applicationId: appPackageName,

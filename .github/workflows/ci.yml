@@ -45,6 +45,10 @@ jobs:
               - '.github/workflows/ci.yml'
               - '.github/workflows/release-please.yml'
               - 'scripts/android-*.js'
+              - 'scripts/llama-hexagon-sdk.js'
+              - 'scripts/llama-hexagon-sdk-manifest.json'
+              - 'scripts/eas-llama-build-setup.js'
+              - 'patches/**'
               - 'scripts/build-android-release.js'
               - 'scripts/verify-ci-gate-results.js'
               - 'scripts/verify-native-config.js'
@@ -149,6 +153,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         env:
           ANDROID_SMOKE_APK_VARIANT: release
+          ANDROID_SMOKE_TARGET_ABI: x86_64
           POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
         with:
           api-level: ${{ matrix.api-level }}
@@ -359,6 +364,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         env:
           ANDROID_SMOKE_APK_VARIANT: release
+          ANDROID_SMOKE_TARGET_ABI: x86_64
           POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
         with:
           api-level: 34

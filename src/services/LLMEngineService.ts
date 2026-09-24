@@ -10,6 +10,12 @@ import appPackageJson from '../../package.json';
 import { getLlamaRuntimeDiagnostics } from './llamaRnModule';
 import { hardwareListenerService } from './HardwareListenerService';
 import { exactPromptTokenCache } from './ExactPromptTokenCache';
+import { getCompanionBindingIdentity } from '../utils/modelArtifacts';
+import type { LoraProfileAdapter } from '../utils/advancedLoadProfile';
+import { PreparedLlamaRequestCache } from './PreparedLlamaRequest';
+import { getCompletionPromptTokenCount } from './LlamaPromptTokenCount';
+import { freezeGenerationParameters, resolveAdvancedSampling, type AdvancedGenerationParameters } from '../utils/generationControls';
+import { prepareStructuredOutput, validateStructuredOutputResult } from '../utils/structuredOutput';
 import {
   EngineBackendMode,
   type EngineBackendInitAttempt,
@@ -36,6 +42,7 @@ import {
 } from '../types/chat';
 import { registry } from './LocalStorageRegistry';
 import {
+  DEFAULT_MODEL_LOAD_PARAMETERS,
   getModelLoadParametersForModel,
   type ModelLoadParameters,
   UNKNOWN_MODEL_GPU_LAYERS_CEILING,
@@ -76,6 +83,12 @@ import {
 } from '../utils/modelCapabilities';
 import { isMultimodalReadinessReusableForModel } from '../utils/multimodalReadiness';
 import { resolveKvCacheTypes } from '../utils/kvCache';
+import { resolveLoraProfileForLoad, type ResolvedLoraProfile } from './LoraProfileResolver';
+import {
+  assertAdvancedLoadParameterCombinations, buildAdvancedNativeLoadParams, getAdvancedLoadDiagnostics,
+  getAdvancedLoadProfileIdentity, getOptionalAdvancedLoadProfileIdentity, getEffectiveAdvancedLoadProfileIdentity,
+  isPublicKvCacheType, sanitizeAdvancedLoadParameters,
+} from '../utils/advancedLoadProfile';
 import { inferenceBackendService } from './InferenceBackendService';
 import { resolveInferenceProfileCandidates, type ResolvedInferenceProfile } from './resolveInferenceProfile';
 import { readAutotuneResult } from './InferenceAutotuneStore';
@@ -178,7 +191,6 @@ import {
   sanitizeMultimodalFailureCategory,
   sanitizeMultimodalFailureReason,
 } from '../utils/multimodalFailureReason';
-import { getLlmContentPartSignatureEntry } from '../utils/llmContentPartSignature';
 import type {
   MultimodalDiagnosticsSummary,
   MultimodalReadinessState,
@@ -191,6 +203,8 @@ export interface LoadModelOptions {
   forceReload?: boolean;
   allowUnsafeMemoryLoad?: boolean;
   loadParamsOverride?: Partial<ModelLoadParameters>;
+  /** Replace the complete requested profile; omitted fields use runtime defaults. */
+  loadParamsMode?: 'patch' | 'replace';
   preferLastWorkingProfile?: boolean;
   /**
    * Explicit user retry from the separately named thinking-detection action.
@@ -219,7 +233,6 @@ const DEFAULT_LLAMA_NATIVE_MICRO_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_BATCH_TOKENS = 512;
 const DEFAULT_LLAMA_NATIVE_MULTIMODAL_IMAGE_MAX_TOKENS = 512;
 const MAX_NATIVE_LOG_COUNT = 120;
-const MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES = 8;
 const MODEL_LOAD_PROGRESS_MIN_PERCENT_DELTA = 2;
 const MODEL_LOAD_PROGRESS_MAX_PUBLISH_INTERVAL_MS = 250;
 const CONTEXT_OPERATION_UNLOAD_DRAIN_TIMEOUT_MS = 5000;
@@ -256,6 +269,9 @@ const BACKGROUND_CONTEXT_OPERATION_TIMEOUT_MESSAGE = 'A background model operati
 const ACTIVE_COMPLETION_STOP_TIMEOUT_MESSAGE = 'Timed out waiting for active completion to stop';
 const LOW_MEMORY_UNLOAD_FAILURE_MESSAGE = 'Failed to unload the model after a low-memory warning';
 const MAX_UNLOAD_RECLAIM_FRACTION_OF_TOTAL_MEMORY = 0.25;
+// Existing product budgets allow 8192 visible + 8192 reasoning tokens. Bound
+// every native request, including probability buffers, while preserving prefill.
+const MAX_COMPLETION_PREDICT_TOKENS = 16_384;
 const FALLBACK_STOP_WORDS = [
   '</s>',
   '<|end|>',
@@ -496,10 +512,6 @@ function getMessageTextContentParts(message: LlmChatMessage): LlmTextContentPart
 
 function countMessageTextContentOccurrences(message: LlmChatMessage): number {
   return getMessageTextContentParts(message).length;
-}
-
-function getMessageContentPartSignatureEntries(message: LlmChatMessage): string[] {
-  return message.contentParts?.map(getLlmContentPartSignatureEntry) ?? [];
 }
 
 function getMessageLegacyMediaPaths(message: LlmChatMessage): string[] {
@@ -1364,6 +1376,10 @@ class LLMEngineService {
   private initDevices: string[] | null = null;
   private initCacheTypeK: string | null = null;
   private initCacheTypeV: string | null = null;
+  private requestedLoadParameters: ModelLoadParameters | null = null;
+  private effectiveLoadParameters: ModelLoadParameters | null = null;
+  private activeLoraAdapters: ResolvedLoraProfile['adapters'] = [];
+  private uncertainLoraPaths = new Set<string>();
   private initFlashAttnType: 'auto' | 'on' | 'off' | null = null;
   private initUseMmap: boolean | null = null;
   private initUseMlock: boolean | null = null;
@@ -1374,7 +1390,7 @@ class LLMEngineService {
   private initNBatch: number | null = null;
   private initNUbatch: number | null = null;
   private initKvUnified: boolean | null = null;
-  private additionalStopWordsCache: Map<string, TemplateAdditionalStopWordsResolution> = new Map();
+  private preparedRequestCache = new PreparedLlamaRequestCache();
   private state: EngineState = {
     status: EngineStatus.IDLE,
     loadProgress: 0,
@@ -1390,7 +1406,7 @@ class LLMEngineService {
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
   private exclusiveOperationCount = 0;
-  private auxiliaryOperation: { modelId: string; cancelled: boolean } | null = null;
+  private auxiliaryOperation: { modelId: string; cancelled: boolean; isCurrent?: () => boolean } | null = null;
   private auxiliaryRestoreError: string | undefined;
   private autotuneReserved = false;
   private contextOperationRunner = new ContextOperationRunner();
@@ -1406,6 +1422,7 @@ class LLMEngineService {
   private speculativeDraftSizeBytes: number | null = null;
   private speculativeMemorySession: SpeculativeMemorySession | null = null;
   private lastCompletionTelemetry: InferenceCompletionTelemetry | null = null;
+  private lastGenerationDiagnostics: NonNullable<EngineState['diagnostics']>['generation'] | null = null;
   private activePromptStateCachePolicy: PromptStateCachePolicy | null = null;
   private loadedContextDisablesContextShiftForMultimodal = false;
   private pendingMultimodalReadinessRefresh: MultimodalReadinessRefreshRequest | null = null;
@@ -1539,7 +1556,7 @@ class LLMEngineService {
     this.context = context;
     this.contextGeneration += 1;
     exactPromptTokenCache.invalidateContext();
-    this.additionalStopWordsCache.clear();
+    this.preparedRequestCache.clear();
   }
 
   private toPositiveByteCount(value: unknown): number | null {
@@ -2471,6 +2488,10 @@ class LLMEngineService {
       await drainPromise;
       if (context) {
         await releaseLlamaContext(context);
+        if (this.context === null) {
+          this.activeLoraAdapters = [];
+          this.uncertainLoraPaths.clear();
+        }
       }
     })
       .catch((error) => {
@@ -2729,64 +2750,6 @@ class LLMEngineService {
     return this.waitForActiveContextOperations().then(() => undefined);
   }
 
-  private buildAdditionalStopWordsCacheKey({
-    generation,
-    messages,
-    enableThinking,
-    reasoningFormat,
-  }: {
-    generation: number;
-    messages: LlmChatMessage[];
-    enableThinking: boolean;
-    reasoningFormat: ChatCompletionReasoningFormat;
-  }): string {
-    return [
-      this.state.activeModelId ?? 'unknown-model',
-      generation,
-      enableThinking ? 'thinking:on' : 'thinking:off',
-      `reasoning:${reasoningFormat}`,
-      'generation-prompt:on',
-      `messages:${this.buildChatMessagesCacheSignature(messages)}`,
-    ].join('|');
-  }
-
-  private buildChatMessagesCacheSignature(messages: LlmChatMessage[]): string {
-    let hash = 2166136261;
-    for (const message of messages) {
-      hash = this.updateCacheHash(hash, message.role);
-      hash = this.updateCacheHash(hash, '\u0000');
-      hash = this.updateCacheHash(hash, String(message.content.length));
-      hash = this.updateCacheHash(hash, '\u0001');
-      hash = this.updateCacheHash(hash, message.content);
-      hash = this.updateCacheHash(hash, '\u0002');
-      const mediaPaths = getMessageMediaPaths(message);
-      hash = this.updateCacheHash(hash, String(mediaPaths.length));
-      hash = this.updateCacheHash(hash, '\u0003');
-      for (const mediaPath of mediaPaths) {
-        hash = this.updateCacheHash(hash, mediaPath);
-        hash = this.updateCacheHash(hash, '\u0004');
-      }
-      const contentPartEntries = getMessageContentPartSignatureEntries(message);
-      hash = this.updateCacheHash(hash, String(contentPartEntries.length));
-      hash = this.updateCacheHash(hash, '\u0005');
-      for (const contentPartEntry of contentPartEntries) {
-        hash = this.updateCacheHash(hash, contentPartEntry);
-        hash = this.updateCacheHash(hash, '\u0006');
-      }
-    }
-
-    return `${messages.length}:${hash.toString(36)}`;
-  }
-
-  private updateCacheHash(hash: number, value: string): number {
-    let nextHash = hash >>> 0;
-    for (let i = 0; i < value.length; i += 1) {
-      nextHash ^= value.charCodeAt(i);
-      nextHash = Math.imul(nextHash, 16777619) >>> 0;
-    }
-    return nextHash;
-  }
-
   private normalizeAdditionalStopWords(stops: unknown[]): string[] {
     return Array.from(
       new Set(
@@ -2795,16 +2758,6 @@ class LLMEngineService {
           .filter((stop) => stop.length > 0),
       ),
     );
-  }
-
-  private copyTemplateStopWordsResolution(
-    resolution: TemplateAdditionalStopWordsResolution,
-  ): TemplateAdditionalStopWordsResolution {
-    return {
-      stopWords: [...resolution.stopWords],
-      strictRoleSystemNormalization: resolution.strictRoleSystemNormalization,
-      templateType: resolution.templateType,
-    };
   }
 
   private shouldIncludeFallbackStopWords(templateType: string | null, templateStopCount: number): boolean {
@@ -2860,76 +2813,7 @@ class LLMEngineService {
       templateStopCount: resolution.templateStopCount,
       fallbackStopCount: resolution.fallbackStopCount,
       stopCount: resolution.stopWords.length,
-      resolvedStops: resolution.stopWords,
     });
-  }
-
-  private async resolveTemplateAdditionalStopWords({
-    context,
-    generation,
-    messages,
-    enableThinking,
-    reasoningFormat,
-  }: {
-    context: LlamaContext;
-    generation: number;
-    messages: LlmChatMessage[];
-    enableThinking: boolean;
-    reasoningFormat: ChatCompletionReasoningFormat;
-  }): Promise<TemplateAdditionalStopWordsResolution> {
-    const cacheKey = this.buildAdditionalStopWordsCacheKey({
-      generation,
-      messages,
-      enableThinking,
-      reasoningFormat,
-    });
-    const cached = this.additionalStopWordsCache.get(cacheKey);
-    if (cached) {
-      this.assertContextStillCurrent(context, generation);
-      return this.copyTemplateStopWordsResolution(cached);
-    }
-
-    try {
-      this.assertContextStillCurrent(context, generation);
-      const formatted = await getFormattedChatFromContext({
-        context,
-        messages,
-        options: {
-          enable_thinking: enableThinking,
-          reasoning_format: reasoningFormat,
-          add_generation_prompt: true,
-        },
-      });
-      this.assertContextStillCurrent(context, generation);
-
-      const normalizedStops = this.normalizeAdditionalStopWords(formatted.additional_stops);
-      const resolution: TemplateAdditionalStopWordsResolution = {
-        stopWords: normalizedStops,
-        strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(formatted),
-        templateType: readFormattedChatType(formatted),
-      };
-      this.additionalStopWordsCache.set(cacheKey, resolution);
-      if (this.additionalStopWordsCache.size > MAX_ADDITIONAL_STOP_WORDS_CACHE_ENTRIES) {
-        const oldestCacheKey = this.additionalStopWordsCache.keys().next().value;
-        if (oldestCacheKey) {
-          this.additionalStopWordsCache.delete(oldestCacheKey);
-        }
-      }
-      return this.copyTemplateStopWordsResolution(resolution);
-    } catch (error) {
-      this.assertContextStillCurrent(context, generation);
-      if (process.env.NODE_ENV !== 'test') {
-        console.warn(
-          '[LLMEngine] Failed to resolve template stop tokens',
-          getSanitizedTemplateFormatterErrorMetadata(error),
-        );
-      }
-      return {
-        stopWords: [],
-        strictRoleSystemNormalization: 'plain',
-        templateType: null,
-      };
-    }
   }
 
   public async getBackendAvailability(): Promise<BackendAvailability> {
@@ -3115,6 +2999,7 @@ class LLMEngineService {
   }
 
   private buildCalibrationKeyString({
+    allocationIdentity,
     ggufMetadata,
     verifiedFileSizeBytes,
     contextTokens,
@@ -3129,6 +3014,7 @@ class LLMEngineService {
     nBatch,
     nUbatch,
   }: {
+    allocationIdentity?: string;
     ggufMetadata?: Record<string, unknown>;
     verifiedFileSizeBytes: number;
     contextTokens: number;
@@ -3144,6 +3030,7 @@ class LLMEngineService {
     nUbatch?: number;
   }): string | null {
     const key = createCalibrationKey({
+      allocationIdentity,
       deviceModel: this.resolveCalibrationDeviceModel(),
       osMajor: this.resolveCalibrationOsMajor(),
       ggufMetadata,
@@ -3269,6 +3156,8 @@ class LLMEngineService {
   }
 
   private resolveMaxSafeLoadProfile({
+    allocationIdentity,
+    loraSizeBytes,
     ggufMetadata,
     resolvedModelSizeBytes,
     verifiedFileSizeBytes,
@@ -3284,6 +3173,8 @@ class LLMEngineService {
     hasMmproj = false,
     preferGpuLayers = false,
   }: {
+    allocationIdentity?: string;
+    loraSizeBytes?: number;
     ggufMetadata?: Record<string, unknown>;
     resolvedModelSizeBytes: number;
     verifiedFileSizeBytes: number | null;
@@ -3321,6 +3212,7 @@ class LLMEngineService {
       );
       const calibrationKey = verifiedFileSizeBytes !== null
         ? this.buildCalibrationKeyString({
+            allocationIdentity,
             ggufMetadata,
             verifiedFileSizeBytes,
             contextTokens: normalizedContext,
@@ -3337,6 +3229,7 @@ class LLMEngineService {
 
       const fit = estimateAccurateMemoryFit({
         input: {
+          loraSizeBytes,
           modelSizeBytes: resolvedModelSizeBytes,
           verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
           ...(multimodalSizeBytes ? { multimodalSizeBytes } : null),
@@ -3595,8 +3488,10 @@ class LLMEngineService {
       const allowUnsafeMemoryLoad = options?.allowUnsafeMemoryLoad === true;
       const persistedLoadParams = getModelLoadParametersForModel(modelId);
       const resolvedLoadParams = options?.loadParamsOverride
-        ? { ...persistedLoadParams, ...options.loadParamsOverride }
+        ? { ...(options.loadParamsMode === 'replace' ? DEFAULT_MODEL_LOAD_PARAMETERS : persistedLoadParams), ...options.loadParamsOverride }
         : persistedLoadParams;
+      const advancedProfileChanged = this.requestedLoadParameters !== null
+        && getAdvancedLoadProfileIdentity(resolvedLoadParams) !== getAdvancedLoadProfileIdentity(this.requestedLoadParameters);
       const fallbackDownloadMarker = this.resolveArtifactFallbackDownloadMarker(model);
       let resolvedArtifactInfo: ResolvedModelArtifactInfo | null = null;
       let isCurrentLoadedArtifact = false;
@@ -3624,6 +3519,7 @@ class LLMEngineService {
         this.state.activeModelId && (
           this.state.activeModelId !== modelId
           || forceReload
+          || advancedProfileChanged
           || !isCurrentLoadedArtifact
           || shouldReloadLoadedContextForMultimodalContextShift
         ),
@@ -3633,6 +3529,7 @@ class LLMEngineService {
         this.state.status === EngineStatus.READY &&
         this.state.activeModelId === modelId &&
         !forceReload &&
+        !advancedProfileChanged &&
         isCurrentLoadedArtifact &&
         !shouldReloadLoadedContextForMultimodalContextShift
       ) {
@@ -3797,7 +3694,7 @@ class LLMEngineService {
       const unknownOwnership = !main
         || (this.activeMultimodalContext !== null && !projector)
         || (this.activeSpeculativeDecoding?.mode === 'draft_model' && !draft);
-      const heldPaths = [main, projector, draft].filter((path): path is string => Boolean(path))
+      const heldPaths = [main, projector, draft, ...this.activeLoraAdapters.map(adapter => adapter.path), ...this.uncertainLoraPaths].filter((path): path is string => Boolean(path))
         .map(fileUriToNativePath);
       contextOwnsResources = unknownOwnership || resourcePaths.some(path => heldPaths.includes(fileUriToNativePath(path)));
     }
@@ -3842,14 +3739,14 @@ class LLMEngineService {
         // Restore the actual loaded profile, including temporary CPU/context
         // overrides. Saved defaults can describe a different allocation.
         const previousLoadParams = previousModelId ? {
-          ...getModelLoadParametersForModel(previousModelId),
+          ...(this.getEffectiveLoadParameters() ?? getModelLoadParametersForModel(previousModelId)),
           contextSize: this.activeContextSize,
           gpuLayers: this.initGpuLayers ?? this.activeGpuLayers,
           backendPolicy: this.activeBackendMode === 'unknown' ? this.effectiveBackendPolicy ?? undefined : this.activeBackendMode,
           selectedBackendDevices: this.initDevices,
           mtpEnabled: this.activeSpeculativeDecoding !== null,
-          ...(this.initCacheTypeK === 'f16' || this.initCacheTypeK === 'q8_0' || this.initCacheTypeK === 'q4_0'
-            ? { kvCacheType: this.initCacheTypeK } : {}),
+          ...(isPublicKvCacheType(this.initCacheTypeK) ? { cacheTypeK: this.initCacheTypeK } : {}),
+          ...(isPublicKvCacheType(this.initCacheTypeV) ? { cacheTypeV: this.initCacheTypeV } : {}),
           ...(this.initFlashAttnType ? { flashAttention: this.initFlashAttnType } : {}),
           ...(this.initUseMmap !== null ? { useMmap: this.initUseMmap } : {}),
           ...(this.initUseMlock !== null ? { useMlock: this.initUseMlock } : {}),
@@ -3912,7 +3809,7 @@ class LLMEngineService {
         if (previousModelId && selectionCurrent() && !this.orphanedContextReleaseError) {
           try {
             await this.loadWithProjectorResolutionOperationCache(previousModelId, {
-              loadParamsOverride: previousLoadParams,
+              loadParamsOverride: previousLoadParams, loadParamsMode: 'replace',
               preferLastWorkingProfile: true,
             }, new Map(), { lifecycleOwned: true });
             if (!selectionCurrent() && this.context) await this.unloadInternal();
@@ -3957,7 +3854,15 @@ class LLMEngineService {
     multimodalReadiness,
     onToken,
     params,
+    generation,
   }: LlmChatCompletionOptions): Promise<LlamaCompletionResult> {
+    const predictTokens = params?.n_predict === undefined ? 512 : params.n_predict;
+    if (!Number.isSafeInteger(predictTokens) || predictTokens < 0 || predictTokens > MAX_COMPLETION_PREDICT_TOKENS) {
+      throw new AppError('action_failed', 'The completion token budget must be an integer from 0 to 16384.');
+    }
+    const requestGeneration = freezeGenerationParameters(generation);
+    const sampling = resolveAdvancedSampling(requestGeneration);
+    const output = prepareStructuredOutput(requestGeneration.output);
     if (this.auxiliaryOperation) {
       throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
     }
@@ -4095,18 +4000,26 @@ class LLMEngineService {
           disableSpeculative = false,
         ) => {
           this.assertCompletionNotInterrupted(interruptGeneration);
-          const enableThinking = params?.enable_thinking ?? false;
-          const reasoningFormat: ChatCompletionReasoningFormat = params?.reasoning_format ?? 'none';
-          const templateStopResolution = await this.trackContextOperation(async (cancellation) => {
+          const enableThinking = output.mode === 'text' && (params?.enable_thinking ?? false);
+          const reasoningFormat: ChatCompletionReasoningFormat = output.mode === 'text'
+            ? requestGeneration.reasoningFormat ?? params?.reasoning_format ?? 'none' : 'none';
+          const prepared = await this.trackContextOperation(async (cancellation) => {
             cancellation.throwIfCancelled();
             this.assertCompletionNotInterrupted(interruptGeneration);
-            const resolution = await this.resolveTemplateAdditionalStopWords({
+            const resolution = await this.preparedRequestCache.prepare({
               context,
-              generation: contextGeneration,
+              epoch: contextGeneration,
               messages: completionMessages,
+              generation: requestGeneration,
               enableThinking,
               reasoningFormat,
+            }).catch((error: unknown) => {
+              if (process.env.NODE_ENV !== 'test') {
+                console.warn('[LLMEngine] Failed to prepare chat template', getSanitizedTemplateFormatterErrorMetadata(error));
+              }
+              throw error;
             });
+            this.assertContextStillCurrent(context, contextGeneration);
             cancellation.throwIfCancelled();
             this.assertCompletionNotInterrupted(interruptGeneration);
             return resolution;
@@ -4118,6 +4031,14 @@ class LLMEngineService {
               CONTEXT_OPERATION_COMPLETION_DRAIN_TIMEOUT_MESSAGE,
             ),
           });
+          if (sampling.ignore_eos && (prepared.completion.grammar || prepared.completion.json_schema)) {
+            throw new AppError('action_failed', 'Ignoring EOS cannot be combined with a template output grammar.');
+          }
+          const templateStopResolution: TemplateAdditionalStopWordsResolution = {
+            stopWords: this.normalizeAdditionalStopWords(prepared.formatted.additional_stops),
+            strictRoleSystemNormalization: resolveStrictRoleSystemNormalization(prepared.formatted),
+            templateType: readFormattedChatType(prepared.formatted),
+          };
           strictRoleSystemNormalization = templateStopResolution.strictRoleSystemNormalization;
           this.assertCompletionNotInterrupted(interruptGeneration);
 
@@ -4125,8 +4046,9 @@ class LLMEngineService {
           this.recordResolvedCompletionStopWords(resolvedStops);
 
           const completionParams: CompletionParams = {
-            messages: completionMessages,
-            n_predict: params?.n_predict ?? 512,
+            ...prepared.completion,
+            ...sampling,
+            n_predict: predictTokens,
             temperature: params?.temperature ?? 0.7,
             top_p: params?.top_p ?? 0.9,
             top_k: params?.top_k ?? 40,
@@ -4134,7 +4056,8 @@ class LLMEngineService {
             penalty_repeat: params?.penalty_repeat ?? 1,
             enable_thinking: enableThinking,
             reasoning_format: reasoningFormat,
-            stop: resolvedStops.stopWords,
+            stop: Array.from(new Set([...resolvedStops.stopWords, ...(requestGeneration.stop ?? [])])),
+            seed: -1,
           };
 
           if (activeSpeculativeConfig) {
@@ -4146,7 +4069,7 @@ class LLMEngineService {
                 };
           }
 
-          if (requestMediaPaths.length > 0) {
+          if (requestMediaPaths.length > 0 && !completionParams.media_paths) {
             completionParams.media_paths = requestMediaPaths;
           }
 
@@ -4158,6 +4081,8 @@ class LLMEngineService {
           // reuses a previously-supplied value across completions. (`llama.rn` treats -1 as unset.)
           if (!enableThinking) {
             completionParams.thinking_budget_tokens = -1;
+          } else if (requestGeneration.thinkingBudgetTokens !== undefined) {
+            completionParams.thinking_budget_tokens = requestGeneration.thinkingBudgetTokens;
           } else if (typeof params?.thinking_budget_tokens === 'number' && Number.isFinite(params.thinking_budget_tokens)) {
             completionParams.thinking_budget_tokens = Math.max(0, Math.round(params.thinking_budget_tokens));
           } else {
@@ -4168,6 +4093,16 @@ class LLMEngineService {
           this.assertExpectedCompletionModel(expectedModelId);
           this.assertCompletionNotInterrupted(interruptGeneration);
 
+          this.lastGenerationDiagnostics = {
+            outputMode: output.mode,
+            templateSource: requestGeneration.template?.chatTemplate ? 'custom' : 'model',
+            formatter: prepared.formatted.type === 'jinja' || prepared.formatted.type === 'llama-chat'
+              ? prepared.formatted.type : 'unknown',
+            nProbs: sampling.n_probs ?? 0,
+            prefill: completionParams.n_predict === 0,
+            hasPrefillText: Boolean(requestGeneration.template?.prefillText),
+          };
+          this.updateState(this.state);
           return await runCompletionOnContext({
             context,
             params: completionParams,
@@ -4220,6 +4155,34 @@ class LLMEngineService {
         };
 
         const finalizeCompletionResult = (result: LlamaCompletionResult): LlamaCompletionResult => {
+          const probabilities = result.completion_probabilities;
+          const maxProbabilityTokens = 64;
+          const probabilityLimit = sampling.n_probs ?? 0;
+          result = {
+            ...result,
+            ...(output.mode !== 'text' ? { structuredOutput: validateStructuredOutputResult(output, {
+              content: result.content ?? (result.reasoning_content ? '' : result.text ?? ''),
+              interrupted: result.interrupted,
+              stoppedLimit: result.stopped_limit,
+              truncated: result.truncated,
+              contextFull: result.context_full,
+            }) } : {}),
+            ...(probabilities ? {
+              completion_probabilities: probabilityLimit > 0
+                ? probabilities.slice(0, maxProbabilityTokens).map((entry) => ({
+                    content: entry.content.slice(0, 256),
+                    probs: entry.probs.slice(0, probabilityLimit).map((item) => ({
+                      tok_str: item.tok_str.slice(0, 256), prob: item.prob,
+                    })),
+                  })) : [],
+              probabilitiesSummary: {
+                requested: probabilityLimit,
+                retainedTokens: probabilityLimit > 0 ? Math.min(probabilities.length, maxProbabilityTokens) : 0,
+                totalTokens: probabilities.length,
+                truncated: probabilities.length > maxProbabilityTokens,
+              },
+            } : {}),
+          };
           const telemetry = buildInferenceCompletionTelemetry({
             result,
             mtpSupported: configuredSpeculativeDecoding !== null,
@@ -4235,6 +4198,19 @@ class LLMEngineService {
           });
 
           this.lastCompletionTelemetry = telemetry;
+          if (this.lastGenerationDiagnostics) {
+            this.lastGenerationDiagnostics = { ...this.lastGenerationDiagnostics,
+              probabilities: result.probabilitiesSummary ? {
+                retainedTokens: result.probabilitiesSummary.retainedTokens,
+                truncated: result.probabilitiesSummary.truncated,
+              } : undefined,
+              timings: {
+                tokensPredicted: telemetry.tokensPredicted, tokensEvaluated: telemetry.tokensEvaluated,
+                predictedPerSecond: telemetry.predictedPerSecond, promptPerSecond: telemetry.promptPerSecond,
+                timeToFirstTokenMs: telemetry.timeToFirstTokenMs,
+              },
+            };
+          }
           performanceMonitor.mark('llm.mtp.completion', {
             requested: telemetry.mtp.requested,
             attempted: telemetry.mtp.attempted,
@@ -4303,6 +4279,237 @@ class LLMEngineService {
     this.completionRunner.attachDriver(completionTask, completionDriver);
 
     return completionTask;
+  }
+
+  /** Evaluate the actual chat prompt without creating an assistant history item. */
+  public async prefillPrompt(options: Omit<LlmChatCompletionOptions, 'onToken'>): Promise<LlamaCompletionResult> {
+    return this.chatCompletion({ ...options, params: { ...options.params, n_predict: 0 } });
+  }
+
+  /** Active load settings commit only after this receipt; persistence belongs to the controller. */
+  public async applyLoadProfileTransaction(
+    modelId: string,
+    options: LoadModelOptions,
+    isCurrent: () => boolean,
+  ): Promise<ModelLoadParameters> {
+    this.assertContextRecoveryNotRequired();
+    if (this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0
+      || this.hasActiveCompletion() || this.hasActiveContextOperation() || this.isUnloading || this.initPromise) {
+      throw new AppError('engine_busy', 'The engine is busy. Retry after the current operation finishes.');
+    }
+    this.assertExpectedCompletionModel(modelId);
+    this.getReadyContextOrThrow();
+    const previous = this.getEffectiveLoadParameters();
+    const model = registry.getModel(modelId);
+    if (!previous || !model) throw new AppError('engine_not_ready', 'The applied model profile is unavailable.');
+    const identity = getCompanionBindingIdentity(model);
+    const owner: { modelId: string; cancelled: boolean; isCurrent?: () => boolean } = { modelId, cancelled: false };
+    const selectionCurrent = () => {
+      try {
+        const current = registry.getModel(modelId);
+        return !owner.cancelled && isCurrent() && current !== undefined
+          && getCompanionBindingIdentity(current) === identity;
+      } catch { return false; }
+    };
+    const staleError = () => new AppError('engine_busy', 'The load settings change was cancelled because the model selection changed.');
+    owner.isCurrent = selectionCurrent;
+    this.auxiliaryOperation = owner;
+    this.cancelScheduledContextRecovery();
+    this.updateState(this.state);
+    try {
+      return await this.runExclusiveOperation(async () => {
+        if (!selectionCurrent()) throw staleError();
+        try {
+          await this.loadWithProjectorResolutionOperationCache(modelId, {
+            ...options, forceReload: true, loadParamsMode: 'replace',
+            loadParamsOverride: options.loadParamsMode === 'replace'
+              ? options.loadParamsOverride : { ...previous, ...options.loadParamsOverride },
+          }, new Map(), { lifecycleOwned: true });
+        } catch (loadError) {
+          if (this.orphanedContextReleaseError || this.orphanedContextReleasePromise) {
+            throw new AppError('engine_recovery_required', 'Native resources are still in use. Wait for recovery before changing the load profile.');
+          }
+          if (!selectionCurrent()) {
+            if (this.context) await this.unloadInternal();
+            throw staleError();
+          }
+          try {
+            await this.loadWithProjectorResolutionOperationCache(modelId, {
+              forceReload: true, loadParamsOverride: previous, loadParamsMode: 'replace', preferLastWorkingProfile: false,
+            }, new Map(), { lifecycleOwned: true });
+          } catch {
+            this.updateState({ ...this.state, status: EngineStatus.ERROR,
+              lastError: 'The previous load profile could not be restored. Reload the model.' });
+            throw new AppError('engine_recovery_required', 'The previous load profile could not be restored. Reload the model.');
+          }
+          if (!selectionCurrent()) {
+            if (this.context) await this.unloadInternal();
+            throw staleError();
+          }
+          if (loadError instanceof AppError && (
+            loadError.code === 'model_load_blocked' || loadError.code === 'model_memory_warning'
+            || loadError.code === 'model_memory_insufficient'
+          )) throw loadError;
+          throw new AppError('model_load_failed', 'The new load profile failed. The previous effective profile was restored.');
+        }
+        if (!selectionCurrent()) {
+          if (this.context) await this.unloadInternal();
+          throw staleError();
+        }
+        const confirmed = this.getEffectiveLoadParameters();
+        if (!confirmed || this.state.status !== EngineStatus.READY || this.state.activeModelId !== modelId) {
+          throw new AppError('engine_recovery_required', 'The native load profile was not confirmed. Reload the model.');
+        }
+        return confirmed;
+      });
+    } finally {
+      if (this.auxiliaryOperation === owner) this.auxiliaryOperation = null;
+      this.updateState(this.state);
+    }
+  }
+
+  /** Apply only verified artifact references while holding the sole native owner. */
+  public async applyLoraConfiguration(
+    modelId: string,
+    selection: readonly LoraProfileAdapter[],
+    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+  ): Promise<LoraProfileAdapter[]> {
+    this.assertContextRecoveryNotRequired();
+    if (this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0
+      || this.hasActiveCompletion() || this.hasActiveContextOperation() || this.isUnloading || this.initPromise) {
+      throw new AppError('engine_busy', 'The engine is busy. Retry after the current operation finishes.');
+    }
+    this.assertExpectedCompletionModel(modelId);
+    const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+    const model = registry.getModel(modelId);
+    const previousProfile = this.getEffectiveLoadParameters();
+    if (!model || !previousProfile) throw new AppError('engine_not_ready', 'The applied model profile is unavailable.');
+    const baseIdentity = getCompanionBindingIdentity(model);
+    const owner: { modelId: string; cancelled: boolean; isCurrent?: () => boolean } = { modelId, cancelled: false };
+    this.auxiliaryOperation = owner;
+    this.cancelScheduledContextRecovery();
+    const isCurrent = () => {
+      try {
+        const currentModel = registry.getModel(modelId);
+        return !owner.cancelled && !options.signal?.aborted && (options.isCurrent?.() ?? true)
+          && currentModel !== undefined && getCompanionBindingIdentity(currentModel) === baseIdentity;
+      } catch { return false; }
+    };
+    owner.isCurrent = isCurrent;
+    const assertCurrent = () => {
+      if (!isCurrent()) throw new AppError('engine_busy', 'The adapter change was cancelled because the model selection changed.');
+    };
+    this.updateState(this.state);
+    try {
+      return await this.runExclusiveOperation(async () => {
+        assertCurrent();
+        this.assertContextStillCurrent(context, contextGeneration);
+        const resolved = await resolveLoraProfileForLoad(model, selection);
+        assertCurrent();
+        this.assertContextStillCurrent(context, contextGeneration);
+        if (resolved.sizeBytes > 0) {
+          const snapshot = await getFreshMemorySnapshot(0).catch(() => null);
+          const available = snapshot ? resolveConservativeAvailableMemoryBudget(snapshot, { strictFreeCap: true }) : null;
+          const reserve = 2 * resolved.sizeBytes + 64 * 1024 * 1024;
+          if (available === null || available < reserve || snapshot?.lowMemory || snapshot?.pressureLevel === 'critical') {
+            throw new AppError('model_memory_insufficient', 'There is not enough verified free memory to apply these adapters safely.');
+          }
+          assertCurrent();
+        }
+        if (typeof context.applyLoraAdapters !== 'function' || typeof context.removeLoraAdapters !== 'function'
+          || typeof context.getLoadedLoraAdapters !== 'function' || typeof context.clearCache !== 'function') {
+          throw new AppError('model_incompatible', 'This native runtime does not expose adapter management.');
+        }
+        for (const adapter of [...this.activeLoraAdapters, ...resolved.adapters]) this.uncertainLoraPaths.add(adapter.path);
+        this.updateState({ ...this.state, status: EngineStatus.INITIALIZING, lastError: undefined });
+        let nativeError: unknown;
+        // No cancellation race can release this owner before the raw native task
+        // settles. apply may have removed/loaded only part of the previous set.
+        const nativeOperation = (async () => {
+          if (resolved.adapters.length === 0) await context.removeLoraAdapters();
+          else await context.applyLoraAdapters(resolved.adapters.map(adapter => ({ ...adapter })));
+          const loaded = await context.getLoadedLoraAdapters();
+          if (!Array.isArray(loaded) || loaded.length !== resolved.adapters.length
+            || !loaded.every((adapter, index) => {
+              const expected = resolved.adapters[index];
+              return typeof adapter.path === 'string' && fileUriToNativePath(adapter.path) === fileUriToNativePath(expected.path)
+                && typeof (adapter.scaled ?? 1) === 'number'
+                && Math.fround(adapter.scaled ?? 1) === Math.fround(expected.scaled);
+            })) throw new Error('Adapter readback did not match the requested set.');
+          await context.clearCache(true);
+        })().catch((error: unknown) => { nativeError = error; });
+        const outcome = await this.waitForUnloadPromise(nativeOperation, 30_000);
+        if (outcome === 'timed_out') {
+          const error = new AppError('engine_recovery_required', 'Adapter changes are still using native resources. Wait for recovery before retrying.');
+          this.detachCurrentContextAfterTimedOutOperation(modelId, error, { drainPromise: nativeOperation });
+          throw error;
+        }
+        if (nativeError || !isCurrent()) {
+          // On cancellation never restore a now-obsolete chat/variant. On partial
+          // failure rebuild the previously confirmed context instead of assuming
+          // native apply/remove was atomic.
+          try {
+            await this.unloadInternal();
+            if (isCurrent()) {
+              await this.loadWithProjectorResolutionOperationCache(modelId, {
+                forceReload: true, loadParamsOverride: previousProfile, loadParamsMode: 'replace', preferLastWorkingProfile: false,
+              }, new Map(), { lifecycleOwned: true });
+              if (!isCurrent() && this.context) await this.unloadInternal();
+            }
+          } catch {
+            this.updateState({ ...this.state, status: EngineStatus.ERROR,
+              lastError: 'The previous adapter configuration could not be restored. Reload the model.' });
+            throw new AppError('engine_recovery_required', 'The previous adapter configuration could not be restored. Reload the model.');
+          }
+          if (!isCurrent()) throw new AppError('engine_busy', 'The adapter change was cancelled.');
+          throw new AppError('model_load_failed', 'The adapter change failed. The previous model configuration was restored.');
+        }
+        this.activeLoraAdapters = resolved.adapters.map(adapter => ({ ...adapter }));
+        this.uncertainLoraPaths.clear();
+        const loraAdapters = resolved.profile.map(adapter => ({ ...adapter }));
+        this.requestedLoadParameters = { ...(this.requestedLoadParameters ?? previousProfile), loraAdapters };
+        this.effectiveLoadParameters = { ...previousProfile, loraAdapters };
+        // Old observations do not prove the allocation or behavior of this set.
+        this.activeCalibrationSession = null;
+        this.speculativeMemorySession = null;
+        this.lastCompletionTelemetry = null;
+        this.lastGenerationDiagnostics = null;
+        this.setContext(context);
+        this.updateState({ ...this.state, status: EngineStatus.READY, lastError: undefined });
+        return loraAdapters.map(adapter => ({ ...adapter }));
+      });
+    } finally {
+      if (this.auxiliaryOperation === owner) this.auxiliaryOperation = null;
+      this.updateState(this.state);
+    }
+  }
+
+  /** Advanced private diagnostics, serialized with all other context operations. */
+  public async inspectTokens(text: string, expectedModelId?: string): Promise<{
+    tokenCount: number; tokens: number[]; detokenized: string; truncated: boolean;
+  }> {
+    if (text.length > 16_384) throw new AppError('action_failed', 'Token inspection is limited to 16384 characters.');
+    this.assertContextRecoveryNotRequired();
+    this.assertExpectedCompletionModel(expectedModelId);
+    if (this.activeCompletionPromise || this.auxiliaryOperation || this.isUnloading) {
+      throw new AppError('engine_busy', 'Wait for the current model operation to finish.');
+    }
+    return this.trackContextOperation(async (cancellation) => {
+      cancellation.throwIfCancelled();
+      if (this.auxiliaryOperation || this.activeCompletionPromise || this.isUnloading) {
+        throw new AppError('engine_busy', 'Wait for the current model operation to finish.');
+      }
+      this.assertExpectedCompletionModel(expectedModelId);
+      const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+      const result = await tokenizeFormattedPrompt({ context, prompt: text });
+      cancellation.throwIfCancelled();
+      this.assertContextStillCurrent(context, contextGeneration);
+      const tokens = result.tokens.slice(0, 4096);
+      const detokenized = await context.detokenize(tokens);
+      cancellation.throwIfCancelled();
+      this.assertContextStillCurrent(context, contextGeneration);
+      return { tokenCount: result.tokens.length, tokens, detokenized, truncated: tokens.length < result.tokens.length };
+    }, { priority: 'prompt_preparation' });
   }
 
   private async probeThinkingCapability(
@@ -4719,12 +4926,14 @@ class LLMEngineService {
   public async countPromptTokens({
     messages,
     params,
+    generation,
     multimodalReadiness,
     expectedModelId,
     chatBlocking = true,
     allowMediaFallback = false,
   }: {
     messages: LlmChatMessage[];
+    generation?: AdvancedGenerationParameters;
     params?: {
       enable_thinking?: boolean;
       reasoning_format?: 'none' | 'auto' | 'deepseek';
@@ -4735,6 +4944,12 @@ class LLMEngineService {
     chatBlocking?: boolean;
     allowMediaFallback?: boolean;
   }): Promise<number> {
+    if (this.auxiliaryOperation) {
+      throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
+    }
+    const requestGeneration = freezeGenerationParameters(generation);
+    // Validate constraints before any native formatting/tokenization.
+    prepareStructuredOutput(requestGeneration.output);
     if (this.isUnloading) {
       throw new AppError('engine_unloading', 'The model engine is unloading. Please wait a moment.');
     }
@@ -4826,7 +5041,7 @@ class LLMEngineService {
     return this.trackContextOperation(async (cancellation) => {
       cancellation.throwIfCancelled();
 
-      if (this.activeCompletionPromise) {
+      if (this.activeCompletionPromise || this.auxiliaryOperation) {
         throw new AppError('engine_busy', 'A response is already being generated.');
       }
 
@@ -4841,15 +5056,16 @@ class LLMEngineService {
         this.assertContextStillCurrent(context, contextGeneration);
         let formatted: LlamaFormattedChatResult;
         try {
-          formatted = await getFormattedChatFromContext({
+          const prepared = await this.preparedRequestCache.prepare({
             context,
+            epoch: contextGeneration,
             messages: promptMessages,
-            options: {
-              enable_thinking: params?.enable_thinking ?? false,
-              reasoning_format: params?.reasoning_format ?? 'none',
-              add_generation_prompt: params?.add_generation_prompt,
-            },
+            generation: requestGeneration,
+            enableThinking: params?.enable_thinking ?? false,
+            reasoningFormat: requestGeneration.reasoningFormat ?? params?.reasoning_format ?? 'none',
+            addGenerationPrompt: params?.add_generation_prompt,
           });
+          formatted = { ...prepared.formatted, prompt: prepared.completion.prompt ?? '' };
         } catch (error) {
           this.assertContextStillCurrent(context, contextGeneration);
           throw error;
@@ -4875,7 +5091,7 @@ class LLMEngineService {
         }
 
         this.assertContextStillCurrent(context, contextGeneration);
-        return tokenized.tokens.length;
+        return getCompletionPromptTokenCount(context, tokenized);
       };
 
       try {
@@ -5191,6 +5407,16 @@ class LLMEngineService {
     return Array.isArray(this.initDevices) ? [...this.initDevices] : [];
   }
 
+  /** Private configuration snapshot for transactional restore and response provenance. */
+  public getEffectiveLoadParameters(): ModelLoadParameters | null {
+    return this.effectiveLoadParameters ? {
+      ...this.effectiveLoadParameters,
+      ...sanitizeAdvancedLoadParameters(this.effectiveLoadParameters),
+      ...(this.effectiveLoadParameters.selectedBackendDevices
+        ? { selectedBackendDevices: [...this.effectiveLoadParameters.selectedBackendDevices] } : {}),
+    } : null;
+  }
+
   private buildSpeculativeDecodingDiagnostics(): EngineSpeculativeDecodingDiagnostics | null {
     const configured = this.configuredSpeculativeDecoding;
     if (!configured) {
@@ -5285,7 +5511,15 @@ class LLMEngineService {
       speculativeDecodingDiagnostics: this.buildSpeculativeDecodingDiagnostics(),
       activePromptStateCachePolicy: this.activePromptStateCachePolicy,
     });
-    return { ...diagnostics, runtime: getLlamaRuntimeDiagnostics(this.context) };
+    return { ...diagnostics, runtime: getLlamaRuntimeDiagnostics(this.context),
+      generation: this.lastGenerationDiagnostics ? {
+        ...this.lastGenerationDiagnostics,
+        probabilities: this.lastGenerationDiagnostics.probabilities ? { ...this.lastGenerationDiagnostics.probabilities } : undefined,
+        timings: this.lastGenerationDiagnostics.timings ? { ...this.lastGenerationDiagnostics.timings } : undefined,
+      } : undefined,
+      requestedAdvancedLoad: getAdvancedLoadDiagnostics(this.requestedLoadParameters),
+      effectiveAdvancedLoad: getAdvancedLoadDiagnostics(this.effectiveLoadParameters),
+    };
   }
 
   private recordRecentMultimodalDiagnostics({
@@ -6252,11 +6486,19 @@ class LLMEngineService {
         reason: 'release_failed',
       });
     }
+    this.activeLoraAdapters = [];
+    this.uncertainLoraPaths.clear();
   }
 
   private updateState(newState: EngineState): void {
+    let canPublishReady = true;
+    if (this.auxiliaryOperation?.isCurrent) {
+      try { canPublishReady = this.auxiliaryOperation.isCurrent(); }
+      catch { canPublishReady = false; }
+    }
     this.state = {
       ...newState,
+      ...(newState.status === EngineStatus.READY && !canPublishReady ? { status: EngineStatus.INITIALIZING } : {}),
       auxiliaryOperation: this.auxiliaryOperation !== null,
       auxiliaryRestoreError: this.auxiliaryRestoreError,
       diagnostics: this.buildDiagnosticsSnapshot(),
@@ -6296,6 +6538,8 @@ class LLMEngineService {
     this.initDevices = null;
     this.initCacheTypeK = null;
     this.initCacheTypeV = null;
+    this.requestedLoadParameters = null;
+    this.effectiveLoadParameters = null;
     this.initFlashAttnType = null;
     this.initUseMmap = null;
     this.initUseMlock = null;
@@ -6314,6 +6558,7 @@ class LLMEngineService {
     this.speculativeDraftSizeBytes = null;
     this.speculativeMemorySession = null;
     this.lastCompletionTelemetry = null;
+    this.lastGenerationDiagnostics = null;
     this.activePromptStateCachePolicy = null;
   }
 
@@ -6474,6 +6719,14 @@ class LLMEngineService {
       });
 
       const loadParams = resolvedLoadParams ?? getModelLoadParametersForModel(modelId);
+      const advancedLoadParams = sanitizeAdvancedLoadParameters(loadParams);
+      const modelForLora = registry.getModel(modelId);
+      const resolvedLora = modelForLora
+        ? await resolveLoraProfileForLoad(modelForLora, advancedLoadParams.loraAdapters)
+        : { adapters: [], sizeBytes: 0, profile: [] };
+      if (advancedLoadParams.loraAdapters !== undefined) advancedLoadParams.loraAdapters = resolvedLora.profile;
+      let allocationIdentity = getOptionalAdvancedLoadProfileIdentity(advancedLoadParams);
+      const loraSizeBytes = resolvedLora.sizeBytes;
       const rawSystemMemorySnapshot = recentUnloadReclaim?.afterUnloadSnapshot
         ?? await getFreshMemorySnapshot(recentUnloadReclaim ? 0 : 1500).catch(() => null);
       const systemMemorySnapshot = this.withRecentUnloadReclaimableBudget(
@@ -6500,6 +6753,8 @@ class LLMEngineService {
       const kvCacheAvailableBudgetBytes = systemMemorySnapshot ? resolveConservativeAvailableMemoryBudget(systemMemorySnapshot) : null;
       let { cacheTypeK, cacheTypeV } = resolveKvCacheTypes({
         kvCacheType: loadParams.kvCacheType,
+        cacheTypeK: advancedLoadParams.cacheTypeK,
+        cacheTypeV: advancedLoadParams.cacheTypeV,
         requestedContextTokens: loadParams.contextSize,
         totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number' && Number.isFinite(resolvedTotalMemoryBytes) && resolvedTotalMemoryBytes > 0
           ? resolvedTotalMemoryBytes
@@ -6509,7 +6764,7 @@ class LLMEngineService {
 
       const resolveEffectiveFlashAttnType = (value: 'auto' | 'on' | 'off', layers: number): 'auto' | 'on' | 'off' => {
         const base = layers > 0 ? value : 'off';
-        return cacheTypeV !== 'f16' && base === 'off'
+        return cacheTypeV !== 'f16' && cacheTypeV !== 'f32' && base === 'off'
           ? 'auto'
           : base;
       };
@@ -6566,13 +6821,17 @@ class LLMEngineService {
           architecture: ggufArchitecture,
           type: ggufType,
         },
-        loadParams,
+        loadParams: { ...loadParams, loraAdapters: undefined },
       };
 
       const cachedModel = registry.getModel(modelId);
       const configuredSpeculativeDecoding = cachedModel
         ? resolveSpeculativeDecodingWithEnabledOverride(cachedModel, loadParams.mtpEnabled)
         : undefined;
+      assertAdvancedLoadParameterCombinations(advancedLoadParams, configuredSpeculativeDecoding?.enabled);
+      if (configuredSpeculativeDecoding && advancedLoadParams.specDraftNMax !== undefined) {
+        configuredSpeculativeDecoding.maxDraftTokens = advancedLoadParams.specDraftNMax;
+      }
       this.configuredSpeculativeDecoding = configuredSpeculativeDecoding
         ? { ...configuredSpeculativeDecoding }
         : null;
@@ -6589,6 +6848,9 @@ class LLMEngineService {
           ? { ...configuredSpeculativeDecoding }
           : null;
       let speculativeDraftPath: string | undefined;
+      let speculativeDraftCacheTypeK = advancedLoadParams.specDraftCacheTypeK ?? 'f16';
+      let speculativeDraftCacheTypeV = advancedLoadParams.specDraftCacheTypeV ?? 'f16';
+      let speculativeDraftExtraMemoryBytes = 0;
       const configuredDraftArtifact = cachedModel && speculativeDecodingForLoad?.mode === 'draft_model'
         ? getConfiguredMtpDraftArtifact(cachedModel)
         : undefined;
@@ -6611,6 +6873,26 @@ class LLMEngineService {
               artifact: draftArtifact,
             });
             speculativeDraftPath = resolvedDraft.artifactPath;
+            if (advancedLoadParams.specDraftCacheTypeK !== undefined || advancedLoadParams.specDraftCacheTypeV !== undefined) {
+              const draftMetadata = await loadLlamaModelInfo(resolvedDraft.artifactPath);
+              const { headDimK, headDimV } = resolveKvCacheHeadDims(draftMetadata);
+              const unsafeCache = (type: string, dimension: number | null) => type !== 'f16' && type !== 'f32'
+                && (dimension === null || dimension % 32 !== 0);
+              if (unsafeCache(speculativeDraftCacheTypeK, headDimK)) speculativeDraftCacheTypeK = 'f16';
+              if (unsafeCache(speculativeDraftCacheTypeV, headDimV)) speculativeDraftCacheTypeV = 'f16';
+              // Quantized draft V requires FA; this runtime does not expose a draft FA policy.
+              if (speculativeDraftCacheTypeV !== 'f16' && speculativeDraftCacheTypeV !== 'f32') speculativeDraftCacheTypeV = 'f16';
+              const draftFit = estimateAccurateMemoryFit({ input: {
+                modelSizeBytes: resolvedDraft.fileInfo.size ?? null,
+                verifiedFileSizeBytes: resolvedDraft.fileInfo.size ?? undefined,
+                metadataTrust: 'verified_local', ggufMetadata: draftMetadata,
+                runtimeParams: { n_ctx: loadParams.contextSize, cache_type_k: speculativeDraftCacheTypeK,
+                  cache_type_v: speculativeDraftCacheTypeV },
+              }, totalMemoryBytes: resolvedTotalMemoryBytes });
+              speculativeDraftExtraMemoryBytes = draftFit.breakdown.kvCacheBytes + draftFit.breakdown.computeBytes
+                + draftFit.breakdown.overheadBytes + draftFit.breakdown.safetyMarginBytes;
+              if (speculativeDraftExtraMemoryBytes <= 0) throw new Error('Draft allocation is unknown');
+            }
             speculativeDraftSizeBytes = typeof resolvedDraft.fileInfo.size === 'number'
               && Number.isFinite(resolvedDraft.fileInfo.size)
               && resolvedDraft.fileInfo.size > 0
@@ -6657,7 +6939,7 @@ class LLMEngineService {
       );
       const loadTimeProjectorSizeBytes = loadTimeProjectorMemory?.memoryFitSizeBytes;
       let loadTimeCompanionSizeBytes = (loadTimeProjectorSizeBytes ?? 0)
-        + (speculativeDecodingForLoad?.mode === 'draft_model' ? (speculativeDraftSizeBytes ?? 0) : 0);
+        + (speculativeDecodingForLoad?.mode === 'draft_model' ? (speculativeDraftSizeBytes ?? 0) + speculativeDraftExtraMemoryBytes : 0);
       const hasLoadTimeMmproj = loadTimeProjectorMemory !== null;
       const shouldDisableContextShiftForMultimodal = hasLoadTimeMmproj;
       const ggufMetadata = modelInfo !== null || cachedModel?.gguf
@@ -6673,13 +6955,15 @@ class LLMEngineService {
       //
       // In particular, quantized KV cache types require the per-head key/value dimensions to be
       // divisible by the quantization block size.
-      if (cacheTypeK !== 'f16' || cacheTypeV !== 'f16') {
+      if ((cacheTypeK !== 'f16' && cacheTypeK !== 'f32') || (cacheTypeV !== 'f16' && cacheTypeV !== 'f32')) {
         const { headDimK, headDimV } = resolveKvCacheHeadDims(ggufMetadata as unknown as Record<string, unknown> | undefined);
         const quantBlockSize = 32;
-        const missingK = cacheTypeK !== 'f16' && headDimK === null;
-        const missingV = cacheTypeV !== 'f16' && headDimV === null;
-        const incompatibleK = cacheTypeK !== 'f16' && headDimK !== null && headDimK % quantBlockSize !== 0;
-        const incompatibleV = cacheTypeV !== 'f16' && headDimV !== null && headDimV % quantBlockSize !== 0;
+        const quantizedK = cacheTypeK !== 'f16' && cacheTypeK !== 'f32';
+        const quantizedV = cacheTypeV !== 'f16' && cacheTypeV !== 'f32';
+        const missingK = quantizedK && headDimK === null;
+        const missingV = quantizedV && headDimV === null;
+        const incompatibleK = quantizedK && headDimK !== null && headDimK % quantBlockSize !== 0;
+        const incompatibleV = quantizedV && headDimV !== null && headDimV % quantBlockSize !== 0;
         const shouldFallback = missingK || missingV || incompatibleK || incompatibleV;
 
         if (shouldFallback) {
@@ -6732,9 +7016,24 @@ class LLMEngineService {
         })
         : null;
       const baseLoadProfileModelSizeBytes = verifiedFileSizeBytes ?? resolvedModelSizeBytes;
+      allocationIdentity = getEffectiveAdvancedLoadProfileIdentity(advancedLoadParams, {
+        ...advancedLoadParams, cacheTypeK, cacheTypeV,
+        specDraftCacheTypeK: speculativeDraftCacheTypeK,
+        specDraftCacheTypeV: speculativeDraftCacheTypeV,
+      });
+
+      const allocationIdentityForBuffers = (noExtraBufts: boolean) => getEffectiveAdvancedLoadProfileIdentity(
+        advancedLoadParams, {
+          ...advancedLoadParams, cacheTypeK, cacheTypeV,
+          specDraftCacheTypeK: speculativeDraftCacheTypeK,
+          specDraftCacheTypeV: speculativeDraftCacheTypeV,
+          noExtraBufts,
+        },
+      );
 
       const lastGoodProfile = preferLastWorkingProfile
         ? readLastGoodInferenceProfile({
+            allocationIdentity,
             modelId,
             contextSize: loadParams.contextSize,
             kvCacheType: loadParams.kvCacheType,
@@ -6793,6 +7092,7 @@ class LLMEngineService {
           && Number.isFinite(baseLoadProfileModelSizeBytes)
           && baseLoadProfileModelSizeBytes > 0
           ? baseLoadProfileModelSizeBytes + companionSizeBytes
+            + loraSizeBytes
           : baseLoadProfileModelSizeBytes;
         const { recommendedGpuLayers, gpuLayersCeiling } = this.resolveRecommendedLoadProfile({
           totalMemoryBytes: typeof resolvedTotalMemoryBytes === 'number'
@@ -6821,6 +7121,7 @@ class LLMEngineService {
           appMaxContextTokens: loadParams.contextSize,
           input: {
             modelSizeBytes: resolvedModelSizeBytes,
+            loraSizeBytes,
             verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
             ...(companionSizeBytes > 0 ? { multimodalSizeBytes: companionSizeBytes } : null),
             metadataTrust: metadataTrustForEstimator,
@@ -6836,6 +7137,7 @@ class LLMEngineService {
         });
         const requestedCalibrationKey = verifiedFileSizeBytes !== null
           ? this.buildCalibrationKeyString({
+            allocationIdentity,
             ggufMetadata,
             verifiedFileSizeBytes,
             contextTokens: resolvedContextSize,
@@ -6852,6 +7154,7 @@ class LLMEngineService {
           ? registry.getCalibrationRecord(requestedCalibrationKey)
           : undefined;
         const requestedEstimatorInput: EstimatorInput = {
+          loraSizeBytes,
           modelSizeBytes: resolvedModelSizeBytes,
           verifiedFileSizeBytes: verifiedFileSizeBytes ?? undefined,
           ...(companionSizeBytes > 0 ? { multimodalSizeBytes: companionSizeBytes } : null),
@@ -6987,6 +7290,8 @@ class LLMEngineService {
           configuredContextCeilingTokens,
           modelContextCeilingTokens,
           computeSafeProfile: () => this.resolveMaxSafeLoadProfile({
+            allocationIdentity: allocationIdentityForBuffers(true),
+            loraSizeBytes,
             ggufMetadata,
             resolvedModelSizeBytes,
             verifiedFileSizeBytes,
@@ -7105,6 +7410,8 @@ class LLMEngineService {
       }
       let calibrationKeyForLoad = verifiedFileSizeBytes !== null
         ? this.buildCalibrationKeyString({
+          allocationIdentity: allocationIdentityForBuffers(advancedLoadParams.noExtraBufts === true
+            || (shouldUseLowMemoryContextParams && effectiveBatchParams !== null)),
           ggufMetadata,
           verifiedFileSizeBytes,
           contextTokens: finalContextSize,
@@ -7204,11 +7511,11 @@ class LLMEngineService {
       const backendInitAttempts: EngineBackendInitAttempt[] = [];
       const initAttemptGuard = new ModelInitAttemptGuard();
       const profileUsesNoExtraBufts = (profile: InitInferenceProfile): boolean => (
-        shouldUseLowMemoryContextParams
+        advancedLoadParams.noExtraBufts === true || (shouldUseLowMemoryContextParams
         && typeof profile.nBatch === 'number'
         && Number.isFinite(profile.nBatch)
         && typeof profile.nUbatch === 'number'
-        && Number.isFinite(profile.nUbatch)
+        && Number.isFinite(profile.nUbatch))
       );
       const publishBackendInitAttempts = () => {
         this.backendInitAttemptsSnapshot = backendInitAttempts;
@@ -7226,6 +7533,7 @@ class LLMEngineService {
         speculativeEnabled: boolean,
         promptStateCachePolicy: PromptStateCachePolicy,
       ): ModelInitAttemptIdentity => ({
+        allocationIdentity,
         backendMode: profile.backendMode,
         devices: profile.devices,
         nGpuLayers: Math.max(0, Math.round(layers)),
@@ -7255,6 +7563,7 @@ class LLMEngineService {
         speculativeConfig: ModelSpeculativeDecodingConfig | null,
         promptStateCachePolicy: PromptStateCachePolicy,
       ): ModelInitFailureBoundIdentity => ({
+        allocationIdentity,
         modelId,
         modelFileSizeBytes: verifiedFileSizeBytes,
         modelSha256: cachedModel?.downloadIntegrity?.sha256 ?? cachedModel?.sha256,
@@ -7492,6 +7801,7 @@ class LLMEngineService {
         const normalizedLayers = Math.max(0, Math.round(layers));
         const calibrationKey = verifiedFileSizeBytes !== null
           ? this.buildCalibrationKeyString({
+              allocationIdentity: allocationIdentityForBuffers(profileUsesNoExtraBufts(profile)),
               ggufMetadata,
               verifiedFileSizeBytes,
               contextTokens: finalContextSize,
@@ -7570,24 +7880,26 @@ class LLMEngineService {
       const applyCalibrationForGpuLayers = (
         nextGpuLayers: number,
         promptStateCachePolicy: PromptStateCachePolicy,
+        profile: InitInferenceProfile,
       ) => {
         const normalized = Math.max(0, Math.round(nextGpuLayers));
         resolvedGpuLayers = normalized;
         calibrationKeyForLoad = verifiedFileSizeBytes !== null
           ? this.buildCalibrationKeyString({
+              allocationIdentity: allocationIdentityForBuffers(profileUsesNoExtraBufts(profile)),
               ggufMetadata,
               verifiedFileSizeBytes,
               contextTokens: finalContextSize,
               gpuLayers: normalized,
               cacheTypeK,
               cacheTypeV,
-              useMmap: requestedUseMmap,
+              useMmap: profile.useMmap,
               hasMmproj: hasLoadTimeMmproj,
               stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
               stateCacheMaxCheckpoints: promptStateCachePolicy.maxCheckpoints,
               stateCachePolicyVersion: promptStateCachePolicy.policyVersion,
-              nBatch: effectiveBatchParams?.nBatch,
-              nUbatch: effectiveBatchParams?.nUbatch,
+              nBatch: profile.nBatch,
+              nUbatch: profile.nUbatch,
             })
           : null;
         calibrationRecordForLoad = calibrationKeyForLoad
@@ -7607,14 +7919,10 @@ class LLMEngineService {
                 ...requestedEstimatorInput.runtimeParams,
                 contextTokens: finalContextSize,
                 gpuLayers: normalized,
-                useMmap: requestedUseMmap,
+                useMmap: profile.useMmap,
                 stateCacheBudgetMb: promptStateCachePolicy.budgetMb,
-                ...(effectiveBatchParams
-                  ? {
-                      nBatch: effectiveBatchParams.nBatch,
-                      nUbatch: effectiveBatchParams.nUbatch,
-                    }
-                  : null),
+                nBatch: profile.nBatch,
+                nUbatch: profile.nUbatch,
               },
               calibrationRecord: calibrationRecordForLoad,
             },
@@ -7660,9 +7968,17 @@ class LLMEngineService {
           // combined with cache_type_v=q8_0/q4_0, llama.cpp returns a null context and
           // llama.rn can crash before surfacing the error.
           const resolvedFlashAttnType = resolveEffectiveFlashAttnType(flashAttnType, layers);
+          const nativeAdvanced = buildAdvancedNativeLoadParams(advancedLoadParams);
 
           return {
             model: modelPath,
+            ...(resolvedLora.adapters.length > 0 ? { lora_list: resolvedLora.adapters } : {}),
+            ...(nativeAdvanced.rope_freq_base !== undefined ? { rope_freq_base: nativeAdvanced.rope_freq_base } : {}),
+            ...(nativeAdvanced.rope_freq_scale !== undefined ? { rope_freq_scale: nativeAdvanced.rope_freq_scale } : {}),
+            ...(nativeAdvanced.swa_full !== undefined ? { swa_full: nativeAdvanced.swa_full } : {}),
+            ...(nativeAdvanced.n_cpu_moe !== undefined ? { n_cpu_moe: nativeAdvanced.n_cpu_moe } : {}),
+            ...(advancedLoadParams.noExtraBufts !== undefined || profileUsesNoExtraBufts(profile)
+              ? { no_extra_bufts: profileUsesNoExtraBufts(profile) } : {}),
             state_cache_budget_mb: promptStateCachePolicy.budgetMb,
             state_cache_max_checkpoints: promptStateCachePolicy.maxCheckpoints,
             ...(speculativeConfig
@@ -7670,6 +7986,9 @@ class LLMEngineService {
                   speculative: {
                     type: 'draft-mtp' as const,
                     n_max: speculativeConfig.maxDraftTokens,
+                    ...(advancedLoadParams.specDraftNMin !== undefined ? { n_min: advancedLoadParams.specDraftNMin } : {}),
+                    ...(advancedLoadParams.specDraftPMin !== undefined ? { p_min: advancedLoadParams.specDraftPMin } : {}),
+                    ...(advancedLoadParams.specDraftPSplit !== undefined ? { p_split: advancedLoadParams.specDraftPSplit } : {}),
                   },
                   ...(speculativeConfig.mode === 'draft_model' && speculativeDraftPath
                     ? {
@@ -7677,12 +7996,11 @@ class LLMEngineService {
                         // llama.rn defaults separate draft models to -1 (all GPU layers).
                         // Keep the optional drafter inside the same backend/safe-load plan as
                         // the target model instead of allowing an implicit full offload.
-                        spec_draft_n_gpu_layers: Math.max(0, Math.round(layers)),
-                        // Draft head dimensions are not part of the target GGUF metadata used by
-                        // our quantized-KV compatibility guard. Preserve llama.cpp's safe F16
-                        // defaults until the drafter itself can be inspected independently.
-                        spec_draft_cache_type_k: 'f16',
-                        spec_draft_cache_type_v: 'f16',
+                        spec_draft_n_gpu_layers: Math.max(0, Math.min(Math.round(layers), advancedLoadParams.specDraftNGpuLayers === undefined
+                          || advancedLoadParams.specDraftNGpuLayers === -1 ? Math.round(layers) : advancedLoadParams.specDraftNGpuLayers)),
+                        // Explicit draft cache formats were checked against the draft metadata.
+                        spec_draft_cache_type_k: speculativeDraftCacheTypeK,
+                        spec_draft_cache_type_v: speculativeDraftCacheTypeV,
                       }
                     : null),
                 }
@@ -7827,6 +8145,7 @@ class LLMEngineService {
           );
           try {
             this.assertNoOrphanedContextReleasePending();
+            this.activeLoraAdapters = resolvedLora.adapters.map(adapter => ({ ...adapter }));
             const context = await this.awaitModelInitWithProgressWatchdog(
               (progressListener) => initLlamaContext(
                 buildOptions(
@@ -7838,6 +8157,14 @@ class LLMEngineService {
               ),
               onProgress,
             );
+            if (resolvedLora.adapters.length > 0) {
+              const loaded = await context.getLoadedLoraAdapters();
+              if (loaded.length !== resolvedLora.adapters.length || loaded.some((item, index) => (
+                fileUriToNativePath(item.path) !== fileUriToNativePath(resolvedLora.adapters[index].path)
+                || typeof (item.scaled ?? 1) !== 'number'
+                || Math.fround(item.scaled ?? 1) !== Math.fround(resolvedLora.adapters[index].scaled)
+              ))) throw new AppError('model_load_failed', 'The runtime did not confirm the requested adapter configuration.');
+            }
             const durationMs = Math.max(0, Date.now() - startedAtMs);
             const attempt = createInitAttemptRecord({
               profile,
@@ -7874,6 +8201,7 @@ class LLMEngineService {
               initAttemptGuard.recordProbableOom(identity);
               const calibrationKey = verifiedFileSizeBytes !== null
                 ? this.buildCalibrationKeyString({
+                    allocationIdentity: allocationIdentityForBuffers(profileUsesNoExtraBufts(profile)),
                     ggufMetadata,
                     verifiedFileSizeBytes,
                     contextTokens: finalContextSize,
@@ -8009,7 +8337,7 @@ class LLMEngineService {
           if (result.status === 'skipped') {
             return null;
           }
-          applyCalibrationForGpuLayers(0, result.promptStateCachePolicy);
+          applyCalibrationForGpuLayers(0, result.promptStateCachePolicy, profile);
           return {
             context: result.context,
             resolvedGpuLayers: 0,
@@ -8055,6 +8383,7 @@ class LLMEngineService {
             applyCalibrationForGpuLayers(
               normalizedLayers,
               result.promptStateCachePolicy,
+              profile,
             );
             return {
               context: result.context,
@@ -8106,6 +8435,7 @@ class LLMEngineService {
             applyCalibrationForGpuLayers(
               candidateLayers,
               result.promptStateCachePolicy,
+              profile,
             );
             return {
               context: result.context,
@@ -8144,6 +8474,7 @@ class LLMEngineService {
 
       const autotuneResult = normalizedBackendPolicy === 'auto'
         ? readAutotuneResult({
+            allocationIdentity,
             modelId,
             contextSize: loadParams.contextSize,
             kvCacheType: loadParams.kvCacheType,
@@ -8490,9 +8821,9 @@ class LLMEngineService {
             : null;
 
           if (!actualGpu) {
-            applyCalibrationForGpuLayers(0, promptStateCachePolicy);
+            applyCalibrationForGpuLayers(0, promptStateCachePolicy, profile);
           } else if (candidateGpuLayers !== resolvedGpuLayers) {
-            applyCalibrationForGpuLayers(candidateGpuLayers, promptStateCachePolicy);
+            applyCalibrationForGpuLayers(candidateGpuLayers, promptStateCachePolicy, profile);
           }
 
           this.setContext(context);
@@ -8619,6 +8950,28 @@ class LLMEngineService {
       }
 
       const reportedLoadedGpuLayers = this.resolveReportedLoadedGpuLayers(resolvedGpuLayers);
+      this.requestedLoadParameters = { ...loadParams, ...sanitizeAdvancedLoadParameters(loadParams) };
+      this.effectiveLoadParameters = {
+        ...this.requestedLoadParameters,
+        ...advancedLoadParams,
+        contextSize: finalContextSize,
+        gpuLayers: resolvedInitGpuLayers ?? reportedLoadedGpuLayers,
+        backendPolicy: this.activeBackendMode === 'unknown' ? loadParams.backendPolicy : this.activeBackendMode,
+        selectedBackendDevices: this.initDevices ? [...this.initDevices] : null,
+        cacheTypeK, cacheTypeV,
+        noExtraBufts: resolvedInitProfile ? profileUsesNoExtraBufts(resolvedInitProfile) : advancedLoadParams.noExtraBufts,
+        mtpEnabled: this.activeSpeculativeDecoding !== null,
+        ...(this.activeSpeculativeDecoding?.mode === 'draft_model' ? {
+          specDraftNGpuLayers: Math.max(0, Math.min(resolvedInitGpuLayers ?? 0,
+            advancedLoadParams.specDraftNGpuLayers === undefined || advancedLoadParams.specDraftNGpuLayers === -1
+              ? resolvedInitGpuLayers ?? 0 : advancedLoadParams.specDraftNGpuLayers)),
+          specDraftCacheTypeK: speculativeDraftCacheTypeK, specDraftCacheTypeV: speculativeDraftCacheTypeV,
+        } : {}),
+        flashAttention: this.initFlashAttnType ?? undefined,
+        useMmap: this.initUseMmap ?? undefined, useMlock: this.initUseMlock ?? undefined,
+        cpuThreads: this.initNThreads, cpuMask: this.initCpuMask, cpuStrict: this.initCpuStrict ?? undefined,
+        nBatch: this.initNBatch, nUbatch: this.initNUbatch, kvUnified: this.initKvUnified, parallelSlots: 1,
+      };
       this.activeContextSize = finalContextSize;
       this.activeGpuLayers = reportedLoadedGpuLayers;
       this.safeModeLoadLimits = shouldUseSafeLoadProfile
@@ -8638,6 +8991,7 @@ class LLMEngineService {
         // - CPU mode: persist when CPU was the intended policy, or when no accelerator last-good exists.
         if (didActuallyAccelerate || shouldPersistCpuFallback) {
           writeLastGoodInferenceProfile({
+            allocationIdentity: getEffectiveAdvancedLoadProfileIdentity(advancedLoadParams, this.effectiveLoadParameters),
             createdAtMs: Date.now(),
             modelId,
             contextSize: loadParams.contextSize,

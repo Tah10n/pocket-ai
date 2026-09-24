@@ -1,5 +1,5 @@
 import { LifecycleStatus, type ModelMetadata, type ModelVariant } from '../types/models';
-import { buildHuggingFaceResolveUrl } from './huggingFaceUrls';
+import { buildHuggingFaceResolveUrl, resolveHuggingFaceResolveIdentity } from './huggingFaceUrls';
 import { normalizePersistedModelMetadata } from '../services/ModelMetadataNormalizer';
 import { isSupportedGgufFileName } from '../services/ModelCatalogFileSelector';
 import { dedupeModelVariantsByIdentity } from './modelVariantIdentity';
@@ -24,6 +24,17 @@ type ModelVariantSelectionSource = Pick<ModelMetadata, 'activeVariantId' | 'reso
   | 'speculativeDecoding'
   | 'variants'
 >>;
+
+// Reselecting installed bytes must not rewrite a pinned source URL using a
+// local registry alias. A real file/revision change still uses the catalog URL.
+function getVariantDownloadUrl(model: ModelMetadata, fileName: string): string {
+  const source = resolveHuggingFaceResolveIdentity(model.downloadUrl);
+  if (model.resolvedFileName === fileName && source?.filePath === fileName
+    && (model.hfRevision === undefined || model.hfRevision === source.revision)) {
+    return model.downloadUrl;
+  }
+  return buildHuggingFaceResolveUrl(model.id, fileName, model.hfRevision);
+}
 
 export const DEFAULT_CATALOG_QUANTIZATION_LABEL = 'Q4_K_M';
 
@@ -276,7 +287,7 @@ export function applyModelVariantSelectionIfAvailable(
   return normalizePersistedModelMetadata({
     ...model,
     size: nextSize,
-    downloadUrl: buildHuggingFaceResolveUrl(model.id, selectedFileName, model.hfRevision),
+    downloadUrl: getVariantDownloadUrl(model, selectedFileName),
     resolvedFileName: selectedFileName,
     sha256: canUseSelectionFileMetadata
       ? selection.sha256 ?? (!isDifferentFile ? model.sha256 : undefined)
@@ -369,7 +380,7 @@ export function applyModelVariantSelection(model: ModelMetadata, variantId: stri
   const isDifferentFile = model.resolvedFileName !== variant.fileName;
   const nextSize = selectedSize ?? (!isDifferentFile ? model.size : null);
   const isDifferentFitIdentity = isDifferentFile || model.size !== nextSize;
-  const nextDownloadUrl = buildHuggingFaceResolveUrl(model.id, variant.fileName, model.hfRevision);
+  const nextDownloadUrl = getVariantDownloadUrl(model, variant.fileName);
   const nextSha256 = variant.sha256 ?? (!isDifferentFile ? model.sha256 : undefined);
   const nextMetadataTrust = !isDifferentFile && model.metadataTrust
     ? model.metadataTrust

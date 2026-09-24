@@ -607,6 +607,7 @@ export function getCopyableAssistantContent(content: string) {
   return presentation.hasThought ? presentation.finalContent : content;
 }
 
-export function getVisibleMessageContent(role: ChatMessageRole, content: string) {
+export function getVisibleMessageContent(role: ChatMessageRole, content: string, structuredMode?: string) {
+  if (structuredMode && structuredMode !== 'text') return content;
   return role === 'assistant' ? getVisibleAssistantContent(content) : content;
 }

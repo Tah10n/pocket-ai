@@ -122,6 +122,27 @@ const git = {
 };
 
 describe('Android build content provenance', () => {
+  it('binds verified SDK content to the build without publishing private roots', () => {
+    const root = createProject();
+    const sdk = require('../../scripts/llama-hexagon-sdk');
+    const identity = { version: '6.4.0.2', archiveSha256: 'a'.repeat(64), requiredFilesDigest: 'b'.repeat(64) };
+    const verify = jest.spyOn(sdk, 'verifyLlamaHexagonSdk').mockReturnValue({ status: 'verified',
+      env: { HEXAGON_SDK_ROOT: '/private/sdk' }, identity });
+    try {
+      fs.mkdirSync(path.join(root, 'scripts'));
+      fs.writeFileSync(path.join(root, 'scripts', 'llama-hexagon-sdk-manifest.json'), '{}');
+      const options = { abi: 'universal', env: {}, git: { headSha: 'test' }, toolchains: {},
+        userGradlePropertiesPath: path.join(root, 'absent.properties') };
+      const first = collectBuildProvenance(root, options);
+      expect(first.llamaHexagon).toEqual(identity);
+      expect(JSON.stringify(first)).not.toContain('/private/sdk');
+      verify.mockReturnValue({ status: 'verified', env: {}, identity: { ...identity, requiredFilesDigest: 'c'.repeat(64) } });
+      expect(collectBuildProvenance(root, options).digest).not.toBe(first.digest);
+      verify.mockImplementation(() => { throw new Error('SDK mismatch'); });
+      expect(() => collectBuildProvenance(root, options)).toThrow('SDK mismatch');
+    } finally { verify.mockRestore(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('ignores mtime changes but detects equal-size content replacements', () => {
     const projectRoot = createProject();
     const inputPath = path.join(projectRoot, 'plugins', 'withFixture.js');
@@ -431,6 +452,36 @@ describe('Android build content provenance', () => {
       expect(changedArbitraryModeFile).not.toBe(changedExpansionDependency);
       expect(dotenvDisabled).not.toBe(changedArbitraryModeFile);
       expect(clientEnvDisabled).not.toBe(changedArbitraryModeFile);
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('hashes the imported Stage 3 fixture without recursively including validation documents', () => {
+    const projectRoot = createProject();
+    const fixtureRelativePath = 'docs/validation/llama-rn-stage3/lora-fixture.json';
+    const fixturePath = path.join(projectRoot, fixtureRelativePath);
+    const reportPath = path.join(path.dirname(fixturePath), 'acceptance.md');
+    const collect = (options = {}) => collectBuildProvenance(projectRoot, {
+      variant: 'debug', abi: 'x86_64', toolchains, git, ...options,
+    });
+    try {
+      fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
+      fs.writeFileSync(fixturePath, '{"probabilityProbe":{"nProbs":10}}');
+      fs.writeFileSync(reportPath, 'First acceptance report');
+      const debug = collect();
+      const embedded = collect({ includeBundleInputs: true });
+      const release = collect({ variant: 'release' });
+      expect(embedded.entries.some(entry => entry.path === fixtureRelativePath)).toBe(true);
+      expect(release.entries.some(entry => entry.path === fixtureRelativePath)).toBe(true);
+      expect(debug.entries.some(entry => entry.path === fixtureRelativePath)).toBe(false);
+      expect(embedded.entries.some(entry => entry.path.endsWith('acceptance.md'))).toBe(false);
+      fs.writeFileSync(reportPath, 'Updated acceptance report');
+      expect(collect({ includeBundleInputs: true }).digest).toBe(embedded.digest);
+      fs.writeFileSync(fixturePath, '{"probabilityProbe":{"nProbs":5}}');
+      expect(collect({ includeBundleInputs: true }).digest).not.toBe(embedded.digest);
+      expect(collect({ variant: 'release' }).digest).not.toBe(release.digest);
+      expect(collect().digest).toBe(debug.digest);
     } finally {
       fs.rmSync(projectRoot, { force: true, recursive: true });
     }
@@ -1670,6 +1721,81 @@ describe('Android build provenance routing', () => {
     } finally {
       fs.rmSync(projectRoot, { force: true, recursive: true });
     }
+  });
+
+  it.each([
+    ['project argument', { gradleArgs: ['-PrnllamaBuildFromSource=false'] }],
+    ['long project argument', { gradleArgs: ['--project-prop', 'rnllamaBuildFromSource=false'] }],
+    ['system argument', { gradleArgs: ['-Dorg.gradle.project.rnllamaBuildFromSource=false'] }],
+    ['nested JVM argument', { gradleArgs: ['-Dorg.gradle.jvmargs=-Dorg.gradle.project.rnllamaBuildFromSource=false'] }],
+    ['project environment', { env: { ORG_GRADLE_PROJECT_rnllamaBuildFromSource: 'false' } }],
+    ...['_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JAVA_OPTS', 'GRADLE_OPTS']
+      .map(key => [key, { env: { [key]: '-Dorg.gradle.project.rnllamaBuildFromSource=false' } }]),
+    ['user Gradle property', { userProperties: 'rnllamaBuildFromSource=false\n' }],
+    ['user Gradle system property', { userProperties: 'systemProp.org.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['user Gradle JVM property', { userProperties: 'org.gradle.jvmargs=-Dorg.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['project Gradle system property', { projectProperties: 'systemProp.org.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['project Gradle JVM property', { projectProperties: 'org.gradle.jvmargs=-Dorg.gradle.project.rnllamaBuildFromSource=false\n' }],
+    ['external true value', { gradleArgs: ['-PrnllamaBuildFromSource=true'] }],
+    ['external empty value', { env: { ORG_GRADLE_PROJECT_rnllamaBuildFromSource: '' } }],
+  ])('rejects external llama native source-build override from %s', (_name, override) => {
+    const projectRoot = createProject();
+    const userGradlePropertiesPath = path.join(projectRoot, 'private-gradle', 'gradle.properties');
+    fs.mkdirSync(path.dirname(userGradlePropertiesPath), { recursive: true });
+    fs.writeFileSync(userGradlePropertiesPath, override.userProperties || '');
+    fs.writeFileSync(path.join(projectRoot, 'android', 'gradle.properties'), [
+      'rnllamaBuildFromSource=true',
+      override.projectProperties || '',
+    ].join('\n'));
+    try {
+      for (const [variant, abi] of [['debug', 'x86_64'], ['release', 'universal']]) {
+        expect(() => assertAndroidBuildOverrideContract(projectRoot, {
+          variant, abi, env: override.env || {}, gradleArgs: override.gradleArgs || [],
+          userGradlePropertiesPath,
+        })).toThrow(/reject external rnllamaBuildFromSource overrides/);
+      }
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('allows the repository-owned llama native source-build property without external overrides', () => {
+    const projectRoot = createProject();
+    const userGradlePropertiesPath = path.join(projectRoot, 'private-gradle', 'gradle.properties');
+    fs.writeFileSync(path.join(projectRoot, 'android', 'gradle.properties'), 'rnllamaBuildFromSource=true\n');
+    try {
+      for (const [variant, abi] of [['debug', 'x86_64'], ['release', 'universal']]) {
+        expect(() => assertAndroidBuildOverrideContract(projectRoot, {
+          variant, abi, env: {}, userGradlePropertiesPath,
+        })).not.toThrow();
+      }
+    } finally {
+      fs.rmSync(projectRoot, { force: true, recursive: true });
+    }
+  });
+
+  it.each(['arm64-v8a', 'universal'])('prevents external backend narrowing for %s while allowing CPU QA', abi => {
+    const root = createProject();
+    try {
+      const options = { env: { ORG_GRADLE_PROJECT_rnllamaVariants: 'rnllama' }, userGradlePropertiesPath: path.join(root, 'absent.properties') };
+      expect(() => assertAndroidBuildOverrideContract(root, { ...options, abi })).toThrow(/preserve all llama.rn backend variants/);
+      expect(() => assertAndroidBuildOverrideContract(root, { ...options, abi: 'x86_64' })).not.toThrow();
+      fs.writeFileSync(path.join(root, 'android', 'gradle.properties'), 'rnllamaVariants=rnllama\n');
+      expect(() => assertAndroidBuildOverrideContract(root, { ...options, env: {}, abi })).toThrow(/preserve all llama.rn backend variants/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('binds private SDK roots without exposing them in public provenance', () => {
+    const root = createProject();
+    try {
+      const options = { userGradlePropertiesPath: path.join(root, 'absent.properties'), hmacKeyPath: path.join(root, 'hmac.key') };
+      const first = collectAndroidPrivateBuildReuseDigest(root, { ...options, env: { HEXAGON_SDK_ROOT: '/private/a', HEXAGON_TOOLS_ROOT: '/private/a/tools' } });
+      const second = collectAndroidPrivateBuildReuseDigest(root, { ...options, env: { HEXAGON_SDK_ROOT: '/private/b', HEXAGON_TOOLS_ROOT: '/private/a/tools' } });
+      const third = collectAndroidPrivateBuildReuseDigest(root, { ...options, env: { HEXAGON_SDK_ROOT: '/private/a', HEXAGON_TOOLS_ROOT: '/private/b/tools' } });
+      expect(first).not.toBe(second);
+      expect(first).not.toBe(third);
+      expect(first).toMatch(/^[a-f0-9]{64}$/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it('rejects every externally injected Android artifact override channel', () => {

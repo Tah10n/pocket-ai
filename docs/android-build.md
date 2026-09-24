@@ -22,6 +22,7 @@ scripts, explicitly run the same installer before building:
 
 ```bash
 node node_modules/llama.rn/install/download-native-artifacts.js
+node patches/llama-rn-0.13.0-rc.3.js
 npm run verify:native-config
 ```
 
@@ -29,6 +30,31 @@ The verifier checks the exact manifest/lock/installed package version, download
 receipts and required payloads. Receipts and JavaScript `BuildInfo` are not proof
 of the embedded binary; retain artifact provenance and native smoke checks.
 Do not reuse an old generated native project after changing the runtime pin.
+
+The pinned rc.3 includes [local native corrections](./validation/llama-rn-stage3/native-probability-patch.md).
+The Expo source-build plugin generates `rnllamaBuildFromSource=true`, so Gradle
+compiles the corrected core instead of packaging the vendor core. The build wrapper
+rejects external overrides of this property. A clean first build takes longer;
+reuse the same build directory and cache for subsequent verification.
+
+ARM64/universal wrappers also prepare a hash-pinned Hexagon **host** SDK subset to
+preserve the existing NPU backend during source compilation. The first setup downloads
+[SDK archive v6.4.0.2](https://github.com/snapdragon-toolchain/hexagon-sdk/releases/tag/v6.4.0.2)
+(706,737,852 bytes), verifies SHA-256, extracts only 60 required files (678,879 bytes),
+and deletes the archive. The subset lives under
+`node_modules/.cache/pocket-ai-android/hexagon-sdk/6.4.0.2`; it contains headers and the
+Android ARM64 FastRPC link stub, not a DSP compiler. Proprietary Qualcomm notices are
+retained; the SDK is not project source and is not covered by the app's license.
+The [manifest](../scripts/llama-hexagon-sdk-manifest.json) records archive and file hashes.
+An existing `HEXAGON_SDK_ROOT`/`HEXAGON_TOOLS_ROOT` is accepted only after matching these
+files. Python 3 is required for safe archive extraction and OpenCL kernel preparation.
+
+CPU emulator CI explicitly sets `ANDROID_SMOKE_TARGET_ABI=x86_64` and skips SDK setup.
+The generated Gradle guard rejects missing/drifted SDK inputs and ARM64 backend narrowing.
+EAS uses the same helper through `eas-build-post-install` and exports verified roots
+with the documented [EAS set-env command](https://docs.expo.dev/eas/environment-variables/usage/#dynamically-setting-environment-variables-during-the-job-execution).
+No cloud build is needed to run the local CPU acceptance pack. SDK source compilation
+and NPU behavior on a supported device are separate verification requirements.
 
 Prepare and verify the document toolchain once:
 

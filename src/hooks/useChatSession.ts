@@ -1,4 +1,5 @@
 import { AppState, AppStateStatus } from 'react-native';
+import { isThreadLoraProfileReady } from '../utils/chatLoraProfile';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import { llmEngineService } from '../services/LLMEngineService';
@@ -8,7 +9,7 @@ import {
   exactPromptTokenCache,
 } from '../services/ExactPromptTokenCache';
 import { performanceMonitor } from '../services/PerformanceMonitor';
-import { GenerationParameters, getGenerationParametersForModel, getSettings } from '../services/SettingsStore';
+import { GenerationParameters, getGenerationParametersForModel, getSettings, sanitizeGenerationParameters } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
 import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
@@ -65,8 +66,10 @@ import {
   getAssistantPresentation,
   getVisibleAssistantContent,
 } from '../utils/chatPresentation';
-import { resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
-import { syncThreadParameters } from '../utils/chatThreadParameters';
+import { applyAdvancedReasoningConfig, resolveModelReasoningCapability, resolveReasoningRuntimeConfig } from '../utils/modelReasoningCapabilities';
+import { resolveThreadGenerationParameters, syncThreadParameters } from '../utils/chatThreadParameters';
+import { freezeGenerationParameters, generationFormattingIdentity, getPreparedTemplateNow, sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
+import { prepareStructuredOutput, StructuredOutputConfigurationError } from '../utils/structuredOutput';
 import { PrivateStorageUnavailableError, getPrivateStorageHealthSnapshot, isPrivateStorageWritable } from '../services/storage';
 import { useTruncationTracking } from './useTruncationTracking';
 import { markInteractiveWorkStarted } from '../utils/idleTask';
@@ -361,6 +364,12 @@ interface ActiveGenerationState {
 }
 
 export type AppendUserMessageOptions = {
+  newThreadParameters?: {
+    modelId: string;
+    presetId: string | null;
+    revision: number;
+    paramsSnapshot: GenerationParameters;
+  };
   attachmentDrafts?: readonly AttachmentDraft[];
   documentAttachmentDrafts?: readonly ChatDocumentAttachmentDraft[];
   mediaAttachmentDrafts?: readonly ChatMediaAttachmentDraft[];
@@ -2377,11 +2386,11 @@ function resolveThreadReasoningRuntimeConfig(thread: Pick<ChatThread, 'modelId' 
   const model = registry.getModel(activeModelId);
   const modelName = model?.name ?? activeModelId;
   const capability = resolveModelReasoningCapability(model, activeModelId, modelName);
-  const runtimeConfig = resolveReasoningRuntimeConfig({
+  const runtimeConfig = applyAdvancedReasoningConfig(resolveReasoningRuntimeConfig({
     reasoningEffort: thread.paramsSnapshot.reasoningEffort,
     capability,
     maxTokens: thread.paramsSnapshot.maxTokens,
-  });
+  }), thread.paramsSnapshot, thread.paramsSnapshot.maxTokens);
 
   return {
     activeModelId,
@@ -2466,6 +2475,7 @@ async function refineDocumentContextWithExactPromptBudget({
     enable_thinking: runtimeConfig.enableThinking,
     reasoning_format: runtimeConfig.reasoningFormat,
   };
+  const generation = freezeGenerationParameters(baseThread.paramsSnapshot, generationWork.templateNowSeconds);
   const countResolvedMessages = async (messages: readonly LlmChatMessage[]): Promise<number> => {
     generationWork.assertCurrent();
     const resolvedMessages = await generationWork.waitFor(
@@ -2480,6 +2490,7 @@ async function refineDocumentContextWithExactPromptBudget({
     generationWork.assertCurrent();
     return generationWork.waitFor(llmEngineService.countPromptTokens({
       messages: resolvedMessages,
+      generation,
       params: tokenCountParams,
       multimodalReadiness,
       expectedModelId,
@@ -3005,6 +3016,14 @@ export const useChatSession = () => {
 
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
+    const generation = freezeGenerationParameters(storedThread.paramsSnapshot, completionOptions.generationWork?.templateNowSeconds);
+    const loadProfileSnapshot = llmEngineService.getEffectiveLoadParameters?.() ?? undefined;
+    const generationSnapshot: ChatMessage['generationSnapshot'] = {
+      ...storedThread.paramsSnapshot, ...sanitizeAdvancedGenerationParameters(generation),
+      template: { ...generation.template, now: getPreparedTemplateNow(generation) },
+    };
+    const interruptedOutput: ChatMessage['structuredOutput'] = generation.output && generation.output.mode !== 'text'
+      ? { mode: generation.output.mode, status: 'incomplete', error: 'interrupted' } : undefined;
 
     const modelId = completionOptions.expectedModelId ?? getThreadActiveModelId(storedThread);
 
@@ -3062,6 +3081,11 @@ export const useChatSession = () => {
       : null;
 
     const presentationParser = createIncrementalAssistantPresentationParser();
+    const hasStructuredConstraint = generation.output !== undefined && generation.output.mode !== 'text';
+    let exactStructuredContent = '';
+    const getAssistantPresentation = () => hasStructuredConstraint
+      ? { finalContent: exactStructuredContent, thoughtContent: '' }
+      : presentationParser.getPresentation();
     let presentationSnapshotSource: 'raw' | 'native-content' | null = null;
     let tokensCount = 0;
     let hasMarkedFirstToken = false;
@@ -3135,7 +3159,7 @@ export const useChatSession = () => {
     };
 
     const hasBufferedAssistantContent = () => {
-      const presentation = presentationParser.getPresentation();
+      const presentation = getAssistantPresentation();
       return presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0;
     };
 
@@ -3156,9 +3180,12 @@ export const useChatSession = () => {
 
       const elapsedSec = (Date.now() - startTime) / 1000;
       const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
-      const presentation = presentationParser.getPresentation();
+      const presentation = getAssistantPresentation();
 
       const updates: Partial<ChatMessage> = {
+        generationSnapshot,
+        loadProfileSnapshot,
+        structuredOutput: interruptedOutput,
         content: presentation.finalContent,
         thoughtContent: presentation.thoughtContent || undefined,
         tokensPerSec,
@@ -3205,12 +3232,15 @@ export const useChatSession = () => {
       if (!pendingTerminalFinalization) {
         const elapsedSec = (Date.now() - startTime) / 1000;
         const tokensPerSec = elapsedSec > 0 ? tokensCount / elapsedSec : 0;
-        const presentation = presentationParser.getPresentation();
+        const presentation = getAssistantPresentation();
         const bufferedThoughtContent = presentation.thoughtContent.length > 0
           ? presentation.thoughtContent
           : null;
         pendingTerminalFinalization = {
           ...finalization,
+          generationSnapshot,
+          loadProfileSnapshot,
+          structuredOutput: finalization.structuredOutput ?? interruptedOutput,
           content: finalization.content ?? presentation.finalContent,
           thoughtContent: finalization.thoughtContent === undefined
             ? bufferedThoughtContent
@@ -3255,7 +3285,7 @@ export const useChatSession = () => {
         return;
       }
 
-      const presentation = presentationParser.getPresentation();
+      const presentation = getAssistantPresentation();
       const delayMs = resolveAssistantStreamPatchInterval({
         tokensCount,
         visibleCharCount: presentation.finalContent.length,
@@ -3323,6 +3353,7 @@ export const useChatSession = () => {
       stop: () => settleActiveChatGenerationForStop(generationState),
     });
     try {
+      prepareStructuredOutput(generation.output);
       releasePromptPreparation = llmEngineService.beginPromptPreparation();
       const {
         activeModelId,
@@ -3484,6 +3515,7 @@ export const useChatSession = () => {
         enableThinking: params.enable_thinking,
         reasoningFormat: params.reasoning_format,
         addGenerationPrompt: params.add_generation_prompt,
+        formattingIdentity: generationFormattingIdentity(generation),
       });
       const resolvePromptTokenMessages = (messagesToCount: LlmChatMessage[]) => messagesToCount.map((message) => (
         resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
@@ -3502,6 +3534,7 @@ export const useChatSession = () => {
             : null;
           const tokenCountPromise = llmEngineService.countPromptTokens({
             messages: sanitizedMessagesToCount,
+            generation,
             params,
             multimodalReadiness: effectiveMultimodalReadiness,
             expectedModelId: activeModelId,
@@ -3588,6 +3621,7 @@ export const useChatSession = () => {
         promptTokens = result.promptTokens;
         promptSafetyMarginTokens = result.promptSafetyMarginTokens;
       } catch (error) {
+        if (error instanceof StructuredOutputConfigurationError) throw error;
         if (generationState.stopRequested) {
           throw error;
         }
@@ -3810,6 +3844,7 @@ export const useChatSession = () => {
       notifyNativeCompletionSettlementChanged();
       const completion = await llmEngineService.chatCompletion({
         messages,
+        generation,
         expectedModelId: modelId,
         multimodalReadiness: effectiveMultimodalReadiness,
         params: {
@@ -3854,6 +3889,13 @@ export const useChatSession = () => {
           }
           streamingCallbackRevision += 1;
           const callbackRevision = streamingCallbackRevision;
+          if (hasStructuredConstraint) {
+            if (typeof token === 'string') exactStructuredContent += token;
+            else if (token.content !== undefined) exactStructuredContent = token.content;
+            else if (token.reasoningContent === undefined) {
+              exactStructuredContent = token.accumulatedText ?? exactStructuredContent + token.token;
+            }
+          }
 
           if (typeof token === 'string') {
             appendPresentationDelta(token);
@@ -3943,7 +3985,7 @@ export const useChatSession = () => {
         return;
       }
 
-      const currentPresentation = presentationParser.getPresentation();
+      const currentPresentation = getAssistantPresentation();
       const finalThoughtContent = resolveSuccessfulAssistantThought({
         completionContent: completion.content,
         completionReasoningContent: completion.reasoning_content,
@@ -3953,9 +3995,16 @@ export const useChatSession = () => {
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
+      const outputValidation = completion.structuredOutput;
+      const outputIncomplete = outputValidation?.status === 'incomplete';
+      const outputInvalid = outputValidation?.status === 'invalid';
+      const structured = generation.output !== undefined && generation.output.mode !== 'text';
       const successResult = finalizeBufferedAssistantTurn({
-        outcome: 'success',
-        content: resolveSuccessfulAssistantContent({
+        ...(outputInvalid
+          ? { outcome: 'error' as const, errorCode: 'structured_output_invalid', errorMessage: 'The output did not satisfy the selected format.' }
+          : { outcome: outputIncomplete ? 'stopped' as const : 'success' as const }),
+        structuredOutput: outputValidation,
+        content: structured ? completion.content ?? completion.text ?? '' : resolveSuccessfulAssistantContent({
           completionContent: completion.content,
           completionText: completion.text,
           preferRawSnapshot:
@@ -3963,16 +4012,16 @@ export const useChatSession = () => {
           streamedContent: currentPresentation.finalContent,
           rawSnapshot: latestRawAssistantSnapshot,
         }),
-        thoughtContent: finalThoughtContent.length > 0 ? finalThoughtContent : null,
+        thoughtContent: !structured && finalThoughtContent.length > 0 ? finalThoughtContent : null,
         inferenceMetrics: completionTelemetry ?? undefined,
       });
       const successCommitError = resolveTerminalCommitError(successResult);
       if (successCommitError) {
         throw successCommitError;
       }
-      recordCompletionStats('success');
+      recordCompletionStats(outputInvalid ? 'error' : outputIncomplete ? 'stopped' : 'success');
 
-      if (AppState.currentState !== 'active') {
+      if (!outputInvalid && !outputIncomplete && AppState.currentState !== 'active') {
         void notificationService.sendCompletionNotification('inference', { threadId });
       }
     } catch (error) {
@@ -4076,6 +4125,9 @@ export const useChatSession = () => {
 
     const threadModelId = getThreadActiveModelId(thread);
     assertThreadModelExecutionInvariant(thread.id, threadModelId);
+    if (!isThreadLoraProfileReady(thread, llmEngineService.getEffectiveLoadParameters?.())) {
+      throw new AppError('chat_model_mismatch', 'Restore this conversation’s adapter configuration before generating.');
+    }
 
     if (
       llmEngineService.hasActiveCompletion()
@@ -4099,7 +4151,16 @@ export const useChatSession = () => {
     const targetModelId = existingThreadAtStart
       ? getThreadActiveModelId(existingThreadAtStart)
       : settings.activeModelId?.trim() ?? '';
-    const newThreadModelParams = getGenerationParametersForModel(targetModelId);
+    const selectedPreset = settings.activePresetId ? presetManager.getPreset(settings.activePresetId) : undefined;
+    const draftParameters = !existingThreadAtStart ? options.newThreadParameters : undefined;
+    if (draftParameters && (draftParameters.modelId !== targetModelId
+      || draftParameters.presetId !== settings.activePresetId
+      || draftParameters.revision !== interactiveStateAtStart.newThreadRevision)) {
+      throw new AppError('action_failed', 'The new conversation settings changed before sending. Please retry.');
+    }
+    const newThreadModelParams = draftParameters
+      ? sanitizeGenerationParameters(draftParameters.paramsSnapshot)
+      : selectedPreset?.generationParameters ?? getGenerationParametersForModel(targetModelId);
 
     if (existingThreadAtStart) {
       ensureThreadCanGenerate(existingThreadAtStart, 'sending another message');
@@ -4351,6 +4412,7 @@ export const useChatSession = () => {
         presetId: settings.activePresetId,
         presetSnapshot: newThreadPresetSnapshot,
         paramsSnapshot: newThreadModelParams,
+        loraSnapshot: llmEngineService.getEffectiveLoadParameters?.()?.loraAdapters ?? [],
         messages: [],
         createdAt: userMessageCreatedAt,
         updatedAt: userMessageCreatedAt,
@@ -4573,6 +4635,7 @@ export const useChatSession = () => {
           presetId: settings.activePresetId,
           presetSnapshot: newThreadPresetSnapshot,
           paramsSnapshot: newThreadModelParams,
+          loraSnapshot: llmEngineService.getEffectiveLoadParameters?.()?.loraAdapters ?? [],
         });
 
       if (!setActiveThread(threadId)) {
@@ -5023,7 +5086,7 @@ export const useChatSession = () => {
         throw new Error('The conversation changed while selecting regeneration context. Try again.');
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
-      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
+      const branchParamsSnapshot = resolveThreadGenerationParameters(activeThread);
 
       const assistantMessageId = replaceBranchFromUserMessage(
         activeThread.id,
@@ -5271,7 +5334,7 @@ export const useChatSession = () => {
         throw new Error('The conversation changed while selecting regeneration context. Try again.');
       }
       assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
-      const branchParamsSnapshot = getGenerationParametersForModel(activeModelId);
+      const branchParamsSnapshot = resolveThreadGenerationParameters(activeThread);
 
       const lastAssistantMessageIndex = (() => {
         for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {

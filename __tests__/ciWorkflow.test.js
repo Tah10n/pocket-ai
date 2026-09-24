@@ -196,6 +196,10 @@ describe('Android catalog QA CI configuration', () => {
     expect(nativeScope).toContain("'.github/workflows/ci.yml'");
     expect(nativeScope).toContain("'.github/workflows/release-please.yml'");
     expect(nativeScope).toContain("'scripts/android-*.js'");
+    for (const entry of ['scripts/llama-hexagon-sdk.js', 'scripts/llama-hexagon-sdk-manifest.json', 'scripts/eas-llama-build-setup.js', 'patches/**']) {
+      expect(nativeScope).toContain(`'${entry}'`);
+    }
+    expect(androidGate).toContain('ANDROID_SMOKE_TARGET_ABI: x86_64');
     expect(nativeScope).toContain("'scripts/build-android-release.js'");
     expect(nativeScope).toContain("'scripts/verify-ci-gate-results.js'");
     expect(nativeScope).toContain("'src/design-system/materials/**'");

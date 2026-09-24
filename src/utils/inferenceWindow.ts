@@ -164,7 +164,7 @@ function hasFileBackedInferenceInput(message: ChatMessage): boolean {
 }
 
 function toLlmChatMessage(message: ChatMessage): LlmChatMessage {
-  const content = getVisibleMessageContent(message.role, message.content);
+  const content = getVisibleMessageContent(message.role, message.content, message.structuredOutput?.mode);
   const mediaPaths = getChatImageAttachmentMediaPaths(message.attachments);
   const attachmentAudioContentParts = getAudioContentPartsFromAttachments(message.attachments);
   const storedContentParts = [
@@ -220,7 +220,7 @@ export function getThreadInferenceWindow(
       message.state !== 'error'
       && (message.kind ?? 'message') !== 'model_switch'
       && (
-        getVisibleMessageContent(message.role, message.content).trim().length > 0
+        getVisibleMessageContent(message.role, message.content, message.structuredOutput?.mode).trim().length > 0
         || (message.contentParts?.length ?? 0) > 0
         || getChatImageAttachmentMediaPaths(message.attachments).length > 0
         || hasAudioAttachmentInput(message.attachments)
@@ -388,7 +388,7 @@ export function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
       message.state !== 'error'
       && (message.kind ?? 'message') !== 'model_switch'
       && (
-        getVisibleMessageContent(message.role, message.content).trim().length > 0
+        getVisibleMessageContent(message.role, message.content, message.structuredOutput?.mode).trim().length > 0
         || (message.contentParts?.length ?? 0) > 0
         || getChatImageAttachmentMediaPaths(message.attachments).length > 0
         || hasAudioAttachmentInput(message.attachments)

@@ -10,6 +10,8 @@ import { inferenceBackendService } from '../../src/services/InferenceBackendServ
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { writeAutotuneResult } from '../../src/services/InferenceAutotuneStore';
 import * as inferenceLastGoodStore from '../../src/services/InferenceLastGoodProfileStore';
+import * as loraProfileResolver from '../../src/services/LoraProfileResolver';
+import * as safeLoadPolicy from '../../src/services/LLMEngineService.safeLoadPolicy';
 import { createStorage } from '../../src/services/storage';
 import { getModelLoadParametersForModel, updateSettings } from '../../src/services/SettingsStore';
 import { getFreshMemorySnapshot } from '../../src/services/SystemMetricsService';
@@ -361,6 +363,7 @@ describe('LLMEngineService', () => {
     (llmEngineService as any).activeMultimodalContext = null;
     (llmEngineService as any).loadedContextDisablesContextShiftForMultimodal = false;
     (llmEngineService as any).additionalStopWordsCache?.clear?.();
+    (llmEngineService as any).preparedRequestCache?.clear?.();
     getBackendDevicesInfoMock().mockResolvedValue([
       {
         type: 'gpu',
@@ -375,6 +378,7 @@ describe('LLMEngineService', () => {
     getReleaseMultimodalMock().mockResolvedValue(undefined);
     (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1024 });
     (llamaRn.initLlama as jest.Mock).mockImplementation(async (options?: { n_gpu_layers?: number }) => ({
+      model: { metadata: { 'general.architecture': 'qwen2', 'tokenizer.ggml.model': 'gpt2', 'tokenizer.ggml.pre': 'qwen2' } },
       completion: (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
       getFormattedChat: getFormattedChatMock(),
       tokenize: (llamaRn as unknown as { __tokenizeMock: jest.Mock }).__tokenizeMock,
@@ -454,8 +458,246 @@ describe('LLMEngineService', () => {
     }
   });
 
-  it('forwards structured messages to llama.rn completion', async () => {
+  it('shares custom formatting and prefill between exact counting and generation', async () => {
     await llmEngineService.load('test/model');
+    getFormattedChatMock().mockResolvedValue({ type: 'jinja', prompt: '<bos><assistant>', additional_stops: [' END '],
+      generation_prompt: '<assistant>', chat_parser: 'parser', thinking_start_tag: '<think>', thinking_end_tag: '</think>' });
+    getTokenizeMock().mockResolvedValueOnce({ tokens: [1, 2, 3] });
+    const messages = [{ role: 'user' as const, content: 'Question' }];
+    const generation = { template: { chatTemplate: 'custom', jinja: true, kwargs: { value: 0 }, now: 0, prefillText: 'prefix ' }, stop: [' extra '] };
+    await expect(llmEngineService.countPromptTokens({ messages, generation })).resolves.toBe(3);
+    await llmEngineService.chatCompletion({ messages, generation });
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+    expect(getTokenizeMock()).toHaveBeenCalledWith('<bos><assistant>prefix ', undefined);
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    expect(completion).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: '<bos><assistant>prefix ', prefill_text: 'prefix ', generation_prompt: '<assistant>',
+      chat_parser: 'parser', thinking_start_tag: '<think>', thinking_end_tag: '</think>', stop: [' END ', ' extra '],
+    }), expect.any(Function));
+    expect(completion.mock.calls[0][0].messages).toBeUndefined();
+    expect(messages).toEqual([{ role: 'user', content: 'Question' }]);
+  });
+
+  it('includes pinned native automatic BOS in exact count without adding a second prompt prefix', async () => {
+    await llmEngineService.load('test/model');
+    const service = llmEngineService as unknown as { context: { model: { metadata: object } } };
+    service.context.model.metadata = { 'general.architecture': 'llama', 'tokenizer.ggml.model': 'llama' };
+    getFormattedChatMock().mockResolvedValue({ type: 'jinja', prompt: '[INST] question [/INST]', additional_stops: [] });
+    getTokenizeMock().mockResolvedValueOnce({ tokens: [10, 20, 30], has_media: false });
+    const generation = { template: { now: 0 } };
+    const messages = [{ role: 'user' as const, content: 'question' }];
+    await expect(llmEngineService.countPromptTokens({ messages, generation })).resolves.toBe(4);
+    await llmEngineService.chatCompletion({ messages, generation });
+    expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock)
+      .toHaveBeenCalledWith(expect.objectContaining({ prompt: '[INST] question [/INST]' }), expect.any(Function));
+    expect(getFormattedChatMock()).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms a fractional LoRA scale after init float32 round-trip and reload', async () => {
+    const loraAdapters = [{ artifactId: 'adapter', artifactIdentity: 'source', baseModelIdentity: 'base', scale: 0.1, sizeBytes: 1024 }];
+    const resolved = { adapters: [{ path: '/models/adapter.gguf', scaled: 0.1 }], profile: loraAdapters, sizeBytes: 1024 };
+    const resolver = jest.spyOn(loraProfileResolver, 'resolveLoraProfileForLoad').mockResolvedValue(resolved);
+    const init = llamaRn.initLlama as jest.Mock;
+    const originalInit = init.getMockImplementation()!;
+    init.mockImplementation(async (...args: unknown[]) => ({ ...await originalInit(...args),
+      getLoadedLoraAdapters: jest.fn().mockResolvedValue([{ path: '/models/adapter.gguf', scaled: Math.fround(0.1) }]),
+    }));
+    try {
+      const options = { forceReload: true, loadParamsOverride: { backendPolicy: 'cpu' as const, gpuLayers: 0, loraAdapters } };
+      await llmEngineService.load('test/model', options);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+      await llmEngineService.load('test/model', options);
+      expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
+      expect(llmEngineService.getEffectiveLoadParameters()?.loraAdapters?.[0].scale).toBe(0.1);
+      expect(init.mock.calls.at(-1)?.[0].lora_list).toEqual(resolved.adapters);
+    } finally { resolver.mockRestore(); init.mockImplementation(originalInit); }
+  });
+
+  it('maps advanced load scalars and independent cache types and reloads changed profiles', async () => {
+    await llmEngineService.load('test/model', { forceReload: true, loadParamsOverride: {
+      backendPolicy: 'cpu', contextSize: 1024, kvCacheType: 'f16', cacheTypeK: 'f32', cacheTypeV: 'f16',
+      ropeFreqBase: 0, ropeFreqScale: 0, noExtraBufts: false, swaFull: true, nCpuMoe: 0,
+    } });
+    expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).toMatchObject({
+      cache_type_k: 'f32', cache_type_v: 'f16', rope_freq_base: 0, rope_freq_scale: 0,
+      no_extra_bufts: false, swa_full: true, n_cpu_moe: 0,
+    });
+    const identity = llmEngineService.getPromptContextIdentity();
+    await llmEngineService.load('test/model', { loadParamsOverride: {
+      backendPolicy: 'cpu', contextSize: 1024, kvCacheType: 'f16', cacheTypeK: 'f32', cacheTypeV: 'f16',
+      ropeFreqBase: 0, ropeFreqScale: 2, noExtraBufts: false, swaFull: true, nCpuMoe: 0,
+    } });
+    expect(llmEngineService.getPromptContextIdentity()).not.toBe(identity);
+    expect(llmEngineService.getEffectiveLoadParameters()?.ropeFreqScale).toBe(2);
+    await llmEngineService.unload();
+  });
+
+  it('resets every advanced sampler on the next chat and preserves zero/false/empty array values', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], params: { seed: 0 }, generation: {
+      penaltyLastN: 0, frequencyPenalty: 0, typicalP: 0, mirostat: 2, mirostatTau: 0, mirostatEta: 0,
+      xtcProbability: 0, dryMultiplier: 1, dryAllowedLength: 0, dryPenaltyLastN: 0,
+      drySequenceBreakers: [], nProbs: 3, ignoreEos: false, logitBias: [],
+    } });
+    expect(completion.mock.calls[0][0]).toMatchObject({ seed: 0, penalty_last_n: 0, typical_p: 0,
+      mirostat: 2, mirostat_tau: 0, mirostat_eta: 0, dry_sequence_breakers: [], n_probs: 3 });
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }] });
+    expect(completion.mock.calls[1][0]).toMatchObject({ seed: -1, penalty_last_n: 64, typical_p: 1,
+      mirostat: 0, mirostat_tau: 5, mirostat_eta: 0.1, dry_multiplier: 0, dry_sequence_breakers: ['\n', ':', '"', '*'], n_probs: 0 });
+  });
+
+  it('validates structured final content and labels token-limit JSON incomplete', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    const generation = { output: { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"answer":{"enum":["yes","no"]}},"required":["answer"]}' } };
+    completion.mockResolvedValueOnce({ text: '<think>thought</think>{"answer":"yes"}', content: '{"answer":"yes"}', reasoning_content: 'thought' });
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation }))
+      .resolves.toMatchObject({ structuredOutput: { status: 'valid' } });
+    completion.mockResolvedValueOnce({ content: '{"answer":"maybe"}' });
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation }))
+      .resolves.toMatchObject({ structuredOutput: { status: 'invalid', error: 'schema_mismatch' } });
+    completion.mockResolvedValueOnce({ content: '{"answer":"yes"}', stopped_limit: true });
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation }))
+      .resolves.toMatchObject({ structuredOutput: { status: 'incomplete' } });
+  });
+
+  it('retains output constraints on strict-role retry and recovers after a native grammar failure', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completion.mockRejectedValueOnce(new Error('Conversation roles must alternate user/assistant')).mockResolvedValueOnce({ text: 'yes' });
+    const grammar = 'root ::= "yes"';
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }, { role: 'user', content: 'B' }], generation: { output: { mode: 'gbnf', grammar } } });
+    expect(completion.mock.calls.map(([params]) => params.grammar)).toEqual([grammar, grammar]);
+    completion.mockRejectedValueOnce(new Error('invalid grammar'));
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'C' }], generation: { output: { mode: 'gbnf', grammar: 'invalid' } } })).rejects.toThrow('invalid grammar');
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'D' }] })).resolves.toEqual({ text: 'Hello back' });
+    expect(completion.mock.calls.at(-1)?.[0].grammar).toBeUndefined();
+  });
+
+  it('rejects the unsupported llguidance directive before native completion and permits the next request', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'Private request' }],
+      generation: { output: { mode: 'gbnf', grammar: '%llguidance' } } })).rejects.toThrow();
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'Next request' }] }))
+      .resolves.toEqual({ text: 'Hello back' });
+    expect(completion).toHaveBeenCalledTimes(1);
+    expect(completion.mock.calls[0][0].grammar).toBeUndefined();
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'Literal request' }],
+      generation: { output: { mode: 'gbnf', grammar: 'root ::= "%llguidance"' } } });
+    expect(completion.mock.calls[1][0].grammar).toBe('root ::= "%llguidance"');
+  });
+
+  it('keeps rejected llguidance grammar and prompt out of technical logs and performance exports', async () => {
+    const prompt = 'PRIVATE_GRAMMAR_PROMPT_SENTINEL';
+    const grammar = '%llguidance\nPRIVATE_GRAMMAR_BODY_SENTINEL';
+    performanceMonitor.setEnabled(true);
+    try {
+      await llmEngineService.load('test/model');
+      await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: prompt }],
+        generation: { output: { mode: 'gbnf', grammar } } })).rejects.toThrow('Invalid structured output configuration');
+      const technicalOutput = JSON.stringify([
+        consoleWarnSpy.mock.calls, consoleErrorSpy.mock.calls, buildPerformanceExportJson({ pretty: false }),
+      ]);
+      expect(technicalOutput).not.toContain(prompt);
+      expect(technicalOutput).not.toContain('PRIVATE_GRAMMAR_BODY_SENTINEL');
+    } finally {
+      performanceMonitor.setEnabled(false);
+    }
+  });
+
+  it('rejects invalid schema and conflicting EOS suppression before touching native', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    for (const generation of [{ output: { mode: 'json_schema' as const, schema: '{' } }, { ignoreEos: true, output: { mode: 'gbnf' as const, grammar: 'root ::= "yes"' } }]) {
+      await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation })).rejects.toThrow();
+    }
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+  });
+
+  it('maps patched numeric biases and EOS suppression, then resets both for the next request', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], params: { n_predict: 1 },
+      generation: { ignoreEos: true, logitBias: [[5, 10], [0, 0], [5, -100]] } });
+    expect(completion.mock.calls[0][0]).toMatchObject({ n_predict: 1, ignore_eos: true, logit_bias: [[0, 0], [5, -100]] });
+    completion.mockRejectedValueOnce(new Error('logit_bias token is outside the loaded vocabulary'));
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }],
+      generation: { logitBias: [[2147483647, 1]] } })).rejects.toThrow('outside the loaded vocabulary');
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'C' }] })).resolves.toEqual({ text: 'Hello back' });
+    expect(completion.mock.calls.at(-1)?.[0]).toMatchObject({ ignore_eos: false, logit_bias: [] });
+  });
+
+  it('refuses EOS suppression when the formatter introduces a grammar and then permits ordinary text', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    getFormattedChatMock().mockResolvedValueOnce({ type: 'jinja', prompt: 'formatted', grammar: 'root ::= "yes"' });
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation: { ignoreEos: true } }))
+      .rejects.toThrow('template output grammar');
+    expect(completion).not.toHaveBeenCalled();
+    await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }] })).resolves.toEqual({ text: 'Hello back' });
+  });
+
+  it('evaluates prefill with n_predict=0 without inventing an assistant response', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    completion.mockResolvedValueOnce({ text: '', tokens_predicted: 0, tokens_evaluated: 3 });
+    await expect(llmEngineService.prefillPrompt({ messages: [{ role: 'user', content: 'A' }] }))
+      .resolves.toMatchObject({ text: '', tokens_predicted: 0 });
+    expect(completion.mock.calls[0][0].n_predict).toBe(0);
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+    expect(llmEngineService.getState().diagnostics?.generation).toMatchObject({ prefill: true, nProbs: 0 });
+  });
+
+  it.each([0, 10])('rejects unbounded or invalid native token budgets before formatting with nProbs=%s', async nProbs => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    for (const nPredict of [-2, -1, 0.5, NaN, Infinity, -Infinity, 16_385, Number.MAX_SAFE_INTEGER]) {
+      await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }],
+        params: { n_predict: nPredict }, generation: { nProbs } })).rejects.toMatchObject({ code: 'action_failed' });
+    }
+    expect(getFormattedChatMock()).not.toHaveBeenCalled();
+    expect(completion).not.toHaveBeenCalled();
+    expect(llmEngineService.hasActiveCompletion()).toBe(false);
+  });
+
+  it('preserves bounded visible-plus-reasoning and default prediction budgets', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }],
+      params: { n_predict: 16_384, enable_thinking: true }, generation: { nProbs: 10, thinkingBudgetTokens: 8192 } });
+    expect(completion.mock.calls[0][0]).toMatchObject({ n_predict: 16_384, n_probs: 10, thinking_budget_tokens: 8192 });
+    await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'B' }] });
+    expect(completion.mock.calls[1][0].n_predict).toBe(512);
+  });
+
+  it('bounds probabilities once at finalization and exposes their count without correctness claims', async () => {
+    await llmEngineService.load('test/model');
+    const completion = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock;
+    const probabilities = Array.from({ length: 100 }, () => ({ content: 'token', probs: Array.from({ length: 5 }, () => ({ tok_str: 'alternative', prob: 0.2 })) }));
+    completion.mockResolvedValueOnce({ text: 'reply', completion_probabilities: probabilities });
+    const result = await llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'A' }], generation: { nProbs: 2 } });
+    expect(result.completion_probabilities).toHaveLength(64);
+    expect(result.completion_probabilities?.[0].probs).toHaveLength(2);
+    expect(result.probabilitiesSummary).toEqual({ requested: 2, retainedTokens: 64, totalTokens: 100, truncated: true });
+    expect(probabilities).toHaveLength(100);
+    expect(probabilities[0].probs).toHaveLength(5);
+    expect(llmEngineService.getState().diagnostics?.generation).toMatchObject({
+      outputMode: 'text', templateSource: 'model', nProbs: 2, prefill: false,
+      probabilities: { retainedTokens: 64, truncated: true },
+      timings: { tokensPredicted: 0, tokensEvaluated: 0 },
+    });
+    const diagnostics = JSON.stringify(llmEngineService.getState().diagnostics?.generation);
+    expect(diagnostics).not.toContain('reply');
+    expect(diagnostics).not.toContain('alternative');
+  });
+
+  it('formats structured messages once and forwards the resulting prompt to llama.rn completion', async () => {
+    await llmEngineService.load('test/model', { forceReload: true });
 
     expect(llmEngineService.getState().status).toBe(EngineStatus.READY);
     expect(updateSettings).toHaveBeenCalledWith({ activeModelId: 'test/model' });
@@ -475,16 +717,17 @@ describe('LLMEngineService', () => {
     expect(llamaRn.initLlama).toHaveBeenCalled();
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        messages: [
-          { role: 'system', content: 'Be concise.' },
-          { role: 'user', content: 'Hello' },
-        ],
+        prompt: expect.any(String),
         temperature: 0.4,
         top_p: 0.8,
         n_predict: 128,
       }),
       expect.any(Function),
     );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([
+          { role: 'system', content: 'Be concise.' },
+          { role: 'user', content: 'Hello' },
+        ]);
   });
 
   it('enters restart-required when initLlama stops reporting progress and never settles', async () => {
@@ -685,13 +928,14 @@ describe('LLMEngineService', () => {
       (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock,
     ).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        messages: [
-          { role: 'system', content: 'Use the shared system prefix.' },
-          { role: 'user', content: 'Regenerate this turn.' },
-        ],
+        prompt: expect.any(String),
       }),
       expect.any(Function),
     );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([
+          { role: 'system', content: 'Use the shared system prefix.' },
+          { role: 'user', content: 'Regenerate this turn.' },
+        ]);
   });
 
   it('sends only the selected chat payload after switching conversations', async () => {
@@ -711,8 +955,9 @@ describe('LLMEngineService', () => {
 
     const secondRequest = completionMock.mock.calls[1]?.[0];
     expect(secondRequest).toEqual(expect.objectContaining({
-      messages: [{ role: 'user', content: 'Independent question from chat B' }],
+      prompt: 'Formatted prompt',
     }));
+    expect(getFormattedChatMock().mock.calls[1]?.[0]).toEqual([{ role: 'user', content: 'Independent question from chat B' }]);
     expect(JSON.stringify(secondRequest)).not.toContain('Synthetic fact from chat A');
   });
 
@@ -1033,16 +1278,17 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         media_paths: ['test-dir/chat-attachments/image.jpg'],
-        messages: [{
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([{
           role: 'user',
           content: [
             { type: 'text', text: 'Describe this' },
             { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
           ],
-        }],
-      }),
-      expect.any(Function),
-    );
+        }]);
     expect(llmEngineService.getState().diagnostics?.multimodal).toEqual(expect.objectContaining({
       visionCapability: 'vision_capable',
       projectorPresence: 'downloaded',
@@ -1219,16 +1465,17 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         media_paths: ['test-dir/chat-attachments/image.jpg'],
-        messages: [{
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([{
           role: 'user',
           content: [
             { type: 'text', text: 'Describe this' },
             { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/image.jpg' } },
           ],
-        }],
-      }),
-      expect.any(Function),
-    );
+        }]);
   });
 
   it('rejects explicit media paths outside app-owned chat attachment storage', async () => {
@@ -1361,7 +1608,11 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         media_paths: ['test-dir/chat-attachments/first.jpg', 'test-dir/chat-attachments/latest-existing.jpg', 'test-dir/chat-attachments/top.jpg'],
-        messages: expect.arrayContaining([
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual(expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
             content: [
@@ -1377,10 +1628,7 @@ describe('LLMEngineService', () => {
               { type: 'image_url', image_url: { url: 'test-dir/chat-attachments/top.jpg' } },
             ],
           }),
-        ]),
-      }),
-      expect.any(Function),
-    );
+        ]));
   });
 
   it('forwards retained historical image media paths for a latest text-only follow-up', async () => {
@@ -1424,7 +1672,11 @@ describe('LLMEngineService', () => {
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         media_paths: ['test-dir/chat-attachments/first.jpg'],
-        messages: [
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([
           { role: 'system', content: 'Be concise.' },
           {
             role: 'user',
@@ -1435,10 +1687,7 @@ describe('LLMEngineService', () => {
           },
           { role: 'assistant', content: 'Earlier answer' },
           { role: 'user', content: 'Continue with text only' },
-        ],
-      }),
-      expect.any(Function),
-    );
+        ]);
     const completionParams = (llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock.mock.calls.at(-1)?.[0];
     expect(completionParams.media_paths).toEqual(['test-dir/chat-attachments/first.jpg']);
   });
@@ -4171,16 +4420,17 @@ describe('LLMEngineService', () => {
 
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        messages: [{
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([{
           role: 'user',
           content: [
             { type: 'text', text: 'Transcribe this' },
             { type: 'input_audio', input_audio: { format: 'wav', url: 'file:///document/audio.wav' } },
           ],
-        }],
-      }),
-      expect.any(Function),
-    );
+        }]);
   });
 
   it('rejects requests with more than the supported image attachment limit before native completion', async () => {
@@ -4879,19 +5129,19 @@ describe('LLMEngineService', () => {
     try {
       await llmEngineService.load('test/model');
 
-      await llmEngineService.chatCompletion({
+      await expect(llmEngineService.chatCompletion({
         messages: [{ role: 'user', content: 'Hello' }],
         params: { n_predict: 32 },
-      });
+      })).rejects.toBe(sensitiveFormatterError);
     } finally {
       (process.env as any).NODE_ENV = previousNodeEnv;
     }
 
     const formatterWarning = consoleWarnSpy.mock.calls.find(
-      (call) => call[0] === '[LLMEngine] Failed to resolve template stop tokens',
+      (call) => call[0] === '[LLMEngine] Failed to prepare chat template',
     );
     expect(formatterWarning).toEqual([
-      '[LLMEngine] Failed to resolve template stop tokens',
+      '[LLMEngine] Failed to prepare chat template',
       {
         errorType: 'Error',
         hasMessage: true,
@@ -5053,7 +5303,7 @@ describe('LLMEngineService', () => {
       templateType: 'jinja',
       templateStopCount: 1,
       fallbackStopCount: 0,
-      resolvedStops: ['  <|jinja_stop|>  '],
+      stopCount: 1,
     }));
   });
 
@@ -6049,17 +6299,18 @@ describe('LLMEngineService', () => {
 
     expect((llamaRn as unknown as { __completionMock: jest.Mock }).__completionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        messages: [
-          { role: 'system', content: 'Frozen system prompt.' },
-          { role: 'user', content: 'Use thread snapshot params.' },
-          { role: 'assistant', content: 'Prior answer.' },
-        ],
+        prompt: expect.any(String),
         temperature: 1.1,
         top_p: 0.55,
         n_predict: 333,
       }),
       expect.any(Function),
     );
+    expect(getFormattedChatMock().mock.calls.at(-1)?.[0]).toEqual([
+          { role: 'system', content: 'Frozen system prompt.' },
+          { role: 'user', content: 'Use thread snapshot params.' },
+          { role: 'assistant', content: 'Prior answer.' },
+        ]);
   });
 
   it('retries strict alternation failures with normalized chat history', async () => {
@@ -6095,7 +6346,13 @@ describe('LLMEngineService', () => {
     expect(completionMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        messages: [
+        prompt: expect.any(String),
+        temperature: 0.25,
+        n_predict: 64,
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls[1]?.[0]).toEqual([
           {
             role: 'user',
             content: '<<SYS>>\nBe concise.\n\nConversation summary:\nEarlier context.\n<</SYS>>\n\nFirst user question.',
@@ -6108,12 +6365,7 @@ describe('LLMEngineService', () => {
             role: 'user',
             content: 'Latest user question.',
           },
-        ],
-        temperature: 0.25,
-        n_predict: 64,
-      }),
-      expect.any(Function),
-    );
+        ]);
   });
 
   it('retries strict alternation without Llama system wrappers for non-Llama templates', async () => {
@@ -6146,7 +6398,11 @@ describe('LLMEngineService', () => {
     expect(completionMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        messages: [
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls[1]?.[0]).toEqual([
           {
             role: 'user',
             content: 'Be concise. Literal <<SYS>> marker <</SYS>>.\n\nFirst user question.',
@@ -6155,10 +6411,7 @@ describe('LLMEngineService', () => {
             role: 'assistant',
             content: 'First assistant reply.\n\nExtra assistant details.',
           },
-        ],
-      }),
-      expect.any(Function),
-    );
+        ]);
   });
 
   it('preserves document text content parts when retrying strict alternation normalization', async () => {
@@ -6191,7 +6444,11 @@ describe('LLMEngineService', () => {
     expect(completionMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        messages: [
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls[1]?.[0]).toEqual([
           expect.objectContaining({
             role: 'user',
             content: expect.arrayContaining([
@@ -6199,10 +6456,7 @@ describe('LLMEngineService', () => {
               { type: 'text', text: 'Document attachment text\n\nImportant notes' },
             ]),
           }),
-        ],
-      }),
-      expect.any(Function),
-    );
+        ]);
   });
 
   it('falls back to Llama system wrapping for legacy formatted payloads without type metadata', async () => {
@@ -6228,15 +6482,16 @@ describe('LLMEngineService', () => {
     expect(completionMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        messages: [
+        prompt: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+    expect(getFormattedChatMock().mock.calls[1]?.[0]).toEqual([
           {
             role: 'user',
             content: '<<SYS>>\nBe concise.\n<</SYS>>\n\nFirst user question.',
           },
-        ],
-      }),
-      expect.any(Function),
-    );
+        ]);
   });
 
   it('loads the model with saved context and gpu preferences', async () => {
@@ -9507,8 +9762,60 @@ describe('LLMEngineService', () => {
         }
       });
     expect(lowMemoryCalibrationLookup).toBeDefined();
+    expect(JSON.parse(JSON.parse(lowMemoryCalibrationLookup!).allocationIdentity).noExtraBufts).toBe(true);
 
     getCalibrationRecordSpy.mockRestore();
+  });
+
+  it('does not reuse a forced no-extra-buffer calibration for an otherwise identical ordinary allocation', async () => {
+    const originalPolicy = safeLoadPolicy.resolveSafeLoadPolicyOrThrow;
+    let useLowMemoryBuffers = true;
+    const safeCandidateKeys: string[] = [];
+    const policySpy = jest.spyOn(safeLoadPolicy, 'resolveSafeLoadPolicyOrThrow').mockImplementation(input => {
+      if (useLowMemoryBuffers) {
+        const beforeSafeProfile = lookup.mock.calls.length;
+        input.computeSafeProfile();
+        safeCandidateKeys.push(...lookup.mock.calls.slice(beforeSafeProfile).map(([key]) => key));
+      }
+      return { ...originalPolicy(input), shouldUseLowMemoryContextParams: useLowMemoryBuffers };
+    });
+    const lookup = jest.spyOn(registry, 'getCalibrationRecord');
+    const service = llmEngineService as unknown as { activeCalibrationSession: { calibrationKey: string } | null };
+    (FileSystem.getInfoAsync as jest.Mock).mockResolvedValue({ exists: true, size: 1_000_000_000 });
+    (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8_000_000_000);
+    (getFreshMemorySnapshot as jest.Mock).mockResolvedValue({
+      timestampMs: Date.now(), platform: 'android', totalBytes: 8_000_000_000,
+      availableBytes: 4_000_000_000, freeBytes: 4_000_000_000, usedBytes: 4_000_000_000,
+      appUsedBytes: 250_000_000, lowMemory: false, pressureLevel: 'normal', thresholdBytes: 0,
+    });
+    try {
+      const requested = { contextSize: 2048, backendPolicy: 'cpu' as const, gpuLayers: 0, noExtraBufts: false };
+      await llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true, loadParamsOverride: requested });
+      const firstInit = (llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0] as { n_batch: number; n_ubatch: number; no_extra_bufts: boolean };
+      expect(firstInit.no_extra_bufts).toBe(true);
+      expect(safeCandidateKeys.length).toBeGreaterThan(0);
+      expect(safeCandidateKeys.every(key => JSON.parse(JSON.parse(key).allocationIdentity).noExtraBufts === true)).toBe(true);
+      const forcedKey = service.activeCalibrationSession?.calibrationKey;
+      expect(forcedKey).toBeDefined();
+      expect(JSON.parse(JSON.parse(forcedKey!).allocationIdentity).noExtraBufts).toBe(true);
+      // Unload legitimately updates the old record; observe only the next load.
+      await llmEngineService.unload();
+      useLowMemoryBuffers = false;
+      lookup.mockClear();
+      await llmEngineService.load('test/model', { forceReload: true, allowUnsafeMemoryLoad: true,
+        loadParamsOverride: { ...requested, nBatch: firstInit.n_batch, nUbatch: firstInit.n_ubatch } });
+      expect((llamaRn.initLlama as jest.Mock).mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+        no_extra_bufts: false, n_batch: firstInit.n_batch, n_ubatch: firstInit.n_ubatch,
+      }));
+      const ordinaryKey = service.activeCalibrationSession?.calibrationKey;
+      expect(ordinaryKey).toBeDefined();
+      expect(ordinaryKey).not.toBe(forcedKey);
+      expect(JSON.parse(JSON.parse(ordinaryKey!).allocationIdentity).noExtraBufts).toBe(false);
+      expect(lookup.mock.calls.some(([key]) => key === forcedKey)).toBe(false);
+    } finally {
+      lookup.mockRestore();
+      policySpy.mockRestore();
+    }
   });
 
   it('separates load-time memory calibration keys for downloaded multimodal projectors', async () => {

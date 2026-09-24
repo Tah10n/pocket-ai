@@ -1,3 +1,6 @@
+import { sanitizeCatalogModelRuntimeState } from '../../src/services/ModelCatalogCacheStore';
+import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
+import { bindManagedCompanion, getCompanionBindingIdentity, getSelectedManagedCompanions } from '../../src/utils/modelArtifacts';
 import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
 import { getModelFileIdentity } from '../../src/utils/modelRoles';
 import {
@@ -64,6 +67,44 @@ function makeMtpDraft(overrides: Partial<ModelArtifactMetadata> = {}): ModelArti
 }
 
 describe('modelRuntimeState', () => {
+  it('preserves the bound source of an installed synthetic QA model through details hydration', () => {
+    const base = normalizePersistedModelMetadata(makeModel({
+      id: 'pocket-ai/android-qa-smollm2-135m-instruct-q8',
+      downloadUrl: 'https://huggingface.co/Mungert/SmolLM2-135M-Instruct-GGUF/resolve/980b4318b34b2f20e60c89d8f8a98283ec83cbd6/SmolLM2-135M-Instruct-q8_0.gguf',
+      resolvedFileName: 'SmolLM2-135M-Instruct-q8_0.gguf', size: 144811552,
+      sha256: LOCAL_SHA256, localPath: 'qa-base.gguf', metadataTrust: 'verified_local',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, downloadProgress: 1,
+      downloadIntegrity: { kind: 'sha256', sha256: LOCAL_SHA256, sizeBytes: 144811552, checkedAt: 1 },
+    }));
+    const bound = normalizePersistedModelMetadata(bindManagedCompanion(base, {
+      kind: 'lora_adapter', downloadUrl: 'https://example.test/adapter.gguf', sizeBytes: 100,
+    }));
+    const displayed = mergeModelWithRuntimeState(sanitizeCatalogModelRuntimeState(bound), { localModel: bound, activeModelId: base.id });
+    expect(getCompanionBindingIdentity(displayed)).toBe(getCompanionBindingIdentity(bound));
+    expect(getSelectedManagedCompanions(displayed)).toHaveLength(1);
+  });
+
+  it('shows explicit companion rebinding from the registry over stale detail state', () => {
+    const base = makeModel({ resolvedFileName: 'model.gguf', size: 1024,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, localPath: 'base.gguf' });
+    const input = { kind: 'lora_adapter' as const, downloadUrl: 'https://example.test/adapter.gguf', sizeBytes: 100 };
+    const stale = bindManagedCompanion(base, input);
+    stale.artifacts = stale.artifacts?.map(artifact => ({ ...artifact, selected: false,
+      boundToModelIdentity: 'previous-base', installState: 'installed', localPath: 'adapter.gguf' }));
+    // The resource card uses this same binding action on the latest registry record.
+    const rebound = bindManagedCompanion(stale, input);
+    const displayed = mergeModelWithRuntimeState(stale, { localModel: rebound });
+    expect(getSelectedManagedCompanions(displayed)).toHaveLength(1);
+    expect(displayed.artifacts?.[0]).toMatchObject({ selected: true,
+      boundToModelIdentity: getCompanionBindingIdentity(rebound), installState: 'installed', localPath: 'adapter.gguf' });
+    const cleared = { ...rebound, artifacts: rebound.artifacts?.map(artifact => ({ ...artifact, selected: false, boundToModelIdentity: undefined })) };
+    expect(getSelectedManagedCompanions(mergeModelWithRuntimeState(rebound, { localModel: cleared }))).toHaveLength(0);
+    const changedSource = { ...rebound, artifacts: rebound.artifacts?.map(artifact => ({ ...artifact, downloadUrl: 'https://example.test/other.gguf' })) };
+    expect(getSelectedManagedCompanions(mergeModelWithRuntimeState(stale, { localModel: changedSource }))).toHaveLength(0);
+    const otherVariant = { ...stale, resolvedFileName: 'other.gguf', downloadUrl: 'https://example.test/other-base.gguf', sha256: REMOTE_SHA256 };
+    expect(getSelectedManagedCompanions(mergeModelWithRuntimeState(otherVariant, { localModel: rebound }))).toHaveLength(0);
+  });
+
   it.each((['load', 'embedding'] as const).flatMap((operation) => (
     (['route', 'queue', 'both'] as const).map((source) => ({ operation, source }))
   )))('does not resurrect a cleared $operation receipt from stale $source state for the same file identity', ({ operation, source }) => {

@@ -9,7 +9,8 @@ import type { ModelMetadata } from '../../types/models';
 import { LifecycleStatus } from '../../types/models';
 import { normalizeSha256Digest } from '../../utils/sha256';
 import { MODEL_ROLES, getModelFileIdentity, getModelRoleEvidence } from '../../utils/modelRoles';
-import { bindManagedCompanion, getManagedCompanionArtifacts, getSelectedManagedCompanions, getManagedCompanionDiskPlan } from '../../utils/modelArtifacts';
+import { bindManagedCompanion, getManagedCompanionArtifacts, getSelectedManagedCompanions, getManagedCompanionDiskPlan, getCompanionBindingIdentity } from '../../utils/modelArtifacts';
+import { ModelLoraControls } from './ModelLoraControls';
 import { registry } from '../../services/LocalStorageRegistry';
 import { getModelDownloadManager } from '../../services/ModelDownloadManager';
 import { getSettings, subscribeSettings, type AuxiliaryModelRole } from '../../services/SettingsStore';
@@ -20,7 +21,9 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
   const { t } = useTranslation();
   const [settings, setSettings] = useState(getSettings);
   const [message, setMessage] = useState<string>();
-  const [checking, setChecking] = useState(false);
+  const [checkingAuxiliary, setChecking] = useState(false);
+  const [loraBusy, setLoraBusy] = useState(false);
+  const checking = checkingAuxiliary || loraBusy;
   const [url, setUrl] = useState('');
   const [sha256, setSha256] = useState('');
   const [size, setSize] = useState('');
@@ -92,9 +95,11 @@ export function ModelResourcesSection({ model }: { model: ModelMetadata }) {
           </Box>
         </Box>;
       })}
-      {checking ? <Button action="secondary" onPress={() => abort.current?.abort()}><ButtonText>{t('resources.cancelCheck')}</ButtonText></Button> : null}
+      {checkingAuxiliary ? <Button action="secondary" onPress={() => abort.current?.abort()}><ButtonText>{t('resources.cancelCheck')}</ButtonText></Button> : null}
       {message ? <Text accessibilityLiveRegion="polite">{message}</Text> : null}
       <Text colorRole="secondary">{t('resources.futureFunctions')}</Text>
+      <ModelLoraControls key={getCompanionBindingIdentity(model)} model={model}
+        disabled={checking || Boolean(queued)} onBusyChange={setLoraBusy} />
       <Text className="font-semibold">{t('resources.companions')}</Text>
       <Text colorRole="secondary">{t('resources.companionScope')}</Text>
       <Text>{t('resources.downloadBytes', { bytes: diskPlan.selectedDownloadBytes ?? t('resources.unknownSize') })}</Text>

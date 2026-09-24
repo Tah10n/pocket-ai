@@ -1,0 +1,14 @@
+{
+  "verifiedOn": "2026-09-24",
+  "apkSha256": "a6f83939059db6b7e3334067c78cf832c5bdf3522667f20d532dcf70104de786",
+  "scope": "manual Android CPU emulator UI; Resources card in Russian",
+  "checks": [
+    { "id": "explicit_companion_rebinding_enables_selection", "status": "passed" },
+    { "id": "selection_does_not_apply_automatically", "status": "passed", "nativeListEmptyBeforeApply": true },
+    { "id": "apply_in_flight", "status": "passed", "nativeStateUnconfirmed": true, "mutationControlsDisabled": true },
+    { "id": "explicit_apply_scale_1", "status": "passed", "confirmedLoadedScale": 1 },
+    { "id": "draft_scale_separate_from_applied", "status": "passed", "draftScale": 0.5, "confirmedLoadedScale": 1 },
+    { "id": "explicit_apply_scale_half", "status": "passed", "confirmedLoadedScale": 0.5 },
+    { "id": "remove_all", "status": "passed", "nativeListEmpty": true, "removeControlDisabled": true }
+  ]
+}

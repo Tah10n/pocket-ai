@@ -12,7 +12,7 @@ import { ScrollView } from '@/components/ui/scroll-view';
 import { Text } from '@/components/ui/text';
 import { useTranslation } from 'react-i18next';
 import { presetManager, SystemPromptPreset } from '../../services/PresetManager';
-import { getSettings, subscribeSettings } from '../../services/SettingsStore';
+import { getGenerationParametersForModel, getSettings, subscribeSettings, type GenerationParameters } from '../../services/SettingsStore';
 import { getReportedErrorMessage } from '../../services/AppError';
 import {
     assertActiveChatPresetMutationAllowed,
@@ -32,6 +32,7 @@ export function PresetManagerScreen() {
     const [editorState, setEditorState] = useState<EditorState>({ preset: null, visible: false });
     const [draftName, setDraftName] = useState('');
     const [draftPrompt, setDraftPrompt] = useState('');
+    const [draftGeneration, setDraftGeneration] = useState<GenerationParameters | undefined>();
 
     const { t } = useTranslation();
     const insets = useSafeAreaInsets();
@@ -58,12 +59,14 @@ export function PresetManagerScreen() {
     );
 
     const openCreatePreset = useCallback(() => {
+        setDraftGeneration(undefined);
         setDraftName('');
         setDraftPrompt('');
         setEditorState({ preset: null, visible: true });
     }, []);
 
     const openEditPreset = useCallback((preset: SystemPromptPreset) => {
+        setDraftGeneration(preset.generationParameters);
         setDraftName(preset.name);
         setDraftPrompt(preset.systemPrompt);
         setEditorState({ preset, visible: true });
@@ -101,10 +104,11 @@ export function PresetManagerScreen() {
                 const updated = presetManager.updatePreset(editorState.preset.id, {
                     name: trimmedName,
                     systemPrompt: trimmedPrompt,
+                    generationParameters: draftGeneration,
                 });
                 presetIdToActivate = updated.id;
             } else if (!editorState.preset) {
-                const created = presetManager.addPreset(trimmedName, trimmedPrompt);
+                const created = presetManager.addPreset(trimmedName, trimmedPrompt, draftGeneration);
                 presetIdToActivate = created.id;
             }
 
@@ -267,6 +271,15 @@ export function PresetManagerScreen() {
                                 contentContainerStyle={{ flexGrow: 1 }}
                             >
                                 <Box className="flex-1 pb-2">
+                                    <Text colorRole="secondary" className="text-sm mb-2">{t('presets.generationParametersHint')}</Text>
+                                    <Button action="secondary" testID="preset-capture-generation" onPress={() => {
+                                        setDraftGeneration(getGenerationParametersForModel(getSettings().activeModelId));
+                                    }}>
+                                        <ButtonText>{t('presets.captureGenerationParameters')}</ButtonText>
+                                    </Button>
+                                    {draftGeneration ? <Button action="secondary" testID="preset-clear-generation" onPress={() => setDraftGeneration(undefined)}>
+                                        <ButtonText>{t('presets.clearGenerationParameters')}</ButtonText>
+                                    </Button> : null}
                                     <ScreenTextField
                                         label={t('presets.nameLabel')}
                                         size="prominent"

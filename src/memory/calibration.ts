@@ -78,6 +78,7 @@ export function serializeCalibrationKey(key: CalibrationKey): string {
 }
 
 export function createCalibrationKey({
+  allocationIdentity,
   deviceModel,
   osMajor,
   ggufMetadata,
@@ -94,6 +95,7 @@ export function createCalibrationKey({
   nBatch = 0,
   nUbatch = 0,
 }: {
+  allocationIdentity?: string;
   deviceModel: string;
   osMajor: string;
   ggufMetadata?: Record<string, unknown>;
@@ -144,6 +146,7 @@ export function createCalibrationKey({
   const quantization = resolveCalibrationQuantizationLabel(ggufMetadata);
 
   return {
+    ...(allocationIdentity !== undefined ? { allocationIdentity } : {}),
     deviceModel: normalizedDevice,
     osMajor: normalizedOsMajor,
     architecture,

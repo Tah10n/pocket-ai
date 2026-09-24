@@ -1,9 +1,10 @@
 import { DECIMAL_GIGABYTE } from './modelSize';
 import type { ModelLoadParameters } from '../services/SettingsStore';
+import { isPublicKvCacheType, type PublicKvCacheType } from './advancedLoadProfile';
 
-export type ResolvedKvCacheType = 'f16' | 'q8_0' | 'q4_0';
+export type ResolvedKvCacheType = PublicKvCacheType;
 
-export function resolveKvCacheTypes({
+function resolveLegacyKvCacheTypes({
   kvCacheType,
   requestedContextTokens,
   totalMemoryBytes,
@@ -64,4 +65,16 @@ export function resolveKvCacheTypes({
   }
 
   return { cacheTypeK: 'f16', cacheTypeV: 'f16' };
+}
+
+/** Each explicit side wins independently; an absent side retains the legacy setting. */
+export function resolveKvCacheTypes(options: Parameters<typeof resolveLegacyKvCacheTypes>[0] & {
+  cacheTypeK?: PublicKvCacheType;
+  cacheTypeV?: PublicKvCacheType;
+}): { cacheTypeK: ResolvedKvCacheType; cacheTypeV: ResolvedKvCacheType } {
+  const legacy = resolveLegacyKvCacheTypes(options);
+  return {
+    cacheTypeK: isPublicKvCacheType(options.cacheTypeK) ? options.cacheTypeK : legacy.cacheTypeK,
+    cacheTypeV: isPublicKvCacheType(options.cacheTypeV) ? options.cacheTypeV : legacy.cacheTypeV,
+  };
 }

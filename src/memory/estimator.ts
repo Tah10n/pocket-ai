@@ -166,6 +166,12 @@ function bytesPerKvElement(cacheType: string | null): number {
   }
 
   const normalized = cacheType.trim().toLowerCase();
+  // GGML block types include per-block scales/minima, not just quantized payload bits.
+  const publicBlockBytes: Record<string, number> = {
+    q8_0: 34 / 32, q4_0: 18 / 32, q4_1: 20 / 32,
+    iq4_nl: 18 / 32, q5_0: 22 / 32, q5_1: 24 / 32,
+  };
+  if (publicBlockBytes[normalized] !== undefined) return publicBlockBytes[normalized];
   if (normalized.includes('f32') || normalized.includes('fp32')) {
     return 4;
   }
@@ -512,10 +518,16 @@ function createComponentBreakdown(input: EstimatorInput): {
 } {
   const verifiedWeights = toFinitePositiveNumber(input.verifiedFileSizeBytes);
   const modelSize = toFinitePositiveNumber(input.modelSizeBytes);
-  const weightsResidentBytes = verifiedWeights ?? modelSize ?? 0;
+  const baseWeightsResidentBytes = verifiedWeights ?? modelSize ?? 0;
+  const loraBytes = input.loraSizeBytes === undefined ? 0 : input.loraSizeBytes;
+  // Unknown companion allocation must not become a zero-cost successful admission.
+  if (loraBytes === null || !Number.isSafeInteger(loraBytes) || loraBytes < 0) {
+    return { breakdown: UNKNOWN_BREAKDOWN, hasKvMetadata: false, usedVerifiedWeights: false };
+  }
+  const weightsResidentBytes = baseWeightsResidentBytes;
   const usedVerifiedWeights = verifiedWeights !== null;
 
-  if (weightsResidentBytes <= 0) {
+  if (baseWeightsResidentBytes <= 0 || !Number.isFinite(weightsResidentBytes + loraBytes)) {
     return { breakdown: UNKNOWN_BREAKDOWN, hasKvMetadata: false, usedVerifiedWeights: false };
   }
 
@@ -551,7 +563,9 @@ function createComponentBreakdown(input: EstimatorInput): {
 
   const calibratedWeightsResidentBytes = Math.round(Math.max(0, weightsResidentBytes * weightsCorrectionFactor));
   const calibratedComputeBufferBytes = Math.round(Math.max(0, computeBufferBytes * computeCorrectionFactor));
-  const calibratedRuntimeOverheadBytes = Math.round(Math.max(0, runtimeOverheadBytes * overheadCorrectionFactor));
+  // Adapter allocations remain resident even when base weights use mmap; never discount them
+  // through the base-weight calibration or mmap reclaim heuristic.
+  const calibratedRuntimeOverheadBytes = Math.round(Math.max(0, runtimeOverheadBytes * overheadCorrectionFactor)) + loraBytes;
 
   const baseBytes = (
     calibratedWeightsResidentBytes

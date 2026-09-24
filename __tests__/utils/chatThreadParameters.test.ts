@@ -68,7 +68,7 @@ describe('syncThreadParameters', () => {
     expect(mockGetGenerationParametersForModel).not.toHaveBeenCalled();
   });
 
-  it('loads model parameters from the active model and persists them when they changed', () => {
+  it('keeps an existing chat snapshot when global model defaults change', () => {
     const thread = createThread({
       modelId: 'author/base-model',
       activeModelId: 'author/active-model',
@@ -80,11 +80,8 @@ describe('syncThreadParameters', () => {
 
     const result = syncThreadParameters(thread, updateThreadParamsSnapshot);
 
-    expect(mockGetGenerationParametersForModel).toHaveBeenCalledWith('author/active-model');
-    expect(updateThreadParamsSnapshot).toHaveBeenCalledWith('thread-1', resolvedParams);
-    expect(result).toEqual({
-      ...thread,
-      paramsSnapshot: resolvedParams,
-    });
+    expect(mockGetGenerationParametersForModel).not.toHaveBeenCalled();
+    expect(updateThreadParamsSnapshot).not.toHaveBeenCalled();
+    expect(result).toBe(thread);
   });
 });

@@ -60,6 +60,7 @@ function createMockContext(options?: { n_gpu_layers?: number }) {
     const accelerated = layers > 0;
 
     return {
+        model: { metadata: { 'general.architecture': 'qwen2', 'tokenizer.ggml.model': 'gpt2', 'tokenizer.ggml.pre': 'qwen2' } },
         completion: jest.fn().mockResolvedValue({ text: '' }),
         getFormattedChat: jest.fn().mockResolvedValue({ prompt: 'Formatted prompt', additional_stops: [] }),
         tokenize: jest.fn().mockResolvedValue({ tokens: [] }),

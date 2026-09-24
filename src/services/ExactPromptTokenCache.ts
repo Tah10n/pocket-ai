@@ -16,6 +16,7 @@ export type ExactPromptTokenCacheKeyInput = {
   enableThinking: boolean;
   reasoningFormat: 'none' | 'auto' | 'deepseek';
   addGenerationPrompt?: boolean;
+  formattingIdentity?: string;
   allowMediaFallback?: boolean;
 };
 
@@ -71,11 +72,12 @@ function assertPositiveFiniteNumber(value: number, label: string): void {
 
 export function buildExactPromptTokenCacheKey(input: ExactPromptTokenCacheKeyInput): string {
   return [
-    'v1',
+    'v2',
     input.contextIdentity,
     input.modelId,
     input.multimodalReadinessIdentity,
     input.messageSignature,
+    input.formattingIdentity ?? '',
     input.enableThinking ? 'thinking:on' : 'thinking:off',
     `reasoning:${input.reasoningFormat}`,
     input.addGenerationPrompt === undefined

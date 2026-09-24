@@ -458,6 +458,35 @@ describe('chatStore', () => {
     expect(migrated.messages[0]?.modelId).toBe('author/legacy-q8');
   });
 
+  it('keeps LoRA and generation snapshots local to each chat and leaves historical response configuration intact', () => {
+    const adapter = { artifactId: 'adapter', artifactIdentity: 'revision', baseModelIdentity: 'base', scale: 0.5, sizeBytes: 64 };
+    const first = buildThread('first-stage3', 1);
+    const second = buildThread('second-stage3', 2);
+    const response: ChatMessage = { id: 'old-reply', role: 'assistant', content: 'Saved response', createdAt: 3,
+      state: 'complete', generationSnapshot: { ...first.paramsSnapshot, output: { mode: 'json_object' } },
+      loadProfileSnapshot: { contextSize: 4096, gpuLayers: 0, kvCacheType: 'f16', loraAdapters: [adapter] } };
+    first.messages.push(response);
+    useChatStore.setState({ threads: { [first.id]: first, [second.id]: second }, activeThreadId: first.id });
+    const changed = [{ ...adapter, scale: 0 }];
+    useChatStore.getState().updateThreadLoraSnapshot(first.id, changed);
+    useChatStore.getState().updateThreadParamsSnapshot(first.id, { ...first.paramsSnapshot,
+      nProbs: 0, stop: [], template: { jinja: false, kwargs: { enabled: false, count: 0 } } });
+    changed[0].scale = 1;
+    expect(useChatStore.getState().threads[first.id].loraSnapshot?.[0].scale).toBe(0);
+    expect(useChatStore.getState().threads[first.id].paramsSnapshot).toMatchObject({ nProbs: 0, stop: [],
+      template: { jinja: false, kwargs: { enabled: false, count: 0 } } });
+    expect(useChatStore.getState().threads[second.id]).toBe(second);
+    expect(useChatStore.getState().threads[first.id].messages.at(-1)).toBe(response);
+    expect(response.loadProfileSnapshot?.loraAdapters?.[0].scale).toBe(0.5);
+  });
+
+  it('does not change an active generating chat adapter snapshot', () => {
+    const thread = { ...buildThread('generating-lora', 1), status: 'generating' as const, loraSnapshot: [] };
+    useChatStore.setState({ threads: { [thread.id]: thread }, activeThreadId: thread.id });
+    useChatStore.getState().updateThreadLoraSnapshot(thread.id, [{ artifactId: 'a', artifactIdentity: 'r', baseModelIdentity: 'b', scale: 1 }]);
+    expect(useChatStore.getState().threads[thread.id]).toBe(thread);
+  });
+
   it('leaves a legacy thread unavailable when it has no persisted model evidence', () => {
     const legacyThread = {
       ...buildThread('legacy-empty', 10),

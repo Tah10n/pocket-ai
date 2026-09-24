@@ -20,6 +20,9 @@ import {
   ScreenStack,
 } from '@/components/ui/ScreenShell';
 import { Text } from '@/components/ui/text';
+import { AdvancedGenerationControls } from './AdvancedGenerationControls';
+import { AdvancedLoadControls } from './AdvancedLoadControls';
+import { GenerationRuntimeDiagnostics } from './GenerationRuntimeDiagnostics';
 import type { EngineDiagnostics } from '@/types/models';
 import type { AndroidBlurTargetRef } from '@/utils/androidBlur';
 import { getNativeSafeAreaInset } from '@/utils/safeArea';
@@ -91,6 +94,13 @@ interface ModelParametersSheetProps {
   onResetLoadField: (field: ModelLoadProfileField) => void;
   onReset: () => void;
   onApplyReload: () => void;
+  onPrefill?: () => void;
+  onInspectTokens?: () => void;
+  diagnosticBusy?: boolean;
+  onCancelDiagnostics?: () => void;
+  generationScopeKey?: string;
+  hasSpeculativeDraft?: boolean;
+  supportsMoe?: boolean;
 }
 
 interface SliderRowProps {
@@ -453,6 +463,13 @@ export function ModelParametersSheet({
   onResetLoadField,
   onReset,
   onApplyReload,
+  onPrefill,
+  onInspectTokens,
+  diagnosticBusy,
+  onCancelDiagnostics,
+  generationScopeKey,
+  hasSpeculativeDraft,
+  supportsMoe,
 }: ModelParametersSheetProps) {
   const { t } = useTranslation();
   const insets = useSafeAreaInsets();
@@ -1154,6 +1171,7 @@ export function ModelParametersSheet({
 
                   <SliderRow
                     label={t('chat.modelControls.topP')}
+                    disabled={(params.mirostat ?? 0) !== 0}
                     description={t('chat.modelControls.topPDescription')}
                     valueLabel={formatDecimal(params.topP)}
                     minLabel={t('chat.modelControls.topPMin')}
@@ -1170,6 +1188,7 @@ export function ModelParametersSheet({
 
                   <SliderRow
                     label={t('chat.modelControls.topK')}
+                    disabled={(params.mirostat ?? 0) !== 0}
                     description={t('chat.modelControls.topKDescription')}
                     valueLabel={`${Math.round(params.topK)}`}
                     minLabel={t('chat.modelControls.topKMin')}
@@ -1186,6 +1205,7 @@ export function ModelParametersSheet({
 
                   <SliderRow
                     label={t('chat.modelControls.minP')}
+                    disabled={(params.mirostat ?? 0) !== 0}
                     description={t('chat.modelControls.minPDescription')}
                     valueLabel={formatDecimal(params.minP)}
                     minLabel={t('chat.modelControls.minPMin')}
@@ -1202,6 +1222,7 @@ export function ModelParametersSheet({
 
                   <SliderRow
                     label={t('chat.modelControls.repetitionPenalty')}
+                    disabled={(params.mirostat ?? 0) !== 0}
                     description={t('chat.modelControls.repetitionPenaltyDescription')}
                     valueLabel={formatDecimal(params.repetitionPenalty)}
                     minLabel={t('chat.modelControls.repetitionPenaltyMin')}
@@ -1234,6 +1255,11 @@ export function ModelParametersSheet({
                 </ScreenStack>
               </ScreenCard>
 
+              <AdvancedGenerationControls key={`${generationScopeKey ?? modelId}:${visible}`} params={params}
+                supportsReasoning={supportsReasoning} disabled={isApplyingReload || isAutotuneRunning}
+                onChange={onChangeParams} onPrefill={onPrefill} onInspectTokens={onInspectTokens}
+                diagnosticBusy={diagnosticBusy} onCancelDiagnostics={onCancelDiagnostics} />
+
               <ScreenCard tone="accent">
                 <ScreenStack gap="default">
                   <Box>
@@ -1244,6 +1270,11 @@ export function ModelParametersSheet({
                       {t('chat.modelControls.runtimeReloadDescription')}
                     </Text>
                   </Box>
+
+                  <AdvancedLoadControls key={`${modelId}:${visible}`} value={loadParamsDraft}
+                    onChange={onChangeLoadParams} disabled={isApplyingReload || isAutotuneRunning}
+                    mtpEnabled={mtpEnabled} hasSpeculativeDraft={hasSpeculativeDraft} supportsMoe={supportsMoe}
+                    diagnostics={engineDiagnostics} />
 
                   {typeof loadedContextSize === 'number' && Number.isFinite(loadedContextSize) ? (
                     <ScreenCard tone="default" variant="inset" padding="compact">
@@ -1414,6 +1445,8 @@ export function ModelParametersSheet({
                       <Text colorRole="secondary" className="text-sm leading-5  ">
                         {t('chat.modelControls.runtimeBackendBackend', { backend: backendLabel })}
                       </Text>
+
+                      {engineDiagnostics.generation ? <GenerationRuntimeDiagnostics value={engineDiagnostics.generation} /> : null}
 
                       {resolvedLoadedContextSize === null ? (
                         <Text colorRole="secondary" className="text-sm leading-5  ">

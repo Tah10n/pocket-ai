@@ -9,6 +9,8 @@ import {
   type GenerationParamsSnapshot,
 } from '../types/chat';
 
+import { sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
+
 export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_LENGTH = 200_000;
 export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PARTS = 8;
 export const MAX_CHAT_BRANCH_REPLACEMENT_CONTENT_PART_TOTAL_CHARS = 200_000;
@@ -391,7 +393,7 @@ export function buildChatBranchReplacementPlan({
     activeModelId,
     replacementUserMessage,
     insertedModelSwitchMessage,
-    paramsSnapshot: { ...paramsSnapshot },
+    paramsSnapshot: { ...paramsSnapshot, ...sanitizeAdvancedGenerationParameters(paramsSnapshot) },
     clearSummary: true,
   };
 }
@@ -487,7 +489,7 @@ export function materializeChatBranchReplacementThread({
     ...thread,
     title,
     activeModelId: plan.activeModelId,
-    paramsSnapshot: { ...plan.paramsSnapshot },
+    paramsSnapshot: { ...plan.paramsSnapshot, ...sanitizeAdvancedGenerationParameters(plan.paramsSnapshot) },
     messages,
     summary: undefined,
     status,
@@ -508,7 +510,7 @@ export function createChatBranchReplacementProgress(
     baseSemanticIdentity: baseIdentity.baseSemanticIdentity,
     replacementUserMessage: plan.replacementUserMessage,
     insertedModelSwitchMessage: plan.insertedModelSwitchMessage,
-    paramsSnapshot: { ...plan.paramsSnapshot },
+    paramsSnapshot: { ...plan.paramsSnapshot, ...sanitizeAdvancedGenerationParameters(plan.paramsSnapshot) },
   };
 }
 
@@ -521,7 +523,7 @@ export function createChatBranchReplacementPlanFromProgress(
     activeModelId,
     replacementUserMessage: progress.replacementUserMessage,
     insertedModelSwitchMessage: progress.insertedModelSwitchMessage,
-    paramsSnapshot: { ...progress.paramsSnapshot },
+    paramsSnapshot: { ...progress.paramsSnapshot, ...sanitizeAdvancedGenerationParameters(progress.paramsSnapshot) },
     clearSummary: true,
   };
 }

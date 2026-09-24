@@ -1,0 +1,11 @@
+{
+  "apkSha256": "48508d4338366589193cd3215cfad3496af48eb80a971ad7a6634494634e35c7",
+  "unsupportedDirective": "%llguidance",
+  "editorError": "Value not saved. Check the format, range or supported schema; the previous setting is still active.",
+  "explicitTextMode": true,
+  "processIdBeforeNormal": 9151,
+  "processIdAfterNormal": 9151,
+  "assistantComplete": true,
+  "assistantNonempty": true,
+  "status": "passed"
+}

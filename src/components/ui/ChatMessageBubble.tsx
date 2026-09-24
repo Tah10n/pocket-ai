@@ -7,7 +7,7 @@ import { Image } from '@/components/ui/image';
 import { Pressable } from '@/components/ui/pressable';
 import { Text } from '@/components/ui/text';
 import type { ChatAttachment } from '@/types/attachments';
-import type { ChatMessageState } from '@/types/chat';
+import type { ChatMessage, ChatMessageState } from '@/types/chat';
 import type { InferenceCompletionTelemetry } from '@/types/models';
 import type { ChatImageAttachment } from '@/types/multimodal';
 import { MaterialSymbols } from './MaterialSymbols';
@@ -37,6 +37,8 @@ export interface ChatMessageBubbleProps {
   messageState?: ChatMessageState;
   tokensPerSec?: number;
   inferenceMetrics?: InferenceCompletionTelemetry;
+  structuredOutput?: ChatMessage['structuredOutput'];
+  errorCode?: string;
   canDelete?: boolean;
   canRegenerate?: boolean;
   onDelete?: (messageId: string) => void;
@@ -148,6 +150,8 @@ function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: Chat
     && prev.messageState === next.messageState
     && prev.tokensPerSec === next.tokensPerSec
     && prev.inferenceMetrics === next.inferenceMetrics
+    && prev.structuredOutput === next.structuredOutput
+    && prev.errorCode === next.errorCode
     && prev.canDelete === next.canDelete
     && prev.canRegenerate === next.canRegenerate
     && prev.onDelete === next.onDelete
@@ -194,6 +198,8 @@ const ChatMessageBubbleComponent = ({
   messageState,
   tokensPerSec,
   inferenceMetrics,
+  structuredOutput,
+  errorCode,
   canDelete = false,
   canRegenerate = false,
   onDelete,
@@ -206,8 +212,10 @@ const ChatMessageBubbleComponent = ({
   const failedAttachmentPreviewUrisRef = useRef<Record<string, Set<string>>>({});
   const { t } = useTranslation();
   const theme = useTheme();
+  const isJsonOutput = !isUser && (structuredOutput?.mode === 'json_object' || structuredOutput?.mode === 'json_schema');
+  const isConstrainedOutput = isJsonOutput || (!isUser && structuredOutput?.mode === 'gbnf');
   const hasExplicitThoughtContent = explicitThoughtContent !== undefined;
-  const assistantPresentation = isUser
+  const assistantPresentation = isUser || isConstrainedOutput
     ? null
     : hasExplicitThoughtContent
       ? null
@@ -224,7 +232,7 @@ const ChatMessageBubbleComponent = ({
   const hasThought = hasExplicitThoughtContent
     ? thoughtContent.trim().length > 0
     : Boolean(assistantPresentation?.hasThought);
-  const sanitizedExplicitAssistantContent = hasExplicitThoughtContent
+  const sanitizedExplicitAssistantContent = hasExplicitThoughtContent && !isConstrainedOutput
     ? getAssistantPresentation(content).finalContent
     : content;
   const finalContent = hasExplicitThoughtContent
@@ -283,7 +291,7 @@ const ChatMessageBubbleComponent = ({
     mtpTelemetryLabel !== null
     || typeof inferenceMetrics?.timeToFirstTokenMs === 'number'
   );
-  const copyableContent = isUser
+  const copyableContent = isUser || isConstrainedOutput
     ? content
     : hasExplicitThoughtContent
       ? sanitizedExplicitAssistantContent
@@ -329,7 +337,12 @@ const ChatMessageBubbleComponent = ({
     ? t('chat.thinkingDescription')
     : t('chat.thoughtDescription');
   const assistantBodyContent = isUser ? content : finalContent;
-  const hasErrorMessage = !isUser && typeof errorMessage === 'string' && errorMessage.trim().length > 0;
+  const displayErrorMessage = errorCode === 'structured_output_invalid' ? t('structuredOutput.validationFailed') : errorMessage;
+  const hasErrorMessage = !isUser && typeof displayErrorMessage === 'string' && displayErrorMessage.trim().length > 0;
+  const jsonStatus = isStreaming ? 'streaming'
+    : structuredOutput?.status === 'invalid' ? 'invalid'
+      : messageState === 'stopped' || messageState === 'error' || structuredOutput?.status === 'incomplete' ? 'incomplete'
+        : structuredOutput?.status === 'valid' ? 'valid' : 'unvalidated';
   const shouldShowStreamingPlaceholder = isAssistantStreaming && !shouldShowThoughtSection && !assistantBodyContent;
   // Thought containers keep a minimum width so the collapsible panel does not jitter while content streams in.
   const thoughtBubbleClassName = 'min-w-[220px] max-w-full px-3 py-2';
@@ -558,6 +571,25 @@ const ChatMessageBubbleComponent = ({
                 </Text>
               ) : null}
             </>
+          ) : isJsonOutput ? (
+            <Box className="gap-2" testID={`assistant-message-content-${id}`}>
+              <Text testID={`structured-output-status-${id}`} accessibilityRole="text"
+                colorRole={jsonStatus === 'invalid' ? 'danger' : jsonStatus === 'valid' ? 'success' : 'secondary'}
+                className="text-xs">
+                {t(`structuredOutput.${jsonStatus}`)}
+              </Text>
+              <Text testID={`structured-output-content-${id}`} selectable colorRole="primary" className="font-mono text-sm leading-5">
+                {content}
+              </Text>
+              {isStreaming ? <StreamingCursor reduceMotion={reduceAndroidQaStreamingMotion} /> : null}
+            </Box>
+          ) : isConstrainedOutput ? (
+            <Box testID={`assistant-message-content-${id}`}>
+              <Text testID={`structured-output-content-${id}`} selectable colorRole="primary" className="font-mono text-sm leading-5">
+                {content}
+              </Text>
+              {isStreaming ? <StreamingCursor reduceMotion={reduceAndroidQaStreamingMotion} /> : null}
+            </Box>
           ) : shouldShowStreamingPlaceholder ? (
             <StreamingCursor compact reduceMotion={reduceAndroidQaStreamingMotion} />
           ) : isStreaming && assistantBodyContent ? (
@@ -582,7 +614,7 @@ const ChatMessageBubbleComponent = ({
             >
               <MaterialSymbols colorRole="danger" name="error-outline" size="sm" className="mt-0.5  " />
               <Text colorRole="danger" selectable className="min-w-0 flex-1 text-sm leading-5  ">
-                {errorMessage}
+                {displayErrorMessage}
               </Text>
             </Surface>
           ) : null}

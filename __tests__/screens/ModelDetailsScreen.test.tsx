@@ -362,6 +362,14 @@ jest.mock('../../src/services/HardwareListenerService', () => ({
 
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
+    getState: () => mockEngineState,
+    subscribe: (listener: (state: typeof mockEngineState) => void) => { listener(mockEngineState); return () => {}; },
+    getEffectiveLoadParameters: () => {
+      const { getModelLoadParametersForModel } = jest.requireMock('../../src/services/SettingsStore');
+      return mockEngineState.status === 'ready' ? getModelLoadParametersForModel(mockEngineState.activeModelId) : null;
+    },
+    hasActiveCompletion: () => false,
+    hasActiveContextOperation: () => false,
     ensurePersistedCapabilitySnapshot: (model: any) => {
       if (!model) {
         return null;
@@ -401,6 +409,7 @@ jest.mock('../../src/services/StorageManagerService', () => ({
 }));
 
 jest.mock('../../src/services/SettingsStore', () => ({
+  sanitizeModelLoadParameters: jest.requireActual('../../src/services/SettingsStore').sanitizeModelLoadParameters,
   DEFAULT_MODEL_LOAD_PARAMETERS: {
     contextSize: 4096,
     gpuLayers: null,

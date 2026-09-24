@@ -1,3 +1,8 @@
+import { advancedGenerationIdentity } from '@/utils/generationControls';
+import { isThreadLoraProfileReady, loraExecutionIdentity } from '@/utils/chatLoraProfile';
+import { runPromptDiagnostic } from '@/services/PromptDiagnosticsService';
+import type { LoraProfileAdapter } from '@/utils/advancedLoadProfile';
+
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
     Alert,
@@ -68,13 +73,16 @@ import { getChatHardwareBannerInputs, hardwareListenerService } from '../../serv
 import { llmEngineService } from '../../services/LLMEngineService';
 import { performanceMonitor } from '../../services/PerformanceMonitor';
 import { registry } from '../../services/LocalStorageRegistry';
+import { presetManager } from '../../services/PresetManager';
 import { useChatStore } from '../../store/chatStore';
 import { getShortModelLabel } from '@/utils/modelLabel';
 import { AppError, getErrorMessage, getReportedErrorMessage, toAppError } from '../../services/AppError';
 import {
     getGenerationParametersForModel,
+    getModelLoadParametersForModel,
     getSettings,
     resetGenerationParametersForModel,
+    sanitizeGenerationParameters,
     subscribeSettings,
     updateGenerationParametersForModel,
 } from '../../services/SettingsStore';
@@ -99,6 +107,7 @@ import {
 import { isAndroidQaDocumentModelBootstrapEnabled } from '../../services/AndroidQaDocumentModelBootstrap';
 import { isChatModelEligible } from '../../utils/modelRoles';
 import { getAndroidQaModelResourcesEvidence, subscribeAndroidQaModelResources, runAndroidQaModelResources } from '../../services/AndroidQaModelResources';
+import { getAndroidQaStage3Evidence, subscribeAndroidQaStage3, runAndroidQaStage3 } from '../../services/AndroidQaStage3';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
 import {
@@ -132,6 +141,7 @@ function areGenerationParamsSnapshotsEqual(
 ): boolean {
     return (
         left.temperature === right.temperature
+        && advancedGenerationIdentity(left) === advancedGenerationIdentity(right)
         && left.topP === right.topP
         && (left.topK ?? FALLBACK_TOP_K) === (right.topK ?? FALLBACK_TOP_K)
         && (left.minP ?? FALLBACK_MIN_P) === (right.minP ?? FALLBACK_MIN_P)
@@ -200,6 +210,7 @@ export function sanitizeDocumentFailureDisplayName(
     return bounded || fallback;
 }
 const IMAGE_ATTACHMENTS_NO_MODEL_REASON_KEY = 'chat.visionReadiness.noModel';
+const NO_LORA_ADAPTERS: LoraProfileAdapter[] = [];
 const IMAGE_ATTACHMENTS_EDITING_REASON_KEY = 'chat.visionReadiness.editingMessage';
 const DOCUMENT_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.documentEditingDisabled';
 const MEDIA_ATTACHMENTS_EDITING_REASON_KEY = 'chat.attachments.mediaEditingDisabled';
@@ -748,6 +759,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     const resourceEvidence = useSyncExternalStore(
         subscribeAndroidQaModelResources, getAndroidQaModelResourcesEvidence, getAndroidQaModelResourcesEvidence,
     );
+    const stage3Evidence = useSyncExternalStore(subscribeAndroidQaStage3, getAndroidQaStage3Evidence, getAndroidQaStage3Evidence);
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
     >('idle');
@@ -836,6 +848,11 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                         </Button>
                         <View accessible collapsable={false} testID="chat-qa-model-resources-evidence"
                             accessibilityLabel={JSON.stringify(resourceEvidence)} style={styles.androidQaEvidenceMarker} />
+                        <Button size="xs" action="secondary" testID="chat-qa-run-stage3"
+                            disabled={stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            onPress={() => void runAndroidQaStage3()}><ButtonText>QA Stage 3</ButtonText></Button>
+                        <View accessible collapsable={false} testID="chat-qa-stage3-evidence"
+                            accessibilityLabel={JSON.stringify(stage3Evidence)} style={styles.androidQaEvidenceMarker} />
                     </>
                 ) : null}
                 <Button
@@ -994,6 +1011,9 @@ const ChatScreenContent = () => {
     const isScreenFocused = useIsFocused();
     const [hardwareStatus, setHardwareStatus] = useState(() => hardwareListenerService.getCurrentStatus());
     const [composerDraft, setComposerDraft] = useState('');
+    const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+    const diagnosticAbortRef = useRef<AbortController | null>(null);
+    useEffect(() => () => diagnosticAbortRef.current?.abort(), []);
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
     const [isAndroidKeyboardVisible, setIsAndroidKeyboardVisible] = useState(false);
     const [composerContainerHeight, setComposerContainerHeight] = useState(0);
@@ -1014,6 +1034,10 @@ const ChatScreenContent = () => {
         attachments: ChatMessage['attachments'];
     } | null>(null);
     const newThreadRevision = useChatStore((state) => state.newThreadRevision);
+    const [draftParameters, setDraftParameters] = useState<{
+        owner: string;
+        params: GenerationParamsSnapshot;
+    } | null>(null);
     const updateThreadPresetSnapshot = useChatStore((state) => state.updateThreadPresetSnapshot);
     const updateThreadParamsSnapshot = useChatStore((state) => state.updateThreadParamsSnapshot);
     const listRef = useRef<FlashListRef<ChatMessage> | null>(null);
@@ -1059,8 +1083,10 @@ const ChatScreenContent = () => {
         && pendingModelSelection.threadId === activeThreadId;
     const isCurrentChatModelReady = Boolean(currentChatActiveModelId)
         && isEngineReady
-        && engineState.activeModelId === currentChatActiveModelId;
+        && engineState.activeModelId === currentChatActiveModelId
+        && (!activeThread || isThreadLoraProfileReady(activeThread, llmEngineService.getEffectiveLoadParameters?.()));
     const isInputDisabled = !isCurrentChatModelReady
+        || diagnosticBusy
         || isPendingModelSelectionForCurrentThread
         || isGenerationBusy;
     const statusLabel = activeThread?.status === 'stopped'
@@ -1257,7 +1283,12 @@ const ChatScreenContent = () => {
 
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
-    const rawCurrentParams = getGenerationParametersForModel(configurableModelId);
+    const draftParametersOwner = JSON.stringify([configurableModelId, settings.activePresetId, newThreadRevision]);
+    useEffect(() => { setDraftParameters(null); }, [draftParametersOwner, activeThread?.id]);
+    const presetGeneration = !activeThread && settings.activePresetId
+        ? presetManager.getPreset(settings.activePresetId)?.generationParameters : undefined;
+    const rawCurrentParams = !activeThread && draftParameters?.owner === draftParametersOwner
+        ? draftParameters.params : presetGeneration ?? getGenerationParametersForModel(configurableModelId);
     const currentParams = {
         ...rawCurrentParams,
         topK: rawCurrentParams.topK ?? FALLBACK_TOP_K,
@@ -1523,6 +1554,7 @@ const ChatScreenContent = () => {
             if (
                 currentEngineState.status === EngineStatus.READY
                 && currentEngineState.activeModelId === authoritativeModelId
+                && isThreadLoraProfileReady(authoritativeThread, llmEngineService.getEffectiveLoadParameters?.())
             ) {
                 return { status: 'recovered' };
             }
@@ -1530,13 +1562,14 @@ const ChatScreenContent = () => {
             try {
                 await loadModel(authoritativeModelId, {
                     preferLastWorkingProfile: true,
+                    loadParamsOverride: { ...getModelLoadParametersForModel(authoritativeModelId), loraAdapters: authoritativeThread.loraSnapshot ?? [] },
                 });
             } catch {
                 if (!isLatestRequest()) {
                     return { status: 'stale' };
                 }
                 autoModelLoadTargetKeyRef.current =
-                    `${threadId}:${authoritativeModelId}`;
+                    `${threadId}:${authoritativeModelId}:${loraExecutionIdentity(authoritativeThread.loraSnapshot)}`;
                 return {
                     status: 'failed',
                     error: new Error(
@@ -1563,7 +1596,7 @@ const ChatScreenContent = () => {
                 || postRecoveryEngineState.activeModelId !== authoritativeModelId
             ) {
                 autoModelLoadTargetKeyRef.current =
-                    `${threadId}:${authoritativeModelId}`;
+                    `${threadId}:${authoritativeModelId}:${loraExecutionIdentity(authoritativeThread.loraSnapshot)}`;
                 return {
                     status: 'failed',
                     error: new Error(
@@ -1576,7 +1609,12 @@ const ChatScreenContent = () => {
         let targetModelLoadCompleted = false;
 
         try {
-            await loadModel(targetModelId, options);
+            const targetThread = threadId ? useChatStore.getState().getThread(threadId) : undefined;
+            await loadModel(targetModelId, !applySelection && targetThread ? {
+                ...options,
+                loadParamsOverride: { ...getModelLoadParametersForModel(targetModelId), ...options?.loadParamsOverride,
+                    loraAdapters: targetThread.loraSnapshot ?? [] },
+            } : options);
             targetModelLoadCompleted = true;
 
             if (!isLatestRequest()) {
@@ -1623,6 +1661,7 @@ const ChatScreenContent = () => {
                     threadId,
                     expectedCurrentModelId: expectedThreadModelId,
                     nextModelId: targetModelId,
+                    loraSnapshot: llmEngineService.getEffectiveLoadParameters?.()?.loraAdapters ?? [],
                     paramsSnapshot: expectedParamsSnapshot,
                 });
 
@@ -1731,7 +1770,7 @@ const ChatScreenContent = () => {
                         && recoveryThread
                     ) {
                         autoModelLoadTargetKeyRef.current =
-                            `${threadId}:${getThreadActiveModelId(recoveryThread)}`;
+                            `${threadId}:${getThreadActiveModelId(recoveryThread)}:${loraExecutionIdentity(recoveryThread.loraSnapshot)}`;
                     }
                     return failSelection(
                         new Error(
@@ -1900,13 +1939,15 @@ const ChatScreenContent = () => {
         },
         applyReloadErrorScope: 'ChatScreen.handleApplyLoadParams',
         activeModelId: currentChatActiveModelId,
-        canApplyReload: !isGenerationBusy,
+        canApplyReload: !isGenerationBusy && !diagnosticBusy,
         modelLabelOverride: modelLabel,
         paramsOverride: paramsSource,
+        loraOverride: activeThread?.loraSnapshot ?? (activeThread ? NO_LORA_ADAPTERS : undefined),
         defaultParamsOverride: defaultParams,
         onChangeParams: (modelId, partial) => {
             const nextParams = {
-                ...getGenerationParametersForModel(modelId),
+                ...(activeThread && getThreadActiveModelId(activeThread) === modelId
+                    ? activeThread.paramsSnapshot : currentParams),
                 ...partial,
             };
 
@@ -1914,13 +1955,16 @@ const ChatScreenContent = () => {
 
             if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, nextParams);
+            } else if (!activeThread && modelId === configurableModelId) {
+                setDraftParameters({ owner: draftParametersOwner, params: sanitizeGenerationParameters(nextParams) });
             }
         },
         onResetParamField: (modelId, field) => {
             const resetParams = getGenerationParametersForModel(null);
             const partial = { [field]: resetParams[field] } as Partial<typeof resetParams>;
             const nextParams = {
-                ...getGenerationParametersForModel(modelId),
+                ...(activeThread && getThreadActiveModelId(activeThread) === modelId
+                    ? activeThread.paramsSnapshot : currentParams),
                 ...partial,
             };
 
@@ -1928,6 +1972,8 @@ const ChatScreenContent = () => {
 
             if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, nextParams);
+            } else if (!activeThread && modelId === configurableModelId) {
+                setDraftParameters({ owner: draftParametersOwner, params: sanitizeGenerationParameters(nextParams) });
             }
         },
         onResetAllParams: (modelId) => {
@@ -1936,9 +1982,31 @@ const ChatScreenContent = () => {
 
             if (activeThread && getThreadActiveModelId(activeThread) === modelId) {
                 updateThreadParamsSnapshot(activeThread.id, resetParams);
+            } else if (!activeThread && modelId === configurableModelId) {
+                setDraftParameters({ owner: draftParametersOwner, params: resetParams });
             }
         },
     });
+
+    const runDiagnostic = async (kind: 'prefill' | 'tokens') => {
+        if (!currentChatActiveModelId || !isCurrentChatModelReady || diagnosticAbortRef.current) return;
+        const controller = new AbortController();
+        diagnosticAbortRef.current = controller;
+        setDiagnosticBusy(true);
+        try {
+            const result = await runPromptDiagnostic({ kind, modelId: currentChatActiveModelId, text: composerDraft,
+                systemPrompt: activeThread?.presetSnapshot.systemPrompt ?? resolvePresetSnapshot(settings.activePresetId).systemPrompt,
+                generation: paramsSource, signal: controller.signal });
+            Alert.alert(t('advancedGeneration.diagnosticTitle'), result.kind === 'prefill'
+                ? t('advancedGeneration.prefillResult', { tokens: result.tokenCount, duration: result.durationMs })
+                : t('advancedGeneration.tokenResult', { tokens: result.tokenCount, text: result.detokenized,
+                    suffix: result.truncated ? t('advancedGeneration.tokenTruncated') : '' }));
+        } catch (error) {
+            if (!controller.signal.aborted) Alert.alert(t('advancedGeneration.diagnosticTitle'), getReportedErrorMessage('PromptDiagnostics', error, t));
+        } finally {
+            if (diagnosticAbortRef.current === controller) { diagnosticAbortRef.current = null; setDiagnosticBusy(false); }
+        }
+    };
 
     const clearForcedScrollTimeouts = useCallback(() => {
         forcedScrollTimeoutsRef.current.forEach((timeoutId) => {
@@ -2506,6 +2574,10 @@ const ChatScreenContent = () => {
                 await appendUserMessage(
                     content,
                     {
+                        ...(!activeThread && configurableModelId ? {
+                            newThreadParameters: { modelId: configurableModelId, presetId: settings.activePresetId,
+                                revision: newThreadRevision, paramsSnapshot: sanitizeGenerationParameters(paramsSource) },
+                        } : {}),
                         ...(hasSendableAttachmentDrafts
                             ? {
                                 attachmentDrafts,
@@ -2789,6 +2861,7 @@ const ChatScreenContent = () => {
         if (
             engineState.status === EngineStatus.READY
             && engineState.activeModelId === currentChatActiveModelId
+            && isCurrentChatModelReady
         ) {
             autoModelLoadTargetKeyRef.current = null;
             return;
@@ -2805,7 +2878,7 @@ const ChatScreenContent = () => {
             return;
         }
 
-        const targetKey = `${activeThreadId}:${currentChatActiveModelId}`;
+        const targetKey = `${activeThreadId}:${currentChatActiveModelId}:${loraExecutionIdentity(activeThread?.loraSnapshot)}`;
         if (autoModelLoadTargetKeyRef.current === targetKey) {
             return;
         }
@@ -2860,6 +2933,8 @@ const ChatScreenContent = () => {
         isScreenFocused,
         modelRegistryRevision,
         showAlertForError,
+        activeThread,
+        isCurrentChatModelReady,
     ]);
 
     useEffect(() => {
@@ -3053,6 +3128,8 @@ const ChatScreenContent = () => {
                 attachments={msg.attachments}
                 thoughtContent={msg.thoughtContent}
                 errorMessage={msg.errorMessage}
+                errorCode={msg.errorCode}
+                structuredOutput={msg.structuredOutput}
                 isStreaming={msg.state === 'streaming'}
                 messageState={msg.state}
                 tokensPerSec={msg.tokensPerSec}
@@ -3496,6 +3573,11 @@ const ChatScreenContent = () => {
 
             <ModelParametersSheet
                 {...modelParametersSheetProps}
+                generationScopeKey={activeThread?.id ?? configurableModelId ?? 'defaults'}
+                diagnosticBusy={diagnosticBusy}
+                onPrefill={() => void runDiagnostic('prefill')}
+                onInspectTokens={() => void runDiagnostic('tokens')}
+                onCancelDiagnostics={() => diagnosticAbortRef.current?.abort()}
                 androidContentBlurTargetRef={warmupContentBlurTargetRef}
             />
             <ErrorReportSheet

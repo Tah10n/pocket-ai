@@ -23,6 +23,8 @@ import {
   toLegacyChatImageAttachment,
 } from '../utils/chatAttachments';
 import type { AppStorageFacade } from './storage';
+import { ADVANCED_GENERATION_KEYS, sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
+import { sanitizeModelLoadParameters } from '../services/SettingsStore';
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import {
   createChatBranchBaseSemanticIdentity,
@@ -94,7 +96,24 @@ export interface ChatThreadRecord {
   commitRevision?: number;
 }
 
-export interface ChatStreamingProgressRecord {
+type ChatProgressConfiguration = Pick<ChatMessage,
+  'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput'>;
+
+function parseProgressConfiguration(value: Record<string, unknown>): ChatProgressConfiguration {
+  const generationSnapshot = parseBranchParamsSnapshot(value.generationSnapshot) ?? undefined;
+  const loadProfileSnapshot = value.loadProfileSnapshot == null ? undefined
+    : sanitizeModelLoadParameters(value.loadProfileSnapshot);
+  const output = value.structuredOutput;
+  const mode = output && typeof output === 'object' && 'mode' in output ? output.mode : undefined;
+  return {
+    ...(generationSnapshot ? { generationSnapshot } : {}),
+    ...(loadProfileSnapshot ? { loadProfileSnapshot } : {}),
+    ...(mode === 'json_object' || mode === 'json_schema' || mode === 'gbnf'
+      ? { structuredOutput: { mode, status: 'incomplete', error: 'interrupted' } as const } : {}),
+  };
+}
+
+export interface ChatStreamingProgressRecord extends ChatProgressConfiguration {
   schemaVersion: typeof CHAT_STREAM_PROGRESS_SCHEMA_VERSION;
   threadId: string;
   messageId: string;
@@ -112,7 +131,7 @@ export interface ChatStreamingProgressRecord {
 
 type ChatStreamingProgressSlot = 0 | 1;
 
-interface ChatStreamingOperationRecord {
+interface ChatStreamingOperationRecord extends ChatProgressConfiguration {
   schemaVersion: typeof CHAT_STREAM_PROGRESS_STORAGE_SCHEMA_VERSION;
   threadId: string;
   messageId: string;
@@ -130,6 +149,7 @@ type ChatStreamingOperationInput = Pick<
   | 'createdAt'
   | 'regeneratesMessageId'
   | 'branchReplacement'
+  | keyof ChatProgressConfiguration
 >;
 
 interface ChatStreamingProgressCheckpointRecord {
@@ -916,10 +936,24 @@ export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId
   const attachments = sanitizePersistedChatMessageAttachments(message, threadId);
   const contentParts = sanitizePersistedChatMessageContentParts(message);
   const inferenceMetrics = sanitizeInferenceCompletionTelemetry(message.inferenceMetrics);
+  const generationSnapshot = message.generationSnapshot === undefined ? undefined
+    : parseBranchParamsSnapshot(message.generationSnapshot) ?? undefined;
+  const loadProfileSnapshot = message.loadProfileSnapshot === undefined ? undefined
+    : sanitizeModelLoadParameters(message.loadProfileSnapshot);
+  const rawOutput = message.structuredOutput;
+  const structuredOutput: ChatMessage['structuredOutput'] = rawOutput
+    && ['text', 'json_object', 'json_schema', 'gbnf'].includes(rawOutput.mode)
+    && ['not_applicable', 'valid', 'invalid', 'incomplete'].includes(rawOutput.status)
+    ? { mode: rawOutput.mode, status: rawOutput.status,
+      ...(['invalid_json', 'not_an_object', 'schema_mismatch', 'result_limit', 'interrupted'].includes(rawOutput.error ?? '')
+        ? { error: rawOutput.error } : {}) } : undefined;
   if (
     attachments === message.attachments
     && contentParts === message.contentParts
     && inferenceMetrics === message.inferenceMetrics
+    && JSON.stringify(generationSnapshot) === JSON.stringify(message.generationSnapshot)
+    && JSON.stringify(loadProfileSnapshot) === JSON.stringify(message.loadProfileSnapshot)
+    && JSON.stringify(structuredOutput) === JSON.stringify(message.structuredOutput)
   ) {
     return message;
   }
@@ -929,6 +963,9 @@ export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId
     ...(attachments ? { attachments } : { attachments: undefined }),
     ...(contentParts ? { contentParts } : { contentParts: undefined }),
     ...(inferenceMetrics ? { inferenceMetrics } : { inferenceMetrics: undefined }),
+    generationSnapshot,
+    loadProfileSnapshot,
+    structuredOutput,
   };
 }
 
@@ -1046,6 +1083,7 @@ function parseBranchParamsSnapshot(value: unknown): GenerationParamsSnapshot | n
 
   const allowedKeys = new Set([
     'temperature',
+    ...ADVANCED_GENERATION_KEYS,
     'topP',
     'topK',
     'minP',
@@ -1081,6 +1119,7 @@ function parseBranchParamsSnapshot(value: unknown): GenerationParamsSnapshot | n
   }
 
   return {
+    ...sanitizeAdvancedGenerationParameters(value),
     temperature: value.temperature as number,
     topP: value.topP as number,
     topK: typeof value.topK === 'number' ? value.topK : undefined,
@@ -1380,6 +1419,7 @@ export function parseChatStreamingProgressRecord(
       revision: value.revision,
       regeneratesMessageId: regeneratesMessageId ?? undefined,
       branchReplacement: branchReplacement ?? undefined,
+      ...parseProgressConfiguration(value),
     },
   };
 }
@@ -1514,6 +1554,9 @@ function parseChatStreamingOperationValue(
     'createdAt',
     'regeneratesMessageId',
     'branchReplacement',
+    'generationSnapshot',
+    'loadProfileSnapshot',
+    'structuredOutput',
   ]);
   const threadId = readRequiredString(value.threadId);
   const messageId = readRequiredString(value.messageId);
@@ -1553,6 +1596,7 @@ function parseChatStreamingOperationValue(
     createdAt: value.createdAt,
     regeneratesMessageId: regeneratesMessageId ?? undefined,
     branchReplacement: branchReplacement ?? undefined,
+    ...parseProgressConfiguration(value),
   };
 }
 
@@ -1964,6 +2008,7 @@ function readChatStreamingProgressState(
     revision: manifest.revision,
     regeneratesMessageId: operation.regeneratesMessageId,
     branchReplacement: operation.branchReplacement,
+    ...parseProgressConfiguration({ ...operation }),
   };
   return {
     ok: true,
@@ -2068,6 +2113,12 @@ function hasSameProgressOperationIdentity(
     && left.modelId === right.modelId
     && left.createdAt === right.createdAt
     && left.regeneratesMessageId === right.regeneratesMessageId
+    && (left.generationSnapshot === right.generationSnapshot
+      || hasSameJsonShape(left.generationSnapshot, right.generationSnapshot))
+    && (left.loadProfileSnapshot === right.loadProfileSnapshot
+      || hasSameJsonShape(left.loadProfileSnapshot, right.loadProfileSnapshot))
+    && (left.structuredOutput === right.structuredOutput
+      || hasSameJsonShape(left.structuredOutput, right.structuredOutput))
     && (
       left.branchReplacement === right.branchReplacement
       || hasSameJsonShape(left.branchReplacement, right.branchReplacement)
@@ -2147,6 +2198,7 @@ function createProgressOperationRecord(
     messageId: progress.messageId,
     modelId: progress.modelId,
     createdAt: progress.createdAt,
+    ...parseProgressConfiguration({ ...progress }),
     ...(progress.regeneratesMessageId
       ? { regeneratesMessageId: progress.regeneratesMessageId }
       : null),
@@ -2799,7 +2851,7 @@ export function sanitizeChatThreadForPersistence(thread: ChatThread): ChatThread
 
   const hasPersistedStreamingMessage = messages.some((message) => message.state === 'streaming');
   const status =
-    (thread.status === 'generating' || thread.status === 'stopped') && !hasPersistedStreamingMessage
+    removedEmptyProgressPlaceholder && (thread.status === 'generating' || thread.status === 'stopped') && !hasPersistedStreamingMessage
       ? 'idle'
       : thread.status;
 
@@ -2909,6 +2961,7 @@ export function recoverChatThreadFromStreamingProgress(
       tokensPerSec: progress.tokensPerSec,
       createdAt: progress.createdAt,
       state: 'stopped',
+      ...parseProgressConfiguration({ ...progress }),
     };
     const completedAt = Math.max(thread.updatedAt, progress.persistedAt, now);
     const recoveredThread = materializeChatBranchReplacementThread({
@@ -2982,6 +3035,7 @@ export function recoverChatThreadFromStreamingProgress(
     createdAt: progress.createdAt,
     state: 'stopped',
     regeneratesMessageId: progress.regeneratesMessageId,
+    ...parseProgressConfiguration({ ...progress }),
   };
   const messages = matchingMessage
     ? thread.messages.map((message, index) => (index === matchingIndex ? recoveredMessage : message))

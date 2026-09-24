@@ -1,6 +1,6 @@
 # Model parameters
 
-This document describes how Pocket AI stores and applies per-model generation parameters and model load profiles.
+This document describes how Pocket AI stores and applies generation parameters and model load profiles with llama.rn **0.13.0-rc.3**. The [Android CPU acceptance](llama-rn-013-stage3-acceptance.md) verifies structured output, shared template/count/prefill, probabilities and LoRA application/restoration on pinned fixtures. The [capability inventory](llama-rn-capabilities.md) separates that evidence from typed mapping and still-unverified model/backend combinations.
 
 ## Categories
 
@@ -20,6 +20,52 @@ They are snapshotted into chat threads so history remains reproducible and stabl
 - `src/types/chat.ts` (`GenerationParamsSnapshot`)
 - `src/store/chatStore.ts`
 - `src/utils/chatThreadParameters.ts`
+
+Opening, sending or regenerating an existing chat preserves its own snapshot. Changing one control merges into that chat's snapshot; it does not replace unrelated fields with another chat's model defaults. Presets can capture generation settings, including template and output mode, to seed new chats. Legacy presets without these settings keep the existing default behavior. Completed/stopped/error assistant messages retain their generation and actual load-profile snapshots; changing settings does not rewrite earlier messages.
+
+Before the first send, the parameter sheet shows the selected preset's generation seed, or model defaults when the preset has none. Explicit edits and resets override that seed for the current draft and become the first thread snapshot. Changing the draft's model or preset, or starting another chat, discards its local overrides.
+
+### Advanced generation controls
+
+The sheet groups sampling, templates and output under Advanced. Fields are optional, strictly typed and bounded by `generationControls.ts`. Zero, false and empty arrays remain distinct from absence. The adapter explicitly resets mutable native sampler values for every request because native completion state is reused.
+
+| Product setting | Native field | Product bounds / behavior |
+| --- | --- | --- |
+| `frequencyPenalty`, `presencePenalty` | `penalty_freq`, `penalty_present` | -2..2; default 0 |
+| `penaltyLastN` | `penalty_last_n` | -1..131072 tokens; -1 means context, 0 disables window |
+| `typicalP` | `typical_p` | 0..1; default 1 |
+| `mirostat`, `mirostatTau`, `mirostatEta` | `mirostat`, `mirostat_tau`, `mirostat_eta` | mode 0/1/2, tau 0..20, eta 0..1; default mode 0. Mirostat bypasses the ordinary sampler chain, including penalties and DRY |
+| `xtcProbability`, `xtcThreshold` | `xtc_probability`, `xtc_threshold` | 0..1; probability 0 by default |
+| `dryMultiplier`, `dryBase`, `dryAllowedLength`, `dryPenaltyLastN`, `drySequenceBreakers` | canonical `dry_*` fields | multiplier 0..10 (default 0), base 1..10, length 0..256 tokens, window -1..131072; at most 32 literal breakers |
+| `topNSigma` | `top_n_sigma` | -1..20; default -1 (off) |
+| `stop` | `stop` | at most 32 strings, each 1..256 characters; significant whitespace retained; snapshot arrays are never mutated |
+| `nProbs` | `n_probs` | 0..10; default 0. Probability is token likelihood, not answer correctness |
+| `reasoningFormat`, `thinkingBudgetTokens`, `thinkingBudgetMessage` | `reasoning_format`, `thinking_budget_tokens`, `thinking_budget_message` | format none/auto/deepseek; budget 0..8192 tokens. Capability/effort and context fit still apply. Structured modes disable reasoning |
+| `ignoreEos`, `logitBias` | `ignore_eos`, `logit_bias` | default false / empty; at most 128 numeric pairs, token ID 0..2147483647, bias -100..100; loaded-vocabulary bounds checked natively |
+
+`nProbs` retains at most 64 token positions × 10 candidates, truncating token strings to 256 characters in diagnostic payloads. The limit is applied once at completion; growing probability arrays are not copied each token or persisted into every message.
+
+The app uses only the rc.3 public numeric `[tokenId, bias]` contract; string token names and boolean biases are unsupported. Token IDs belong to the loaded model's vocabulary. Duplicate IDs use the last value, then pairs are stored in token-ID order; zero biases and empty lists remain explicit. The [pinned bridge correction](validation/llama-rn-stage3/native-probability-patch.md) replaces upstream invalid vector indexing with checked entries and rejects IDs outside the loaded vocabulary before sampling. `ignoreEos=true` suppresses every end-of-generation token, overriding any finite bias for those tokens. Model-defined suppressed tokens remain suppressed.
+
+EOS suppression cannot be combined with an explicit structured output mode or a grammar supplied by the template: an exhausted grammar could otherwise have no permitted termination token. The request is rejected without dropping its constraint. Every completion has a finite integer `n_predict` budget, at most 16384 total visible and reasoning tokens; zero is reserved for explicit prefill. Normal responses remain bounded by `maxTokens`. These mapping and safety checks require a native rebuild containing the pinned correction; device acceptance is reported separately.
+
+### Templates, exact counts and prefill
+
+`template` maps `chatTemplate`, `jinja`, scalar `kwargs`, `addGenerationPrompt`, `now`, `forcePureContent` and `prefillText` to the public formatter. Templates are local data for the native formatter, never JavaScript or remotely fetched executable content. Template text and prefill are limited to 32768 characters; kwargs have at most 32 bounded scalar entries.
+
+One frozen `now` and one bounded prepared-request cache feed token counting, context selection, completion and role-normalization retry. Completion receives the prepared `prompt`, avoiding upstream `completion(messages)` reformatting and grammar replacement. Parser, grammar, thinking tags and template stops come from that same formatter result. Explicit output constraints take priority. Special-token count adjustment follows the pinned native tokenizer metadata; an unknown tokenizer cannot be reported as an exact count.
+
+Prefill text is appended once to the formatted prompt and supplied to the parser. JSON modes use a content-only parser and advance the output grammar with that same content prefix, without feeding the template's assistant protocol prefix into a bare JSON grammar. GBNF with nonempty prefill is rejected because this runtime does not advance user grammar with the prefix. An explicit matching final assistant continuation already present in the formatted prompt is reused. The saved transcript is not modified. The advanced diagnostic action evaluates the unsent composer text with `n_predict=0`, without creating an assistant message. Cancellation waits for actual native settlement. Token diagnostics expose a bounded tokenize/detokenize preview; special/media tokens are not promised to round-trip byte for byte.
+
+The raw rc.3 `tokens_predicted` counter excludes the first output token sampled after a multi-token prompt batch. A completed one-token response can therefore report zero; prefill is identified by the requested `n_predict=0`, not by this counter.
+
+### Structured output
+
+The mutually exclusive modes are text, JSON object, JSON Schema and custom GBNF. Explicit GBNF wins over template grammar; a selected JSON format clears conflicting template grammar and uses the public `response_format` / `json_schema` contracts. Retry never removes a constraint to obtain an arbitrary answer.
+
+Schema validation is local and uses a deliberately narrow Draft-7 subset, with no new dependency, network resolution, file resolution or code execution. The input limit is 32768 characters, depth 16 and 512 schema nodes. Acyclic local `$defs`/`definitions` references are expanded within those bounds; remote references, recursive references and unsupported keywords are rejected before native execution. Supported keywords include types, object properties/required/additionalProperties, array items and length limits, string length limits, enum/const, integer bounds and `anyOf`. This is not full JSON Schema support; constructs such as pattern/format, oneOf/allOf and numeric bounds on non-integer types are rejected.
+
+After native settlement, JSON is parsed once and schema results are independently checked against the validated schema. Interrupted, context-full or token-limited JSON is incomplete even if a fragment happens to parse. Available exact content is retained with an invalid/incomplete status, never silently repaired. JSON uses an exact monospace view and exact copy; legacy text presentation remains unchanged. GBNF constrains native decoding but is not represented as an independent post-generation grammar validation.
 
 For multi-model conversations, Pocket AI resolves these snapshots from the thread's **active chat model**, not only the original thread model. Switching models inside a conversation appends a `model_switch` system event while preserving the per-message `modelId` for user and assistant turns.
 
@@ -42,7 +88,7 @@ Current generation parameters include:
   - a number means “fixed seed”
   - normalize to a non-negative int within `0..2_147_483_647`
 
-Visible assistant content strips *leading* reasoning blocks from assistant messages. Supported markers include:
+Ordinary text presentation strips *leading* reasoning blocks from assistant messages. Structured content, including GBNF, is displayed and copied exactly. Interrupted streaming recovery retains the mode and response configuration and marks structured content incomplete. Supported markers for ordinary text include:
 
 - `<think>...</think>` / `<thinking>...</thinking>`
 - `[THINK]...[/THINK]`
@@ -66,6 +112,9 @@ They affect native initialization and memory-fit estimation:
 - `contextSize`
 - `gpuLayers`
 - `kvCacheType` (`auto | f16 | q8_0 | q4_0`)
+  - optional `cacheTypeK` / `cacheTypeV` override their respective side; an absent side falls back to `kvCacheType`
+  - public formats: f16, f32, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1; no internal bf16 setting
+  - metadata/backend/flash-attention compatibility still determines the effective format; requested and effective values are shown separately
 - `mtpEnabled` (`boolean | undefined`)
   - stored per model when the user changes the MTP control
   - `undefined` keeps the model catalog default
@@ -88,6 +137,33 @@ When Advanced Model Controls are enabled, Pocket AI can also persist extra runti
 - `parallelSlots`
 - `nBatch`, `nUbatch`
 - `kvUnified`
+
+Stage 3 also carries `ropeFreqBase`, `ropeFreqScale`, `noExtraBufts`, `swaFull`, `nCpuMoe` and the public draft controls `specDraftNMax`, `specDraftNMin`, `specDraftPMin`, `specDraftPSplit`, `specDraftNGpuLayers`, `specDraftCacheTypeK`, `specDraftCacheTypeV`. These are load-profile fields and require reload. Draft settings apply only to an admitted draft configuration; minimum cannot exceed maximum, and enabled MTP cannot use a zero maximum. Quantized draft V requests fall back to f16 because rc.3 exposes no independent draft flash-attention policy. The diagnostic profile makes this fallback visible.
+
+All advanced allocation settings participate in reload, last-good, autotune and calibration identities. Old successful profiles do not certify a new allocation. Applying the active profile reserves context ownership, confirms native initialization before persisting the request, and restores the previous complete effective profile on a settled failure. A changed chat/variant cancels restoration; uncertain native ownership cannot publish READY. Safe fallback retains requested/effective diagnostics.
+
+### Reset and partial changes
+
+`Reset all` replaces the complete load draft. After `Apply & reload` succeeds,
+advanced overrides (including independent K/V caches, RoPE, memory flags, MoE,
+speculative draft options and LoRA) are removed from the applied and saved profile.
+Changing a basic value after Reset retains that value without restoring old advanced
+options. Inactive models save the replacement for their next load. Reopening or
+restarting uses that confirmed profile.
+
+For the current chat, a confirmed Reset also clears its LoRA snapshot together with
+the model-default adapter configuration. Ordinary edits preserve the distinction
+between the chat's adapter snapshot and the model default. Other chats, other models
+and old message snapshots remain unchanged. A partial programmatic update preserves
+untouched fields; an explicit `undefined` clears an optional override. Failed or
+cancelled reloads do not persist the replacement.
+### LoRA profiles
+
+The existing Resources card selects one or more installed `lora_adapter` artifacts and individual scales (-16..16, including 0), then explicitly applies or removes them. Selection, local download and native-confirmed application are separate states. No editor accepts filesystem paths. Resolver checks exact base/variant and artifact identities, managed paths, size, GGUF header, SHA-256 and architecture/adapter metadata; native loading remains the final tensor compatibility check.
+
+Live changes call `applyLoraAdapters`, `removeLoraAdapters` and `getLoadedLoraAdapters` under the context lifecycle lease. Only verified readback followed by cache invalidation commits the effective list. A settled partial failure reloads the previous confirmed profile; a timeout retains original and uncertain paths until native settlement and confirmed release. Applied files cannot be removed even when registry selection has changed. Independent files remain removable when lifecycle ownership permits it.
+
+Ordered adapter identities/scales and verified resident bytes participate in memory fit and allocation identities. Initialization restores the list through `lora_list`; auxiliary A→B→A restores the full actual profile. Each chat has its own adapter snapshot, old chats default to the base model, and response load snapshots record what was used. Regeneration uses the current explicit chat configuration; earlier messages remain unchanged.
 
 KV cache auto-selection is shared logic:
 
@@ -219,7 +295,7 @@ Pocket AI automatically recognizes compatible multi-token prediction (MTP) metad
 - Each completed assistant response records native llama.rn telemetry: predicted tokens/sec, time to first token, proposed draft tokens, accepted draft tokens, and acceptance rate. `draftTokens > 0` proves that the native draft loop ran; accepted tokens and stable native throughput are required before claiming a speedup.
 - Model Controls also reports app/PSS memory snapshots captured before model load, after model initialization, and after the first generated token when the platform exposes them.
 
-Model details shows whether MTP is embedded, ready, downloading, or needs a companion download. MTP draft-token limits are selected conservatively from the active quantization; the user-facing load-profile control enables or disables the resolved MTP configuration rather than editing that native token limit.
+Model details shows whether MTP is embedded, ready, downloading, or needs a companion download. MTP draft-token limits default conservatively from the active quantization. The compact load-profile control enables or disables MTP; Advanced load controls can override the minimum/maximum draft-token limits and other supported draft parameters. These overrides use the same validation, memory admission and transactional reload as the rest of the load profile.
 
 Advanced runtime controls, backend autotune, and runtime diagnostics are shown only when `showAdvancedInferenceControls` is enabled in settings.
 

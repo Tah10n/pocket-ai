@@ -183,7 +183,12 @@ fresh-chat isolation, and unload/reload with real native token counters. It then
 pinned MiniLM embedding model through the download manager, checks it through the production
 resource owner, restores the chat model, and generates another response. It then removes
 the unused embedding fixture, verifies that the chat context and history were retained,
-and generates again without reloading the chat model. See
+and generates again without reloading the chat model. The final Stage 3 scenario checks
+JSON/schema/GBNF, template and prefill token counts, cancellation recovery and bounded
+probabilities. It downloads a pinned 4.9 MB LoRA adapter through the same resource manager,
+measures its effect and scale changes against repeated baseline probabilities, removes it,
+and verifies LoRA restoration across an auxiliary embedding check and deletion protection.
+See the [LoRA fixture and acceptance protocol](docs/validation/llama-rn-stage3/lora-fixture.md),
 [model resource acceptance](docs/llama-rn-013-stage2-acceptance.md) and
 [runtime device validation](docs/runtime-hardening-device-validation.md#explicit-android-cpu-lifecycle-smoke).
 

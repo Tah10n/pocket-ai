@@ -33,6 +33,12 @@ After the XCFramework exists, generate the native project from tracked Expo inpu
 NODE_ENV=production EAS_BUILD_PROFILE=production npx expo prebuild --clean --platform ios --no-install
 ```
 
+The Expo source-build plugin sets `RNLLAMA_BUILD_FROM_SOURCE=1` at the start of
+the generated Podfile, before CocoaPods evaluates the pinned llama.rn podspec.
+This compiles the [local native corrections](./validation/llama-rn-stage3/native-probability-patch.md)
+instead of using the vendor core framework. Keep this setting in generated builds;
+Android acceptance does not establish iOS compatibility.
+
 Then install CocoaPods dependencies:
 
 ```bash

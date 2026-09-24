@@ -162,6 +162,10 @@ async function main() {
     throw new Error("Could not resolve expo.android.package from app.json.");
   }
   assertSmokeBuildOverrideContract(null, { applicationId: appPackage });
+  const sdk = await require("./llama-hexagon-sdk").setupLlamaHexagonSdk(projectRoot, {
+    abi: buildTargetAbi, env: androidBuildEnvironment,
+  });
+  Object.assign(androidBuildEnvironment, sdk.env);
 
   log("Starting adb server...");
   runChecked(tools.adb, ["start-server"], { stdio: "ignore" });

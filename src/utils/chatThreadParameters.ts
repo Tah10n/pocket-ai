@@ -1,8 +1,17 @@
-import { GenerationParameters, getGenerationParametersForModel } from '../services/SettingsStore';
-import { getThreadActiveModelId, type ChatThread } from '../types/chat';
+import type { GenerationParameters } from '../services/SettingsStore';
+import { type ChatThread } from '../types/chat';
+import { advancedGenerationIdentity, sanitizeAdvancedGenerationParameters } from './generationControls';
 
 export function resolveThreadGenerationParameters(thread: ChatThread): GenerationParameters {
-  return getGenerationParametersForModel(getThreadActiveModelId(thread));
+  // Existing chats own their settings. Model defaults seed new chats and explicit
+  // model changes; they must not overwrite another chat at Send or Regenerate.
+  return {
+    ...thread.paramsSnapshot,
+    ...sanitizeAdvancedGenerationParameters(thread.paramsSnapshot),
+    topK: thread.paramsSnapshot.topK ?? 40,
+    minP: thread.paramsSnapshot.minP ?? 0.05,
+    repetitionPenalty: thread.paramsSnapshot.repetitionPenalty ?? 1,
+  };
 }
 
 export function areThreadGenerationParametersEqual(
@@ -11,6 +20,7 @@ export function areThreadGenerationParametersEqual(
 ): boolean {
   return (
     paramsSnapshot.temperature === resolvedParams.temperature
+    && advancedGenerationIdentity(paramsSnapshot) === advancedGenerationIdentity(resolvedParams)
     && paramsSnapshot.topP === resolvedParams.topP
     && paramsSnapshot.topK === resolvedParams.topK
     && paramsSnapshot.minP === resolvedParams.minP

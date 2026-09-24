@@ -8,6 +8,7 @@ export const MAX_MODEL_INIT_LAYER_RETRY_CANDIDATES = 4;
 export const MAX_MODEL_INIT_TOTAL_ATTEMPTS = MAX_MODEL_INIT_ACCELERATOR_ATTEMPTS + 2;
 
 export type ModelInitCandidateIdentity = {
+  allocationIdentity?: string;
   backendMode: 'cpu' | 'gpu' | 'npu';
   devices?: string[];
   nGpuLayers: number;
@@ -66,6 +67,7 @@ function normalizeDevices(devices: string[] | undefined): string[] {
 
 function buildCandidateKeyPayload(identity: ModelInitCandidateIdentity) {
   return {
+    ...(identity.allocationIdentity !== undefined ? { allocationIdentity: identity.allocationIdentity } : {}),
     backendMode: identity.backendMode,
     devices: normalizeDevices(identity.devices),
     nGpuLayers: normalizeInteger(identity.nGpuLayers),

@@ -1,4 +1,5 @@
 import { llmEngineService } from './LLMEngineService';
+import { getEffectiveAdvancedLoadProfileIdentity, getOptionalAdvancedLoadProfileIdentity } from '../utils/advancedLoadProfile';
 import { inferenceBackendService } from './InferenceBackendService';
 import {
   getModelLoadParametersForModel,
@@ -297,7 +298,8 @@ class InferenceAutotuneService {
         ? getInitDeviceSelectorsForAutotune()
         : [];
       const restoreLoadParamsOverride = shouldRestorePreviousModel
-        ? resolveRestoreLoadParamsOverride(engineState.diagnostics, restoreInitDeviceSelectors)
+        ? { ...llmEngineService.getEffectiveLoadParameters?.(),
+            ...resolveRestoreLoadParamsOverride(engineState.diagnostics, restoreInitDeviceSelectors) }
         : null;
 
       let didUnloadPreviousModel = false;
@@ -333,7 +335,15 @@ class InferenceAutotuneService {
       }
 
       const baseLoadParams = getModelLoadParametersForModel(normalizedModelId);
+      const allocationIdentity = getOptionalAdvancedLoadProfileIdentity(baseLoadParams);
+      const assertMatchingAllocation = () => {
+        const effective = llmEngineService.getEffectiveLoadParameters?.();
+        if (effective && getEffectiveAdvancedLoadProfileIdentity(baseLoadParams, effective) !== allocationIdentity) {
+          throw new Error('The loaded allocation differs from the requested benchmark profile');
+        }
+      };
       const previousAutotuneResult = readAutotuneResult({
+        allocationIdentity: getOptionalAdvancedLoadProfileIdentity(baseLoadParams),
         modelId: normalizedModelId,
         contextSize: baseLoadParams.contextSize,
         kvCacheType: baseLoadParams.kvCacheType,
@@ -383,6 +393,7 @@ class InferenceAutotuneService {
 
     if (cancelled) {
       const result: AutotuneResult = {
+        allocationIdentity,
         createdAtMs: Date.now(),
         modelId: normalizedModelId,
         contextSize: baseLoadParams.contextSize,
@@ -417,6 +428,7 @@ class InferenceAutotuneService {
         let firstTokenMs: number | null = null;
         const startMs = Date.now();
 
+        assertMatchingAllocation();
         await llmEngineService.chatCompletion({
           messages: [{ role: 'user', content: prompt }],
           onToken: () => {
@@ -532,6 +544,7 @@ class InferenceAutotuneService {
           : previousAutotuneResult?.bestStable;
 
       const result: AutotuneResult = {
+        allocationIdentity,
         createdAtMs: Date.now(),
         modelId: normalizedModelId,
         contextSize: baseLoadParams.contextSize,
@@ -582,6 +595,7 @@ class InferenceAutotuneService {
           candidateCount,
         });
         const loadParamsOverride: Partial<ModelLoadParameters> = {
+          ...baseLoadParams,
           backendPolicy: mapBackendModeToPolicy(candidate.backendMode),
           gpuLayers: candidate.backendMode === 'cpu' ? 0 : candidate.nGpuLayers,
           // Ensure benchmarks don't implicitly depend on a persisted device selection.
@@ -630,6 +644,7 @@ class InferenceAutotuneService {
           let firstTokenMs: number | null = null;
           const startMs = Date.now();
 
+          assertMatchingAllocation();
           await llmEngineService.chatCompletion({
             messages: [{ role: 'user', content: prompt }],
             onToken: () => {
@@ -786,6 +801,7 @@ class InferenceAutotuneService {
         : previousAutotuneResult?.bestStable;
 
       result = {
+        allocationIdentity,
         createdAtMs: Date.now(),
         modelId: normalizedModelId,
         contextSize: baseLoadParams.contextSize,

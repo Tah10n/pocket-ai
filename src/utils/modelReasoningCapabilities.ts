@@ -1,5 +1,6 @@
 import type { ModelMetadata } from '@/types/models';
 import type { ReasoningEffort, ResolvedReasoningEffort } from '@/types/reasoning';
+import type { AdvancedGenerationParameters } from './generationControls';
 
 type ReasoningModelMetadata = Pick<
   ModelMetadata,
@@ -265,5 +266,22 @@ export function normalizeReasoningPreference<T extends { reasoningEffort?: Reaso
   return {
     ...params,
     reasoningEffort: nextReasoningEffort,
+  };
+}
+
+export function applyAdvancedReasoningConfig(
+  config: ReasoningRuntimeConfig,
+  generation: AdvancedGenerationParameters,
+  maxTokens: number,
+): ReasoningRuntimeConfig {
+  const structured = generation.output !== undefined && generation.output.mode !== 'text';
+  const enableThinking = config.enableThinking && !structured && generation.thinkingBudgetTokens !== 0;
+  const thinkingBudgetTokens = enableThinking ? generation.thinkingBudgetTokens ?? config.thinkingBudgetTokens : 0;
+  return {
+    ...config,
+    enableThinking,
+    reasoningFormat: enableThinking ? generation.reasoningFormat ?? config.reasoningFormat : 'none',
+    thinkingBudgetTokens,
+    responseReserveTokens: Math.max(1, Math.round(maxTokens)) + thinkingBudgetTokens,
   };
 }

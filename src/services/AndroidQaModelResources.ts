@@ -76,7 +76,7 @@ function fixture(): ModelMetadata {
     roleEvidence: [{ role: 'embedding', source: 'pipeline_tag', confidence: 'declared', value: 'feature-extraction' }],
   };
 }
-async function prepareEmbeddingFixture(timeoutMs: number): Promise<ModelMetadata> {
+export async function prepareAndroidQaEmbeddingFixture(timeoutMs: number): Promise<ModelMetadata> {
   const desired = fixture();
   const ready = () => {
     const model = registry.getModel(desired.id);
@@ -169,7 +169,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
       paramsSnapshot: { temperature: 0, topP: 1, maxTokens: 32, seed: 42 } });
     await generate('generate_before');
     phase('prepare_embedding');
-    const model = await prepareEmbeddingFixture(downloadTimeoutMs);
+    const model = await prepareAndroidQaEmbeddingFixture(downloadTimeoutMs);
     pass({ id: 'prepare_embedding' });
     selectAuxiliaryModel('embedding', model);
     const threadBefore = JSON.stringify(useChatStore.getState().threads[ownedThread]);

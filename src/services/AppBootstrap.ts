@@ -1,3 +1,4 @@
+import { sanitizeAdvancedGenerationParameters } from '../utils/generationControls';
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -94,6 +95,7 @@ function buildThreadFromLegacyHistory(entry: ChatHistoryEntry, settings: AppSett
     presetId: entry.presetId,
     presetSnapshot: resolveMigratedPresetSnapshot(entry.presetId),
     paramsSnapshot: {
+      ...sanitizeAdvancedGenerationParameters(settings),
       temperature: settings.temperature,
       topP: settings.topP,
       topK: settings.topK ?? 40,

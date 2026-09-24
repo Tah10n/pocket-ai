@@ -56,6 +56,7 @@ type LegacyModelArtifactInput = Pick<
 type MergeModelArtifactsOptions = {
   preferDerivedRuntimeState?: boolean;
   preservePersistedRuntimeState?: boolean;
+  preservePersistedCompanionSelection?: boolean;
 };
 
 type StableModelArtifactMetadata = Pick<
@@ -523,7 +524,7 @@ export function mergeModelArtifacts(
     }
     const derivedArtifact = byId.get(artifact.id);
     const mergedArtifact = options.preservePersistedRuntimeState === true && derivedArtifact
-      ? mergeArtifactWithPersistedRuntimeState(derivedArtifact, artifact)
+      ? mergeArtifactWithPersistedRuntimeState(derivedArtifact, artifact, options.preservePersistedCompanionSelection)
       : options.preferDerivedRuntimeState === true && derivedArtifact
         ? mergeArtifactWithDerivedRuntimeState(derivedArtifact, artifact)
         : {
@@ -686,6 +687,7 @@ function mergeArtifactWithDerivedRuntimeState(
 function mergeArtifactWithPersistedRuntimeState(
   derivedArtifact: ModelArtifactMetadata,
   persistedArtifact: ModelArtifactMetadata,
+  preserveCompanionSelection = false,
 ): ModelArtifactMetadata {
   const sharesStableIdentity = artifactsShareStableIdentity(derivedArtifact, persistedArtifact);
   const merged = {
@@ -701,6 +703,12 @@ function mergeArtifactWithPersistedRuntimeState(
 
   return {
     ...merged,
+    // Only a runtime projection opts in: explicit registry edits outrank a
+    // stale route snapshot, and only after the source identity matched above.
+    ...(preserveCompanionSelection && isManagedCompanionArtifact(derivedArtifact) ? {
+      selected: persistedArtifact.selected,
+      boundToModelIdentity: persistedArtifact.boundToModelIdentity,
+    } : {}),
     localPath: persistedArtifact.localPath,
     installState: persistedArtifact.installState,
     downloadProgress: persistedArtifact.downloadProgress,

@@ -8,6 +8,7 @@ const GENERATION_STOP_MESSAGE = 'Generation was stopped before completion starte
 export type ChatGenerationDrainResult = 'drained' | 'timed_out';
 
 export interface ChatGenerationWorkHandle {
+  readonly templateNowSeconds?: number;
   assertCurrent: () => void;
   finish: () => void;
   onCancel: (listener: () => void) => () => void;
@@ -87,6 +88,7 @@ export function beginChatGenerationWork(scope: string): ChatGenerationWorkHandle
   };
 
   return {
+    templateNowSeconds: Math.floor(Date.now() / 1000),
     assertCurrent,
     finish: () => {
       if (finished) {

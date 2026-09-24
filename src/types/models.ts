@@ -375,6 +375,18 @@ export interface LlamaRuntimeDiagnostics {
 }
 
 export interface EngineDiagnostics {
+  generation?: {
+    outputMode: 'text' | 'json_object' | 'json_schema' | 'gbnf';
+    templateSource: 'custom' | 'model';
+    formatter: 'jinja' | 'llama-chat' | 'unknown';
+    nProbs: number;
+    prefill: boolean;
+    hasPrefillText: boolean;
+    probabilities?: { retainedTokens: number; truncated: boolean };
+    timings?: Omit<InferenceCompletionTelemetry, 'mtp'>;
+  };
+  requestedAdvancedLoad?: ReturnType<typeof import('../utils/advancedLoadProfile').getAdvancedLoadDiagnostics>;
+  effectiveAdvancedLoad?: ReturnType<typeof import('../utils/advancedLoadProfile').getAdvancedLoadDiagnostics>;
   runtime?: LlamaRuntimeDiagnostics;
   backendMode: EngineBackendMode;
   backendDevices: string[];

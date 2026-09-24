@@ -41,6 +41,7 @@ export type AutotuneCandidateReport = {
 };
 
 export type AutotuneResult = {
+  allocationIdentity?: string;
   createdAtMs: number;
   modelId: string;
   contextSize: number;
@@ -215,6 +216,7 @@ function sanitizeCandidateReport(value: unknown): AutotuneCandidateReport | null
 function sanitizeAutotuneResult(value: AutotuneResult): AutotuneResult {
   const bestStable = sanitizeBestStableProfile(value.bestStable);
   return {
+    ...(typeof value.allocationIdentity === 'string' ? { allocationIdentity: value.allocationIdentity } : {}),
     createdAtMs: toOptionalNonNegativeNumber(value.createdAtMs) ?? 0,
     modelId: typeof value.modelId === 'string' ? value.modelId : '',
     contextSize: Math.round(toOptionalNonNegativeNumber(value.contextSize) ?? 0),
@@ -267,6 +269,7 @@ function buildAutotuneKey({
 }
 
 export function readAutotuneResult({
+  allocationIdentity,
   modelId,
   contextSize,
   kvCacheType,
@@ -275,6 +278,7 @@ export function readAutotuneResult({
   expectedNativeModuleVersion = getCurrentNativeModuleVersion(),
   maxAgeMs = DEFAULT_AUTOTUNE_MAX_AGE_MS,
 }: {
+  allocationIdentity?: string;
   modelId: string;
   contextSize: number;
   kvCacheType: string;
@@ -300,6 +304,7 @@ export function readAutotuneResult({
     if (!Array.isArray(parsed.candidates)) {
       return null;
     }
+    if (parsed.allocationIdentity !== allocationIdentity) return null;
 
     const expectedFileSize = typeof modelFileSizeBytes === 'number' && Number.isFinite(modelFileSizeBytes) && modelFileSizeBytes > 0
       ? Math.round(modelFileSizeBytes)
@@ -368,6 +373,7 @@ export function writeAutotuneResult(result: AutotuneResult): void {
 }
 
 export function readBestStableAutotuneProfile({
+  allocationIdentity,
   modelId,
   contextSize,
   kvCacheType,
@@ -376,6 +382,7 @@ export function readBestStableAutotuneProfile({
   expectedNativeModuleVersion,
   maxAgeMs,
 }: {
+  allocationIdentity?: string;
   modelId: string;
   contextSize: number;
   kvCacheType: string;
@@ -385,6 +392,7 @@ export function readBestStableAutotuneProfile({
   maxAgeMs?: number;
 }): AutotuneBestStableProfile | null {
   const result = readAutotuneResult({
+    allocationIdentity,
     modelId,
     contextSize,
     kvCacheType,

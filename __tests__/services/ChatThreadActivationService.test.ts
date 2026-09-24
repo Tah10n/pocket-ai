@@ -21,7 +21,7 @@ jest.mock('../../src/services/BackgroundTaskService', () => ({
 import { activateThreadForNavigation } from '../../src/services/ChatThreadActivationService';
 import * as ChatGenerationService from '../../src/services/ChatGenerationService';
 import { getGenerationParametersForModel } from '../../src/services/SettingsStore';
-import { getChatThreadStorageKey } from '../../src/store/chatPersistence';
+import { CHAT_PERSISTENCE_INDEX_KEY } from '../../src/store/chatPersistence';
 import {
   flushPendingChatPersistenceWrites,
   useChatStore,
@@ -97,7 +97,7 @@ describe('ChatThreadActivationService', () => {
     ChatGenerationService.__resetChatGenerationServiceForTests();
   });
 
-  it('opens an idle existing thread and synchronizes its parameters atomically', () => {
+  it('opens an idle existing thread without replacing its parameters with global model defaults', () => {
     const threadA = createThread();
     const threadB = createThread();
     useChatStore.getState().setActiveThread(threadA);
@@ -110,8 +110,8 @@ describe('ChatThreadActivationService', () => {
 
     const state = useChatStore.getState();
     expect(state.activeThreadId).toBe(threadB);
-    expect(state.threads[threadB].paramsSnapshot).toEqual(SYNCHRONIZED_PARAMS);
-    expect(state.inferenceRevision).toBe(revisionBefore + 1);
+    expect(state.threads[threadB].paramsSnapshot).toEqual(STORED_PARAMS);
+    expect(state.inferenceRevision).toBe(revisionBefore);
   });
 
   it('returns already_active without invoking the persistence command', () => {
@@ -232,7 +232,7 @@ describe('ChatThreadActivationService', () => {
       key: string,
       value: unknown,
     ) {
-      if (!didFail && key === getChatThreadStorageKey(threadB)) {
+      if (!didFail && key === CHAT_PERSISTENCE_INDEX_KEY) {
         didFail = true;
         throw writeError;
       }

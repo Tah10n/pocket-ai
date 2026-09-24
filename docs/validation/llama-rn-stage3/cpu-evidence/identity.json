@@ -1,11 +1,11 @@
 {
   "verifiedOn": "2026-09-24",
   "runtimeVersion": "0.13.0-rc.3",
-  "appTree": "c35e6c331b0f51c84e8fdd621f82f2c5a2ad90dc",
-  "apkSha256": "53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571",
-  "installedApkSha256": "53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571",
-  "apkBytes": 82005858,
-  "provenanceDigest": "ba4b33bded37fda088193e39dd1124761ee48a82cef82783a94a0c8fef9de2ea",
+  "appTree": "54432c35b0614511c88af839c63d98be4cd8188c",
+  "apkSha256": "a6f83939059db6b7e3334067c78cf832c5bdf3522667f20d532dcf70104de786",
+  "installedApkSha256": "a6f83939059db6b7e3334067c78cf832c5bdf3522667f20d532dcf70104de786",
+  "apkBytes": 82006154,
+  "provenanceDigest": "fb8940ce1def0ae36f761d32107b41f320bd4e927942b35b182c5356c491829d",
   "packageName": "com.github.tah10n.pocketai.qa",
   "abi": "x86_64",
   "backend": "cpu",
@@ -13,17 +13,17 @@
     {
       "id": "runtime-inference-lifecycle",
       "status": "passed",
-      "durationMs": 30705
+      "durationMs": 41480
     },
     {
       "id": "runtime-model-resources",
       "status": "passed",
-      "durationMs": 75534
+      "durationMs": 92064
     },
     {
       "id": "runtime-stage3",
       "status": "passed",
-      "durationMs": 79996
+      "durationMs": 137073
     }
   ]
 }

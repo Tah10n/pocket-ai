@@ -11,6 +11,11 @@ file sizes and SHA-256 values were checked against Hugging Face metadata on
 loaded-list readback, nonzero probability effects at two scales, removal and
 auxiliary restoration. This is not output-quality, GPU, iOS, NPU or MTP evidence.
 
+The manifest's `nativeAcceptance` metadata records the initial native passing
+APK. It is imported by the QA bundle and is intentionally retained as historical
+fixture metadata. The current rebuilt APK, source identity and repeated results
+are recorded in the acceptance report and its CPU evidence receipts.
+
 ## Sources and conditions
 
 - [Pinned base repository](https://huggingface.co/Mungert/SmolLM2-135M-Instruct-GGUF/tree/980b4318b34b2f20e60c89d8f8a98283ec83cbd6)

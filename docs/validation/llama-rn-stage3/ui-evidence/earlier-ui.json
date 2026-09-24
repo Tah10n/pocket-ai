@@ -1,0 +1,47 @@
+{
+  "verifiedOn": "2026-09-24",
+  "apkSha256": "53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571",
+  "scope": "manual Android UI, isolated emulator-5582",
+  "checks": [
+    {
+      "id": "output_modes_en",
+      "status": "passed",
+      "exclusiveModes": 4
+    },
+    {
+      "id": "json_ui_validation",
+      "status": "passed",
+      "parseable": true,
+      "characters": 17
+    },
+    {
+      "id": "json_exact_copy_paste",
+      "status": "passed",
+      "exactMatch": true,
+      "characters": 17
+    },
+    {
+      "id": "output_mode_ru",
+      "status": "passed",
+      "selectedMode": "json_object",
+      "selectionPreserved": true
+    },
+    {
+      "id": "load_cache_ru",
+      "status": "passed",
+      "separateKV": true,
+      "draftRequestedEffectiveVisible": true,
+      "reloadNotice": true
+    },
+    {
+      "id": "lora_ui_apply",
+      "status": "failed",
+      "reason": "Installed companion stays unbound in model details; selecting for role does not enable apply selection."
+    },
+    {
+      "id": "lora_ui_scale_remove",
+      "status": "not_run",
+      "reason": "Blocked by disabled adapter selection in model details."
+    }
+  ]
+}

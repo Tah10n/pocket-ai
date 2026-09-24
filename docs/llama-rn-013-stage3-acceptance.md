@@ -9,10 +9,10 @@ of every model, advanced parameter combination or accelerator.
 
 | Item | Verified value |
 | --- | --- |
-| Public app source Git tree | `c35e6c331b0f51c84e8fdd621f82f2c5a2ad90dc` |
-| APK and installed APK SHA-256 | `53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571` |
-| APK size | 82,005,858 bytes |
-| Build provenance digest | `ba4b33bded37fda088193e39dd1124761ee48a82cef82783a94a0c8fef9de2ea` |
+| Public app source Git tree | `54432c35b0614511c88af839c63d98be4cd8188c` |
+| APK and installed APK SHA-256 | `a6f83939059db6b7e3334067c78cf832c5bdf3522667f20d532dcf70104de786` |
+| APK size | 82,006,154 bytes |
+| Build provenance digest | `fb8940ce1def0ae36f761d32107b41f320bd4e927942b35b182c5356c491829d` |
 | Package / variant | `com.github.tah10n.pocketai.qa` / release with embedded bundle |
 | Device / packaged ABI | `sdk_gphone64_x86_64` emulator / x86_64 |
 | Effective backend | CPU, zero GPU layers, no GPU acceleration |
@@ -106,6 +106,29 @@ record. The assertions inspect the actual final record, finite values, token
 budget and terminal flags, and confirmed completion settlement. They do not
 substitute a callback count or a randomly different text for evidence of effect.
 
+## Manual UI checks
+
+On the final APK identified above, the Russian Resources card passed explicit
+companion binding, selection without automatic application, apply at scale 1,
+draft scale 0.5 while confirmed scale remained 1, explicit application of 0.5,
+and removal with confirmed empty native state. Mutation controls were disabled
+while native state was unconfirmed. See the [LoRA UI receipt](validation/llama-rn-stage3/ui-evidence/lora-ui.json),
+[applied scale 0.5](validation/llama-rn-stage3/ui-evidence/ui-lora-scale-half-ru.png)
+and [removed state](validation/llama-rn-stage3/ui-evidence/ui-lora-removed-ru.png).
+
+Earlier APK `53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571`
+passed manual checks of four exclusive output modes in
+[English](validation/llama-rn-stage3/ui-evidence/ui-output-en.png) and
+[Russian](validation/llama-rn-stage3/ui-evidence/ui-output-ru.png), preserved
+selection across language changes, [validated JSON display](validation/llama-rn-stage3/ui-evidence/ui-json-en.png),
+and exact clipboard copy/paste of the displayed 17-character JSON result.
+[Advanced load controls](validation/llama-rn-stage3/ui-evidence/ui-load-ru.png)
+showed separate K/V caches, requested/effective values and reload guidance.
+The [earlier UI receipt](validation/llama-rn-stage3/ui-evidence/earlier-ui.json)
+retains its LoRA binding failure and blocked scale/remove checks; those were
+retested successfully on the final APK as recorded above. These manual UI checks
+are separate from the three automated native packs on the final APK.
+
 ## Earlier failed attempts
 
 These failures remain separate from the final passing run:
@@ -115,7 +138,15 @@ These failures remain separate from the final passing run:
 | `00e068e70b8a84e90c486174e2ceefe2f22c16120594785375d9c1944aa2cbd3` | Stage 1/2 passed; Stage 3 failed custom-clock template/prefill because the vendor core ignored `now`. Later steps not run. |
 | `a5f7a011c85d42ac5f87c9ae5ab8c6ec1a05146e8dc3d4ebb2f698cb924443f9` | Stage 1/2 passed; source-core Stage 3 aborted after invalid grammar due to upstream sampler ownership. Later steps not run. |
 | `c23e55570e72e0771a53d4cfec87374104dd8d10327e9a5ce8a1c9435957ce76` | Stage 1/2 passed; Stage 3 failed the old LoRA assertion requiring a streaming callback despite a final probability record. Scale/remove/auxiliary/deletion steps not run. This attempt is not LoRA-effect or robust cancellation proof. |
-| Final APK `53b68061…` (first bootstrap) | Android System UI ANR overlay blocked bootstrap while the QA app was ready behind it. Inference not run on this attempt. After dismissing the overlay, the same hash-verified APK passed all three packs without rebuilding. |
+| Earlier APK `53b68061…` (first bootstrap) | Android System UI ANR overlay blocked bootstrap while the QA app was ready behind it. Inference not run on this attempt. After dismissing the overlay, the same hash-verified APK passed all three packs without rebuilding. |
+
+The earlier APK `53b68061fb0a767a4e2b16827e3548098c524eba92d3f0d6708ccc8a74359571`
+subsequently passed all native packs, but manual Resources-card testing found
+that a prepared adapter could not be selected: equivalent source-URL aliases
+changed the binding identity, and companion selection could use stale state.
+Those UI binding defects were corrected before the APK identified above was
+built. All three native packs were repeated on that new APK. The earlier native
+pass is retained as evidence of its tested scope, not proof of the failed UI path.
 
 The clock and ownership failures required the version/source-guarded native
 corrections. The probability assertion was corrected to validate final native
@@ -125,7 +156,7 @@ interruption. An interrupted build before APK completion is not an inference run
 ## Local checks and remaining boundaries
 
 `npm run verify:release` exited 0 on the source used for the final APK:
-TypeScript, Expo lint, native configuration checks, **242 Jest suites / 5160
+TypeScript, Expo lint, native configuration checks, **242 Jest suites / 5165
 tests**, Rust formatting/clippy/scaffolding, **68 Rust tests and 3 doc-tests**.
 Deferred-promise tests cover late native settlement, partial adapter failure,
 rollback, stale chat/variant restore, deletion ownership, and parameter isolation.

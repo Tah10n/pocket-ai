@@ -69,6 +69,7 @@ function mergeSpeculativeDraftRuntimeArtifacts(
   ));
   const mergedDrafts = mergeModelArtifacts(catalogDrafts, runtimeDrafts, {
     preservePersistedRuntimeState: true,
+    preservePersistedCompanionSelection: true,
   });
   const artifacts = [...stableArtifacts, ...mergedDrafts];
   return artifacts.length > 0 ? artifacts : undefined;

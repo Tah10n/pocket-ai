@@ -56,6 +56,21 @@ function createModel(overrides: Partial<ModelMetadata> = {}): ModelMetadata {
 }
 
 describe('modelVariants', () => {
+  it('preserves a pinned source on same-file reselect but honors changed revision and file', () => {
+    const source = 'https://huggingface.co/actual/base/resolve/pinned/model.Q4_K_M.gguf';
+    const base = createModel({ id: 'local/alias', downloadUrl: source, hfRevision: undefined });
+    expect(applyModelVariantSelection(base, 'model.Q4_K_M.gguf').downloadUrl).toBe(source);
+    expect(applyModelVariantSelection({ ...base, hfRevision: 'pinned' }, 'model.Q4_K_M.gguf').downloadUrl).toBe(source);
+    expect(applyModelVariantSelection({ ...base, hfRevision: 'new-revision' }, 'model.Q4_K_M.gguf').downloadUrl)
+      .toBe('https://huggingface.co/local/alias/resolve/new-revision/model.Q4_K_M.gguf');
+    expect(applyModelVariantSelection(base, 'model.Q8_0.gguf').downloadUrl)
+      .toBe('https://huggingface.co/local/alias/resolve/main/model.Q8_0.gguf');
+    expect(applyModelVariantSelection({ ...base, downloadUrl: 'https://huggingface.co/actual/base/resolve/pinned/unrelated.gguf' }, 'model.Q4_K_M.gguf').downloadUrl)
+      .toBe('https://huggingface.co/local/alias/resolve/main/model.Q4_K_M.gguf');
+    const fallback = { ...base, variants: undefined };
+    expect(applyModelVariantSelectionIfAvailable(fallback, fallback).downloadUrl).toBe(source);
+  });
+
   it('resolves the active variant from explicit selection or current file', () => {
     const model = createModel({ activeVariantId: undefined });
 

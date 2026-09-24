@@ -1,3 +1,6 @@
+import { normalizePersistedModelMetadata } from '../../src/services/ModelMetadataNormalizer';
+import { bindManagedCompanion, getCompanionBindingIdentity, getSelectedManagedCompanions } from '../../src/utils/modelArtifacts';
+import { mergeModelWithRuntimeState } from '../../src/utils/modelRuntimeState';
 import DeviceInfo from 'react-native-device-info';
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 import { useModelsCatalogData } from '../../src/hooks/useModelsCatalogData';
@@ -220,6 +223,38 @@ describe('ModelCatalogService', () => {
     (DeviceInfo.getTotalMemory as jest.Mock).mockResolvedValue(8 * 1024 * 1024 * 1024);
     (DeviceInfo.getFreeDiskStorage as jest.Mock).mockResolvedValue(50 * 1024 * 1024 * 1024);
     (getSystemMemorySnapshot as jest.Mock).mockResolvedValue(null);
+  });
+
+  it('keeps the installed QA companion binding through missing remote details and cached hydration', async () => {
+    const id = 'pocket-ai/android-qa-smollm2-135m-instruct-q8';
+    const base = normalizePersistedModelMetadata({ ...makeLocalModel(id),
+      downloadUrl: 'https://huggingface.co/Mungert/SmolLM2-135M-Instruct-GGUF/resolve/980b4318b34b2f20e60c89d8f8a98283ec83cbd6/SmolLM2-135M-Instruct-q8_0.gguf',
+      resolvedFileName: 'SmolLM2-135M-Instruct-q8_0.gguf', size: 144811552,
+      activeVariantId: 'SmolLM2-135M-Instruct-q8_0.gguf',
+      sha256: LOCAL_SHA256, localPath: 'qa-base.gguf', metadataTrust: 'verified_local',
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, downloadProgress: 1,
+      downloadIntegrity: { kind: 'sha256', sha256: LOCAL_SHA256, sizeBytes: 144811552, checkedAt: 1 },
+    });
+    let persisted = normalizePersistedModelMetadata(bindManagedCompanion(base, {
+      kind: 'lora_adapter', downloadUrl: 'https://example.test/adapter.gguf', sizeBytes: 100,
+    }));
+    const identity = getCompanionBindingIdentity(persisted);
+    mockedRegistry.getModel.mockImplementation(modelId => modelId === id ? persisted : undefined);
+    mockedRegistry.getModels.mockImplementation(() => [persisted]);
+    mockedRegistry.updateModel.mockImplementation(updated => { persisted = updated; });
+    global.fetch = jest.fn(async () => ({ ok: false, status: 404, text: async () => '', json: async () => ({ error: 'not found' }) })) as jest.Mock;
+    const service = new ModelCatalogService();
+    try {
+      await service.getLocalModels();
+      const cached = service.getCachedModel(id)!;
+      expect(getCompanionBindingIdentity(cached)).toBe(identity);
+      let detailed: ModelMetadata;
+      try { detailed = await service.getModelDetails(id); }
+      catch { detailed = service.getCachedModel(id)!; }
+      const displayed = mergeModelWithRuntimeState(detailed, { localModel: persisted, activeModelId: id });
+      expect(getCompanionBindingIdentity(displayed)).toBe(identity);
+      expect(getSelectedManagedCompanions(displayed)).toHaveLength(1);
+    } finally { service.dispose(); mockedRegistry.updateModel.mockReset(); }
   });
 
   it.each((['load', 'embedding'] as const).flatMap((operation) => (

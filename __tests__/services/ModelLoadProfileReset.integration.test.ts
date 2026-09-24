@@ -4,7 +4,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useModelParametersSheetController } from '../../src/hooks/useModelParametersSheetController';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
-import { DEFAULT_MODEL_LOAD_PARAMETERS, getModelLoadParametersForModel, getSettingsStorage, resetSettings,
+import { DEFAULT_GENERATION_PARAMETERS, DEFAULT_MODEL_LOAD_PARAMETERS, getModelLoadParametersForModel, getSettingsStorage, resetSettings,
   updateModelLoadParametersForModel, updateSettings, resetSettingsRuntimeForPrivateStorageReset } from '../../src/services/SettingsStore';
 import { resolveLoraProfileForLoad } from '../../src/services/LoraProfileResolver';
 import { useChatStore, flushPendingChatPersistenceWrites } from '../../src/store/chatStore';
@@ -214,4 +214,39 @@ it('reset marks legacy-only overrides dirty and removes them from native initial
   expect(jest.mocked(initLlama).mock.calls.slice(-1)[0][0]).toMatchObject({ use_mmap: true, use_mlock: false });
   expect(jest.mocked(initLlama).mock.calls.slice(-1)[0][0].cpu_strict).toBeUndefined();
   expect(jest.mocked(initLlama).mock.calls.slice(-1)[0][0].cpu_mask).toBeUndefined();
+});
+
+
+it.each(['settled', 'reopen-reset'] as const)('refreshes saved load state with a stable chat generation override: %s', async checkPoint => {
+  updateModelLoadParametersForModel(model.id, DEFAULT_MODEL_LOAD_PARAMETERS, 'replace');
+  await llmEngineService.load(model.id, { forceReload: true });
+  const paramsOverride = { ...DEFAULT_GENERATION_PARAMETERS, temperature: 0.25 };
+  const { result } = renderHook(() => useModelParametersSheetController({ getModelById: () => model,
+    showError, applyReloadErrorScope: 'test', activeModelId: model.id, paramsOverride }));
+  await act(async () => { result.current.openModelParameters(model.id); });
+  await act(async () => { result.current.sheetProps.onChangeLoadParams({ cacheTypeK: 'f32', cacheTypeV: 'f16', noExtraBufts: true }); });
+  await act(async () => { await result.current.sheetProps.onApplyReload(); });
+  expect(showError).not.toHaveBeenCalled();
+  expect(jest.mocked(initLlama).mock.calls.slice(-1)[0][0]).toMatchObject({ cache_type_k: 'f32', no_extra_bufts: true });
+  expect(getModelLoadParametersForModel(model.id)).toMatchObject({ cacheTypeK: 'f32', noExtraBufts: true });
+  expect(result.current.sheetProps.params.temperature).toBe(0.25);
+  if (checkPoint === 'settled') {
+    expect(result.current.sheetProps.showApplyReload).toBe(false);
+    await act(async () => { result.current.closeModelParameters(); });
+    await act(async () => { updateModelLoadParametersForModel(model.id, { cacheTypeK: 'f16' }); });
+    await act(async () => { result.current.openModelParameters(model.id); });
+    expect(result.current.sheetProps.loadParamsDraft.cacheTypeK).toBe('f16');
+    expect(result.current.sheetProps.params.temperature).toBe(0.25);
+    return;
+  }
+  await act(async () => { result.current.closeModelParameters(); });
+  await act(async () => { result.current.openModelParameters(model.id); });
+  await act(async () => { result.current.sheetProps.onReset(); });
+  expect(result.current.sheetProps.showApplyReload).toBe(true);
+  await act(async () => { await result.current.sheetProps.onApplyReload(); });
+  expect(showError).not.toHaveBeenCalled();
+  expect(getModelLoadParametersForModel(model.id)).toEqual(DEFAULT_MODEL_LOAD_PARAMETERS);
+  expect(llmEngineService.getState().diagnostics?.requestedAdvancedLoad).toEqual({});
+  expect(jest.mocked(initLlama).mock.calls.slice(-1)[0][0].cache_type_k).not.toBe('f32');
+  expect(result.current.sheetProps.showApplyReload).toBe(false);
 });

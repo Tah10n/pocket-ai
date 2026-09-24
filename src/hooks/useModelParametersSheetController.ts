@@ -270,14 +270,22 @@ export function useModelParametersSheetController({
   }, [activeModelId]);
 
   useEffect(() => {
-    if (!isOpen || paramsOverride !== undefined) {
+    // Chat generation overrides do not replace the persisted model load profile.
+    if (!isOpen) {
       return undefined;
     }
 
+    // Opening already reads the latest profile. Ignore the subscription's
+    // synchronous initial notification so it cannot restart metadata loading.
+    let initialNotification = true;
     return subscribeSettings(() => {
+      if (initialNotification) {
+        initialNotification = false;
+        return;
+      }
       setSettingsRevision((current) => current + 1);
     });
-  }, [isOpen, paramsOverride]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!didSaveLoadProfile) {
@@ -331,9 +339,11 @@ export function useModelParametersSheetController({
   );
   const resetLoadProfileRef = useRef(false);
   const currentLoadParams = useMemo(() => {
+    // Reopen reads changes made while the settings subscription was inactive.
+    void isOpen;
     void settingsRevision;
     return { ...getModelLoadParametersForModel(configurableModelId), ...(loraOverride !== undefined ? { loraAdapters: loraOverride } : {}) };
-  }, [configurableModelId, settingsRevision, loraOverride]);
+  }, [configurableModelId, settingsRevision, loraOverride, isOpen]);
   const defaultLoadParams = getModelLoadParametersForModel(null);
   const persistedMtp = persistedConfigurableModel
     ? resolveEffectiveSpeculativeDecoding(persistedConfigurableModel)

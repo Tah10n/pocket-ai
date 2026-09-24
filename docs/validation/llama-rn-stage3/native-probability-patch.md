@@ -6,7 +6,7 @@ The existing `throwIfContextBusy` guard precedes the reset on both platforms. Th
 
 ## Installation and verification
 
-`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all fifteen complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
+`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all nineteen complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
 
 Run `node patches/llama-rn-0.13.0-rc.3.js --check` to verify without writing. `npm run verify:native-config` includes this check. Fingerprints use SHA-256 after normalizing CRLF to LF:
 
@@ -27,7 +27,7 @@ The same pinned patch corrects `cpp/jsi/JSIParams.cpp`, also compiled locally on
 
 Duplicate user token entries use the last value, rather than accidentally adding biases. `ignore_eos` defaults to false for each request. When enabled it overrides user biases for every model EOG token (including EOS and end-of-turn tokens), using the core precomputed EOG list. Each override replaces an existing entry or appends one unique entry. This avoids relying on duplicate handling, which differs between the core sampler aligned and fallback candidate paths. Model-defined suppress tokens remain governed by the unchanged core sampler.
 
-The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All fifteen source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
+The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All nineteen source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
 
 ## Fixed request clock in Jinja
 
@@ -54,7 +54,7 @@ The initializer also allocates its chain before rejecting malformed grammar and 
 | Original `cpp/common/sampling.cpp` | `e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5` |
 | Patched `cpp/common/sampling.cpp` | `942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c` |
 
-Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All fifteen patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
+Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All nineteen patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
 
 ## Grammar parser and lazy-trigger diagnostic privacy
 
@@ -91,3 +91,11 @@ Five runtime consumers (`rn-completion.h`, `rn-llama.h`, `rn-slot-manager.h`, `r
 Each complete input has a pinned before/after fingerprint. The existing JSI JSON-only correction is accepted as an exact intermediate. Tests cover relative resolution, all-input preflight rejection, idempotence and intermediate fixture normalization. The prior Xcode failures remain failed build attempts; successful local preprocessing is not an iOS application build or inference result.
 
 A second Clang 18.0.2 fixture placed the conflicting map earlier in the quote group (`-iquote map` before the runtime directories). The bare include failed despite the later runtime `-iquote`; the explicit relative include passed, including paths with spaces. This reproduces a search order consistent with the Xcode failure; the CI log does not expose the exact response-file contents.
+
+## Compile-target CPU source selection
+
+The next iOS attempt passed compilation and failed at x86_64 linking: `lm_ggml_vec_dot_q2_0_q8_0_generic` was referenced by the ARM Q2 wrapper. The recursive CocoaPods source glob compiled both CPU architecture trees, while CMake selects only the target architecture. On x86, `arch-fallback.h` renames the generic Q2 implementation to the public name, so the ARM wrapper references a missing symbol.
+
+Four complete files (ARM/x86 `quants.c` and `repack.cpp`) now have outer compile-target guards matching the architecture macros in `arch-fallback.h`, also excluding `LM_GGML_CPU_GENERIC`. Their original bodies are unchanged; generic aliases, quantization algorithms, CPU feature files and backend settings are unchanged. Both ARM and x86 remain supported. Exact source fingerprints, byte-preservation tests and drift rejection cover these guards. This correction requires a new iOS build; the failed link is not acceptance evidence.
+
+A Clang 18.0.2 check compiled the complete math translation units for Android ARM64 and x86_64. Matching implementations had identical preprocessed output after accounting for the wrapper line offset and outer blank lines; other-architecture and generic-mode guarded files were empty. Relocatable linking with generic `quants.c` succeeded for each target, with the public Q2 symbol defined and no unresolved Q2 generic reference. This is compiler/linker evidence for these units, not an Apple SDK application build or iOS inference.

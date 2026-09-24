@@ -433,6 +433,28 @@ describe('pinned serial sampling and template clock corrections', () => {
     }
   });
 
+  const archSources = ['arm', 'x86'].flatMap(arch => ['quants.c', 'repack.cpp'].map(file => `cpp/ggml-cpu/arch/${arch}/${file}`));
+  it.each(archSources)('limits %s to its compile target without changing its implementation', (relative) => {
+    const file = path.join(root, 'node_modules/llama.rn', relative);
+    const original = fs.readFileSync(file, 'utf8');
+    patchLlamaBridge(root);
+    const source = fs.readFileSync(file, 'utf8');
+    const macros = relative.includes('/arm/') ? ['__aarch64__', '__arm__', '_M_ARM', '_M_ARM64'] : ['__x86_64__', '__i386__', '_M_IX86', '_M_X64'];
+    const guard = `#if !defined(LM_GGML_CPU_GENERIC) && (${macros.map(macro => `defined(${macro})`).join(' || ')})`;
+    expect(source).toBe(`${guard}\n${original}\n#endif // compile-target CPU architecture\n`);
+    // Architecture selection must retain every public and generic math implementation.
+    const fallback = fs.readFileSync(path.resolve(__dirname, '../../node_modules/llama.rn/cpp/ggml-cpu/arch-fallback.h'), 'utf8');
+    for (const macro of macros) expect(fallback).toContain(`defined(${macro})`);
+    expect(SOURCE_PATCHES.some(entry => entry.source === 'cpp/ggml-cpu/arch-fallback.h')).toBe(false);
+  });
+
+  it.each(archSources)('rejects architecture source drift before any patch write: %s', (relative) => {
+    const before = fs.readFileSync(sourcePath);
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn', relative), '\n// drift\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch/u);
+    expect(fs.readFileSync(sourcePath)).toEqual(before);
+  });
+
   it('is installed by the package hook and participates in existing native provenance', () => {
     const projectRoot = path.resolve(__dirname, '../..');
     const relative = 'patches/llama-rn-0.13.0-rc.3.js';

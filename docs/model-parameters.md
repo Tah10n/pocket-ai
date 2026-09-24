@@ -280,7 +280,7 @@ Pocket AI automatically recognizes compatible multi-token prediction (MTP) metad
 - Each completed assistant response records native llama.rn telemetry: predicted tokens/sec, time to first token, proposed draft tokens, accepted draft tokens, and acceptance rate. `draftTokens > 0` proves that the native draft loop ran; accepted tokens and stable native throughput are required before claiming a speedup.
 - Model Controls also reports app/PSS memory snapshots captured before model load, after model initialization, and after the first generated token when the platform exposes them.
 
-Model details shows whether MTP is embedded, ready, downloading, or needs a companion download. MTP draft-token limits are selected conservatively from the active quantization; the user-facing load-profile control enables or disables the resolved MTP configuration rather than editing that native token limit.
+Model details shows whether MTP is embedded, ready, downloading, or needs a companion download. MTP draft-token limits default conservatively from the active quantization. The compact load-profile control enables or disables MTP; Advanced load controls can override the minimum/maximum draft-token limits and other supported draft parameters. These overrides use the same validation, memory admission and transactional reload as the rest of the load profile.
 
 Advanced runtime controls, backend autotune, and runtime diagnostics are shown only when `showAdvancedInferenceControls` is enabled in settings.
 

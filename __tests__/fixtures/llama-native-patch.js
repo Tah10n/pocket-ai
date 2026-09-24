@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { BUILD_FILES, SOURCE_PATCHES, applyReplacements } = require('../../patches/llama-rn-0.13.0-rc.3');
+const { BUILD_FILES, SOURCE_PATCHES, applyReplacements, hashSource } = require('../../patches/llama-rn-0.13.0-rc.3');
 
 // Copy the pinned patch inputs and their source/build contracts only,
 // never binaries or the dependency tree. Reversal also accepts partial installs.
@@ -11,7 +11,9 @@ function copyLlamaPatchSources(root, { pristine = false } = {}) {
     let text = fs.readFileSync(path.join(installed, relative), 'utf8').replace(/\r\n/gu, '\n');
     const patch = SOURCE_PATCHES.find((entry) => entry.source === relative);
     if (patch) {
-      for (const [before, after] of [...patch.replacements].reverse()) text = text.replace(after, before);
+      if (hashSource(text) !== patch.beforeSha256) {
+        for (const [before, after] of [...patch.replacements].reverse()) text = text.replace(after, before);
+      }
       if (!pristine) text = applyReplacements(text, patch.replacements);
     }
     fs.mkdirSync(path.dirname(target), { recursive: true });

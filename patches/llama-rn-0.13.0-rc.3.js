@@ -247,6 +247,20 @@ const SOURCE_PATCHES = [
   { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, replacements: COMPLETION_REPLACEMENTS },
   { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, replacements: SAMPLING_REPLACEMENTS },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
+  { source: 'llama-rn.podspec', beforeSha256: 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55', afterSha256: '0074a4cddbe0f46352067174cdc89362dde6512625eea29a0fcd3b444d648f50', replacements: [
+    [
+      "s.source_files = \"ios/**/*.{h,m,mm}\", \"cpp/**/*.{h,cpp,hpp,c,m,mm,s}\"",
+      "s.source_files = \"ios/*.{h,m,mm}\", \"cpp/**/*.{cpp,c,m,mm,s}\""
+    ],
+    [
+      "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/hash\"'",
+      "    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/hash\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/nlohmann\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/ggml-cpu\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/codec/include\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/codec/common\"'\n    header_search_paths << '\"${PODS_TARGET_SRCROOT}/cpp/tools/mtmd\"'"
+    ],
+    [
+      "# Header-only JSON dependency needed by JSI when using the prebuilt xcframework\n  s.preserve_paths = \"cpp/nlohmann/**/*.{h,hpp}\"",
+      "# Keep internal headers for compilation without exporting duplicate basenames.\n  s.preserve_paths = \"cpp/**/*.{h,hpp}\""
+    ]
+  ] },
 ];
 // JSI fixes are compiled locally in every mode. Clock and sampler fixes are in the core:
 // source-build configuration must also be enforced by the native config verifier.
@@ -255,7 +269,6 @@ const BUILD_FILES = Object.freeze({
   'cpp/common/sampling.h': '92a10833fc729a5a8eff065d269a88ceb21b81d77c2eba5942a3450fe1a0d2d1',
   'cpp/llama-sampler.cpp': '38999ce7ce5fdba6a9cd29b775a81cee918ab6d1a3e0f0d71d35c9158d629c0f',
   'android/src/main/CMakeLists.txt': '286375df7159c18c674e30ef8e324c964c4d7304f451f07abffa4a2f279eb2b6',
-  'llama-rn.podspec': 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55',
   'cpp/rn-completion.h': 'a827a43b7452ecb6130f821fc20dc1c3c30bd9c8c3fa7dfc450bc8cae185b182',
   'android/build.gradle': '841f2514b2f6540a6f118b9fc024690ea238e17b23151c421a52a3105fb16583',
   'android/src/main/rnllama/CMakeLists.txt': 'f58142de643017b3145767553add3353a411a9ae2accfff1cc0bc6cc6a710364',

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { sync: globSync } = require('glob');
 const {
   AFTER, AFTER_SHA256, BEFORE, BEFORE_SHA256, BUILD_FILES, SOURCE, VERSION,
   hashSource, patchLlamaBridge, SOURCE_PATCHES, PARAMS_SOURCE, PARAMS_AFTER_SHA256, applyReplacements,
@@ -285,6 +286,48 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(podspec).toContain('s.source_files = "ios/*.{h,m,mm}", "cpp/jsi/**/*.{h,cpp}"');
     expect(podspec).toContain('s.vendored_frameworks = "ios/rnllama.xcframework"');
     expect(podspec).toContain('s.source_files = "ios/**/*.{h,m,mm}", "cpp/**/*.{h,cpp,hpp,c,m,mm,s}"');
+  });
+
+  it('keeps internal headers available without exporting duplicate framework outputs', () => {
+    const originalPodspec = fs.readFileSync(path.join(root, 'node_modules/llama.rn/llama-rn.podspec'), 'utf8');
+    patchLlamaBridge(root);
+    const packageRoot = path.resolve(__dirname, '../../node_modules/llama.rn');
+    const podspec = fs.readFileSync(path.join(root, 'node_modules/llama.rn/llama-rn.podspec'), 'utf8');
+    expect(podspec.split('  else')[1].split('  end')[0]).toBe(originalPodspec.split('  else')[1].split('  end')[0]);
+    const sourceBranch = podspec.split('if ENV["RNLLAMA_BUILD_FROM_SOURCE"] == "1"')[1].split('  else')[0];
+    const patterns = [...sourceBranch.match(/s\.source_files = ([^\n]+)/u)[1].matchAll(/"([^"]+)"/gu)].map(match => match[1]);
+    const selected = patterns.flatMap(pattern => globSync(pattern, { cwd: packageRoot })).map(file => file.replace(/\\/gu, '/'));
+    expect(selected.filter(file => /\.(?:h|hpp)$/u.test(file))).toEqual(['ios/RNLlama.h']);
+    for (const source of ['ios/RNLlama.mm', 'cpp/jsi/RNLlamaJSI.cpp', 'cpp/common/chat.cpp', 'cpp/common/sampling.cpp', 'cpp/ggml-metal/ggml-metal-device.m', 'cpp/ggml-metal/ggml-metal-embed-argsort.s']) {
+      expect(selected).toContain(source);
+    }
+    // Simulate the installed framework slices without downloading binary archives.
+    const fixturePackage = path.join(root, 'node_modules/llama.rn');
+    for (const relative of ['ios/RNLlama.h', 'ios/rnllama.xcframework/ios-arm64/rnllama.framework/Headers/common.h', 'ios/rnllama.xcframework/ios-arm64_x86_64-simulator/rnllama.framework/Headers/common.h']) {
+      const file = path.join(fixturePackage, relative);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '// header\n');
+    }
+    const fixtureHeaders = patterns.flatMap(pattern => globSync(pattern, { cwd: fixturePackage })).filter(file => /\.h$/u.test(file));
+    expect(fixtureHeaders.map(file => file.replace(/\\/gu, '/'))).toEqual(['ios/RNLlama.h']);
+    const preserved = podspec.match(/s\.preserve_paths = "([^"]+)"/u)[1];
+    const headers = globSync(preserved, { cwd: packageRoot }).map(file => file.replace(/\\/gu, '/'));
+    for (const header of ['cpp/common/common.h', 'cpp/ggml-cpu/common.h', 'cpp/jsi/RNLlamaJSI.h', 'cpp/nlohmann/json.hpp']) expect(headers).toContain(header);
+    const searchPaths = [...sourceBranch.matchAll(/header_search_paths << '"\$[({]PODS_TARGET_SRCROOT[)}]\/([^"]+)"'/gu)].map(match => match[1]);
+    expect(searchPaths).toEqual(['cpp', 'cpp/common', 'cpp/hash', 'cpp/nlohmann', 'cpp/ggml-cpu', 'cpp/codec/include', 'cpp/codec/common', 'cpp/tools/mtmd']);
+    expect(podspec).toContain('-DLM_GGML_USE_METAL -DLM_GGML_METAL_EMBED_LIBRARY=1');
+    const assembly = fs.readFileSync(path.join(packageRoot, 'cpp/ggml-metal/ggml-metal-embed-argsort.s'), 'utf8');
+    expect(assembly).toContain('_lm_ggml_metallib_argsort_start:');
+    expect(assembly).toContain('_lm_ggml_metallib_argsort_end:');
+    expect(assembly).toContain('.byte ');
+    expect(assembly).not.toContain('.incbin');
+  });
+
+  it('rejects podspec drift before writing any native correction', () => {
+    const before = fs.readFileSync(sourcePath);
+    fs.appendFileSync(path.join(root, 'node_modules/llama.rn/llama-rn.podspec'), '\n# unexpected change\n');
+    expect(() => patchLlamaBridge(root)).toThrow(/fingerprint mismatch: llama-rn\.podspec/u);
+    expect(fs.readFileSync(sourcePath)).toEqual(before);
   });
 
   it('is installed by the package hook and participates in existing native provenance', () => {

@@ -157,7 +157,7 @@ interruption. An interrupted build before APK completion is not an inference run
 
 `npm run verify:release` exited 0 on the source used for the final APK:
 TypeScript, Expo lint, native configuration checks, **242 Jest suites / 5165
-tests**, Rust formatting/clippy/scaffolding, **68 Rust tests and 3 doc-tests**.
+tests**, Rust formatting/clippy/scaffolding, **68 Rust library tests and 3 host-bench tests**.
 Deferred-promise tests cover late native settlement, partial adapter failure,
 rollback, stale chat/variant restore, deletion ownership, and parameter isolation.
 Those simulated failures are not claimed as physical-device fault injection.

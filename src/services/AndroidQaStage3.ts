@@ -14,14 +14,16 @@ import { llmEngineService } from './LLMEngineService';
 import { registry } from './LocalStorageRegistry';
 import { getModelDownloadManager } from './ModelDownloadManager';
 import { getSettings, updateSettings, type ModelLoadParameters } from './SettingsStore';
-import type { LlamaCompletionResult } from './LlamaRuntimeAdapter';
+import { runCompletionOnContext, type LlamaCompletionResult } from './LlamaRuntimeAdapter';
+import { StructuredOutputConfigurationError } from '../utils/structuredOutput';
+import { resolveModelFilePathOrThrow } from './LLMEngineService.modelFile';
 
 export const ANDROID_QA_STAGE3_STEPS = [
   'cpu_load', 'text', 'stop', 'json_object', 'json_schema', 'gbnf', 'template_prefill',
-  'token_diagnostics', 'invalid_schema', 'invalid_grammar', 'truncated_json', 'structured_cancel', 'ordinary_after_failure',
+  'token_diagnostics', 'invalid_schema', 'invalid_grammar', 'unsupported_grammar', 'ordinary_after_unsupported', 'gbnf_literal', 'truncated_json', 'structured_cancel', 'ordinary_after_failure',
   'prepare_adapter', 'probability_baseline', 'logit_bias', 'ignore_eos', 'invalid_logit_bias', 'sampling_reset',
   'lora_apply', 'lora_scale', 'lora_remove',
-  'lora_restore_baseline', 'prepare_embedding', 'lora_auxiliary_restore', 'lora_delete_guard', 'cleanup',
+  'lora_restore_baseline', 'prepare_embedding', 'lora_auxiliary_restore', 'lora_delete_guard', 'native_disabled_grammar', 'cleanup',
 ] as const;
 type StepId = typeof ANDROID_QA_STAGE3_STEPS[number];
 type Step = { id: StepId; status: 'passed' | 'failed' | 'not_run';
@@ -35,7 +37,7 @@ type Step = { id: StepId; status: 'passed' | 'failed' | 'not_run';
   interrupted?: boolean; truncated?: boolean; contextFull?: boolean; completionDrained?: boolean; exactConstraintMatch?: boolean;
   valid?: boolean; stopped?: boolean; historyUnchanged?: boolean; profileRestored?: boolean;
   loadedListConfirmed?: boolean; deletionRejected?: boolean; finite?: boolean; probabilitiesValidated?: boolean;
-  structuredIncomplete?: boolean; supportMatched?: boolean };
+  structuredIncomplete?: boolean; supportMatched?: boolean; nativeErrorMatched?: boolean; contextReleased?: boolean };
 export type AndroidQaStage3Evidence = {
   schemaVersion: 1; status: 'idle' | 'running' | 'passed' | 'failed'; phase: StepId | 'idle' | 'preconditions' | 'complete';
   requiresForceStop: boolean; failureCode?: 'timeout' | 'precondition' | 'assertion' | 'download' | 'operation_failed' | 'cleanup_failed';
@@ -126,6 +128,45 @@ export function getAndroidQaEffectiveProfileIdentity(profile: ModelLoadParameter
   };
   return JSON.stringify(canonical(profile));
 }
+/** Fixed QA-only native probe. It never accepts arbitrary user grammar or model paths. */
+export async function runAndroidQaDisabledGrammarProbe(operationTimeoutMs = 120_000): Promise<Omit<Step, 'id' | 'status'>> {
+  if (!isAndroidQaDocumentModelBootstrapEnabled()) throw new Stage3Failure('precondition');
+  const model = registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID);
+  check(model?.localPath && model.downloadIntegrity?.sha256 === fixture.base.sha256);
+  check(!llmEngineService.hasActiveCompletion() && !llmEngineService.hasAuxiliaryContextOperation());
+  const { modelPath } = await resolveModelFilePathOrThrow({ modelId: ANDROID_QA_DOCUMENT_MODEL_ID, localPath: model.localPath });
+  const threadId = useChatStore.getState().activeThreadId;
+  const isCurrent = () => useChatStore.getState().activeThreadId === threadId
+    && registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID)?.localPath === model.localPath
+    && registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID)?.downloadIntegrity?.sha256 === fixture.base.sha256;
+  // Existing engine ownership spans detach, init, the actual native settlement,
+  // release and restoration. Never timeout a callback while native work owns it.
+  const receipt = await bounded(llmEngineService.runWithAuxiliaryContext({
+    modelId: ANDROID_QA_DOCUMENT_MODEL_ID, isCurrent,
+    initParams: { model: modelPath, n_ctx: 512, n_gpu_layers: 0,
+      n_parallel: 1, state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 },
+  }, async context => {
+    let nativeErrorMatched = false;
+    try {
+      await runCompletionOnContext({ context, params: {
+        prompt: 'A friendly dog', grammar: '%llguidance', n_predict: 16, temperature: 0,
+      } });
+    } catch (error) {
+      nativeErrorMatched = error instanceof Error
+        && error.message.includes('Unsupported grammar backend: llguidance is not enabled');
+    }
+    check(nativeErrorMatched && isCurrent());
+    let callbacks = 0;
+    const result = await runCompletionOnContext({ context, params: {
+      prompt: 'A friendly dog', n_predict: 32, temperature: 0,
+    }, onToken: token => { if (token.token.length > 0) callbacks += 1; } });
+    const metrics = { ...getAndroidQaCompletionReceipt(result, callbacks, true), nativeErrorMatched };
+    assertAndroidQaGeneratedReceipt(metrics);
+    check(result.interrupted === false && isCurrent());
+    return metrics;
+  }), operationTimeoutMs);
+  return { ...receipt, contextReleased: true, valid: true };
+}
 async function bounded<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -206,7 +247,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
       onToken: token => { if ((typeof token === 'string' ? token : token.token).length > 0) callbacks += 1; },
     }), operationTimeoutMs);
     pendingStepReceipt = { ...getAndroidQaCompletionReceipt(result, callbacks, !llmEngineService.hasActiveCompletion()),
-      ...(id === 'gbnf' ? { exactConstraintMatch: (result.content ?? result.text) === 'yes' } : {}),
+      ...(['gbnf', 'gbnf_literal'].includes(id) ? { exactConstraintMatch: (result.content ?? result.text) === (id === 'gbnf' ? 'yes' : '%llguidance') } : {}),
       ...(tokenCount !== undefined ? { tokenCount } : {}) };
     assertAndroidQaGeneratedReceipt(pendingStepReceipt);
     validate?.(result);
@@ -269,7 +310,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     phase('cpu_load');
     touchedContext = true;
     await bounded(llmEngineService.load(ANDROID_QA_DOCUMENT_MODEL_ID, { forceReload: true,
-      loadParamsOverride: { contextSize: 512, backendPolicy: 'cpu', gpuLayers: 0, mtpEnabled: false,
+      loadParamsMode: 'replace', loadParamsOverride: { contextSize: 512, backendPolicy: 'cpu', gpuLayers: 0, mtpEnabled: false,
         kvCacheType: 'f16', cacheTypeK: 'f16', cacheTypeV: 'f16', loraAdapters: [], parallelSlots: 1 } }), operationTimeoutMs);
     assertCpu(); pass({ id: 'cpu_load' });
     check(useChatStore.getState().beginNewThread());
@@ -319,6 +360,18 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
       catch (error) { if (error instanceof Stage3Failure && error.requiresForceStop) throw error; rejected = true; }
       check(rejected && !llmEngineService.hasActiveCompletion()); pass({ id, valid: true });
     }
+    phase('unsupported_grammar');
+    let unsupportedRejected = false;
+    try { await bounded(llmEngineService.chatCompletion(request({ output: { mode: 'gbnf', grammar: '%llguidance' } })), operationTimeoutMs); }
+    catch (error) {
+      if (error instanceof Stage3Failure && error.requiresForceStop) throw error;
+      unsupportedRejected = error instanceof StructuredOutputConfigurationError && error.reason === 'unsupported';
+    }
+    check(unsupportedRejected && !llmEngineService.hasActiveCompletion());
+    pass({ id: 'unsupported_grammar', valid: true, completionDrained: true });
+    await generate('ordinary_after_unsupported');
+    await generate('gbnf_literal', request({ output: { mode: 'gbnf', grammar: 'root ::= "%llguidance"' } }, 32),
+      result => check((result.content ?? result.text) === '%llguidance' && result.stopped_limit === false && result.interrupted === false));
     await generate('truncated_json', request({ output: { mode: 'json_schema', schema: JSON.stringify({
       type: 'object', properties: { answer: { type: 'string', enum: ['definitely'] } }, required: ['answer'], additionalProperties: false,
     }) } }, 1, 'Return the required JSON object.'), result => {
@@ -405,7 +458,11 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     catch (error) { rejected = error !== null && typeof error === 'object' && 'code' in error && error.code === 'engine_busy'; }
     check(rejected && registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID)?.artifacts?.some(item => item.id === adapter.artifactId && item.installState === 'installed'));
     pass({ id: 'lora_delete_guard', deletionRejected: true });
-    phase('cleanup'); await apply([]);
+    await apply([]);
+    phase('native_disabled_grammar');
+    pendingStepReceipt = await runAndroidQaDisabledGrammarProbe(operationTimeoutMs);
+    pass({ id: 'native_disabled_grammar', ...pendingStepReceipt });
+    phase('cleanup');
     completed = true;
   } catch (error) {
     abort.abort();
@@ -422,7 +479,7 @@ async function execute({ operationTimeoutMs = 120_000, downloadTimeoutMs = 300_0
     if (touchedContext && !evidence.requiresForceStop) {
       try {
         if (originalModelId && originalProfile) await bounded(llmEngineService.load(originalModelId,
-          { forceReload: true, loadParamsOverride: originalProfile }), operationTimeoutMs);
+          { forceReload: true, loadParamsMode: 'replace', loadParamsOverride: originalProfile }), operationTimeoutMs);
         else await bounded(llmEngineService.unload(), operationTimeoutMs);
         if (ownedThread) useChatStore.getState().deleteThread(ownedThread);
         useChatStore.getState().setActiveThread(originalThread);

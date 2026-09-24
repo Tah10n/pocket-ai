@@ -1,10 +1,20 @@
 import fixture from '../../docs/validation/llama-rn-stage3/lora-fixture.json';
 import { assertAndroidQaCancelledReceipt, assertAndroidQaGeneratedReceipt, assertAndroidQaProbabilityReceipt, getAndroidQaCompletionReceipt, getAndroidQaEffectiveProfileIdentity,
-  getAndroidQaStage3Evidence, resetAndroidQaStage3ForTests, runAndroidQaStage3 } from '../../src/services/AndroidQaStage3';
+  getAndroidQaStage3Evidence, resetAndroidQaStage3ForTests, runAndroidQaStage3, runAndroidQaDisabledGrammarProbe } from '../../src/services/AndroidQaStage3';
 import type { ModelLoadParameters } from '../../src/services/SettingsStore';
 import type { LlmChatCompletionOptions } from '../../src/types/chat';
 import type { LlamaCompletionResult } from '../../src/services/LlamaRuntimeAdapter';
 
+const mockAuxiliary = jest.fn();
+const mockReleaseNative = jest.fn();
+const mockRunNative = jest.fn();
+const mockResolveModel = jest.fn();
+jest.mock('../../src/services/LlamaRuntimeAdapter', () => ({
+  runCompletionOnContext: (...args: unknown[]) => mockRunNative(...args),
+}));
+jest.mock('../../src/services/LLMEngineService.modelFile', () => ({
+  resolveModelFilePathOrThrow: (...args: unknown[]) => mockResolveModel(...args),
+}));
 const mockEnabled = jest.fn(() => true);
 const mockStage1 = jest.fn(() => ({ status: 'passed' }));
 const mockStage2 = jest.fn(() => ({ status: 'passed' }));
@@ -13,7 +23,7 @@ const mockUnload = jest.fn(async () => undefined);
 const mockGetState = jest.fn(() => ({ activeModelId: 'qa-chat', status: 'error', diagnostics: {} }));
 const mockRestoreThread = jest.fn();
 const mockUpdateSettings = jest.fn();
-const mockGetModel = jest.fn(() => ({ id: 'qa-chat', downloadIntegrity: { sha256: fixture.base.sha256 } }));
+const mockGetModel = jest.fn(() => ({ id: 'qa-chat', localPath: 'qa.gguf', downloadIntegrity: { sha256: fixture.base.sha256 } }));
 const mockCompletion = jest.fn<Promise<LlamaCompletionResult>, [LlmChatCompletionOptions]>();
 jest.mock('../../src/services/AndroidQaDocumentModelBootstrap', () => ({
   ANDROID_QA_DOCUMENT_MODEL_ID: 'qa-chat', isAndroidQaDocumentModelBootstrapEnabled: () => mockEnabled(),
@@ -29,6 +39,7 @@ jest.mock('../../src/store/chatStore', () => ({ useChatStore: { getState: () => 
   beginNewThread: () => true, createThread: () => 'qa-owned', deleteThread: () => undefined,
 }) } }));
 jest.mock('../../src/services/LLMEngineService', () => ({ llmEngineService: {
+  runWithAuxiliaryContext: (...args: unknown[]) => mockAuxiliary(...args),
   load: (...args: unknown[]) => mockLoad(...args), unload: () => mockUnload(),
   getEffectiveLoadParameters: () => ({ contextSize: 512 }), getState: () => mockGetState(),
   hasActiveCompletion: () => false, hasAuxiliaryContextOperation: () => false,
@@ -41,9 +52,67 @@ describe('Stage 3 QA lifecycle contract (unit tests are not native acceptance)',
     mockEnabled.mockReturnValue(true); mockStage1.mockReturnValue({ status: 'passed' }); mockStage2.mockReturnValue({ status: 'passed' });
     mockLoad.mockImplementation(async () => undefined);
     mockGetState.mockReturnValue({ activeModelId: 'qa-chat', status: 'error', diagnostics: {} });
-    mockGetModel.mockReturnValue({ id: 'qa-chat', downloadIntegrity: { sha256: fixture.base.sha256 } });
+    mockGetModel.mockReturnValue({ id: 'qa-chat', localPath: 'qa.gguf', downloadIntegrity: { sha256: fixture.base.sha256 } });
   });
   afterEach(() => jest.useRealTimers());
+  it('direct native disabled-backend probe is gated before any native or file work', async () => {
+    mockEnabled.mockReturnValue(false);
+    await expect(runAndroidQaDisabledGrammarProbe()).rejects.toThrow('precondition');
+    expect(mockResolveModel).not.toHaveBeenCalled(); expect(mockUnload).not.toHaveBeenCalled();
+    expect(mockAuxiliary).not.toHaveBeenCalled();
+  });
+  const nativeFixture = () => {
+    const context = { completion: jest.fn(), stopCompletion: jest.fn() };
+    mockResolveModel.mockResolvedValue({ modelPath: 'file:///PRIVATE/qa.gguf' });
+    mockReleaseNative.mockResolvedValue(undefined);
+    mockAuxiliary.mockImplementation(async (_request, operation) => {
+      try { return await operation(context); } finally { await mockReleaseNative(context); }
+    });
+    mockRunNative.mockReset();
+    return context;
+  };
+  it('requires the disabled-branch error, then real output on the SAME native context and release', async () => {
+    const context = nativeFixture();
+    mockRunNative.mockRejectedValueOnce(new Error('Unsupported grammar backend: llguidance is not enabled'));
+    mockRunNative.mockImplementationOnce(async ({ onToken }) => {
+      onToken({ token: 'PRIVATE OUTPUT' });
+      return { text: 'PRIVATE OUTPUT', tokens_predicted: 1, tokens_evaluated: 4, interrupted: false };
+    });
+    const receipt = await runAndroidQaDisabledGrammarProbe();
+    expect(mockUnload).not.toHaveBeenCalled();
+    expect(mockAuxiliary).toHaveBeenCalledWith(expect.objectContaining({ modelId: 'qa-chat', isCurrent: expect.any(Function),
+      initParams: expect.objectContaining({ n_ctx: 512, n_gpu_layers: 0,
+        n_parallel: 1, state_cache_budget_mb: 0, state_cache_max_checkpoints: 8 }) }), expect.any(Function));
+    expect(mockRunNative.mock.calls.map(([args]) => args.context)).toEqual([context, context]);
+    expect(mockRunNative.mock.calls[0][0].params.grammar).toBe('%llguidance');
+    expect(mockRunNative.mock.calls[1][0].params.grammar).toBeUndefined();
+    expect(mockReleaseNative).toHaveBeenCalledWith(context);
+    expect(receipt).toMatchObject({ valid: true, nativeErrorMatched: true, contextReleased: true, callbacks: 1, completionDrained: true });
+    expect(JSON.stringify(receipt)).not.toMatch(/PRIVATE|llguidance/);
+  });
+  it.each(['wrong-error', 'unexpected-success', 'recovery-error'])('releases settled native context after %s and refuses acceptance', async failure => {
+    const context = nativeFixture();
+    if (failure === 'unexpected-success') mockRunNative.mockResolvedValueOnce({ text: 'x' });
+    else mockRunNative.mockRejectedValueOnce(new Error(failure === 'wrong-error' ? 'PRIVATE native failure'
+      : 'Unsupported grammar backend: llguidance is not enabled'));
+    mockRunNative.mockRejectedValueOnce(new Error('PRIVATE recovery error'));
+    await expect(runAndroidQaDisabledGrammarProbe()).rejects.toThrow();
+    expect(mockReleaseNative).toHaveBeenCalledWith(context);
+    expect(mockRunNative).toHaveBeenCalledTimes(failure === 'recovery-error' ? 2 : 1);
+  });
+  it('requires force-stop if a direct native operation times out, without release or replacement overlap', async () => {
+    jest.useFakeTimers(); nativeFixture();
+    mockRunNative.mockImplementationOnce(() => new Promise(() => undefined));
+    const pending = runAndroidQaDisabledGrammarProbe(20);
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'timeout', requiresForceStop: true });
+    await jest.advanceTimersByTimeAsync(21); await assertion;
+    expect(mockRunNative).toHaveBeenCalledTimes(1); expect(mockReleaseNative).not.toHaveBeenCalled();
+  });
+  it('refuses acceptance when owned native context release fails', async () => {
+    nativeFixture(); mockRunNative.mockRejectedValueOnce(new Error('PRIVATE failure'));
+    mockReleaseNative.mockRejectedValueOnce(new Error('PRIVATE release failure'));
+    await expect(runAndroidQaDisabledGrammarProbe()).rejects.toThrow('PRIVATE release failure');
+  });
   it('preserves native first-token zero and exports only safe completion metrics', () => {
     const receipt = getAndroidQaCompletionReceipt({ text: 'PRIVATE', content: 'PRIVATE', tokens_predicted: 0,
       tokens_evaluated: 12, stopped_eos: true, stopped_limit: false, interrupted: false }, 1, true);
@@ -169,7 +238,7 @@ describe('Stage 3 QA lifecycle contract (unit tests are not native acceptance)',
   it.each(['stage1', 'stage2', 'identity'])('does not touch the context before the %s precondition is confirmed', async failure => {
     if (failure === 'stage1') mockStage1.mockReturnValue({ status: 'failed' });
     if (failure === 'stage2') mockStage2.mockReturnValue({ status: 'running' });
-    if (failure === 'identity') mockGetModel.mockReturnValue({ id: 'qa-chat', downloadIntegrity: { sha256: 'unverified' } });
+    if (failure === 'identity') mockGetModel.mockReturnValue({ id: 'qa-chat', localPath: 'qa.gguf', downloadIntegrity: { sha256: 'unverified' } });
     await runAndroidQaStage3();
     expect(getAndroidQaStage3Evidence()).toMatchObject({ status: 'failed', failureCode: 'precondition' });
     expect(getAndroidQaStage3Evidence().steps.every(step => step.status === 'not_run')).toBe(true);
@@ -191,7 +260,7 @@ describe('Stage 3 QA lifecycle contract (unit tests are not native acceptance)',
   it('restores the original confirmed load profile after a settled assertion failure', async () => {
     await runAndroidQaStage3();
     expect(getAndroidQaStage3Evidence()).toMatchObject({ status: 'failed', failureCode: 'assertion', requiresForceStop: false });
-    expect(mockLoad).toHaveBeenLastCalledWith('qa-chat', { forceReload: true, loadParamsOverride: { contextSize: 512 } });
+    expect(mockLoad).toHaveBeenLastCalledWith('qa-chat', { forceReload: true, loadParamsMode: 'replace', loadParamsOverride: { contextSize: 512 } });
     expect(mockRestoreThread).toHaveBeenCalledWith('original');
     expect(mockUpdateSettings).toHaveBeenCalledWith({ auxiliaryModels: {} });
   });

@@ -1,9 +1,9 @@
 const fixture = require('../../docs/validation/llama-rn-stage3/lora-fixture.json');
 const STEP_IDS = ['cpu_load', 'text', 'stop', 'json_object', 'json_schema', 'gbnf', 'template_prefill',
-  'token_diagnostics', 'invalid_schema', 'invalid_grammar', 'truncated_json', 'structured_cancel', 'ordinary_after_failure',
+  'token_diagnostics', 'invalid_schema', 'invalid_grammar', 'unsupported_grammar', 'ordinary_after_unsupported', 'gbnf_literal', 'truncated_json', 'structured_cancel', 'ordinary_after_failure',
   'prepare_adapter', 'probability_baseline', 'logit_bias', 'ignore_eos', 'invalid_logit_bias', 'sampling_reset',
   'lora_apply', 'lora_scale', 'lora_remove', 'lora_restore_baseline',
-  'prepare_embedding', 'lora_auxiliary_restore', 'lora_delete_guard', 'cleanup'];
+  'prepare_embedding', 'lora_auxiliary_restore', 'lora_delete_guard', 'native_disabled_grammar', 'cleanup'];
 const IDENTITIES = { runtimeVersion: fixture.runtimeVersion, backend: 'cpu', baseRevision: fixture.base.revision,
   baseSha256: fixture.base.sha256, adapterRevision: fixture.adapter.revision, adapterSha256: fixture.adapter.sha256 };
 const FAILURE_CODES = ['timeout', 'precondition', 'assertion', 'download', 'operation_failed', 'cleanup_failed'];
@@ -11,7 +11,7 @@ const NUMERIC_FIELDS = ['callbacks', 'tokensPredicted', 'tokensEvaluated', 'outp
   'sharedTokens', 'maxDelta', 'baselineDelta', 'threshold', 'scaleDelta', 'tokenCount', 'dimensions',
   'contentCharacters', 'sampledTokens', 'repeatedTokensPredicted', 'repeatedSampledTokens',
   'templateGenerationTokensEvaluated', 'templateGenerationCallbacks', 'templateGenerationOutputCharacters', 'probabilityBefore', 'probabilityAfter'];
-const BOOLEAN_FIELDS = ['probabilitiesValidated', 'structuredIncomplete', 'supportMatched', 'valid', 'stopped', 'historyUnchanged', 'profileRestored', 'loadedListConfirmed', 'deletionRejected', 'finite',
+const BOOLEAN_FIELDS = ['nativeErrorMatched', 'contextReleased', 'probabilitiesValidated', 'structuredIncomplete', 'supportMatched', 'valid', 'stopped', 'historyUnchanged', 'profileRestored', 'loadedListConfirmed', 'deletionRejected', 'finite',
   'hasContent', 'hasReasoning', 'stoppedLimit', 'stoppedEos', 'stoppedWord', 'interrupted', 'truncated', 'contextFull', 'completionDrained', 'exactConstraintMatch', 'eosConfirmed', 'resetEosConfirmed'];
 function sanitizeStage3Evidence(input) {
   return {
@@ -56,10 +56,10 @@ function validateStage3Evidence(input) {
   const steps = Object.fromEntries(evidence.steps.map(step => [step.id, step]));
   evidence.steps.forEach((step, index) => {
     requireValue(step.id === STEP_IDS[index] && step.status === 'passed', 'Stage 3 sequence is incomplete.');
-    if (['text', 'json_object', 'json_schema', 'gbnf', 'truncated_json', 'ordinary_after_failure'].includes(step.id)) {
+    if (['text', 'json_object', 'json_schema', 'gbnf', 'truncated_json', 'ordinary_after_failure', 'ordinary_after_unsupported', 'gbnf_literal', 'native_disabled_grammar'].includes(step.id)) {
       requireValue(realOutput(step), 'No real generation evidence.');
     }
-    if (['json_object', 'json_schema', 'gbnf', 'invalid_schema', 'invalid_grammar', 'truncated_json', 'token_diagnostics'].includes(step.id)) {
+    if (['json_object', 'json_schema', 'gbnf', 'invalid_schema', 'invalid_grammar', 'truncated_json', 'token_diagnostics', 'unsupported_grammar', 'gbnf_literal', 'native_disabled_grammar'].includes(step.id)) {
       requireValue(step.valid === true, 'Missing independent output or rejection validation.');
     }
     if (['stop', 'structured_cancel'].includes(step.id)) requireValue(positive(step.callbacks) && step.stopped === true
@@ -68,8 +68,11 @@ function validateStage3Evidence(input) {
     if (['probability_baseline', 'sampling_reset', 'lora_restore_baseline', 'lora_auxiliary_restore'].includes(step.id)) {
       requireValue(step.supportMatched === true, 'Complete probability support was not restored.');
     }
-    if (step.id === 'gbnf') requireValue(step.exactConstraintMatch === true && step.stoppedLimit === false
+    if (['gbnf', 'gbnf_literal'].includes(step.id)) requireValue(step.exactConstraintMatch === true && step.stoppedLimit === false
       && step.interrupted === false, 'GBNF exact constraint completion is unproven.');
+    if (step.id === 'native_disabled_grammar') requireValue(step.nativeErrorMatched === true && step.contextReleased === true
+      && step.interrupted === false, 'Direct disabled-backend recovery is unproven.');
+    if (step.id === 'unsupported_grammar') requireValue(step.completionDrained === true, 'Rejected grammar did not drain.');
     if (step.id === 'truncated_json') requireValue(step.stoppedLimit === true, 'Missing token-limit structured output evidence.');
     if (step.id === 'text') requireValue(positive(step.tokenCount) && step.tokensEvaluated === step.tokenCount, 'Default prompt count differs from completion.');
     if (step.id === 'template_prefill') requireValue(positive(step.tokenCount) && step.tokensEvaluated === step.tokenCount

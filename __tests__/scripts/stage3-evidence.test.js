@@ -7,8 +7,8 @@ const fixture = () => ({ schemaVersion: 1, status: 'passed', phase: 'complete', 
     tokensEvaluated: 12, tokenCount: 12, outputCharacters: 8, dimensions: 384, finite: true,
     historyUnchanged: true, profileRestored: true, loadedListConfirmed: true, deletionRejected: true,
     valid: true, stopped: true, adapterCount: 0, sharedTokens: 10, maxDelta: 0, baselineDelta: 0, threshold: 1e-6,
-    completionDrained: true, exactConstraintMatch: true, stoppedLimit: id !== 'gbnf', interrupted: false, truncated: false, contextFull: false,
-    probabilitiesValidated: true, structuredIncomplete: true, supportMatched: true,
+    completionDrained: true, exactConstraintMatch: true, stoppedLimit: !['gbnf', 'gbnf_literal'].includes(id), interrupted: false, truncated: false, contextFull: false,
+    nativeErrorMatched: true, contextReleased: true, probabilitiesValidated: true, structuredIncomplete: true, supportMatched: true,
     sampledTokens: 1, repeatedTokensPredicted: 1, repeatedSampledTokens: 1,
     templateGenerationTokensEvaluated: 12, templateGenerationCallbacks: 1, templateGenerationOutputCharacters: 4,
     probabilityBefore: 0.1, probabilityAfter: 0.999, eosConfirmed: true, resetEosConfirmed: true, stoppedEos: false, stoppedWord: false,
@@ -48,6 +48,10 @@ describe('Stage 3 native evidence boundary', () => {
     expect(() => validateStage3Evidence({ ...fixture(), [field]: 'unknown' })).toThrow(/identities/);
   });
   it.each([
+    ['unsupported_grammar', 'valid'], ['unsupported_grammar', 'completionDrained'],
+    ['ordinary_after_unsupported', 'callbacks'], ['gbnf_literal', 'exactConstraintMatch'], ['gbnf_literal', 'stoppedLimit'],
+    ['native_disabled_grammar', 'nativeErrorMatched'], ['native_disabled_grammar', 'contextReleased'],
+    ['native_disabled_grammar', 'callbacks'], ['native_disabled_grammar', 'interrupted'],
     ['json_schema', 'valid'], ['gbnf', 'valid'], ['truncated_json', 'valid'], ['structured_cancel', 'stopped'],
     ['template_prefill', 'tokensEvaluated'], ['template_prefill', 'historyUnchanged'], ['token_diagnostics', 'tokenCount'],
     ['probability_baseline', 'finite'], ['probability_baseline', 'baselineDelta'], ['lora_apply', 'loadedListConfirmed'],

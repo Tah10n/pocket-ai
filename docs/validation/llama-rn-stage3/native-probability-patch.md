@@ -151,6 +151,4 @@ unknown input or output fingerprints fail atomically. The source-contract suite
 passed 73 tests, including privacy replacements, exact migrations, idempotence and
 drift refusal. These checks are not native logcat or inference acceptance.
 
-A new source-core build is required. Stage 4 rebuilt-device privacy and tool-loop
-acceptance remain pending; the earlier reports above retain their original source,
-APK and historical privacy scope, which allowed some numeric token diagnostics.
+The [Stage 4 rebuilt Android CPU acceptance](../../llama-rn-013-stage4-acceptance.md) passed the tool loop and regression scenarios. Final-source app-scoped log review is recorded separately in that report. The earlier reports above retain their original source, APK and historical privacy scope, which allowed some numeric token diagnostics.

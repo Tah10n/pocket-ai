@@ -1,0 +1,22 @@
+{
+  "runtimeVersion": "0.13.0-rc.3",
+  "appTree": "02c96702cdb4385a04d818c65a47229fa58b4e8d",
+  "files": {
+    "patches/llama-rn-0.13.0-rc.3.js": {
+      "rawSha256": "99c7f684d2298a0c5e2d36de9058f43b3e4800e3643c9e736a61d68eeb8000a5",
+      "lfNormalizedSha256": "29b5064c382e6ad69e48ef03cd64cfa0946573a9f52fb234cc82691de789c8de"
+    },
+    "node_modules/llama.rn/cpp/rn-completion.cpp": {
+      "rawSha256": "014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc",
+      "lfNormalizedSha256": "014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc"
+    },
+    "node_modules/llama.rn/cpp/common/sampling.cpp": {
+      "rawSha256": "2f4188ff106231e281e439e6c6f906657394d4d0c0372e130c9fc44670bc4e9d",
+      "lfNormalizedSha256": "2f4188ff106231e281e439e6c6f906657394d4d0c0372e130c9fc44670bc4e9d"
+    },
+    "node_modules/llama.rn/cpp/llama-batch.cpp": {
+      "rawSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96",
+      "lfNormalizedSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96"
+    }
+  }
+}

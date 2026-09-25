@@ -1,0 +1,12 @@
+{
+  "patterns": {
+    "calculatorArguments": 0,
+    "documentSentinel": 0,
+    "visibleAnswer": 0,
+    "tokenDump": 0
+  },
+  "apkSha256": "69f824ce55f7201c0eea86092416ebaf55b71de515c8458fdc830b19d0103646",
+  "appUid": 10227,
+  "scope": "Available isolated QA app UID log buffer after final CPU acceptance, document lookup and cold reopen",
+  "lines": 2957
+}

@@ -5,11 +5,7 @@ use their results in its next response. Enable them explicitly in the current
 chat's **Local tools** control, open **Available tools**, then send a request. Existing
 chats keep tools off by default. No confirmation is needed for each calculation.
 
-The implementation is covered by application tests. Stage 4 native acceptance is
-pending: a real model-generated call, result-to-model continuation, device document
-search, structured final response, Stop recovery and cold reopen are **not_run**
-until recorded in a separate native acceptance report. Template metadata or a
-successful formatter call is not a native execution receipt.
+[Android CPU native acceptance](llama-rn-013-stage4-acceptance.md) verifies required calculator execution, attached-document search, structured final output, Stop recovery and cold reopen on the pinned Qwen fixture. Automatic calculator selection was observed with zero native calls; ordinary JSON was correctly not executed. This does not establish compatibility for every model, platform or document format.
 
 ## Available functions
 

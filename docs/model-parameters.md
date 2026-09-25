@@ -286,7 +286,7 @@ content prefill remains rejected. A template override or pure-content forcing is
 not accepted for tool execution. A compatible Jinja formatter is necessary but
 cannot establish model tool-use quality or native acceptance. See
 [Local tools](local-tools.md) for functions, limits, cancellation, history and the
-pinned runtime's exact supported choices. Stage 4 native acceptance is pending.
+pinned runtime's exact supported choices. [Stage 4 Android CPU acceptance](llama-rn-013-stage4-acceptance.md) records the tested fixture and limits, including automatic calculator non-selection.
 
 ## UI entry points
 

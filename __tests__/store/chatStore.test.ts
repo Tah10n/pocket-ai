@@ -435,6 +435,33 @@ describe('chatStore', () => {
     storage.getAllKeys().forEach((key) => storage.remove(key));
   });
 
+  it.each(['regenerate', 'branch'] as const)('starts %s with fresh tool state and retains the old durable evidence until commit', (mode) => {
+    const thread = buildCompletedRegenerationThread(`tool-${mode}`);
+    const settings = { enabled: true, allowedTools: ['calculate' as const], toolChoice: 'auto' as const };
+    thread.toolSettings = settings;
+    thread.messages[1].toolRun = { id: thread.messages[1].id, threadId: thread.id, settings,
+      phase: 'final', status: 'completed', rounds: [{ index: 0, content: '', calls: [
+        { id: 'old-call', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'completed', result: '{"ok":true,"result":4}' },
+      ] }] };
+    seedPersistedChatThread(thread, thread.updatedAt);
+    const oldRun = thread.messages[1].toolRun;
+    const nextId = mode === 'regenerate' ? useChatStore.getState().replaceLastAssistantMessage(thread.id)
+      : useChatStore.getState().replaceBranchFromUserMessage(thread.id, thread.messages[0].id, 'Calculate again');
+    expect(nextId).toBeTruthy();
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)?.toolRun).toBeUndefined();
+    expect(useChatStore.getState().threads[thread.id].messages[1].toolRun).toBe(oldRun);
+    expect(useChatStore.getState().getThread(thread.id)?.toolSettings).toEqual(settings);
+    const revision = useChatStore.getState().inferenceRevision;
+    useChatStore.getState().patchAssistantMessage(thread.id, nextId!, { toolRun: {
+      id: nextId!, threadId: thread.id, settings, phase: 'tools', status: 'running', rounds: [],
+    } });
+    expect(useChatStore.getState().inferenceRevision).toBe(revision);
+    useChatStore.getState().finalizeAssistantTurn(thread.id, nextId!, { outcome: 'stopped' });
+    expect(useChatStore.getState().threads[thread.id].messages.at(-1)?.toolRun?.id).toBe(nextId);
+    useChatStore.getState().updateThreadToolSettings(thread.id, { ...settings, enabled: false });
+    expect(useChatStore.getState().inferenceRevision).toBeGreaterThan(revision);
+  });
+
   it('migrates a legacy thread without modelId only from persisted model evidence', () => {
     const legacyThread = {
       ...buildThread('legacy', 10),

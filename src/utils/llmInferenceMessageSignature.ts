@@ -66,6 +66,8 @@ export function buildLlmInferenceMessagesSignature(messages: readonly LlmChatMes
   for (const message of messages) {
     appendSignatureSegment(state, message.role);
     appendSignatureSegment(state, message.content);
+    appendSignatureSegment(state, JSON.stringify(message.tool_calls ?? []));
+    appendSignatureSegment(state, message.tool_call_id ?? '');
 
     const mediaPaths = getInferenceMessageMediaPaths(message);
     appendSignatureSegment(state, String(mediaPaths.length));

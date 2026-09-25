@@ -114,6 +114,7 @@ export function createChatBranchBaseSemanticIdentity(thread: ChatThread): string
     presetId: thread.presetId,
     presetSnapshot: thread.presetSnapshot,
     paramsSnapshot: thread.paramsSnapshot,
+    toolSettings: thread.toolSettings,
     messages: thread.messages,
     createdAt: thread.createdAt,
     lastGeneratedAt: thread.lastGeneratedAt,

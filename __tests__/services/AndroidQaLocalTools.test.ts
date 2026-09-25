@@ -125,4 +125,28 @@ it('preserves a settled native answer before a failed QA assertion and retains i
     nativeSteps: 2, executedCalls: 1, resultReturned: true, referenceMatched: true, finalReferencePresent: false, status: 'failed' });
   expect(JSON.parse(getAndroidQaLocalToolsHistoryMarker()).threadCount).toBe(0);
   expect(JSON.stringify(getAndroidQaLocalToolsEvidence())).not.toContain(actualNativeAnswer);
+
+  // A separate synthetic sequence proves unselected auto output reaches the next required check.
+  resetAndroidQaLocalToolsForTests(); state.activeThreadId = null; mockRun.mockReset();
+  const rawModelText = '{"name":"calculate","arguments":{"expression":"17+25"}}';
+  mockRun.mockImplementation(async ({ onProgress, onNativeStep }) => {
+    const index = mockRun.mock.calls.length;
+    if (index === 3) throw new AppError('engine_not_ready');
+    const result = '{"ok":true,"result":{"value":42}}';
+    onProgress({ id: 'assistant', threadId: 'qa-thread', status: 'completed', phase: 'final',
+      rounds: index === 1 ? [{ index: 0, content: '', calls: [{ id: 'call', name: 'calculate', status: 'completed', result }] }] : [] });
+    onNativeStep({ messages: [], promptTokens: 10, result: { tokens_predicted: 1, tokens_evaluated: 10,
+      tool_calls: index === 1 ? [{}] : [] } });
+    if (index === 1) onNativeStep({ messages: [{ role: 'tool', tool_call_id: 'call', content: result }], promptTokens: 20,
+      result: { tokens_predicted: 1, tokens_evaluated: 20 } });
+    return { content: index === 1 ? 'The numeric result is 42.' : rawModelText };
+  });
+  await runAndroidQaLocalTools();
+  expect(mockRun).toHaveBeenCalledTimes(3);
+  expect(getAndroidQaLocalToolsEvidence()).toMatchObject({ status: 'failed', phase: 'ordinary_auto', appErrorCode: 'engine_not_ready' });
+  expect(getAndroidQaLocalToolsEvidence().steps.find(step => step.id === 'calculate_auto')).toMatchObject({
+    status: 'observed', automaticCallSelected: false, nativeCalls: 0, executedCalls: 0, resultReturned: false,
+    referenceMatched: false, finalReferencePresent: false });
+  expect(finalize).toHaveBeenCalledWith('qa-thread', 'assistant', expect.objectContaining({ outcome: 'success', content: rawModelText }));
+  expect(JSON.stringify(getAndroidQaLocalToolsEvidence())).not.toContain(rawModelText);
 });

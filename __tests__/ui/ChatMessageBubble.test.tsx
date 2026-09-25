@@ -102,8 +102,8 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatMessageBubble', () => {
-  it.each(['<think>\n\n</think>\n\n', '<think>private reasoning</think>Visible plan'])(
-    'uses assistant presentation for tool rounds while preserving canonical content %s', content => {
+  it.each(['<think>\n\n</think>\n\n', '<think>private reasoning</think>Visible plan', '<|im_start|>assistant\nVisible plan'])(
+    'hides intermediate tool-round text while preserving canonical content %s', content => {
       const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
         phase: 'final' as const, status: 'completed' as const,
         rounds: [{ index: 0, content, calls: [{ id: 'c', name: 'calculate', arguments: '{"expression":"17+25"}',
@@ -111,11 +111,24 @@ describe('ChatMessageBubble', () => {
       };
       const view = render(<ChatMessageBubble id="tool-presentation" isUser={false} content="The result is 42." toolRun={toolRun} />);
       fireEvent.press(view.getByTestId('tool-run-toggle-tool-presentation'));
-      expect(view.queryByText(/<think>|private reasoning/)).toBeNull();
+      expect(view.queryByText(/<think>|private reasoning|<\|im_start\|>|Visible plan/)).toBeNull();
+      expect(view.getByText('{"expression":"17+25"}')).toBeTruthy();
+      expect(view.getByText(/calculate/)).toBeTruthy();
       expect(view.getByText('{"value":42}')).toBeTruthy();
-      if (content.includes('Visible plan')) expect(view.getByText('Visible plan')).toBeTruthy();
       expect(toolRun.rounds[0].content).toBe(content);
     });
+
+  it('hides an empty completed tool run after showing its running preparation state', () => {
+    const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
+      phase: 'tools' as const, status: 'running' as const, rounds: [],
+    };
+    const view = render(<ChatMessageBubble id="no-calls" isUser={false} content="" toolRun={toolRun} />);
+    expect(view.getByTestId('tool-run-toggle-no-calls')).toBeTruthy();
+    view.rerender(<ChatMessageBubble id="no-calls" isUser={false} content="An ordinary answer."
+      toolRun={{ ...toolRun, status: 'completed' }} />);
+    expect(view.queryByTestId('tool-run-toggle-no-calls')).toBeNull();
+    expect(view.getByTestId('markdown-renderer')).toBeTruthy();
+  });
 
   it('keeps requested tool work distinct from executed work and updates the collapsed run', () => {
     const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },

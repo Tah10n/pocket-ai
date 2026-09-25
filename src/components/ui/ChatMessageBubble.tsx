@@ -434,7 +434,7 @@ const ChatMessageBubbleComponent = ({
           className={`max-w-full min-w-0 flex-shrink ${bubbleAlignmentClassName} ${bubbleClassName}`}
           style={bubbleShapeStyle}
         >
-          {!isUser && toolRun ? (
+          {!isUser && toolRun && (toolRun.status !== 'completed' || toolRun.rounds.some(round => round.calls.length > 0)) ? (
             <Box className="mb-2 gap-2">
               <Pressable testID={`tool-run-toggle-${id}`} accessibilityRole="button"
                 accessibilityLabel={t('chat.tools.steps')} accessibilityState={{ expanded: toolsExpanded }}
@@ -442,10 +442,8 @@ const ChatMessageBubbleComponent = ({
                 <Text colorRole="primary" className="text-sm font-medium">{t('chat.tools.steps')} · {t(`chat.tools.status.${toolRun.status}`)}</Text>
               </Pressable>
               {toolsExpanded ? toolRun.rounds.map(round => {
-                const visibleContent = getAssistantPresentation(round.content).finalContent;
                 return (
                 <Box key={round.index} className="gap-2">
-                  {visibleContent ? <Text selectable colorRole="secondary" className="text-xs">{visibleContent}</Text> : null}
                   {round.calls.map(call => <Box key={call.id} testID={`tool-call-${call.id}`} className="rounded-lg border border-outline-200 p-2">
                     <Text colorRole="primary" className="text-sm font-medium">{call.name} · {t(`chat.tools.status.${call.status}`)}</Text>
                     <Text selectable colorRole="secondary" className="text-xs">{call.arguments}</Text>

@@ -25,8 +25,8 @@ export const ANDROID_QA_TOOL_FIXTURE = Object.freeze({
 export const ANDROID_QA_LOCAL_TOOL_STEPS = ['prepare_model', 'cpu_load', 'calculate_required', 'calculate_auto',
   'ordinary_auto', 'document_search', 'json_schema', 'stop', 'ordinary_after_stop', 'cleanup'] as const;
 type StepId = typeof ANDROID_QA_LOCAL_TOOL_STEPS[number];
-type Receipt = { id: StepId; status: 'passed' | 'failed' | 'not_run'; nativeSteps?: number; nativeCalls?: number;
-  executedCalls?: number; resultReturned?: boolean; referenceMatched?: boolean; membershipMatched?: boolean;
+type Receipt = { id: StepId; status: 'passed' | 'observed' | 'failed' | 'not_run'; nativeSteps?: number; nativeCalls?: number;
+  automaticCallSelected?: boolean; executedCalls?: number; resultReturned?: boolean; referenceMatched?: boolean; membershipMatched?: boolean;
   locatorMatched?: boolean; finalReferencePresent?: boolean; schemaAnswerMatched?: boolean; structuredValid?: boolean; cancelled?: boolean;
   completionDrained?: boolean; outputCharacters?: number; fixtureVerified?: boolean; cpuConfirmed?: boolean;
   nativeStage?: 'count_prompt' | 'completion';
@@ -192,7 +192,12 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
         toolRun: latest, structuredOutput: result.structuredOutput }).status === 'committed';
       check(answerCommitted);
       check(!stop);
-      if (id === 'ordinary_auto') check(hasAndroidQaVisibleAnswer(content) && receipt.nativeCalls === 0 && receipt.executedCalls === 0);
+      if (id === 'calculate_auto') receipt.automaticCallSelected = receipt.nativeCalls! > 0;
+      if (id === 'calculate_auto' && receipt.automaticCallSelected === false) {
+        check(receipt.nativeSteps! > 0 && receipt.executedCalls === 0 && hasAndroidQaVisibleAnswer(content));
+        receipt.referenceMatched = false;
+        receipt.finalReferencePresent = hasAndroidQaFinalReference(content, 'calculate');
+      } else if (id === 'ordinary_auto') check(hasAndroidQaVisibleAnswer(content) && receipt.nativeCalls === 0 && receipt.executedCalls === 0);
       else {
         check(receipt.nativeCalls! > 0 && receipt.executedCalls! > 0 && receipt.resultReturned && receipt.referenceMatched);
         if (id === 'json_schema') {
@@ -211,7 +216,9 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
       if (!answerCommitted) useChatStore.getState().finalizeAssistantTurn(threadId, runId, { outcome: 'stopped', toolRun: latest });
       if (!stop || !receipt.cancelled || !receipt.completionDrained || receipt.nativeCalls! < 1 || receipt.executedCalls !== 0) throw error;
     }
-    pass(receipt);
+    if (id === 'calculate_auto' && receipt.automaticCallSelected === false) {
+      publish({ steps: [...evidence.steps, { ...receipt, status: 'observed' }] });
+    } else pass(receipt);
   };
   publish({ status: 'running', phase: 'preconditions' });
   try {

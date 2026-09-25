@@ -3,7 +3,7 @@ const { validateColdLocalToolsHistory, STEP_IDS, IDENTITIES, sanitizeLocalToolsE
 // Synthetic receipts only test the verifier. They are never native acceptance evidence.
 function receipt() {
   return { schemaVersion: 1, ...IDENTITIES, status: 'passed', phase: 'complete', requiresForceStop: false,
-    steps: STEP_IDS.map(id => ({ id, status: 'passed', nativeSteps: 2, nativeCalls: 1, executedCalls: 1,
+    steps: STEP_IDS.map(id => ({ id, status: 'passed', automaticCallSelected: id === 'calculate_auto' ? true : undefined, nativeSteps: 2, nativeCalls: 1, executedCalls: 1,
       resultReturned: true, referenceMatched: true, membershipMatched: true, locatorMatched: true, finalReferencePresent: true, schemaAnswerMatched: true,
       structuredValid: true, completionDrained: true, outputCharacters: 2, fixtureVerified: true, cpuConfirmed: true,
       historyRetained: true, profileRestored: true,
@@ -73,4 +73,23 @@ it('allows only finite native boundary and parser categories', () => {
   expect(sanitizeLocalToolsEvidence(input).nativeFailureCategory).toBe('formatter_parser_generation');
   input.steps[2].nativeStage = 'secret native text'; input.nativeFailureCategory = 'secret template';
   expect(JSON.stringify(sanitizeLocalToolsEvidence(input))).not.toContain('secret');
+});
+
+it('records no native auto selection as observed, never as successful tool execution', () => {
+  const input = receipt();
+  const step = input.steps.find(item => item.id === 'calculate_auto');
+  Object.assign(step, { status: 'observed', automaticCallSelected: false, nativeSteps: 1, nativeCalls: 0,
+    executedCalls: 0, resultReturned: false, referenceMatched: false, finalReferencePresent: false });
+  expect(validateLocalToolsEvidence(input).steps[3]).toMatchObject({ status: 'observed', automaticCallSelected: false });
+  for (const patch of [{ status: 'passed' }, { executedCalls: 1 }, { nativeCalls: 1 }, { resultReturned: true },
+    { referenceMatched: true }, { completionDrained: false }, { outputCharacters: 0 }]) {
+    const changed = receipt(); changed.steps[3] = { ...step, ...patch };
+    expect(() => validateLocalToolsEvidence(changed)).toThrow();
+  }
+  input.steps[2] = { ...step, id: 'calculate_required' };
+  expect(() => validateLocalToolsEvidence(input)).toThrow();
+});
+it('still requires exact execution and forwarded result when auto selects a native call', () => {
+  const input = receipt(); input.steps[3].resultReturned = false;
+  expect(() => validateLocalToolsEvidence(input)).toThrow();
 });

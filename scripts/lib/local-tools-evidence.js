@@ -5,7 +5,7 @@ const fixture = require('../../docs/validation/llama-rn-stage4/tool-fixture.json
 const IDENTITIES = { runtimeVersion: fixture.runtimeVersion, backend: 'cpu',
   modelRevision: fixture.model.revision, modelSha256: fixture.model.sha256 };
 const NUMBERS = ['nativeSteps', 'nativeCalls', 'executedCalls', 'outputCharacters'];
-const BOOLEANS = ['resultReturned', 'referenceMatched', 'membershipMatched', 'locatorMatched', 'finalReferencePresent', 'schemaAnswerMatched',
+const BOOLEANS = ['automaticCallSelected', 'resultReturned', 'referenceMatched', 'membershipMatched', 'locatorMatched', 'finalReferencePresent', 'schemaAnswerMatched',
   'structuredValid', 'cancelled', 'completionDrained', 'fixtureVerified', 'cpuConfirmed', 'historyRetained', 'profileRestored'];
 function sanitizeLocalToolsEvidence(input) {
   return {
@@ -21,7 +21,7 @@ function sanitizeLocalToolsEvidence(input) {
     steps: Array.isArray(input?.steps) ? input.steps.slice(0, STEP_IDS.length + 1).map(step => ({
       id: STEP_IDS.includes(step?.id) ? step.id : 'unknown',
       nativeStage: ['count_prompt', 'completion'].includes(step?.nativeStage) ? step.nativeStage : undefined,
-      status: ['passed', 'failed', 'not_run'].includes(step?.status) ? step.status : 'unknown',
+      status: ['passed', 'observed', 'failed', 'not_run'].includes(step?.status) ? step.status : 'unknown',
       ...Object.fromEntries(NUMBERS.filter(key => Number.isSafeInteger(step?.[key]) && step[key] >= 0).map(key => [key, step[key]])),
       ...Object.fromEntries(BOOLEANS.filter(key => typeof step?.[key] === 'boolean').map(key => [key, step[key]])),
     })) : [],
@@ -34,7 +34,16 @@ function validateLocalToolsEvidence(input) {
     && evidence.requiresForceStop === false && !evidence.failureCode && evidence.steps.length === STEP_IDS.length
     && Object.entries(IDENTITIES).every(([key, value]) => evidence[key] === value), 'Local tool evidence is incomplete or has unverified identities.');
   for (const [index, step] of evidence.steps.entries()) {
-    requireValue(step.id === STEP_IDS[index] && step.status === 'passed', 'Local tool sequence did not pass.');
+    const unselectedAuto = step.id === 'calculate_auto' && step.automaticCallSelected === false;
+    requireValue(step.id === STEP_IDS[index] && step.status === (unselectedAuto ? 'observed' : 'passed'), 'Local tool sequence did not pass.');
+    if (unselectedAuto) {
+      requireValue(step.nativeSteps >= 1 && step.nativeCalls === 0 && step.executedCalls === 0
+        && step.resultReturned === false && step.referenceMatched === false
+        && typeof step.finalReferencePresent === 'boolean' && step.completionDrained === true && step.outputCharacters > 0,
+      'Unselected automatic tool observation is inconsistent.');
+      continue;
+    }
+    if (step.id === 'calculate_auto') requireValue(step.automaticCallSelected === true, 'Automatic native selection missing.');
     if (['calculate_required', 'calculate_auto', 'document_search', 'json_schema'].includes(step.id)) {
       requireValue(step.nativeSteps >= 2 && step.nativeCalls >= 1 && step.executedCalls >= 1 && step.nativeCalls <= 8
         && step.executedCalls <= step.nativeCalls && step.resultReturned === true && step.referenceMatched === true

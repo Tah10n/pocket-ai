@@ -1,5 +1,5 @@
 import { AppError } from '../../src/services/AppError';
-import { getAndroidQaLocalToolsEvidence, resetAndroidQaLocalToolsForTests, runAndroidQaLocalTools } from '../../src/services/AndroidQaLocalTools';
+import { hasAndroidQaVisibleAnswer, matchesAndroidQaLocalToolAnswer, getAndroidQaLocalToolsEvidence, resetAndroidQaLocalToolsForTests, runAndroidQaLocalTools } from '../../src/services/AndroidQaLocalTools';
 const mockEnabled = jest.fn(() => true);
 const mockBaseline = jest.fn(() => ({ status: 'failed' }));
 const mockLoad = jest.fn();
@@ -59,4 +59,21 @@ it('classifies the fixed parser failure prefix without retaining its remainder',
   await runAndroidQaLocalTools();
   expect(getAndroidQaLocalToolsEvidence().nativeFailureCategory).toBe('formatter_parser_generation');
   expect(JSON.stringify(getAndroidQaLocalToolsEvidence())).not.toContain('secret');
+});
+
+it.each(['42', '42.0', 'The result is 42.', 'The result of 17 + 25 is **42**.', '17+25 = 42',
+  '<think>private reasoning</think>\nThe answer is 42.'])(
+  'accepts the visible fixture answer %s', text => expect(matchesAndroidQaLocalToolAnswer(text, 'calculate')).toBe(true));
+it.each(['420', '142', 'The answer is not 42.', 'The result is 42 or 43.', '42 cats',
+  '<think>42</think>', '{"answer":42}', '{"tool_calls":[{"arguments":"42"}]}', '18+25=42'])(
+  'rejects ambiguous or protocol fixture answer %s', text => expect(matchesAndroidQaLocalToolAnswer(text, 'calculate')).toBe(false));
+it.each(['CERULEAN-731', 'The verification code is CERULEAN-731.', 'The Meridian verification code is **CERULEAN-731**.'])(
+  'accepts bounded document answer %s', text => expect(matchesAndroidQaLocalToolAnswer(text, 'document_search')).toBe(true));
+it.each(['CERULEAN-7310', 'Not CERULEAN-731', '{"code":"CERULEAN-731"}', '<think>CERULEAN-731</think>'])(
+  'rejects nonanswer document code %s', text => expect(matchesAndroidQaLocalToolAnswer(text, 'document_search')).toBe(false));
+
+it.each(['', '   ', '<think>\n\n</think>\n', '<think>reasoning only</think>', '<thinking>unfinished'])(
+  'rejects empty user-visible ordinary answer %s', text => expect(hasAndroidQaVisibleAnswer(text)).toBe(false));
+it('accepts visible ordinary text following reasoning framing', () => {
+  expect(hasAndroidQaVisibleAnswer('<think>reasoning</think> Hello.')).toBe(true);
 });

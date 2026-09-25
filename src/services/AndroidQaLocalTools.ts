@@ -1,3 +1,4 @@
+import { getAssistantPresentation } from '../utils/chatPresentation';
 import { AppError, getSafeAppErrorCode, type AppErrorCode } from './AppError';
 import fixture from '../../docs/validation/llama-rn-stage4/tool-fixture.json';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -93,6 +94,21 @@ async function prepareFixture(timeoutMs: number): Promise<void> {
   throw new QaFailure('timeout');
 }
 
+export function hasAndroidQaVisibleAnswer(content: string): boolean {
+  return getAssistantPresentation(content).finalContent.trim().length > 0;
+}
+
+/** Bounded fixture-answer grammar, applied only to user-visible assistant text. */
+export function matchesAndroidQaLocalToolAnswer(content: string, kind: 'calculate' | 'document_search'): boolean {
+  const visible = getAssistantPresentation(content).finalContent.trim();
+  // Permit ordinary inline emphasis around the single reference value, never protocol JSON.
+  const normalized = visible.replace(/\*\*(42(?:\.0+)?|CERULEAN-731)\*\*/g, '$1').replace(/\s+/g, ' ');
+  if (kind === 'calculate') {
+    return /^(?:(?:the )?(?:result|answer)(?: of 17\s*\+\s*25)?(?: is |: ?| = )|17\s*\+\s*25\s*=\s*)?42(?:\.0+)?[.!]?$/i.test(normalized);
+  }
+  return /^(?:(?:the )?(?:Meridian )?(?:verification )?code(?: is |: ?| = ))?CERULEAN-731[.!]?$/.test(normalized.replace(/^The /, 'the '));
+}
+
 /** Explicit isolated-QA action. Proposals always originate in production native completion. */
 export function runAndroidQaLocalTools(options: { operationTimeoutMs?: number; downloadTimeoutMs?: number } = {}): Promise<void> {
   if (!isAndroidQaDocumentModelBootstrapEnabled() || evidence.status !== 'idle') return activeRun ?? Promise.resolve();
@@ -172,11 +188,11 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
       receipt.completionDrained = !llmEngineService.hasActiveCompletion();
       check(receipt.completionDrained && content.trim().length && latest?.status === 'completed');
       check(!stop);
-      if (id === 'ordinary_auto') check(receipt.nativeCalls === 0 && receipt.executedCalls === 0);
+      if (id === 'ordinary_auto') check(hasAndroidQaVisibleAnswer(content) && receipt.nativeCalls === 0 && receipt.executedCalls === 0);
       else {
         check(receipt.nativeCalls! > 0 && receipt.executedCalls! > 0 && receipt.resultReturned && receipt.referenceMatched);
-        receipt.finalMatched = id === 'document_search' ? content.trim() === 'CERULEAN-731'
-          : id === 'json_schema' ? JSON.parse(content).answer === 42 : content.trim() === '42';
+        receipt.finalMatched = id === 'json_schema' ? JSON.parse(content).answer === 42
+          : matchesAndroidQaLocalToolAnswer(content, id === 'document_search' ? 'document_search' : 'calculate');
         check(receipt.finalMatched);
         if (id === 'document_search') check(receipt.membershipMatched && receipt.locatorMatched);
         if (id === 'json_schema') { receipt.structuredValid = result.structuredOutput?.status === 'valid'; check(receipt.structuredValid); }
@@ -237,7 +253,7 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
     phase('ordinary_after_stop');
     const ordinary = await bounded(llmEngineService.chatCompletion({ expectedModelId: ANDROID_QA_TOOL_FIXTURE.repository,
       messages: [{ role: 'user', content: 'Say hello in one short sentence.' }], params: { temperature: 0, n_predict: 64, enable_thinking: false } }), operationTimeoutMs);
-    check((ordinary.content ?? ordinary.text ?? '').trim().length > 0 && !ordinary.interrupted && !ordinary.stopped_limit && !ordinary.truncated && !ordinary.context_full && !llmEngineService.hasActiveCompletion());
+    check(hasAndroidQaVisibleAnswer(ordinary.content ?? ordinary.text ?? '') && !ordinary.interrupted && !ordinary.stopped_limit && !ordinary.truncated && !ordinary.context_full && !llmEngineService.hasActiveCompletion());
     pass({ id: 'ordinary_after_stop', completionDrained: true, outputCharacters: (ordinary.content ?? ordinary.text ?? '').length });
     completed = true;
   } catch (error) {

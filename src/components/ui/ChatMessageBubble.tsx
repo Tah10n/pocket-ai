@@ -441,16 +441,19 @@ const ChatMessageBubbleComponent = ({
                 className="min-h-11 justify-center" onPress={() => setToolsExpanded(!toolsExpanded)}>
                 <Text colorRole="primary" className="text-sm font-medium">{t('chat.tools.steps')} · {t(`chat.tools.status.${toolRun.status}`)}</Text>
               </Pressable>
-              {toolsExpanded ? toolRun.rounds.map(round => (
+              {toolsExpanded ? toolRun.rounds.map(round => {
+                const visibleContent = getAssistantPresentation(round.content).finalContent;
+                return (
                 <Box key={round.index} className="gap-2">
-                  {round.content ? <Text selectable colorRole="secondary" className="text-xs">{round.content}</Text> : null}
+                  {visibleContent ? <Text selectable colorRole="secondary" className="text-xs">{visibleContent}</Text> : null}
                   {round.calls.map(call => <Box key={call.id} testID={`tool-call-${call.id}`} className="rounded-lg border border-outline-200 p-2">
                     <Text colorRole="primary" className="text-sm font-medium">{call.name} · {t(`chat.tools.status.${call.status}`)}</Text>
                     <Text selectable colorRole="secondary" className="text-xs">{call.arguments}</Text>
                     {call.result !== undefined ? <Text selectable colorRole="primary" className="mt-1 text-xs">{call.result}</Text> : null}
                   </Box>)}
                 </Box>
-              )) : null}
+                );
+              }) : null}
             </Box>
           ) : null}
           {shouldShowThoughtSection ? (

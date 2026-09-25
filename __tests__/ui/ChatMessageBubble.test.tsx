@@ -102,6 +102,21 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatMessageBubble', () => {
+  it.each(['<think>\n\n</think>\n\n', '<think>private reasoning</think>Visible plan'])(
+    'uses assistant presentation for tool rounds while preserving canonical content %s', content => {
+      const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
+        phase: 'final' as const, status: 'completed' as const,
+        rounds: [{ index: 0, content, calls: [{ id: 'c', name: 'calculate', arguments: '{"expression":"17+25"}',
+          status: 'completed' as const, result: '{"value":42}' }] }],
+      };
+      const view = render(<ChatMessageBubble id="tool-presentation" isUser={false} content="The result is 42." toolRun={toolRun} />);
+      fireEvent.press(view.getByTestId('tool-run-toggle-tool-presentation'));
+      expect(view.queryByText(/<think>|private reasoning/)).toBeNull();
+      expect(view.getByText('{"value":42}')).toBeTruthy();
+      if (content.includes('Visible plan')) expect(view.getByText('Visible plan')).toBeTruthy();
+      expect(toolRun.rounds[0].content).toBe(content);
+    });
+
   it('keeps requested tool work distinct from executed work and updates the collapsed run', () => {
     const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
       phase: 'tools' as const, status: 'running' as const,

@@ -1415,7 +1415,7 @@ class LLMEngineService {
   public beginLocalToolRun(expectedModelId: string) {
     if (this.localToolRun || this.auxiliaryOperation || this.autotuneReserved
       || this.exclusiveOperationCount > 0 || this.isUnloading || this.initPromise
-      || this.hasActiveCompletion() || this.contextOperationRunner.hasActive()) {
+      || this.hasActiveCompletion() || this.contextOperationRunner.hasActiveChatBlocking()) {
       throw new AppError('engine_busy', 'The engine is busy.');
     }
     this.assertExpectedCompletionModel(expectedModelId);
@@ -1428,6 +1428,8 @@ class LLMEngineService {
     let resolveSettled!: () => void;
     const settled = new Promise<void>(resolve => { resolveSettled = resolve; });
     const owner = { token: Symbol('local-tool-run'), controller, settled };
+    // Preempt passive probes just like ordinary prompt preparation. The native
+    // queue retains their raw work until it drains before admitting this owner.
     const release = this.beginPromptPreparation();
     this.localToolRun = owner;
     let finished = false;

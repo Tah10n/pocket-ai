@@ -55,3 +55,21 @@ it('proves cold reopen preserves protocol and rejects any new process-local run'
     expect(() => validateColdLocalToolsHistory(before, { ...after, ...patch })).toThrow();
   }
 });
+
+it('keeps allowlisted AppError diagnostics and strips arbitrary native strings', async () => {
+  const failed = { ...receipt(), status: 'failed', failureCode: 'operation_failed', appErrorCode: 'engine_busy' };
+  expect(sanitizeLocalToolsEvidence(failed).appErrorCode).toBe('engine_busy');
+  await expect(waitForLocalToolsEvidence(async () => failed)).rejects.toThrow('app=engine_busy');
+  const unsafe = sanitizeLocalToolsEvidence({ ...failed, appErrorCode: 'secret prompt/path', message: 'secret native error' });
+  expect(unsafe.appErrorCode).toBeUndefined();
+  expect(JSON.stringify(unsafe)).not.toContain('secret');
+});
+
+it('allows only finite native boundary and parser categories', () => {
+  const input = receipt(); input.steps[2].nativeStage = 'count_prompt';
+  input.nativeFailureCategory = 'formatter_parser_generation';
+  expect(sanitizeLocalToolsEvidence(input).steps[2].nativeStage).toBe('count_prompt');
+  expect(sanitizeLocalToolsEvidence(input).nativeFailureCategory).toBe('formatter_parser_generation');
+  input.steps[2].nativeStage = 'secret native text'; input.nativeFailureCategory = 'secret template';
+  expect(JSON.stringify(sanitizeLocalToolsEvidence(input))).not.toContain('secret');
+});

@@ -1,3 +1,4 @@
+import { freezeGenerationParameters } from '../utils/generationControls';
 import { useChatStore } from '../store/chatStore';
 import type { LlmChatCompletionOptions, LlmChatMessage } from '../types/chat';
 import type { LocalToolRun, LocalToolSettings } from '../types/localTools';
@@ -29,13 +30,15 @@ let processLocalToolRunStarts = 0;
 export const getLocalToolRunStartCount = () => processLocalToolRunStarts;
 
 /** One bounded extension of the existing engine, with no alternative native context. */
-export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, onProgress, onNativeStep }: {
+export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, onProgress, onNativeStep, onNativeStage }: {
   options: LlmChatCompletionOptions;
   threadId: string;
   runId: string;
   settings: LocalToolSettings;
   assertCurrent: () => void;
   onProgress: (run: LocalToolRun) => void;
+  /** Read-only QA boundary observer; only a finite stage name is exposed. */
+  onNativeStage?: (stage: 'count_prompt' | 'completion') => void;
   /** Read-only QA observer; payloads must not be logged or included in receipts. */
   onNativeStep?: (step: { phase: LocalToolRequest['phase']; promptTokens: number;
     messages: readonly LlmChatMessage[]; result: LlamaCompletionResult }) => void;
@@ -44,6 +47,8 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
   if (!captured.enabled || !captured.allowedTools.length || !options.expectedModelId) {
     throw new LocalToolRunError('invalid_proposal');
   }
+  // Counting, selection and final dispatch share one template-time snapshot.
+  const generation = freezeGenerationParameters(options.generation);
   processLocalToolRunStarts += 1;
   assertCurrent();
   const lease = llmEngineService.beginLocalToolRun(options.expectedModelId);
@@ -82,8 +87,9 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
   const complete = async (request: LocalToolRequest): Promise<LlamaCompletionResult> => {
     check();
     if (remainingTokens <= 0) throw new LocalToolRunError('token_limit');
+    onNativeStage?.('count_prompt');
     const count = await llmEngineService.countPromptTokens({
-      messages, generation: options.generation, toolRequest: request, runOwner: lease.token,
+      messages, generation, toolRequest: request, runOwner: lease.token,
       expectedModelId: options.expectedModelId, multimodalReadiness: options.multimodalReadiness,
       params: options.params,
     });
@@ -93,7 +99,8 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
     if (totalTokens >= LOCAL_TOOL_LIMITS.totalTokens) throw new LocalToolRunError('token_limit');
     const available = Math.min(llmEngineService.getContextSize() - count - 16, LOCAL_TOOL_LIMITS.totalTokens - totalTokens);
     if (available < 1) throw new LocalToolRunError('context_limit');
-    const result = await llmEngineService.chatCompletion({ ...options, messages,
+    onNativeStage?.('completion');
+    const result = await llmEngineService.chatCompletion({ ...options, messages, generation,
       toolRequest: request, runOwner: lease.token,
       // Intermediate parser output is only a proposal. Never display raw tokens
       // or a generic protocol envelope as user text while it is still partial.
@@ -125,8 +132,8 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
         let final = result;
         // Selection suppresses content prefill so it cannot corrupt tool parsing.
         // Restore it only in a final phase where new tools cannot execute.
-        const needsFinalPhase = (options.generation?.output && options.generation.output.mode !== 'text')
-          || (options.generation?.template?.prefillText?.length ?? 0) > 0;
+        const needsFinalPhase = (generation.output && generation.output.mode !== 'text')
+          || (generation.template?.prefillText?.length ?? 0) > 0;
         if (needsFinalPhase) {
           run.phase = 'final';
           snapshot();
@@ -137,7 +144,7 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
         }
         // Only bridge-parsed content is displayable on the tool parser path.
         // Ordinary assistant JSON is never interpreted as an action.
-        if (!options.generation?.output || options.generation.output.mode === 'text') {
+        if (!generation.output || generation.output.mode === 'text') {
           if (!final.content?.trim() && !final.reasoning_content?.trim()) throw new LocalToolRunError('invalid_proposal');
           final = { ...final, content: final.content ?? '', text: final.content ?? '' };
         }

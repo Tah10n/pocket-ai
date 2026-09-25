@@ -1,4 +1,6 @@
+import type { ContextOperationRunner } from '../../src/services/LLMEngineService.runners';
 import type { LlamaContext } from 'llama.rn';
+import { runLocalToolCompletion } from '../../src/services/LocalToolRun';
 import { llmEngineService } from '../../src/services/LLMEngineService';
 import { registry } from '../../src/services/LocalStorageRegistry';
 import { resolveLoraProfileForLoad } from '../../src/services/LoraProfileResolver';
@@ -15,6 +17,7 @@ jest.mock('llama.rn', () => ({
 }));
 
 type EngineTestAccess = {
+  contextOperationRunner: ContextOperationRunner;
   state: EngineState;
   updateState(state: EngineState): void;
   context: LlamaContext | null;
@@ -181,4 +184,77 @@ it('a document drain timeout does not release ownership or permit native reuse',
   await expect(llmEngineService.load('other/model')).rejects.toMatchObject({ code: 'engine_busy' });
   lease.finish();
   await expect(llmEngineService.chatCompletion({ messages: [{ role: 'user', content: 'next' }] })).resolves.toMatchObject({ text: 'reply' });
+});
+
+
+it.each([undefined, { output: { mode: 'json_object' as const } }])(
+  'freezes template time across real counting and completion dispatch with generation %j', async generation => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-09-25T12:00:00Z'));
+    const initialNow = Math.floor(Date.now() / 1000);
+    context.model.chatTemplates = { jinja: {
+      default: true, defaultCaps: { tools: true, toolCalls: true }, toolUse: false,
+    } } as LlamaContext['model']['chatTemplates'];
+    const formattedTimes: unknown[] = [];
+    const countedPrompts: string[] = [];
+    const completionPrompts: string[] = [];
+    jest.mocked(context.getFormattedChat).mockImplementation(async (_messages, _template, format) => {
+      formattedTimes.push(format?.now);
+      return { type: 'jinja', prompt: `prompt:${format?.now}:${format?.tool_choice}`,
+        additional_stops: [], has_media: false, grammar: 'template grammar', chat_format: 1, chat_parser: 'parser' } as Awaited<ReturnType<LlamaContext['getFormattedChat']>>;
+    });
+    jest.mocked(context.tokenize).mockImplementation(async prompt => {
+      countedPrompts.push(prompt);
+      jest.setSystemTime(Date.now() + 2000);
+      return { tokens: [1] } as Awaited<ReturnType<LlamaContext['tokenize']>>;
+    });
+    jest.mocked(context.completion).mockImplementation(async params => {
+      expect(typeof params.prompt).toBe('string');
+      completionPrompts.push(params.prompt ?? '');
+      const content = generation ? '{"ok":true}' : 'reply';
+      return { text: content, content, tokens_predicted: 3 } as Awaited<ReturnType<LlamaContext['completion']>>;
+    });
+    await expect(runLocalToolCompletion({
+      options: { expectedModelId: model.id, messages: [{ role: 'user', content: 'Question' }], generation },
+      threadId: 'clock-chat', runId: 'clock-run', settings: { enabled: true, allowedTools: ['calculate'] },
+      assertCurrent: () => undefined, onProgress: () => undefined,
+    })).resolves.toMatchObject({ text: generation ? '{"ok":true}' : 'reply' });
+    expect(completionPrompts).toHaveLength(generation ? 2 : 1);
+    expect(completionPrompts).toEqual(countedPrompts);
+    expect(formattedTimes.every(now => now === initialNow)).toBe(true);
+  },
+);
+
+
+it('preempts passive readiness while retaining its raw native queue owner until drain', async () => {
+  const pending = deferred<void>();
+  let started = false;
+  let cancelled = () => false;
+  const passive = service.contextOperationRunner.track(async cancellation => {
+    started = true;
+    cancelled = () => cancellation.isCancelled();
+    await pending.promise;
+  }, () => new Error('Passive operation cancelled'), { chatBlocking: false, priority: 'passive_readiness' }).catch(error => error);
+  try {
+    await until(() => started);
+    lease = llmEngineService.beginLocalToolRun(model.id);
+    expect(cancelled()).toBe(true);
+    const counting = llmEngineService.countPromptTokens({
+      messages: [{ role: 'user', content: 'next' }], runOwner: lease.token,
+    });
+    await Promise.resolve();
+    expect(context.tokenize).not.toHaveBeenCalled();
+    expect(context.completion).not.toHaveBeenCalled();
+    await expect(llmEngineService.load('other/model')).rejects.toMatchObject({ code: 'engine_busy' });
+    pending.resolve();
+    await passive;
+    await expect(counting).resolves.toBe(1);
+    await expect(llmEngineService.chatCompletion({
+      messages: [{ role: 'user', content: 'next' }], runOwner: lease.token,
+    })).resolves.toMatchObject({ text: 'reply' });
+    lease.assertCurrent();
+  } finally {
+    pending.resolve();
+    await passive;
+  }
 });

@@ -1,3 +1,4 @@
+import { AppError, getSafeAppErrorCode, type AppErrorCode } from './AppError';
 import fixture from '../../docs/validation/llama-rn-stage4/tool-fixture.json';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useChatStore } from '../store/chatStore';
@@ -27,6 +28,7 @@ type Receipt = { id: StepId; status: 'passed' | 'failed' | 'not_run'; nativeStep
   executedCalls?: number; resultReturned?: boolean; referenceMatched?: boolean; membershipMatched?: boolean;
   locatorMatched?: boolean; finalMatched?: boolean; structuredValid?: boolean; cancelled?: boolean;
   completionDrained?: boolean; outputCharacters?: number; fixtureVerified?: boolean; cpuConfirmed?: boolean;
+  nativeStage?: 'count_prompt' | 'completion';
   historyRetained?: boolean; profileRestored?: boolean };
 export type AndroidQaLocalToolsEvidence = {
   schemaVersion: 1; runtimeVersion: '0.13.0-rc.3'; backend: 'cpu';
@@ -35,6 +37,8 @@ export type AndroidQaLocalToolsEvidence = {
   failureCode?: 'precondition' | 'assertion' | 'operation_failed' | 'timeout' | 'cleanup_failed';
   requiresForceStop: boolean; steps: Receipt[];
   toolFailureReason?: LocalToolRunError['reason'];
+  appErrorCode?: AppErrorCode;
+  nativeFailureCategory?: 'formatter_parser_generation';
 };
 const initial = (): AndroidQaLocalToolsEvidence => ({ schemaVersion: 1, runtimeVersion: '0.13.0-rc.3', backend: 'cpu',
   modelRevision: ANDROID_QA_TOOL_FIXTURE.revision, modelSha256: ANDROID_QA_TOOL_FIXTURE.sha256,
@@ -139,6 +143,7 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
             stopRequested = true; void llmEngineService.interruptActiveCompletion().catch(() => undefined);
           }
         },
+        onNativeStage: stage => { receipt.nativeStage = stage; },
         onNativeStep: step => {
           receipt.nativeSteps! += 1; receipt.nativeCalls! += step.result.tool_calls?.length ?? 0;
           check(Number.isSafeInteger(step.result.tokens_predicted) && step.result.tokens_predicted! >= 0
@@ -240,6 +245,9 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
     publish({ status: 'failed', failureCode: error instanceof QaFailure ? error.code : 'operation_failed',
       requiresForceStop: error instanceof QaFailure && error.requiresForceStop,
       toolFailureReason: error instanceof LocalToolRunError ? error.reason : undefined,
+      appErrorCode: error instanceof AppError ? getSafeAppErrorCode(error.code) : undefined,
+      nativeFailureCategory: error instanceof Error && error.message.startsWith('Unable to generate parser')
+        ? 'formatter_parser_generation' : undefined,
       steps: [...evidence.steps, ...ANDROID_QA_LOCAL_TOOL_STEPS.filter(id => !evidence.steps.some(step => step.id === id))
         .map(id => ({ ...(pendingReceipt?.id === id ? pendingReceipt : {}), id, status: id === failed ? 'failed' as const : 'not_run' as const }))] });
     if (failed === 'prepare_model') await getModelDownloadManager().cancelDownload(ANDROID_QA_TOOL_FIXTURE.repository).catch(() => undefined);

@@ -1,3 +1,4 @@
+const APP_ERROR_CODES = ['local_tool_unsupported', 'local_tool_cancelled', 'local_tool_timeout', 'local_tool_round_limit', 'local_tool_call_limit', 'local_tool_token_limit', 'local_tool_result_limit', 'local_tool_invalid_proposal', 'local_tool_duplicate_id', 'local_tool_conflicting_id', 'local_tool_context_limit', 'action_failed', 'engine_not_ready', 'engine_busy', 'engine_recovery_required', 'engine_unloading', 'model_not_found', 'model_load_blocked', 'model_load_failed', 'model_incompatible', 'model_memory_insufficient', 'model_memory_warning', 'download_disk_space_low', 'download_size_unknown', 'download_metadata_unavailable', 'download_http_error', 'download_verification_failed', 'download_file_missing', 'storage_private_unavailable', 'message_empty', 'message_too_long', 'chat_model_not_loaded', 'chat_model_mismatch', 'chat_history_busy', 'multimodal_not_ready', 'chat_attachment_copy_failed', 'chat_attachment_limit_exceeded', 'chat_attachment_missing', 'chat_attachment_not_ready', 'chat_attachment_unsupported_type', 'chat_attachment_corrupt', 'chat_attachment_parse_failed', 'chat_attachment_too_large_for_context', 'chat_attachment_document_encrypted', 'chat_attachment_document_no_extractable_text', 'chat_attachment_document_too_large', 'chat_attachment_document_resource_limit', 'chat_attachment_document_semantic_spreadsheet', 'chat_attachment_native_unavailable', 'chat_attachment_native_failed', 'chat_attachment_processing_cancelled', 'chat_attachment_assets_skipped', 'chat_attachment_context_truncated'];
 const STEP_IDS = ['prepare_model', 'cpu_load', 'calculate_required', 'calculate_auto', 'ordinary_auto',
   'document_search', 'json_schema', 'stop', 'ordinary_after_stop', 'cleanup'];
 const fixture = require('../../docs/validation/llama-rn-stage4/tool-fixture.json');
@@ -12,11 +13,14 @@ function sanitizeLocalToolsEvidence(input) {
     status: ['idle', 'running', 'passed', 'failed'].includes(input?.status) ? input.status : 'unknown',
     phase: [...STEP_IDS, 'idle', 'preconditions', 'complete'].includes(input?.phase) ? input.phase : 'unknown',
     failureCode: ['precondition', 'assertion', 'operation_failed', 'timeout', 'cleanup_failed'].includes(input?.failureCode) ? input.failureCode : undefined,
+    nativeFailureCategory: input?.nativeFailureCategory === 'formatter_parser_generation' ? input.nativeFailureCategory : undefined,
+    appErrorCode: APP_ERROR_CODES.includes(input?.appErrorCode) ? input.appErrorCode : undefined,
     toolFailureReason: ['cancelled', 'timeout', 'round_limit', 'call_limit', 'token_limit', 'result_limit', 'invalid_proposal', 'duplicate_id', 'conflicting_id', 'context_limit'].includes(input?.toolFailureReason) ? input.toolFailureReason : undefined,
     requiresForceStop: typeof input?.requiresForceStop === 'boolean' ? input.requiresForceStop : null,
     ...Object.fromEntries(Object.entries(IDENTITIES).map(([key, value]) => [key, input?.[key] === value ? value : null])),
     steps: Array.isArray(input?.steps) ? input.steps.slice(0, STEP_IDS.length + 1).map(step => ({
       id: STEP_IDS.includes(step?.id) ? step.id : 'unknown',
+      nativeStage: ['count_prompt', 'completion'].includes(step?.nativeStage) ? step.nativeStage : undefined,
       status: ['passed', 'failed', 'not_run'].includes(step?.status) ? step.status : 'unknown',
       ...Object.fromEntries(NUMBERS.filter(key => Number.isSafeInteger(step?.[key]) && step[key] >= 0).map(key => [key, step[key]])),
       ...Object.fromEntries(BOOLEANS.filter(key => typeof step?.[key] === 'boolean').map(key => [key, step[key]])),
@@ -56,7 +60,7 @@ async function waitForLocalToolsEvidence(readEvidence, options = {}) {
   const deadline = now() + (options.timeoutMs ?? 1800000);
   while (now() < deadline) {
     const evidence = sanitizeLocalToolsEvidence(await readEvidence());
-    if (evidence.status === 'failed') throw new Error(`Local tools failed: phase=${evidence.phase}, code=${evidence.failureCode || 'unknown'}, tool=${evidence.toolFailureReason || 'none'}.`);
+    if (evidence.status === 'failed') throw new Error(`Local tools failed: phase=${evidence.phase}, code=${evidence.failureCode || 'unknown'}, tool=${evidence.toolFailureReason || 'none'}, app=${evidence.appErrorCode || 'none'}.`);
     if (evidence.status === 'passed') return validateLocalToolsEvidence(evidence);
     await wait(1000);
   }

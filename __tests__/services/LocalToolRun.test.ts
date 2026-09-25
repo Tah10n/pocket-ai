@@ -120,7 +120,8 @@ test('required applies only on initial step and structured final retains its sch
   const generation = { output: { mode: 'json_schema' as const, schema: '{"type":"object"}' } };
   await run({ settings: { ...settings, toolChoice: 'required' }, options: { ...options, generation } });
   expect(completion.mock.calls.map(([request]) => request.toolRequest?.toolChoice)).toEqual(['required', 'auto', 'none']);
-  expect(completion.mock.calls[2][0].generation).toEqual(generation);
+  expect(completion.mock.calls[2][0].generation).toMatchObject(generation);
+  expect(completion.mock.calls.every(([request]) => request.generation === completion.mock.calls[0][0].generation)).toBe(true);
   expect(completion.mock.calls[2][0].toolRequest?.tools).not.toHaveLength(0);
 });
 
@@ -182,12 +183,24 @@ test.each([false, true])('preserves text prefill in final phase after tools=%s',
   expect(executor).toHaveBeenCalledTimes(usesTool ? 1 : 0);
   const final = completion.mock.calls.at(-1)![0];
   expect(final.toolRequest).toMatchObject({ phase: 'final', toolChoice: 'none' });
-  expect(final.generation).toEqual(generation);
+  expect(final.generation).toMatchObject(generation);
   expect(final.onToken).toBe(onToken);
   expect(completion.mock.calls.slice(0, -1).every(([request]) => request.onToken === undefined)).toBe(true);
   expect(llmEngineService.countPromptTokens).toHaveBeenLastCalledWith(expect.objectContaining({
-    generation, toolRequest: final.toolRequest, runOwner: final.runOwner,
+    generation: final.generation, toolRequest: final.toolRequest, runOwner: final.runOwner,
   }));
   if (usesTool) expect(final.messages.at(-1)).toMatchObject({ role: 'tool', content: '{"ok":true,"result":{"value":42}}' });
   expect(progress.at(-1)).toMatchObject({ phase: 'final', status: 'completed' });
+});
+
+test('reports finite native boundaries before counting and completing', async () => {
+  const stages: string[] = [];
+  jest.mocked(llmEngineService.countPromptTokens).mockImplementationOnce(async () => {
+    expect(stages).toEqual(['count_prompt']); return 100;
+  });
+  completion.mockImplementationOnce(async () => {
+    expect(stages).toEqual(['count_prompt', 'completion']); return answer();
+  });
+  await run({ onNativeStage: stage => stages.push(stage) });
+  expect(stages).toEqual(['count_prompt', 'completion']);
 });

@@ -27,7 +27,7 @@ export const ANDROID_QA_LOCAL_TOOL_STEPS = ['prepare_model', 'cpu_load', 'calcul
 type StepId = typeof ANDROID_QA_LOCAL_TOOL_STEPS[number];
 type Receipt = { id: StepId; status: 'passed' | 'failed' | 'not_run'; nativeSteps?: number; nativeCalls?: number;
   executedCalls?: number; resultReturned?: boolean; referenceMatched?: boolean; membershipMatched?: boolean;
-  locatorMatched?: boolean; finalMatched?: boolean; structuredValid?: boolean; cancelled?: boolean;
+  locatorMatched?: boolean; finalReferencePresent?: boolean; schemaAnswerMatched?: boolean; structuredValid?: boolean; cancelled?: boolean;
   completionDrained?: boolean; outputCharacters?: number; fixtureVerified?: boolean; cpuConfirmed?: boolean;
   nativeStage?: 'count_prompt' | 'completion';
   historyRetained?: boolean; profileRestored?: boolean };
@@ -98,15 +98,14 @@ export function hasAndroidQaVisibleAnswer(content: string): boolean {
   return getAssistantPresentation(content).finalContent.trim().length > 0;
 }
 
-/** Bounded fixture-answer grammar, applied only to user-visible assistant text. */
-export function matchesAndroidQaLocalToolAnswer(content: string, kind: 'calculate' | 'document_search'): boolean {
+/** Reference presence only; semantic prose correctness requires visual inspection of the retained chat. */
+export function hasAndroidQaFinalReference(content: string, kind: 'calculate' | 'document_search'): boolean {
   const visible = getAssistantPresentation(content).finalContent.trim();
-  // Permit ordinary inline emphasis around the single reference value, never protocol JSON.
-  const normalized = visible.replace(/\*\*(42(?:\.0+)?|CERULEAN-731)\*\*/g, '$1').replace(/\s+/g, ' ');
-  if (kind === 'calculate') {
-    return /^(?:(?:the )?(?:result|answer)(?: of 17\s*\+\s*25)?(?: is |: ?| = )|17\s*\+\s*25\s*=\s*)?42(?:\.0+)?[.!]?$/i.test(normalized);
-  }
-  return /^(?:(?:the )?(?:Meridian )?(?:verification )?code(?: is |: ?| = ))?CERULEAN-731[.!]?$/.test(normalized.replace(/^The /, 'the '));
+  // Never count JSON, fenced output or tool framing as a user-facing reference answer.
+  if (!visible || /[{}\[\]<>`]|(?:tool_calls|tool_call_id|<\|)/i.test(visible)) return false;
+  return kind === 'calculate'
+    ? /(?:^|[^\p{L}\p{N}_.+\-])42(?![\p{L}\p{N}_]|\.\d)/u.test(visible)
+    : /(?:^|[^\p{L}\p{N}_-])CERULEAN-731(?![\p{L}\p{N}_-])/u.test(visible);
 }
 
 /** Explicit isolated-QA action. Proposals always originate in production native completion. */
@@ -143,6 +142,7 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
     pendingReceipt = receipt;
     let latest: LocalToolRun | undefined;
     let stopRequested = false;
+    let answerCommitted = false;
     const assertCurrent = () => check(useChatStore.getState().activeThreadId === threadId
       && useChatStore.getState().inferenceRevision === revision);
     try {
@@ -187,22 +187,28 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
       receipt.outputCharacters = content.length;
       receipt.completionDrained = !llmEngineService.hasActiveCompletion();
       check(receipt.completionDrained && content.trim().length && latest?.status === 'completed');
+      // Preserve settled native output for visual QA even if a later evidence assertion fails.
+      answerCommitted = useChatStore.getState().finalizeAssistantTurn(threadId, runId, { outcome: 'success', content,
+        toolRun: latest, structuredOutput: result.structuredOutput }).status === 'committed';
+      check(answerCommitted);
       check(!stop);
       if (id === 'ordinary_auto') check(hasAndroidQaVisibleAnswer(content) && receipt.nativeCalls === 0 && receipt.executedCalls === 0);
       else {
         check(receipt.nativeCalls! > 0 && receipt.executedCalls! > 0 && receipt.resultReturned && receipt.referenceMatched);
-        receipt.finalMatched = id === 'json_schema' ? JSON.parse(content).answer === 42
-          : matchesAndroidQaLocalToolAnswer(content, id === 'document_search' ? 'document_search' : 'calculate');
-        check(receipt.finalMatched);
+        if (id === 'json_schema') {
+          receipt.schemaAnswerMatched = JSON.parse(content).answer === 42;
+          check(receipt.schemaAnswerMatched);
+        } else {
+          receipt.finalReferencePresent = hasAndroidQaFinalReference(content, id === 'document_search' ? 'document_search' : 'calculate');
+          check(receipt.finalReferencePresent);
+        }
         if (id === 'document_search') check(receipt.membershipMatched && receipt.locatorMatched);
         if (id === 'json_schema') { receipt.structuredValid = result.structuredOutput?.status === 'valid'; check(receipt.structuredValid); }
       }
-      check(useChatStore.getState().finalizeAssistantTurn(threadId, runId, { outcome: 'success', content,
-        toolRun: latest, structuredOutput: result.structuredOutput }).status === 'committed');
     } catch (error) {
       receipt.completionDrained = !llmEngineService.hasActiveCompletion();
       receipt.cancelled = stopRequested && error instanceof LocalToolRunError && error.reason === 'cancelled';
-      useChatStore.getState().finalizeAssistantTurn(threadId, runId, { outcome: 'stopped', toolRun: latest });
+      if (!answerCommitted) useChatStore.getState().finalizeAssistantTurn(threadId, runId, { outcome: 'stopped', toolRun: latest });
       if (!stop || !receipt.cancelled || !receipt.completionDrained || receipt.nativeCalls! < 1 || receipt.executedCalls !== 0) throw error;
     }
     pass(receipt);
@@ -258,6 +264,7 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
     completed = true;
   } catch (error) {
     const failed = evidence.phase;
+    if (threadId) useChatStore.getState().renameThread(threadId, `Android local tools QA failed ${Date.now()}`);
     publish({ status: 'failed', failureCode: error instanceof QaFailure ? error.code : 'operation_failed',
       requiresForceStop: error instanceof QaFailure && error.requiresForceStop,
       toolFailureReason: error instanceof LocalToolRunError ? error.reason : undefined,
@@ -275,9 +282,11 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
         if (originalModel && originalProfile) await bounded(llmEngineService.load(originalModel, { forceReload: true,
           loadParamsMode: 'replace', loadParamsOverride: originalProfile }), operationTimeoutMs);
         else await bounded(llmEngineService.unload(), operationTimeoutMs);
-        if (!completed && threadId) useChatStore.getState().deleteThread(threadId);
         useChatStore.getState().setActiveThread(originalThread);
-      } catch { publish({ status: 'failed', phase: 'cleanup', failureCode: 'cleanup_failed', requiresForceStop: true }); }
+      } catch {
+        if (threadId) useChatStore.getState().renameThread(threadId, `Android local tools QA failed ${Date.now()}`);
+        publish({ status: 'failed', phase: 'cleanup', failureCode: 'cleanup_failed', requiresForceStop: true });
+      }
     }
   }
   if (completed && evidence.status !== 'failed') {

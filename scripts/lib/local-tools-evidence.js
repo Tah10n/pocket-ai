@@ -5,7 +5,7 @@ const fixture = require('../../docs/validation/llama-rn-stage4/tool-fixture.json
 const IDENTITIES = { runtimeVersion: fixture.runtimeVersion, backend: 'cpu',
   modelRevision: fixture.model.revision, modelSha256: fixture.model.sha256 };
 const NUMBERS = ['nativeSteps', 'nativeCalls', 'executedCalls', 'outputCharacters'];
-const BOOLEANS = ['resultReturned', 'referenceMatched', 'membershipMatched', 'locatorMatched', 'finalMatched',
+const BOOLEANS = ['resultReturned', 'referenceMatched', 'membershipMatched', 'locatorMatched', 'finalReferencePresent', 'schemaAnswerMatched',
   'structuredValid', 'cancelled', 'completionDrained', 'fixtureVerified', 'cpuConfirmed', 'historyRetained', 'profileRestored'];
 function sanitizeLocalToolsEvidence(input) {
   return {
@@ -38,7 +38,7 @@ function validateLocalToolsEvidence(input) {
     if (['calculate_required', 'calculate_auto', 'document_search', 'json_schema'].includes(step.id)) {
       requireValue(step.nativeSteps >= 2 && step.nativeCalls >= 1 && step.executedCalls >= 1 && step.nativeCalls <= 8
         && step.executedCalls <= step.nativeCalls && step.resultReturned === true && step.referenceMatched === true
-        && step.finalMatched === true && step.completionDrained === true && step.outputCharacters > 0,
+        && (step.id === 'json_schema' ? step.schemaAnswerMatched === true : step.finalReferencePresent === true) && step.completionDrained === true && step.outputCharacters > 0,
       'Real native proposal, actual execution, result feedback and continuation are not all proven.');
     }
     if (step.id === 'prepare_model') requireValue(step.fixtureVerified === true, 'Missing verified fixture.');

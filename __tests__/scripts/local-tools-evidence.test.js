@@ -4,7 +4,7 @@ const { validateColdLocalToolsHistory, STEP_IDS, IDENTITIES, sanitizeLocalToolsE
 function receipt() {
   return { schemaVersion: 1, ...IDENTITIES, status: 'passed', phase: 'complete', requiresForceStop: false,
     steps: STEP_IDS.map(id => ({ id, status: 'passed', nativeSteps: 2, nativeCalls: 1, executedCalls: 1,
-      resultReturned: true, referenceMatched: true, membershipMatched: true, locatorMatched: true, finalMatched: true,
+      resultReturned: true, referenceMatched: true, membershipMatched: true, locatorMatched: true, finalReferencePresent: true, schemaAnswerMatched: true,
       structuredValid: true, completionDrained: true, outputCharacters: 2, fixtureVerified: true, cpuConfirmed: true,
       historyRetained: true, profileRestored: true,
       ...(id === 'ordinary_auto' ? { nativeCalls: 0, executedCalls: 0 } : {}),
@@ -21,7 +21,7 @@ it('allows only bounded aggregate and boolean receipts, never payloads or native
   expect(safe.steps[2]).not.toHaveProperty('tokens');
   expect(() => validateLocalToolsEvidence(safe)).not.toThrow();
 });
-it.each(['nativeCalls', 'executedCalls', 'resultReturned', 'referenceMatched', 'finalMatched', 'completionDrained'])(
+it.each(['nativeCalls', 'executedCalls', 'resultReturned', 'referenceMatched', 'finalReferencePresent', 'completionDrained'])(
   'rejects calculator success without %s evidence', field => {
     const input = receipt(); input.steps[2][field] = false;
     expect(() => validateLocalToolsEvidence(input)).toThrow();
@@ -34,7 +34,8 @@ it('rejects false success, mismatched identities, duplicate steps and incomplete
   for (const modify of [input => { input.modelSha256 = 'wrong'; },
     input => { input.steps[0].id = 'calculate_auto'; },
     input => { input.steps[3].status = 'not_run'; },
-    input => { input.steps.find(step => step.id === 'json_schema').structuredValid = false; }]) {
+    input => { input.steps.find(step => step.id === 'json_schema').structuredValid = false; },
+    input => { input.steps.find(step => step.id === 'json_schema').schemaAnswerMatched = false; }]) {
     const input = receipt(); modify(input); expect(() => validateLocalToolsEvidence(input)).toThrow();
   }
 });

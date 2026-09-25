@@ -128,7 +128,7 @@ const CLOCK_PRIVACY_REPLACEMENTS = [
 ];
 const COMPLETION_SOURCE = 'cpp/rn-completion.cpp';
 const COMPLETION_BEFORE_SHA256 = '4563b4a65e98e7022d4ae38014f12acd2241a0911fc2201f5da465679df82087';
-const COMPLETION_AFTER_SHA256 = 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058';
+const COMPLETION_AFTER_SHA256 = '014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc';
 const COMPLETION_REPLACEMENTS = [
   [
     `    if (ctx_sampling != nullptr) {
@@ -244,7 +244,14 @@ const GRAMMAR_REPLACEMENTS = [
   ]
 ];
 // Stage 4: retain numeric telemetry, never reconstructible token sequences.
+const PROMPT_TOKEN_PRIVACY_REPLACEMENTS = [
+  [
+    "        // LOG tokens\n        std::stringstream ss;\n        ss << \"\\n\" << __func__ << \": prompt_tokens = \";\n        for (auto& token : text_tokens) {\n            ss << token << \" \";\n        }\n        LOG_INFO(\"%s\\n\", ss.str().c_str());",
+    "        LOG_INFO(\"prompt token count: %zu\", num_prompt_tokens);"
+  ]
+];
 const COMPLETION_PRIVACY_REPLACEMENTS = [
+  ...PROMPT_TOKEN_PRIVACY_REPLACEMENTS,
   [
     "        LOG_VERBOSE(\"prompt ingested, n_past: %d, cached: %s, to_eval: %s\",\n            n_past,\n            tokens_to_str(parent_ctx->ctx, embd.cbegin(), embd.cbegin() + n_past).c_str(),\n            tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()\n        );",
     "        LOG_VERBOSE(\"prompt ingested, n_past: %d\", n_past);"
@@ -272,7 +279,7 @@ const SOURCE_PATCHES = [
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
-  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
+  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }, { sha256: 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058', replacements: PROMPT_TOKEN_PRIVACY_REPLACEMENTS }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
   { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: [...LLGUIDANCE_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] }, { sha256: 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2', replacements: SAMPLING_PRIVACY_REPLACEMENTS }], replacements: [...SAMPLING_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
   {"source": "cpp/llama-batch.cpp", "beforeSha256": "88f7b462c41fda25c1767880c0d0a70550bfd816a1477663de06de8d5f5ca2fe", "afterSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96", "replacements": [["                    LLAMA_LOG_DEBUG(\"%s:  %4d: id = %6d (%16s), pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.token[i], vocab->token_to_piece(ubatch.token[i]).c_str(),\n                            ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);", "                    LLAMA_LOG_DEBUG(\"%s:  %4d: [token], pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);"]]},

@@ -47,6 +47,9 @@ describe('pinned serial sampling and template clock corrections', () => {
     expect(completion).not.toContain('stopping_word: %s');
     expect(completion).not.toContain('n_threads: %d, embd: %s');
     expect(completion).not.toContain('EOS: %s');
+    expect(completion).not.toContain(': prompt_tokens = ');
+    expect(completion).not.toContain('ss << token');
+    expect(completion).toContain('LOG_INFO("prompt token count: %zu", num_prompt_tokens);');
     expect(patchLlamaBridge(root).status).toBe('already-applied');
   });
 
@@ -63,6 +66,19 @@ describe('pinned serial sampling and template clock corrections', () => {
     fs.writeFileSync(file, previous);
     patchLlamaBridge(root);
     expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
+  });
+
+  it('upgrades the exact first Stage 4 source without retaining its indirect prompt dump', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === COMPLETION_SOURCE);
+    const migration = patch.intermediates.find(entry => entry.sha256 === 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058');
+    const file = path.join(root, 'node_modules/llama.rn', COMPLETION_SOURCE);
+    let previous = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
+    for (const [before, after] of migration.replacements) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(migration.sha256);
+    fs.writeFileSync(file, previous);
+    patchLlamaBridge(root);
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(COMPLETION_AFTER_SHA256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
   });
 
   it('rejects unknown batch debug source before writing earlier protected files', () => {

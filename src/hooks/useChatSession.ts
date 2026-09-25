@@ -15,7 +15,7 @@ import {
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings, sanitizeGenerationParameters } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
-import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
+import { AppError, isLocalToolRunErrorCode, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
 import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
@@ -4082,6 +4082,7 @@ export const useChatSession = () => {
       const appError = toAppError(error);
       const assistantErrorCode = appError.code === 'chat_model_mismatch'
         || appError.code === 'chat_model_not_loaded'
+        || isLocalToolRunErrorCode(appError.code)
         ? appError.code
         : 'generation_failed';
 

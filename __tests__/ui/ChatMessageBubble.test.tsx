@@ -1,3 +1,5 @@
+import en from '../../src/i18n/locales/en.json';
+import ru from '../../src/i18n/locales/ru.json';
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
@@ -13,6 +15,7 @@ import type { ChatAttachment } from '../../src/types/attachments';
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
   __resetTranslations: () => void;
+  __setMockLanguage: (language: string) => void;
 };
 
 jest.mock('react-native-css-interop', () => {
@@ -777,3 +780,16 @@ describe('ChatMessageBubble', () => {
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
   });
 });
+
+it.each([['en', en.common.errors.localToolRoundLimit], ['ru', ru.common.errors.localToolRoundLimit]])(
+  'renders a persisted tool termination in the active %s locale', (language, localized) => {
+    reactI18nextMock.__setMockLanguage(language);
+    reactI18nextMock.__setTranslationOverride('common.errors.localToolRoundLimit', localized, language);
+    try {
+      const view = render(<ChatMessageBubble id="limited-tool" isUser={false} content="" messageState="error"
+        errorCode="local_tool_round_limit" errorMessage="Local tool run could not complete." />);
+      expect(view.getByText(localized)).toBeTruthy();
+      expect(view.queryByText('Local tool run could not complete.')).toBeNull();
+    } finally { reactI18nextMock.__resetTranslations(); }
+  },
+);

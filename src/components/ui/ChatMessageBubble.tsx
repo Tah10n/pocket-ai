@@ -1,3 +1,4 @@
+import { AppError, getErrorMessage, isLocalToolRunErrorCode } from '../../services/AppError';
 import React, { useEffect, useRef, useState } from 'react';
 import type { LayoutChangeEvent } from 'react-native';
 import { useTranslation } from 'react-i18next';
@@ -341,7 +342,9 @@ const ChatMessageBubbleComponent = ({
     ? t('chat.thinkingDescription')
     : t('chat.thoughtDescription');
   const assistantBodyContent = isUser ? content : finalContent;
-  const displayErrorMessage = errorCode === 'structured_output_invalid' ? t('structuredOutput.validationFailed') : errorMessage;
+  const displayErrorMessage = isLocalToolRunErrorCode(errorCode)
+    ? getErrorMessage(new AppError(errorCode), t)
+    : errorCode === 'structured_output_invalid' ? t('structuredOutput.validationFailed') : errorMessage;
   const hasErrorMessage = !isUser && typeof displayErrorMessage === 'string' && displayErrorMessage.trim().length > 0;
   const jsonStatus = isStreaming ? 'streaming'
     : structuredOutput?.status === 'invalid' ? 'invalid'

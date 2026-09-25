@@ -7,12 +7,11 @@ import type { LlamaCompletionResult } from './LlamaRuntimeAdapter';
 import { executeLocalTool, getLocalToolDefinitions } from './LocalToolExecutor';
 import { LOCAL_TOOL_LIMITS, utf8Bytes } from './LocalToolLimits';
 import type { LocalToolRequest } from './LocalToolRequest';
-import { AppError } from './AppError';
+import { AppError, LOCAL_TOOL_RUN_ERROR_CODES, type LocalToolRunErrorReason } from './AppError';
 
 export class LocalToolRunError extends AppError {
-  constructor(readonly reason: 'cancelled' | 'timeout' | 'round_limit' | 'call_limit' | 'token_limit'
-    | 'result_limit' | 'invalid_proposal' | 'duplicate_id' | 'conflicting_id' | 'context_limit') {
-    super('action_failed', `Local tool run ended (${reason}).`);
+  constructor(readonly reason: LocalToolRunErrorReason) {
+    super(LOCAL_TOOL_RUN_ERROR_CODES[reason], 'Local tool run could not complete.');
     this.name = 'LocalToolRunError';
   }
 }

@@ -855,6 +855,17 @@ describe('useChatSession', () => {
       expect(finish).toHaveBeenCalledTimes(2);
     });
 
+    it('preserves a typed tool budget termination in durable assistant history', async () => {
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce({ ...proposal(), tokens_predicted: 1023 });
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await expect(getSession()?.appendUserMessage('Calculate', { newThreadToolSettings: settings }))
+          .rejects.toMatchObject({ code: 'local_tool_token_limit' });
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)).toMatchObject({ state: 'error', errorCode: 'local_tool_token_limit' });
+      expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.errorCode).toBe('local_tool_token_limit');
+    });
     it('keeps tool protocol and the final JSON Schema phase distinct', async () => {
       const output = { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"value":{"type":"number"}},"required":["value"],"additionalProperties":false}' };
       (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...getGenerationParametersForModel('author/model-q4'), output });

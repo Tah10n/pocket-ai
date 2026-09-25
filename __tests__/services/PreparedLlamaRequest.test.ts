@@ -226,11 +226,11 @@ describe('local tool preparation', () => {
   it('rejects unsupported caps, pure content and absent parser rather than downgrading', async () => {
     const { cache, request, getFormattedChat } = setup();
     request.context.model.chatTemplates.jinja.defaultCaps.toolCalls = false;
-    await expect(cache.prepare({ ...request, toolRequest })).rejects.toThrow('local tool protocol');
+    await expect(cache.prepare({ ...request, toolRequest })).rejects.toMatchObject({ code: 'local_tool_unsupported' });
     request.context.model.chatTemplates.jinja.defaultCaps.toolCalls = true;
-    await expect(cache.prepare({ ...request, toolRequest, generation: { template: { forcePureContent: true } } })).rejects.toThrow('local tool protocol');
+    await expect(cache.prepare({ ...request, toolRequest, generation: { template: { forcePureContent: true } } })).rejects.toMatchObject({ code: 'local_tool_unsupported' });
     getFormattedChat.mockResolvedValue({ type: 'jinja', prompt: 'p', chat_format: 0, chat_parser: '' });
-    await expect(cache.prepare({ ...request, toolRequest })).rejects.toThrow('tool parser');
+    await expect(cache.prepare({ ...request, toolRequest })).rejects.toMatchObject({ code: 'local_tool_unsupported' });
   });
 
   it('uses tool-use capabilities for final definitions but rejects unsupported default history', async () => {
@@ -244,7 +244,7 @@ describe('local tool preparation', () => {
     }] }, { role: 'tool' as const, content: '4', tool_call_id: 'c1' }];
     await expect(cache.prepare({ ...request, messages, toolRequest: { ...toolRequest, phase: 'final' } }))
       .resolves.toHaveProperty('completion.prompt');
-    await expect(cache.prepare({ ...request, messages })).rejects.toThrow('local tool protocol');
+    await expect(cache.prepare({ ...request, messages })).rejects.toMatchObject({ code: 'local_tool_unsupported' });
   });
 
   it('invalidates on tool choice and schema changes', async () => {

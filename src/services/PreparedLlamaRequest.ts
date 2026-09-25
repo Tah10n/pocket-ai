@@ -1,3 +1,4 @@
+import { AppError } from './AppError';
 import type { CompletionParams, JinjaFormattedChatResult, LlamaContext } from 'llama.rn';
 import { hasToolProtocol, localToolFormatterOptions, type LocalToolRequest } from './LocalToolRequest';
 import type { LlmChatMessage } from '../types/chat';
@@ -75,7 +76,7 @@ export class PreparedLlamaRequestCache {
       if (template.jinja === false || template.forcePureContent === true || template.chatTemplate !== undefined
         || !jinja || !(useToolTemplate || jinja.default) || !caps?.toolCalls
         || (selectingTools && !caps.tools)) {
-        throw new Error('The loaded model template does not support the local tool protocol.');
+        throw new AppError('local_tool_unsupported', 'The loaded model does not support local tool calls.');
       }
     }
     const output = selectingTools ? prepareStructuredOutput(undefined) : requestedOutput;
@@ -113,7 +114,7 @@ export class PreparedLlamaRequestCache {
     if (needsToolProtocol && (formatted.type !== 'jinja' || (selectingTools
       && (!formatted.chat_parser || !formatted.chat_format
         || (toolRequest?.toolChoice !== 'none' && !formatted.grammar))))) {
-      throw new Error('The loaded model formatter did not prepare a tool parser.');
+      throw new AppError('local_tool_unsupported', 'The loaded model does not support local tool calls.');
     }
     const prefill = selectingTools ? '' : template.prefillText ?? '';
     const lastMessage = messages.at(-1);

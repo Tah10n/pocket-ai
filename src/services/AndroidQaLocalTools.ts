@@ -94,6 +94,12 @@ async function prepareFixture(timeoutMs: number): Promise<void> {
   throw new QaFailure('timeout');
 }
 
+export function createAndroidQaDocumentSearchPrompt(documentId: string): string {
+  return `Search the attached document with ID ${JSON.stringify(documentId)} using search_attached_documents. `
+    + 'Search for Meridian verification code. Use this exact document ID if you provide documentIds; do not invent an ID. '
+    + 'Then return the verification code found in the tool result.';
+}
+
 export function hasAndroidQaVisibleAnswer(content: string): boolean {
   return getAssistantPresentation(content).finalContent.trim().length > 0;
 }
@@ -258,7 +264,7 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
       } }] });
     unattachedDraft = undefined;
     await FileSystem.deleteAsync(temporarySource, { idempotent: true }); temporarySource = undefined;
-    await runCase('document_search', 'Search the attached documents for Meridian verification code, then return only the exact code.',
+    await runCase('document_search', createAndroidQaDocumentSearchPrompt(documentId),
       { enabled: true, allowedTools: ['search_attached_documents'], toolChoice: 'required' });
     await runCase('json_schema', 'Use calculate for 17+25. Return the result in the answer field.', required,
       { output: { mode: 'json_schema', schema: JSON.stringify({ type: 'object', properties: { answer: { type: 'integer' } }, required: ['answer'], additionalProperties: false }) } });

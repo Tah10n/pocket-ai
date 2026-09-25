@@ -1,5 +1,5 @@
 import { AppError } from '../../src/services/AppError';
-import { getAndroidQaLocalToolsHistoryMarker, hasAndroidQaVisibleAnswer, hasAndroidQaFinalReference, getAndroidQaLocalToolsEvidence, resetAndroidQaLocalToolsForTests, runAndroidQaLocalTools } from '../../src/services/AndroidQaLocalTools';
+import { createAndroidQaDocumentSearchPrompt, getAndroidQaLocalToolsHistoryMarker, hasAndroidQaVisibleAnswer, hasAndroidQaFinalReference, getAndroidQaLocalToolsEvidence, resetAndroidQaLocalToolsForTests, runAndroidQaLocalTools } from '../../src/services/AndroidQaLocalTools';
 const mockEnabled = jest.fn(() => true);
 const mockBaseline = jest.fn(() => ({ status: 'failed' }));
 const mockLoad = jest.fn();
@@ -150,3 +150,12 @@ it('preserves a settled native answer before a failed QA assertion and retains i
   expect(finalize).toHaveBeenCalledWith('qa-thread', 'assistant', expect.objectContaining({ outcome: 'success', content: rawModelText }));
   expect(JSON.stringify(getAndroidQaLocalToolsEvidence())).not.toContain(rawModelText);
 });
+
+it.each(['attached-fixture-a', 'attached-fixture-b'])(
+  'gives native generation the actual attached ID %s without supplying the document answer', documentId => {
+    const prompt = createAndroidQaDocumentSearchPrompt(documentId);
+    expect(prompt).toContain(JSON.stringify(documentId));
+    expect(prompt).toContain('Meridian verification code');
+    expect(prompt).not.toContain('CERULEAN-731');
+    expect(prompt).not.toContain('document123');
+  });

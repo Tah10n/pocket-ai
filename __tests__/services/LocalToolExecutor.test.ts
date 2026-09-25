@@ -95,3 +95,10 @@ describe('LocalToolExecutor', () => {
     expect(Object.isFrozen(LOCAL_TOOL_DEFINITIONS[0].function.parameters)).toBe(true);
   });
 });
+
+it('describes optional document IDs as actual context IDs without changing the required query contract', () => {
+  const definition = getLocalToolDefinitions(settings).find(tool => tool.function.name === 'search_attached_documents');
+  expect(definition).toHaveProperty('function.parameters.required', ['query']);
+  expect(definition).toHaveProperty('function.parameters.properties.documentIds.description',
+    'Optional. Omit to search this chat; use only actual attached document IDs provided in context. Never invent IDs.');
+});

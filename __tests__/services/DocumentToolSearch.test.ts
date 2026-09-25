@@ -55,6 +55,11 @@ describe('DocumentToolSearch', () => {
     await expect(searchAttachedDocuments('target', ['doc'], context())).rejects.toHaveProperty('category', 'document_unavailable');
     expect(mockStat).not.toHaveBeenCalled(); expect(mockProcess).not.toHaveBeenCalled();
   });
+  it('rejects a model-invented document ID without falling back to another attached document', async () => {
+    await expect(searchAttachedDocuments('Meridian verification code', ['document123'], context()))
+      .rejects.toHaveProperty('category', 'document_unavailable');
+    expect(mockStat).not.toHaveBeenCalled(); expect(mockSelect).not.toHaveBeenCalled(); expect(mockProcess).not.toHaveBeenCalled();
+  });
   it('refuses missing files even when parsed content is cached', async () => {
     mockStat.mockResolvedValue({ exists: false });
     await expect(searchAttachedDocuments('target', ['doc'], context())).rejects.toHaveProperty('category', 'document_unavailable');

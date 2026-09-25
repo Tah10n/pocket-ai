@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalToolsEvidence, waitForLocalToolsEvidence } = require("./lib/local-tools-evidence");
 
 const fs = require("fs");
 const path = require("path");
@@ -107,7 +108,7 @@ const SCENARIO_PACK_SCENARIOS = {
   "attachments-prepared-send": PREPARED_ATTACHMENT_SEND_SCENARIOS,
   "branch-regeneration": BRANCH_REGENERATION_SCENARIOS,
   documents: DOCUMENT_SCENARIOS,
-  inference: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3"],
+  inference: ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools"],
   "document-benchmark": DOCUMENT_BENCHMARK_SCENARIOS,
   "dependency-ui": [
     ...CORE_SCENARIOS,
@@ -3156,6 +3157,56 @@ function buildScenarios() {
       },
     },
     {
+      id: "runtime-local-tools",
+      tier: "critical",
+      requiresCurrentHeadProvenance: true,
+      requiresIsolatedQaInstall: true,
+      description: "Verify real local tool calls, document scope, structured final output and Stop after the Stage 1–3 CPU baseline.",
+      run: async (ctx) => {
+        const adbPath = resolveAdbPath();
+        const evidencePath = path.join(artifactsRoot, "local-tools-evidence.json");
+        fs.rmSync(evidencePath, { force: true });
+        try {
+          await goToHome(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const action = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-local-tools", { timeoutMs: 180000, visibleOnly: true });
+          if (!action.bounds) throw new Error("Local tools QA action is not tappable.");
+          tapBounds(adbPath, ctx.serial, action.bounds);
+          const details = await waitForLocalToolsEvidence(() => {
+            const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), "chat-qa-local-tools-evidence");
+            if (!node) return null;
+            let observed;
+            try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safeEvidence = sanitizeLocalToolsEvidence(observed);
+            fs.writeFileSync(evidencePath, `${JSON.stringify(safeEvidence, null, 2)}\n`);
+            return safeEvidence;
+          });
+          const readHistory = async () => {
+            const node = await waitForResourceId(adbPath, ctx.serial, "chat-qa-local-tools-history", { timeoutMs: 120000, visibleOnly: false });
+            return sanitizeLocalToolsHistory(JSON.parse(node.contentDesc || node.text));
+          };
+          const before = await readHistory();
+          if (!before.hydrated) throw new Error("Chat history is not hydrated before cold reopen.");
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          let after = await readHistory();
+          const hydrationDeadline = Date.now() + 30000;
+          while (!after.hydrated && Date.now() < hydrationDeadline) {
+            await new Promise(resolve => setTimeout(resolve, 250)); after = await readHistory();
+          }
+          const coldReopen = validateColdLocalToolsHistory(before, after);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          validateColdLocalToolsHistory(before, await readHistory());
+          fs.writeFileSync(path.join(artifactsRoot, "local-tools-cold-reopen.json"), `${JSON.stringify(coldReopen, null, 2)}\n`);
+          return { details: { ...details, coldReopen } };
+        } catch (error) {
+          forceStopScenarioApp(adbPath, ctx.serial);
+          throw error;
+        }
+      },
+    },
+    {
       id: "native-glass-theme-matrix",
       tier: "critical",
       requiresCurrentHeadProvenance: true,
@@ -5556,7 +5607,7 @@ function configureScenarioBuildEnvironment(options, requiresCurrentHeadProvenanc
       );
     }
     env.EXPO_PUBLIC_ANDROID_QA = "1";
-    if (["documents", "inference"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3"].includes(options.scenario)) {
+    if (["documents", "inference"].includes(options.pack) || ["runtime-inference-lifecycle", "runtime-model-resources", "runtime-stage3", "runtime-local-tools"].includes(options.scenario)) {
       env.EXPO_PUBLIC_ANDROID_QA_DOCUMENTS = "1";
     }
     env.POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING =
@@ -6843,6 +6894,7 @@ function selectScenarios(scenarios, options) {
       "runtime-inference-lifecycle",
       "runtime-model-resources",
       "runtime-stage3",
+      "runtime-local-tools",
       "native-glass-theme-matrix",
       "foreground-service-notification-states",
     ]);

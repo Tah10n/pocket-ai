@@ -38,6 +38,7 @@ export interface ChatMessageBubbleProps {
   tokensPerSec?: number;
   inferenceMetrics?: InferenceCompletionTelemetry;
   structuredOutput?: ChatMessage['structuredOutput'];
+  toolRun?: ChatMessage['toolRun'];
   errorCode?: string;
   canDelete?: boolean;
   canRegenerate?: boolean;
@@ -151,6 +152,7 @@ function areChatMessageBubblePropsEqual(prev: ChatMessageBubbleProps, next: Chat
     && prev.tokensPerSec === next.tokensPerSec
     && prev.inferenceMetrics === next.inferenceMetrics
     && prev.structuredOutput === next.structuredOutput
+    && prev.toolRun === next.toolRun
     && prev.errorCode === next.errorCode
     && prev.canDelete === next.canDelete
     && prev.canRegenerate === next.canRegenerate
@@ -199,6 +201,7 @@ const ChatMessageBubbleComponent = ({
   tokensPerSec,
   inferenceMetrics,
   structuredOutput,
+  toolRun,
   errorCode,
   canDelete = false,
   canRegenerate = false,
@@ -207,6 +210,7 @@ const ChatMessageBubbleComponent = ({
   onLayout,
 }: ChatMessageBubbleProps) => {
   const [copied, setCopied] = useState(false);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
   const [isThoughtExpanded, setThoughtExpanded] = useState(false);
   const [attachmentPreviewUris, setAttachmentPreviewUris] = useState<Record<string, string | null>>({});
   const failedAttachmentPreviewUrisRef = useRef<Record<string, Set<string>>>({});
@@ -427,6 +431,25 @@ const ChatMessageBubbleComponent = ({
           className={`max-w-full min-w-0 flex-shrink ${bubbleAlignmentClassName} ${bubbleClassName}`}
           style={bubbleShapeStyle}
         >
+          {!isUser && toolRun ? (
+            <Box className="mb-2 gap-2">
+              <Pressable testID={`tool-run-toggle-${id}`} accessibilityRole="button"
+                accessibilityLabel={t('chat.tools.steps')} accessibilityState={{ expanded: toolsExpanded }}
+                className="min-h-11 justify-center" onPress={() => setToolsExpanded(!toolsExpanded)}>
+                <Text colorRole="primary" className="text-sm font-medium">{t('chat.tools.steps')} · {t(`chat.tools.status.${toolRun.status}`)}</Text>
+              </Pressable>
+              {toolsExpanded ? toolRun.rounds.map(round => (
+                <Box key={round.index} className="gap-2">
+                  {round.content ? <Text selectable colorRole="secondary" className="text-xs">{round.content}</Text> : null}
+                  {round.calls.map(call => <Box key={call.id} testID={`tool-call-${call.id}`} className="rounded-lg border border-outline-200 p-2">
+                    <Text colorRole="primary" className="text-sm font-medium">{call.name} · {t(`chat.tools.status.${call.status}`)}</Text>
+                    <Text selectable colorRole="secondary" className="text-xs">{call.arguments}</Text>
+                    {call.result !== undefined ? <Text selectable colorRole="primary" className="mt-1 text-xs">{call.result}</Text> : null}
+                  </Box>)}
+                </Box>
+              )) : null}
+            </Box>
+          ) : null}
           {shouldShowThoughtSection ? (
             <Surface
               material={THOUGHT_CONTENT_MATERIAL}

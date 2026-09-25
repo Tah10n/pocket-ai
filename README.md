@@ -227,6 +227,7 @@ This project uses Conventional Commit-style **PR titles** to drive automated ver
 | [Privacy & Disclosures](docs/privacy-disclosures.md) | Data handling and privacy policies |
 | [Multimodal Attachments](docs/multimodal-attachments.md) | Local attachment lifecycle, runtime media contracts, and privacy boundaries |
 | [Document Processing](docs/document-processing.md) | Offline formats, session-only retrieval, native architecture, limits, and maintenance |
+| [Local Tools](docs/local-tools.md) | Per-chat functions, permissions, execution limits and compatibility |
 | [Model Parameters](docs/model-parameters.md) | Generation settings, load profiles, and chat snapshot behavior |
 | [Runtime Performance](docs/runtime-performance.md) | Bounded streaming, persistence, model-load, catalog, cache-scan, and tracing contracts |
 | [Android Build Guide](docs/android-build.md) | Deterministic Android release builds, signing, provenance, and current-head QA |

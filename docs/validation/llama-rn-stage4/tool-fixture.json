@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "metadataVerifiedOn": "2026-09-25",
+  "runtimeVersion": "0.13.0-rc.3",
+  "nativeAcceptance": {
+    "scope": "Native acceptance is recorded separately. Metadata and unit tests do not establish native tool-calling success."
+  },
+  "model": {
+    "repository": "bartowski/Qwen_Qwen3-0.6B-GGUF",
+    "revision": "60b85c0e3d8fe0f6474f406922a26d12aca4550d",
+    "filename": "Qwen_Qwen3-0.6B-Q8_0.gguf",
+    "sizeBytes": 804753824,
+    "sha256": "c159d1518f16bc42533d9a09f034eb598b670341adc2b08b9a9751614aea71eb",
+    "downloadUrl": "https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/resolve/60b85c0e3d8fe0f6474f406922a26d12aca4550d/Qwen_Qwen3-0.6B-Q8_0.gguf?download=true",
+    "license": "Apache-2.0",
+    "declaredBaseModel": "Qwen/Qwen3-0.6B"
+  },
+  "toolChoiceCoverage": [
+    "required_first_round",
+    "auto"
+  ],
+  "coldReopenEvidence": [
+    "unchanged_protocol_digest",
+    "terminal_call_statuses",
+    "zero_new_tool_runs",
+    "no_active_completion"
+  ]
+}

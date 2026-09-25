@@ -394,6 +394,28 @@
     "body": "This route is reserved for compact modal interactions that should inherit the shared theme, typography, and navigation chrome."
   },
   "chat": {
+    "tools": {
+      "title": "Local tools",
+      "enable": "Enable local tools for this chat",
+      "available": "Available tools",
+      "description": "Allow local calculation, device date and time, and search only in documents attached to this chat. Tool results are reference data.",
+      "steps": "Tool steps",
+      "names": {
+        "calculate": "Calculator",
+        "get_current_datetime": "Device date and time",
+        "search_attached_documents": "Search attached documents"
+      },
+      "status": {
+        "proposed": "Requested",
+        "running": "Running",
+        "completed": "Completed",
+        "error": "Error",
+        "cancelled": "Cancelled",
+        "interrupted": "Interrupted"
+      },
+      "on": "On",
+      "off": "Off"
+    },
     "remoteImageBlocked": "[Remote image blocked]",
     "title": "Chat",
     "newChatTitle": "New chat",

@@ -25,6 +25,10 @@ export function createLocalToolRequest(settings: LocalToolSettings, first = true
   };
 }
 
+let processLocalToolRunStarts = 0;
+/** Aggregate process-local QA receipt; no arguments or results are retained. */
+export const getLocalToolRunStartCount = () => processLocalToolRunStarts;
+
 /** One bounded extension of the existing engine, with no alternative native context. */
 export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, onProgress, onNativeStep }: {
   options: LlmChatCompletionOptions;
@@ -41,6 +45,7 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
   if (!captured.enabled || !captured.allowedTools.length || !options.expectedModelId) {
     throw new LocalToolRunError('invalid_proposal');
   }
+  processLocalToolRunStarts += 1;
   assertCurrent();
   const lease = llmEngineService.beginLocalToolRun(options.expectedModelId);
   const controller = new AbortController();

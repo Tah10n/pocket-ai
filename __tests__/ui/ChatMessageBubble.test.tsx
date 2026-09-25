@@ -99,6 +99,23 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatMessageBubble', () => {
+  it('keeps requested tool work distinct from executed work and updates the collapsed run', () => {
+    const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
+      phase: 'tools' as const, status: 'running' as const,
+      rounds: [{ index: 0, content: '', calls: [{ id: 'c', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'proposed' as const }] }],
+    };
+    const view = render(<ChatMessageBubble id="tools" isUser={false} content="" toolRun={toolRun} />);
+    expect(view.queryByTestId('tool-call-c')).toBeNull();
+    fireEvent.press(view.getByTestId('tool-run-toggle-tools'));
+    expect(view.getByText(/chat.tools.status.proposed/)).toBeTruthy();
+    view.rerender(<ChatMessageBubble id="tools" isUser={false} content="" toolRun={{ ...toolRun,
+      rounds: [{ ...toolRun.rounds[0], calls: [{ ...toolRun.rounds[0].calls[0], status: 'completed', result: '{"value":4}' }] }],
+    }} />);
+    expect(view.getByText(/chat.tools.status.completed/)).toBeTruthy();
+    expect(view.getByText('{"value":4}')).toBeTruthy();
+    expect(view.queryByTestId('markdown-renderer')).toBeNull();
+  });
+
   it('displays and copies exact JSON without stripping literal thinking tags or whitespace', async () => {
     const raw = '  {"value":"<think>literal</think>", "ok": true}\n';
     const view = render(<ChatMessageBubble id="json-exact" isUser={false} content={raw}

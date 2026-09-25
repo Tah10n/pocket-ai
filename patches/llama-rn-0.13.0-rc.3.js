@@ -128,7 +128,7 @@ const CLOCK_PRIVACY_REPLACEMENTS = [
 ];
 const COMPLETION_SOURCE = 'cpp/rn-completion.cpp';
 const COMPLETION_BEFORE_SHA256 = '4563b4a65e98e7022d4ae38014f12acd2241a0911fc2201f5da465679df82087';
-const COMPLETION_AFTER_SHA256 = 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d';
+const COMPLETION_AFTER_SHA256 = 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058';
 const COMPLETION_REPLACEMENTS = [
   [
     `    if (ctx_sampling != nullptr) {
@@ -144,7 +144,7 @@ const COMPLETION_REPLACEMENTS = [
 ];
 const SAMPLING_SOURCE = 'cpp/common/sampling.cpp';
 const SAMPLING_BEFORE_SHA256 = 'e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5';
-const SAMPLING_AFTER_SHA256 = 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2';
+const SAMPLING_AFTER_SHA256 = '2f4188ff106231e281e439e6c6f906657394d4d0c0372e130c9fc44670bc4e9d';
 const SAMPLING_PREVIOUS_SHA256 = '942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c';
 const LLGUIDANCE_REPLACEMENTS = [["        LM_GGML_ABORT(\"llguidance (cmake -DLLAMA_LLGUIDANCE=ON) is not enabled\");", "        throw std::runtime_error(\"Unsupported grammar backend: llguidance is not enabled\");"]];
 const SAMPLING_REPLACEMENTS = [
@@ -243,13 +243,39 @@ const GRAMMAR_REPLACEMENTS = [
     "            LLAMA_LOG_DEBUG(\"Grammar still awaiting trigger\\n\");"
   ]
 ];
+// Stage 4: retain numeric telemetry, never reconstructible token sequences.
+const COMPLETION_PRIVACY_REPLACEMENTS = [
+  [
+    "        LOG_VERBOSE(\"prompt ingested, n_past: %d, cached: %s, to_eval: %s\",\n            n_past,\n            tokens_to_str(parent_ctx->ctx, embd.cbegin(), embd.cbegin() + n_past).c_str(),\n            tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()\n        );",
+    "        LOG_VERBOSE(\"prompt ingested, n_past: %d\", n_past);"
+  ],
+  [
+    "                LOG_ERROR(\"failed to eval, n_eval: %d, n_past: %d, n_threads: %d, embd: %s\",\n                    n_eval,\n                    n_past,\n                    parent_ctx->params.cpuparams.n_threads,\n                    tokens_to_str(parent_ctx->ctx, embd.cbegin() + n_past, embd.cend()).c_str()\n                );",
+    "                LOG_ERROR(\"failed to eval, n_eval: %d, n_past: %d, n_threads: %d\",\n                    n_eval, n_past, parent_ctx->params.cpuparams.n_threads);"
+  ],
+  [
+    "            LOG_VERBOSE(\"EOS: %s\", common_token_to_piece(parent_ctx->ctx, new_token_id).c_str());",
+    "            LOG_VERBOSE(\"EOS reached\");"
+  ],
+  [
+    "    LOG_VERBOSE(\"next token, token: %s, token_text: %s, has_next_token: %d, n_remain: %d, num_tokens_predicted: %d, stopped_eos: %d, stopped_word: %d, stopped_limit: %d, stopping_word: %s\",\n        common_token_to_piece(parent_ctx->ctx, token_with_probs.tok),\n        tokens_to_output_formatted_string(parent_ctx->ctx, token_with_probs.tok).c_str(),\n        has_next_token,\n        n_remain,\n        num_tokens_predicted,\n        stopped_eos,\n        stopped_word,\n        stopped_limit,\n        stopping_word.c_str()\n    );",
+    "    LOG_VERBOSE(\"completion step, has_next_token: %d, n_remain: %d, num_tokens_predicted: %d, stopped_eos: %d, stopped_word: %d, stopped_limit: %d\",\n        has_next_token, n_remain, num_tokens_predicted, stopped_eos, stopped_word, stopped_limit);"
+  ]
+];
+const SAMPLING_PRIVACY_REPLACEMENTS = [
+  [
+    "            LOG_DBG(\"%s: Backend sampler selected token: '%d'. Will not run any CPU samplers\\n\", __func__, id);",
+    "            LOG_DBG(\"%s: Backend sampler selected a token; skipping CPU samplers\\n\", __func__);"
+  ]
+];
 const SOURCE_PATCHES = [
   { source: SOURCE, beforeSha256: BEFORE_SHA256, afterSha256: AFTER_SHA256, replacements: [[BEFORE, AFTER]] },
   { source: PARAMS_SOURCE, beforeSha256: PARAMS_BEFORE_SHA256, afterSha256: PARAMS_AFTER_SHA256, replacements: PARAMS_REPLACEMENTS },
   { source: CLOCK_SOURCE, beforeSha256: CLOCK_BEFORE_SHA256, afterSha256: CLOCK_AFTER_SHA256, replacements: [[CLOCK_BEFORE, CLOCK_AFTER], ...CLOCK_PRIVACY_REPLACEMENTS], intermediates: [{ sha256: CLOCK_PREVIOUS_SHA256, replacements: CLOCK_PRIVACY_REPLACEMENTS }] },
-  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, replacements: COMPLETION_REPLACEMENTS },
-  { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: LLGUIDANCE_REPLACEMENTS }], replacements: SAMPLING_REPLACEMENTS },
+  { source: COMPLETION_SOURCE, beforeSha256: COMPLETION_BEFORE_SHA256, afterSha256: COMPLETION_AFTER_SHA256, intermediates: [{ sha256: 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d', replacements: COMPLETION_PRIVACY_REPLACEMENTS }], replacements: [...COMPLETION_REPLACEMENTS, ...COMPLETION_PRIVACY_REPLACEMENTS] },
+  { source: SAMPLING_SOURCE, beforeSha256: SAMPLING_BEFORE_SHA256, afterSha256: SAMPLING_AFTER_SHA256, intermediates: [{ sha256: SAMPLING_PREVIOUS_SHA256, replacements: [...LLGUIDANCE_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] }, { sha256: 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2', replacements: SAMPLING_PRIVACY_REPLACEMENTS }], replacements: [...SAMPLING_REPLACEMENTS, ...SAMPLING_PRIVACY_REPLACEMENTS] },
   { source: GRAMMAR_SOURCE, beforeSha256: GRAMMAR_BEFORE_SHA256, afterSha256: GRAMMAR_AFTER_SHA256, replacements: GRAMMAR_REPLACEMENTS },
+  {"source": "cpp/llama-batch.cpp", "beforeSha256": "88f7b462c41fda25c1767880c0d0a70550bfd816a1477663de06de8d5f5ca2fe", "afterSha256": "941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96", "replacements": [["                    LLAMA_LOG_DEBUG(\"%s:  %4d: id = %6d (%16s), pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.token[i], vocab->token_to_piece(ubatch.token[i]).c_str(),\n                            ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);", "                    LLAMA_LOG_DEBUG(\"%s:  %4d: [token], pos = %4d, n_seq_id = %2d, seq_id = [%s], output = %d\\n\",\n                            __func__, i, ubatch.pos[i], ubatch.n_seq_id[i], ss.str().c_str(), ubatch.output[i]);"]]},
   { source: 'llama-rn.podspec', beforeSha256: 'af42dc7cca2823272b4367ddfd21b8191bb265d8fd5c54b6a2072959b0931a55', afterSha256: 'e539fba083a63e6edda56d27780c7d14194542cabb3b99919a4fe81a609adbff', replacements: [
     [
       "s.source_files = \"ios/**/*.{h,m,mm}\", \"cpp/**/*.{h,cpp,hpp,c,m,mm,s}\"",

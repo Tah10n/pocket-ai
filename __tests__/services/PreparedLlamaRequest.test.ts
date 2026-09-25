@@ -10,7 +10,9 @@ function setup() {
     thinking_start_tag: '<think>', thinking_end_tag: '</think>', thinking_forced_open: false,
   });
   // Only the formatter is used by this helper; lifecycle tests cover full contexts.
-  const context = { getFormattedChat } as unknown as LlamaContext;
+  const context = { getFormattedChat, model: { chatTemplates: { jinja: {
+    default: true, defaultCaps: { tools: true, toolCalls: true }, toolUse: false,
+  } } } } as unknown as LlamaContext;
   const cache = new PreparedLlamaRequestCache();
   const request = {
     context, epoch: 1, messages: [{ role: 'user' as const, content: 'Question' }],
@@ -172,5 +174,87 @@ describe('one prepared llama request for counting and completion', () => {
     for (let now = 0; now < 10; now++) await cache.prepare({ ...request, generation: { template: { now } } });
     await cache.prepare({ ...request, generation: { template: { now: 0 } } });
     expect(getFormattedChat).toHaveBeenCalledTimes(11);
+  });
+});
+
+
+describe('local tool preparation', () => {
+  const toolRequest = {
+    phase: 'tools' as const, tools: [{ type: 'function' as const, function: {
+      name: 'calculate', description: 'Calculate', parameters: { type: 'object' },
+    } }], toolChoice: 'required' as const, parallelToolCalls: false as const,
+  };
+
+  it('keeps tool parser and grammar separate from final JSON and prefill', async () => {
+    const { cache, request, getFormattedChat } = setup();
+    const generation = freezeGenerationParameters({ output: { mode: 'json_object' }, template: { prefillText: '{' } }, 100);
+    const tools = await cache.prepare({ ...request, generation, toolRequest });
+    expect(tools.output.mode).toBe('text');
+    expect(tools.completion).toMatchObject({ chat_parser: 'parser', grammar: 'template grammar', prefill_text: '' });
+    expect(tools.completion.prompt).toBe('<bos>user<assistant>');
+    expect(getFormattedChat.mock.calls[0][2]).toMatchObject({ tools: toolRequest.tools, tool_choice: 'required', now: 100 });
+    expect(getFormattedChat.mock.calls[0][2]).not.toHaveProperty('response_format');
+    expect(getFormattedChat.mock.calls[0][2]).not.toHaveProperty('parallel_tool_calls');
+    const final = await cache.prepare({ ...request, generation, toolRequest: { ...toolRequest, phase: 'final' } });
+    expect(final.completion).toMatchObject({ chat_parser: '', chat_format: 0, grammar: '', generation_prompt: '{' });
+    expect(getFormattedChat.mock.calls[1][2]).toMatchObject({ tools: toolRequest.tools, tool_choice: 'none' });
+  });
+
+  it('allows content-only final parsing after formatting linked protocol history', async () => {
+    const { cache, request, getFormattedChat } = setup();
+    const call = { id: 'call-1', type: 'function' as const, function: { name: 'calculate', arguments: '{}' } };
+    const messages = [{ role: 'assistant' as const, content: '', tool_calls: [call] },
+      { role: 'tool' as const, content: '4', tool_call_id: call.id }];
+    getFormattedChat.mockResolvedValue({ type: 'jinja', prompt: 'rendered-history', chat_format: 0, chat_parser: '' });
+    const final = await cache.prepare({ ...request, messages,
+      generation: freezeGenerationParameters({ output: { mode: 'json_object' } }, 100),
+      toolRequest: { ...toolRequest, phase: 'final' },
+    });
+    expect(final.completion).toMatchObject({ prompt: 'rendered-history', chat_format: 0, chat_parser: '' });
+    expect(getFormattedChat.mock.calls[0][0]).toEqual(messages);
+    await expect(cache.prepare({ ...request, messages })).resolves.toHaveProperty('completion.prompt', 'rendered-history');
+  });
+
+  it('validates output before dispatching tools', async () => {
+    const { cache, request, getFormattedChat } = setup();
+    await expect(cache.prepare({ ...request, toolRequest,
+      generation: freezeGenerationParameters({ output: { mode: 'gbnf', grammar: 'root ::= "x"' }, template: { prefillText: 'x' } }, 100),
+    })).rejects.toThrow('Custom GBNF');
+    expect(getFormattedChat).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported caps, pure content and absent parser rather than downgrading', async () => {
+    const { cache, request, getFormattedChat } = setup();
+    request.context.model.chatTemplates.jinja.defaultCaps.toolCalls = false;
+    await expect(cache.prepare({ ...request, toolRequest })).rejects.toThrow('local tool protocol');
+    request.context.model.chatTemplates.jinja.defaultCaps.toolCalls = true;
+    await expect(cache.prepare({ ...request, toolRequest, generation: { template: { forcePureContent: true } } })).rejects.toThrow('local tool protocol');
+    getFormattedChat.mockResolvedValue({ type: 'jinja', prompt: 'p', chat_format: 0, chat_parser: '' });
+    await expect(cache.prepare({ ...request, toolRequest })).rejects.toThrow('tool parser');
+  });
+
+  it('uses tool-use capabilities for final definitions but rejects unsupported default history', async () => {
+    const { cache, request } = setup();
+    const jinja = request.context.model.chatTemplates.jinja;
+    jinja.defaultCaps.toolCalls = false;
+    jinja.toolUse = true;
+    jinja.toolUseCaps = { tools: true, toolCalls: true, systemRole: true, parallelToolCalls: false };
+    const messages = [{ role: 'assistant' as const, content: '', tool_calls: [{
+      id: 'c1', type: 'function' as const, function: { name: 'calculate', arguments: '{}' },
+    }] }, { role: 'tool' as const, content: '4', tool_call_id: 'c1' }];
+    await expect(cache.prepare({ ...request, messages, toolRequest: { ...toolRequest, phase: 'final' } }))
+      .resolves.toHaveProperty('completion.prompt');
+    await expect(cache.prepare({ ...request, messages })).rejects.toThrow('local tool protocol');
+  });
+
+  it('invalidates on tool choice and schema changes', async () => {
+    const { cache, request, getFormattedChat } = setup();
+    await cache.prepare({ ...request, toolRequest });
+    await cache.prepare({ ...request, toolRequest });
+    await cache.prepare({ ...request, toolRequest: { ...toolRequest, toolChoice: 'auto' } });
+    await cache.prepare({ ...request, toolRequest: { ...toolRequest, tools: [{ ...toolRequest.tools[0], function: {
+      ...toolRequest.tools[0].function, parameters: { type: 'object', additionalProperties: false },
+    } }] } });
+    expect(getFormattedChat).toHaveBeenCalledTimes(3);
   });
 });

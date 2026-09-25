@@ -24,6 +24,15 @@ export async function clearChatHistory(): Promise<number> {
   try {
     const drainResult = await stopAllGenerationWork();
     generationWorkStopped = drainResult === 'drained';
+    if (!generationWorkStopped) {
+      // A timeout does not release the native/document owner. Preserve both
+      // history and attachment resources until a later explicit retry drains it.
+      throw new AppError(
+        'chat_history_busy',
+        'Chat history is still busy. Stop the current generation and try again.',
+        { details: { drainResult } },
+      );
+    }
     const store = useChatStore.getState();
     const removedThreadIds = Object.keys(store.threads);
     let removedThreads = store.clearAllThreads();

@@ -1,3 +1,4 @@
+import { sanitizeLocalToolRun, sanitizeLocalToolSettings, type LocalToolRun, type LocalToolSettings, type LlmToolCall } from './localTools';
 import { getVisibleMessageContent } from '../utils/chatPresentation';
 import type {
   ChatImageAttachment,
@@ -54,6 +55,7 @@ export interface ChatMessage {
   generationSnapshot?: GenerationParamsSnapshot;
   loadProfileSnapshot?: ModelLoadParameters;
   structuredOutput?: StructuredOutputValidation;
+  toolRun?: LocalToolRun;
   errorCode?: string;
   errorMessage?: string;
   regeneratesMessageId?: string;
@@ -75,6 +77,7 @@ export interface ChatThread {
   presetSnapshot: PresetSnapshot;
   paramsSnapshot: GenerationParamsSnapshot;
   loraSnapshot?: LoraProfileAdapter[];
+  toolSettings?: LocalToolSettings;
   messages: ChatMessage[];
   createdAt: number;
   updatedAt: number;
@@ -94,7 +97,9 @@ export interface ConversationIndexItem {
 }
 
 export interface LlmChatMessage {
-  role: ChatMessageRole;
+  role: ChatMessageRole | 'tool';
+  tool_calls?: LlmToolCall[];
+  tool_call_id?: string;
   content: string;
   attachments?: (ChatImageAttachment | ChatAttachment)[];
   mediaPaths?: string[];
@@ -128,6 +133,8 @@ export type LlmContentPart =
   | LlmInputAudioContentPart;
 
 export interface LlmChatCompletionOptions {
+  toolRequest?: import('../services/LocalToolRequest').LocalToolRequest;
+  runOwner?: symbol;
   messages: LlmChatMessage[];
   generation?: AdvancedGenerationParameters;
   /**
@@ -298,7 +305,7 @@ export function buildConversationIndex(
 
 export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
   const sanitizedMessages = thread.messages.filter(
-    (message) => message.state !== 'streaming',
+    (message) => message.state !== 'streaming' || Boolean(message.toolRun),
   );
   const legacyThread = thread as ChatThread & {
     modelId?: unknown;
@@ -354,6 +361,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
       ...message,
       kind,
       modelId: message.modelId ?? (currentModelId || undefined),
+      ...(message.toolRun ? { toolRun: message.toolRun.threadId === thread.id ? sanitizeLocalToolRun(message.toolRun, true) : undefined, state: message.state === 'streaming' ? 'stopped' : message.state } : {}),
     };
   });
 
@@ -363,6 +371,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
   });
 
   const removedStreamingMessages = sanitizedMessages.length !== thread.messages.length;
+  const recoveredStreamingMessages = thread.messages.some(message => message.state === 'streaming' && message.toolRun);
   const legacyReasoningEnabled = (thread.paramsSnapshot as { reasoningEnabled?: unknown }).reasoningEnabled;
 
   return {
@@ -370,6 +379,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     modelId: baseModelId,
     activeModelId,
     loraSnapshot: sanitizeLoraProfileAdapters(thread.loraSnapshot),
+    ...(thread.toolSettings ? { toolSettings: sanitizeLocalToolSettings(thread.toolSettings) } : {}),
     presetSnapshot: thread.presetSnapshot ?? {
       ...DEFAULT_PRESET_SNAPSHOT,
       id: thread.presetId ?? null,
@@ -387,7 +397,7 @@ export function sanitizeHydratedThread(thread: ChatThread): ChatThread {
     },
     titleSource: thread.titleSource === 'manual' ? 'manual' : 'derived',
     messages: migratedMessages,
-    status: removedStreamingMessages && thread.status === 'generating' ? 'stopped' : thread.status,
-    updatedAt: removedStreamingMessages ? Date.now() : thread.updatedAt,
+    status: (removedStreamingMessages || recoveredStreamingMessages) && thread.status === 'generating' ? 'stopped' : thread.status,
+    updatedAt: removedStreamingMessages || recoveredStreamingMessages ? Date.now() : thread.updatedAt,
   };
 }

@@ -1,3 +1,7 @@
+import { createLocalToolRequest, runLocalToolCompletion } from '../services/LocalToolRun';
+import { hasToolProtocol } from '../services/LocalToolRequest';
+import { sanitizeLocalToolSettings, sanitizeLocalToolRun, type LocalToolRun, type LocalToolSettings } from '../types/localTools';
+import type { LlmChatCompletionOptions } from '../types/chat';
 import { AppState, AppStateStatus } from 'react-native';
 import { isThreadLoraProfileReady } from '../utils/chatLoraProfile';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -11,7 +15,7 @@ import {
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings, sanitizeGenerationParameters } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
-import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
+import { AppError, isLocalToolRunErrorCode, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
 import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
@@ -364,6 +368,7 @@ interface ActiveGenerationState {
 }
 
 export type AppendUserMessageOptions = {
+  newThreadToolSettings?: LocalToolSettings;
   newThreadParameters?: {
     modelId: string;
     presetId: string | null;
@@ -2116,6 +2121,8 @@ function getLatestUserLlmMessageIndex(messages: readonly LlmChatMessage[]): numb
 
 function hasLlmMessageInferenceContent(message: LlmChatMessage): boolean {
   return message.role === 'system'
+    || Boolean(message.tool_calls?.length)
+    || (message.role === 'tool' && Boolean(message.tool_call_id))
     || message.content.trim().length > 0
     || getLlmInferenceMessageContentPartTextCount(message) > 0
     || (message.mediaPaths?.length ?? 0) > 0
@@ -2128,6 +2135,9 @@ function filterEmptyLlmInferenceMessages(messages: readonly LlmChatMessage[]): L
 }
 
 function normalizeLlmInferenceMessagePairs(messages: readonly LlmChatMessage[]): LlmChatMessage[] {
+  // Protocol groups are projected and bounded atomically by inferenceWindow.
+  // Never erase an assistant call/final answer to satisfy legacy alternation.
+  if (hasToolProtocol(messages)) return [...messages];
   const normalized: LlmChatMessage[] = [];
   let lastNonSystemRole: LlmChatMessage['role'] | null = null;
 
@@ -3013,6 +3023,9 @@ export const useChatSession = () => {
       throw new Error('Thread not found');
     }
     const inferenceRevisionAtPromptStart = useChatStore.getState().inferenceRevision;
+    const toolSettings = sanitizeLocalToolSettings(storedThread.toolSettings);
+    const toolRequest = toolSettings.enabled ? createLocalToolRequest(toolSettings) : undefined;
+    let latestToolRun: LocalToolRun | undefined;
 
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
@@ -3240,6 +3253,9 @@ export const useChatSession = () => {
           ...finalization,
           generationSnapshot,
           loadProfileSnapshot,
+          toolRun: finalization.outcome === 'stopped' && latestToolRun
+            ? { ...sanitizeLocalToolRun(latestToolRun, true)!, status: 'cancelled' }
+            : latestToolRun,
           structuredOutput: finalization.structuredOutput ?? interruptedOutput,
           content: finalization.content ?? presentation.finalContent,
           thoughtContent: finalization.thoughtContent === undefined
@@ -3515,7 +3531,7 @@ export const useChatSession = () => {
         enableThinking: params.enable_thinking,
         reasoningFormat: params.reasoning_format,
         addGenerationPrompt: params.add_generation_prompt,
-        formattingIdentity: generationFormattingIdentity(generation),
+        formattingIdentity: JSON.stringify([generationFormattingIdentity(generation), toolRequest]),
       });
       const resolvePromptTokenMessages = (messagesToCount: LlmChatMessage[]) => messagesToCount.map((message) => (
         resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
@@ -3535,6 +3551,7 @@ export const useChatSession = () => {
           const tokenCountPromise = llmEngineService.countPromptTokens({
             messages: sanitizedMessagesToCount,
             generation,
+            toolRequest,
             params,
             multimodalReadiness: effectiveMultimodalReadiness,
             expectedModelId: activeModelId,
@@ -3842,7 +3859,7 @@ export const useChatSession = () => {
       }
       generationState.nativeCompletionStarted = true;
       notifyNativeCompletionSettlementChanged();
-      const completion = await llmEngineService.chatCompletion({
+      const requestOptions: LlmChatCompletionOptions = {
         messages,
         generation,
         expectedModelId: modelId,
@@ -3962,7 +3979,19 @@ export const useChatSession = () => {
               presentationParser.doesVisibleContentEndAtSentenceBoundary(),
           });
         },
-      });
+      };
+      const completion = toolRequest
+        ? await runLocalToolCompletion({
+            options: requestOptions, threadId, runId: assistantMessageId,
+            settings: toolSettings, assertCurrent: throwIfGenerationStopped,
+            onProgress: (run) => {
+              if (!canMutateAssistantMessage()
+                || useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart) return;
+              latestToolRun = run;
+              patchAssistantMessage(threadId, assistantMessageId, { toolRun: run });
+            },
+          })
+        : await llmEngineService.chatCompletion(requestOptions);
       if (isAndroidQaEvidenceEnabled) {
         await waitForAndroidQaGenerationGateRelease(assistantMessageId);
       }
@@ -4053,6 +4082,7 @@ export const useChatSession = () => {
       const appError = toAppError(error);
       const assistantErrorCode = appError.code === 'chat_model_mismatch'
         || appError.code === 'chat_model_not_loaded'
+        || isLocalToolRunErrorCode(appError.code)
         ? appError.code
         : 'generation_failed';
 
@@ -4638,6 +4668,9 @@ export const useChatSession = () => {
           loraSnapshot: llmEngineService.getEffectiveLoadParameters?.()?.loraAdapters ?? [],
         });
 
+      if (!existingThreadAtStart && options.newThreadToolSettings) {
+        useChatStore.getState().updateThreadToolSettings(threadId, options.newThreadToolSettings);
+      }
       if (!setActiveThread(threadId)) {
         throw new AppError(
           'action_failed',

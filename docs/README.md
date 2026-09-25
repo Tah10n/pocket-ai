@@ -10,8 +10,10 @@ This folder contains the public maintainer-facing documentation for Pocket AI.
 - [`release-checklist.md`](./release-checklist.md): pre-release verification steps, manual QA flow, and release-facing files that must stay aligned
 - [`new-architecture.md`](./new-architecture.md): notes about React Native New Architecture, native-module expectations, and troubleshooting direction
 - [`ui-architecture.md`](./ui-architecture.md): conventions for UI structure, imports, layout, styling, and localization
+- [`local-tools.md`](./local-tools.md): per-chat local functions, permissions, bounded execution, history, output formats and current verification limits
 - [`model-parameters.md`](./model-parameters.md): how generation/load parameters are stored, snapshotted, and mapped to runtime engine settings
 - [`llama-rn-capabilities.md`](./llama-rn-capabilities.md): pinned runtime API inventory, application integration boundaries, compatibility exceptions, and staged verification criteria
+- [`llama-rn-013-stage4-acceptance.md`](./llama-rn-013-stage4-acceptance.md): Android CPU local-tool execution, document search, structured final output, Stop and cold-reopen evidence
 - [`llama-rn-013-stage3-acceptance.md`](./llama-rn-013-stage3-acceptance.md): Android CPU structured-output and LoRA evidence, reproducible identities, earlier failures, and untested boundaries
 - [`multimodal-attachments.md`](./multimodal-attachments.md): runtime media payload contracts, local attachment lifecycle boundaries, and privacy constraints
 - [`document-processing.md`](./document-processing.md): offline document formats, native parser boundary, session-only retrieval, resource limits, and update procedure

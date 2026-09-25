@@ -1,3 +1,6 @@
+import { getAndroidQaLocalToolsHistoryMarker, subscribeAndroidQaLocalToolsHistory, getAndroidQaLocalToolsEvidence, subscribeAndroidQaLocalTools, runAndroidQaLocalTools } from '../../services/AndroidQaLocalTools';
+import { ChatToolsControl } from '@/components/ui/ChatToolsControl';
+import { sanitizeLocalToolSettings, type LocalToolSettings } from '@/types/localTools';
 import { advancedGenerationIdentity } from '@/utils/generationControls';
 import { isThreadLoraProfileReady, loraExecutionIdentity } from '@/utils/chatLoraProfile';
 import { runPromptDiagnostic } from '@/services/PromptDiagnosticsService';
@@ -759,6 +762,8 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     const resourceEvidence = useSyncExternalStore(
         subscribeAndroidQaModelResources, getAndroidQaModelResourcesEvidence, getAndroidQaModelResourcesEvidence,
     );
+    const localToolsHistoryMarker = useSyncExternalStore(subscribeAndroidQaLocalToolsHistory, getAndroidQaLocalToolsHistoryMarker, getAndroidQaLocalToolsHistoryMarker);
+    const localToolsEvidence = useSyncExternalStore(subscribeAndroidQaLocalTools, getAndroidQaLocalToolsEvidence, getAndroidQaLocalToolsEvidence);
     const stage3Evidence = useSyncExternalStore(subscribeAndroidQaStage3, getAndroidQaStage3Evidence, getAndroidQaStage3Evidence);
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
@@ -851,6 +856,13 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                         <Button size="xs" action="secondary" testID="chat-qa-run-stage3"
                             disabled={stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaStage3()}><ButtonText>QA Stage 3</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-run-local-tools"
+                            disabled={localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            onPress={() => void runAndroidQaLocalTools()}><ButtonText>QA Local Tools</ButtonText></Button>
+                        <View accessible collapsable={false} testID="chat-qa-local-tools-history"
+                            accessibilityLabel={localToolsHistoryMarker} style={styles.androidQaEvidenceMarker} />
+                        <View accessible collapsable={false} testID="chat-qa-local-tools-evidence"
+                            accessibilityLabel={JSON.stringify(localToolsEvidence)} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-stage3-evidence"
                             accessibilityLabel={JSON.stringify(stage3Evidence)} style={styles.androidQaEvidenceMarker} />
                     </>
@@ -1284,6 +1296,9 @@ const ChatScreenContent = () => {
     const headerTitle = activeThread?.title ?? t('chat.newChatTitle');
     const configurableModelId = currentChatActiveModelId;
     const draftParametersOwner = JSON.stringify([configurableModelId, settings.activePresetId, newThreadRevision]);
+    const [draftToolSettings, setDraftToolSettings] = useState<{ owner: string; settings: LocalToolSettings } | null>(null);
+    const toolSettings = sanitizeLocalToolSettings(activeThread?.toolSettings
+        ?? (!activeThread && draftToolSettings?.owner === draftParametersOwner ? draftToolSettings.settings : undefined));
     useEffect(() => { setDraftParameters(null); }, [draftParametersOwner, activeThread?.id]);
     const presetGeneration = !activeThread && settings.activePresetId
         ? presetManager.getPreset(settings.activePresetId)?.generationParameters : undefined;
@@ -2575,6 +2590,7 @@ const ChatScreenContent = () => {
                     content,
                     {
                         ...(!activeThread && configurableModelId ? {
+                            newThreadToolSettings: toolSettings,
                             newThreadParameters: { modelId: configurableModelId, presetId: settings.activePresetId,
                                 revision: newThreadRevision, paramsSnapshot: sanitizeGenerationParameters(paramsSource) },
                         } : {}),
@@ -3130,6 +3146,7 @@ const ChatScreenContent = () => {
                 errorMessage={msg.errorMessage}
                 errorCode={msg.errorCode}
                 structuredOutput={msg.structuredOutput}
+                toolRun={msg.toolRun}
                 isStreaming={msg.state === 'streaming'}
                 messageState={msg.state}
                 tokensPerSec={msg.tokensPerSec}
@@ -3191,6 +3208,12 @@ const ChatScreenContent = () => {
                 onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
             />
 
+            <ChatToolsControl settings={toolSettings}
+                disabled={isModelSelectionPending || (isGenerationBusy && !toolSettings.enabled)}
+                onChange={(next) => {
+                    if (activeThread) useChatStore.getState().updateThreadToolSettings(activeThread.id, next);
+                    else setDraftToolSettings({ owner: draftParametersOwner, settings: next });
+                }} />
             <ScreenAndroidContentBlurTarget
                 blurTargetRef={warmupContentBlurTargetRef}
                 style={styles.warmupContentBlurTarget}

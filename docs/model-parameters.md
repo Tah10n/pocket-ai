@@ -272,6 +272,22 @@ Keep UI estimates aligned with runtime:
 - Runtime model loading uses `resolveKvCacheTypes(...)` in `src/services/LLMEngineService.ts`.
 - UI context-window ceiling estimation uses the same `resolveKvCacheTypes(...)` in `src/hooks/useModelParametersSheetController.ts`.
 
+## Local tool permissions
+
+Local tools are an explicit per-chat opt-in, separate from model load parameters.
+The enabled built-in functions and automatic choice are captured
+for each run and rechecked before execution. Existing chats default to tools off. The chat control enables all three built-ins;
+first-call-required mode is an internal acceptance option.
+The loaded model/template and LoRA identity stay reserved across all tool steps.
+
+Tool-selection steps use the native tool parser; the configured text/JSON/JSON
+Schema/GBNF response constraint applies to the final answer. Custom GBNF plus
+content prefill remains rejected. A template override or pure-content forcing is
+not accepted for tool execution. A compatible Jinja formatter is necessary but
+cannot establish model tool-use quality or native acceptance. See
+[Local tools](local-tools.md) for functions, limits, cancellation, history and the
+pinned runtime's exact supported choices. [Stage 4 Android CPU acceptance](llama-rn-013-stage4-acceptance.md) records the tested fixture and limits, including automatic calculator non-selection.
+
 ## UI entry points
 
 The primary UI for changing these settings lives in:

@@ -1,4 +1,6 @@
+import { AppError } from './AppError';
 import type { CompletionParams, JinjaFormattedChatResult, LlamaContext } from 'llama.rn';
+import { hasToolProtocol, localToolFormatterOptions, type LocalToolRequest } from './LocalToolRequest';
 import type { LlmChatMessage } from '../types/chat';
 import { getPreparedTemplateNow, type AdvancedGenerationParameters } from '../utils/generationControls';
 import { prepareStructuredOutput, type PreparedStructuredOutput } from '../utils/structuredOutput';
@@ -41,7 +43,7 @@ export class PreparedLlamaRequestCache {
     this.chars = 0;
   }
 
-  async prepare({ context, epoch, messages, generation, enableThinking, reasoningFormat, addGenerationPrompt }: {
+  async prepare({ context, epoch, messages, generation, enableThinking, reasoningFormat, addGenerationPrompt, toolRequest }: {
     context: LlamaContext;
     epoch: number;
     messages: LlmChatMessage[];
@@ -49,6 +51,7 @@ export class PreparedLlamaRequestCache {
     enableThinking: boolean;
     reasoningFormat: 'none' | 'auto' | 'deepseek';
     addGenerationPrompt?: boolean;
+    toolRequest?: LocalToolRequest;
   }): Promise<PreparedLlamaRequest> {
     if (this.context !== context || this.epoch !== epoch) {
       this.clear();
@@ -56,12 +59,27 @@ export class PreparedLlamaRequestCache {
       this.epoch = epoch;
     }
     const template = generation.template ?? {};
-    const output = prepareStructuredOutput(generation.output);
-    if (output.mode === 'gbnf' && (template.prefillText?.length ?? 0) > 0) {
+    const requestedOutput = prepareStructuredOutput(generation.output);
+    if (requestedOutput.mode === 'gbnf' && (template.prefillText?.length ?? 0) > 0) {
       // USER grammars are deliberately not advanced by generation_prompt in
       // this pinned native sampler. Do not claim full-output prefill semantics.
       throw new Error('Custom GBNF cannot be combined with content prefill in this runtime.');
     }
+    const selectingTools = toolRequest?.phase === 'tools';
+    const needsToolProtocol = selectingTools || hasToolProtocol(messages);
+    if (needsToolProtocol) {
+      const jinja = context.model?.chatTemplates?.jinja;
+      // Native chooses toolUse for nonempty definitions, even with choice none.
+      // History without a tool request uses the default template.
+      const useToolTemplate = (toolRequest?.tools.length ?? 0) > 0 && jinja?.toolUse;
+      const caps = useToolTemplate ? jinja.toolUseCaps : jinja?.defaultCaps;
+      if (template.jinja === false || template.forcePureContent === true || template.chatTemplate !== undefined
+        || !jinja || !(useToolTemplate || jinja.default) || !caps?.toolCalls
+        || (selectingTools && !caps.tools)) {
+        throw new AppError('local_tool_unsupported', 'The loaded model does not support local tool calls.');
+      }
+    }
+    const output = selectingTools ? prepareStructuredOutput(undefined) : requestedOutput;
     const effectiveThinking = output.mode === 'text' && enableThinking;
     const effectiveReasoningFormat = output.mode === 'text' ? reasoningFormat : 'none';
     const options: LlamaChatFormatOptions = {
@@ -72,10 +90,11 @@ export class PreparedLlamaRequestCache {
       now: getPreparedTemplateNow(generation),
       chat_template_kwargs: template.kwargs,
       force_pure_content: template.forcePureContent,
+      ...(toolRequest ? localToolFormatterOptions(toolRequest) : {}),
       ...(output.responseFormat ? { response_format: output.responseFormat } : {}),
     };
     // Private in-memory key; never log it. Full equality avoids hash collisions.
-    const key = JSON.stringify([messages, template.chatTemplate ?? null, options, template.prefillText, generation.output]);
+    const key = JSON.stringify([messages, template.chatTemplate ?? null, options, template.prefillText, generation.output, toolRequest]);
     const cached = this.cache.get(key);
     if (cached) {
       this.cache.delete(key);
@@ -92,7 +111,12 @@ export class PreparedLlamaRequestCache {
     )) {
       throw new Error('The loaded model formatter cannot apply these template options. A compatible Jinja template is required.');
     }
-    const prefill = template.prefillText ?? '';
+    if (needsToolProtocol && (formatted.type !== 'jinja' || (selectingTools
+      && (!formatted.chat_parser || !formatted.chat_format
+        || (toolRequest?.toolChoice !== 'none' && !formatted.grammar))))) {
+      throw new AppError('local_tool_unsupported', 'The loaded model does not support local tool calls.');
+    }
+    const prefill = selectingTools ? '' : template.prefillText ?? '';
     const lastMessage = messages.at(-1);
     const lastAssistantText = lastMessage?.role === 'assistant' ? lastMessage.content : undefined;
     // An explicit assistant continuation can already carry the configured

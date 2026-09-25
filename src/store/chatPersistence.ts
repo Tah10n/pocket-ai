@@ -1,3 +1,4 @@
+import { sanitizeLocalToolRun } from '../types/localTools';
 import {
   getThreadActiveModelId,
   type ChatMessage,
@@ -97,7 +98,7 @@ export interface ChatThreadRecord {
 }
 
 type ChatProgressConfiguration = Pick<ChatMessage,
-  'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput'>;
+  'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput' | 'toolRun'>;
 
 function parseProgressConfiguration(value: Record<string, unknown>): ChatProgressConfiguration {
   const generationSnapshot = parseBranchParamsSnapshot(value.generationSnapshot) ?? undefined;
@@ -107,6 +108,7 @@ function parseProgressConfiguration(value: Record<string, unknown>): ChatProgres
   const mode = output && typeof output === 'object' && 'mode' in output ? output.mode : undefined;
   return {
     ...(generationSnapshot ? { generationSnapshot } : {}),
+    ...(value.toolRun ? { toolRun: sanitizeLocalToolRun(value.toolRun) } : {}),
     ...(loadProfileSnapshot ? { loadProfileSnapshot } : {}),
     ...(mode === 'json_object' || mode === 'json_schema' || mode === 'gbnf'
       ? { structuredOutput: { mode, status: 'incomplete', error: 'interrupted' } as const } : {}),
@@ -940,6 +942,8 @@ export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId
     : parseBranchParamsSnapshot(message.generationSnapshot) ?? undefined;
   const loadProfileSnapshot = message.loadProfileSnapshot === undefined ? undefined
     : sanitizeModelLoadParameters(message.loadProfileSnapshot);
+  const toolRun = message.role === 'assistant' && message.toolRun?.threadId === threadId
+    ? sanitizeLocalToolRun(message.toolRun) : undefined;
   const rawOutput = message.structuredOutput;
   const structuredOutput: ChatMessage['structuredOutput'] = rawOutput
     && ['text', 'json_object', 'json_schema', 'gbnf'].includes(rawOutput.mode)
@@ -954,6 +958,7 @@ export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId
     && JSON.stringify(generationSnapshot) === JSON.stringify(message.generationSnapshot)
     && JSON.stringify(loadProfileSnapshot) === JSON.stringify(message.loadProfileSnapshot)
     && JSON.stringify(structuredOutput) === JSON.stringify(message.structuredOutput)
+    && JSON.stringify(toolRun) === JSON.stringify(message.toolRun)
   ) {
     return message;
   }
@@ -966,6 +971,7 @@ export function sanitizeChatMessageForPersistence(message: ChatMessage, threadId
     generationSnapshot,
     loadProfileSnapshot,
     structuredOutput,
+    toolRun,
   };
 }
 
@@ -1557,6 +1563,7 @@ function parseChatStreamingOperationValue(
     'generationSnapshot',
     'loadProfileSnapshot',
     'structuredOutput',
+    'toolRun',
   ]);
   const threadId = readRequiredString(value.threadId);
   const messageId = readRequiredString(value.messageId);
@@ -2130,6 +2137,7 @@ function hasSameProgressSnapshot(
   right: ChatStreamingProgressRecord,
 ): boolean {
   return hasSameProgressOperationIdentity(left, right)
+    && (left.toolRun === right.toolRun || hasSameJsonShape(left.toolRun, right.toolRun))
     && left.content === right.content
     && left.thoughtContent === right.thoughtContent
     && left.tokensPerSec === right.tokensPerSec
@@ -2587,7 +2595,9 @@ export function writeChatStreamingProgressRecord(
     }
   }
 
-  if (!currentState || currentState.progress.messageId !== progress.messageId) {
+  if (!currentState || currentState.progress.messageId !== progress.messageId
+    || (currentState.progress.toolRun !== progress.toolRun
+      && !hasSameJsonShape(currentState.progress.toolRun, progress.toolRun))) {
     return writeInitialProgressCheckpoint(storage, progress, currentState, writerStates);
   }
 
@@ -2811,7 +2821,7 @@ function hasPersistableAssistantContent(message: ChatMessage): boolean {
   return (
     message.content.trim().length > 0 ||
     (message.thoughtContent?.trim().length ?? 0) > 0 ||
-    Boolean(message.errorCode || message.errorMessage)
+    Boolean(message.errorCode || message.errorMessage || message.toolRun)
   );
 }
 
@@ -2880,6 +2890,7 @@ export function recoverStaleStreamingThread(thread: ChatThread, now = Date.now()
     return {
       ...message,
       state: 'stopped' as const,
+      ...(message.toolRun ? { toolRun: sanitizeLocalToolRun(message.toolRun, true) } : {}),
     };
   });
 
@@ -2910,7 +2921,7 @@ export function recoverChatThreadFromStreamingProgress(
     return { outcome: 'stale' };
   }
 
-  if (progress.content.trim().length === 0 && (progress.thoughtContent?.trim().length ?? 0) === 0) {
+  if (progress.content.trim().length === 0 && (progress.thoughtContent?.trim().length ?? 0) === 0 && !progress.toolRun) {
     return { outcome: 'empty' };
   }
 
@@ -2962,6 +2973,7 @@ export function recoverChatThreadFromStreamingProgress(
       createdAt: progress.createdAt,
       state: 'stopped',
       ...parseProgressConfiguration({ ...progress }),
+      ...(progress.toolRun ? { toolRun: sanitizeLocalToolRun(progress.toolRun, true) } : {}),
     };
     const completedAt = Math.max(thread.updatedAt, progress.persistedAt, now);
     const recoveredThread = materializeChatBranchReplacementThread({
@@ -3036,6 +3048,7 @@ export function recoverChatThreadFromStreamingProgress(
     state: 'stopped',
     regeneratesMessageId: progress.regeneratesMessageId,
     ...parseProgressConfiguration({ ...progress }),
+    ...(progress.toolRun ? { toolRun: sanitizeLocalToolRun(progress.toolRun, true) } : {}),
   };
   const messages = matchingMessage
     ? thread.messages.map((message, index) => (index === matchingIndex ? recoveredMessage : message))

@@ -224,6 +224,17 @@ jest.mock('../../src/hooks/useChatDocumentAttachments', () => ({
   useChatDocumentAttachments: (options: any) => mockUseChatDocumentAttachments(options),
 }));
 
+jest.mock('../../src/services/AndroidQaLocalTools', () => {
+  const evidence = { status: 'idle', phase: 'idle', steps: [] };
+  return {
+    getAndroidQaLocalToolsEvidence: () => evidence,
+    subscribeAndroidQaLocalTools: () => () => {},
+    getAndroidQaLocalToolsHistoryMarker: () => '{}',
+    subscribeAndroidQaLocalToolsHistory: () => () => {},
+    runAndroidQaLocalTools: jest.fn().mockResolvedValue(undefined),
+  };
+});
+
 jest.mock('../../src/services/LLMEngineService', () => ({
   llmEngineService: {
     ensurePersistedCapabilitySnapshot: (model: any) => {

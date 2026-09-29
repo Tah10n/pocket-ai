@@ -43,6 +43,7 @@ import { storage } from '../../src/store/storage';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import type { ChatAttachment } from '../../src/types/attachments';
 import type { ChatThread } from '../../src/types/chat';
+import type { LocalToolRun } from '../../src/types/localTools';
 import {
   MAX_CHAT_IMAGE_ATTACHMENTS,
   MAX_CHAT_IMAGE_ATTACHMENT_BYTES,
@@ -57,6 +58,105 @@ import {
 } from '../../src/store/chatBranchReplacement';
 
 const LEGACY_MAX_CHAT_VIDEO_DERIVED_FRAME_ATTACHMENTS = 8;
+
+it('does not checkpoint an initial empty tool envelope', () => {
+  const progress = buildProgress('empty-tool-checkpoint', { content: '', thoughtContent: undefined,
+    toolRun: { id: 'empty-tool-checkpoint-assistant-progress', threadId: 'empty-tool-checkpoint',
+      settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+      phase: 'tools', status: 'running', rounds: [] } });
+  const before = listChatStreamingProgressStorageKeys(storage);
+  expect(writeChatStreamingProgressRecord(storage, progress)).toEqual({ status: 'rejected', reason: 'empty_progress' });
+  expect(listChatStreamingProgressStorageKeys(storage)).toEqual(before);
+});
+
+it.each(['regenerate', 'branch'] as const)('classifies legacy %s empty tool checkpoint as empty instead of materializing replacement history', (mode) => {
+  const thread = buildBranchRecoveryThread(`empty-tool-recovery-${mode}`);
+  const originalMessages = thread.messages;
+  if (mode === 'regenerate') {
+    thread.messages = thread.messages.slice(0, -1);
+    thread.activeModelId = 'author/model-q4';
+  }
+  const progress = mode === 'branch'
+    ? buildBranchProgress(thread.id, { content: '', thoughtContent: undefined })
+    : buildProgress(thread.id, { content: '', thoughtContent: undefined, createdAt: 6, persistedAt: 120,
+      regeneratesMessageId: thread.messages.at(-1)!.id });
+  progress.toolRun = { id: progress.messageId, threadId: thread.id,
+    settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' }, phase: 'tools', status: 'interrupted', rounds: [] };
+  expect(recoverChatThreadFromStreamingProgress(thread, 100, progress, 130, 7)).toEqual({ outcome: 'empty' });
+  expect(thread.messages).toEqual(mode === 'regenerate' ? originalMessages.slice(0, -1) : originalMessages);
+});
+
+it('drops only empty tool placeholders and retains real parsed round content during cold recovery', () => {
+  const thread = buildThread('empty-tool-placeholder');
+  const emptyRun: LocalToolRun = { id: thread.messages[0].id, threadId: thread.id,
+    settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+    phase: 'tools', status: 'running', rounds: [] };
+  thread.messages[0] = { ...thread.messages[0], content: '', thoughtContent: '', toolRun: emptyRun };
+  expect(recoverStaleStreamingThread(thread, 20).messages).toEqual([]);
+  thread.messages[0].toolRun = { ...emptyRun, rounds: [{ index: 0, content: 'Confirmed parsed assistant content', calls: [] }] };
+  const recovered = recoverStaleStreamingThread(thread, 20);
+  expect(recovered.messages).toHaveLength(1);
+  expect(recovered.messages[0]).toMatchObject({ state: 'stopped', toolRun: { status: 'interrupted',
+    rounds: [{ content: 'Confirmed parsed assistant content', calls: [] }] } });
+});
+
+it('does not let malformed tool history manufacture replacement progress', () => {
+  const thread = buildBranchRecoveryThread('malformed-tool-envelope');
+  const progress = buildBranchProgress(thread.id, { content: '', thoughtContent: undefined,
+    toolRun: { rounds: [{ calls: [{}] }] } as unknown as LocalToolRun });
+  expect(recoverChatThreadFromStreamingProgress(thread, 100, progress, 130, 7)).toEqual({ outcome: 'mismatched' });
+  thread.messages = [{ ...thread.messages[1], content: '', state: 'streaming', toolRun: progress.toolRun }];
+  expect(recoverStaleStreamingThread(thread).messages).toEqual([]);
+  thread.messages[0].toolRun = { id: thread.messages[0].id, threadId: 'another-chat',
+    settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' }, phase: 'tools', status: 'running',
+    rounds: [{ index: 0, content: '', calls: [{ id: 'wrong-owner', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'proposed' }] }] };
+  expect(recoverStaleStreamingThread(thread).messages).toEqual([]);
+});
+
+it('recovers tool-only progress as cancelled history without creating executor work', () => {
+  const thread = buildBranchRecoveryThread('tool-only-recovery');
+  const progress = buildBranchProgress(thread.id, { content: '', thoughtContent: undefined });
+  progress.toolRun = { id: progress.messageId, threadId: thread.id,
+    settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' }, phase: 'tools', status: 'running', rounds: [
+      { index: 0, content: '', calls: [
+        { id: 'already-completed', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'completed', result: '{"ok":true,"result":4}' },
+        { id: 'not-settled', name: 'calculate', arguments: '{"expression":"3+3"}', status: 'running' },
+      ] },
+    ] };
+  expect(writeChatStreamingProgressRecord(storage, progress).status).toBe('written');
+  const readback = readChatStreamingProgressRecord(storage, thread.id);
+  if (!readback.ok) throw new Error('Tool progress missing');
+  const recovered = recoverChatThreadFromStreamingProgress(thread, 100, readback.value, 130, 7);
+  expect(recovered).toMatchObject({ outcome: 'recovered', thread: { status: 'stopped' } });
+  if (recovered.outcome !== 'recovered') throw new Error('Tool history not recovered');
+  expect(recovered.thread.messages.at(-1)).toMatchObject({ content: '', state: 'stopped', toolRun: { status: 'interrupted',
+    rounds: [{ calls: [{ id: 'already-completed', status: 'completed', result: '{"ok":true,"result":4}' },
+      { id: 'not-settled', status: 'cancelled' }] }] } });
+  expect(recoverStaleStreamingThread(recovered.thread, 140).messages).toEqual(recovered.thread.messages);
+});
+
+it.each([
+  { field: 'threadId', content: '' }, { field: 'id', content: '' },
+  { field: 'threadId', content: 'Available user text' }, { field: 'id', content: 'Available user text' },
+] as const)('rejects a checkpoint with foreign tool $field ownership and content="$content"', ({ field, content }) => {
+  const thread = buildBranchRecoveryThread(`foreign-checkpoint-${field}-${content.length}`);
+  const progress = buildBranchProgress(thread.id, { content, thoughtContent: undefined });
+  progress.toolRun = { id: progress.messageId, threadId: thread.id,
+    settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' }, phase: 'tools', status: 'running',
+    rounds: [{ index: 0, content: '', calls: [{ id: 'owned-call', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'proposed' }] }] };
+  expect(writeChatStreamingProgressRecord(storage, progress).status).toBe('written');
+  const operationKey = getChatStreamingOperationStorageKey(thread.id, 0);
+  const operation = JSON.parse(storage.getString(operationKey)!);
+  operation.toolRun[field] = 'foreign-owner';
+  storage.set(operationKey, JSON.stringify(operation));
+  expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({ ok: false, reason: 'invalid_shape' });
+  progress.toolRun = { ...progress.toolRun, [field]: 'foreign-owner' };
+  expect(recoverChatThreadFromStreamingProgress(thread, 100, progress, 130, 7)).toEqual({ outcome: 'mismatched' });
+  storage.set(getChatStreamingProgressStorageKey(thread.id), JSON.stringify(progress));
+  expect(readChatStreamingProgressRecord(storage, thread.id)).toEqual({ ok: false, reason: 'invalid_shape' });
+  expect(writeChatStreamingProgressRecord(storage, { ...progress, revision: 4, persistedAt: 121 }))
+    .toEqual({ status: 'rejected', reason: 'invalid_tool_run' });
+});
 
 it.each(['json_schema', 'gbnf'] as const)('recovers exact interrupted %s content and its immutable configuration from the progress journal', (mode) => {
   const thread = buildThread(`structured-progress-${mode}`);

@@ -1,4 +1,5 @@
-import { sanitizeLocalToolSettings, type LocalToolSettings } from '../types/localTools';
+import { sanitizeLocalToolRun, sanitizeLocalToolSettings, type LocalToolSettings } from '../types/localTools';
+import { hasAssistantTurnProgress } from '../utils/localTools';
 import { sanitizeAdvancedGenerationParameters, advancedGenerationIdentity } from '../utils/generationControls';
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
@@ -2588,7 +2589,7 @@ function createStreamingProgressRecord(
   runtime: TransientAssistantRuntime,
 ): ChatStreamingProgressRecord | null {
   const message = runtime.currentMessage;
-  if (message.content.trim().length === 0 && (message.thoughtContent?.trim().length ?? 0) === 0 && !message.toolRun) {
+  if (!hasAssistantTurnProgress(message)) {
     return null;
   }
 
@@ -3380,8 +3381,7 @@ export const useChatStore = create<ChatStoreState>()(
                 structuredOutput: finalization.structuredOutput ?? currentMessage.structuredOutput,
                 toolRun: finalization.toolRun ?? currentMessage.toolRun,
               };
-              const hasRecoverableOutput = terminalFields.content.trim().length > 0
-                || (terminalFields.thoughtContent?.trim().length ?? 0) > 0 || Boolean(terminalFields.toolRun);
+              const hasRecoverableOutput = hasAssistantTurnProgress(terminalFields);
               const shouldRestoreReplacement = (
                 (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
                 && !hasRecoverableOutput
@@ -3957,6 +3957,7 @@ export function flushChatStreamingProgressForAndroidQa(
   const expectedRevision = runtime.progressRevision;
   const expectedContent = runtime.currentMessage.content;
   const expectedThoughtContent = runtime.currentMessage.thoughtContent;
+  const expectedToolRun = sanitizeLocalToolRun(runtime.currentMessage.toolRun);
   chatPersistenceScheduler.flushThreadWrite(threadId, 'streaming_patch');
 
   const persistedProgress = readChatStreamingProgressRecord(getAppStorage(), threadId);
@@ -3965,6 +3966,8 @@ export function flushChatStreamingProgressForAndroidQa(
     && persistedProgress.value.revision === expectedRevision
     && persistedProgress.value.content === expectedContent
     && persistedProgress.value.thoughtContent === expectedThoughtContent
+    // Both sides are bounded canonical history, with no native handles or log output.
+    && JSON.stringify(persistedProgress.value.toolRun) === JSON.stringify(expectedToolRun)
     && persistedProgress.value.persistedAt === runtime.lastProgressPersistedAt;
 }
 

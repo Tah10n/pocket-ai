@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import type { LocalToolRun } from '../../src/types/localTools';
 import {
   ChatMessage,
   ChatThread,
@@ -9,6 +10,7 @@ import {
   __getUnreferencedAttachmentCleanupStateForTests,
   __resetUnreferencedAttachmentCleanupForTests,
   findMostRecentThreadId,
+  flushChatStreamingProgressForAndroidQa,
   flushPendingChatPersistenceWrites,
   getThreadInferenceWindow,
   resetChatStoreForPrivateStorageReset,
@@ -457,9 +459,190 @@ describe('chatStore', () => {
     } });
     expect(useChatStore.getState().inferenceRevision).toBe(revision);
     useChatStore.getState().finalizeAssistantTurn(thread.id, nextId!, { outcome: 'stopped' });
-    expect(useChatStore.getState().threads[thread.id].messages.at(-1)?.toolRun?.id).toBe(nextId);
+    expect(useChatStore.getState().getThread(thread.id)?.messages).toEqual(thread.messages);
+    expect(useChatStore.getState().threads[thread.id].messages[1].toolRun).toBe(oldRun);
     useChatStore.getState().updateThreadToolSettings(thread.id, { ...settings, enabled: false });
     expect(useChatStore.getState().inferenceRevision).toBeGreaterThan(revision);
+  });
+
+  it.each([
+    { mode: 'regenerate', outcome: 'stopped' },
+    { mode: 'regenerate', outcome: 'error' },
+    { mode: 'branch', outcome: 'stopped' },
+    { mode: 'branch', outcome: 'error' },
+  ] as const)('rolls back an initial empty tool run for $mode/$outcome without losing attachments or another chat', async ({ mode, outcome }) => {
+    const threadId = `empty-tool-${mode}-${outcome}`;
+    const originalAttachment = buildStoredAttachment(threadId, `${threadId}-user-1`, 'original-owned.jpg');
+    const tailAttachment = buildStoredAttachment(threadId, `${threadId}-user-tail`, 'tail-owned.jpg');
+    const thread = mode === 'regenerate'
+      ? buildCompletedRegenerationThread(threadId)
+      : buildTrailingModelSwitchThread(threadId, { oldTailAttachment: tailAttachment });
+    thread.messages[0].attachments = [originalAttachment];
+    const previousRun: LocalToolRun = {
+      id: thread.messages[1].id, threadId, settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+      phase: 'final', status: 'completed', rounds: [{ index: 0, content: '', calls: [
+        { id: 'durable-call', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'completed', result: '{"ok":true,"result":4}' },
+      ] }],
+    };
+    thread.messages[1].toolRun = previousRun;
+    seedPersistedChatThread(thread, 100);
+    const other = buildCompletedRegenerationThread(`${threadId}-other`);
+    useChatStore.setState({ threads: { ...useChatStore.getState().threads, [other.id]: other } });
+    const durableRecordBefore = storage.getString(getChatThreadStorageKey(threadId));
+    const otherRecordBefore = storage.getString(getChatThreadStorageKey(other.id));
+    const preparedAttachment = buildStoredAttachment(threadId, thread.messages[0].id, 'discarded-prepared.jpg');
+    const nextId = mode === 'regenerate'
+      ? useChatStore.getState().replaceLastAssistantMessage(threadId)!
+      : useChatStore.getState().replaceBranchFromUserMessage(threadId, thread.messages[0].id, 'Edited prompt', undefined,
+        { attachments: [preparedAttachment], contentParts: undefined })!;
+    expect(nextId).toBeTruthy();
+    useChatStore.getState().patchAssistantMessage(threadId, nextId, { toolRun: {
+      id: nextId, threadId, settings: previousRun.settings, phase: 'tools', status: 'running', rounds: [],
+    } });
+    expect(useChatStore.getState().getThread(threadId)?.messages.at(-1)?.toolRun?.rounds).toEqual([]);
+    flushPendingChatPersistenceWrites('background');
+    expect(readChatStreamingProgressRecord(storage, threadId)).toEqual({ ok: false, reason: 'missing' });
+    expect(useChatStore.getState().finalizeAssistantTurn(threadId, nextId, outcome === 'error'
+      ? { outcome, errorCode: 'generation_failed', errorMessage: 'First completion failed' }
+      : { outcome })).toEqual({ status: 'restored_without_write' });
+    await flushAttachmentCleanup();
+    expect(useChatStore.getState().getThread(threadId)).toBe(thread);
+    expect(storage.getString(getChatThreadStorageKey(threadId))).toBe(durableRecordBefore);
+    expect(useChatStore.getState().threads[other.id]).toBe(other);
+    expect(storage.getString(getChatThreadStorageKey(other.id))).toBe(otherRecordBefore);
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(originalAttachment.localUri, expect.anything());
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(tailAttachment.localUri, expect.anything());
+    if (mode === 'branch') {
+      expect(FileSystem.deleteAsync).toHaveBeenCalledWith(preparedAttachment.localUri, { idempotent: true });
+    }
+    expect(useChatStore.getState().threads[threadId].messages[1].toolRun).toBe(previousRun);
+    expect(useChatStore.getState().finalizeAssistantTurn(threadId, nextId, { outcome: 'success', content: 'Late output' })).toEqual({ status: 'stale' });
+    expectNoStreamingProgressArtifacts(threadId);
+  });
+
+  it.each(['regenerate', 'branch'] as const)('restores %s and its attachment owners from a cold legacy empty tool checkpoint', async (mode) => {
+    const threadId = `cold-empty-tool-${mode}`;
+    const tailAttachment = buildStoredAttachment(threadId, `${threadId}-user-tail`, 'cold-tail.jpg');
+    const thread = mode === 'regenerate'
+      ? buildCompletedRegenerationThread(threadId)
+      : buildTrailingModelSwitchThread(threadId, { oldTailAttachment: tailAttachment });
+    seedPersistedChatThread(thread, 100);
+    const durableRecord = readChatThreadRecord(storage, threadId);
+    if (!durableRecord.ok) throw new Error('Durable base missing');
+    const nextId = mode === 'regenerate'
+      ? useChatStore.getState().replaceLastAssistantMessage(threadId)!
+      : useChatStore.getState().replaceBranchFromUserMessage(threadId, thread.messages[0].id, 'Transient edited prompt')!;
+    const presented = useChatStore.getState().getThread(threadId)!;
+    const current = presented.messages.at(-1)!;
+    const progress = {
+      schemaVersion: CHAT_STREAM_PROGRESS_SCHEMA_VERSION, threadId, messageId: nextId,
+      modelId: getThreadActiveModelId(thread), createdAt: current.createdAt, content: '',
+      state: 'streaming', persistedAt: durableRecord.value.persistedAt + 1, revision: 1,
+      toolRun: { id: nextId, threadId, settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+        phase: 'tools', status: 'running', rounds: [] },
+      ...(mode === 'regenerate' ? { regeneratesMessageId: thread.messages.at(-1)!.id } : {
+        branchReplacement: { targetUserMessageId: thread.messages[0].id, targetUserCreatedAt: thread.messages[0].createdAt,
+          baseDurablePersistedAt: durableRecord.value.persistedAt, baseCommitRevision: durableRecord.value.commitRevision,
+          replacementUserMessage: presented.messages.find((message) => message.id === thread.messages[0].id),
+          insertedModelSwitchMessage: presented.messages.find((message) => message.kind === 'model_switch'), paramsSnapshot: thread.paramsSnapshot },
+      }),
+    };
+    // A previous build could persist this envelope. Read the actual legacy journal after a cold store reset.
+    storage.set(getChatStreamingProgressStorageKey(threadId), JSON.stringify(progress));
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+    await flushAttachmentCleanup();
+    const recovered = useChatStore.getState().getThread(threadId)!;
+    expect(recovered.messages).toEqual(sanitizeHydratedThread(thread)?.messages);
+    expect(recovered.status).toBe('idle');
+    expect(recovered.messages.some((message) => message.id === nextId)).toBe(false);
+    expect(FileSystem.deleteAsync).not.toHaveBeenCalledWith(tailAttachment.localUri, expect.anything());
+    expectNoStreamingProgressArtifacts(threadId);
+    // Hydration is a history transformation and never creates a new active replacement/executor owner.
+    expect(useChatStore.getState().finalizeAssistantTurn(threadId, nextId, { outcome: 'success', content: 'Replay' })).toEqual({ status: 'stale' });
+  });
+
+  it.each(['proposed', 'running', 'completed'] as const)('retains a genuine %s tool call without visible text through branch commit and repeated hydration', async (callStatus) => {
+    const thread = buildCompletedRegenerationThread(`genuine-call-${callStatus}`);
+    seedPersistedChatThread(thread, 100);
+    const nextId = useChatStore.getState().replaceBranchFromUserMessage(thread.id, thread.messages[0].id, 'Calculate again')!;
+    const toolRun: LocalToolRun = { id: nextId, threadId: thread.id,
+      settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' }, phase: 'tools', status: 'cancelled',
+      rounds: [{ index: 0, content: '', calls: [{ id: 'genuine-call', name: 'calculate', arguments: '{"expression":"2+2"}',
+        status: callStatus, ...(callStatus === 'completed' ? { result: '{"ok":true,"result":4}' } : {}) }] }] };
+    useChatStore.getState().patchAssistantMessage(thread.id, nextId, { toolRun });
+    flushPendingChatPersistenceWrites('background');
+    expect(readChatStreamingProgressRecord(storage, thread.id).ok).toBe(true);
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, nextId, { outcome: 'stopped', toolRun })).toEqual({ status: 'committed' });
+    for (let index = 0; index < 2; index += 1) {
+      useChatStore.setState({ threads: {}, activeThreadId: null });
+      await useChatStore.persist.rehydrate();
+      const recovered = useChatStore.getState().getThread(thread.id)?.messages.at(-1)!;
+      expect(recovered.id).toBe(nextId);
+      expect(recovered.content).toBe('');
+      expect(recovered.state).toBe('stopped');
+      expect(recovered.toolRun?.rounds[0].calls[0]).toEqual(expect.objectContaining({
+        id: 'genuine-call', status: callStatus === 'completed' ? 'completed' : 'cancelled',
+        ...(callStatus === 'completed' ? { result: '{"ok":true,"result":4}' } : {}),
+      }));
+      expect(useChatStore.getState().finalizeAssistantTurn(thread.id, nextId, { outcome: 'success', content: 'Replay' })).toEqual({ status: 'stale' });
+    }
+  });
+
+  it.each(['content', 'thoughtContent'] as const)('keeps actual %s with an empty tool envelope during stopped regeneration', (field) => {
+    const thread = buildCompletedRegenerationThread(`empty-envelope-${field}`);
+    seedPersistedChatThread(thread, 100);
+    const nextId = useChatStore.getState().replaceLastAssistantMessage(thread.id)!;
+    useChatStore.getState().patchAssistantMessage(thread.id, nextId, { [field]: 'Already received parsed text', toolRun: {
+      id: nextId, threadId: thread.id, settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+      phase: 'tools', status: 'cancelled', rounds: [],
+    } });
+    expect(useChatStore.getState().finalizeAssistantTurn(thread.id, nextId, { outcome: 'stopped' })).toEqual({ status: 'committed' });
+    expect(useChatStore.getState().getThread(thread.id)?.messages.at(-1)).toEqual(expect.objectContaining({
+      id: nextId, [field]: 'Already received parsed text', state: 'stopped',
+    }));
+  });
+
+  it('proves the exact tool-only journal in QA flush and rejects different canonical call evidence', () => {
+    const thread = buildCompletedRegenerationThread('qa-tool-journal');
+    seedPersistedChatThread(thread, 100);
+    const messageId = useChatStore.getState().replaceLastAssistantMessage(thread.id)!;
+    const toolRun: LocalToolRun = { id: messageId, threadId: thread.id,
+      settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' }, phase: 'tools', status: 'running',
+      rounds: [{ index: 0, content: '', calls: [{ id: 'qa-call', name: 'calculate', arguments: '{"expression":"2+2"}',
+        status: 'completed', result: '{"ok":true,"result":4}' }] }] };
+    useChatStore.getState().patchAssistantMessage(thread.id, messageId, { toolRun });
+    expect(flushChatStreamingProgressForAndroidQa(thread.id, messageId)).toBe(true);
+    const progress = readChatStreamingProgressRecord(storage, thread.id);
+    expect(progress).toMatchObject({ ok: true, value: { content: '', toolRun } });
+    const appStorage = getAppStorage();
+    const originalGetString = appStorage.getString;
+    appStorage.getString = jest.fn(function getStringWithDifferentToolResult(this: unknown, key: string) {
+      const raw = originalGetString.call(this, key);
+      if (!raw || !key.startsWith('chat-store:operation:')) return raw;
+      const operation = JSON.parse(raw);
+      if (operation.toolRun) operation.toolRun.rounds[0].calls[0].result = '{"ok":true,"result":999}';
+      return JSON.stringify(operation);
+    });
+    try {
+      expect(flushChatStreamingProgressForAndroidQa(thread.id, messageId)).toBe(false);
+    } finally {
+      appStorage.getString = originalGetString;
+      useChatStore.getState().stopAssistantMessage(thread.id, messageId);
+    }
+  });
+
+  it('reports no QA checkpoint for an initial empty tool envelope', () => {
+    const thread = buildCompletedRegenerationThread('qa-empty-tool-journal');
+    seedPersistedChatThread(thread, 100);
+    const messageId = useChatStore.getState().replaceLastAssistantMessage(thread.id)!;
+    useChatStore.getState().patchAssistantMessage(thread.id, messageId, { toolRun: {
+      id: messageId, threadId: thread.id, settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+      phase: 'tools', status: 'running', rounds: [],
+    } });
+    expect(flushChatStreamingProgressForAndroidQa(thread.id, messageId)).toBe(false);
+    expectNoStreamingProgressArtifacts(thread.id);
+    expect(useChatStore.getState().stopAssistantMessage(thread.id, messageId)).toEqual({ status: 'restored_without_write' });
   });
 
   it('migrates a legacy thread without modelId only from persisted model evidence', () => {

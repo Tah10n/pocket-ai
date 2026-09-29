@@ -1,4 +1,5 @@
 import { sanitizeLocalToolRun } from '../types/localTools';
+import { hasAssistantTurnProgress } from '../utils/localTools';
 import {
   getThreadActiveModelId,
   type ChatMessage,
@@ -100,6 +101,14 @@ export interface ChatThreadRecord {
 type ChatProgressConfiguration = Pick<ChatMessage,
   'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput' | 'toolRun'>;
 
+function hasOwnedProgressToolRun(value: Record<string, unknown>): boolean {
+  if (value.toolRun == null) return true;
+  const toolRun = sanitizeLocalToolRun(value.toolRun);
+  return toolRun !== undefined
+    && toolRun.threadId === readRequiredString(value.threadId)
+    && toolRun.id === readRequiredString(value.messageId);
+}
+
 function parseProgressConfiguration(value: Record<string, unknown>): ChatProgressConfiguration {
   const generationSnapshot = parseBranchParamsSnapshot(value.generationSnapshot) ?? undefined;
   const loadProfileSnapshot = value.loadProfileSnapshot == null ? undefined
@@ -108,7 +117,7 @@ function parseProgressConfiguration(value: Record<string, unknown>): ChatProgres
   const mode = output && typeof output === 'object' && 'mode' in output ? output.mode : undefined;
   return {
     ...(generationSnapshot ? { generationSnapshot } : {}),
-    ...(value.toolRun ? { toolRun: sanitizeLocalToolRun(value.toolRun) } : {}),
+    ...(value.toolRun && hasOwnedProgressToolRun(value) ? { toolRun: sanitizeLocalToolRun(value.toolRun) } : {}),
     ...(loadProfileSnapshot ? { loadProfileSnapshot } : {}),
     ...(mode === 'json_object' || mode === 'json_schema' || mode === 'gbnf'
       ? { structuredOutput: { mode, status: 'incomplete', error: 'interrupted' } as const } : {}),
@@ -223,6 +232,8 @@ export type ChatStreamingProgressWriteResult =
   | {
       status: 'rejected';
       reason:
+        | 'empty_progress'
+        | 'invalid_tool_run'
         | 'content_too_large'
         | 'thought_too_large'
         | 'operation_too_large'
@@ -1405,6 +1416,7 @@ export function parseChatStreamingProgressRecord(
     || (hasBranchReplacement && !branchReplacement)
     || (branchReplacement != null && regeneratesMessageId != null)
     || branchReplacement?.insertedModelSwitchMessage?.id === messageId
+    || !hasOwnedProgressToolRun(value)
   ) {
     return { ok: false, reason: 'invalid_shape' };
   }
@@ -1591,6 +1603,7 @@ function parseChatStreamingOperationValue(
     || (hasBranchReplacement && !branchReplacement)
     || (branchReplacement != null && regeneratesMessageId != null)
     || branchReplacement?.insertedModelSwitchMessage?.id === messageId
+    || !hasOwnedProgressToolRun(value)
   ) {
     return null;
   }
@@ -2040,6 +2053,9 @@ export function readChatStreamingProgressRecord(
   threadId: string,
 ): ChatPersistenceReadResult<ChatStreamingProgressRecord> {
   const result = readChatStreamingProgressState(storage, threadId);
+  if (result.ok && !hasAssistantTurnProgress(result.progress)) {
+    return { ok: false, reason: 'invalid_shape' };
+  }
   return result.ok
     ? { ok: true, value: result.progress }
     : result;
@@ -2542,9 +2558,16 @@ export function writeChatStreamingProgressRecord(
   storage: AppStorageFacade,
   progress: ChatStreamingProgressRecord,
 ): ChatStreamingProgressWriteResult {
+  if (!hasOwnedProgressToolRun({ ...progress })) {
+    return { status: 'rejected', reason: 'invalid_tool_run' };
+  }
   const oversized = rejectOversizedProgress(progress);
   if (oversized) {
     return oversized;
+  }
+
+  if (!hasAssistantTurnProgress(progress)) {
+    return { status: 'rejected', reason: 'empty_progress' };
   }
 
   const writerStates = getChatStreamingProgressWriterStateMap(storage);
@@ -2818,11 +2841,7 @@ export function listChatThreadStorageKeys(storage: Pick<AppStorageFacade, 'getAl
 }
 
 function hasPersistableAssistantContent(message: ChatMessage): boolean {
-  return (
-    message.content.trim().length > 0 ||
-    (message.thoughtContent?.trim().length ?? 0) > 0 ||
-    Boolean(message.errorCode || message.errorMessage || message.toolRun)
-  );
+  return hasAssistantTurnProgress(message) || Boolean(message.errorCode || message.errorMessage);
 }
 
 function isEmptyAssistantProgressPlaceholder(message: ChatMessage): boolean {
@@ -2841,13 +2860,15 @@ export function sanitizeChatThreadForPersistence(thread: ChatThread): ChatThread
   let removedEmptyProgressPlaceholder = false;
   let changedMessages = false;
   const messages = thread.messages.flatMap((message) => {
-    if (isEmptyAssistantProgressPlaceholder(message)) {
+    const sanitizedMessage = sanitizeChatMessageForPersistence(message, thread.id);
+    // Ownership and shape sanitation must happen before deciding whether a
+    // canonical tool call gives this assistant placeholder durable progress.
+    if (isEmptyAssistantProgressPlaceholder(sanitizedMessage)) {
       removedEmptyProgressPlaceholder = true;
       changedMessages = true;
       return [];
     }
 
-    const sanitizedMessage = sanitizeChatMessageForPersistence(message, thread.id);
     if (sanitizedMessage !== message) {
       changedMessages = true;
     }
@@ -2913,7 +2934,8 @@ export function recoverChatThreadFromStreamingProgress(
   now = Date.now(),
   durableCommitRevision?: number,
 ): ChatStreamingProgressRecoveryResult {
-  if (progress.threadId !== thread.id || progress.modelId !== getThreadActiveModelId(thread)) {
+  if (progress.threadId !== thread.id || progress.modelId !== getThreadActiveModelId(thread)
+    || !hasOwnedProgressToolRun({ ...progress })) {
     return { outcome: 'mismatched' };
   }
 
@@ -2921,7 +2943,7 @@ export function recoverChatThreadFromStreamingProgress(
     return { outcome: 'stale' };
   }
 
-  if (progress.content.trim().length === 0 && (progress.thoughtContent?.trim().length ?? 0) === 0 && !progress.toolRun) {
+  if (!hasAssistantTurnProgress(progress)) {
     return { outcome: 'empty' };
   }
 

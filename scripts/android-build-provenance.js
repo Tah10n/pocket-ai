@@ -42,6 +42,8 @@ const PREBUILD_INPUTS = [
 const EMBEDDED_BUNDLE_INPUTS = [
   // Imported by AndroidQaStage3.ts and embedded in the JavaScript bundle.
   "docs/validation/llama-rn-stage3/lora-fixture.json",
+  // Imported by AndroidQaLocalTools.ts; content changes invalidate the embedded bundle.
+  "docs/validation/llama-rn-stage4/tool-fixture.json",
   "app",
   "src",
   "components",

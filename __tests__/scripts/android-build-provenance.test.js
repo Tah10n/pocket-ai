@@ -457,9 +457,8 @@ describe('Android build content provenance', () => {
     }
   });
 
-  it('hashes the imported Stage 3 fixture without recursively including validation documents', () => {
+  it.each(['docs/validation/llama-rn-stage3/lora-fixture.json', 'docs/validation/llama-rn-stage4/tool-fixture.json'])('hashes imported fixture %s without recursively including validation documents', (fixtureRelativePath) => {
     const projectRoot = createProject();
-    const fixtureRelativePath = 'docs/validation/llama-rn-stage3/lora-fixture.json';
     const fixturePath = path.join(projectRoot, fixtureRelativePath);
     const reportPath = path.join(path.dirname(fixturePath), 'acceptance.md');
     const collect = (options = {}) => collectBuildProvenance(projectRoot, {

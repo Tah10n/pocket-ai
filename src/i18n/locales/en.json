@@ -230,6 +230,17 @@
       "chatModelNotLoaded": "Load this conversation's model before continuing.",
       "chatModelMismatch": "The loaded model no longer matches this conversation. Reload the conversation model and try again.",
       "chatHistoryBusy": "Chat history is still busy. Stop the current response and try again.",
+      "localToolUnsupported": "This model or its template does not support local tools. Choose a compatible model, or start a new chat with tools off.",
+      "localToolCancelled": "Tool use was stopped. You can send another message.",
+      "localToolTimeout": "Tool use took too long and was stopped. Try a shorter request.",
+      "localToolRoundLimit": "Stopped after 4 tool rounds. Ask a narrower follow-up question.",
+      "localToolCallLimit": "Stopped at the limit of 8 tool calls per request. Ask a narrower question.",
+      "localToolTokenLimit": "Tool use reached this request's token budget. Try a shorter request.",
+      "localToolResultLimit": "Tool results exceeded the allowed size. Narrow the request or document search.",
+      "localToolInvalidProposal": "The model returned an incomplete or unsupported tool response. No new tool was executed.",
+      "localToolDuplicateId": "The model repeated a tool call. It was not executed again.",
+      "localToolConflictingId": "The model reused a tool call ID with different arguments. The conflicting call was not executed.",
+      "localToolContextLimit": "The tool conversation no longer fits the model's context. Start a shorter request or a new chat.",
       "multimodalNotReady": "Vision chat is not ready for image attachments yet.",
       "chatAttachmentCopyFailed": "The image could not be copied into app storage. Try a different image.",
       "chatAttachmentLimitExceeded": "You can attach up to 4 images.",
@@ -394,6 +405,28 @@
     "body": "This route is reserved for compact modal interactions that should inherit the shared theme, typography, and navigation chrome."
   },
   "chat": {
+    "tools": {
+      "title": "Local tools",
+      "enable": "Enable local tools for this chat",
+      "available": "Available tools",
+      "description": "Allow local calculation, device date and time, and search only in documents attached to this chat. Tool results are reference data.",
+      "steps": "Tool steps",
+      "names": {
+        "calculate": "Calculator",
+        "get_current_datetime": "Device date and time",
+        "search_attached_documents": "Search attached documents"
+      },
+      "status": {
+        "proposed": "Requested",
+        "running": "Running",
+        "completed": "Completed",
+        "error": "Error",
+        "cancelled": "Cancelled",
+        "interrupted": "Interrupted"
+      },
+      "on": "On",
+      "off": "Off"
+    },
     "remoteImageBlocked": "[Remote image blocked]",
     "title": "Chat",
     "newChatTitle": "New chat",

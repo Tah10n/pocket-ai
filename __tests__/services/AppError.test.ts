@@ -1,5 +1,10 @@
+import { createInstance } from 'i18next';
+import en from '../../src/i18n/locales/en.json';
+import ru from '../../src/i18n/locales/ru.json';
 import {
   AppError,
+  LOCAL_TOOL_RUN_ERROR_CODES,
+  isLocalToolRunErrorCode,
   getErrorMessage,
   getPrivacySafeErrorLogDetails,
   getReportedErrorMessage,
@@ -317,3 +322,19 @@ describe('AppError', () => {
   });
 });
 
+
+describe('local tool error localization', () => {
+  it.each(['en', 'ru'])('translates every typed tool termination in %s without raw error payloads', async language => {
+    const translator = createInstance();
+    await translator.init({ lng: language, resources: { en: { translation: en }, ru: { translation: ru } }, initAsync: false });
+    for (const code of Object.values(LOCAL_TOOL_RUN_ERROR_CODES)) {
+      const message = getErrorMessage(new AppError(code, 'PRIVATE_NATIVE_ERROR'), translator.t.bind(translator));
+      expect(message).not.toContain('PRIVATE_NATIVE_ERROR');
+      expect(message).not.toContain('common.errors.');
+      expect(message).not.toBe(code);
+      expect(isLocalToolRunErrorCode(code)).toBe(true);
+      expect(getPrivacySafeErrorLogDetails(new AppError(code))).toMatchObject({ errorCode: code });
+    }
+    expect(isLocalToolRunErrorCode('local_tool_private_payload')).toBe(false);
+  });
+});

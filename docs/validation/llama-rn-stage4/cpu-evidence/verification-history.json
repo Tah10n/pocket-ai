@@ -1,0 +1,133 @@
+{
+  "runs": [
+    {
+      "id": "verify-release-initial",
+      "status": "failed",
+      "jest": {
+        "suitesPassed": 250,
+        "suitesFailed": 4,
+        "testsPassed": 5255,
+        "testsFailed": 131
+      },
+      "causes": [
+        "QA module missing in ChatScreen test mocks",
+        "inference scenario pack expectation not extended",
+        "raw palette text classes violated semantic color boundary"
+      ],
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "not_run"
+    },
+    {
+      "id": "verify-release-final",
+      "status": "passed",
+      "exitCode": 0,
+      "jest": {
+        "suitesPassed": 254,
+        "testsPassed": 5389
+      },
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "passed",
+      "note": "Latest localization changes also receive focused verification before native build."
+    },
+    {
+      "id": "verify-release-head",
+      "status": "passed",
+      "exitCode": 0,
+      "publicAppTree": "c0476fee70066512d40323316d2497b280ef297a",
+      "jest": {
+        "suitesPassed": 254,
+        "testsPassed": 5392
+      },
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "passed"
+    },
+    {
+      "id": "verify-release-native-fixes",
+      "status": "failed",
+      "exitCode": 1,
+      "publicAppTree": "913203061519021f58960b691ff4f02c53acf954",
+      "jest": {
+        "testsPassed": 5402,
+        "suitesPassed": 253,
+        "suitesFailed": 1,
+        "testsFailed": 1
+      },
+      "cause": "Existing mocked ADB text-only attachment scenario exceeded 5000 ms while source compilation ran concurrently",
+      "isolatedRetry": "passed on unchanged source",
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "not_run"
+    },
+    {
+      "id": "verify-release-final-candidate",
+      "status": "passed",
+      "exitCode": 0,
+      "publicAppTree": "b64cee2ce3b0192eaae30b120c71ad5a0598ff9a",
+      "jest": {
+        "testsPassed": 5433,
+        "suitesPassed": 254
+      },
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "passed"
+    },
+    {
+      "id": "verify-release-retained-answers",
+      "status": "passed",
+      "exitCode": 0,
+      "publicAppTree": "6c61a9818ec0eaa125c9c04d862965c35e72e005",
+      "jest": {
+        "testsPassed": 5433,
+        "suitesPassed": 254
+      },
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "passed"
+    },
+    {
+      "id": "verify-release-tool-observation",
+      "status": "passed",
+      "exitCode": 0,
+      "publicAppTree": "9050f99a7ad42e99945b78717768af2d1b308e5b",
+      "jest": {
+        "testsPassed": 5437,
+        "suitesPassed": 254
+      },
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "passed"
+    },
+    {
+      "id": "verify-release-document-identity",
+      "status": "passed",
+      "exitCode": 0,
+      "publicAppTree": "02c96702cdb4385a04d818c65a47229fa58b4e8d",
+      "jest": {
+        "testsPassed": 5441,
+        "suitesPassed": 254
+      },
+      "rustLibraryTests": 68,
+      "rustHostTests": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfig": "passed"
+    }
+  ]
+}

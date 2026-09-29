@@ -4626,6 +4626,7 @@ describe('android-scenarios pack selection', () => {
         'runtime-inference-lifecycle',
         'runtime-model-resources',
         'runtime-stage3',
+        'runtime-local-tools',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));

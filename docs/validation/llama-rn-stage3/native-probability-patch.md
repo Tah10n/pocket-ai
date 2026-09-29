@@ -6,7 +6,7 @@ The existing `throwIfContextBusy` guard precedes the reset on both platforms. Th
 
 ## Installation and verification
 
-`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all nineteen complete source fingerprints and build inclusion files. It accepts only the original or already-patched source. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
+`npm ci` runs [the local patch](../../../patches/llama-rn-0.13.0-rc.3.js) through the package's `postinstall` hook. No patching dependency is required. The patch checks the exact manifest, lockfile and installed package version, then checks all twenty complete source fingerprints and build inclusion files. It accepts only original, already-patched, or explicitly fingerprinted earlier patch states. Unexpected versions or source changes fail installation; they require a fresh review rather than a best-effort patch.
 
 Run `node patches/llama-rn-0.13.0-rc.3.js --check` to verify without writing. `npm run verify:native-config` includes this check. Fingerprints use SHA-256 after normalizing CRLF to LF:
 
@@ -27,7 +27,7 @@ The same pinned patch corrects `cpp/jsi/JSIParams.cpp`, also compiled locally on
 
 Duplicate user token entries use the last value, rather than accidentally adding biases. `ignore_eos` defaults to false for each request. When enabled it overrides user biases for every model EOG token (including EOS and end-of-turn tokens), using the core precomputed EOG list. Each override replaces an existing entry or appends one unique entry. This avoids relying on duplicate handling, which differs between the core sampler aligned and fallback candidate paths. Model-defined suppress tokens remain governed by the unchanged core sampler.
 
-The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All nineteen source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
+The original JSIParams source SHA-256 is `07a9f25b2b79bab090cfd112668f1968c6fb078e11a6d8b65c649294a4e16475`; the corrected source is `6ab84994d6db625621b501461181ad4de4d0e427ef5a960ddf2e0f7464b5c9d5`. All twenty source inputs are validated before any is written. These source guards and application tests are not native behavioral acceptance; the rebuilt-device probe must independently verify suppression, bias effects and recovery after invalid token IDs.
 
 ## Fixed request clock in Jinja
 
@@ -54,7 +54,7 @@ The initializer also allocates its chain before rejecting malformed grammar and 
 | Original `cpp/common/sampling.cpp` | `e4926ff1507748facc785d6192554f66dcbaa7aa98b3371d907b11414c1f9fa5` |
 | Patched `cpp/common/sampling.cpp` | `942c2c508a03968f8ba78fc554832c899b0fc8e29be4f6c526ba8118f141cf1c` |
 
-Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All nineteen patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
+Full-source fingerprints additionally pin the sampler free/chain insertion contracts and sampling declarations. All twenty patch sources are preflighted before any write, including installations with the previous three corrections already applied. Tests check the real patched ownership and transfer sites, idempotence and rejection of source drift; these are source-contract checks, not native execution. The earlier crashing APK remains a failed run. The [new source-core APK acceptance](../../llama-rn-013-stage3-acceptance.md) passed invalid grammar rejection followed by ordinary generation, later context replacement and all three regression packs. This independently verifies recovery on Android CPU; it does not establish other-platform behavior.
 
 ## Grammar parser and lazy-trigger diagnostic privacy
 
@@ -121,3 +121,34 @@ sources still fail before writes. Postinstall is idempotent. Build provenance
 includes the patch file, so this correction requires a newly built binary.
 Historical APK identities and results above continue to describe their original
 binaries; they do not verify this new branch correction.
+
+## Stage 4 token-sequence privacy extension
+
+The current patch extends the accepted Stage 3 corrections without changing their
+original fingerprints or ownership fixes. It suppresses the backend-selected token
+ID in `common/sampling.cpp`, per-token IDs and decoded pieces in batch diagnostics,
+the always-on prompt-token array log, and serial completion prompt/token/stop-text dumps (including verbose builds and
+the decode-error path). Aggregate counts, positions, timings and error categories
+remain available. TTS synthesis and parallel inference remain outside this stage.
+
+| Source | Current patched SHA-256 |
+| --- | --- |
+| `cpp/rn-completion.cpp` | `014f8c1319dd8b75b909dff2c6c8532dae28aea82524c71535e1f9b83bd780dc` |
+| `cpp/common/sampling.cpp` | `2f4188ff106231e281e439e6c6f906657394d4d0c0372e130c9fc44670bc4e9d` |
+| `cpp/llama-batch.cpp` | `941ede2131208b75ce936979e9822934c88bc34f4d8760df736fb0c4eb0d2e96` |
+
+The new batch input fingerprint is
+`88f7b462c41fda25c1767880c0d0a70550bfd816a1477663de06de8d5f5ca2fe`.
+The accepted Stage 3 completion fingerprint
+`e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d`
+and sampler fingerprint
+`d68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2`
+are explicit migration states. The first Stage 4 completion fingerprint
+`fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058`
+is also accepted solely to remove its remaining prompt-token array log. The older guarded sampler migration remains valid.
+All twenty sources and unchanged build contracts are validated before any write;
+unknown input or output fingerprints fail atomically. The source-contract suite
+passed 73 tests, including privacy replacements, exact migrations, idempotence and
+drift refusal. These checks are not native logcat or inference acceptance.
+
+The [Stage 4 rebuilt Android CPU acceptance](../../llama-rn-013-stage4-acceptance.md) passed the tool loop and regression scenarios. Final-source app-scoped log review is recorded separately in that report. The earlier reports above retain their original source, APK and historical privacy scope, which allowed some numeric token diagnostics.

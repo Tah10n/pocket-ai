@@ -488,7 +488,30 @@ describe('LlamaRuntimeAdapter', () => {
 
   it('rejects unsupported chat roles before calling the native formatter', () => {
     expect(() => normalizeLlamaMessages([
-      { role: 'tool' as never, content: 'Nope' },
+      { role: 'unsupported' as never, content: 'Nope' },
     ])).toThrow('unsupported role');
+  });
+});
+
+
+describe('tool protocol message bridge', () => {
+  const call = { id: 'run-1-0', type: 'function' as const, function: { name: 'calculate', arguments: '{"expression":"2+2"}' } };
+  it('preserves empty assistant proposals and explicitly linked tool results', () => {
+    const messages = [
+      { role: 'assistant' as const, content: '', tool_calls: [call] },
+      { role: 'tool' as const, content: '{"value":4}', tool_call_id: call.id },
+    ];
+    expect(normalizeLlamaMessages(messages)).toEqual(messages);
+  });
+  it('preserves protocol fields in the typed content mapping', () => {
+    expect(normalizeLlamaMessages([{ role: 'assistant', content: '', tool_calls: [call],
+      contentParts: [{ type: 'text', text: '' }],
+    }])[0]).toMatchObject({ tool_calls: [call], content: [{ type: 'text', text: '' }] });
+  });
+  it('rejects invalid roles and missing identity before native dispatch', () => {
+    expect(() => normalizeLlamaMessages([{ role: 'user', content: '', tool_calls: [call] }])).toThrow('invalid assistant tool calls');
+    expect(() => normalizeLlamaMessages([{ role: 'tool', content: '4' }])).toThrow('missing tool call ID');
+    expect(() => normalizeLlamaMessages([{ role: 'assistant', content: '', tool_calls: [{ ...call, id: '' }] }])).toThrow('invalid assistant tool calls');
+    expect(() => normalizeLlamaMessages([{ role: 'assistant', content: '', tool_call_id: call.id }])).toThrow('requires tool role');
   });
 });

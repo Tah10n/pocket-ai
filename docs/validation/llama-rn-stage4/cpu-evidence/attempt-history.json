@@ -1,0 +1,538 @@
+{
+  "schemaVersion": 1,
+  "note": "Historical failures remain failed. Only attempt 10 establishes final mandatory native acceptance; automatic non-selection remains observed.",
+  "attempts": [
+    {
+      "attempt": 4,
+      "apkSha256": "1122c01e0f3b19304ea8774acd4ce9aad6ad8fb3c3659274073f4290f76af87f",
+      "installedApkSha256": "1122c01e0f3b19304ea8774acd4ce9aad6ad8fb3c3659274073f4290f76af87f",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "failed"
+        }
+      ],
+      "localTools": {
+        "status": "not_run"
+      }
+    },
+    {
+      "attempt": 5,
+      "apkSha256": "1122c01e0f3b19304ea8774acd4ce9aad6ad8fb3c3659274073f4290f76af87f",
+      "installedApkSha256": "1122c01e0f3b19304ea8774acd4ce9aad6ad8fb3c3659274073f4290f76af87f",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed"
+        }
+      ],
+      "localTools": {
+        "status": "failed",
+        "phase": "calculate_required",
+        "failureCode": "operation_failed",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "calculate_required",
+            "status": "failed",
+            "nativeSteps": 0,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "document_search",
+            "status": "not_run"
+          },
+          {
+            "id": "json_schema",
+            "status": "not_run"
+          },
+          {
+            "id": "stop",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "not_run"
+          },
+          {
+            "id": "cleanup",
+            "status": "not_run"
+          }
+        ]
+      }
+    },
+    {
+      "attempt": 6,
+      "apkSha256": "cf70c959dbaafc2edd63d95d0ff4773722b7dc273d41329464ee5675bf3b054c",
+      "installedApkSha256": "cf70c959dbaafc2edd63d95d0ff4773722b7dc273d41329464ee5675bf3b054c",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed"
+        }
+      ],
+      "localTools": {
+        "status": "failed",
+        "phase": "calculate_required",
+        "failureCode": "assertion",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "calculate_required",
+            "status": "failed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalMatched": false,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "document_search",
+            "status": "not_run"
+          },
+          {
+            "id": "json_schema",
+            "status": "not_run"
+          },
+          {
+            "id": "stop",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "not_run"
+          },
+          {
+            "id": "cleanup",
+            "status": "not_run"
+          }
+        ]
+      }
+    },
+    {
+      "attempt": 7,
+      "apkSha256": "c3493d0c713af451b2fa43b8a37c3e943af3fb9038d0842ab5d854ca96dfe273",
+      "installedApkSha256": "c3493d0c713af451b2fa43b8a37c3e943af3fb9038d0842ab5d854ca96dfe273",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed"
+        }
+      ],
+      "localTools": {
+        "status": "failed",
+        "phase": "calculate_required",
+        "failureCode": "assertion",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "calculate_required",
+            "status": "failed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalMatched": false,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "document_search",
+            "status": "not_run"
+          },
+          {
+            "id": "json_schema",
+            "status": "not_run"
+          },
+          {
+            "id": "stop",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "not_run"
+          },
+          {
+            "id": "cleanup",
+            "status": "not_run"
+          }
+        ]
+      }
+    },
+    {
+      "attempt": 8,
+      "apkSha256": "0af53dea3277edcbe52060e28eaf10384daeb0ac39c971d880dfe037ef7f6bc4",
+      "installedApkSha256": "0af53dea3277edcbe52060e28eaf10384daeb0ac39c971d880dfe037ef7f6bc4",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed"
+        }
+      ],
+      "localTools": {
+        "status": "failed",
+        "phase": "calculate_auto",
+        "failureCode": "assertion",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "calculate_required",
+            "status": "passed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalReferencePresent": true,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "status": "failed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_auto",
+            "status": "not_run"
+          },
+          {
+            "id": "document_search",
+            "status": "not_run"
+          },
+          {
+            "id": "json_schema",
+            "status": "not_run"
+          },
+          {
+            "id": "stop",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "not_run"
+          },
+          {
+            "id": "cleanup",
+            "status": "not_run"
+          }
+        ]
+      }
+    },
+    {
+      "attempt": 9,
+      "apkSha256": "359c0fc3386e015182b70ed1faa75a7a5673c18657e01b5c2a8d45fdffef3173",
+      "installedApkSha256": "359c0fc3386e015182b70ed1faa75a7a5673c18657e01b5c2a8d45fdffef3173",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "failed"
+        }
+      ],
+      "localTools": {
+        "status": "failed",
+        "phase": "document_search",
+        "failureCode": "assertion",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "calculate_required",
+            "status": "passed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalReferencePresent": true,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "status": "observed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "referenceMatched": false,
+            "finalReferencePresent": false,
+            "automaticCallSelected": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_auto",
+            "status": "passed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "document_search",
+            "status": "failed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "json_schema",
+            "status": "not_run"
+          },
+          {
+            "id": "stop",
+            "status": "not_run"
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "not_run"
+          },
+          {
+            "id": "cleanup",
+            "status": "not_run"
+          }
+        ]
+      }
+    },
+    {
+      "attempt": 10,
+      "apkSha256": "69f824ce55f7201c0eea86092416ebaf55b71de515c8458fdc830b19d0103646",
+      "installedApkSha256": "69f824ce55f7201c0eea86092416ebaf55b71de515c8458fdc830b19d0103646",
+      "scenarios": [
+        {
+          "id": "runtime-inference-lifecycle",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-model-resources",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-stage3",
+          "status": "passed"
+        },
+        {
+          "id": "runtime-local-tools",
+          "status": "passed"
+        }
+      ],
+      "localTools": {
+        "status": "passed",
+        "phase": "complete",
+        "steps": [
+          {
+            "id": "prepare_model",
+            "status": "passed"
+          },
+          {
+            "id": "cpu_load",
+            "status": "passed"
+          },
+          {
+            "id": "calculate_required",
+            "status": "passed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalReferencePresent": true,
+            "completionDrained": true
+          },
+          {
+            "id": "calculate_auto",
+            "status": "observed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "referenceMatched": false,
+            "finalReferencePresent": false,
+            "automaticCallSelected": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_auto",
+            "status": "passed",
+            "nativeSteps": 1,
+            "nativeCalls": 0,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "document_search",
+            "status": "passed",
+            "nativeSteps": 2,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "finalReferencePresent": true,
+            "completionDrained": true
+          },
+          {
+            "id": "json_schema",
+            "status": "passed",
+            "nativeSteps": 3,
+            "nativeCalls": 1,
+            "executedCalls": 1,
+            "resultReturned": true,
+            "referenceMatched": true,
+            "completionDrained": true
+          },
+          {
+            "id": "stop",
+            "status": "passed",
+            "nativeSteps": 1,
+            "nativeCalls": 1,
+            "executedCalls": 0,
+            "resultReturned": false,
+            "completionDrained": true
+          },
+          {
+            "id": "ordinary_after_stop",
+            "status": "passed",
+            "completionDrained": true
+          },
+          {
+            "id": "cleanup",
+            "status": "passed"
+          }
+        ]
+      }
+    }
+  ]
+}

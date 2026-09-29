@@ -37,7 +37,7 @@ const MAX_RESPONSE_RESERVE_SHARE_OF_PROMPT_BUDGET = 0.5;
 
 export function estimateLlmMessageTokens(message: LlmChatMessage) {
   const mediaPathCount = getLlmMessageMediaPaths(message).length + getLlmMessageAudioInputCount(message);
-  return Math.max(1, Math.ceil(getNativeLlmMessageTextCharacterCount(message) / CHARS_PER_ESTIMATED_TOKEN))
+  return Math.max(1, Math.ceil((getNativeLlmMessageTextCharacterCount(message) + (message.tool_calls ? JSON.stringify(message.tool_calls).length : 0) + (message.tool_call_id?.length ?? 0)) / CHARS_PER_ESTIMATED_TOKEN))
     + MESSAGE_TOKEN_OVERHEAD
     + (mediaPathCount * IMAGE_ATTACHMENT_ESTIMATED_TOKENS);
 }
@@ -189,12 +189,99 @@ function toLlmChatMessage(message: ChatMessage): LlmChatMessage {
   };
 }
 
+
+/** Expand protocol only for inference. Durable/UI history keeps one assistant message. */
+export function expandChatMessageForInference(message: ChatMessage): LlmChatMessage[] {
+  if (message.role !== 'assistant' || !message.toolRun) return [toLlmChatMessage(message)];
+  const messages: LlmChatMessage[] = [];
+  for (const round of message.toolRun.rounds) {
+    // Unanswered proposals are retained in history/UI but are never replayed as
+    // executable work or as an orphan protocol message in a later prompt.
+    if (!round.calls.length || round.calls.some(call => call.result === undefined
+      || (call.status !== 'completed' && call.status !== 'error'))) continue;
+    messages.push({ role: 'assistant', content: round.content, tool_calls: round.calls.map(call => ({
+      id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments },
+    })) });
+    for (const call of round.calls) messages.push({ role: 'tool', tool_call_id: call.id, content: call.result! });
+  }
+  if (message.content.trim()) messages.push(toLlmChatMessage(message));
+  return messages;
+}
+
+type ProtocolWindowGroup = { ids: string[]; messages: LlmChatMessage[] };
+function protocolWindowGroups(thread: ChatThread, latestUserMessage?: ChatMessage): ProtocolWindowGroup[] {
+  const eligible = getEligibleThreadMessages(thread);
+  if (latestUserMessage && !thread.messages.some(message => message.id === latestUserMessage.id)) eligible.push(latestUserMessage);
+  const groups: ProtocolWindowGroup[] = [];
+  for (const message of eligible) {
+    const expanded = expandChatMessageForInference(message);
+    if (!expanded.length) continue;
+    if (message.role === 'user' || groups.length === 0) groups.push({ ids: [], messages: [] });
+    groups[groups.length - 1].ids.push(message.id);
+    groups[groups.length - 1].messages.push(...expanded);
+  }
+  return groups;
+}
+function protocolSystemMessages(thread: ChatThread): LlmChatMessage[] {
+  const content = [thread.presetSnapshot.systemPrompt.trim(),
+    thread.summary && !thread.summary.isPlaceholder ? `Conversation summary:\n${thread.summary.content}` : '',
+  ].filter(Boolean).join('\n\n');
+  return content ? [{ role: 'system', content }] : [];
+}
+function selectProtocolGroups(thread: ChatThread, options: ThreadInferenceWindowOptions, latestUserMessage?: ChatMessage) {
+  const system = protocolSystemMessages(thread);
+  const groups = protocolWindowGroups(thread, latestUserMessage);
+  let start = 0;
+  // A required newest turn remains indivisible even when it exceeds the message cap.
+  while (start < groups.length - 1 && system.length + groups.slice(start).reduce((n, g) => n + g.ids.length, 0) > options.maxContextMessages) start++;
+  return { system, groups, start };
+}
+function getProtocolInferenceWindow(thread: ChatThread, options: ThreadInferenceWindowOptions, latestUserMessage?: ChatMessage): ThreadInferenceWindow {
+  const selected = selectProtocolGroups(thread, options, latestUserMessage);
+  const { system, groups } = selected;
+  let { start } = selected;
+  if (options.maxContextTokens && groups.length) {
+    const total = Math.max(0, options.maxContextTokens - (options.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS));
+    const required = estimateLlmMessagesTokens([...system, ...groups[groups.length - 1].messages]);
+    const reserve = Math.min(resolveBalancedResponseReserveTokens(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens, total), Math.max(0, total - required));
+    while (start < groups.length - 1 && estimateLlmMessagesTokens([...system, ...groups.slice(start).flatMap(g => g.messages)]) > total - reserve) start++;
+  }
+  return { messages: [...system, ...groups.slice(start).flatMap(g => g.messages)], truncatedMessageIds: groups.slice(0, start).flatMap(g => g.ids) };
+}
+async function getAccurateProtocolInferenceWindow(thread: ChatThread, options: ThreadInferenceWindowOptions,
+  count: (messages: LlmChatMessage[]) => Promise<number>, control: { throwIfCancelled?: () => void }) {
+  const { system, groups, start: boundedStart } = selectProtocolGroups(thread, options);
+  const margin = Math.max(0, Math.round(options.promptSafetyMarginTokens ?? DEFAULT_INFERENCE_PROMPT_SAFETY_MARGIN_TOKENS));
+  const total = options.maxContextTokens && options.maxContextTokens > 0 ? Math.max(0, options.maxContextTokens - margin) : Infinity;
+  const measure = async (messages: LlmChatMessage[]) => { control.throwIfCancelled?.(); const result = await count(messages); control.throwIfCancelled?.(); return result; };
+  const requiredMessages = [...system, ...(groups.at(-1)?.messages ?? [])];
+  const requiredTokens = await measure(requiredMessages);
+  if (requiredTokens > total) throw new AppError('message_too_long', 'The current tool-call/result group cannot fit in the context window.');
+  const reserve = Number.isFinite(total) ? Math.min(resolveBalancedResponseReserveTokens(options.responseReserveTokens ?? thread.paramsSnapshot.maxTokens, total), total - requiredTokens) : 0;
+  let start = boundedStart;
+  // Avoid reopening arbitrarily old file-backed history during exact backfill.
+  const heuristic = getProtocolInferenceWindow(thread, options);
+  let heuristicStart = 0;
+  let skipped = 0;
+  while (heuristicStart < groups.length && skipped < heuristic.truncatedMessageIds.length) skipped += groups[heuristicStart++].ids.length;
+  start = Math.max(start, heuristicStart);
+  let messages = [...system, ...groups.slice(start).flatMap(g => g.messages)];
+  let promptTokens = await measure(messages);
+  while (start < groups.length - 1 && promptTokens > total - reserve) {
+    start++;
+    messages = [...system, ...groups.slice(start).flatMap(g => g.messages)];
+    promptTokens = await measure(messages);
+  }
+  return { messages, promptTokens, promptSafetyMarginTokens: margin, truncatedMessageIds: groups.slice(0, start).flatMap(g => g.ids) };
+}
+
 export function getThreadInferenceWindow(
   thread: ChatThread,
   optionsOrMaxContextMessages: number | ThreadInferenceWindowOptions,
   latestUserMessage?: ChatMessage,
 ): ThreadInferenceWindow {
   const options = resolveInferenceWindowOptions(optionsOrMaxContextMessages);
+  if (thread.messages.some(message => message.toolRun)) return getProtocolInferenceWindow(thread, options, latestUserMessage);
   const systemMessages: LlmChatMessage[] = [];
 
   const systemContentParts: string[] = [];
@@ -217,13 +304,14 @@ export function getThreadInferenceWindow(
 
   const eligibleMessages = thread.messages.filter(
     (message) =>
-      message.state !== 'error'
+      (message.state !== 'error' || Boolean(message.toolRun))
       && (message.kind ?? 'message') !== 'model_switch'
       && (
         getVisibleMessageContent(message.role, message.content, message.structuredOutput?.mode).trim().length > 0
         || (message.contentParts?.length ?? 0) > 0
         || getChatImageAttachmentMediaPaths(message.attachments).length > 0
         || hasAudioAttachmentInput(message.attachments)
+        || Boolean(message.toolRun)
       ),
   );
   const historyMessages = eligibleMessages.map<LlmChatMessage>(toLlmChatMessage);
@@ -385,13 +473,14 @@ export const SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES = 1;
 export function getEligibleThreadMessages(thread: ChatThread): ChatMessage[] {
   return thread.messages.filter(
     (message) =>
-      message.state !== 'error'
+      (message.state !== 'error' || Boolean(message.toolRun))
       && (message.kind ?? 'message') !== 'model_switch'
       && (
         getVisibleMessageContent(message.role, message.content, message.structuredOutput?.mode).trim().length > 0
         || (message.contentParts?.length ?? 0) > 0
         || getChatImageAttachmentMediaPaths(message.attachments).length > 0
         || hasAudioAttachmentInput(message.attachments)
+        || Boolean(message.toolRun)
       ),
   );
 }
@@ -415,6 +504,7 @@ export async function buildInferenceWindowWithAccurateTokenCounts(
   promptSafetyMarginTokens: number;
   truncatedMessageIds: string[];
 }> {
+  if (thread.messages.some(message => message.toolRun)) return getAccurateProtocolInferenceWindow(thread, options, countPromptTokens, control);
   const countPromptTokensWithCancellation = async (messages: LlmChatMessage[]) => {
     control.throwIfCancelled?.();
     const tokens = await countPromptTokens(messages);

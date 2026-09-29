@@ -36,6 +36,59 @@ describe('pinned serial sampling and template clock corrections', () => {
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('removes reconstructible token IDs and text from serial completion and batch diagnostics', () => {
+    patchLlamaBridge(root);
+    const read = source => fs.readFileSync(path.join(root, 'node_modules/llama.rn', source), 'utf8');
+    expect(read(SAMPLING_SOURCE)).not.toContain("Backend sampler selected token: '%d'");
+    expect(read('cpp/llama-batch.cpp')).not.toContain('id = %6d (%16s)');
+    const completion = read(COMPLETION_SOURCE);
+    expect(completion).not.toContain('cached: %s, to_eval: %s');
+    expect(completion).not.toContain('token_text: %s');
+    expect(completion).not.toContain('stopping_word: %s');
+    expect(completion).not.toContain('n_threads: %d, embd: %s');
+    expect(completion).not.toContain('EOS: %s');
+    expect(completion).not.toContain(': prompt_tokens = ');
+    expect(completion).not.toContain('ss << token');
+    expect(completion).toContain('LOG_INFO("prompt token count: %zu", num_prompt_tokens);');
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it.each([COMPLETION_SOURCE, SAMPLING_SOURCE])('migrates the exact accepted stage 3 privacy source: %s', source => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === source);
+    const previousHash = source === COMPLETION_SOURCE
+      ? 'e4148aee26b8f99b8646407e3b217157ef66a3614e0529dcc2cf6fe0416d2b2d'
+      : 'd68916d80be1f3e3b1dd8ec238ab77cc23b8056394f3db49991eb2739fd0a1c2';
+    const migration = patch.intermediates.find(entry => entry.sha256 === previousHash);
+    const file = path.join(root, 'node_modules/llama.rn', source);
+    let previous = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
+    for (const [before, after] of [...migration.replacements].reverse()) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(previousHash);
+    fs.writeFileSync(file, previous);
+    patchLlamaBridge(root);
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(patch.afterSha256);
+  });
+
+  it('upgrades the exact first Stage 4 source without retaining its indirect prompt dump', () => {
+    const patch = SOURCE_PATCHES.find(entry => entry.source === COMPLETION_SOURCE);
+    const migration = patch.intermediates.find(entry => entry.sha256 === 'fda4ee31c019b9650b08e14ffcf694e66e45cd2538f02b93e36ce090804ab058');
+    const file = path.join(root, 'node_modules/llama.rn', COMPLETION_SOURCE);
+    let previous = applyReplacements(fs.readFileSync(file, 'utf8'), patch.replacements);
+    for (const [before, after] of migration.replacements) previous = previous.replace(after, before);
+    expect(hashSource(previous)).toBe(migration.sha256);
+    fs.writeFileSync(file, previous);
+    patchLlamaBridge(root);
+    expect(hashSource(fs.readFileSync(file, 'utf8'))).toBe(COMPLETION_AFTER_SHA256);
+    expect(patchLlamaBridge(root).status).toBe('already-applied');
+  });
+
+  it('rejects unknown batch debug source before writing earlier protected files', () => {
+    const file = path.join(root, 'node_modules/llama.rn/cpp/llama-batch.cpp');
+    const original = fs.readFileSync(sourcePath, 'utf8');
+    fs.appendFileSync(file, '// unknown source');
+    expect(() => patchLlamaBridge(root)).toThrow('fingerprint mismatch');
+    expect(fs.readFileSync(sourcePath, 'utf8')).toBe(original);
+  });
+
   it('makes precisely one native reset after rewind and is idempotent', () => {
     const original = fs.readFileSync(sourcePath, 'utf8');
     expect(hashSource(original)).toBe(BEFORE_SHA256);

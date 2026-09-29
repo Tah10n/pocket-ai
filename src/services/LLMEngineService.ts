@@ -1,3 +1,4 @@
+import { hasToolProtocol, type LocalToolRequest } from './LocalToolRequest';
 import type {
   CompletionParams,
   LlamaContext,
@@ -1406,6 +1407,73 @@ class LLMEngineService {
   private initPromise: Promise<void> | null = null;
   private operationQueue: Promise<void> = Promise.resolve();
   private exclusiveOperationCount = 0;
+  private localToolRun: {
+    token: symbol; controller: AbortController; settled: Promise<void>;
+  } | null = null;
+
+  /** Reserve between completions without holding the non-reentrant native queue. */
+  public beginLocalToolRun(expectedModelId: string) {
+    if (this.localToolRun || this.auxiliaryOperation || this.autotuneReserved
+      || this.exclusiveOperationCount > 0 || this.isUnloading || this.initPromise
+      || this.hasActiveCompletion() || this.contextOperationRunner.hasActiveChatBlocking()) {
+      throw new AppError('engine_busy', 'The engine is busy.');
+    }
+    this.assertExpectedCompletionModel(expectedModelId);
+    this.getReadyContextOrThrow();
+    const contextIdentity = this.getPromptContextIdentity();
+    const modelAtStart = registry.getModel(expectedModelId);
+    const modelIdentity = modelAtStart ? getCompanionBindingIdentity(modelAtStart) : null;
+    const loadIdentity = JSON.stringify(this.getEffectiveLoadParameters());
+    const controller = new AbortController();
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>(resolve => { resolveSettled = resolve; });
+    const owner = { token: Symbol('local-tool-run'), controller, settled };
+    // Preempt passive probes just like ordinary prompt preparation. The native
+    // queue retains their raw work until it drains before admitting this owner.
+    const release = this.beginPromptPreparation();
+    this.localToolRun = owner;
+    let finished = false;
+    const assertCanPublish = () => {
+      if (finished || this.localToolRun !== owner
+        || this.getPromptContextIdentity() !== contextIdentity
+        || JSON.stringify(this.getEffectiveLoadParameters()) !== loadIdentity
+        || (() => {
+          const current = registry.getModel(expectedModelId);
+          return (current ? getCompanionBindingIdentity(current) : null) !== modelIdentity;
+        })()) {
+        throw new AppError('engine_busy', 'The local tool run was cancelled.');
+      }
+      this.assertExpectedCompletionModel(expectedModelId);
+    };
+    return {
+      token: owner.token,
+      signal: controller.signal,
+      // Stop prevents further actions, but a settled parsed reply still belongs
+      // to this lease until its context/model identity changes or it finishes.
+      assertCanPublish,
+      assertCurrent: () => {
+        assertCanPublish();
+        if (controller.signal.aborted) {
+          throw new AppError('engine_busy', 'The local tool run was cancelled.');
+        }
+      },
+      finish: () => {
+        if (finished) return;
+        finished = true;
+        release();
+        if (this.localToolRun === owner) this.localToolRun = null;
+        resolveSettled();
+      },
+    };
+  }
+
+  private assertLocalToolRunOwner(token?: symbol): void {
+    if (this.localToolRun && (this.localToolRun.token !== token || this.localToolRun.controller.signal.aborted)) {
+      throw new AppError('engine_busy', 'A local tool run owns the engine.');
+    }
+    if (token && !this.localToolRun) throw new AppError('engine_busy', 'The local tool run has ended.');
+  }
+
   private auxiliaryOperation: { modelId: string; cancelled: boolean; isCurrent?: () => boolean } | null = null;
   private auxiliaryRestoreError: string | undefined;
   private autotuneReserved = false;
@@ -2115,11 +2183,11 @@ class LLMEngineService {
   }
 
   public hasActiveContextOperation(): boolean {
-    return this.contextOperationRunner.hasActive() || this.orphanedContextOperationDrains.size > 0;
+    return this.localToolRun !== null || this.contextOperationRunner.hasActive() || this.orphanedContextOperationDrains.size > 0;
   }
 
   public hasActiveChatBlockingContextOperation(): boolean {
-    return this.contextOperationRunner.hasActiveChatBlocking();
+    return this.localToolRun !== null || this.contextOperationRunner.hasActiveChatBlocking();
   }
 
   public beginPromptPreparation(): () => void {
@@ -2138,6 +2206,9 @@ class LLMEngineService {
     // Establish the cache boundary synchronously. Promise rejection propagates
     // through microtasks, so waiting for it alone leaves an immediate retry able
     // to join the cancelled in-flight entry.
+    const toolRunAtCancellation = this.localToolRun;
+    toolRunAtCancellation?.controller.abort();
+    if (toolRunAtCancellation) void this.interruptActiveCompletion().catch(() => undefined);
     exactPromptTokenCache.detachInFlight();
     this.contextOperationRunner.cancelGenerationOwned(
       new AppError('engine_busy', CONTEXT_OPERATION_STOP_MESSAGE),
@@ -2157,6 +2228,10 @@ class LLMEngineService {
         this.state.activeModelId ?? null,
         new AppError('engine_busy', CONTEXT_OPERATION_STOP_TIMEOUT_MESSAGE),
       );
+    }
+    if (toolRunAtCancellation
+      && await this.waitForUnloadPromise(toolRunAtCancellation.settled, timeoutMs) === 'timed_out') {
+      return 'timed_out';
     }
     return drainResult;
   }
@@ -3425,6 +3500,7 @@ class LLMEngineService {
    * Initialize the llama.rn engine and load a GGUF model from disk.
    */
   public async load(modelId: string, options?: LoadModelOptions): Promise<void> {
+    this.assertLocalToolRunOwner();
     if (this.auxiliaryOperation) {
       throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
     }
@@ -3472,6 +3548,7 @@ class LLMEngineService {
     }
 
     const loadOperation = async () => {
+      this.assertLocalToolRunOwner();
       if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
         return;
       }
@@ -3667,6 +3744,7 @@ class LLMEngineService {
 
   /** Excludes auxiliary work through autotune's preparation and candidate gaps. */
   public reserveAutotuneContext(): () => void {
+    this.assertLocalToolRunOwner();
     this.assertNoOrphanedContextReleasePending();
     if (this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.isUnloading) {
       throw new AppError('engine_busy', 'The engine is busy. Retry after the current operation finishes.');
@@ -3830,6 +3908,14 @@ class LLMEngineService {
   }
 
   public async unload(): Promise<void> {
+    const toolRun = this.localToolRun;
+    if (toolRun) {
+      toolRun.controller.abort();
+      await this.interruptActiveCompletion();
+      if (await this.waitForUnloadPromise(toolRun.settled, CONTEXT_OPERATION_STOP_DRAIN_TIMEOUT_MS) === 'timed_out') {
+        throw new AppError('engine_busy', 'Local document work is still stopping.');
+      }
+    }
     if (this.auxiliaryOperation) {
       this.invalidateAuxiliaryContextOperation();
       throw new AppError('engine_busy', 'An auxiliary model is still using native resources. Retry after it finishes.');
@@ -3855,14 +3941,17 @@ class LLMEngineService {
     onToken,
     params,
     generation,
+    toolRequest,
+    runOwner,
   }: LlmChatCompletionOptions): Promise<LlamaCompletionResult> {
+    this.assertLocalToolRunOwner(runOwner);
     const predictTokens = params?.n_predict === undefined ? 512 : params.n_predict;
     if (!Number.isSafeInteger(predictTokens) || predictTokens < 0 || predictTokens > MAX_COMPLETION_PREDICT_TOKENS) {
       throw new AppError('action_failed', 'The completion token budget must be an integer from 0 to 16384.');
     }
     const requestGeneration = freezeGenerationParameters(generation);
     const sampling = resolveAdvancedSampling(requestGeneration);
-    const output = prepareStructuredOutput(requestGeneration.output);
+    const output = prepareStructuredOutput(toolRequest?.phase === 'tools' ? undefined : requestGeneration.output);
     if (this.auxiliaryOperation) {
       throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
     }
@@ -4013,6 +4102,7 @@ class LLMEngineService {
               generation: requestGeneration,
               enableThinking,
               reasoningFormat,
+              toolRequest,
             }).catch((error: unknown) => {
               if (process.env.NODE_ENV !== 'test') {
                 console.warn('[LLMEngine] Failed to prepare chat template', getSanitizedTemplateFormatterErrorMetadata(error));
@@ -4135,7 +4225,8 @@ class LLMEngineService {
             return await runCompletion(completionMessages, markTokensStreamed);
           } catch (error) {
             if (
-              !activeSpeculativeConfig
+              toolRequest !== undefined
+              || !activeSpeculativeConfig
               || requestMediaInputOccurrenceCount > 0
               || hasStreamedTokens
               || isConversationAlternationError(error)
@@ -4236,7 +4327,7 @@ class LLMEngineService {
             await runCompletionWithSpeculativeFallback(requestMessages),
           ));
         } catch (error) {
-          if (isConversationAlternationError(error)) {
+          if (isConversationAlternationError(error) && !toolRequest && !hasToolProtocol(requestMessages)) {
             if (hasStreamedTokens && onToken) {
               console.warn(
                 '[LLMEngine] Conversation alternation error after streaming started; skipping retry to avoid duplicate output',
@@ -4488,6 +4579,7 @@ class LLMEngineService {
   public async inspectTokens(text: string, expectedModelId?: string): Promise<{
     tokenCount: number; tokens: number[]; detokenized: string; truncated: boolean;
   }> {
+    this.assertLocalToolRunOwner();
     if (text.length > 16_384) throw new AppError('action_failed', 'Token inspection is limited to 16384 characters.');
     this.assertContextRecoveryNotRequired();
     this.assertExpectedCompletionModel(expectedModelId);
@@ -4501,6 +4593,7 @@ class LLMEngineService {
       }
       this.assertExpectedCompletionModel(expectedModelId);
       const { context, generation: contextGeneration } = this.getReadyContextOrThrow();
+      this.assertLocalToolRunOwner();
       const result = await tokenizeFormattedPrompt({ context, prompt: text });
       cancellation.throwIfCancelled();
       this.assertContextStillCurrent(context, contextGeneration);
@@ -4927,6 +5020,8 @@ class LLMEngineService {
     messages,
     params,
     generation,
+    toolRequest,
+    runOwner,
     multimodalReadiness,
     expectedModelId,
     chatBlocking = true,
@@ -4934,6 +5029,8 @@ class LLMEngineService {
   }: {
     messages: LlmChatMessage[];
     generation?: AdvancedGenerationParameters;
+    toolRequest?: LocalToolRequest;
+    runOwner?: symbol;
     params?: {
       enable_thinking?: boolean;
       reasoning_format?: 'none' | 'auto' | 'deepseek';
@@ -4944,6 +5041,7 @@ class LLMEngineService {
     chatBlocking?: boolean;
     allowMediaFallback?: boolean;
   }): Promise<number> {
+    this.assertLocalToolRunOwner(runOwner);
     if (this.auxiliaryOperation) {
       throw new AppError('engine_busy', 'An auxiliary model check is using the engine. Please retry.');
     }
@@ -5040,6 +5138,7 @@ class LLMEngineService {
 
     return this.trackContextOperation(async (cancellation) => {
       cancellation.throwIfCancelled();
+      this.assertLocalToolRunOwner(runOwner);
 
       if (this.activeCompletionPromise || this.auxiliaryOperation) {
         throw new AppError('engine_busy', 'A response is already being generated.');
@@ -5064,6 +5163,7 @@ class LLMEngineService {
             enableThinking: params?.enable_thinking ?? false,
             reasoningFormat: requestGeneration.reasoningFormat ?? params?.reasoning_format ?? 'none',
             addGenerationPrompt: params?.add_generation_prompt,
+            toolRequest,
           });
           formatted = { ...prepared.formatted, prompt: prepared.completion.prompt ?? '' };
         } catch (error) {
@@ -5097,7 +5197,7 @@ class LLMEngineService {
       try {
         return await countTokens(requestMessages);
       } catch (error) {
-        if (isConversationAlternationError(error)) {
+        if (isConversationAlternationError(error) && !toolRequest && !hasToolProtocol(requestMessages)) {
           console.warn('[LLMEngine] Retrying prompt token count after normalizing chat roles for strict templates');
           const normalizedMessages = normalizeMessagesForStrictRoleAlternation(requestMessages, {
             systemNormalization: strictRoleSystemNormalization,
@@ -5155,6 +5255,7 @@ class LLMEngineService {
   }
 
   public async stopCompletion(): Promise<void> {
+    this.localToolRun?.controller.abort();
     // Prompt token counting may still be outside the context runner while it
     // awaits model initialization. Invalidate that pre-admission work as part
     // of the same stop boundary without touching lifecycle-owned warmup. Detach
@@ -5185,6 +5286,7 @@ class LLMEngineService {
   }
 
   public async interruptActiveCompletion(): Promise<void> {
+    this.localToolRun?.controller.abort();
     const activeCompletion = this.activeCompletionDriverPromise;
     if (!activeCompletion) {
       return;

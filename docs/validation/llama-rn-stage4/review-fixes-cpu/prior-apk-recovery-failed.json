@@ -1,0 +1,37 @@
+{
+  "appTree": "452d3c16c1700cbdcb78932f5c77bf86988b33b8",
+  "apkSha256": "9f35ecab2b1718d6716eed04fa21089f8061b8d8e91bb5218d46f752c984a6d5",
+  "evidence": {
+    "schemaVersion": 1,
+    "status": "failed",
+    "phase": "ordinary_auto_limit",
+    "failureCode": "assertion",
+    "requiresForceStop": false,
+    "steps": [
+      {
+        "id": "ordinary_auto_limit",
+        "status": "failed",
+        "nativeSteps": 1,
+        "nativeCalls": 0,
+        "executedCalls": 0,
+        "outputCharacters": 143,
+        "stoppedLimit": true,
+        "parsedContentRetained": false,
+        "storedStopped": true,
+        "completionDrained": true
+      },
+      {
+        "id": "empty_regenerate_stop",
+        "status": "not_run"
+      },
+      {
+        "id": "empty_branch_stop",
+        "status": "not_run"
+      },
+      {
+        "id": "empty_checkpoint_cold_recovery",
+        "status": "not_run"
+      }
+    ]
+  }
+}

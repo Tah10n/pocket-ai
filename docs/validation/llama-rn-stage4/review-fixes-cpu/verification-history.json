@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "command": "npm run verify:release",
+  "attempts": [
+    {
+      "attempt": 1,
+      "finishedAt": "2026-09-29T22:40:02.7429356Z",
+      "status": "failed",
+      "jestSuitesPassed": 254,
+      "jestSuitesFailed": 1,
+      "jestTestsPassed": 5523,
+      "jestTestsFailed": 1,
+      "reason": "Old local-tool history checkpoint fixture used run ID 'run' for message ID 'a'. Canonical checkpoint ownership now rejects this mismatch.",
+      "correction": "Fixture run ID corrected to 'a'; all six targeted tests passed. Production ownership checks were retained."
+    },
+    {
+      "attempt": 2,
+      "finishedAt": "2026-09-29T22:49:59.1940196Z",
+      "status": "passed",
+      "jestSuitesPassed": 255,
+      "jestTestsPassed": 5524,
+      "rustLibraryTestsPassed": 68,
+      "rustHostTestsPassed": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfiguration": "passed",
+      "rustFormatClippyScaffold": "passed"
+    },
+    {
+      "attempt": 3,
+      "appTree": "1a16de40584d3ac6751a7fe12f5c742fde470f4d",
+      "finishedAt": "2026-09-29T23:16:01.5251507Z",
+      "status": "failed",
+      "remainingChecks": "not_run",
+      "reason": "Unchanged ChatScreen preset baseline exceeded its 5000ms timeout while native C++ compilation ran concurrently. Remaining verification was deliberately aborted and its process tree cleaned up. No source or timeout change was made."
+    },
+    {
+      "attempt": 4,
+      "appTree": "1a16de40584d3ac6751a7fe12f5c742fde470f4d",
+      "finishedAt": "2026-09-29T23:26:48.3335097Z",
+      "status": "passed",
+      "jestSuitesPassed": 255,
+      "jestTestsPassed": 5527,
+      "rustLibraryTestsPassed": 68,
+      "rustHostTestsPassed": 3,
+      "typecheck": "passed",
+      "lint": "passed",
+      "nativeConfiguration": "passed",
+      "rustFormatClippyScaffold": "passed",
+      "reason": "Final release verification ran sequentially after the native suite and unused build daemons finished."
+    }
+  ],
+  "hostedCi": "Evaluated separately on the published PR head. Local/native results do not imply hosted CI success."
+}

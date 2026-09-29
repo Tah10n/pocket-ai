@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "phase": "complete",
+  "requiresForceStop": false,
+  "runtimeVersion": "0.13.0-rc.3",
+  "backend": "cpu",
+  "modelRevision": "60b85c0e3d8fe0f6474f406922a26d12aca4550d",
+  "modelSha256": "c159d1518f16bc42533d9a09f034eb598b670341adc2b08b9a9751614aea71eb",
+  "steps": [
+    {
+      "id": "prepare_model",
+      "status": "passed",
+      "fixtureVerified": true
+    },
+    {
+      "id": "cpu_load",
+      "status": "passed",
+      "cpuConfirmed": true
+    },
+    {
+      "id": "calculate_required",
+      "nativeStage": "completion",
+      "status": "passed",
+      "nativeSteps": 2,
+      "nativeCalls": 1,
+      "executedCalls": 1,
+      "outputCharacters": 44,
+      "resultReturned": true,
+      "referenceMatched": true,
+      "finalReferencePresent": true,
+      "completionDrained": true
+    },
+    {
+      "id": "calculate_auto",
+      "nativeStage": "completion",
+      "status": "observed",
+      "nativeSteps": 1,
+      "nativeCalls": 0,
+      "executedCalls": 0,
+      "outputCharacters": 78,
+      "automaticCallSelected": false,
+      "resultReturned": false,
+      "referenceMatched": false,
+      "finalReferencePresent": false,
+      "completionDrained": true
+    },
+    {
+      "id": "ordinary_auto",
+      "nativeStage": "completion",
+      "status": "passed",
+      "nativeSteps": 1,
+      "nativeCalls": 0,
+      "executedCalls": 0,
+      "outputCharacters": 28,
+      "resultReturned": false,
+      "completionDrained": true
+    },
+    {
+      "id": "document_search",
+      "nativeStage": "completion",
+      "status": "passed",
+      "nativeSteps": 2,
+      "nativeCalls": 1,
+      "executedCalls": 1,
+      "outputCharacters": 130,
+      "resultReturned": true,
+      "referenceMatched": true,
+      "membershipMatched": true,
+      "locatorMatched": true,
+      "finalReferencePresent": true,
+      "completionDrained": true
+    },
+    {
+      "id": "json_schema",
+      "nativeStage": "completion",
+      "status": "passed",
+      "nativeSteps": 3,
+      "nativeCalls": 1,
+      "executedCalls": 1,
+      "outputCharacters": 14,
+      "resultReturned": true,
+      "referenceMatched": true,
+      "schemaAnswerMatched": true,
+      "structuredValid": true,
+      "completionDrained": true
+    },
+    {
+      "id": "stop",
+      "nativeStage": "completion",
+      "status": "passed",
+      "nativeSteps": 1,
+      "nativeCalls": 1,
+      "executedCalls": 0,
+      "resultReturned": false,
+      "cancelled": true,
+      "completionDrained": true
+    },
+    {
+      "id": "ordinary_after_stop",
+      "status": "passed",
+      "outputCharacters": 53,
+      "completionDrained": true
+    },
+    {
+      "id": "cleanup",
+      "status": "passed",
+      "historyRetained": true,
+      "profileRestored": true
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+import en from '../../src/i18n/locales/en.json';
+import ru from '../../src/i18n/locales/ru.json';
 import React from 'react';
 import { StyleSheet, View } from 'react-native';
 import { act, fireEvent, render, waitFor, within } from '@testing-library/react-native';
@@ -13,6 +15,7 @@ import type { ChatAttachment } from '../../src/types/attachments';
 const reactI18nextMock = jest.requireMock('react-i18next') as {
   __setTranslationOverride: (key: string, value: string, nextLanguage?: string) => void;
   __resetTranslations: () => void;
+  __setMockLanguage: (language: string) => void;
 };
 
 jest.mock('react-native-css-interop', () => {
@@ -99,6 +102,51 @@ jest.mock('@/components/ui/pressable', () => {
 });
 
 describe('ChatMessageBubble', () => {
+  it.each(['<think>\n\n</think>\n\n', '<think>private reasoning</think>Visible plan', '<|im_start|>assistant\nVisible plan'])(
+    'hides intermediate tool-round text while preserving canonical content %s', content => {
+      const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
+        phase: 'final' as const, status: 'completed' as const,
+        rounds: [{ index: 0, content, calls: [{ id: 'c', name: 'calculate', arguments: '{"expression":"17+25"}',
+          status: 'completed' as const, result: '{"value":42}' }] }],
+      };
+      const view = render(<ChatMessageBubble id="tool-presentation" isUser={false} content="The result is 42." toolRun={toolRun} />);
+      fireEvent.press(view.getByTestId('tool-run-toggle-tool-presentation'));
+      expect(view.queryByText(/<think>|private reasoning|<\|im_start\|>|Visible plan/)).toBeNull();
+      expect(view.getByText('{"expression":"17+25"}')).toBeTruthy();
+      expect(view.getByText(/calculate/)).toBeTruthy();
+      expect(view.getByText('{"value":42}')).toBeTruthy();
+      expect(toolRun.rounds[0].content).toBe(content);
+    });
+
+  it('hides an empty completed tool run after showing its running preparation state', () => {
+    const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
+      phase: 'tools' as const, status: 'running' as const, rounds: [],
+    };
+    const view = render(<ChatMessageBubble id="no-calls" isUser={false} content="" toolRun={toolRun} />);
+    expect(view.getByTestId('tool-run-toggle-no-calls')).toBeTruthy();
+    view.rerender(<ChatMessageBubble id="no-calls" isUser={false} content="An ordinary answer."
+      toolRun={{ ...toolRun, status: 'completed' }} />);
+    expect(view.queryByTestId('tool-run-toggle-no-calls')).toBeNull();
+    expect(view.getByTestId('markdown-renderer')).toBeTruthy();
+  });
+
+  it('keeps requested tool work distinct from executed work and updates the collapsed run', () => {
+    const toolRun = { id: 'r', threadId: 't', settings: { enabled: true, allowedTools: ['calculate' as const] },
+      phase: 'tools' as const, status: 'running' as const,
+      rounds: [{ index: 0, content: '', calls: [{ id: 'c', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'proposed' as const }] }],
+    };
+    const view = render(<ChatMessageBubble id="tools" isUser={false} content="" toolRun={toolRun} />);
+    expect(view.queryByTestId('tool-call-c')).toBeNull();
+    fireEvent.press(view.getByTestId('tool-run-toggle-tools'));
+    expect(view.getByText(/chat.tools.status.proposed/)).toBeTruthy();
+    view.rerender(<ChatMessageBubble id="tools" isUser={false} content="" toolRun={{ ...toolRun,
+      rounds: [{ ...toolRun.rounds[0], calls: [{ ...toolRun.rounds[0].calls[0], status: 'completed', result: '{"value":4}' }] }],
+    }} />);
+    expect(view.getByText(/chat.tools.status.completed/)).toBeTruthy();
+    expect(view.getByText('{"value":4}')).toBeTruthy();
+    expect(view.queryByTestId('markdown-renderer')).toBeNull();
+  });
+
   it('displays and copies exact JSON without stripping literal thinking tags or whitespace', async () => {
     const raw = '  {"value":"<think>literal</think>", "ok": true}\n';
     const view = render(<ChatMessageBubble id="json-exact" isUser={false} content={raw}
@@ -760,3 +808,16 @@ describe('ChatMessageBubble', () => {
     expect(FileSystem.getInfoAsync).not.toHaveBeenCalled();
   });
 });
+
+it.each([['en', en.common.errors.localToolRoundLimit], ['ru', ru.common.errors.localToolRoundLimit]])(
+  'renders a persisted tool termination in the active %s locale', (language, localized) => {
+    reactI18nextMock.__setMockLanguage(language);
+    reactI18nextMock.__setTranslationOverride('common.errors.localToolRoundLimit', localized, language);
+    try {
+      const view = render(<ChatMessageBubble id="limited-tool" isUser={false} content="" messageState="error"
+        errorCode="local_tool_round_limit" errorMessage="Local tool run could not complete." />);
+      expect(view.getByText(localized)).toBeTruthy();
+      expect(view.queryByText('Local tool run could not complete.')).toBeNull();
+    } finally { reactI18nextMock.__resetTranslations(); }
+  },
+);

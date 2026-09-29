@@ -285,7 +285,13 @@ function hasNonTextContentParts(parts: readonly RNLlamaMessagePart[]): boolean {
   return parts.some((part) => part.type !== 'text');
 }
 
-export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICompatibleMessage[] {
+// The pinned bridge supports these fields although its declaration omits them.
+export type LlamaProtocolMessage = RNLlamaOAICompatibleMessage & {
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+};
+
+export function normalizeLlamaMessages(messages: LlmChatMessage[]): LlamaProtocolMessage[] {
   if (!Array.isArray(messages)) {
     throw new Error('[LLMEngine] Invalid chat messages: expected array');
   }
@@ -301,8 +307,26 @@ export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICo
       throw new Error(`[LLMEngine] Invalid chat message at index ${index}: role and content must be strings`);
     }
 
-    if (role !== 'system' && role !== 'user' && role !== 'assistant') {
+    if (role !== 'system' && role !== 'user' && role !== 'assistant' && role !== 'tool') {
       throw new Error(`[LLMEngine] Invalid chat message at index ${index}: unsupported role`);
+    }
+
+    const protocol: Pick<LlamaProtocolMessage, 'tool_calls' | 'tool_call_id'> = {};
+    if (message.tool_calls !== undefined) {
+      if (role !== 'assistant' || !Array.isArray(message.tool_calls) || message.tool_calls.length === 0
+        || !message.tool_calls.every(call => isToolCall(call) && typeof call.id === 'string' && call.id.length > 0
+          && call.function.name.length > 0)) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${index}: invalid assistant tool calls`);
+      }
+      protocol.tool_calls = message.tool_calls;
+    }
+    if (role === 'tool') {
+      if (typeof message.tool_call_id !== 'string' || message.tool_call_id.length === 0) {
+        throw new Error(`[LLMEngine] Invalid chat message at index ${index}: missing tool call ID`);
+      }
+      protocol.tool_call_id = message.tool_call_id;
+    } else if (message.tool_call_id !== undefined) {
+      throw new Error(`[LLMEngine] Invalid chat message at index ${index}: tool call ID requires tool role`);
     }
 
     const contentParts = normalizeLlmContentParts((message as { contentParts?: unknown }).contentParts, index);
@@ -326,10 +350,10 @@ export function normalizeLlamaMessages(messages: LlmChatMessage[]): RNLlamaOAICo
         })),
       ];
 
-      return { role, content: nativeContentParts };
+      return { role, content: nativeContentParts, ...protocol };
     }
 
-    return { role, content };
+    return { role, content, ...protocol };
   });
 }
 

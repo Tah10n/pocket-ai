@@ -1,3 +1,8 @@
+import { createLocalToolRequest, runLocalToolCompletion, type LocalToolCompletionResult } from '../services/LocalToolRun';
+import type { LlamaCompletionResult } from '../services/LlamaRuntimeAdapter';
+import { hasToolProtocol } from '../services/LocalToolRequest';
+import { sanitizeLocalToolSettings, sanitizeLocalToolRun, type LocalToolRun, type LocalToolSettings } from '../types/localTools';
+import type { LlmChatCompletionOptions } from '../types/chat';
 import { AppState, AppStateStatus } from 'react-native';
 import { isThreadLoraProfileReady } from '../utils/chatLoraProfile';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -11,7 +16,7 @@ import {
 import { performanceMonitor } from '../services/PerformanceMonitor';
 import { GenerationParameters, getGenerationParametersForModel, getSettings, sanitizeGenerationParameters } from '../services/SettingsStore';
 import { presetManager } from '../services/PresetManager';
-import { AppError, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
+import { AppError, isLocalToolRunErrorCode, getPrivacySafeErrorLogDetails, toAppError } from '../services/AppError';
 import { EngineStatus } from '../types/models';
 import { backgroundTaskService } from '../services/BackgroundTaskService';
 import { notificationService } from '../services/NotificationService';
@@ -133,6 +138,10 @@ import {
   shouldHoldAndroidQaGenerationBeforeFirstOutput,
   waitForAndroidQaGenerationGateRelease,
 } from '../services/AndroidQaGenerationEvidence';
+import {
+  recordAndroidQaLocalToolNativeFirstToken,
+  recordAndroidQaLocalToolNativeSettlement,
+} from '../services/AndroidQaLocalToolsRecovery';
 
 export { SUMMARY_AFFORDANCE_MIN_TRUNCATED_MESSAGES } from '../utils/inferenceWindow';
 const DEFAULT_CONTEXT_SIZE = 4096;
@@ -359,11 +368,14 @@ interface ActiveGenerationState {
   messageId: string;
   stopRequested: boolean;
   nativeCompletionStarted: boolean;
+  /** Tool parsing may only expose its ordinary partial content at native settlement. */
+  deferToolTerminalUntilSettlement?: boolean;
   flushPendingAssistantPatch?: () => void;
   commitTerminalState?: () => TerminalCommitResult;
 }
 
 export type AppendUserMessageOptions = {
+  newThreadToolSettings?: LocalToolSettings;
   newThreadParameters?: {
     modelId: string;
     presetId: string | null;
@@ -1229,6 +1241,12 @@ async function settleActiveChatGenerationForStop(
   generation.stopRequested = true;
   notifyNativeCompletionSettlementChanged();
   releaseAndroidQaGenerationGate(generation.messageId);
+
+  if (generation.deferToolTerminalUntilSettlement && generation.nativeCompletionStarted) {
+    // Keep the replacement transaction and generation identity alive until the
+    // parser returns. The engine stop path still drains the real native work.
+    return;
+  }
 
   const settlementResult = generation.commitTerminalState
     ? generation.commitTerminalState()
@@ -2116,6 +2134,8 @@ function getLatestUserLlmMessageIndex(messages: readonly LlmChatMessage[]): numb
 
 function hasLlmMessageInferenceContent(message: LlmChatMessage): boolean {
   return message.role === 'system'
+    || Boolean(message.tool_calls?.length)
+    || (message.role === 'tool' && Boolean(message.tool_call_id))
     || message.content.trim().length > 0
     || getLlmInferenceMessageContentPartTextCount(message) > 0
     || (message.mediaPaths?.length ?? 0) > 0
@@ -2128,6 +2148,9 @@ function filterEmptyLlmInferenceMessages(messages: readonly LlmChatMessage[]): L
 }
 
 function normalizeLlmInferenceMessagePairs(messages: readonly LlmChatMessage[]): LlmChatMessage[] {
+  // Protocol groups are projected and bounded atomically by inferenceWindow.
+  // Never erase an assistant call/final answer to satisfy legacy alternation.
+  if (hasToolProtocol(messages)) return [...messages];
   const normalized: LlmChatMessage[] = [];
   let lastNonSystemRole: LlmChatMessage['role'] | null = null;
 
@@ -3013,6 +3036,9 @@ export const useChatSession = () => {
       throw new Error('Thread not found');
     }
     const inferenceRevisionAtPromptStart = useChatStore.getState().inferenceRevision;
+    const toolSettings = sanitizeLocalToolSettings(storedThread.toolSettings);
+    const toolRequest = toolSettings.enabled ? createLocalToolRequest(toolSettings) : undefined;
+    let latestToolRun: LocalToolRun | undefined;
 
     const latestUserMessageId = findLatestUserMessageIdBeforeAssistant(storedThread, assistantMessageId);
     let thread = storedThread;
@@ -3035,6 +3061,7 @@ export const useChatSession = () => {
       messageId: assistantMessageId,
       stopRequested: false,
       nativeCompletionStarted: false,
+      deferToolTerminalUntilSettlement: toolRequest !== undefined,
     };
     sharedGenerationState.current = generationState;
     notifyNativeCompletionSettlementChanged();
@@ -3158,6 +3185,15 @@ export const useChatSession = () => {
       );
     };
 
+    const assertToolResultCanPublish = () => {
+      if (!canMutateAssistantMessage({ allowStopped: true })
+        || useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart
+        || !isPrivateStorageWritable()) {
+        throw new AppError('action_failed', 'The conversation changed before the response settled.');
+      }
+      assertThreadModelExecutionInvariant(threadId, modelId);
+    };
+
     const hasBufferedAssistantContent = () => {
       const presentation = getAssistantPresentation();
       return presentation.finalContent.length > 0 || presentation.thoughtContent.length > 0;
@@ -3240,6 +3276,9 @@ export const useChatSession = () => {
           ...finalization,
           generationSnapshot,
           loadProfileSnapshot,
+          toolRun: finalization.outcome === 'stopped' && generationState.stopRequested && latestToolRun
+            ? { ...sanitizeLocalToolRun(latestToolRun, true)!, status: 'cancelled' }
+            : latestToolRun,
           structuredOutput: finalization.structuredOutput ?? interruptedOutput,
           content: finalization.content ?? presentation.finalContent,
           thoughtContent: finalization.thoughtContent === undefined
@@ -3380,15 +3419,17 @@ export const useChatSession = () => {
           generationState.stopRequested = true;
           notifyNativeCompletionSettlementChanged();
           releaseAndroidQaGenerationGate(assistantMessageId);
-          const result = finalizeBufferedAssistantTurn(
-            { outcome: 'stopped' },
-            { allowStopped: true },
-          );
-          if (isAssistantTurnSettled(result)) {
-            recordCompletionStats('stopped');
-            sendOutcomeNotificationOnce('interrupted');
-          } else {
-            resolveTerminalCommitError(result);
+          if (!generationState.deferToolTerminalUntilSettlement || !generationState.nativeCompletionStarted) {
+            const result = finalizeBufferedAssistantTurn(
+              { outcome: 'stopped' },
+              { allowStopped: true },
+            );
+            if (isAssistantTurnSettled(result)) {
+              recordCompletionStats('stopped');
+              sendOutcomeNotificationOnce('interrupted');
+            } else {
+              resolveTerminalCommitError(result);
+            }
           }
         } finally {
           void (async () => {
@@ -3515,7 +3556,7 @@ export const useChatSession = () => {
         enableThinking: params.enable_thinking,
         reasoningFormat: params.reasoning_format,
         addGenerationPrompt: params.add_generation_prompt,
-        formattingIdentity: generationFormattingIdentity(generation),
+        formattingIdentity: JSON.stringify([generationFormattingIdentity(generation), toolRequest]),
       });
       const resolvePromptTokenMessages = (messagesToCount: LlmChatMessage[]) => messagesToCount.map((message) => (
         resolveLlmMessageSupportedInferenceContent(message, effectiveMultimodalReadiness, activeModelId)
@@ -3535,6 +3576,7 @@ export const useChatSession = () => {
           const tokenCountPromise = llmEngineService.countPromptTokens({
             messages: sanitizedMessagesToCount,
             generation,
+            toolRequest,
             params,
             multimodalReadiness: effectiveMultimodalReadiness,
             expectedModelId: activeModelId,
@@ -3842,7 +3884,7 @@ export const useChatSession = () => {
       }
       generationState.nativeCompletionStarted = true;
       notifyNativeCompletionSettlementChanged();
-      const completion = await llmEngineService.chatCompletion({
+      const requestOptions: LlmChatCompletionOptions = {
         messages,
         generation,
         expectedModelId: modelId,
@@ -3962,17 +4004,68 @@ export const useChatSession = () => {
               presentationParser.doesVisibleContentEndAtSentenceBoundary(),
           });
         },
-      });
+      };
+      let completion: LlamaCompletionResult;
+      let localToolOutcome: LocalToolCompletionResult['localToolOutcome'] | undefined;
+      if (toolRequest) {
+        const toolCompletion = await runLocalToolCompletion({
+            options: requestOptions, threadId, runId: assistantMessageId,
+            settings: toolSettings, assertCurrent: throwIfGenerationStopped,
+            assertCanPublish: assertToolResultCanPublish,
+            ...(isAndroidQaEvidenceEnabled && process.env.EXPO_PUBLIC_ANDROID_QA === '1' ? {
+              onNativeStage: (stage: 'count_prompt' | 'completion' | 'first_token') => {
+                if (stage === 'first_token') recordAndroidQaLocalToolNativeFirstToken({
+                  threadId, runId: assistantMessageId, phase: latestToolRun?.phase ?? 'tools',
+                });
+              },
+              onNativeStep: ({ phase, result }: { phase: 'tools' | 'final'; result: LlamaCompletionResult }) => {
+                recordAndroidQaLocalToolNativeSettlement({ threadId, runId: assistantMessageId, phase, result });
+              },
+            } : {}),
+            onProgress: (run) => {
+              if (!canMutateAssistantMessage({ allowStopped: true })
+                || useChatStore.getState().inferenceRevision !== inferenceRevisionAtPromptStart) return;
+              latestToolRun = run;
+              patchAssistantMessage(threadId, assistantMessageId, { toolRun: run });
+            },
+          });
+        completion = toolCompletion;
+        localToolOutcome = toolCompletion.localToolOutcome;
+      } else {
+        completion = await llmEngineService.chatCompletion(requestOptions);
+      }
       if (isAndroidQaEvidenceEnabled) {
         await waitForAndroidQaGenerationGateRelease(assistantMessageId);
       }
       generationState.nativeCompletionStarted = false;
       notifyNativeCompletionSettlementChanged();
 
+      const currentPresentation = getAssistantPresentation();
+      const structured = generation.output !== undefined && generation.output.mode !== 'text';
+      const finalThoughtContent = resolveSuccessfulAssistantThought({
+        completionContent: completion.content,
+        completionReasoningContent: completion.reasoning_content,
+        completionText: toolRequest ? completion.content ?? undefined : completion.text,
+        streamedThoughtContent: currentPresentation.thoughtContent,
+      });
+      const settledContent = structured
+        ? (toolRequest ? completion.content ?? '' : completion.content ?? completion.text ?? '')
+        : resolveSuccessfulAssistantContent({
+            completionContent: completion.content,
+            completionText: toolRequest ? completion.content ?? undefined : completion.text,
+            preferRawSnapshot: !toolRequest && latestRawAssistantSnapshotRevision > latestPresentationUpdateRevision,
+            streamedContent: currentPresentation.finalContent,
+            rawSnapshot: toolRequest ? undefined : latestRawAssistantSnapshot,
+          });
+
       if (generationState.stopRequested) {
         if (isMatchingGeneration(threadId, assistantMessageId)) {
           const result = terminalSettlement.result ?? finalizeBufferedAssistantTurn(
-            { outcome: 'stopped' },
+            { outcome: 'stopped',
+              ...(toolRequest ? { content: settledContent,
+                thoughtContent: !structured && finalThoughtContent.length > 0 ? finalThoughtContent : null,
+                structuredOutput: completion.structuredOutput } : {}),
+            },
             { allowStopped: true },
           );
           if (isAssistantTurnSettled(result)) {
@@ -3985,33 +4078,21 @@ export const useChatSession = () => {
         return;
       }
 
-      const currentPresentation = getAssistantPresentation();
-      const finalThoughtContent = resolveSuccessfulAssistantThought({
-        completionContent: completion.content,
-        completionReasoningContent: completion.reasoning_content,
-        completionText: completion.text,
-        streamedThoughtContent: currentPresentation.thoughtContent,
-      });
       const completionTelemetry = typeof llmEngineService.getLastCompletionTelemetry === 'function'
         ? llmEngineService.getLastCompletionTelemetry()
         : null;
       const outputValidation = completion.structuredOutput;
-      const outputIncomplete = outputValidation?.status === 'incomplete';
-      const outputInvalid = outputValidation?.status === 'invalid';
-      const structured = generation.output !== undefined && generation.output.mode !== 'text';
+      const outputIncomplete = outputValidation?.status === 'incomplete' || localToolOutcome?.status === 'stopped';
+      const outputInvalid = outputValidation?.status === 'invalid' || localToolOutcome?.status === 'error';
+      const terminalErrorFields = localToolOutcome?.status === 'error' && localToolOutcome.reason === 'timeout'
+        ? { errorCode: 'local_tool_timeout', errorMessage: 'The local tool run reached its time limit.' }
+        : { errorCode: 'structured_output_invalid', errorMessage: 'The output did not satisfy the selected format.' };
       const successResult = finalizeBufferedAssistantTurn({
         ...(outputInvalid
-          ? { outcome: 'error' as const, errorCode: 'structured_output_invalid', errorMessage: 'The output did not satisfy the selected format.' }
+          ? { outcome: 'error' as const, ...terminalErrorFields }
           : { outcome: outputIncomplete ? 'stopped' as const : 'success' as const }),
         structuredOutput: outputValidation,
-        content: structured ? completion.content ?? completion.text ?? '' : resolveSuccessfulAssistantContent({
-          completionContent: completion.content,
-          completionText: completion.text,
-          preferRawSnapshot:
-            latestRawAssistantSnapshotRevision > latestPresentationUpdateRevision,
-          streamedContent: currentPresentation.finalContent,
-          rawSnapshot: latestRawAssistantSnapshot,
-        }),
+        content: settledContent,
         thoughtContent: !structured && finalThoughtContent.length > 0 ? finalThoughtContent : null,
         inferenceMetrics: completionTelemetry ?? undefined,
       });
@@ -4053,6 +4134,7 @@ export const useChatSession = () => {
       const appError = toAppError(error);
       const assistantErrorCode = appError.code === 'chat_model_mismatch'
         || appError.code === 'chat_model_not_loaded'
+        || isLocalToolRunErrorCode(appError.code)
         ? appError.code
         : 'generation_failed';
 
@@ -4638,6 +4720,9 @@ export const useChatSession = () => {
           loraSnapshot: llmEngineService.getEffectiveLoadParameters?.()?.loraAdapters ?? [],
         });
 
+      if (!existingThreadAtStart && options.newThreadToolSettings) {
+        useChatStore.getState().updateThreadToolSettings(threadId, options.newThreadToolSettings);
+      }
       if (!setActiveThread(threadId)) {
         throw new AppError(
           'action_failed',

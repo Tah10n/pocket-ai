@@ -1,7 +1,26 @@
 import type { TFunction } from 'i18next';
 import { sanitizeErrorForReport, sanitizeErrorReportContext } from './ErrorReportSanitizer';
 
+export const LOCAL_TOOL_RUN_ERROR_CODES = Object.freeze({
+  unsupported: 'local_tool_unsupported',
+  cancelled: 'local_tool_cancelled',
+  timeout: 'local_tool_timeout',
+  round_limit: 'local_tool_round_limit',
+  call_limit: 'local_tool_call_limit',
+  token_limit: 'local_tool_token_limit',
+  result_limit: 'local_tool_result_limit',
+  invalid_proposal: 'local_tool_invalid_proposal',
+  duplicate_id: 'local_tool_duplicate_id',
+  conflicting_id: 'local_tool_conflicting_id',
+  context_limit: 'local_tool_context_limit',
+} as const);
+export type LocalToolRunErrorReason = keyof typeof LOCAL_TOOL_RUN_ERROR_CODES;
+export type LocalToolRunErrorCode = typeof LOCAL_TOOL_RUN_ERROR_CODES[LocalToolRunErrorReason];
+export function isLocalToolRunErrorCode(code: unknown): code is LocalToolRunErrorCode {
+  return Object.values(LOCAL_TOOL_RUN_ERROR_CODES).some(value => value === code);
+}
 export type AppErrorCode =
+  | LocalToolRunErrorCode
   | 'action_failed'
   | 'engine_not_ready'
   | 'engine_busy'
@@ -68,6 +87,17 @@ const ERROR_MESSAGE_KEYS: Partial<Record<AppErrorCode, string>> = {
   chat_model_not_loaded: 'common.errors.chatModelNotLoaded',
   chat_model_mismatch: 'common.errors.chatModelMismatch',
   chat_history_busy: 'common.errors.chatHistoryBusy',
+  local_tool_unsupported: 'common.errors.localToolUnsupported',
+  local_tool_cancelled: 'common.errors.localToolCancelled',
+  local_tool_timeout: 'common.errors.localToolTimeout',
+  local_tool_round_limit: 'common.errors.localToolRoundLimit',
+  local_tool_call_limit: 'common.errors.localToolCallLimit',
+  local_tool_token_limit: 'common.errors.localToolTokenLimit',
+  local_tool_result_limit: 'common.errors.localToolResultLimit',
+  local_tool_invalid_proposal: 'common.errors.localToolInvalidProposal',
+  local_tool_duplicate_id: 'common.errors.localToolDuplicateId',
+  local_tool_conflicting_id: 'common.errors.localToolConflictingId',
+  local_tool_context_limit: 'common.errors.localToolContextLimit',
   multimodal_not_ready: 'common.errors.multimodalNotReady',
   chat_attachment_copy_failed: 'common.errors.chatAttachmentCopyFailed',
   chat_attachment_limit_exceeded: 'common.errors.chatAttachmentLimitExceeded',
@@ -144,6 +174,7 @@ const SAFE_ERROR_NAMES = new Set([
 ]);
 
 const SAFE_APP_ERROR_CODES: ReadonlySet<string> = new Set<AppErrorCode>([
+  ...Object.values(LOCAL_TOOL_RUN_ERROR_CODES),
   'action_failed',
   'engine_not_ready',
   'engine_busy',

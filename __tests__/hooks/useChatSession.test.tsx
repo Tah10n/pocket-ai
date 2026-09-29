@@ -86,6 +86,7 @@ jest.mock('../../src/services/LLMEngineService', () => ({
     getLastCompletionTelemetry: jest.fn(),
     getEffectiveLoadParameters: jest.fn(),
     beginPromptPreparation: jest.fn(() => jest.fn()),
+    beginLocalToolRun: jest.fn(),
     chatCompletion: jest.fn(),
     countPromptTokens: jest.fn(),
     assertActiveMultimodalReadyForMediaPaths: jest.fn(),
@@ -732,6 +733,317 @@ describe('useChatSession', () => {
     expect(llmEngineService.chatCompletion).not.toHaveBeenCalled();
   });
 
+  describe('integrated local tools', () => {
+    const settings = { enabled: true, allowedTools: ['calculate' as const], toolChoice: 'auto' as const };
+    const proposal = () => ({ content: '', text: '', tokens_predicted: 12,
+      tool_calls: [{ id: 'native-call', type: 'function', function: { name: 'calculate', arguments: '{"expression":"6*7"}' } }] });
+    const answer = () => ({ content: 'The result is 42.', text: 'The result is 42.', tokens_predicted: 7, tool_calls: [] });
+    let leaseControllers: AbortController[];
+    let finish: jest.Mock;
+    beforeEach(() => {
+      leaseControllers = [];
+      finish = jest.fn();
+      (llmEngineService.beginLocalToolRun as jest.Mock).mockImplementation(() => {
+        const controller = new AbortController(); leaseControllers.push(controller);
+        return { token: Symbol('tool-run'), signal: controller.signal, finish,
+          assertCanPublish: () => undefined,
+          assertCurrent: () => { if (controller.signal.aborted) throw new Error('Cancelled tool owner'); } };
+      });
+      (llmEngineService.stopCompletion as jest.Mock).mockImplementation(async () => {
+        leaseControllers.forEach(controller => controller.abort());
+      });
+    });
+
+    it('executes calculate through the real executor and publishes only one final answer', async () => {
+      const pendingFinal = createDeferred<ReturnType<typeof answer>>();
+      const completionNotification = jest.spyOn(notificationService, 'sendCompletionNotification').mockResolvedValue(undefined);
+      Object.defineProperty(AppState, 'currentState', { configurable: true, value: 'background' });
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce(proposal()).mockImplementationOnce(() => pendingFinal.promise);
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      await act(async () => { send = getSession()?.appendUserMessage('Calculate six times seven', { newThreadToolSettings: settings }); });
+      await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2));
+      const continuation = (llmEngineService.chatCompletion as jest.Mock).mock.calls[1][0] as LlmChatCompletionOptions;
+      expect(continuation.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({ role: 'assistant', tool_calls: [expect.objectContaining({ id: 'native-call' })] }),
+        expect.objectContaining({ role: 'tool', tool_call_id: 'native-call', content: '{"ok":true,"result":{"value":42}}' }),
+      ]));
+      expect(continuation.onToken).toBeUndefined();
+      expect(llmEngineService.countPromptTokens).toHaveBeenCalledWith(expect.objectContaining({
+        toolRequest: expect.objectContaining({ phase: 'tools', tools: [expect.objectContaining({ function: expect.objectContaining({ name: 'calculate' }) })] }),
+        runOwner: expect.any(Symbol),
+      }));
+      const running = useChatStore.getState().getActiveThread()!;
+      expect(running.messages.filter(message => message.role === 'assistant')).toHaveLength(1);
+      expect(running.messages.at(-1)).toMatchObject({ state: 'streaming', toolRun: { status: 'running', rounds: [
+        expect.objectContaining({ calls: [expect.objectContaining({ status: 'completed', result: '{"ok":true,"result":{"value":42}}' })] }),
+      ] } });
+      expect(completionNotification).not.toHaveBeenCalled();
+      await act(async () => { pendingFinal.resolve(answer()); await send; });
+      const completed = useChatStore.getState().getActiveThread()!;
+      expect(completed.messages.at(-1)).toMatchObject({ state: 'complete', content: 'The result is 42.', toolRun: { status: 'completed' } });
+      expect(completed.messages.filter(message => message.role === 'assistant')).toHaveLength(1);
+      expect(completionNotification).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledTimes(1);
+      completionNotification.mockRestore();
+    });
+
+    it('stops a deferred proposal without executing it and accepts the next ordinary request', async () => {
+      const pending = createDeferred<ReturnType<typeof proposal>>();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => pending.promise);
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      await act(async () => { send = getSession()?.appendUserMessage('Calculate', { newThreadToolSettings: settings }); });
+      await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await getSession()?.stopGeneration(); pending.resolve(proposal()); await send;
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)?.toolRun?.rounds).toEqual([]);
+      expect(thread.messages.at(-1)?.state).toBe('stopped');
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        useChatStore.getState().updateThreadToolSettings(thread.id, { ...settings, enabled: false });
+        await getSession()?.appendUserMessage('Reply normally');
+      });
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toMatchObject({ state: 'complete', content: 'Hello back' });
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2);
+      expect(llmEngineService.beginLocalToolRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('discards a delayed proposal when tools are disabled mid-run', async () => {
+      const pending = createDeferred<ReturnType<typeof proposal>>();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => pending.promise);
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      await act(async () => { send = getSession()?.appendUserMessage('Calculate', { newThreadToolSettings: settings }); });
+      await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        const thread = useChatStore.getState().getActiveThread()!;
+        useChatStore.getState().updateThreadToolSettings(thread.id, { ...settings, enabled: false });
+        pending.resolve(proposal());
+        await send?.catch(() => undefined);
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.toolSettings?.enabled).toBe(false);
+      expect(thread.messages.at(-1)?.toolRun?.rounds).toEqual([]);
+      expect(thread.messages.at(-1)?.state).not.toBe('complete');
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledTimes(1);
+    });
+
+    it('hydrates completed protocol without execution and regenerates only on explicit request', async () => {
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce(proposal()).mockResolvedValueOnce(answer())
+        .mockResolvedValueOnce(proposal()).mockResolvedValueOnce(answer());
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Calculate', { newThreadToolSettings: settings }); });
+      const first = useChatStore.getState().getActiveThread()!;
+      const previousRunId = first.messages.at(-1)?.toolRun?.id;
+      await act(async () => {
+        flushPendingChatPersistenceWrites('background');
+        useChatStore.setState({ threads: {}, activeThreadId: null });
+        await useChatStore.persist.rehydrate();
+      });
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2);
+      expect(useChatStore.getState().getThread(first.id)?.messages.at(-1)?.toolRun?.id).toBe(previousRunId);
+      await act(async () => { await getSession()?.regenerateLastResponse(); });
+      const second = useChatStore.getState().getActiveThread()!;
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(4);
+      expect(second.messages.at(-1)?.toolRun?.id).not.toBe(previousRunId);
+      expect(second.messages.at(-1)?.toolRun?.rounds[0].calls[0]).toMatchObject({ status: 'completed', result: '{"ok":true,"result":{"value":42}}' });
+      expect(second.messages.filter(message => message.role === 'assistant')).toHaveLength(1);
+      expect(finish).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['Available partial answer', '\nAvailable partial answer\n'])(
+      'retains the exact parsed ordinary auto answer stopped by the native token limit: %j', async (content) => {
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce({
+        content, text: '<tool_call>raw protocol</tool_call>',
+        tokens_predicted: 7, tool_calls: [], stopped_limit: true,
+      });
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await getSession()?.appendUserMessage('Reply normally', { newThreadToolSettings: settings });
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)).toMatchObject({ content,
+        state: 'stopped', toolRun: { status: 'interrupted', rounds: [] } });
+      expect(thread.messages.at(-1)?.errorCode).toBeUndefined();
+      expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)).toMatchObject({
+        content, state: 'stopped',
+      });
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+      expect(finish).toHaveBeenCalledTimes(1);
+    });
+
+    it('retains completed tool evidence and a token-limited ordinary continuation', async () => {
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce(proposal())
+        .mockResolvedValueOnce({ ...answer(), content: 'The calculation gives',
+          text: '<protocol>must not appear</protocol>', stopped_limit: true });
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await getSession()?.appendUserMessage('Calculate', { newThreadToolSettings: settings });
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)).toMatchObject({ content: 'The calculation gives',
+        state: 'stopped', toolRun: { status: 'interrupted', rounds: [
+          expect.objectContaining({ calls: [expect.objectContaining({ status: 'completed',
+            result: '{"ok":true,"result":{"value":42}}' })] }),
+        ] } });
+      expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.content).toBe('The calculation gives');
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(2);
+    });
+
+    it('retains settled parsed partial content after Stop while rejecting late raw callbacks', async () => {
+      const pending = createDeferred<ReturnType<typeof answer> & { interrupted: boolean }>();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => pending.promise);
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      await act(async () => { send = getSession()?.appendUserMessage('Reply normally', { newThreadToolSettings: settings }); });
+      await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+      await act(async () => { await getSession()?.stopGeneration(); });
+      expect(finish).not.toHaveBeenCalled();
+      const request = (llmEngineService.chatCompletion as jest.Mock).mock.calls[0][0] as LlmChatCompletionOptions;
+      request.onToken?.({ token: '<tool_call>late raw protocol</tool_call>' });
+      await act(async () => {
+        pending.resolve({ ...answer(), content: 'Native settled partial',
+          text: '<tool_call>raw protocol</tool_call>', interrupted: true });
+        await send;
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)).toMatchObject({ content: 'Native settled partial',
+        state: 'stopped', toolRun: { status: 'cancelled', rounds: [] } });
+      expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.content).toBe('Native settled partial');
+      expect(finish).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        useChatStore.getState().updateThreadToolSettings(thread.id, { ...settings, enabled: false });
+        await getSession()?.appendUserMessage('Next ordinary request');
+      });
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toMatchObject({ state: 'complete', content: 'Hello back' });
+    });
+
+    it.each([
+      { mode: 'json_object' as const },
+      { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"value":{"type":"number"}},"required":["value"]}' },
+      { mode: 'gbnf' as const, grammar: 'root ::= "yes"' },
+    ])('retains incomplete $mode final content without validation success', async output => {
+      (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...getGenerationParametersForModel('author/model-q4'), output });
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce(answer())
+        .mockResolvedValueOnce({ content: '{"value":', text: '<raw protocol>', tokens_predicted: 5,
+          tool_calls: [], stopped_limit: true,
+          structuredOutput: { mode: output.mode, status: 'incomplete', error: 'interrupted' } });
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await getSession()?.appendUserMessage('Return JSON', { newThreadToolSettings: settings });
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)).toMatchObject({ content: '{"value":', state: 'stopped',
+        structuredOutput: { status: 'incomplete' }, toolRun: { status: 'interrupted', phase: 'final' } });
+      expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)).toMatchObject({ structuredOutput: { status: 'incomplete' } });
+    });
+
+    it.each(['chat', 'model', 'permissions'] as const)('does not publish a late ordinary partial after %s invalidation', async change => {
+      const pending = createDeferred<ReturnType<typeof answer> & { stopped_limit: boolean }>();
+      (llmEngineService.chatCompletion as jest.Mock).mockImplementationOnce(() => pending.promise);
+      const getSession = renderHookHarness();
+      let send: Promise<void> | undefined;
+      await act(async () => { send = getSession()?.appendUserMessage('Reply normally', { newThreadToolSettings: settings }); });
+      await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+      const original = useChatStore.getState().getActiveThread()!;
+      let otherThreadId: string | undefined;
+      await act(async () => {
+        if (change === 'chat') {
+          otherThreadId = useChatStore.getState().createThread({ modelId: original.modelId,
+            presetId: original.presetId, presetSnapshot: original.presetSnapshot, paramsSnapshot: original.paramsSnapshot });
+          useChatStore.getState().setActiveThread(otherThreadId);
+        } else if (change === 'model') {
+          (llmEngineService.getState as jest.Mock).mockReturnValue({ status: EngineStatus.READY, activeModelId: 'other/model' });
+        } else {
+          useChatStore.getState().updateThreadToolSettings(original.id, { ...settings, allowedTools: [] });
+        }
+        pending.resolve({ ...answer(), content: 'Late settled text must not publish', stopped_limit: true });
+        await send?.catch(() => undefined);
+      });
+      expect(useChatStore.getState().getThread(original.id)?.messages.at(-1)?.content).toBe('');
+      expect(useChatStore.getState().getThread(original.id)?.messages.at(-1)?.state).not.toBe('complete');
+      if (otherThreadId) expect(useChatStore.getState().getThread(otherThreadId)?.messages).toEqual([]);
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['regenerate', 'branch'] as const)('restores original history after an empty tools %s is stopped', async operation => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Original question'); });
+      await act(async () => { await getSession()?.appendUserMessage('Later question'); });
+      const original = useChatStore.getState().getActiveThread()!;
+      const originalMessages = original.messages;
+      act(() => { useChatStore.getState().updateThreadToolSettings(original.id, settings); });
+      const pending = createDeferred<ReturnType<typeof answer> & { interrupted: boolean }>();
+      (llmEngineService.chatCompletion as jest.Mock).mockClear().mockImplementationOnce(() => pending.promise);
+      let replacement: Promise<boolean> | undefined;
+      await act(async () => {
+        replacement = operation === 'regenerate'
+          ? getSession()?.regenerateLastResponse()
+          : getSession()?.regenerateFromUserMessage(original.messages[0].id, 'Edited original');
+      });
+      await waitFor(() => expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1));
+      expect(useChatStore.getState().getThread(original.id)?.messages.at(-1)?.toolRun?.rounds).toEqual([]);
+      expect(useChatStore.getState().threads[original.id].messages).toEqual(originalMessages);
+      await act(async () => {
+        await getSession()?.stopGeneration();
+        pending.resolve({ content: '', text: '<raw protocol>', tokens_predicted: 0, tool_calls: [], interrupted: true });
+        await replacement;
+      });
+      expect(useChatStore.getState().getThread(original.id)?.messages).toEqual(originalMessages);
+      expect(readPersistedThreadRecord(original.id).thread?.messages).toEqual(originalMessages);
+    });
+
+    it.each(['regenerate', 'branch'] as const)('restores original history after an empty tools %s first completion fails', async operation => {
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Original question'); });
+      await act(async () => { await getSession()?.appendUserMessage('Later question'); });
+      const original = useChatStore.getState().getActiveThread()!;
+      act(() => { useChatStore.getState().updateThreadToolSettings(original.id, settings); });
+      (llmEngineService.chatCompletion as jest.Mock).mockClear().mockRejectedValueOnce(new Error('First completion failed'));
+      await act(async () => {
+        const replacement = operation === 'regenerate'
+          ? getSession()?.regenerateLastResponse()
+          : getSession()?.regenerateFromUserMessage(original.messages[0].id, 'Edited original');
+        await replacement?.catch(() => undefined);
+      });
+      expect(useChatStore.getState().getThread(original.id)?.messages).toEqual(original.messages);
+      expect(readPersistedThreadRecord(original.id).thread?.messages).toEqual(original.messages);
+      expect(llmEngineService.chatCompletion).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves a typed tool budget termination in durable assistant history', async () => {
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce({ ...proposal(), tokens_predicted: 1023 });
+      const getSession = renderHookHarness();
+      await act(async () => {
+        await expect(getSession()?.appendUserMessage('Calculate', { newThreadToolSettings: settings }))
+          .rejects.toMatchObject({ code: 'local_tool_token_limit' });
+      });
+      const thread = useChatStore.getState().getActiveThread()!;
+      expect(thread.messages.at(-1)).toMatchObject({ state: 'error', errorCode: 'local_tool_token_limit' });
+      expect(readPersistedThreadRecord(thread.id).thread?.messages?.at(-1)?.errorCode).toBe('local_tool_token_limit');
+    });
+    it('keeps tool protocol and the final JSON Schema phase distinct', async () => {
+      const output = { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"value":{"type":"number"}},"required":["value"],"additionalProperties":false}' };
+      (getGenerationParametersForModel as jest.Mock).mockReturnValue({ ...getGenerationParametersForModel('author/model-q4'), output });
+      (llmEngineService.chatCompletion as jest.Mock).mockResolvedValueOnce(proposal()).mockResolvedValueOnce(answer())
+        .mockResolvedValueOnce({ content: '{"value":42}', text: '{"value":42}', tokens_predicted: 5, tool_calls: [],
+          structuredOutput: { mode: 'json_schema', status: 'valid' } });
+      const getSession = renderHookHarness();
+      await act(async () => { await getSession()?.appendUserMessage('Calculate as JSON', { newThreadToolSettings: settings }); });
+      const requests = (llmEngineService.chatCompletion as jest.Mock).mock.calls.map(([request]) => request as LlmChatCompletionOptions);
+      expect(requests.map(request => request.toolRequest?.phase)).toEqual(['tools', 'tools', 'final']);
+      expect(requests[2]).toMatchObject({ toolRequest: { toolChoice: 'none' }, generation: { output } });
+      expect(requests[2].messages).toEqual(expect.arrayContaining([expect.objectContaining({ role: 'tool', content: '{"ok":true,"result":{"value":42}}' })]));
+      expect(useChatStore.getState().getActiveThread()?.messages.at(-1)).toMatchObject({ content: '{"value":42}', state: 'complete',
+        structuredOutput: { status: 'valid' }, toolRun: { status: 'completed', phase: 'final' } });
+    });
+  });
   it('persists exact validated JSON separately from reasoning and keeps formatting constraints through regeneration', async () => {
     const output = { mode: 'json_schema' as const, schema: '{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}' };
     const generation = { ...getGenerationParametersForModel('author/model-q4'), output,

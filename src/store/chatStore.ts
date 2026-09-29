@@ -1,3 +1,5 @@
+import { sanitizeLocalToolRun, sanitizeLocalToolSettings, type LocalToolSettings } from '../types/localTools';
+import { hasAssistantTurnProgress } from '../utils/localTools';
 import { sanitizeAdvancedGenerationParameters, advancedGenerationIdentity } from '../utils/generationControls';
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
@@ -134,11 +136,11 @@ interface CreateThreadInput {
 }
 
 type AssistantMessagePatch = Partial<
-  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'inferenceMetrics' | 'state' | 'errorCode' | 'errorMessage'>
+  Pick<ChatMessage, 'content' | 'thoughtContent' | 'tokensPerSec' | 'inferenceMetrics' | 'state' | 'errorCode' | 'errorMessage' | 'toolRun'>
 >;
 
 type AssistantTurnTerminalFields = Partial<
-  Pick<ChatMessage, 'content' | 'tokensPerSec' | 'inferenceMetrics' | 'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput'>
+  Pick<ChatMessage, 'content' | 'tokensPerSec' | 'inferenceMetrics' | 'generationSnapshot' | 'loadProfileSnapshot' | 'structuredOutput' | 'toolRun'>
 > & {
   thoughtContent?: string | null;
 };
@@ -207,6 +209,7 @@ interface ChatStoreState {
   }) => ThreadActivationCommitResult;
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
+  updateThreadToolSettings: (threadId: string, settings: LocalToolSettings) => void;
   updateThreadLoraSnapshot: (threadId: string, adapters: ChatThread['loraSnapshot']) => void;
   commitThreadModelSelection: (input: {
     threadId: string;
@@ -2586,7 +2589,7 @@ function createStreamingProgressRecord(
   runtime: TransientAssistantRuntime,
 ): ChatStreamingProgressRecord | null {
   const message = runtime.currentMessage;
-  if (message.content.trim().length === 0 && (message.thoughtContent?.trim().length ?? 0) === 0) {
+  if (!hasAssistantTurnProgress(message)) {
     return null;
   }
 
@@ -2628,6 +2631,7 @@ function createStreamingProgressRecord(
     generationSnapshot: message.generationSnapshot,
     loadProfileSnapshot: message.loadProfileSnapshot,
     structuredOutput: message.structuredOutput,
+    toolRun: message.toolRun,
     state: 'streaming',
     persistedAt,
     revision: runtime.progressRevision,
@@ -3063,6 +3067,16 @@ export const useChatStore = create<ChatStoreState>()(
           });
         },
 
+        updateThreadToolSettings: (threadId, settings) => {
+          setWhenPrivateStorageWritable((state) => {
+            const thread = state.threads[threadId];
+            if (!thread) return state;
+            return { threads: { ...state.threads, [threadId]: updateThreadMetadata({
+              ...thread, toolSettings: sanitizeLocalToolSettings(settings),
+            }) }, inferenceRevision: state.inferenceRevision + 1 };
+          });
+        },
+
         updateThreadLoraSnapshot: (threadId, adapters) => {
           setWhenPrivateStorageWritable((state) => {
             const thread = state.threads[threadId];
@@ -3365,9 +3379,9 @@ export const useChatStore = create<ChatStoreState>()(
                 generationSnapshot: finalization.generationSnapshot ?? currentMessage.generationSnapshot,
                 loadProfileSnapshot: finalization.loadProfileSnapshot ?? currentMessage.loadProfileSnapshot,
                 structuredOutput: finalization.structuredOutput ?? currentMessage.structuredOutput,
+                toolRun: finalization.toolRun ?? currentMessage.toolRun,
               };
-              const hasRecoverableOutput = terminalFields.content.trim().length > 0
-                || (terminalFields.thoughtContent?.trim().length ?? 0) > 0;
+              const hasRecoverableOutput = hasAssistantTurnProgress(terminalFields);
               const shouldRestoreReplacement = (
                 (runtime.mode.kind === 'replace' || runtime.mode.kind === 'replace_branch')
                 && !hasRecoverableOutput
@@ -3635,6 +3649,7 @@ export const useChatStore = create<ChatStoreState>()(
               thoughtContent: updates.thoughtContent,
               tokensPerSec: updates.tokensPerSec,
               inferenceMetrics: updates.inferenceMetrics,
+              toolRun: updates.toolRun,
               errorCode: updates.errorCode ?? 'generation_failed',
               errorMessage: updates.errorMessage ?? 'Generation failed',
             });
@@ -3646,6 +3661,7 @@ export const useChatStore = create<ChatStoreState>()(
             thoughtContent: updates.thoughtContent,
             tokensPerSec: updates.tokensPerSec,
             inferenceMetrics: updates.inferenceMetrics,
+            toolRun: updates.toolRun,
           });
         }
 
@@ -3941,6 +3957,7 @@ export function flushChatStreamingProgressForAndroidQa(
   const expectedRevision = runtime.progressRevision;
   const expectedContent = runtime.currentMessage.content;
   const expectedThoughtContent = runtime.currentMessage.thoughtContent;
+  const expectedToolRun = sanitizeLocalToolRun(runtime.currentMessage.toolRun);
   chatPersistenceScheduler.flushThreadWrite(threadId, 'streaming_patch');
 
   const persistedProgress = readChatStreamingProgressRecord(getAppStorage(), threadId);
@@ -3949,6 +3966,8 @@ export function flushChatStreamingProgressForAndroidQa(
     && persistedProgress.value.revision === expectedRevision
     && persistedProgress.value.content === expectedContent
     && persistedProgress.value.thoughtContent === expectedThoughtContent
+    // Both sides are bounded canonical history, with no native handles or log output.
+    && JSON.stringify(persistedProgress.value.toolRun) === JSON.stringify(expectedToolRun)
     && persistedProgress.value.persistedAt === runtime.lastProgressPersistedAt;
 }
 

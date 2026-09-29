@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "phase": "complete",
+  "requiresForceStop": false,
+  "steps": [
+    {
+      "id": "ordinary_auto_limit",
+      "status": "passed",
+      "nativeSteps": 1,
+      "nativeCalls": 0,
+      "executedCalls": 0,
+      "outputCharacters": 139,
+      "stoppedLimit": true,
+      "parsedContentRetained": true,
+      "storedStopped": true,
+      "completionDrained": true
+    },
+    {
+      "id": "empty_regenerate_stop",
+      "status": "passed",
+      "nativeSteps": 1,
+      "nativeCalls": 0,
+      "executedCalls": 0,
+      "completionDrained": true,
+      "firstNativeTokenObserved": true,
+      "emptyRunObserved": true,
+      "historyUnchanged": true,
+      "attachmentsRetained": true,
+      "otherChatsUnchanged": true
+    },
+    {
+      "id": "empty_branch_stop",
+      "status": "passed",
+      "nativeSteps": 1,
+      "nativeCalls": 0,
+      "executedCalls": 0,
+      "completionDrained": true,
+      "firstNativeTokenObserved": true,
+      "emptyRunObserved": true,
+      "historyUnchanged": true,
+      "attachmentsRetained": true,
+      "otherChatsUnchanged": true
+    },
+    {
+      "id": "empty_checkpoint_cold_recovery",
+      "status": "passed",
+      "completionDrained": true,
+      "historyUnchanged": true,
+      "attachmentsRetained": true,
+      "otherChatsUnchanged": true,
+      "emptyWriteRejected": true,
+      "legacyCheckpointSeeded": true,
+      "legacyCheckpointRejected": true,
+      "noReexecution": true
+    }
+  ]
+}

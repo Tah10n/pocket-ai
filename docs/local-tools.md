@@ -55,6 +55,12 @@ request can proceed after that work drains. Tool errors return bounded structure
 categories when continuation is safe; exhausted budgets terminate without hidden
 retries.
 
+After native work settles, an interrupted ordinary reply keeps its parsed user
+content and a stopped/error status. Raw protocol text is not a partial-answer
+fallback. Incomplete tool proposals cannot execute, and incomplete or invalid
+constrained output cannot become successful. Results from invalidated ownership
+are discarded.
+
 ## Limits
 
 The shared run limits live in `src/services/LocalToolLimits.ts`; arithmetic limits
@@ -85,6 +91,12 @@ storage clearing. Reopening history never executes old calls; an unfinished save
 run becomes interrupted. Regenerate starts a new run. Context preparation preserves
 complete call/result groups and reports insufficient space instead of cutting an
 argument or leaving an orphan result.
+
+Regeneration and early-branch replacement retain the previous history until
+meaningful output exists. An empty run envelope does not commit a replacement:
+early Stop/error and cold recovery restore the original branch and attachment
+owners. Actual parsed content and tool call/result records remain recoverable
+without reexecution.
 
 The pinned runtime remains **llama.rn 0.13.0-rc.3**. Its implemented `tool_choice`
 values are exactly `auto`, `none` and `required`; named-function strings and provider

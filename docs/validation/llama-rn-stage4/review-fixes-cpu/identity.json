@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "testedAt": "2026-09-29T23:23:19.789Z",
+  "runtimeVersion": "0.13.0-rc.3",
+  "appTree": "1a16de40584d3ac6751a7fe12f5c742fde470f4d",
+  "apkSha256": "4644347af1342c1a19f8fd2e55917108015de663038a389baba2ef9c0a41a8a8",
+  "installedApkSha256": "4644347af1342c1a19f8fd2e55917108015de663038a389baba2ef9c0a41a8a8",
+  "apkBytes": 82162062,
+  "provenanceDigest": "fd4fb956ee673a2101323be45e40f5c02ebd9938b08d7ba897cb9956f27d3ad9",
+  "packageName": "com.github.tah10n.pocketai.qa",
+  "variant": "release",
+  "abi": "x86_64",
+  "backend": "cpu",
+  "scenarios": [
+    {
+      "id": "runtime-inference-lifecycle",
+      "status": "passed",
+      "durationMs": 30349
+    },
+    {
+      "id": "runtime-model-resources",
+      "status": "passed",
+      "durationMs": 67921
+    },
+    {
+      "id": "runtime-stage3",
+      "status": "passed",
+      "durationMs": 77297
+    },
+    {
+      "id": "runtime-local-tools",
+      "status": "passed",
+      "durationMs": 201651
+    }
+  ]
+}

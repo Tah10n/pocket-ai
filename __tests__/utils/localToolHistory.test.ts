@@ -7,7 +7,7 @@ import { recoverChatThreadFromStreamingProgress, recoverStaleStreamingThread, sa
 import { storage } from '../../src/store/storage';
 
 function run(): LocalToolRun {
-  return { id: 'run', threadId: 'thread-tools', settings: { enabled: true, allowedTools: ['calculate'] },
+  return { id: 'a', threadId: 'thread-tools', settings: { enabled: true, allowedTools: ['calculate'] },
     phase: 'tools', status: 'running', rounds: [{ index: 0, content: '', calls: [
       { id: 'run:0:0', name: 'calculate', arguments: '{"expression":"2+2"}', status: 'completed', result: '{"value":4}' },
     ] }] };

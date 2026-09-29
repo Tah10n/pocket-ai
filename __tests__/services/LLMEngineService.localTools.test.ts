@@ -157,6 +157,72 @@ it('rejects an owner after native context identity changes', () => {
   expect(() => lease?.assertCurrent()).toThrow();
 });
 
+it('separates publication ownership from Stop while still rejecting a changed context or finished lease', async () => {
+  lease = llmEngineService.beginLocalToolRun(model.id);
+  const stopping = llmEngineService.stopCompletion();
+  expect(lease.signal.aborted).toBe(true);
+  expect(() => lease?.assertCurrent()).toThrow();
+  expect(() => lease?.assertCanPublish()).not.toThrow();
+  service.setContext({ ...context } as LlamaContext);
+  expect(() => lease?.assertCanPublish()).toThrow('The local tool run was cancelled.');
+  lease.finish(); await stopping;
+  expect(() => lease?.assertCanPublish()).toThrow('The local tool run was cancelled.');
+});
+
+it('publication ownership rejects model binding and applied load profile changes', () => {
+  lease = llmEngineService.beginLocalToolRun(model.id);
+  service.effectiveLoadParameters = { ...baseProfile, contextSize: 4096 };
+  expect(() => lease?.assertCanPublish()).toThrow('The local tool run was cancelled.');
+  service.effectiveLoadParameters = { ...baseProfile };
+  jest.mocked(registry.getModel).mockReturnValue({ ...model, resolvedFileName: 'changed.gguf' });
+  expect(() => lease?.assertCanPublish()).toThrow('The local tool run was cancelled.');
+});
+
+function enableNativeToolParser() {
+  context.model.chatTemplates = { jinja: {
+    default: true, defaultCaps: { tools: true, toolCalls: true }, toolUse: false,
+  } } as LlamaContext['model']['chatTemplates'];
+  jest.mocked(context.getFormattedChat).mockResolvedValue({ type: 'jinja', prompt: 'prompt', additional_stops: [],
+    has_media: false, grammar: 'template grammar', chat_format: 1, chat_parser: 'parser' } as Awaited<ReturnType<LlamaContext['getFormattedChat']>>);
+}
+
+it('retains a token-limited ordinary result through actual formatted native dispatch with tools enabled', async () => {
+  enableNativeToolParser();
+  jest.mocked(context.completion).mockResolvedValueOnce({ content: 'Available ordinary answer', text: '<tool_call>unsafe protocol',
+    tool_calls: [], tokens_predicted: 7, stopped_limit: true } as unknown as Awaited<ReturnType<LlamaContext['completion']>>);
+  const progress = jest.fn();
+  await expect(runLocalToolCompletion({ options: { expectedModelId: model.id, messages: [{ role: 'user', content: 'Question' }] },
+    threadId: 'partial-chat', runId: 'partial-run', settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+    assertCurrent: () => undefined, assertCanPublish: () => undefined, onProgress: progress,
+  })).resolves.toMatchObject({ content: 'Available ordinary answer', text: 'Available ordinary answer',
+    localToolOutcome: { status: 'stopped', reason: 'token_limit' } });
+  expect(context.completion).toHaveBeenCalledTimes(1);
+  expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'interrupted', rounds: [] }));
+});
+
+it('Stop preserves settled parsed content, holds native ownership until settlement, and permits the next request', async () => {
+  enableNativeToolParser();
+  const native = deferred<Awaited<ReturnType<LlamaContext['completion']>>>();
+  jest.mocked(context.completion).mockReturnValueOnce(native.promise);
+  const partial = runLocalToolCompletion({ options: { expectedModelId: model.id, messages: [{ role: 'user', content: 'Question' }] },
+    threadId: 'stopped-chat', runId: 'stopped-run', settings: { enabled: true, allowedTools: ['calculate'], toolChoice: 'auto' },
+    assertCurrent: () => undefined, assertCanPublish: () => undefined, onProgress: () => undefined,
+  });
+  let settled = false; void partial.then(() => { settled = true; }, () => { settled = true; });
+  await until(() => jest.mocked(context.completion).mock.calls.length === 1);
+  const stopping = llmEngineService.stopCompletion();
+  expect(settled).toBe(false);
+  expect(() => llmEngineService.beginLocalToolRun(model.id)).toThrow();
+  native.resolve({ content: 'Native partial before Stop', text: '<tool_call>unsafe protocol', tool_calls: [],
+    tokens_predicted: 6, interrupted: true } as unknown as Awaited<ReturnType<LlamaContext['completion']>>);
+  await expect(partial).resolves.toMatchObject({ content: 'Native partial before Stop', text: 'Native partial before Stop',
+    localToolOutcome: { status: 'stopped', reason: 'cancelled' } });
+  await stopping;
+  jest.mocked(context.completion).mockResolvedValueOnce({ text: 'Next request works', content: 'Next request works' } as Awaited<ReturnType<LlamaContext['completion']>>);
+  await expect(llmEngineService.chatCompletion({ expectedModelId: model.id, messages: [{ role: 'user', content: 'next' }] }))
+    .resolves.toMatchObject({ content: 'Next request works' });
+});
+
 it('private-storage cleanup waits for actual deferred document work to release its lease', async () => {
   lease = llmEngineService.beginLocalToolRun(model.id);
   const document = deferred<void>();

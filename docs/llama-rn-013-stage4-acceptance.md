@@ -61,3 +61,53 @@ Final-source visual review confirmed the [completed document search](validation/
 The [app-scoped log audit](validation/llama-rn-stage4/cpu-evidence/log-audit.json) checked 2,957 available lines for the verified isolated QA app UID. It found zero matches for the tested calculator arguments, document sentinel, visible answer and token-dump patterns. This is evidence about that bounded buffer and those patterns; it does not establish absence of sensitive data in every log path or on other platforms.
 
 Native iOS, physical GPU/NPU execution, other models/templates, tool execution with media, all document formats, and `get_current_datetime` model-selected execution remain unverified by this fixture. Automatic tool selection is model-dependent; the controlled automatic calculator case did not select a call. An additional manual check with all three tools enabled also returned ordinary JSON containing the result 42 without an execution panel; it does not demonstrate automatic tool execution. Earlier Stage 1–3 reports retain their original source/APK and verification scope.
+
+## Review fixes — 2026-09-30
+
+Two fixes restore empty-regeneration rollback and retain interrupted ordinary replies with tools enabled. Fresh Android CPU acceptance passed all four scenarios on the source/APK below. The 2026-09-25 report and identity files above retain their original scope; they do not prove these later hook/store fixes. The dependency chain, runtime pin, guarded native patch, allowlist and budgets are unchanged.
+
+### New build identity
+
+The [review-fix identity](validation/llama-rn-stage4/review-fixes-cpu/identity.json) records the source build, installed APK match and native results. It uses the same pinned Qwen fixture described above.
+
+| Item | Identity |
+| --- | --- |
+| Public app tree built | `1a16de40584d3ac6751a7fe12f5c742fde470f4d` |
+| APK and installed APK SHA-256 | `4644347af1342c1a19f8fd2e55917108015de663038a389baba2ef9c0a41a8a8` |
+| APK bytes | 82,162,062 |
+| Build provenance digest | `fd4fb956ee673a2101323be45e40f5c02ebd9938b08d7ba897cb9956f27d3ad9` |
+
+### Rollback and partial-output contracts
+
+A `rounds: []` envelope alone is not meaningful progress. Terminal finalization, streaming checkpoint admission and cold recovery agree on actual user/reasoning text, parsed round content or owned canonical calls/results. Empty regenerate and early-branch replacements restore the original history and attachment owners. Genuine tool-only evidence remains durable; hydration cancels unsettled calls and never creates executor work.
+
+The regression `starts %s with fresh tool state and retains the old durable evidence until commit` now requires the original history and old tool evidence after empty Stop. Its former expectation that a new empty run ID survived was incorrect. Transient/durable isolation is still checked.
+
+Action admission, displayable content and terminal outcome are separate. After actual native settlement, a no-call ordinary reply retains native parsed `content` with a stopped/error outcome. Raw `text`, accumulated protocol and incomplete arguments are not fallback content or execution authority. Final JSON/JSON Schema validation remains independent; incomplete JSON/Schema/GBNF results are retained without success. Stop prevents new actions and waits for native/document drain. Changed chat, model, load profile, permissions or storage ownership rejects late callbacks and publication.
+
+### Regression and device evidence
+
+Before implementation, twelve store/persistence regressions and six hook integration regressions failed. The service/native-dispatch run failed 18 checks and passed 37; three failures concerned rejection classification rather than a newly discovered late-publication vulnerability. Cases covered Stop/error before output, legacy empty checkpoints, a token-limited ordinary reply, a continuation after a completed tool, settled partial output after Stop, and incomplete constrained output.
+
+Separate targeted green runs recorded 58 service/native-dispatch tests, 196 hook tests and 383 store/persistence tests. They overlap full verification and must not be summed. Additional QA comparison and boundary-newline regressions preserve exact parsed content while checking its visible presentation separately.
+
+All four [recovery receipts](validation/llama-rn-stage4/review-fixes-cpu/local-tools-recovery-evidence.json) passed through the mounted production hook:
+
+| Case | Fresh-APK result |
+| --- | --- |
+| Ordinary auto token limit | One native completion; zero calls/executions; actual `stopped_limit`; 139 visible characters; exact parsed content retained; message/thread stopped; completion drained |
+| Empty regenerate Stop | First native token observed with an empty run; original messages, attachments and other chats unchanged; zero calls/executions; drained |
+| Empty early-branch Stop | Same empty-run, history/ownership and drain checks passed for replacement from an earlier user message |
+| Cold empty replacement checkpoint | Current empty write rejected; QA-only legacy journal rejected during actual hydration; original history/attachments retained; no replay or new run |
+
+The [partial reply](validation/llama-rn-stage4/review-fixes-cpu/final-partial.png) and [restored history](validation/llama-rn-stage4/review-fixes-cpu/final-restored-history.png) captures accompany these receipts. All 49 Stage 1–3 baseline steps, required calculator, document search, final JSON Schema, Stop/retry and ordinary tool-history cold reopen also passed. Automatic calculator selection remained an observed zero-call answer, not successful automatic execution.
+
+### Failed, not-run and verification records
+
+[Native attempt history](validation/llama-rn-stage4/review-fixes-cpu/native-attempt-history.json) and [verification history](validation/llama-rn-stage4/review-fixes-cpu/verification-history.json) preserve each attempt's identity and outcome.
+
+**Failed:** Release attempt 1 rejected an old journal fixture whose run ID differed from its message ID; the fixture-only correction passed six tests. Native attempt 2 failed at the launcher before inference. Same-APK attempt 3 passed baseline/tool checks but failed a QA comparison of exact native content against boundary-newline-stripped presentation. Its failed receipt remains unchanged; strict exact-content and visible-content checks then passed nine QA tests, including an altered-content negative case. Release attempt 3 hit an unchanged ChatScreen preset test's five-second deadline during concurrent C++ compilation.
+
+**Not run:** Native attempt 1 was deliberately stopped during build before any APK; inference did not run after attempt 2's launcher failure. Attempt 3's three subsequent rollback/cold-recovery cases and the remaining checks after release attempt 3 were not completed. Final native attempt 4 passed independently. No new GPU/NPU/iOS fixtures or later-stage features are established here.
+
+Full release attempt 2 passed 255 suites / 5,524 tests, Rust checks, typecheck, lint and native configuration. **Final local release attempt 4 passed 255 Jest suites / 5,527 tests, 68 Rust library tests and three host checks, typecheck, lint and native configuration.** Hosted CI is evaluated separately on the published PR head; no hosted result is asserted here.

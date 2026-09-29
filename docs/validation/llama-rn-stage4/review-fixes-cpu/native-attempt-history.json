@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "runtimeVersion": "0.13.0-rc.3",
+  "attempts": [
+    {
+      "attempt": 1,
+      "appTree": "cadd53d95c92c7e489151b38959ffcc866940fe2",
+      "finishedAt": "2026-09-29T22:41:28.4032320Z",
+      "status": "not_run",
+      "phase": "build",
+      "reason": "Build deliberately interrupted before an APK to correct a pre-existing baseline checkpoint fixture's run/message ownership mismatch. No inference ran."
+    },
+    {
+      "attempt": 2,
+      "appTree": "452d3c16c1700cbdcb78932f5c77bf86988b33b8",
+      "apkSha256": "9f35ecab2b1718d6716eed04fa21089f8061b8d8e91bb5218d46f752c984a6d5",
+      "apkBytes": 82162014,
+      "provenanceDigest": "145c2be039e30e7bea1b4e4f3affe83784673e56e3223474ebd27b07dfc8f749",
+      "finishedAt": "2026-09-29T22:51:54.7947114Z",
+      "status": "failed",
+      "build": "passed",
+      "phase": "launcher",
+      "inference": "not_run",
+      "reason": "Initial launcher returned unknown status before inference; scoped crash buffer was empty. Direct relaunch of this same installed APK returned OK."
+    },
+    {
+      "attempt": 3,
+      "appTree": "452d3c16c1700cbdcb78932f5c77bf86988b33b8",
+      "apkSha256": "9f35ecab2b1718d6716eed04fa21089f8061b8d8e91bb5218d46f752c984a6d5",
+      "finishedAt": "2026-09-29T23:00:50.4896125Z",
+      "status": "failed",
+      "build": "reused_same_apk",
+      "baselineStepsPassed": 49,
+      "existingToolAcceptance": "passed",
+      "existingToolHistoryColdReopen": "passed",
+      "recoveryReceipt": "prior-apk-recovery-failed.json",
+      "reason": "Ordinary-limit QA assertion compared raw native parsed content with presentation that removes boundary newlines. Actual stopped_limit, 143 visible characters, zero calls/executions, stopped storage and real drain were observed. The failed receipt is preserved; subsequent three rollback/recovery cases were not_run.",
+      "correction": "QA compares exact parsed-content retention and equivalent visible presentation separately. Nine driver regressions include newline cases and a negative altered-raw-content case. A new APK was built after this QA-only correction."
+    },
+    {
+      "attempt": 4,
+      "appTree": "1a16de40584d3ac6751a7fe12f5c742fde470f4d",
+      "apkSha256": "4644347af1342c1a19f8fd2e55917108015de663038a389baba2ef9c0a41a8a8",
+      "installedApkSha256": "4644347af1342c1a19f8fd2e55917108015de663038a389baba2ef9c0a41a8a8",
+      "provenanceDigest": "fd4fb956ee673a2101323be45e40f5c02ebd9938b08d7ba897cb9956f27d3ad9",
+      "finishedAt": "2026-09-29T23:23:19.8050459Z",
+      "status": "passed",
+      "baselineStepsPassed": 49,
+      "existingToolAcceptance": "passed",
+      "existingToolHistoryColdReopen": "passed",
+      "reviewFixRecovery": "passed",
+      "recoveryReceipt": "local-tools-recovery-evidence.json",
+      "automaticCalculatorSelection": "observed_no_native_call"
+    }
+  ],
+  "notRun": [
+    "iOS inference",
+    "physical GPU/NPU execution",
+    "additional model/template fixtures"
+  ]
+}

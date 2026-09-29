@@ -73,6 +73,11 @@ JSON extraction and silent protocol-to-user/system fallback are not.
 Template capability and successful formatting are distinct from model suitability
 and real native execution. [Stage 4 Android CPU acceptance](llama-rn-013-stage4-acceptance.md) records required native calls, result continuation, attached-document search, JSON Schema, Stop/retry and cold reopen. Automatic calculator selection remained an observed zero-call response, not successful execution. Other models and platforms require separate evidence. Earlier Stage 1–3 receipts below retain their exact source/APK scope.
 
+Follow-up Android CPU acceptance also checks retention of an ordinary parsed reply
+ending at the token limit, empty regenerate/early-branch rollback after Stop, and
+cold rejection of an empty replacement checkpoint while preserving attachments
+and existing tool evidence without reexecution.
+
 ## Stage 3 implementation and verification boundaries
 
 Advanced generation controls extend the existing model-parameter sheet. Settings,

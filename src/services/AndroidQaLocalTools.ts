@@ -165,7 +165,7 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
             stopRequested = true; void llmEngineService.interruptActiveCompletion().catch(() => undefined);
           }
         },
-        onNativeStage: stage => { receipt.nativeStage = stage; },
+        onNativeStage: stage => { if (stage !== 'first_token') receipt.nativeStage = stage; },
         onNativeStep: step => {
           receipt.nativeSteps! += 1; receipt.nativeCalls! += step.result.tool_calls?.length ?? 0;
           check(Number.isSafeInteger(step.result.tokens_predicted) && step.result.tokens_predicted! >= 0
@@ -189,10 +189,11 @@ async function execute({ operationTimeoutMs = 210000, downloadTimeoutMs = 900000
           }
         },
       }), operationTimeoutMs);
-      const content = result.content ?? result.text ?? '';
+      const content = result.content ?? '';
       receipt.outputCharacters = content.length;
       receipt.completionDrained = !llmEngineService.hasActiveCompletion();
-      check(receipt.completionDrained && content.trim().length && latest?.status === 'completed');
+      check(receipt.completionDrained && content.trim().length && latest?.status === 'completed'
+        && result.localToolOutcome.status === 'completed');
       // Preserve settled native output for visual QA even if a later evidence assertion fails.
       answerCommitted = useChatStore.getState().finalizeAssistantTurn(threadId, runId, { outcome: 'success', content,
         toolRun: latest, structuredOutput: result.structuredOutput }).status === 'committed';

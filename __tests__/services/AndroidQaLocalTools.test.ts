@@ -113,7 +113,7 @@ it('preserves a settled native answer before a failed QA assertion and retains i
     onNativeStep({ messages: [], promptTokens: 10, result: { tokens_predicted: 1, tokens_evaluated: 10, tool_calls: [{}] } });
     onNativeStep({ messages: [{ role: 'tool', tool_call_id: 'call', content: result }], promptTokens: 20,
       result: { tokens_predicted: 1, tokens_evaluated: 20 } });
-    return { content: actualNativeAnswer };
+    return { content: actualNativeAnswer, localToolOutcome: { status: 'completed' } };
   });
   await runAndroidQaLocalTools();
   expect(getAndroidQaLocalToolsEvidence()).toMatchObject({ status: 'failed', failureCode: 'assertion' });
@@ -139,7 +139,7 @@ it('preserves a settled native answer before a failed QA assertion and retains i
       tool_calls: index === 1 ? [{}] : [] } });
     if (index === 1) onNativeStep({ messages: [{ role: 'tool', tool_call_id: 'call', content: result }], promptTokens: 20,
       result: { tokens_predicted: 1, tokens_evaluated: 20 } });
-    return { content: index === 1 ? 'The numeric result is 42.' : rawModelText };
+    return { content: index === 1 ? 'The numeric result is 42.' : rawModelText, localToolOutcome: { status: 'completed' } };
   });
   await runAndroidQaLocalTools();
   expect(mockRun).toHaveBeenCalledTimes(3);

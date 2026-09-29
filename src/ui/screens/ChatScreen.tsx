@@ -111,6 +111,8 @@ import { isAndroidQaDocumentModelBootstrapEnabled } from '../../services/Android
 import { isChatModelEligible } from '../../utils/modelRoles';
 import { getAndroidQaModelResourcesEvidence, subscribeAndroidQaModelResources, runAndroidQaModelResources } from '../../services/AndroidQaModelResources';
 import { getAndroidQaStage3Evidence, subscribeAndroidQaStage3, runAndroidQaStage3 } from '../../services/AndroidQaStage3';
+import { checkAndroidQaLocalToolsRecoveryAfterColdReopen, getAndroidQaLocalToolsRecoveryEvidence,
+    runAndroidQaLocalToolsRecovery, subscribeAndroidQaLocalToolsRecovery, type AndroidQaLocalToolsHookActions } from '../../services/AndroidQaLocalToolsRecovery';
 import { hasActiveChatGenerationWork } from '../../services/ChatGenerationService';
 import { selectActiveChatPreset } from '../../services/ActiveChatPresetService';
 import {
@@ -731,9 +733,11 @@ export function handleAndroidBackNavigation({
 function AndroidQaGenerationEvidenceSurface({
     documentDraftCount,
     topInset,
+    getHookActions,
 }: {
     documentDraftCount: number;
     topInset: number;
+    getHookActions: () => AndroidQaLocalToolsHookActions;
 }) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
@@ -742,6 +746,7 @@ function AndroidQaGenerationEvidenceSurface({
         <EnabledAndroidQaGenerationEvidenceSurface
             documentDraftCount={documentDraftCount}
             topInset={topInset}
+            getHookActions={getHookActions}
         />
     );
 }
@@ -749,9 +754,11 @@ function AndroidQaGenerationEvidenceSurface({
 function EnabledAndroidQaGenerationEvidenceSurface({
     documentDraftCount,
     topInset,
+    getHookActions,
 }: {
     documentDraftCount: number;
     topInset: number;
+    getHookActions: () => AndroidQaLocalToolsHookActions;
 }) {
     const { t } = useTranslation();
     const inferenceEvidence = useSyncExternalStore(
@@ -764,6 +771,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     );
     const localToolsHistoryMarker = useSyncExternalStore(subscribeAndroidQaLocalToolsHistory, getAndroidQaLocalToolsHistoryMarker, getAndroidQaLocalToolsHistoryMarker);
     const localToolsEvidence = useSyncExternalStore(subscribeAndroidQaLocalTools, getAndroidQaLocalToolsEvidence, getAndroidQaLocalToolsEvidence);
+    const recoveryEvidence = useSyncExternalStore(subscribeAndroidQaLocalToolsRecovery, getAndroidQaLocalToolsRecoveryEvidence, getAndroidQaLocalToolsRecoveryEvidence);
     const stage3Evidence = useSyncExternalStore(subscribeAndroidQaStage3, getAndroidQaStage3Evidence, getAndroidQaStage3Evidence);
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
@@ -863,6 +871,14 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             accessibilityLabel={localToolsHistoryMarker} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-local-tools-evidence"
                             accessibilityLabel={JSON.stringify(localToolsEvidence)} style={styles.androidQaEvidenceMarker} />
+                        <Button size="xs" action="secondary" testID="chat-qa-run-local-tools-recovery"
+                            disabled={recoveryEvidence.status !== 'idle' || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            onPress={() => void runAndroidQaLocalToolsRecovery(getHookActions)}><ButtonText>QA tool recovery</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-check-local-tools-cold-recovery"
+                            disabled={recoveryEvidence.status !== 'idle'}
+                            onPress={() => void checkAndroidQaLocalToolsRecoveryAfterColdReopen()}><ButtonText>QA cold recovery</ButtonText></Button>
+                        <View accessible collapsable={false} testID="chat-qa-local-tools-recovery-evidence"
+                            accessibilityLabel={JSON.stringify(recoveryEvidence)} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-stage3-evidence"
                             accessibilityLabel={JSON.stringify(stage3Evidence)} style={styles.androidQaEvidenceMarker} />
                     </>
@@ -1008,8 +1024,13 @@ const ChatScreenContent = () => {
         deleteMessage,
         stopGeneration,
         regenerateFromUserMessage,
+        regenerateLastResponse,
         startNewChat,
     } = useChatSession();
+    const qaHookActions = useRef<AndroidQaLocalToolsHookActions>({ appendUserMessage, regenerateFromUserMessage,
+        regenerateLastResponse, stopGeneration });
+    qaHookActions.current = { appendUserMessage, regenerateFromUserMessage, regenerateLastResponse, stopGeneration };
+    const getQaHookActions = useCallback(() => qaHookActions.current, []);
     const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
     usePreventRemove(isPreparingDocuments, () => undefined);
     const { state: engineState, loadModel } = useLLMEngine();
@@ -3296,6 +3317,7 @@ const ChatScreenContent = () => {
                     <AndroidQaGenerationEvidenceSurface
                         documentDraftCount={documentAttachmentDrafts.drafts.length}
                         topInset={headerInset}
+                        getHookActions={getQaHookActions}
                     />
 
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>

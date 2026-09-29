@@ -26,6 +26,7 @@ let controller: AbortController;
 let finish: jest.Mock;
 let progress: LocalToolRun[];
 let current: jest.Mock;
+let publish: jest.Mock;
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 const answer = (content = '42'): LlamaCompletionResult => ({ content, text: content, tokens_predicted: 3, stopped_eos: true });
@@ -34,12 +35,13 @@ const proposal = (id: string | null = 'call', args = '{"expression":"6*7"}'): Ll
   tool_calls: [{ id, type: 'function', function: { name: 'calculate', arguments: args } }],
 });
 const run = (extra: Partial<Parameters<typeof runLocalToolCompletion>[0]> = {}) => runLocalToolCompletion({
-  options, settings, threadId: 'thread', runId: 'assistant', assertCurrent: current,
+  options, settings, threadId: 'thread', runId: 'assistant', assertCurrent: current, assertCanPublish: publish,
   onProgress: value => progress.push(value), ...extra,
 });
 beforeEach(() => {
-  jest.clearAllMocks(); mockListeners.clear(); controller = new AbortController(); finish = jest.fn(); progress = []; current = jest.fn();
+  jest.clearAllMocks(); mockListeners.clear(); controller = new AbortController(); finish = jest.fn(); progress = []; current = jest.fn(); publish = jest.fn();
   jest.mocked(llmEngineService.beginLocalToolRun).mockReturnValue({ token: Symbol('owner'), signal: controller.signal, finish,
+    assertCanPublish: () => undefined,
     assertCurrent: () => { if (controller.signal.aborted) throw new Error('cancelled'); } });
   jest.mocked(llmEngineService.countPromptTokens).mockResolvedValue(100);
   jest.mocked(llmEngineService.getContextSize).mockReturnValue(8192);
@@ -136,6 +138,108 @@ test('ordinary parsed JSON content never becomes a call', async () => {
   await run(); expect(executor).not.toHaveBeenCalled(); expect(completion).toHaveBeenCalledTimes(1);
 });
 
+test.each([
+  ['stopped_limit', 'token_limit'], ['truncated', 'truncated'],
+  ['context_full', 'context_limit'], ['interrupted', 'interrupted'],
+] as const)('retains parsed ordinary content on %s without admitting an action', async (flag, reason) => {
+  completion.mockResolvedValueOnce({ ...answer('The available answer'), tool_calls: [], [flag]: true,
+    text: '<tool_call>unsafe raw protocol', accumulated_text: 'unsafe accumulated protocol' });
+  await expect(run()).resolves.toMatchObject({ content: 'The available answer', text: 'The available answer',
+    localToolOutcome: { status: 'stopped', reason } });
+  expect(executor).not.toHaveBeenCalled(); expect(completion).toHaveBeenCalledTimes(1);
+  expect(progress.at(-1)?.status).toBe('interrupted');
+});
+
+test('retains an ordinary token-limited answer alongside an already executed call and result', async () => {
+  completion.mockResolvedValueOnce(proposal()).mockResolvedValueOnce({ ...answer('The result is'), stopped_limit: true, tool_calls: [] });
+  await expect(run()).resolves.toMatchObject({ content: 'The result is', localToolOutcome: { status: 'stopped', reason: 'token_limit' } });
+  expect(executor).toHaveBeenCalledTimes(1); expect(completion).toHaveBeenCalledTimes(2);
+  expect(progress.at(-1)).toMatchObject({ status: 'interrupted', rounds: [{ calls: [{ status: 'completed', result: '{"ok":true,"result":{"value":42}}' }] }] });
+});
+
+test('retains empty stopped ordinary output without fabricating substantive progress', async () => {
+  completion.mockResolvedValueOnce({ content: '', text: '<tool_call>not user content', tokens_predicted: 0,
+    tool_calls: [], interrupted: true });
+  await expect(run()).resolves.toMatchObject({ content: '', text: '', localToolOutcome: { status: 'stopped', reason: 'interrupted' } });
+  expect(executor).not.toHaveBeenCalled(); expect(progress.at(-1)?.rounds).toEqual([]);
+});
+
+test.each(['json_object', 'json_schema', 'gbnf'] as const)('retains partial %s final without validation success', async mode => {
+  completion.mockResolvedValueOnce(answer('Draft')).mockResolvedValueOnce({ ...answer('{"value":'), stopped_limit: true,
+    text: 'unsafe raw protocol', structuredOutput: { mode, status: mode === 'gbnf' ? 'not_applicable' : 'valid' } });
+  const output = mode === 'json_schema' ? { mode, schema: '{"type":"object"}' }
+    : mode === 'gbnf' ? { mode, grammar: 'root ::= "42"' } : { mode };
+  await expect(run({ options: { ...options, generation: { output } } })).resolves.toMatchObject({
+    content: '{"value":', text: '{"value":', localToolOutcome: { status: 'stopped', reason: 'token_limit' },
+    structuredOutput: { mode, status: 'incomplete' },
+  });
+  expect(executor).not.toHaveBeenCalled(); expect(progress.at(-1)?.status).not.toBe('completed');
+});
+
+test('retains invalid constrained content with an error outcome and independent validation', async () => {
+  completion.mockResolvedValueOnce(answer('Draft')).mockResolvedValueOnce({ ...answer('{"value":"wrong"}'),
+    structuredOutput: { mode: 'json_schema', status: 'valid' } });
+  await expect(run({ options: { ...options, generation: { output: { mode: 'json_schema',
+    schema: '{"type":"object","properties":{"value":{"type":"integer"}},"required":["value"],"additionalProperties":false}' } } } }))
+    .resolves.toMatchObject({ content: '{"value":"wrong"}', localToolOutcome: { status: 'error', reason: 'invalid_output' },
+      structuredOutput: { mode: 'json_schema', status: 'invalid', error: 'schema_mismatch' } });
+  expect(progress.at(-1)?.status).toBe('error'); expect(executor).not.toHaveBeenCalled();
+});
+
+test('does not use raw text as an ordinary partial when parsed content is absent', async () => {
+  completion.mockResolvedValueOnce({ text: '<tool_call>{"expression":"6*7"}', accumulated_text: 'private raw text',
+    tool_calls: [], tokens_predicted: 4, stopped_limit: true });
+  await expect(run()).resolves.toMatchObject({ content: '', text: '', localToolOutcome: { status: 'stopped', reason: 'token_limit' } });
+  expect(executor).not.toHaveBeenCalled();
+});
+
+test('Stop retains settled parsed ordinary content only after the real native result and interrupt drain', async () => {
+  const native = deferred<LlamaCompletionResult>(); const draining = deferred<void>();
+  completion.mockReturnValueOnce(native.promise);
+  jest.mocked(llmEngineService.interruptActiveCompletion).mockReturnValue(draining.promise);
+  const pending = run(); let settled = false; void pending.then(() => { settled = true; }, () => { settled = true; });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  controller.abort(); current.mockImplementation(() => { throw new Error('stopped'); });
+  expect(finish).not.toHaveBeenCalled(); expect(settled).toBe(false);
+  native.resolve({ ...answer('Available before Stop'), interrupted: true, text: 'unsafe raw protocol', tool_calls: [] });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  expect(finish).not.toHaveBeenCalled(); expect(settled).toBe(false);
+  draining.resolve();
+  await expect(pending).resolves.toMatchObject({ content: 'Available before Stop', text: 'Available before Stop',
+    localToolOutcome: { status: 'stopped', reason: 'cancelled' } });
+  expect(progress.at(-1)?.status).toBe('cancelled'); expect(executor).not.toHaveBeenCalled();
+  expect(finish).toHaveBeenCalledTimes(1);
+});
+
+test.each(['chat', 'model', 'permissions'] as const)('rejects late parsed content after %s ownership changes', async identity => {
+  const native = deferred<LlamaCompletionResult>(); const stages = jest.fn();
+  completion.mockImplementationOnce(async request => {
+    const result = await native.promise;
+    request.onToken?.({ token: 'late token', content: 'Must not publish' });
+    return result;
+  });
+  const pending = run({ onNativeStage: stages }); const rejected = expect(pending).rejects.toThrow(`changed ${identity}`);
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  current.mockImplementation(() => { throw new Error(`changed ${identity}`); });
+  publish.mockImplementation(() => { throw new Error(`changed ${identity}`); });
+  mockListeners.forEach(listener => listener());
+  native.resolve({ ...answer('Must not publish'), interrupted: true, tool_calls: [] });
+  await rejected; expect(executor).not.toHaveBeenCalled(); expect(finish).toHaveBeenCalledTimes(1);
+  expect(stages.mock.calls).toEqual([['count_prompt'], ['completion']]);
+  expect(progress).toHaveLength(1);
+});
+
+test('run timeout preserves only settled parsed content and never releases native ownership early', async () => {
+  jest.useFakeTimers(); const native = deferred<LlamaCompletionResult>(); completion.mockReturnValueOnce(native.promise);
+  const pending = run(); await jest.advanceTimersByTimeAsync(180001);
+  expect(finish).not.toHaveBeenCalled(); expect(executor).not.toHaveBeenCalled();
+  native.resolve({ ...answer('Available before timeout'), tool_calls: [], interrupted: true });
+  await expect(pending).resolves.toMatchObject({ content: 'Available before timeout',
+    localToolOutcome: { status: 'error', reason: 'timeout' } });
+  expect(progress.at(-1)?.status).toBe('error'); expect(finish).toHaveBeenCalledTimes(1);
+  expect(completion).toHaveBeenCalledTimes(1);
+});
+
 test('Stop during pending native result rejects late proposal', async () => {
   const native = deferred<LlamaCompletionResult>(); completion.mockReturnValueOnce(native.promise);
   const pending = run(); const rejected = expect(pending).rejects.toMatchObject({ reason: 'cancelled' });
@@ -164,7 +268,8 @@ test.each(['interrupted', 'truncated', 'context_full', 'stopped_limit'] as const
   completion.mockResolvedValueOnce(answer()).mockResolvedValueOnce({ ...answer('42'), [flag]: true,
     structuredOutput: { mode: 'gbnf', status: 'not_applicable' } });
   await expect(run({ options: { ...options, generation: { output: { mode: 'gbnf', grammar: 'root ::= "42"' } } } }))
-    .rejects.toMatchObject({ reason: 'invalid_proposal' });
+    .resolves.toMatchObject({ content: '42', localToolOutcome: { status: 'stopped' },
+      structuredOutput: { mode: 'gbnf', status: 'incomplete' } });
   expect(progress.at(-1)?.status).not.toBe('completed');
 });
 
@@ -184,7 +289,7 @@ test.each([false, true])('preserves text prefill in final phase after tools=%s',
   const final = completion.mock.calls.at(-1)![0];
   expect(final.toolRequest).toMatchObject({ phase: 'final', toolChoice: 'none' });
   expect(final.generation).toMatchObject(generation);
-  expect(final.onToken).toBe(onToken);
+  expect(final.onToken).toEqual(expect.any(Function));
   expect(completion.mock.calls.slice(0, -1).every(([request]) => request.onToken === undefined)).toBe(true);
   expect(llmEngineService.countPromptTokens).toHaveBeenLastCalledWith(expect.objectContaining({
     generation: final.generation, toolRequest: final.toolRequest, runOwner: final.runOwner,
@@ -203,4 +308,34 @@ test('reports finite native boundaries before counting and completing', async ()
   });
   await run({ onNativeStage: stage => stages.push(stage) });
   expect(stages).toEqual(['count_prompt', 'completion']);
+});
+
+test('reports one payload-free first-token boundary per native completion without publishing selection tokens', async () => {
+  const stages: string[] = []; const onToken = jest.fn();
+  completion.mockImplementationOnce(async request => {
+    request.onToken?.({ token: 'PRIVATE ARGUMENTS', accumulatedText: 'PRIVATE PROTOCOL' });
+    request.onToken?.({ token: 'more', content: 'Intermediate private content' });
+    return proposal();
+  }).mockImplementationOnce(async request => {
+    request.onToken?.({ token: 'answer', content: '42' }); return answer();
+  });
+  await run({ options: { ...options, onToken }, onNativeStage: stage => stages.push(stage) });
+  expect(stages).toEqual(['count_prompt', 'completion', 'first_token', 'count_prompt', 'completion', 'first_token']);
+  expect(onToken).not.toHaveBeenCalled();
+});
+
+test('final streaming exposes parsed content/reasoning only and drops stale callbacks', async () => {
+  const onToken = jest.fn();
+  completion.mockResolvedValueOnce(answer('Selection')).mockImplementationOnce(async request => {
+    request.onToken?.('PRIVATE RAW TOKEN');
+    request.onToken?.({ token: 'PRIVATE RAW TOKEN', accumulatedText: 'PRIVATE PROTOCOL' });
+    request.onToken?.({ token: 'PRIVATE RAW TOKEN', accumulatedText: 'PRIVATE PROTOCOL', content: 'Answer: 42',
+      contentMode: 'cumulative', reasoningContent: 'Parsed reasoning', reasoningContentMode: 'cumulative' });
+    publish.mockImplementationOnce(() => { throw new Error('stale ownership'); });
+    request.onToken?.({ token: 'late', content: 'Must not publish' });
+    return answer('Answer: 42');
+  });
+  await run({ options: { ...options, generation: { template: { prefillText: 'Answer: ' } }, onToken } });
+  expect(onToken.mock.calls).toEqual([[{ token: '', content: 'Answer: 42', contentMode: 'cumulative',
+    reasoningContent: 'Parsed reasoning', reasoningContentMode: 'cumulative' }]]);
 });

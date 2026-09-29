@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalToolsEvidence, waitForLocalToolsEvidence } = require("./lib/local-tools-evidence");
+const { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, sanitizeLocalToolsEvidence, waitForLocalToolsEvidence,
+  sanitizeLocalToolsRecoveryEvidence, waitForLocalToolsRecoveryEvidence } = require("./lib/local-tools-evidence");
 
 const fs = require("fs");
 const path = require("path");
@@ -3199,7 +3200,34 @@ function buildScenarios() {
           await new Promise(resolve => setTimeout(resolve, 2000));
           validateColdLocalToolsHistory(before, await readHistory());
           fs.writeFileSync(path.join(artifactsRoot, "local-tools-cold-reopen.json"), `${JSON.stringify(coldReopen, null, 2)}\n`);
-          return { details: { ...details, coldReopen } };
+          const recoveryPath = path.join(artifactsRoot, "local-tools-recovery-evidence.json");
+          fs.rmSync(recoveryPath, { force: true });
+          const recoveryAction = await waitForResourceId(adbPath, ctx.serial, "chat-qa-run-local-tools-recovery", { timeoutMs: 120000, visibleOnly: true });
+          if (!recoveryAction.bounds) throw new Error("Hook tool recovery action is not tappable.");
+          tapBounds(adbPath, ctx.serial, recoveryAction.bounds);
+          const readRecovery = () => {
+            const node = findResourceIdInSnapshot(createUiSnapshot(adbPath, ctx.serial), "chat-qa-local-tools-recovery-evidence");
+            if (!node) return null;
+            let observed;
+            try { observed = JSON.parse(node.contentDesc || node.text); } catch { return null; }
+            const safe = sanitizeLocalToolsRecoveryEvidence(observed);
+            fs.writeFileSync(recoveryPath, `${JSON.stringify(safe, null, 2)}\n`);
+            return safe;
+          };
+          await waitForLocalToolsRecoveryEvidence(readRecovery, { readyForColdReopen: true });
+          ctx.captureScreenshot("local-tools-partial-and-rollback.png");
+          forceStopScenarioApp(adbPath, ctx.serial);
+          await relaunchScenarioApp(ctx);
+          await tapBottomTabUntilVisible(ctx, CHAT_TAB_LABELS, CHAT_ROUTE_LABELS, { timeoutMs: CHAT_ROUTE_TIMEOUT_MS });
+          const coldRecoveryAction = await waitForResourceId(adbPath, ctx.serial, "chat-qa-check-local-tools-cold-recovery", { timeoutMs: 120000, visibleOnly: true });
+          if (!coldRecoveryAction.bounds) throw new Error("Cold hook tool recovery action is not tappable.");
+          tapBounds(adbPath, ctx.serial, coldRecoveryAction.bounds);
+          const recovery = await waitForLocalToolsRecoveryEvidence(readRecovery);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          const afterRecovery = await readHistory();
+          if (afterRecovery.processRunStarts !== 0 || afterRecovery.busy !== false || afterRecovery.pendingCalls !== 0
+            || afterRecovery.runningRuns !== 0) throw new Error("Cold replacement recovery started new tool work.");
+          return { details: { ...details, coldReopen, recovery } };
         } catch (error) {
           forceStopScenarioApp(adbPath, ctx.serial);
           throw error;

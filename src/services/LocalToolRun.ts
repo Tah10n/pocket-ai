@@ -9,6 +9,15 @@ import { executeLocalTool, getLocalToolDefinitions } from './LocalToolExecutor';
 import { LOCAL_TOOL_LIMITS, utf8Bytes } from './LocalToolLimits';
 import type { LocalToolRequest } from './LocalToolRequest';
 import { AppError, LOCAL_TOOL_RUN_ERROR_CODES, type LocalToolRunErrorReason } from './AppError';
+import { prepareStructuredOutput, validateStructuredOutputResult } from '../utils/structuredOutput';
+
+export type LocalToolTerminalOutcome =
+  | { status: 'completed' }
+  | { status: 'stopped'; reason: 'cancelled' | 'interrupted' | 'token_limit' | 'context_limit' | 'truncated' }
+  | { status: 'error'; reason: 'timeout' | 'invalid_output' };
+export type LocalToolCompletionResult = LlamaCompletionResult & {
+  content: string; text: string; localToolOutcome: LocalToolTerminalOutcome;
+};
 
 export class LocalToolRunError extends AppError {
   constructor(readonly reason: LocalToolRunErrorReason) {
@@ -30,19 +39,21 @@ let processLocalToolRunStarts = 0;
 export const getLocalToolRunStartCount = () => processLocalToolRunStarts;
 
 /** One bounded extension of the existing engine, with no alternative native context. */
-export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, onProgress, onNativeStep, onNativeStage }: {
+export async function runLocalToolCompletion({ options, threadId, runId, settings, assertCurrent, assertCanPublish, onProgress, onNativeStep, onNativeStage }: {
   options: LlmChatCompletionOptions;
   threadId: string;
   runId: string;
   settings: LocalToolSettings;
   assertCurrent: () => void;
+  /** Identity/permissions ownership check that deliberately excludes user Stop. */
+  assertCanPublish?: () => void;
   onProgress: (run: LocalToolRun) => void;
   /** Read-only QA boundary observer; only a finite stage name is exposed. */
-  onNativeStage?: (stage: 'count_prompt' | 'completion') => void;
+  onNativeStage?: (stage: 'count_prompt' | 'completion' | 'first_token') => void;
   /** Read-only QA observer; payloads must not be logged or included in receipts. */
   onNativeStep?: (step: { phase: LocalToolRequest['phase']; promptTokens: number;
     messages: readonly LlmChatMessage[]; result: LlamaCompletionResult }) => void;
-}): Promise<LlamaCompletionResult> {
+}): Promise<LocalToolCompletionResult> {
   const captured = sanitizeLocalToolSettings(settings);
   if (!captured.enabled || !captured.allowedTools.length || !options.expectedModelId) {
     throw new LocalToolRunError('invalid_proposal');
@@ -72,6 +83,20 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
     lease.assertCurrent();
     assertCurrent();
   };
+  const checkPublication = () => {
+    lease.assertCanPublish();
+    (assertCanPublish ?? assertCurrent)();
+  };
+  const incompleteOutcome = (result: LlamaCompletionResult): LocalToolTerminalOutcome | undefined => {
+    if (timedOut || Date.now() - startedAt >= LOCAL_TOOL_LIMITS.runMilliseconds) return { status: 'error', reason: 'timeout' };
+    if (controller.signal.aborted || lease.signal.aborted) return { status: 'stopped', reason: 'cancelled' };
+    if (result.interrupted) return { status: 'stopped', reason: 'interrupted' };
+    if (result.truncated) return { status: 'stopped', reason: 'truncated' };
+    if (result.context_full) return { status: 'stopped', reason: 'context_limit' };
+    if (result.stopped_limit) return { status: 'stopped', reason: 'token_limit' };
+    if (result.structuredOutput?.status === 'incomplete') return { status: 'stopped', reason: 'interrupted' };
+    return undefined;
+  };
   const stopForTimeout = () => {
     timedOut = true;
     controller.abort();
@@ -100,14 +125,36 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
     const available = Math.min(llmEngineService.getContextSize() - count - 16, LOCAL_TOOL_LIMITS.totalTokens - totalTokens);
     if (available < 1) throw new LocalToolRunError('context_limit');
     onNativeStage?.('completion');
+    let firstTokenObserved = false;
+    const onToken: LlmChatCompletionOptions['onToken'] = onNativeStage || (request.phase === 'final' && options.onToken)
+      ? token => {
+          try { checkPublication(); } catch { return; }
+          if (!firstTokenObserved && (typeof token === 'string' ? token.length > 0
+            : Boolean(token.token || token.content !== undefined || token.reasoningContent !== undefined))) {
+            firstTokenObserved = true;
+            onNativeStage?.('first_token');
+          }
+          if (request.phase !== 'final' || typeof token === 'string'
+            || (token.content === undefined && token.reasoningContent === undefined)) return;
+          // Final callbacks may publish native parsed fields only. Raw tokens and
+          // accumulated protocol are never a fallback for a partial tool reply.
+          options.onToken?.({ token: '',
+            ...(token.content !== undefined ? { content: token.content, contentMode: token.contentMode } : {}),
+            ...(token.reasoningContent !== undefined ? {
+              reasoningContent: token.reasoningContent, reasoningContentMode: token.reasoningContentMode,
+            } : {}),
+          });
+        } : undefined;
     const result = await llmEngineService.chatCompletion({ ...options, messages, generation,
       toolRequest: request, runOwner: lease.token,
       // Intermediate parser output is only a proposal. Never display raw tokens
       // or a generic protocol envelope as user text while it is still partial.
-      onToken: request.phase === 'final' ? options.onToken : undefined,
+      onToken,
       params: { ...options.params, n_predict: Math.min(remainingTokens, available) },
     });
-    check();
+    // The actual native completion has settled. Ownership is independent of
+    // action admission: Stop can retain parsed user content but cannot execute.
+    checkPublication();
     // rc.3 excludes the first output token in its predicted counter.
     const predicted = result.tokens_predicted;
     if (typeof predicted !== 'number' || !Number.isFinite(predicted) || predicted < 0) {
@@ -119,15 +166,38 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
     onNativeStep?.({ phase: request.phase, promptTokens: count, messages: [...messages], result });
     return result;
   };
+  const finishReply = (result: LlamaCompletionResult): LocalToolCompletionResult => {
+    checkPublication();
+    const content = result.content ?? '';
+    let outcome = incompleteOutcome(result);
+    let final = { ...result, content, text: content };
+    delete final.accumulated_text;
+    if (generation.output && generation.output.mode !== 'text') {
+      const output = prepareStructuredOutput(generation.output);
+      final.structuredOutput = outcome
+        ? { mode: output.mode, status: 'incomplete', error: 'interrupted' }
+        : validateStructuredOutputResult(output, { content,
+          interrupted: result.interrupted, stoppedLimit: result.stopped_limit,
+          truncated: result.truncated, contextFull: result.context_full });
+    }
+    if (!outcome && final.structuredOutput?.status === 'invalid') outcome = { status: 'error', reason: 'invalid_output' };
+    if (!outcome && !content.trim() && !final.reasoning_content?.trim()) throw new LocalToolRunError('invalid_proposal');
+    const localToolOutcome: LocalToolTerminalOutcome = outcome ?? { status: 'completed' };
+    run.status = localToolOutcome.status === 'completed' ? 'completed'
+      : localToolOutcome.status === 'error' ? 'error'
+        : localToolOutcome.reason === 'cancelled' ? 'cancelled' : 'interrupted';
+    snapshot();
+    return { ...final, localToolOutcome };
+  };
   try {
     snapshot();
     for (;;) {
       const result = await complete(createLocalToolRequest(captured, run.rounds.length === 0));
       const proposals = result.tool_calls ?? [];
-      if (result.interrupted || result.truncated || result.context_full || result.stopped_limit) {
-        throw new LocalToolRunError('invalid_proposal');
-      }
       if (!proposals.length) {
+        // A no-call settlement may contain an ordinary partial reply. Preserve
+        // parsed content before considering another constrained final dispatch.
+        if (incompleteOutcome(result)) return finishReply(result);
         if (run.rounds.length === 0 && captured.toolChoice === 'required') throw new LocalToolRunError('invalid_proposal');
         let final = result;
         // Selection suppresses content prefill so it cannot corrupt tool parsing.
@@ -138,22 +208,18 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
           run.phase = 'final';
           snapshot();
           final = await complete({ phase: 'final', tools: getLocalToolDefinitions(captured), toolChoice: 'none', parallelToolCalls: false });
-          if (final.tool_calls?.length || final.interrupted || final.truncated || final.context_full || final.stopped_limit) {
+          if (final.tool_calls?.length) {
             throw new LocalToolRunError('invalid_proposal');
           }
         }
         // Only bridge-parsed content is displayable on the tool parser path.
         // Ordinary assistant JSON is never interpreted as an action.
-        if (!generation.output || generation.output.mode === 'text') {
-          if (!final.content?.trim() && !final.reasoning_content?.trim()) throw new LocalToolRunError('invalid_proposal');
-          final = { ...final, content: final.content ?? '', text: final.content ?? '' };
-        }
-        run.status = final.structuredOutput?.status === 'invalid' ? 'error'
-          : final.structuredOutput?.status === 'incomplete' ? 'interrupted' : 'completed';
-        check();
-        snapshot();
-        return final;
+        return finishReply(final);
       }
+      // Incomplete actions have no execution authority, even if their JSON
+      // arguments already parse. Cancellation also prevents any next action.
+      check();
+      if (incompleteOutcome(result)) throw new LocalToolRunError('invalid_proposal');
       if (run.rounds.length >= LOCAL_TOOL_LIMITS.rounds) throw new LocalToolRunError('round_limit');
       if (calls + proposals.length > LOCAL_TOOL_LIMITS.calls) throw new LocalToolRunError('call_limit');
       const round = { index: run.rounds.length, content: result.content ?? '', calls: proposals.map((proposal, index) => {
@@ -207,7 +273,7 @@ export async function runLocalToolCompletion({ options, threadId, runId, setting
     }));
     // This callback may only update the still-owned assistant; the caller rejects
     // late publication after chat, settings, storage or document invalidation.
-    snapshot();
+    try { checkPublication(); snapshot(); } catch { /* A stale owner cannot publish terminal tool progress. */ }
     throw error;
   } finally {
     clearTimeout(timer);

@@ -1,4 +1,6 @@
 const { validateColdLocalToolsHistory, STEP_IDS, IDENTITIES, sanitizeLocalToolsEvidence, validateLocalToolsEvidence, waitForLocalToolsEvidence } = require('../../scripts/lib/local-tools-evidence');
+const { RECOVERY_STEP_IDS, sanitizeLocalToolsRecoveryEvidence, validateLocalToolsRecoveryEvidence,
+  waitForLocalToolsRecoveryEvidence } = require('../../scripts/lib/local-tools-evidence');
 
 // Synthetic receipts only test the verifier. They are never native acceptance evidence.
 function receipt() {
@@ -92,4 +94,56 @@ it('records no native auto selection as observed, never as successful tool execu
 it('still requires exact execution and forwarded result when auto selects a native call', () => {
   const input = receipt(); input.steps[3].resultReturned = false;
   expect(() => validateLocalToolsEvidence(input)).toThrow();
+});
+
+function recoveryReceipt() {
+  return { schemaVersion: 1, status: 'passed', phase: 'complete', requiresForceStop: false,
+    steps: RECOVERY_STEP_IDS.map(id => ({ id, status: 'passed', nativeSteps: 1, nativeCalls: 0, executedCalls: 0,
+      outputCharacters: 21, stoppedLimit: true, parsedContentRetained: true, storedStopped: true, completionDrained: true,
+      firstNativeTokenObserved: true, emptyRunObserved: true, historyUnchanged: true, attachmentsRetained: true,
+      otherChatsUnchanged: true, emptyWriteRejected: true, legacyCheckpointSeeded: true, legacyCheckpointRejected: true, noReexecution: true })) };
+}
+it('accepts only bounded hook partial/rollback/cold receipts, excluding settled content and paths', () => {
+  const input = recoveryReceipt(); input.steps[0].content = 'secret native answer'; input.path = 'secret path';
+  const safe = validateLocalToolsRecoveryEvidence(input);
+  expect(JSON.stringify(safe)).not.toContain('secret');
+  expect(safe.steps).toHaveLength(4);
+});
+it.each(['stoppedLimit', 'parsedContentRetained', 'storedStopped', 'completionDrained', 'outputCharacters'])(
+  'rejects partial answer success without %s', key => {
+    const input = recoveryReceipt(); input.steps[0][key] = false;
+    expect(() => validateLocalToolsRecoveryEvidence(input)).toThrow();
+  });
+it.each(['firstNativeTokenObserved', 'emptyRunObserved', 'historyUnchanged', 'attachmentsRetained', 'otherChatsUnchanged'])(
+  'rejects empty replacement rollback without %s', key => {
+    for (const index of [1, 2]) {
+      const input = recoveryReceipt(); input.steps[index][key] = false;
+      expect(() => validateLocalToolsRecoveryEvidence(input)).toThrow();
+    }
+  });
+it.each(['emptyWriteRejected', 'legacyCheckpointSeeded', 'legacyCheckpointRejected', 'noReexecution'])(
+  'rejects cold legacy recovery without %s', key => {
+    const input = recoveryReceipt(); input.steps[3][key] = false;
+    expect(() => validateLocalToolsRecoveryEvidence(input)).toThrow();
+  });
+it('distinguishes prepared legacy checkpoint from completed cold acceptance', async () => {
+  const input = recoveryReceipt(); input.status = 'ready_for_cold_reopen'; input.phase = 'empty_checkpoint_cold_recovery'; input.steps.pop();
+  expect(() => validateLocalToolsRecoveryEvidence(input)).toThrow();
+  expect(validateLocalToolsRecoveryEvidence(input, { readyForColdReopen: true })).toHaveProperty('status', 'ready_for_cold_reopen');
+  expect(await waitForLocalToolsRecoveryEvidence(async () => input, { readyForColdReopen: true })).toHaveProperty('status', 'ready_for_cold_reopen');
+});
+it('rejects new execution, duplicate steps, unknown statuses, and oversized counts', () => {
+  for (const change of [input => { input.steps[0].executedCalls = 1; }, input => { input.steps[1].nativeCalls = 1; },
+    input => { input.steps[2].id = 'empty_regenerate_stop'; }, input => { input.steps[0].nativeSteps = Infinity; },
+    input => { input.steps[0].status = 'observed'; }]) {
+    const input = recoveryReceipt(); change(input); expect(() => validateLocalToolsRecoveryEvidence(input)).toThrow();
+  }
+  expect(sanitizeLocalToolsRecoveryEvidence({ ...recoveryReceipt(), failureCode: 'secret path' }).failureCode).toBeUndefined();
+});
+it('fails bounded waiting instead of claiming running/failed hook recovery as passed', async () => {
+  let clock = 0;
+  await expect(waitForLocalToolsRecoveryEvidence(async () => ({ ...recoveryReceipt(), status: 'running' }), {
+    timeoutMs: 2, now: () => clock++, wait: async () => undefined,
+  })).rejects.toThrow('timed out');
+  await expect(waitForLocalToolsRecoveryEvidence(async () => ({ ...recoveryReceipt(), status: 'failed', failureCode: 'assertion' }))).rejects.toThrow('code=assertion');
 });

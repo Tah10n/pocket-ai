@@ -1433,20 +1433,29 @@ class LLMEngineService {
     const release = this.beginPromptPreparation();
     this.localToolRun = owner;
     let finished = false;
+    const assertCanPublish = () => {
+      if (finished || this.localToolRun !== owner
+        || this.getPromptContextIdentity() !== contextIdentity
+        || JSON.stringify(this.getEffectiveLoadParameters()) !== loadIdentity
+        || (() => {
+          const current = registry.getModel(expectedModelId);
+          return (current ? getCompanionBindingIdentity(current) : null) !== modelIdentity;
+        })()) {
+        throw new AppError('engine_busy', 'The local tool run was cancelled.');
+      }
+      this.assertExpectedCompletionModel(expectedModelId);
+    };
     return {
       token: owner.token,
       signal: controller.signal,
+      // Stop prevents further actions, but a settled parsed reply still belongs
+      // to this lease until its context/model identity changes or it finishes.
+      assertCanPublish,
       assertCurrent: () => {
-        if (finished || controller.signal.aborted || this.localToolRun !== owner
-          || this.getPromptContextIdentity() !== contextIdentity
-          || JSON.stringify(this.getEffectiveLoadParameters()) !== loadIdentity
-          || (() => {
-            const current = registry.getModel(expectedModelId);
-            return (current ? getCompanionBindingIdentity(current) : null) !== modelIdentity;
-          })()) {
+        assertCanPublish();
+        if (controller.signal.aborted) {
           throw new AppError('engine_busy', 'The local tool run was cancelled.');
         }
-        this.assertExpectedCompletionModel(expectedModelId);
       },
       finish: () => {
         if (finished) return;

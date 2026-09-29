@@ -94,4 +94,60 @@ function validateColdLocalToolsHistory(before, after) {
   }
   return { historyUnchanged: true, noReexecution: true, callCount: second.callCount, completedCalls: second.completedCalls };
 }
-module.exports = { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, STEP_IDS, IDENTITIES, sanitizeLocalToolsEvidence, validateLocalToolsEvidence, waitForLocalToolsEvidence };
+const RECOVERY_STEP_IDS = ['ordinary_auto_limit', 'empty_regenerate_stop', 'empty_branch_stop', 'empty_checkpoint_cold_recovery'];
+const RECOVERY_BOOLEANS = ['stoppedLimit', 'parsedContentRetained', 'storedStopped', 'completionDrained',
+  'firstNativeTokenObserved', 'emptyRunObserved', 'historyUnchanged', 'attachmentsRetained', 'otherChatsUnchanged',
+  'emptyWriteRejected', 'legacyCheckpointSeeded', 'legacyCheckpointRejected', 'noReexecution'];
+function sanitizeLocalToolsRecoveryEvidence(input) {
+  return { schemaVersion: input?.schemaVersion === 1 ? 1 : null,
+    status: ['idle', 'running', 'ready_for_cold_reopen', 'passed', 'failed'].includes(input?.status) ? input.status : 'unknown',
+    phase: [...RECOVERY_STEP_IDS, 'idle', 'preconditions', 'complete'].includes(input?.phase) ? input.phase : 'unknown',
+    failureCode: ['precondition', 'assertion', 'operation_failed', 'timeout', 'cleanup_failed'].includes(input?.failureCode) ? input.failureCode : undefined,
+    requiresForceStop: typeof input?.requiresForceStop === 'boolean' ? input.requiresForceStop : null,
+    steps: Array.isArray(input?.steps) ? input.steps.slice(0, RECOVERY_STEP_IDS.length).map(step => ({
+      id: RECOVERY_STEP_IDS.includes(step?.id) ? step.id : 'unknown',
+      status: ['passed', 'failed', 'not_run'].includes(step?.status) ? step.status : 'unknown',
+      ...Object.fromEntries(NUMBERS.filter(key => Number.isSafeInteger(step?.[key]) && step[key] >= 0).map(key => [key, step[key]])),
+      ...Object.fromEntries(RECOVERY_BOOLEANS.filter(key => typeof step?.[key] === 'boolean').map(key => [key, step[key]])),
+    })) : [] };
+}
+function validateLocalToolsRecoveryEvidence(input, { readyForColdReopen = false } = {}) {
+  const value = sanitizeLocalToolsRecoveryEvidence(input);
+  const expectedSteps = readyForColdReopen ? RECOVERY_STEP_IDS.slice(0, 3) : RECOVERY_STEP_IDS;
+  const requireValue = (condition, message) => { if (!condition) throw new Error(message); };
+  requireValue(value.schemaVersion === 1 && value.requiresForceStop === false && !value.failureCode
+    && value.status === (readyForColdReopen ? 'ready_for_cold_reopen' : 'passed')
+    && value.phase === (readyForColdReopen ? 'empty_checkpoint_cold_recovery' : 'complete')
+    && value.steps.length === expectedSteps.length, 'Hook tool recovery evidence is incomplete.');
+  for (const [index, step] of value.steps.entries()) {
+    requireValue(step.id === expectedSteps[index] && step.status === 'passed' && step.completionDrained === true,
+      'Hook tool recovery sequence or drain is unproven.');
+    if (step.id === 'ordinary_auto_limit') requireValue(step.nativeSteps === 1 && step.nativeCalls === 0 && step.executedCalls === 0
+      && step.outputCharacters > 0 && step.stoppedLimit === true && step.parsedContentRetained === true && step.storedStopped === true,
+    'Real native stopped_limit parsed content and hook/store stopped status are unproven.');
+    else if (step.id !== 'empty_checkpoint_cold_recovery') requireValue(step.firstNativeTokenObserved === true && step.emptyRunObserved === true
+      && step.nativeCalls === 0 && step.executedCalls === 0 && step.historyUnchanged === true
+      && step.attachmentsRetained === true && step.otherChatsUnchanged === true, 'Empty hook replacement rollback is unproven.');
+    else requireValue(step.emptyWriteRejected === true && step.legacyCheckpointSeeded === true && step.legacyCheckpointRejected === true
+      && step.historyUnchanged === true && step.attachmentsRetained === true && step.otherChatsUnchanged === true && step.noReexecution === true,
+    'Cold legacy empty checkpoint rejection and preservation are unproven.');
+  }
+  return value;
+}
+async function waitForLocalToolsRecoveryEvidence(readEvidence, options = {}) {
+  const now = options.now || Date.now;
+  const wait = options.wait || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const deadline = now() + (options.timeoutMs ?? 900000);
+  while (now() < deadline) {
+    const value = sanitizeLocalToolsRecoveryEvidence(await readEvidence());
+    if (value.status === 'failed') throw new Error(`Hook tool recovery failed: phase=${value.phase}, code=${value.failureCode || 'unknown'}.`);
+    if (value.status === (options.readyForColdReopen ? 'ready_for_cold_reopen' : 'passed')) {
+      return validateLocalToolsRecoveryEvidence(value, options);
+    }
+    await wait(1000);
+  }
+  throw new Error('Hook tool recovery timed out without complete evidence.');
+}
+module.exports = { sanitizeLocalToolsHistory, validateColdLocalToolsHistory, STEP_IDS, IDENTITIES, sanitizeLocalToolsEvidence,
+  validateLocalToolsEvidence, waitForLocalToolsEvidence, RECOVERY_STEP_IDS, sanitizeLocalToolsRecoveryEvidence,
+  validateLocalToolsRecoveryEvidence, waitForLocalToolsRecoveryEvidence };

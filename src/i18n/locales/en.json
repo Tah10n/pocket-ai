@@ -133,7 +133,7 @@
     "checking": "Checking files and loading temporarily…",
     "checkPassed": "Loading checked. The temporary context was released.",
     "cancelCheck": "Cancel check",
-    "futureFunctions": "Search, document reranking and speech synthesis are not implemented in this stage.",
+    "futureFunctions": "Speech synthesis is not implemented in this stage.",
     "companions": "Companion resources",
     "companionScope": "Codec: TTS preparation. LoRA: selected adapter configuration. Draft: MTP. Missing optional resources do not block base text chat.",
     "hashVerified": "Matched expected SHA-256",

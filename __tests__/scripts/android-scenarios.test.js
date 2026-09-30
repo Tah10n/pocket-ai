@@ -4209,6 +4209,18 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('keeps retrieval explicit, isolated and after the unchanged Stage 1–4 native baseline', () => {
+    const baseline = ['runtime-inference-lifecycle', 'runtime-model-resources', 'runtime-stage3', 'runtime-local-tools'];
+    expect(selectScenarios(scenarios, parseCliOptions(['--pack', 'inference'])).map(item => item.id)).toEqual(baseline);
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'retrieval']));
+    expect(selected.map(item => item.id)).toEqual([...baseline, 'runtime-document-retrieval']);
+    expect(selected.every(item => item.requiresCurrentHeadProvenance && item.requiresIsolatedQaInstall)).toBe(true);
+    expect(() => validateScenarioExecutionOptions(selected, { isolatedQaInstall: false })).toThrow(ScenarioPreconditionFailureError);
+    const env = {};
+    expect(configureScenarioBuildEnvironment({ pack: 'retrieval' }, true, env)).toEqual({ androidQaEvidence: true, apkVariant: 'release' });
+    expect(env).toMatchObject({ ANDROID_SMOKE_APK_VARIANT: 'release', EXPO_PUBLIC_ANDROID_QA: '1', EXPO_PUBLIC_ANDROID_QA_DOCUMENTS: '1' });
+  });
+
   it('requires state-mutating native scenarios to use the isolated QA package', () => {
     const nativeScenarios = selectScenarios(scenarios, parseCliOptions(['--pack', 'native']));
 
@@ -4627,6 +4639,7 @@ describe('android-scenarios pack selection', () => {
         'runtime-model-resources',
         'runtime-stage3',
         'runtime-local-tools',
+        'runtime-document-retrieval',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));

@@ -58,6 +58,7 @@
     "android:scenarios:documents": "node ./scripts/android-scenarios.js --pack documents --apk-variant release --fail-on-skip",
     "android:scenarios:document-benchmark": "node ./scripts/android-scenarios.js --pack document-benchmark --apk-variant release --fail-on-skip",
     "android:scenarios:native": "node ./scripts/android-scenarios.js --pack native --apk-variant release --isolated-qa-install --fail-on-skip",
+    "android:scenarios:retrieval": "node ./scripts/android-scenarios.js --pack retrieval --apk-variant release --isolated-qa-install --fail-on-skip",
     "android:scenarios:extended": "node ./scripts/android-scenarios.js --pack extended",
     "android:screens": "node ./scripts/android-screen-capture.js",
     "android:screens:emulator": "node ./scripts/android-screen-capture.js --emulator",

@@ -44,6 +44,8 @@ const EMBEDDED_BUNDLE_INPUTS = [
   "docs/validation/llama-rn-stage3/lora-fixture.json",
   // Imported by AndroidQaLocalTools.ts; content changes invalidate the embedded bundle.
   "docs/validation/llama-rn-stage4/tool-fixture.json",
+  // Imported by AndroidQaDocumentRetrieval.ts; fixed corpus/profile changes invalidate the tested bundle.
+  "docs/validation/llama-rn-stage5/retrieval-fixtures.json",
   "app",
   "src",
   "components",

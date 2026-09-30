@@ -405,6 +405,55 @@
     "body": "This route is reserved for compact modal interactions that should inherit the shared theme, typography, and navigation chrome."
   },
   "chat": {
+    "retrieval": {
+      "title": "Document search",
+      "controls": "Search options",
+      "hide": "Hide",
+      "description": "Applies to document context and document-search tools in this chat. Hybrid search combines keywords with local embeddings.",
+      "rerank": "Local reranking",
+      "enableRerank": "Enable local reranking for this chat",
+      "embeddingModel": "Embedding model: {{name}}",
+      "rerankerModel": "Reranker: {{name}}",
+      "modelNotSelected": "Not selected — choose in Models",
+      "preparationDescription": "Select Hybrid and an embedding model to prepare documents. Preparation runs locally and can be cancelled.",
+      "prepare": "Prepare",
+      "prepareDocument": "Prepare {{name}} for hybrid search",
+      "preparingDocument": "Preparing {{name}}",
+      "cancellingDocument": "Cancelling preparation of {{name}}",
+      "cancelDocument": "Cancel preparation of {{name}}",
+      "noDocuments": "Attach a document to this chat to prepare it.",
+      "actualMode": "Last search used: {{mode}}",
+      "fallback": "Fallback: {{reason}}",
+      "modes": {
+        "lexical": "Keywords",
+        "hybrid": "Hybrid",
+        "lexical+rerank": "Keywords + reranking",
+        "hybrid+rerank": "Hybrid + reranking"
+      },
+      "status": {
+        "not_ready": "Not prepared",
+        "stale": "Needs preparation again",
+        "preparing": "Preparing",
+        "cancelling": "Cancelling",
+        "ready": "Ready for hybrid search",
+        "error": "Preparation failed",
+        "cancelled": "Preparation cancelled"
+      },
+      "reasons": {
+        "model_unavailable": "The selected model is unavailable.",
+        "profile_unverified": "This model's document-search settings are not verified.",
+        "index_not_ready": "The document has not been prepared.",
+        "index_stale": "The document or selected model changed. Prepare it again.",
+        "quota_exceeded": "This document exceeds the local search limits.",
+        "input_too_large": "A document section is too large for the selected model.",
+        "invalid_vector": "The embedding model returned an invalid result.",
+        "invalid_ranking": "The reranker returned an invalid result.",
+        "native_failed": "Local document search could not finish.",
+        "cancelled": "Document search was cancelled.",
+        "ownership_changed": "The chat or document changed during preparation.",
+        "restore_failed": "The chat model could not be restored. Reload it before continuing."
+      }
+    },
     "tools": {
       "title": "Local tools",
       "enable": "Enable local tools for this chat",

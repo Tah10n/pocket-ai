@@ -1,6 +1,14 @@
 import { getAndroidQaLocalToolsHistoryMarker, subscribeAndroidQaLocalToolsHistory, getAndroidQaLocalToolsEvidence, subscribeAndroidQaLocalTools, runAndroidQaLocalTools } from '../../services/AndroidQaLocalTools';
 import { ChatToolsControl } from '@/components/ui/ChatToolsControl';
+import { ChatDocumentRetrievalControl } from '@/components/ui/ChatDocumentRetrievalControl';
 import { sanitizeLocalToolSettings, type LocalToolSettings } from '@/types/localTools';
+import { sanitizeDocumentRetrievalSettings, type DocumentRetrievalSettings } from '@/types/documentRetrieval';
+import { getAuxiliarySelection } from '@/services/AuxiliaryModelService';
+import { cancelDocumentRetrievalPreparation, getDocumentRetrievalPreparationDocuments,
+    prepareDocumentRetrieval, refreshDocumentRetrievalPreparationMetadata } from '@/services/DocumentRetrievalPreparation';
+import { getDocumentRetrievalStatus, subscribeDocumentRetrievalStatus } from '@/services/DocumentRetrievalStatus';
+import { checkAndroidQaDocumentRetrievalAfterColdReopen, getAndroidQaDocumentRetrievalEvidence,
+    runAndroidQaDocumentRetrieval, subscribeAndroidQaDocumentRetrieval } from '@/services/AndroidQaDocumentRetrieval';
 import { advancedGenerationIdentity } from '@/utils/generationControls';
 import { isThreadLoraProfileReady, loraExecutionIdentity } from '@/utils/chatLoraProfile';
 import { runPromptDiagnostic } from '@/services/PromptDiagnosticsService';
@@ -734,10 +742,12 @@ function AndroidQaGenerationEvidenceSurface({
     documentDraftCount,
     topInset,
     getHookActions,
+    isDocumentPreparationActive,
 }: {
     documentDraftCount: number;
     topInset: number;
     getHookActions: () => AndroidQaLocalToolsHookActions;
+    isDocumentPreparationActive?: boolean;
 }) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
         return null;
@@ -747,6 +757,7 @@ function AndroidQaGenerationEvidenceSurface({
             documentDraftCount={documentDraftCount}
             topInset={topInset}
             getHookActions={getHookActions}
+            isDocumentPreparationActive={isDocumentPreparationActive}
         />
     );
 }
@@ -755,10 +766,12 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     documentDraftCount,
     topInset,
     getHookActions,
+    isDocumentPreparationActive = false,
 }: {
     documentDraftCount: number;
     topInset: number;
     getHookActions: () => AndroidQaLocalToolsHookActions;
+    isDocumentPreparationActive?: boolean;
 }) {
     const { t } = useTranslation();
     const inferenceEvidence = useSyncExternalStore(
@@ -773,6 +786,11 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     const localToolsEvidence = useSyncExternalStore(subscribeAndroidQaLocalTools, getAndroidQaLocalToolsEvidence, getAndroidQaLocalToolsEvidence);
     const recoveryEvidence = useSyncExternalStore(subscribeAndroidQaLocalToolsRecovery, getAndroidQaLocalToolsRecoveryEvidence, getAndroidQaLocalToolsRecoveryEvidence);
     const stage3Evidence = useSyncExternalStore(subscribeAndroidQaStage3, getAndroidQaStage3Evidence, getAndroidQaStage3Evidence);
+    const documentRetrievalQaEvidence = useSyncExternalStore(subscribeAndroidQaDocumentRetrieval,
+        getAndroidQaDocumentRetrievalEvidence, getAndroidQaDocumentRetrievalEvidence);
+    const isRetrievalQaBusy = documentRetrievalQaEvidence.status === 'running' || isDocumentPreparationActive;
+    const isAnyNativeQaBusy = isRetrievalQaBusy || recoveryEvidence.status === 'running' || localToolsEvidence.status === 'running'
+        || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running';
     const [backgroundTaskState, setBackgroundTaskState] = useState<
         'idle' | 'starting' | ForegroundServiceStartStatus
     >('idle');
@@ -842,7 +860,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             size="xs"
                             action="secondary"
                             testID="chat-qa-run-inference-smoke"
-                            disabled={resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isRetrievalQaBusy || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaInferenceSmoke()}
                         >
                             <ButtonText>QA inference</ButtonText>
@@ -855,32 +873,40 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             style={styles.androidQaEvidenceMarker}
                         />
                         <Button size="xs" action="secondary" testID="chat-qa-run-model-resources"
-                            disabled={resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isRetrievalQaBusy || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaModelResources()}>
                             <ButtonText>{t('resources.qaCheck')}</ButtonText>
                         </Button>
                         <View accessible collapsable={false} testID="chat-qa-model-resources-evidence"
                             accessibilityLabel={JSON.stringify(resourceEvidence)} style={styles.androidQaEvidenceMarker} />
                         <Button size="xs" action="secondary" testID="chat-qa-run-stage3"
-                            disabled={stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isRetrievalQaBusy || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaStage3()}><ButtonText>QA Stage 3</ButtonText></Button>
                         <Button size="xs" action="secondary" testID="chat-qa-run-local-tools"
-                            disabled={localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isRetrievalQaBusy || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaLocalTools()}><ButtonText>QA Local Tools</ButtonText></Button>
                         <View accessible collapsable={false} testID="chat-qa-local-tools-history"
                             accessibilityLabel={localToolsHistoryMarker} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-local-tools-evidence"
                             accessibilityLabel={JSON.stringify(localToolsEvidence)} style={styles.androidQaEvidenceMarker} />
                         <Button size="xs" action="secondary" testID="chat-qa-run-local-tools-recovery"
-                            disabled={recoveryEvidence.status !== 'idle' || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
+                            disabled={isRetrievalQaBusy || recoveryEvidence.status !== 'idle' || localToolsEvidence.status === 'running' || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running'}
                             onPress={() => void runAndroidQaLocalToolsRecovery(getHookActions)}><ButtonText>QA tool recovery</ButtonText></Button>
                         <Button size="xs" action="secondary" testID="chat-qa-check-local-tools-cold-recovery"
-                            disabled={recoveryEvidence.status !== 'idle'}
+                            disabled={isRetrievalQaBusy || recoveryEvidence.status !== 'idle'}
                             onPress={() => void checkAndroidQaLocalToolsRecoveryAfterColdReopen()}><ButtonText>QA cold recovery</ButtonText></Button>
                         <View accessible collapsable={false} testID="chat-qa-local-tools-recovery-evidence"
                             accessibilityLabel={JSON.stringify(recoveryEvidence)} style={styles.androidQaEvidenceMarker} />
                         <View accessible collapsable={false} testID="chat-qa-stage3-evidence"
                             accessibilityLabel={JSON.stringify(stage3Evidence)} style={styles.androidQaEvidenceMarker} />
+                        <Button size="xs" action="secondary" testID="chat-qa-run-document-retrieval"
+                            disabled={documentRetrievalQaEvidence.status !== 'idle' || isAnyNativeQaBusy}
+                            onPress={() => void runAndroidQaDocumentRetrieval()}><ButtonText>QA Document Search</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-check-document-retrieval-cold"
+                            disabled={documentRetrievalQaEvidence.status !== 'idle' || isAnyNativeQaBusy}
+                            onPress={() => void checkAndroidQaDocumentRetrievalAfterColdReopen()}><ButtonText>QA search cold reuse</ButtonText></Button>
+                        <View accessible collapsable={false} testID="chat-qa-document-retrieval-evidence"
+                            accessibilityLabel={JSON.stringify(documentRetrievalQaEvidence)} style={styles.androidQaEvidenceMarker} />
                     </>
                 ) : null}
                 <Button
@@ -1031,8 +1057,17 @@ const ChatScreenContent = () => {
         regenerateLastResponse, stopGeneration });
     qaHookActions.current = { appendUserMessage, regenerateFromUserMessage, regenerateLastResponse, stopGeneration };
     const getQaHookActions = useCallback(() => qaHookActions.current, []);
-    const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments;
-    usePreventRemove(isPreparingDocuments, () => undefined);
+    const getRetrievalStatus = useCallback(() => getDocumentRetrievalStatus(activeThread?.id ?? ''), [activeThread?.id]);
+    const retrievalStatus = useSyncExternalStore(subscribeDocumentRetrievalStatus, getRetrievalStatus, getRetrievalStatus);
+    const [retrievalPreparationOwner, setRetrievalPreparationOwner] = useState<string | null>(null);
+    const retrievalPreparationOwnerRef = useRef<string | null>(null);
+    const isPreparingRetrieval = retrievalPreparationOwner !== null
+        || retrievalStatus.preparation?.phase === 'preparing' || retrievalStatus.preparation?.phase === 'cancelling';
+    const isGenerationBusy = isGenerating || isStoppingGeneration || isPreparingDocuments || isPreparingRetrieval;
+    usePreventRemove(isPreparingDocuments || isPreparingRetrieval, () => undefined);
+    useEffect(() => () => {
+        if (activeThread?.id) cancelDocumentRetrievalPreparation(activeThread.id);
+    }, [activeThread?.id]);
     const { state: engineState, loadModel } = useLLMEngine();
     const { t } = useTranslation();
     const { resolvedTheme } = useTheme();
@@ -1320,6 +1355,22 @@ const ChatScreenContent = () => {
     const [draftToolSettings, setDraftToolSettings] = useState<{ owner: string; settings: LocalToolSettings } | null>(null);
     const toolSettings = sanitizeLocalToolSettings(activeThread?.toolSettings
         ?? (!activeThread && draftToolSettings?.owner === draftParametersOwner ? draftToolSettings.settings : undefined));
+    const [draftRetrievalSettings, setDraftRetrievalSettings] = useState<{
+        owner: string; settings: DocumentRetrievalSettings;
+    } | null>(null);
+    const retrievalSettings = sanitizeDocumentRetrievalSettings(activeThread?.documentRetrieval
+        ?? (!activeThread && draftRetrievalSettings?.owner === draftParametersOwner ? draftRetrievalSettings.settings : undefined));
+    const retrievalThreadId = activeThread?.id;
+    const retrievalDocuments = useMemo(() => retrievalThreadId
+        ? getDocumentRetrievalPreparationDocuments(retrievalThreadId).map(document => ({ ...document,
+            cancelling: retrievalStatus.preparation?.phase === 'cancelling'
+                && retrievalStatus.preparation.attachmentId === document.attachmentId,
+        })) : [],
+    // Ownership, encrypted manifests and selected model files are read by the service; their revisions invalidate this snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [retrievalThreadId, messageListRevision, retrievalStatus, settings.auxiliaryModels, modelRegistryRevision]);
+    const embeddingModel = getAuxiliarySelection('embedding');
+    const rerankerModel = getAuxiliarySelection('reranker');
     useEffect(() => { setDraftParameters(null); }, [draftParametersOwner, activeThread?.id]);
     const presetGeneration = !activeThread && settings.activePresetId
         ? presetManager.getPreset(settings.activePresetId)?.generationParameters : undefined;
@@ -2501,7 +2552,7 @@ const ChatScreenContent = () => {
     ]);
 
     const handleSendMessage = async (content: string) => {
-        if (sendMessageInFlightRef.current) {
+        if (sendMessageInFlightRef.current || retrievalPreparationOwnerRef.current || isPreparingRetrieval) {
             return;
         }
 
@@ -2612,6 +2663,7 @@ const ChatScreenContent = () => {
                     {
                         ...(!activeThread && configurableModelId ? {
                             newThreadToolSettings: toolSettings,
+                            newThreadDocumentRetrieval: retrievalSettings,
                             newThreadParameters: { modelId: configurableModelId, presetId: settings.activePresetId,
                                 revision: newThreadRevision, paramsSnapshot: sanitizeGenerationParameters(paramsSource) },
                         } : {}),
@@ -2848,6 +2900,8 @@ const ChatScreenContent = () => {
             isScreenActiveRef.current = true;
             return () => {
                 isScreenActiveRef.current = false;
+                const threadId = useChatStore.getState().activeThreadId;
+                if (threadId) cancelDocumentRetrievalPreparation(threadId);
                 modelSelectionRequestIdRef.current += 1;
                 autoModelLoadTargetKeyRef.current = null;
                 performanceMonitor.incrementCounter('chat.modelSelection.invalidated');
@@ -2876,10 +2930,12 @@ const ChatScreenContent = () => {
     }, [activeThreadId]);
 
     useEffect(() => {
-        // The explicit QA smoke owns unload/reload until process restart, including
-        // a failed native timeout. Auto-loading here would race its lifecycle proof.
+        // Explicit native QA owns unload/reload until process restart, including
+        // cold-reopen checkpoints and failed drains.
         if (isAndroidQaDocumentModelBootstrapEnabled()
-            && getAndroidQaInferenceSmokeEvidence().status !== 'idle') {
+            && (getAndroidQaInferenceSmokeEvidence().status !== 'idle'
+                || getAndroidQaDocumentRetrievalEvidence().status !== 'idle'
+                || getAndroidQaDocumentRetrievalEvidence().requiresForceStop)) {
             return;
         }
         if (
@@ -3229,12 +3285,48 @@ const ChatScreenContent = () => {
                 onBack={!isGenerationBusy && router.canGoBack() ? () => router.back() : undefined}
             />
 
-            <ChatToolsControl settings={toolSettings}
-                disabled={isModelSelectionPending || (isGenerationBusy && !toolSettings.enabled)}
-                onChange={(next) => {
-                    if (activeThread) useChatStore.getState().updateThreadToolSettings(activeThread.id, next);
-                    else setDraftToolSettings({ owner: draftParametersOwner, settings: next });
-                }} />
+            <Box testID="chat-document-controls-region" style={{ paddingTop: headerInset }}>
+                <ChatToolsControl settings={toolSettings}
+                    disabled={isModelSelectionPending || isPreparingRetrieval || (isGenerationBusy && !toolSettings.enabled)}
+                    onChange={(next) => {
+                        if (activeThread) useChatStore.getState().updateThreadToolSettings(activeThread.id, next);
+                        else setDraftToolSettings({ owner: draftParametersOwner, settings: next });
+                    }} />
+                <ChatDocumentRetrievalControl key={activeThread?.id ?? draftParametersOwner}
+                    settings={retrievalSettings} disabled={isGenerationBusy || isModelSelectionPending}
+                    embeddingModelName={embeddingModel?.name} rerankerModelName={rerankerModel?.name}
+                    documents={retrievalDocuments} actualMode={retrievalStatus.lastSearch?.actualMode}
+                    fallbackReason={retrievalStatus.lastSearch?.fallbackReason}
+                    onExpand={() => {
+                        if (activeThread && useChatStore.getState().activeThreadId === activeThread.id) {
+                            void refreshDocumentRetrievalPreparationMetadata(activeThread.id);
+                        }
+                    }}
+                    onChange={(next) => {
+                        const chatState = useChatStore.getState();
+                        if (activeThread) {
+                            if (chatState.activeThreadId === activeThread.id) chatState.updateThreadDocumentRetrieval(activeThread.id, next);
+                        } else if (chatState.activeThreadId === null && chatState.newThreadRevision === newThreadRevision) {
+                            setDraftRetrievalSettings({ owner: draftParametersOwner, settings: next });
+                        }
+                    }}
+                    onPrepare={(attachmentId) => {
+                        if (!activeThread || !isScreenActiveRef.current || useChatStore.getState().activeThreadId !== activeThread.id
+                            || isGenerationBusy || isModelSelectionPending || retrievalPreparationOwnerRef.current) return;
+                        const threadId = activeThread.id;
+                        retrievalPreparationOwnerRef.current = threadId;
+                        setRetrievalPreparationOwner(threadId);
+                        void prepareDocumentRetrieval(threadId, [attachmentId])
+                            .catch(() => undefined) // The preparation service exposes a localized failure state.
+                            .finally(() => {
+                                if (retrievalPreparationOwnerRef.current === threadId) retrievalPreparationOwnerRef.current = null;
+                                setRetrievalPreparationOwner(owner => owner === threadId ? null : owner);
+                            });
+                    }}
+                    onCancel={() => {
+                        if (activeThread) cancelDocumentRetrievalPreparation(activeThread.id);
+                    }} />
+            </Box>
             <ScreenAndroidContentBlurTarget
                 blurTargetRef={warmupContentBlurTargetRef}
                 style={styles.warmupContentBlurTarget}
@@ -3316,8 +3408,9 @@ const ChatScreenContent = () => {
 
                     <AndroidQaGenerationEvidenceSurface
                         documentDraftCount={documentAttachmentDrafts.drafts.length}
-                        topInset={headerInset}
+                        topInset={0}
                         getHookActions={getQaHookActions}
+                        isDocumentPreparationActive={isPreparingDocuments || isPreparingRetrieval}
                     />
 
                     <Box testID="chat-list-viewport" className="flex-1" onLayout={handleListViewportLayout}>
@@ -3333,7 +3426,7 @@ const ChatScreenContent = () => {
                                 onTouchStart={handleListTouchStart}
                                 onTouchEnd={handleListTouchEnd}
                                 onTouchCancel={handleListTouchCancel}
-                                contentContainerStyle={{ paddingTop: 4 + headerInset, paddingBottom: listBottomPadding, flexGrow: 1 }}
+                                contentContainerStyle={{ paddingTop: 4, paddingBottom: listBottomPadding, flexGrow: 1 }}
                                 maintainVisibleContentPosition={listMaintainVisibleContentPosition}
                                 onContentSizeChange={handleListContentSizeChange}
                                 onLoad={handleListContentSizeChange}
@@ -3359,7 +3452,6 @@ const ChatScreenContent = () => {
                             <Box
                                 className="flex-1 justify-center px-3 pb-10"
                                 style={{
-                                    paddingTop: headerInset,
                                     paddingBottom: 40 + tabBarInset,
                                 }}
                             >
@@ -3438,7 +3530,6 @@ const ChatScreenContent = () => {
                             <Box
                                 testID="chat-empty-state"
                                 className="flex-1 px-6 pb-8"
-                                style={{ paddingTop: headerInset }}
                             >
                                 <Box className="items-center pt-14">
                                     <Text colorRole="primary" className="text-xl font-semibold  ">

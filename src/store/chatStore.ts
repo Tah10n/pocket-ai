@@ -1,4 +1,5 @@
 import { sanitizeLocalToolRun, sanitizeLocalToolSettings, type LocalToolSettings } from '../types/localTools';
+import { sanitizeDocumentRetrievalSettings, type DocumentRetrievalSettings } from '../types/documentRetrieval';
 import { hasAssistantTurnProgress } from '../utils/localTools';
 import { sanitizeAdvancedGenerationParameters, advancedGenerationIdentity } from '../utils/generationControls';
 import { create } from 'zustand';
@@ -210,6 +211,7 @@ interface ChatStoreState {
   updateThreadPresetSnapshot: (threadId: string, presetId: string | null, presetSnapshot: PresetSnapshot) => void;
   updateThreadParamsSnapshot: (threadId: string, paramsSnapshot: GenerationParamsSnapshot) => void;
   updateThreadToolSettings: (threadId: string, settings: LocalToolSettings) => void;
+  updateThreadDocumentRetrieval: (threadId: string, settings: DocumentRetrievalSettings) => void;
   updateThreadLoraSnapshot: (threadId: string, adapters: ChatThread['loraSnapshot']) => void;
   commitThreadModelSelection: (input: {
     threadId: string;
@@ -3073,6 +3075,16 @@ export const useChatStore = create<ChatStoreState>()(
             if (!thread) return state;
             return { threads: { ...state.threads, [threadId]: updateThreadMetadata({
               ...thread, toolSettings: sanitizeLocalToolSettings(settings),
+            }) }, inferenceRevision: state.inferenceRevision + 1 };
+          });
+        },
+
+        updateThreadDocumentRetrieval: (threadId, settings) => {
+          setWhenPrivateStorageWritable((state) => {
+            const thread = state.threads[threadId];
+            if (!thread || thread.status === 'generating' || getActiveBranchReplacementRuntime(thread)) return state;
+            return { threads: { ...state.threads, [threadId]: updateThreadMetadata({
+              ...thread, documentRetrieval: sanitizeDocumentRetrievalSettings(settings),
             }) }, inferenceRevision: state.inferenceRevision + 1 };
           });
         },

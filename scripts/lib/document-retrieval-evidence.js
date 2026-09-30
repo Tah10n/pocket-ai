@@ -6,19 +6,33 @@ const ISSUES = ['model_unavailable', 'profile_unverified', 'index_not_ready', 'i
   'invalid_vector', 'invalid_ranking', 'native_failed', 'cancelled', 'ownership_changed', 'restore_failed'];
 const IDENTITIES = { fixtureId: fixture.fixtureId, runtimeVersion: fixture.runtimeVersion, backend: 'cpu',
   embeddingSha256: fixture.models[0].sha256, rerankerSha256: fixture.models[1].sha256 };
-const LORA_OPERATIONS = ['adapter_lookup', 'idle_barrier', 'adapter_apply', 'baseline_probe', 'repeat_probe', 'baseline_compare',
-  'retrieval_handoff', 'profile_check', 'restored_probe', 'probability_compare', 'prompt_count', 'answer_completion',
-  'answer_check', 'adapter_remove'];
+const QA_OPERATIONS = [
+  'adapter_lookup', 'idle_barrier', 'adapter_apply', 'baseline_probe', 'repeat_probe', 'baseline_compare', 'retrieval_handoff',
+  'profile_check', 'restored_probe', 'probability_compare', 'prompt_count', 'answer_completion', 'answer_check',
+  'adapter_remove', 'tool_model_load', 'tool_thread_setup', 'tool_run', 'tool_execute', 'tool_feedback', 'tool_schema_parse',
+  'tool_schema_check', 'tool_commit', 'stop_corpus_load', 'stop_retrieval', 'stop_check', 'next_retrieval', 'next_check',
+  'checkpoint_write', 'cold_checkpoint_read', 'cold_checkpoint_check', 'cold_owner_check', 'cold_model_load',
+  'cold_index_reconcile', 'cold_index_check', 'cold_retrieval', 'cold_history_check', 'corpus_delete', 'index_delete_check',
+  'original_restore', 'deleted_checkpoint_write', 'deleted_owner_check', 'deleted_files_check', 'deleted_tool_search',
+  'deleted_check', 'checkpoint_remove', 'persistence_flush', 'cleanup_check'
+];
+const CLEANUP_OPERATIONS = ['corpus_delete', 'source_cache_clear', 'checkpoint_remove', 'original_restore', 'persistence_flush'];
 const OPERATION_ERRORS = ['action_failed', 'engine_not_ready', 'engine_busy', 'engine_recovery_required', 'engine_unloading',
   'model_not_found', 'model_load_blocked', 'model_load_failed', 'model_incompatible', 'model_memory_insufficient',
   'model_memory_warning', 'storage_private_unavailable', 'probabilities_missing', 'probabilities_invalid',
-  'probability_support_mismatch', 'probability_overlap_insufficient', 'probability_receipt_invalid'];
+  'probability_support_mismatch', 'probability_overlap_insufficient', 'probability_receipt_invalid',
+  'local_tool_unsupported', 'local_tool_cancelled', 'local_tool_timeout', 'local_tool_round_limit', 'local_tool_call_limit',
+  'local_tool_token_limit', 'local_tool_result_limit', 'local_tool_invalid_proposal', 'local_tool_duplicate_id',
+  'local_tool_conflicting_id', 'local_tool_context_limit', 'message_too_long', 'chat_model_not_loaded', 'chat_model_mismatch',
+  'chat_history_busy', ...ISSUES];
 const COUNTERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'nativeStarted', 'nativeSettled', 'restored'];
 const NUMBERS = [...COUNTERS, 'chunkCount', 'indexCount', 'nativeSteps', 'toolCalls', 'outputCharacters', 'promptTokens', 'tokensEvaluated'];
 const BOOLEANS = ['fixtureVerified', 'profileRestored', 'probabilityRestored', 'resultReturned', 'membershipMatched', 'locatorMatched',
   'actualModeMatched', 'structuredValid', 'schemaAnswerMatched', 'cancelled', 'completionDrained', 'noReexecution', 'deleted', 'oldIdsRejected',
   'nativeIdleBarrierWaited', 'adapterFound', 'adapterApplied', 'baselineProbeCompleted', 'repeatProbeCompleted',
-  'handoffCompleted', 'restoredProbeCompleted'];
+  'handoffCompleted', 'restoredProbeCompleted', 'modelLoaded', 'threadConfigured', 'toolRunCompleted', 'toolHistoryCommitted',
+  'stopRequested', 'checkpointRead', 'checkpointWritten', 'indexesReconciled', 'indexFingerprintsMatched',
+  'originalRestored', 'corpusDeleted', 'deletedFilesAbsent'];
 const isBoundedInteger = value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000;
 const statuses = ['passed', 'failed', 'not_run'];
 const safeNumbers = (input, keys) => Object.fromEntries(keys.filter(key => isBoundedInteger(input?.[key])).map(key => [key, input[key]]));
@@ -47,10 +61,13 @@ function sanitizeDocumentRetrievalEvidence(input) {
     steps: Array.isArray(input?.steps) ? input.steps.slice(0, STEP_IDS.length).map(step => ({
       id: STEP_IDS.includes(step?.id) ? step.id : 'unknown', status: statuses.includes(step?.status) ? step.status : 'unknown',
       ...safeNumbers(step, NUMBERS), nativeIndices: safeIndices(step?.nativeIndices),
-      ...(step?.id === 'lora_handoff' ? {
-        operation: LORA_OPERATIONS.includes(step?.operation) ? step.operation : undefined,
-        operationErrorCode: OPERATION_ERRORS.includes(step?.operationErrorCode) ? step.operationErrorCode : undefined,
-      } : {}),
+      operation: QA_OPERATIONS.includes(step?.operation) ? step.operation : undefined,
+      operationErrorCode: OPERATION_ERRORS.includes(step?.operationErrorCode) ? step.operationErrorCode : undefined,
+      nativeStage: ['count_prompt', 'completion', 'first_token'].includes(step?.nativeStage) ? step.nativeStage : undefined,
+      actualMode: ['lexical', 'hybrid', 'lexical+rerank', 'hybrid+rerank'].includes(step?.actualMode) ? step.actualMode : undefined,
+      fallbackReason: ISSUES.includes(step?.fallbackReason) ? step.fallbackReason : undefined,
+      cleanupOperation: CLEANUP_OPERATIONS.includes(step?.cleanupOperation) ? step.cleanupOperation : undefined,
+      cleanupErrorCode: OPERATION_ERRORS.includes(step?.cleanupErrorCode) ? step.cleanupErrorCode : undefined,
       promptChunks: safeSelected(step?.promptChunks),
       ...Object.fromEntries(BOOLEANS.filter(key => typeof step?.[key] === 'boolean').map(key => [key, step[key]])),
     })) : [],
@@ -124,6 +141,7 @@ function validateDocumentRetrievalEvidence(input, { readyForColdReopen = false, 
   const tool = byId.tool_schema;
   requireValue(tool.nativeSteps >= 2 && tool.toolCalls >= 1 && tool.toolCalls <= 8 && tool.resultReturned === true
     && tool.membershipMatched === true && tool.locatorMatched === true && tool.actualModeMatched === true
+    && tool.actualMode === 'hybrid' && !tool.fallbackReason
     && tool.structuredValid === true && tool.schemaAnswerMatched === true && tool.outputCharacters > 0 && tool.completionDrained === true,
   'Real tool proposal, owned retrieval feedback and final schema answer are unproven.');
   const stopped = byId.stop_drain;
@@ -144,7 +162,11 @@ async function waitForDocumentRetrievalEvidence(readEvidence, options = {}) {
   const deadline = now() + (options.timeoutMs ?? 3600000);
   while (now() < deadline) {
     const evidence = sanitizeDocumentRetrievalEvidence(await readEvidence());
-    if (evidence.status === 'failed') throw new Error(`Document retrieval failed: phase=${evidence.phase}, code=${evidence.failureCode || 'unknown'}.`);
+    if (evidence.status === 'failed') {
+      const failed = evidence.steps.find(step => step.id === evidence.phase && step.status === 'failed');
+      throw new Error('Document retrieval failed: phase=' + evidence.phase + ', code=' + (evidence.failureCode || 'unknown')
+        + ', operation=' + (failed?.operation || 'unknown') + ', operationErrorCode=' + (failed?.operationErrorCode || 'unknown') + '.');
+    }
     if (evidence.status === (options.readyForColdReopen ? 'ready_for_cold_reopen'
       : options.readyForDeletedReopen ? 'ready_for_deleted_reopen' : 'passed')) return validateDocumentRetrievalEvidence(evidence, options);
     await wait(1000);

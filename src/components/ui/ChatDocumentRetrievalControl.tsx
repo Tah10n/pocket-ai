@@ -121,7 +121,7 @@ export function ChatDocumentRetrievalControl({ settings, onChange, disabled = fa
         testID="chat-retrieval-details">
         <Box className="gap-2 pb-3">
           <Text colorRole="secondary" textRole="caption">{t('chat.retrieval.description')}</Text>
-          <ScreenSegmentedControl activeKey={settings.mode} disabled={disabled} density="compact"
+          <ScreenSegmentedControl activeKey={settings.mode} disabled={disabled} density="compact" itemClassName="min-h-11"
             options={(['lexical', 'hybrid'] as const).map(mode => ({ key: mode, label: t(`chat.retrieval.modes.${mode}`),
               testID: `chat-retrieval-mode-${mode}` }))}
             onChange={mode => onChange({ ...settings, mode: mode === 'hybrid' ? 'hybrid' : 'lexical' })} />

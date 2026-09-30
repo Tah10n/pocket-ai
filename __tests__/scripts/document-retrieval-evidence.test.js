@@ -20,6 +20,7 @@ function receipt({ warm = false, deleted = false } = {}) {
           sourceStart: start, sourceEnd: start + paragraph.text.length };
       }),
       cancelled: true, completionDrained: true, noReexecution: true, deleted: true, oldIdsRejected: true,
+      ...(id === 'tool_schema' ? { actualMode: 'hybrid' } : {}),
       ...(id === 'prepare_indexes' ? { documentEmbeddings: 12, queryEmbeddings: 0, rerankCalls: 0,
         nativeStarted: 12, nativeSettled: 12, restored: 1, nativeIndices: [] } : {}),
       ...(id === 'stop_prepare' ? { documentEmbeddings: 1, queryEmbeddings: 0, rerankCalls: 0,
@@ -129,4 +130,46 @@ it('retains known probability failures and drained counts while dropping arbitra
   const step = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'lora_handoff');
   expect(step.operation).toBeUndefined(); expect(step.operationErrorCode).toBeUndefined();
   expect(JSON.stringify(step)).not.toContain('/private/');
+});
+
+
+it.each(['lexical', 'lexical+rerank', 'hybrid+rerank', undefined])('rejects tool semantic proof with actual mode %s', mode => {
+  const input = receipt(); input.steps.find(step => step.id === 'tool_schema').actualMode = mode;
+  expect(() => validateDocumentRetrievalEvidence(input)).toThrow('Real tool proposal');
+});
+it('rejects a tool fallback even when its mode-match flag claims success', () => {
+  const input = receipt(); input.steps.find(step => step.id === 'tool_schema').fallbackReason = 'native_failed';
+  expect(() => validateDocumentRetrievalEvidence(input)).toThrow('Real tool proposal');
+});
+it('retains genuine tool timeout progress and reports its finite operation without payloads', async () => {
+  const input = receipt(); input.status = 'failed'; input.phase = 'tool_schema'; input.failureCode = 'operation_failed';
+  Object.assign(input.steps.find(step => step.id === 'tool_schema'), { status: 'failed',
+    operation: 'tool_execute', operationErrorCode: 'local_tool_timeout', nativeStage: 'first_token',
+    modelLoaded: true, threadConfigured: true, toolRunCompleted: false, nativeSteps: 1, toolCalls: 1,
+    arguments: 'private query', result: 'private result', prompt: 'private prompt' });
+  const failed = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'tool_schema');
+  expect(failed).toMatchObject({ operation: 'tool_execute', operationErrorCode: 'local_tool_timeout', nativeStage: 'first_token',
+    modelLoaded: true, threadConfigured: true, toolRunCompleted: false, nativeSteps: 1, toolCalls: 1 });
+  expect(JSON.stringify(failed)).not.toMatch(/private|arguments|result":|prompt":/);
+  await expect(waitForDocumentRetrievalEvidence(async () => input)).rejects.toThrow('operationErrorCode=local_tool_timeout');
+});
+it.each([
+  ['stop_drain', 'stop_retrieval'], ['next_query', 'next_retrieval'], ['cold_reuse', 'cold_index_check'],
+  ['delete_corpus', 'corpus_delete'], ['deleted_reuse', 'deleted_tool_search'], ['cleanup', 'original_restore'],
+])('retains finite %s failure diagnostics and secondary cleanup ownership', (id, operation) => {
+  const input = receipt(); Object.assign(input.steps.find(step => step.id === id), { status: 'failed', operation,
+    operationErrorCode: 'ownership_changed', cleanupOperation: 'original_restore', cleanupErrorCode: 'engine_busy',
+    checkpointRead: true, indexFingerprintsMatched: false, corpusDeleted: true });
+  const failed = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === id);
+  expect(failed).toMatchObject({ operation, operationErrorCode: 'ownership_changed',
+    cleanupOperation: 'original_restore', cleanupErrorCode: 'engine_busy',
+    checkpointRead: true, indexFingerprintsMatched: false, corpusDeleted: true });
+  Object.assign(input.steps.find(step => step.id === id), { operation: 'private prompt',
+    operationErrorCode: 'private error', cleanupOperation: '/private/model', cleanupErrorCode: '/private/path',
+    nativeStage: 'private native output', actualMode: 'private mode', fallbackReason: 'private source' });
+  const unknown = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === id);
+  expect(unknown.operation).toBeUndefined(); expect(unknown.operationErrorCode).toBeUndefined();
+  expect(unknown.cleanupOperation).toBeUndefined(); expect(unknown.cleanupErrorCode).toBeUndefined();
+  expect(unknown.nativeStage).toBeUndefined(); expect(unknown.actualMode).toBeUndefined(); expect(unknown.fallbackReason).toBeUndefined();
+  expect(JSON.stringify(unknown)).not.toContain('private');
 });

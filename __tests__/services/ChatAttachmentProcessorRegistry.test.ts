@@ -846,6 +846,192 @@ describe('ChatAttachmentProcessorRegistry', () => {
     })).rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
   });
 
+  it('enumerates every retained native chunk across bounded coverage pages without another parse', async () => {
+    const chunks = Array.from({ length: 130 }, (_, index) => ({
+      index, text: `Source ${index} ${'x'.repeat(980)}`, kind: 'paragraph', pageNumber: index + 1,
+    }));
+    const order = [chunks[0], chunks[65], chunks[129], ...chunks.filter(chunk => ![0, 65, 129].includes(chunk.index))];
+    const nativeModule = createPocketAnydocNativeModule({
+      prepareDocument: jest.fn(async () => ({ ok: true, data: {
+        handle: 'enumeration-handle', canonicalFormat: 'docx', parserId: 'anydoc', parserVersion: '0.1.7',
+        exactAnyDocCommit: '4a45addbd607e8b59f0c263bca26aab228e10370',
+        sourceByteCount: 128, sourceCharCount: 130_000, contentSha256: 'b'.repeat(64), chunkCount: 130, warnings: [],
+      } })),
+      selectContext: jest.fn(async ({ query, cursor }) => {
+        const offset = cursor ? Number(cursor.slice(2)) : 0;
+        const page = query ? [chunks[0]] : order.slice(offset, offset + 64);
+        return { ok: true, data: {
+          chunks: page, selectedCharCount: page.reduce((sum, chunk) => sum + chunk.text.length, 0),
+          truncated: query !== '' || offset + page.length < order.length, warnings: [],
+          ...(!query && offset + page.length < order.length ? { nextCursor: `p:${offset + page.length}` } : {}),
+        } };
+      }),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment({
+      fileName: 'source.docx', localUri: 'file:///test-dir/chat-attachments/source.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }), { query: 'initial', retainSessionContextSource: true });
+    const source = result.sessionContextSource!;
+    try {
+      const indexes: number[] = [];
+      let cursor: string | undefined;
+      let identity: string | undefined;
+      do {
+        const page = await source.enumerateChunks!({ cursor });
+        expect(page.chunks.length).toBeLessThanOrEqual(64);
+        expect(page.chunks.reduce((sum, chunk) => sum + chunk.text.length, 0)).toBeLessThanOrEqual(64_000);
+        expect(page.totalChunks).toBe(130);
+        expect(page.sourceIdentity).toBe(identity ?? page.sourceIdentity);
+        identity = page.sourceIdentity;
+        indexes.push(...page.chunks.map(chunk => chunk.index));
+        expect(page.chunks.every(chunk => chunk.pageNumber === chunk.index + 1)).toBe(true);
+        if (page.nextCursor) expect(page.nextCursor).not.toMatch(/^p:/u);
+        cursor = page.nextCursor;
+      } while (cursor);
+      expect(indexes).toEqual(order.map(chunk => chunk.index));
+      expect(new Set(indexes).size).toBe(130);
+      expect(JSON.parse(identity!)).toEqual(expect.arrayContaining([
+        'b'.repeat(64), 'pocket-anydoc', 1, 'anydoc', '0.1.7', '4a45addbd607e8b59f0c263bca26aab228e10370',
+      ]));
+      expect(identity).not.toContain('enumeration-handle');
+      expect(nativeModule.prepareDocument).toHaveBeenCalledTimes(1);
+      expect(nativeModule.selectContext).toHaveBeenCalledTimes(4);
+      nativeModule.selectContext.mock.calls.slice(1).forEach(([request]) => expect(request).toEqual(expect.objectContaining({
+        handle: 'enumeration-handle', query: '', maxChunks: 64, maxChars: 64_000,
+      })));
+    } finally { await source.release(); }
+  });
+
+  it('enumerates all direct chunks in source order and binds cursors to the retained source', async () => {
+    const text = Array.from({ length: 90 }, (_, index) => `Paragraph ${index} ${'😀'.repeat(500)}`).join('\n\n');
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(text);
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment(), {
+      query: 'Paragraph 0', maxChars: 2_500, retainSessionContextSource: true,
+    });
+    const sibling = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment({ id: 'sibling' }), {
+      query: 'Paragraph 0', maxChars: 2_500, retainSessionContextSource: true,
+    });
+    const source = result.sessionContextSource!;
+    try {
+      const first = await source.enumerateChunks!({});
+      expect(first.chunks.length).toBeLessThan(64); // Character ceiling is reached first.
+      expect(first.nextCursor).toBeDefined();
+      await expect(sibling.sessionContextSource!.enumerateChunks!({ cursor: first.nextCursor }))
+        .rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
+      const second = await source.enumerateChunks!({ cursor: first.nextCursor });
+      expect(second.nextCursor).toBeUndefined();
+      expect([...first.chunks, ...second.chunks].map(chunk => chunk.index)).toEqual(Array.from({ length: 90 }, (_, index) => index));
+      expect([...first.chunks, ...second.chunks].every(chunk => chunk.text.endsWith('😀'))).toBe(true);
+      expect(second.sourceIdentity).toBe(first.sourceIdentity);
+      expect(FileSystem.readAsStringAsync).toHaveBeenCalledTimes(2);
+      await expect(source.enumerateChunks!({ cursor: first.nextCursor })).rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
+      const restarted = await source.enumerateChunks!({});
+      await source.enumerateChunks!({});
+      await expect(source.enumerateChunks!({ cursor: restarted.nextCursor })).rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
+      await source.release();
+      await expect(source.enumerateChunks!({})).rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
+    } finally {
+      await source.release();
+      await sibling.sessionContextSource!.release();
+    }
+  });
+
+  it.each([
+    ['duplicate', [{ index: 0, text: 'duplicate', kind: 'paragraph' }, { index: 2, text: 'last', kind: 'paragraph' }], undefined],
+    ['omitted', [{ index: 1, text: 'middle', kind: 'paragraph' }], undefined],
+    ['out of range', [{ index: 3, text: 'outside', kind: 'paragraph' }], undefined],
+    ['nonprogressing cursor', [{ index: 1, text: 'middle', kind: 'paragraph' }], 'p:1'],
+    ['empty page', [], 'p:1'],
+  ])('rejects native chunk enumeration with %s rather than claiming full coverage', async (_name, chunks, nextCursor) => {
+    let enumerated = 0;
+    const nativeModule = createPocketAnydocNativeModule({
+      selectContext: jest.fn(async ({ query }) => {
+        const page = query || enumerated++ === 0
+          ? [{ index: 0, text: 'first', kind: 'paragraph' }]
+          : chunks;
+        return { ok: true, data: {
+          chunks: page, selectedCharCount: page.reduce((sum, chunk) => sum + chunk.text.length, 0), truncated: true, warnings: [],
+          ...(!query ? { nextCursor: enumerated === 1 ? 'p:1' : nextCursor } : {}),
+        } };
+      }),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment({
+      fileName: 'source.docx', localUri: 'file:///test-dir/chat-attachments/source.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }), { query: 'initial', retainSessionContextSource: true });
+    try {
+      const first = await result.sessionContextSource!.enumerateChunks!({});
+      await expect(result.sessionContextSource!.enumerateChunks!({ cursor: first.nextCursor }))
+        .rejects.toMatchObject({ code: 'chat_attachment_parse_failed' });
+      expect(nativeModule.release).not.toHaveBeenCalled();
+    } finally { await result.sessionContextSource!.release(); }
+  });
+
+  it('reports an indivisible oversized direct chunk and keeps lexical selection unchanged', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(`\`\`\`\n${'x'.repeat(64_001)}\n\`\`\`\n\nSmall retained paragraph.`);
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment(), {
+      query: 'Small', retainSessionContextSource: true,
+    });
+    try {
+      expect(result.text).toContain('Small retained paragraph');
+      await expect(result.sessionContextSource!.enumerateChunks!({})).rejects.toMatchObject({
+        code: 'chat_attachment_document_resource_limit', details: expect.objectContaining({ limit: 'max_selection_chars' }),
+      });
+      await expect(result.sessionContextSource!.selectContext({ query: 'Small' })).resolves.toMatchObject({ text: 'Small retained paragraph.' });
+    } finally { await result.sessionContextSource!.release(); }
+  });
+
+  it('limits direct enumeration to 2048 structural chunks without truncating the retained source', async () => {
+    (FileSystem.readAsStringAsync as jest.Mock).mockResolvedValue(Array.from({ length: 2_049 }, (_, index) => `Part ${index}`).join('\n\n'));
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment(), {
+      query: 'Part 0', retainSessionContextSource: true,
+    });
+    try {
+      await expect(result.sessionContextSource!.enumerateChunks!({})).rejects.toMatchObject({
+        code: 'chat_attachment_document_resource_limit', details: expect.objectContaining({ limit: 'max_document_chunks' }),
+      });
+    } finally { await result.sessionContextSource!.release(); }
+  });
+
+  it.each(['abort', 'release'] as const)('rejects a late native enumeration page after %s and drains the current native request', async (action) => {
+    let resolvePage!: (response: unknown) => void;
+    let notifyStarted!: () => void;
+    const started = new Promise<void>(resolve => { notifyStarted = resolve; });
+    const nativeModule = createPocketAnydocNativeModule({
+      selectContext: jest.fn(async ({ query }) => {
+        if (query) return { ok: true, data: {
+          chunks: [{ index: 0, text: 'first', kind: 'paragraph' }], selectedCharCount: 5, truncated: true, warnings: [],
+        } };
+        notifyStarted();
+        return new Promise(resolve => { resolvePage = resolve; });
+      }),
+    });
+    __setPocketAnydocNativeModuleForTests(nativeModule);
+    const result = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(createDocumentAttachment({
+      fileName: 'source.docx', localUri: 'file:///test-dir/chat-attachments/source.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }), { query: 'initial', retainSessionContextSource: true });
+    const source = result.sessionContextSource!;
+    const controller = new AbortController();
+    const pending = source.enumerateChunks!({ signal: controller.signal });
+    const rejection = expect(pending).rejects.toMatchObject({
+      code: action === 'abort' ? 'chat_attachment_processing_cancelled' : 'chat_attachment_parse_failed',
+    });
+    await started;
+    if (action === 'abort') controller.abort();
+    else await source.release();
+    resolvePage({ ok: true, data: {
+      chunks: [{ index: 0, text: 'first', kind: 'paragraph' }], selectedCharCount: 5, nextCursor: 'p:1', truncated: true, warnings: [],
+    } });
+    try {
+      await rejection;
+      if (action === 'abort') expect(nativeModule.cancel).toHaveBeenCalled();
+      expect(nativeModule.selectContext).toHaveBeenCalledTimes(2);
+    } finally { await source.release(); }
+  });
+
   it('lets an abort macrotask interrupt a large direct-text session rerank', async () => {
     const paragraphs = Array.from(
       { length: 160 },

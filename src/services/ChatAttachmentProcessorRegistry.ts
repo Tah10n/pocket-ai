@@ -20,6 +20,7 @@ import { AppError, type AppErrorCode } from './AppError';
 import {
   PocketAnydocError,
   POCKET_ANYDOC_MAX_QUERY_CHARS,
+  POCKET_ANYDOC_MAX_DOCUMENT_CHUNKS,
   POCKET_ANYDOC_MAX_SELECTION_CHARS,
   POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
   cancel as cancelPocketAnydocRequest,
@@ -75,6 +76,20 @@ export interface SelectChatDocumentSessionContextOptions {
   signal?: AbortSignal;
 }
 
+export interface EnumerateChatDocumentChunksOptions {
+  /** Process-local cursor, valid only for this retained source and traversal. */
+  cursor?: string;
+  signal?: AbortSignal;
+}
+
+export interface ChatDocumentChunkPage {
+  chunks: DocumentContextChunk[];
+  nextCursor?: string;
+  totalChunks: number;
+  /** Exact extraction identity; contains no native handle or document text. */
+  sourceIdentity: string;
+}
+
 /**
  * Process-local access to the complete parsed document. Implementations must
  * keep the source bounded and release all native or JS-owned memory explicitly.
@@ -86,6 +101,7 @@ export interface ChatDocumentSessionContextSource {
   selectContext: (
     options: SelectChatDocumentSessionContextOptions,
   ) => Promise<ChatDocumentTextProcessorResult>;
+  enumerateChunks?: (options: EnumerateChatDocumentChunksOptions) => Promise<ChatDocumentChunkPage>;
   release: () => Promise<void>;
 }
 
@@ -128,6 +144,11 @@ export interface ChatDocumentTextProcessorResult {
   sessionContextSource?: ChatDocumentSessionContextSource;
   isScanned?: boolean;
   warnings?: string[];
+  retrievalOrder?: readonly number[];
+  retrieval?: {
+    actualMode: 'lexical' | 'hybrid' | 'lexical+rerank' | 'hybrid+rerank';
+    fallbackReason?: import('../types/documentRetrieval').DocumentRetrievalIssue;
+  };
 }
 
 function normalizePositiveInteger(
@@ -378,6 +399,110 @@ function createPocketAnydocRequestId(attachmentId: string): string {
   return `anydoc-${safeAttachmentId}-${Date.now().toString(36)}-${nativeRequestCounter.toString(36)}`;
 }
 
+function createDocumentChunkEnumeration(
+  attachment: ChatDocumentAttachment,
+  initialResult: ChatDocumentTextProcessorResult,
+  isReleased: () => boolean,
+  readPage: (cursor: string | undefined, signal?: AbortSignal) => Promise<{
+    chunks: DocumentContextChunk[];
+    nextCursor?: string;
+  }>,
+) {
+  const totalChunks = initialResult.chunkCount ?? 0;
+  const contentSha256 = initialResult.contentSha256;
+  const sourceIdentity = JSON.stringify([
+    'document-chunks-v1', contentSha256, initialResult.processorId, initialResult.processorVersion,
+    initialResult.canonicalFormat, initialResult.parserId ?? null, initialResult.parserVersion ?? null,
+    initialResult.exactAnyDocCommit ?? null, initialResult.sourceByteCount ?? null, totalChunks,
+  ]);
+  type Traversal = {
+    cursor?: string;
+    nativeCursor?: string;
+    seenIndexes: Set<number>;
+    pending: boolean;
+  };
+  let traversal: Traversal | null = null;
+  const invalid = (reason: string) => createAttachmentProcessingError(
+    'chat_attachment_parse_failed',
+    'Document chunk enumeration is invalid.',
+    { attachment, details: { reason } },
+  );
+  const assertAvailable = (signal?: AbortSignal) => {
+    throwIfDocumentProcessingCancelled(signal, attachment);
+    if (isReleased()) throw invalid('session_context_released');
+  };
+  return {
+    invalidate: () => { traversal = null; },
+    enumerateChunks: async (options: EnumerateChatDocumentChunksOptions): Promise<ChatDocumentChunkPage> => {
+      assertAvailable(options.signal);
+      if (!Number.isSafeInteger(totalChunks) || totalChunks < 1
+        || totalChunks > POCKET_ANYDOC_MAX_DOCUMENT_CHUNKS) {
+        throw createAttachmentProcessingError(
+          'chat_attachment_document_resource_limit',
+          'Document has too many chunks for bounded enumeration.',
+          { attachment, details: { limit: 'max_document_chunks' } },
+        );
+      }
+      if (!contentSha256 || !/^[a-f0-9]{64}$/u.test(contentSha256)) {
+        throw invalid('missing_source_identity');
+      }
+      if (options.cursor === undefined) {
+        if (traversal?.pending) throw invalid('chunk_enumeration_busy');
+        traversal = { seenIndexes: new Set(), pending: false };
+      } else if (!traversal || traversal.cursor !== options.cursor || traversal.pending) {
+        throw invalid('chunk_enumeration_cursor');
+      }
+      const current = traversal!;
+      current.pending = true;
+      try {
+        const page = await readPage(current.nativeCursor, options.signal);
+        assertAvailable(options.signal);
+        if (traversal !== current) throw invalid('chunk_enumeration_stale');
+        if (page.chunks.length < 1 || page.chunks.length > POCKET_ANYDOC_MAX_SELECTION_CHUNKS) {
+          throw invalid('chunk_enumeration_page');
+        }
+        let pageChars = 0;
+        for (const chunk of page.chunks) {
+          if (!Number.isSafeInteger(chunk.index) || chunk.index < 0 || chunk.index >= totalChunks
+            || current.seenIndexes.has(chunk.index) || !chunk.text.trim()) {
+            throw invalid('chunk_enumeration_index');
+          }
+          pageChars += chunk.text.length;
+          if (pageChars > POCKET_ANYDOC_MAX_SELECTION_CHARS) {
+            throw createAttachmentProcessingError(
+              'chat_attachment_document_resource_limit',
+              'A structural document chunk exceeds the enumeration limit.',
+              { attachment, details: { limit: 'max_selection_chars' } },
+            );
+          }
+          current.seenIndexes.add(chunk.index);
+        }
+        if (page.nextCursor !== undefined) {
+          if (page.nextCursor !== `p:${current.seenIndexes.size}` || current.seenIndexes.size >= totalChunks) {
+            throw invalid('chunk_enumeration_progress');
+          }
+          current.nativeCursor = page.nextCursor;
+          current.cursor = createPocketAnydocRequestId(`${attachment.id}-chunks`);
+        } else {
+          if (current.seenIndexes.size !== totalChunks) throw invalid('chunk_enumeration_incomplete');
+          traversal = null;
+        }
+        return {
+          chunks: page.chunks,
+          ...(page.nextCursor === undefined ? null : { nextCursor: current.cursor }),
+          totalChunks,
+          sourceIdentity,
+        };
+      } catch (error) {
+        if (traversal === current) traversal = null;
+        throw error;
+      } finally {
+        current.pending = false;
+      }
+    },
+  };
+}
+
 function resolveCanonicalDirectFormat(mimeType: string, fileName: string): string {
   const extension = resolveChatAttachmentExtension(fileName);
   if (extension === 'md' || extension === 'markdown') {
@@ -569,11 +694,52 @@ function createPocketAnydocSessionSource(
   let released = false;
   let releasePromise: Promise<void> | null = null;
   let source!: PocketAnydocSessionSource;
+  const enumeration = createDocumentChunkEnumeration(
+    attachment,
+    initialResult,
+    () => released || releasePromise !== null,
+    async (cursor, signal) => {
+      const requestId = createPocketAnydocRequestId(`${attachment.id}-chunks`);
+      const cancelOnAbort = () => { void cancelPocketAnydocRequest(requestId).catch(() => undefined); };
+      signal?.addEventListener('abort', cancelOnAbort, { once: true });
+      try {
+        throwIfDocumentProcessingCancelled(signal, attachment);
+        const page = await selectPocketAnydocContext({
+          requestId,
+          handle: prepared.handle,
+          query: '',
+          maxChunks: POCKET_ANYDOC_MAX_SELECTION_CHUNKS,
+          maxChars: POCKET_ANYDOC_MAX_SELECTION_CHARS,
+          ...(cursor === undefined ? null : { cursor }),
+        });
+        throwIfDocumentProcessingCancelled(signal, attachment);
+        if (page.chunks.some((chunk) => chunk.assetIds?.some((id) => !assetById.has(id)))) {
+          throw new PocketAnydocError('invalid_native_response', 'Document chunk has an unknown asset reference.');
+        }
+        return { chunks: toDocumentContextChunks(page.chunks), nextCursor: page.nextCursor };
+      } finally {
+        signal?.removeEventListener('abort', cancelOnAbort);
+      }
+    },
+  );
   source = {
     attachmentId: attachment.id,
     kind: 'native',
     isReleased: () => released || releasePromise !== null,
     assets,
+    enumerateChunks: async (options) => {
+      try {
+        return await enumeration.enumerateChunks(options);
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw mapPocketAnydocError(
+          error instanceof PocketAnydocError
+            ? error
+            : new PocketAnydocError('native_failed', 'Pocket AnyDoc failed.', { cause: error }),
+          attachment,
+        );
+      }
+    },
     selectContext: async (options) => {
       if (released || releasePromise) {
         throw mapPocketAnydocError(
@@ -652,6 +818,7 @@ function createPocketAnydocSessionSource(
       }
     },
     release: async () => {
+      enumeration.invalidate();
       if (released) {
         return;
       }
@@ -798,10 +965,41 @@ function createDirectDocumentSessionContextSource(
 ): ChatDocumentSessionContextSource {
   let retainedChunks: readonly DocumentContextChunk[] | null = allChunks;
   let source!: ChatDocumentSessionContextSource;
+  const enumeration = createDocumentChunkEnumeration(
+    attachment,
+    initialResult,
+    () => retainedChunks === null,
+    async (cursor, signal) => {
+      throwIfDocumentProcessingCancelled(signal, attachment);
+      const chunks = retainedChunks;
+      if (!chunks) throw createAttachmentProcessingError(
+        'chat_attachment_parse_failed', 'The session document context has already been released.', { attachment },
+      );
+      const offset = cursor === undefined ? 0 : Number(cursor.slice(2));
+      const page: DocumentContextChunk[] = [];
+      let pageChars = 0;
+      for (let index = offset; index < chunks.length && page.length < POCKET_ANYDOC_MAX_SELECTION_CHUNKS; index += 1) {
+        const chunk = chunks[index];
+        if (chunk.text.length > POCKET_ANYDOC_MAX_SELECTION_CHARS) {
+          throw createAttachmentProcessingError(
+            'chat_attachment_document_resource_limit',
+            'A structural document chunk exceeds the enumeration limit.',
+            { attachment, details: { limit: 'max_selection_chars' } },
+          );
+        }
+        if (pageChars + chunk.text.length > POCKET_ANYDOC_MAX_SELECTION_CHARS) break;
+        page.push(chunk);
+        pageChars += chunk.text.length;
+      }
+      const consumed = offset + page.length;
+      return { chunks: page, ...(consumed < chunks.length ? { nextCursor: `p:${consumed}` } : null) };
+    },
+  );
   source = {
     attachmentId: attachment.id,
     kind: 'memory',
     isReleased: () => retainedChunks === null,
+    enumerateChunks: enumeration.enumerateChunks,
     selectContext: async (options) => {
       throwIfDocumentProcessingCancelled(options.signal, attachment);
       const availableChunks = retainedChunks;
@@ -863,6 +1061,7 @@ function createDirectDocumentSessionContextSource(
       };
     },
     release: async () => {
+      enumeration.invalidate();
       retainedChunks = null;
     },
   };

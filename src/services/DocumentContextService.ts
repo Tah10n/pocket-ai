@@ -32,6 +32,8 @@ export interface DocumentContextInput {
   sourceCharCount?: number;
   truncated?: boolean;
   warnings?: readonly string[];
+  /** Trusted retrieval-service ranking, separate from document-provided text and locators. */
+  retrievalOrder?: readonly number[];
 }
 
 export interface SelectedDocumentContext {
@@ -101,6 +103,7 @@ type RankedChunk = {
 const TOKEN_PATTERN = /[\p{L}\p{N}]+/gu;
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
+const LIMIT_RANK_FALLBACK = 2048;
 const MAX_WARNING_COUNT = 32;
 const MAX_WARNING_CHARS = 96;
 const MAX_DISPLAY_NAME_CHARS = 512;
@@ -467,6 +470,13 @@ async function buildRankedChunks(
     }
   }
   rankedByDocument.forEach((ranked) => {
+    const retrievalOrder = documents[ranked[0]?.documentIndex ?? -1]?.retrievalOrder;
+    if (retrievalOrder?.length) {
+      const order = new Map(retrievalOrder.map((index, rank) => [index, rank]));
+      ranked.forEach(entry => { entry.score = 1 / (1 + (order.get(entry.chunk.index) ?? LIMIT_RANK_FALLBACK)); });
+      ranked.sort((left, right) => right.score - left.score || left.chunk.index - right.chunk.index);
+      return;
+    }
     const useCoverage = useSummaryCoverage || ranked.every((entry) => entry.score === 0);
     if (useCoverage) {
       const sourceOrdered = [...ranked].sort((left, right) => left.chunk.index - right.chunk.index);
@@ -495,6 +505,16 @@ async function buildRankedChunks(
     ranked.sort((left, right) => right.score - left.score || left.chunk.index - right.chunk.index);
   });
   return rankedByDocument;
+}
+
+/** The retrieval service takes bounded lexical candidates from the existing BM25 implementation. */
+export async function rankDocumentContextCandidates(
+  question: string, documents: readonly DocumentContextInput[],
+): Promise<{ attachmentId: string; chunk: DocumentContextChunk }[]> {
+  const normalized = normalizeDocumentInputs(documents);
+  const ranked = await buildRankedChunks(question, normalized);
+  return ranked.flat().sort((left, right) => right.score - left.score || left.documentIndex - right.documentIndex
+    || left.chunk.index - right.chunk.index).map(entry => ({ attachmentId: normalized[entry.documentIndex].attachmentId, chunk: entry.chunk }));
 }
 
 function formatChunk(chunk: DocumentContextChunk): string {

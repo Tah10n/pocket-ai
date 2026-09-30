@@ -173,3 +173,27 @@ it.each([
   expect(unknown.nativeStage).toBeUndefined(); expect(unknown.actualMode).toBeUndefined(); expect(unknown.fallbackReason).toBeUndefined();
   expect(JSON.stringify(unknown)).not.toContain('private');
 });
+
+it('retains bounded Stop preparation failure diagnostics without accepting fallback or leaking payloads', () => {
+  const input = receipt(); input.status = 'failed'; input.phase = 'stop_prepare'; input.failureCode = 'assertion';
+  const pending = input.steps.find(step => step.id === 'stop_prepare');
+  Object.assign(pending, { status: 'failed', sourceEntryCount: 3, modelRestored: false, profileRestored: false,
+    cancelled: false, stopRequested: false, actualMode: 'lexical', fallbackReason: 'model_unavailable',
+    documentEmbeddings: 0, nativeStarted: 0, nativeSettled: 0,
+    text: 'private document', profileIdentity: '/private/model.gguf', vector: [1, 2] });
+  for (const operation of ['stop_prepare_profile_capture', 'stop_prepare_owner_check', 'stop_prepare_source_load',
+    'stop_prepare_retrieval', 'stop_prepare_cancel_check', 'stop_prepare_count_check', 'stop_prepare_idle_check',
+    'stop_prepare_model_check', 'stop_prepare_profile_check', 'stop_prepare_index_check']) {
+    pending.operation = operation;
+    const failed = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'stop_prepare');
+    expect(failed).toMatchObject({ operation, sourceEntryCount: 3, modelRestored: false, cancelled: false,
+      stopRequested: false, actualMode: 'lexical', fallbackReason: 'model_unavailable', nativeStarted: 0, nativeSettled: 0 });
+    expect(JSON.stringify(failed)).not.toMatch(/private|profileIdentity|vector|model\.gguf/);
+    expect(() => validateDocumentRetrievalEvidence(input)).toThrow('incomplete provenance or status');
+  }
+  Object.assign(pending, { operation: '/private/operation', sourceEntryCount: 1_000_001, modelRestored: 'private' });
+  const invalid = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'stop_prepare');
+  expect(invalid.operation).toBeUndefined(); expect(invalid.sourceEntryCount).toBeUndefined(); expect(invalid.modelRestored).toBeUndefined();
+  pending.sourceEntryCount = Number.NaN;
+  expect(sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'stop_prepare').sourceEntryCount).toBeUndefined();
+});

@@ -10,7 +10,10 @@ const QA_OPERATIONS = [
   'adapter_lookup', 'idle_barrier', 'adapter_apply', 'baseline_probe', 'repeat_probe', 'baseline_compare', 'retrieval_handoff',
   'profile_check', 'restored_probe', 'probability_compare', 'prompt_count', 'answer_completion', 'answer_check',
   'adapter_remove', 'tool_model_load', 'tool_thread_setup', 'tool_run', 'tool_execute', 'tool_feedback', 'tool_schema_parse',
-  'tool_schema_check', 'tool_commit', 'stop_corpus_load', 'stop_retrieval', 'stop_check', 'next_retrieval', 'next_check',
+  'tool_schema_check', 'tool_commit', 'stop_corpus_load', 'stop_retrieval', 'stop_check',
+  'stop_prepare_profile_capture', 'stop_prepare_owner_check', 'stop_prepare_source_load', 'stop_prepare_retrieval',
+  'stop_prepare_cancel_check', 'stop_prepare_count_check', 'stop_prepare_idle_check', 'stop_prepare_model_check',
+  'stop_prepare_profile_check', 'stop_prepare_index_check', 'next_retrieval', 'next_check',
   'checkpoint_write', 'cold_checkpoint_read', 'cold_checkpoint_check', 'cold_owner_check', 'cold_model_load',
   'cold_index_reconcile', 'cold_index_check', 'cold_retrieval', 'cold_history_check', 'corpus_delete', 'index_delete_check',
   'original_restore', 'deleted_checkpoint_write', 'deleted_owner_check', 'deleted_files_check', 'deleted_tool_search',
@@ -26,8 +29,8 @@ const OPERATION_ERRORS = ['action_failed', 'engine_not_ready', 'engine_busy', 'e
   'local_tool_conflicting_id', 'local_tool_context_limit', 'message_too_long', 'chat_model_not_loaded', 'chat_model_mismatch',
   'chat_history_busy', ...ISSUES];
 const COUNTERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'nativeStarted', 'nativeSettled', 'restored'];
-const NUMBERS = [...COUNTERS, 'chunkCount', 'indexCount', 'nativeSteps', 'toolCalls', 'outputCharacters', 'promptTokens', 'tokensEvaluated'];
-const BOOLEANS = ['fixtureVerified', 'profileRestored', 'probabilityRestored', 'resultReturned', 'membershipMatched', 'locatorMatched',
+const NUMBERS = [...COUNTERS, 'chunkCount', 'sourceEntryCount', 'indexCount', 'nativeSteps', 'toolCalls', 'outputCharacters', 'promptTokens', 'tokensEvaluated'];
+const BOOLEANS = ['fixtureVerified', 'modelRestored', 'profileRestored', 'probabilityRestored', 'resultReturned', 'membershipMatched', 'locatorMatched',
   'actualModeMatched', 'structuredValid', 'schemaAnswerMatched', 'cancelled', 'completionDrained', 'noReexecution', 'deleted', 'oldIdsRejected',
   'nativeIdleBarrierWaited', 'adapterFound', 'adapterApplied', 'baselineProbeCompleted', 'repeatProbeCompleted',
   'handoffCompleted', 'restoredProbeCompleted', 'modelLoaded', 'threadConfigured', 'toolRunCompleted', 'toolHistoryCommitted',

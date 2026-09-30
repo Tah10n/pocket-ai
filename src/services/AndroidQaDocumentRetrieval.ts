@@ -44,6 +44,9 @@ type RetrievalQaOperation = 'adapter_lookup' | 'idle_barrier' | 'adapter_apply' 
   | 'retrieval_handoff' | 'profile_check' | 'restored_probe' | 'probability_compare' | 'prompt_count' | 'answer_completion'
   | 'answer_check' | 'adapter_remove' | 'tool_model_load' | 'tool_thread_setup' | 'tool_run' | 'tool_execute' | 'tool_feedback'
   | 'tool_schema_parse' | 'tool_schema_check' | 'tool_commit' | 'stop_corpus_load' | 'stop_retrieval' | 'stop_check'
+  | 'stop_prepare_profile_capture' | 'stop_prepare_owner_check' | 'stop_prepare_source_load' | 'stop_prepare_retrieval'
+  | 'stop_prepare_cancel_check' | 'stop_prepare_count_check' | 'stop_prepare_idle_check' | 'stop_prepare_model_check'
+  | 'stop_prepare_profile_check' | 'stop_prepare_index_check'
   | 'next_retrieval' | 'next_check' | 'checkpoint_write' | 'cold_checkpoint_read' | 'cold_checkpoint_check'
   | 'cold_owner_check' | 'cold_model_load' | 'cold_index_reconcile' | 'cold_index_check' | 'cold_retrieval' | 'cold_history_check'
   | 'corpus_delete' | 'index_delete_check' | 'original_restore' | 'deleted_checkpoint_write' | 'deleted_owner_check'
@@ -59,7 +62,8 @@ const PROBABILITY_ERRORS = ['probabilities_missing', 'probabilities_invalid', 'p
 type OperationErrorCode = typeof OPERATION_APP_ERRORS[number] | typeof PROBABILITY_ERRORS[number] | DocumentRetrievalError['code'];
 type Step = Partial<Counters> & { id: StepId; status: 'passed' | 'failed' | 'not_run';
   promptChunks?: NonNullable<AndroidQaRetrievalCase['selected']>; promptTokens?: number; tokensEvaluated?: number;
-  fixtureVerified?: boolean; chunkCount?: number; indexCount?: number; profileRestored?: boolean; probabilityRestored?: boolean;
+  fixtureVerified?: boolean; chunkCount?: number; sourceEntryCount?: number; indexCount?: number;
+  modelRestored?: boolean; profileRestored?: boolean; probabilityRestored?: boolean;
   nativeSteps?: number; toolCalls?: number; resultReturned?: boolean; membershipMatched?: boolean; locatorMatched?: boolean;
   actualModeMatched?: boolean; structuredValid?: boolean; schemaAnswerMatched?: boolean; outputCharacters?: number;
   cancelled?: boolean; completionDrained?: boolean; noReexecution?: boolean; deleted?: boolean; oldIdsRejected?: boolean;
@@ -325,28 +329,60 @@ async function execute({ operationTimeoutMs = 600_000, downloadTimeoutMs = 900_0
     }
     pass({ id: 'prepare_corpus', chunkCount: 12 });
     publish({ phase: 'stop_prepare' });
+    const preparationPending: Omit<Step, 'id' | 'status'> = { operation: 'stop_prepare_profile_capture' };
     const preparationController = new AbortController(); const stoppedPreparation = counters(); let preparationStopRequested = false;
+    pendingStep = preparationPending; pendingCount = stoppedPreparation;
     const beforePreparationProfile = getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters());
-    const checkPreparationCurrent = current(threadId);
+    const assertPreparationOwner = current(threadId);
+    const checkPreparationCurrent = () => {
+      const operation = preparationPending.operation;
+      preparationPending.operation = 'stop_prepare_owner_check';
+      assertPreparationOwner();
+      preparationPending.operation = operation;
+    };
+    preparationPending.operation = 'stop_prepare_source_load';
     const preparationLoaded = await loadCorpus(threadId, corpus.slice(0, 1), checkPreparationCurrent);
+    preparationPending.sourceEntryCount = Math.min(1_000_000, preparationLoaded.entries.length);
     let preparationCancelled = false;
+    preparationPending.operation = 'stop_prepare_retrieval';
     try {
-      await runCorpusNative(preparationLoaded, stoppedPreparation, checkPreparationCurrent, operationTimeoutMs,
+      const preparationResult = await runCorpusNative(preparationLoaded, stoppedPreparation, checkPreparationCurrent, operationTimeoutMs,
         guard => retrieveDocumentCandidates('', preparationLoaded.entries, { mode: 'hybrid', rerank: false }, {
           ...guard, threadId, prepareMissing: true, preparationOnly: true,
         }), { signal: preparationController.signal, observe: event => {
           if (!preparationStopRequested && event.operation === 'embedding' && event.kind === 'document' && event.phase === 'started') {
-            preparationStopRequested = true; queueMicrotask(() => preparationController.abort());
+            preparationStopRequested = true; preparationPending.stopRequested = true;
+            queueMicrotask(() => preparationController.abort());
           }
         } });
-    } catch (error) { preparationCancelled = error instanceof DocumentRetrievalError && error.code === 'cancelled'; if (!preparationCancelled) throw error; }
-    check(preparationCancelled && preparationStopRequested && stoppedPreparation.documentEmbeddings === 1
-      && stoppedPreparation.queryEmbeddings === 0 && stoppedPreparation.rerankCalls === 0
-      && stoppedPreparation.nativeStarted === 1 && stoppedPreparation.nativeSettled === 1 && idle()
-      && llmEngineService.getState().activeModelId === ANDROID_QA_DOCUMENT_MODEL_ID
-      && beforePreparationProfile === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters())
-      && corpus.every(item => documentIndexStore.inspect(threadId!, item.attachmentId) === null));
-    pass({ id: 'stop_prepare', ...stoppedPreparation, cancelled: true, profileRestored: true, completionDrained: true, indexCount: 0 });
+      preparationPending.actualMode = preparationResult.actualMode;
+      if (preparationResult.fallbackReason && RETRIEVAL_ERRORS.some(code => code === preparationResult.fallbackReason)) {
+        preparationPending.fallbackReason = preparationResult.fallbackReason;
+      }
+    } catch (error) {
+      preparationCancelled = error instanceof DocumentRetrievalError && error.code === 'cancelled';
+      preparationPending.cancelled = preparationCancelled;
+      if (!preparationCancelled) throw error;
+    }
+    preparationPending.cancelled = preparationCancelled; preparationPending.stopRequested = preparationStopRequested;
+    preparationPending.operation = 'stop_prepare_cancel_check';
+    check(preparationCancelled && preparationStopRequested);
+    preparationPending.operation = 'stop_prepare_count_check';
+    check(stoppedPreparation.documentEmbeddings === 1 && stoppedPreparation.queryEmbeddings === 0
+      && stoppedPreparation.rerankCalls === 0 && stoppedPreparation.nativeStarted === 1 && stoppedPreparation.nativeSettled === 1);
+    preparationPending.operation = 'stop_prepare_idle_check';
+    preparationPending.completionDrained = idle(); check(preparationPending.completionDrained);
+    preparationPending.operation = 'stop_prepare_model_check';
+    preparationPending.modelRestored = llmEngineService.getState().activeModelId === ANDROID_QA_DOCUMENT_MODEL_ID;
+    check(preparationPending.modelRestored);
+    preparationPending.operation = 'stop_prepare_profile_check';
+    preparationPending.profileRestored = beforePreparationProfile === getAndroidQaEffectiveProfileIdentity(llmEngineService.getEffectiveLoadParameters());
+    check(preparationPending.profileRestored);
+    preparationPending.operation = 'stop_prepare_index_check';
+    preparationPending.indexCount = corpus.filter(item => documentIndexStore.inspect(threadId!, item.attachmentId) !== null).length;
+    check(preparationPending.indexCount === 0);
+    pass({ id: 'stop_prepare', ...preparationPending, ...stoppedPreparation, cancelled: true, profileRestored: true, completionDrained: true, indexCount: 0 });
+    pendingStep = undefined; pendingCount = undefined;
     publish({ phase: 'prepare_indexes' });
     const assertCurrent = current(threadId); const loaded = await loadCorpus(threadId, corpus, assertCurrent); const preparation = counters();
     const prepared = await runCorpusNative(loaded, preparation, assertCurrent, operationTimeoutMs,

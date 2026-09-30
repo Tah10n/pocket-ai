@@ -714,6 +714,9 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
 
     try {
       repairChatHistoryIndex();
+      // Only encrypted manifests/shard keys are reconciled; no startup indexing or native probe.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      (require('./DocumentIndexStore') as typeof import('./DocumentIndexStore')).documentIndexStore.reconcile();
       migrateLegacyChatHistory(settings);
       const cleanupResult = useChatStore.getState().pruneExpiredThreads(
         settings.chatRetentionDays,

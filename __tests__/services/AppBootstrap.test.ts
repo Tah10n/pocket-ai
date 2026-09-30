@@ -37,6 +37,8 @@ jest.mock('../../src/services/storage', () => ({
   initializePrivateStorageEncryption: jest.fn(),
 }));
 
+jest.mock('../../src/services/DocumentIndexStore', () => ({ documentIndexStore: { reconcile: jest.fn() } }));
+
 jest.mock('expo-file-system/legacy', () => ({
   getInfoAsync: jest.fn().mockResolvedValue({ exists: true }),
 }));

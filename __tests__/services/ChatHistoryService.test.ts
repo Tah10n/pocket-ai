@@ -3,6 +3,7 @@ import { clearChatHistory } from '../../src/services/ChatHistoryService';
 const mockStop = jest.fn();
 const mockClearThreads = jest.fn();
 const mockClearDocuments = jest.fn();
+const mockClearIndexes = jest.fn();
 const mockClearLegacy = jest.fn();
 const mockDismiss = jest.fn();
 const mockMark = jest.fn();
@@ -12,6 +13,7 @@ jest.mock('../../src/store/chatStore', () => ({ useChatStore: { getState: () => 
   threads: mockThreads, activeThreadId: null, clearAllThreads: () => mockClearThreads(),
 }) } }));
 jest.mock('../../src/services/DocumentSessionContextCache', () => ({ documentSessionContextCache: { clearAll: () => mockClearDocuments() } }));
+jest.mock('../../src/services/DocumentIndexStore', () => ({ documentIndexStore: { clear: () => mockClearIndexes() } }));
 jest.mock('../../src/services/SettingsStore', () => ({ clearLegacyChatHistory: () => mockClearLegacy() }));
 jest.mock('../../src/services/NotificationService', () => ({ notificationService: { dismissInferenceNotificationForThread: (...args: unknown[]) => mockDismiss(...args) } }));
 jest.mock('../../src/services/PerformanceMonitor', () => ({ performanceMonitor: { mark: (...args: unknown[]) => mockMark(...args) } }));
@@ -36,6 +38,7 @@ describe('ChatHistoryService drain boundary', () => {
     await Promise.resolve();
     expect(mockClearThreads).not.toHaveBeenCalled();
     expect(mockClearDocuments).not.toHaveBeenCalled();
+    expect(mockClearIndexes).not.toHaveBeenCalled();
     drain.resolve('timed_out');
     await expect(clearing).rejects.toMatchObject({ code: 'chat_history_busy' });
     expect(mockThreads).toHaveProperty('thread');
@@ -51,6 +54,7 @@ describe('ChatHistoryService drain boundary', () => {
     await expect(clearChatHistory()).resolves.toBe(3);
     expect(mockClearThreads).toHaveBeenCalledTimes(1);
     expect(mockClearDocuments).toHaveBeenCalledTimes(1);
+    expect(mockClearIndexes).toHaveBeenCalledTimes(1);
     expect(mockClearLegacy).toHaveBeenCalledTimes(1);
     expect(mockDismiss).toHaveBeenCalledWith('thread');
   });

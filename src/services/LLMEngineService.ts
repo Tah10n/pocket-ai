@@ -383,6 +383,10 @@ type MultimodalReadinessRefreshRequest = {
 
 type InternalLoadOptions = {
   readonly lifecycleOwned?: boolean;
+  /** Only the active auxiliary transaction may restore its already cancelled tool owner. */
+  readonly restoreAuxiliaryOwner?: boolean;
+  /** Only the auxiliary transaction may restore the context held by this lease. */
+  readonly runOwner?: symbol;
   readonly backgroundReadinessRefresh?: MultimodalReadinessRefreshRequest;
   readonly contextRecoveryAttempt?: number;
 };
@@ -392,8 +396,40 @@ export interface AuxiliaryContextRequest {
   readonly initParams: LlamaContextInitParams;
   readonly signal?: AbortSignal;
   readonly beforeInit?: () => Promise<void>;
+  /** Explicit preparation budget; never changes local-tool action deadlines. */
+  readonly nativeDrainTimeoutMs?: number;
   /** Includes chat selection, private-storage generation and artifact identity. */
   readonly isCurrent: () => boolean;
+}
+
+export interface AuxiliarySequenceRequest {
+  readonly runOwner?: symbol;
+  readonly signal?: AbortSignal;
+  /** Selection/permission check independent of the temporarily suspended chat context. */
+  readonly isCurrent: () => boolean;
+  /** Stable ownership, excluding Stop; permits exact-A restore only after confirmed drain. */
+  readonly isSelectionCurrent?: () => boolean;
+  /** Emitted only after a confirmed full-profile restore, including safe failure recovery. */
+  readonly onRestored?: (receipt: AuxiliaryRestoreReceipt) => void;
+}
+
+export interface AuxiliaryRestoreReceipt {
+  readonly previousContextIdentity: string;
+  readonly restoredContextIdentity: string;
+  readonly modelId: string;
+}
+
+export interface AuxiliaryContextSequence {
+  /** Phases and their native calls must be awaited sequentially. */
+  withContext: <T>(request: AuxiliaryContextRequest, operation: (context: LlamaContext) => Promise<T>) => Promise<T>;
+}
+
+type AuxiliaryOperationOwner = { modelId: string; cancelled: boolean; isCurrent?: () => boolean };
+
+function auxiliaryLoadProfileIdentity(profile: ModelLoadParameters | null): string {
+  return JSON.stringify(profile === null ? null : Object.fromEntries(
+    Object.entries(profile).sort(([left], [right]) => left.localeCompare(right)),
+  ));
 }
 
 function getDeviceModelForInitFailureIdentity(): string {
@@ -1409,6 +1445,8 @@ class LLMEngineService {
   private exclusiveOperationCount = 0;
   private localToolRun: {
     token: symbol; controller: AbortController; settled: Promise<void>;
+    contextIdentity: string; loadIdentity: string; handoffActive: boolean;
+    assertSelectionCanPublish: () => void;
   } | null = null;
 
   /** Reserve between completions without holding the non-reentrant native queue. */
@@ -1423,24 +1461,31 @@ class LLMEngineService {
     const contextIdentity = this.getPromptContextIdentity();
     const modelAtStart = registry.getModel(expectedModelId);
     const modelIdentity = modelAtStart ? getCompanionBindingIdentity(modelAtStart) : null;
-    const loadIdentity = JSON.stringify(this.getEffectiveLoadParameters());
+    const loadIdentity = auxiliaryLoadProfileIdentity(this.getEffectiveLoadParameters());
     const controller = new AbortController();
     let resolveSettled!: () => void;
     const settled = new Promise<void>(resolve => { resolveSettled = resolve; });
-    const owner = { token: Symbol('local-tool-run'), controller, settled };
+    const owner = { token: Symbol('local-tool-run'), controller, settled,
+      contextIdentity, loadIdentity, handoffActive: false, assertSelectionCanPublish: (): void => undefined };
     // Preempt passive probes just like ordinary prompt preparation. The native
     // queue retains their raw work until it drains before admitting this owner.
     const release = this.beginPromptPreparation();
     this.localToolRun = owner;
     let finished = false;
-    const assertCanPublish = () => {
+    const assertSelectionCanPublish = () => {
       if (finished || this.localToolRun !== owner
-        || this.getPromptContextIdentity() !== contextIdentity
-        || JSON.stringify(this.getEffectiveLoadParameters()) !== loadIdentity
         || (() => {
           const current = registry.getModel(expectedModelId);
           return (current ? getCompanionBindingIdentity(current) : null) !== modelIdentity;
         })()) {
+        throw new AppError('engine_busy', 'The local tool run was cancelled.');
+      }
+    };
+    owner.assertSelectionCanPublish = assertSelectionCanPublish;
+    const assertCanPublish = () => {
+      assertSelectionCanPublish();
+      if (owner.handoffActive || this.getPromptContextIdentity() !== owner.contextIdentity
+        || auxiliaryLoadProfileIdentity(this.getEffectiveLoadParameters()) !== owner.loadIdentity) {
         throw new AppError('engine_busy', 'The local tool run was cancelled.');
       }
       this.assertExpectedCompletionModel(expectedModelId);
@@ -1451,6 +1496,12 @@ class LLMEngineService {
       // Stop prevents further actions, but a settled parsed reply still belongs
       // to this lease until its context/model identity changes or it finishes.
       assertCanPublish,
+      // This check does not authorize native chat dispatch while A is suspended.
+      assertSelectionCurrent: () => {
+        assertSelectionCanPublish();
+        if (controller.signal.aborted) throw new AppError('engine_busy', 'The local tool run was cancelled.');
+      },
+      assertRestorationSelectionCurrent: assertSelectionCanPublish,
       assertCurrent: () => {
         assertCanPublish();
         if (controller.signal.aborted) {
@@ -1467,14 +1518,15 @@ class LLMEngineService {
     };
   }
 
-  private assertLocalToolRunOwner(token?: symbol): void {
-    if (this.localToolRun && (this.localToolRun.token !== token || this.localToolRun.controller.signal.aborted)) {
+  private assertLocalToolRunOwner(token?: symbol, allowCancelledRestore = false): void {
+    if (this.localToolRun && (this.localToolRun.token !== token
+      || (this.localToolRun.controller.signal.aborted && !allowCancelledRestore))) {
       throw new AppError('engine_busy', 'A local tool run owns the engine.');
     }
     if (token && !this.localToolRun) throw new AppError('engine_busy', 'The local tool run has ended.');
   }
 
-  private auxiliaryOperation: { modelId: string; cancelled: boolean; isCurrent?: () => boolean } | null = null;
+  private auxiliaryOperation: AuxiliaryOperationOwner | null = null;
   private auxiliaryRestoreError: string | undefined;
   private autotuneReserved = false;
   private contextOperationRunner = new ContextOperationRunner();
@@ -3548,7 +3600,14 @@ class LLMEngineService {
     }
 
     const loadOperation = async () => {
-      this.assertLocalToolRunOwner();
+      if (internalOptions.runOwner && (!internalOptions.lifecycleOwned || !this.auxiliaryOperation
+        || this.localToolRun?.token !== internalOptions.runOwner || !this.localToolRun.handoffActive)) {
+        throw new AppError('engine_busy', 'The local tool context handoff is unavailable.');
+      }
+      const restoringOwnedAuxiliary = internalOptions.restoreAuxiliaryOwner === true
+        && internalOptions.lifecycleOwned === true && this.auxiliaryOperation !== null
+        && this.localToolRun?.token === internalOptions.runOwner && this.localToolRun?.handoffActive === true;
+      this.assertLocalToolRunOwner(internalOptions.runOwner, restoringOwnedAuxiliary);
       if (recoveryAttempt !== undefined && this.contextRecoveryAttempt !== recoveryAttempt) {
         return;
       }
@@ -3794,30 +3853,70 @@ class LLMEngineService {
     request: AuxiliaryContextRequest,
     operation: (context: LlamaContext) => Promise<T>,
   ): Promise<T> {
+    return this.runWithAuxiliarySequence(request, sequence => sequence.withContext(request, operation));
+  }
+
+  /** One lifecycle lease spans A -> B -> C -> A; phase changes never re-enter its queue. */
+  public async runWithAuxiliarySequence<T>(
+    request: AuxiliarySequenceRequest,
+    operation: (sequence: AuxiliaryContextSequence) => Promise<T>,
+  ): Promise<T> {
+    this.assertLocalToolRunOwner(request.runOwner);
     this.assertNoOrphanedContextReleasePending();
     if (this.auxiliaryOperation || this.autotuneReserved || this.exclusiveOperationCount > 0 || this.hasActiveCompletion()
-      || this.hasActiveChatBlockingContextOperation() || this.isUnloading) {
+      || this.contextOperationRunner.hasActiveChatBlocking() || this.isUnloading || this.initPromise) {
       throw new AppError('engine_busy', 'The engine is busy. Retry after the current operation finishes.');
     }
-    const owner = { modelId: request.modelId, cancelled: false };
+    const toolOwner = request.runOwner ? this.localToolRun : null;
+    if (toolOwner) {
+      toolOwner.assertSelectionCanPublish();
+      if (toolOwner.handoffActive || this.getPromptContextIdentity() !== toolOwner.contextIdentity
+        || auxiliaryLoadProfileIdentity(this.getEffectiveLoadParameters()) !== toolOwner.loadIdentity) {
+        throw new AppError('engine_busy', 'The local tool context changed before auxiliary work.');
+      }
+    }
+    const owner: AuxiliaryOperationOwner = { modelId: '', cancelled: false };
     this.auxiliaryOperation = owner;
     this.auxiliaryRestoreError = undefined;
     this.cancelScheduledContextRecovery();
-    const selectionCurrent = () => !owner.cancelled && request.isCurrent();
-    const isCurrent = () => !request.signal?.aborted && selectionCurrent();
+    const selectionCurrent = () => {
+      try {
+        if (owner.cancelled || !(request.isSelectionCurrent ?? request.isCurrent)()) return false;
+        if (toolOwner) {
+          if (this.localToolRun !== toolOwner || (!request.isSelectionCurrent && toolOwner.controller.signal.aborted)) return false;
+          toolOwner.assertSelectionCanPublish();
+        }
+        return true;
+      } catch { return false; }
+    };
+    const isCurrent = () => {
+      try {
+        return !request.signal?.aborted && !toolOwner?.controller.signal.aborted
+          && selectionCurrent() && request.isCurrent();
+      } catch { return false; }
+    };
     const assertCurrent = () => {
       if (!isCurrent()) throw new AppError('engine_busy', 'The auxiliary model check was cancelled.');
     };
+    owner.isCurrent = selectionCurrent;
     // Notify auto-load observers before detaching A. No native handles are published.
     this.updateState(this.state);
     try {
       return await this.runExclusiveOperation(async () => {
         assertCurrent();
         const previousModelId = this.context ? this.state.activeModelId : undefined;
+        const previousContextIdentity = this.getPromptContextIdentity();
+        const previousProfile = this.getEffectiveLoadParameters();
+        const previousProfileIdentity = auxiliaryLoadProfileIdentity(previousProfile);
+        const previousArtifact = this.loadedArtifactIdentity ? { ...this.loadedArtifactIdentity } : null;
+        const previousMultimodal = this.activeMultimodalContext ? { ...this.activeMultimodalContext } : null;
+        const previousLora = this.activeLoraAdapters.map(adapter => ({ ...adapter }));
+        const previousModel = previousModelId ? registry.getModel(previousModelId) : undefined;
+        const previousBinding = previousModel ? getCompanionBindingIdentity(previousModel) : null;
         // Restore the actual loaded profile, including temporary CPU/context
         // overrides. Saved defaults can describe a different allocation.
-        const previousLoadParams = previousModelId ? {
-          ...(this.getEffectiveLoadParameters() ?? getModelLoadParametersForModel(previousModelId)),
+        const previousLoadParams = previousModelId ? previousProfile ?? {
+          ...getModelLoadParametersForModel(previousModelId),
           contextSize: this.activeContextSize,
           gpuLayers: this.initGpuLayers ?? this.activeGpuLayers,
           backendPolicy: this.activeBackendMode === 'unknown' ? this.effectiveBackendPolicy ?? undefined : this.activeBackendMode,
@@ -3836,61 +3935,131 @@ class LLMEngineService {
           kvUnified: this.initKvUnified,
           parallelSlots: 1,
         } satisfies ModelLoadParameters : undefined;
-        let auxiliaryContext: LlamaContext | null = null;
-        let initStarted = false;
         let result!: T;
         let operationError: unknown;
+        let restorationReceipt: AuxiliaryRestoreReceipt | undefined;
+        let phaseActive = false;
+        let sequenceFinished = false;
+        let phaseDrain: Promise<unknown> | null = null;
+        const withContext: AuxiliaryContextSequence['withContext'] = async <R>(
+          phase: AuxiliaryContextRequest, nativeCallback: (context: LlamaContext) => Promise<R>,
+        ): Promise<R> => {
+          if (sequenceFinished || phaseActive) throw new AppError('engine_busy', 'Auxiliary phases must run sequentially.');
+          assertCurrent();
+          const nativeDrainTimeoutMs = phase.nativeDrainTimeoutMs ?? 30_000;
+          if (!Number.isSafeInteger(nativeDrainTimeoutMs) || nativeDrainTimeoutMs < 1_000 || nativeDrainTimeoutMs > 600_000) {
+            throw new AppError('action_failed', 'The auxiliary operation budget is invalid.');
+          }
+          phaseActive = true;
+          owner.modelId = phase.modelId;
+          let auxiliaryContext: LlamaContext | null = null;
+          let initStarted = false;
+          const assertPhaseCurrent = () => {
+            assertCurrent();
+            let phaseCurrent = false;
+            try { phaseCurrent = phase.isCurrent(); } catch { /* Unknown selection ownership fails closed. */ }
+            if (phase.signal?.aborted || !phaseCurrent) {
+              // A pure Stop blocks phases but does not invalidate stable model/chat ownership.
+              if (!phase.signal?.aborted && !request.signal?.aborted) owner.cancelled = true;
+              throw new AppError('engine_busy', 'The auxiliary model operation was cancelled.');
+            }
+          };
+          const work = (async () => {
+            try {
+              assertPhaseCurrent();
+              await phase.beforeInit?.();
+              assertPhaseCurrent();
+              this.assertNoOrphanedContextReleasePending();
+              initStarted = true;
+              auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
+                progress => initLlamaContext({ ...phase.initParams, n_parallel: 1,
+                  state_cache_budget_mb: DISABLED_PROMPT_STATE_CACHE_BUDGET_MB,
+                  state_cache_max_checkpoints: PROMPT_STATE_CACHE_MAX_CHECKPOINTS }, progress), () => undefined,
+              );
+              assertPhaseCurrent();
+              // rc.3 exposes no generic cancel for embedding/rerank. Await the
+              // actual callback, retaining native ownership throughout its drain.
+              let value!: R;
+              let nativeOperationError: unknown;
+              const nativeOperation = Promise.resolve().then(() => nativeCallback(auxiliaryContext!)).then(
+                next => { value = next; }, error => { nativeOperationError = error; },
+              );
+              const drain = await this.waitForUnloadPromise(nativeOperation, nativeDrainTimeoutMs);
+              if (drain === 'timed_out') {
+                this.scheduleOrphanedContextRelease({ activeModelId: null, context: auxiliaryContext,
+                  drainPromise: nativeOperation });
+                auxiliaryContext = null;
+                const timeoutError = this.recordOrphanedContextReleaseTerminalError({
+                  message: DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE, reason: 'drain_timeout',
+                });
+                this.beginBoundedOrphanedContextReleaseWatch();
+                throw timeoutError;
+              }
+              if (nativeOperationError) throw nativeOperationError;
+              assertPhaseCurrent();
+              return value;
+            } finally {
+              try {
+                if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
+                else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
+              } finally { phaseActive = false; }
+            }
+          })();
+          phaseDrain = work;
+          // If a caller forgets to await a phase, the transaction still owns and
+          // drains it before restoration. Preserve the original phase rejection.
+          void work.catch(() => undefined);
+          return work;
+        };
         try {
           // Completion admission observes auxiliaryOperation synchronously, so no
           // new user generation can start between this check and the detach.
           if (this.hasActiveCompletion()) throw new AppError('engine_busy', 'A response is being generated.');
-          if (this.context) await this.unloadInternal();
+          if (toolOwner) toolOwner.handoffActive = true;
+          if (this.context) await this.unloadInternal({ preservePromptPreparation: true });
           assertCurrent();
-          await request.beforeInit?.();
-          assertCurrent();
-          initStarted = true;
-          auxiliaryContext = await this.awaitModelInitWithProgressWatchdog(
-            (progress) => initLlamaContext(request.initParams, progress),
-            () => undefined,
-          );
-          assertCurrent();
-          // Keep ownership until the actual native operation settles. Cancellation
-          // discards its result; it is not evidence that native memory is free.
-          let nativeOperationError: unknown;
-          const nativeOperation = Promise.resolve().then(() => operation(auxiliaryContext!)).then(
-            (value) => { result = value; },
-            (error: unknown) => { nativeOperationError = error; },
-          );
-          const operationDrain = await this.waitForUnloadPromise(nativeOperation, 30_000);
-          if (operationDrain === 'timed_out') {
-            this.scheduleOrphanedContextRelease({
-              activeModelId: null,
-              context: auxiliaryContext,
-              drainPromise: nativeOperation,
-            });
-            auxiliaryContext = null;
-            const timeoutError = this.recordOrphanedContextReleaseTerminalError({
-              message: DETACHED_CONTEXT_RELEASE_STILL_OWNED_MESSAGE,
-              reason: 'drain_timeout',
-            });
-            this.beginBoundedOrphanedContextReleaseWatch();
-            throw timeoutError;
-          }
-          if (nativeOperationError) throw nativeOperationError;
+          result = await operation({ withContext });
           assertCurrent();
         } catch (error) {
           operationError = error;
         } finally {
-          if (auxiliaryContext) await this.releaseNativeContextsConfirmed(auxiliaryContext);
-          else if (initStarted && !this.orphanedContextReleaseError) await this.releaseNativeContextsConfirmed();
+          sequenceFinished = true;
+          if (phaseDrain) {
+            try { await phaseDrain; } catch (error) { operationError ??= error; }
+          }
         }
         if (previousModelId && selectionCurrent() && !this.orphanedContextReleaseError) {
           try {
+            const currentModel = registry.getModel(previousModelId);
+            if ((currentModel ? getCompanionBindingIdentity(currentModel) : null) !== previousBinding) {
+              throw new AppError('engine_busy', 'The previous chat model changed during auxiliary work.');
+            }
             await this.loadWithProjectorResolutionOperationCache(previousModelId, {
               loadParamsOverride: previousLoadParams, loadParamsMode: 'replace',
               preferLastWorkingProfile: true,
-            }, new Map(), { lifecycleOwned: true });
-            if (!selectionCurrent() && this.context) await this.unloadInternal();
+            }, new Map(), { lifecycleOwned: true, runOwner: request.runOwner, restoreAuxiliaryOwner: true });
+            if (!selectionCurrent() && this.context) {
+              await this.unloadInternal({ preservePromptPreparation: true });
+            } else {
+              const restoreMatches = (!previousProfile || auxiliaryLoadProfileIdentity(this.getEffectiveLoadParameters()) === previousProfileIdentity)
+                && (previousArtifact === null ? this.loadedArtifactIdentity === null
+                  : this.loadedArtifactIdentity !== null && this.areLoadedModelArtifactIdentitiesEqual(previousArtifact, this.loadedArtifactIdentity))
+                && JSON.stringify(previousMultimodal) === JSON.stringify(this.activeMultimodalContext)
+                && JSON.stringify(previousLora) === JSON.stringify(this.activeLoraAdapters);
+              if (!restoreMatches) {
+                if (this.context) await this.unloadInternal({ preservePromptPreparation: true });
+                throw new AppError('engine_recovery_required', 'The previous chat model profile could not be restored exactly.');
+              }
+              if (toolOwner) {
+                // Only this verified internal handoff can move the lease to a
+                // new epoch. Old token/prepared-request caches remain invalid.
+                toolOwner.contextIdentity = this.getPromptContextIdentity();
+                toolOwner.loadIdentity = previousProfileIdentity;
+                toolOwner.handoffActive = false;
+              }
+              restorationReceipt = { previousContextIdentity,
+                restoredContextIdentity: this.getPromptContextIdentity(), modelId: previousModelId };
+            }
           } catch (error) {
             if (this.orphanedContextReleaseError) throw error;
             this.auxiliaryRestoreError = 'The auxiliary check ended, but the previous chat model could not be restored.';
@@ -3898,6 +4067,8 @@ class LLMEngineService {
             throw new AppError('model_load_failed', this.auxiliaryRestoreError);
           }
         }
+        if (restorationReceipt && isCurrent()) request.onRestored?.(restorationReceipt);
+        assertCurrent();
         if (operationError) throw operationError;
         return result;
       });
@@ -9326,7 +9497,7 @@ class LLMEngineService {
     }
   }
 
-  private async unloadInternal(): Promise<ModelUnloadReclaimEstimate | null> {
+  private async unloadInternal(options: { preservePromptPreparation?: boolean } = {}): Promise<ModelUnloadReclaimEstimate | null> {
     const previousModelId = this.state.activeModelId ?? null;
     const activeContextReclaimEstimate = this.context
       ? this.resolveActiveContextEstimatedReclaimableBytes()
@@ -9342,7 +9513,7 @@ class LLMEngineService {
       loadProgress: 0,
       lastError: undefined,
     });
-    this.contextOperationRunner.clearReservations('prompt_preparation');
+    if (!options.preservePromptPreparation) this.contextOperationRunner.clearReservations('prompt_preparation');
 
     try {
       const activeCompletion = this.activeCompletionDriverPromise;

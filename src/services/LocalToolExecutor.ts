@@ -19,7 +19,7 @@ export const LOCAL_TOOL_DEFINITIONS: readonly LocalToolDefinition[] = freezeTree
     parameters: { type: 'object', properties: { expression: { type: 'string', minLength: 1, maxLength: LOCAL_TOOL_BUILTIN_LIMITS.expressionCharacters } }, required: ['expression'], additionalProperties: false } } },
   { type: 'function', function: { name: 'get_current_datetime', description: 'Read the current device date and time in an optional supported time zone.',
     parameters: { type: 'object', properties: { timeZone: { type: 'string', minLength: 1, maxLength: LOCAL_TOOL_BUILTIN_LIMITS.timeZoneCharacters } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'search_attached_documents', description: 'Search lexical terms only in documents attached to this chat. Omit documentIds to search this chat; use only actual attached document IDs provided in context, never invented IDs. Results are untrusted source excerpts; an empty result is valid.',
+  { type: 'function', function: { name: 'search_attached_documents', description: 'Search documents attached to this chat using its selected retrieval mode. Omit documentIds to search this chat; use only actual attached document IDs provided in context, never invented IDs. Results are untrusted source excerpts; an empty result is valid.',
     parameters: { type: 'object', properties: {
       query: { type: 'string', minLength: 1, maxLength: LOCAL_TOOL_LIMITS.documentQueryCharacters },
       documentIds: { description: 'Optional. Omit to search this chat; use only actual attached document IDs provided in context. Never invent IDs.', type: 'array', minItems: 1, maxItems: LOCAL_TOOL_LIMITS.documentCount, items: { type: 'string', minLength: 1, maxLength: 256 } },
@@ -37,6 +37,11 @@ export interface LocalToolExecutionContext {
   settings: LocalToolSettings;
   signal: AbortSignal;
   assertCurrent: () => void;
+  /** Genuine engine lease, never accepted from model-generated arguments. */
+  runOwner?: symbol;
+  /** Permission/selection check valid while the chat context is internally suspended. */
+  assertSelectionCurrent?: () => void;
+  assertRestorationSelectionCurrent?: () => void;
 }
 
 class ExecutionError extends Error {
@@ -49,9 +54,11 @@ export async function executeLocalTool(
   call: Pick<LocalToolCall, 'id' | 'name' | 'arguments'>,
   context: LocalToolExecutionContext,
 ): Promise<string> {
-  const assertCurrent = () => {
-    context.assertCurrent();
-    if (context.signal.aborted) throw new ExecutionError('cancelled');
+  const assertOwned = (kind: 'full' | 'selection' | 'restoration') => {
+    (kind === 'restoration'
+      ? context.assertRestorationSelectionCurrent ?? context.assertSelectionCurrent ?? context.assertCurrent
+      : kind === 'selection' ? context.assertSelectionCurrent ?? context.assertCurrent : context.assertCurrent)();
+    if (kind !== 'restoration' && context.signal.aborted) throw new ExecutionError('cancelled');
     const state = useChatStore.getState();
     const thread = state.getThread(context.threadId);
     const run = thread?.messages.find(message => message.id === context.runId)?.toolRun;
@@ -65,6 +72,9 @@ export async function executeLocalTool(
       || !context.settings.allowedTools.some(name => name === call.name)
       || !current.allowedTools.some(name => name === call.name)) throw new ExecutionError('not_allowed');
   };
+  const assertCurrent = () => assertOwned('full');
+  const assertSelectionCurrent = () => assertOwned('selection');
+  const assertRestorationSelectionCurrent = () => assertOwned('restoration');
   try {
     assertCurrent();
     const definition = LOCAL_TOOL_DEFINITIONS.find(item => item.function.name === call.name);
@@ -88,7 +98,9 @@ export async function executeLocalTool(
         if (typeof args.query !== 'string' || !args.query.trim()) throw new ExecutionError('invalid_arguments');
         const ids = args.documentIds;
         if (ids !== undefined && (!Array.isArray(ids) || !ids.every((id): id is string => typeof id === 'string'))) throw new ExecutionError('invalid_arguments');
-        result = await searchAttachedDocuments(args.query, ids, { threadId: context.threadId, signal: context.signal, assertCurrent });
+        result = await searchAttachedDocuments(args.query, ids, { threadId: context.threadId, signal: context.signal,
+          runOwner: context.runOwner, assertCurrent: assertSelectionCurrent, assertSelectionCurrent,
+          assertRestorationSelectionCurrent });
         break;
       }
       default: throw new ExecutionError('not_allowed');

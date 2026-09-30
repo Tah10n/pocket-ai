@@ -20,7 +20,7 @@ import { retrieveDocumentCandidates, type DocumentRetrievalResult } from './Docu
 import type { RetrievalRuntimeOptions } from './DocumentRetrievalRuntime';
 import { documentIndexStore } from './DocumentIndexStore';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
-import { commitAndroidQaRetrievalToolModelSelection, runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from './AndroidQaRetrievalOperation';
+import { claimVerifiedAndroidQaRetrievalOrphanCheckpoint, commitAndroidQaRetrievalToolModelSelection, runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from './AndroidQaRetrievalOperation';
 import { AppError, LOCAL_TOOL_RUN_ERROR_CODES, type AppErrorCode } from './AppError';
 import { VERIFIED_RETRIEVAL_PROFILES } from './DocumentRetrievalProfiles';
 import { selectAuxiliaryModel } from './AuxiliaryModelService';
@@ -539,6 +539,7 @@ export function checkAndroidQaDocumentRetrievalAfterColdReopen(options: { operat
 }
 async function coldCheck(operationTimeoutMs: number): Promise<void> {
   let owned: Checkpoint | undefined;
+  let orphanedCheckpoint = false;
   let pending: Omit<Step, 'id' | 'status'> = { operation: 'cold_checkpoint_read' }; let count: Counters | undefined;
   publish({ status: 'running', phase: 'cold_reuse' });
   try {
@@ -574,6 +575,10 @@ async function coldCheck(operationTimeoutMs: number): Promise<void> {
       publish({ status: 'passed', phase: 'complete' }); return;
     }
     pending.operation = 'cold_owner_check';
+    // A deleted QA owner must still fail cold reuse, but its verified checkpoint
+    // can authorize orphan cleanup without granting authority over a live thread.
+    owned = claimVerifiedAndroidQaRetrievalOrphanCheckpoint(saved, useChatStore.getState().getThread);
+    orphanedCheckpoint = owned !== undefined;
     const thread = useChatStore.getState().getThread(saved.threadId); check(thread?.title === TITLE && getOwnedRetrievalDocuments(saved.threadId).length === 4
       && toolHistoryDigest(saved.threadId) === saved.toolHistoryDigest);
     owned = saved;
@@ -605,8 +610,16 @@ async function coldCheck(operationTimeoutMs: number): Promise<void> {
     if (owned && !evidence.requiresForceStop && idle()) {
       let cleanupOperation: CleanupOperation = 'corpus_delete';
       try {
+        const cleanupOwner = owned;
+        const assertOrphanStillAbsent = () => {
+          if (orphanedCheckpoint) check(claimVerifiedAndroidQaRetrievalOrphanCheckpoint(
+            cleanupOwner, useChatStore.getState().getThread,
+          ) === cleanupOwner);
+        };
+        assertOrphanStillAbsent();
         if (useChatStore.getState().getThread(owned.threadId)) await deleteOwnedCorpusThread(owned.threadId);
         else { cleanupOperation = 'source_cache_clear'; await documentSessionContextCache.clearThread(owned.threadId); }
+        assertOrphanStillAbsent();
         cleanupOperation = 'checkpoint_remove'; getAppStorage().remove(CHECKPOINT_KEY);
         cleanupOperation = 'original_restore'; await restoreOriginal(owned, operationTimeoutMs);
         cleanupOperation = 'persistence_flush'; flushPendingChatPersistenceWrites();

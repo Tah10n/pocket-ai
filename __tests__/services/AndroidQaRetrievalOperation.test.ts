@@ -1,4 +1,4 @@
-import { runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from '../../src/services/AndroidQaRetrievalOperation';
+import { claimVerifiedAndroidQaRetrievalOrphanCheckpoint, runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from '../../src/services/AndroidQaRetrievalOperation';
 import type { RetrievalRuntimeOptions } from '../../src/services/DocumentRetrievalRuntime';
 
 const counts = (): AndroidQaRetrievalCounters => ({ documentEmbeddings: 0, queryEmbeddings: 0, rerankCalls: 0,
@@ -13,6 +13,51 @@ const nativeEvent = (guard: RetrievalRuntimeOptions, phase: 'started' | 'settled
 
 beforeEach(() => jest.useFakeTimers());
 afterEach(() => jest.useRealTimers());
+
+describe('verified indexed QA orphan cleanup ownership', () => {
+  const checkpoint = () => Object.freeze({ version: 1, stage: 'indexed', threadId: 'owned-qa-thread',
+    evidence: Object.freeze({ status: 'ready_for_cold_reopen' }) });
+
+  it('claims the same verified checkpoint for failure cleanup only after its thread is absent', () => {
+    const saved = checkpoint();
+    const threads = new Map<string, { title: string }>();
+    expect(claimVerifiedAndroidQaRetrievalOrphanCheckpoint(saved, id => threads.get(id))).toBe(saved);
+    expect(saved.evidence.status).toBe('ready_for_cold_reopen');
+    expect(threads.size).toBe(0);
+  });
+
+  it.each(['Android document retrieval QA', 'Unrelated user conversation'])(
+    'preserves an existing %s thread and its checkpoint without claiming orphan cleanup', title => {
+      const saved = checkpoint();
+      const live = Object.freeze({ title });
+      const threads = new Map<string, { title: string }>([[saved.threadId, live]]);
+      expect(claimVerifiedAndroidQaRetrievalOrphanCheckpoint(saved, id => threads.get(id))).toBeUndefined();
+      expect(threads.get(saved.threadId)).toBe(live);
+      expect(saved.evidence.status).toBe('ready_for_cold_reopen');
+    },
+  );
+
+  it('revokes orphan cleanup when a thread appears before the cleanup/removal barrier', () => {
+    const saved = checkpoint();
+    const threads = new Map<string, { title: string }>();
+    expect(claimVerifiedAndroidQaRetrievalOrphanCheckpoint(saved, id => threads.get(id))).toBe(saved);
+    const newOwner = { title: 'Unrelated user conversation' };
+    threads.set(saved.threadId, newOwner);
+    expect(claimVerifiedAndroidQaRetrievalOrphanCheckpoint(saved, id => threads.get(id))).toBeUndefined();
+    expect(threads.get(saved.threadId)).toBe(newOwner);
+    expect(saved.evidence.status).toBe('ready_for_cold_reopen');
+  });
+
+  it.each([
+    { version: 2 }, { stage: 'deleted' }, { threadId: '' }, { threadId: ' ' },
+    { threadId: 'x'.repeat(257) },
+  ])('does not claim a non-indexed or malformed checkpoint: %j', change => {
+    const saved = { ...checkpoint(), ...change };
+    const getThread = jest.fn(() => undefined);
+    expect(claimVerifiedAndroidQaRetrievalOrphanCheckpoint(saved, getThread)).toBeUndefined();
+    expect(getThread).not.toHaveBeenCalled();
+  });
+});
 
 it('retains the actual source lease after a deadline and blocks continuation until native settlement', async () => {
   const native = deferred(); const count = counts(); const release = jest.fn(async () => undefined);

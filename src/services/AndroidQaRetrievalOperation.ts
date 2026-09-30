@@ -22,6 +22,20 @@ export function commitAndroidQaRetrievalToolModelSelection(
 }
 
 /**
+ * The caller must first verify the checkpoint/fixture and cold-process barriers.
+ * Missing ownership permits failure cleanup only; a live thread never grants it.
+ */
+export function claimVerifiedAndroidQaRetrievalOrphanCheckpoint<
+  T extends { version: number; stage: string; threadId: string },
+>(checkpoint: T, getThread: (threadId: string) => unknown): T | undefined {
+  if (checkpoint.version !== 1 || checkpoint.stage !== 'indexed'
+    || typeof checkpoint.threadId !== 'string' || !checkpoint.threadId.length
+    || checkpoint.threadId.length > 256 || checkpoint.threadId.trim() !== checkpoint.threadId
+    || getThread(checkpoint.threadId) != null) return undefined;
+  return checkpoint;
+}
+
+/**
  * Passive prompt counting may start after A is restored. Admit the next QA action
  * only after actual ownership clears; a deadline never proves native settlement.
  */

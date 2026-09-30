@@ -37,6 +37,9 @@ import {
   writeChatThreadRecord,
 } from '../../src/store/chatPersistence';
 import { getAppStorage, storage } from '../../src/store/storage';
+import { commitAndroidQaRetrievalToolModelSelection } from '../../src/services/AndroidQaRetrievalOperation';
+import { resolveLoraProfileForLoad } from '../../src/services/LoraProfileResolver';
+import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
 import { performanceMonitor } from '../../src/services/PerformanceMonitor';
 import * as privateStorageService from '../../src/services/storage';
 import {
@@ -1166,6 +1169,105 @@ describe('chatStore', () => {
     } finally {
       capture.restore();
     }
+  });
+
+  it('persists the adapter-free QA tool model transition and resolves its ordinary cold load profile', async () => {
+    const baseModelId = 'qa/smol-base';
+    const toolModel: ModelMetadata = {
+      id: 'qa/qwen-tools', name: 'Qwen tools', author: 'qa', size: 1000,
+      downloadUrl: 'https://huggingface.co/qa/qwen-tools/resolve/rev/qwen.gguf',
+      hfRevision: 'rev', resolvedFileName: 'qwen.gguf', localPath: 'qwen.gguf',
+      sha256: 'a'.repeat(64), accessState: ModelAccessState.PUBLIC,
+      isGated: false, isPrivate: false, fitsInRam: null,
+      lifecycleStatus: LifecycleStatus.DOWNLOADED, downloadProgress: 1,
+    };
+    const adapter = { artifactId: 'smol-adapter', artifactIdentity: 'smol-adapter-rev',
+      baseModelIdentity: 'smol-base-identity', scale: 0.5, sizeBytes: 64 };
+    const thread = { ...buildThread('qa-retrieval-cold-model', 10), modelId: baseModelId,
+      loraSnapshot: [adapter] };
+    const oldResponse: ChatMessage = { id: 'smol-lora-answer', role: 'assistant', content: 'Saved LoRA proof',
+      createdAt: 11, state: 'complete', modelId: baseModelId,
+      loadProfileSnapshot: { contextSize: 1024, gpuLayers: 0, kvCacheType: 'f16', loraAdapters: [adapter] } };
+    thread.messages.push(oldResponse);
+    seedPersistedChatThread(thread, 100);
+    const other = { ...buildThread('other-lora-chat', 20), loraSnapshot: [adapter] };
+    useChatStore.setState({ threads: { ...useChatStore.getState().threads, [other.id]: other } });
+    const paramsBefore = useChatStore.getState().getThread(thread.id)!.paramsSnapshot;
+
+    expect(commitAndroidQaRetrievalToolModelSelection(useChatStore.getState(), thread.id,
+      baseModelId, toolModel.id)).toBe(true);
+    expect(getThreadActiveModelId(useChatStore.getState().getThread(thread.id)!)).toBe(toolModel.id);
+    expect(useChatStore.getState().getThread(thread.id)?.loraSnapshot).toEqual([]);
+    const committedParams = useChatStore.getState().getThread(thread.id)!.paramsSnapshot;
+    expect(committedParams).toMatchObject(paramsBefore);
+    expect(useChatStore.getState().threads[other.id]).toBe(other);
+    expect(oldResponse.loadProfileSnapshot?.loraAdapters).toEqual([adapter]);
+    flushPendingChatPersistenceWrites('background');
+    expect(readChatThreadRecord(storage, thread.id)).toMatchObject({
+      ok: true, value: { thread: { activeModelId: toolModel.id, loraSnapshot: [] } },
+    });
+
+    useChatStore.setState({ threads: {}, activeThreadId: null });
+    await useChatStore.persist.rehydrate();
+    const reopened = useChatStore.getState().getThread(thread.id)!;
+    expect(useChatStore.getState().activeThreadId).toBe(thread.id);
+    expect(getThreadActiveModelId(reopened)).toBe(toolModel.id);
+    expect(reopened.loraSnapshot).toEqual([]);
+    expect(reopened.paramsSnapshot).toEqual(committedParams);
+    expect(reopened.messages.at(-2)?.loadProfileSnapshot?.loraAdapters).toEqual([adapter]);
+    expect(reopened.messages.at(-1)).toMatchObject({
+      kind: 'model_switch', switchFromModelId: baseModelId, switchToModelId: toolModel.id,
+    });
+    // This is the same snapshot passed by ordinary ChatScreen cold auto-load.
+    await expect(resolveLoraProfileForLoad(toolModel, reopened.loraSnapshot)).resolves.toEqual({
+      adapters: [], profile: [], sizeBytes: 0,
+    });
+  });
+
+  it('keeps the prior QA LoRA profile when its tool model selection is stale', () => {
+    const thread = { ...buildThread('qa-stale-model', 10), loraSnapshot: [{
+      artifactId: 'smol-adapter', artifactIdentity: 'revision', baseModelIdentity: 'base', scale: 0.5,
+    }] };
+    seedPersistedChatThread(thread, 100);
+    const before = useChatStore.getState().getThread(thread.id)!;
+    const durableBefore = storage.getString(getChatThreadStorageKey(thread.id));
+    expect(commitAndroidQaRetrievalToolModelSelection(useChatStore.getState(), thread.id,
+      'different-base', 'qa/qwen-tools')).toBe(false);
+    expect(useChatStore.getState().getThread(thread.id)).toBe(before);
+    expect(storage.getString(getChatThreadStorageKey(thread.id))).toBe(durableBefore);
+    expect(commitAndroidQaRetrievalToolModelSelection(useChatStore.getState(), 'missing-qa-thread',
+      'author/model-q4', 'qa/qwen-tools')).toBe(false);
+    expect(useChatStore.getState().getThread(thread.id)).toBe(before);
+  });
+
+  it('keeps the QA base and its adapter snapshot when the atomic tool transition cannot persist', () => {
+    const thread = { ...buildThread('qa-model-write-failure', 10), loraSnapshot: [{
+      artifactId: 'smol-adapter', artifactIdentity: 'revision', baseModelIdentity: 'base', scale: 0.5,
+    }] };
+    seedPersistedChatThread(thread, 100);
+    const before = useChatStore.getState().getThread(thread.id)!;
+    const durableBefore = readChatThreadRecord(storage, thread.id);
+    if (!durableBefore.ok) throw new Error('Expected the seeded durable QA thread');
+    const appStorage = getAppStorage() as unknown as { set: jest.Mock };
+    const originalSet = appStorage.set;
+    let failed = false;
+    appStorage.set = jest.fn(function failToolTransition(this: unknown, key: string, value: unknown) {
+      if (!failed && key === getChatThreadStorageKey(thread.id)) {
+        failed = true; throw new Error('QA transition persistence failure');
+      }
+      return originalSet.call(this, key, value);
+    });
+    try {
+      expect(commitAndroidQaRetrievalToolModelSelection(useChatStore.getState(), thread.id,
+        'author/model-q4', 'qa/qwen-tools')).toBe(false);
+    } finally {
+      appStorage.set = originalSet;
+    }
+    expect(failed).toBe(true);
+    expect(useChatStore.getState().getThread(thread.id)).toBe(before);
+    const durableAfter = readChatThreadRecord(storage, thread.id);
+    if (!durableAfter.ok) throw new Error('Expected the restored durable QA thread');
+    expect(durableAfter.value.thread).toEqual(durableBefore.value.thread);
   });
 
   it('rolls back both model and params when atomic model selection persistence fails', () => {

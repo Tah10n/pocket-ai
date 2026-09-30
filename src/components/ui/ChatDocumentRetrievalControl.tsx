@@ -20,6 +20,7 @@ export interface DocumentPreparationCardItem {
   cancelling?: boolean;
 }
 
+// NativeWind's native 14 dp rem makes min-h-11 38.5 dp; min-h-14 exceeds the 44 dp touch minimum.
 export function DocumentPreparationCard({ document, disabled, onPrepare, onCancel }: {
   document: DocumentPreparationCardItem;
   disabled: boolean;
@@ -43,7 +44,7 @@ export function DocumentPreparationCard({ document, disabled, onPrepare, onCance
           </Text>
         </Box>
         {isPreparing ? (
-          <Pressable className="min-h-11 justify-center px-2" accessibilityRole="button"
+          <Pressable className="min-h-14 justify-center px-2" accessibilityRole="button"
             accessibilityLabel={t('chat.retrieval.cancelDocument', { name: document.displayName })}
             disabled={document.cancelling} accessibilityState={{ disabled: document.cancelling === true }}
             testID={`document-preparation-cancel-${document.attachmentId}`}
@@ -51,7 +52,7 @@ export function DocumentPreparationCard({ document, disabled, onPrepare, onCance
             <Text colorRole="accent" textRole="action">{t(document.cancelling ? 'chat.retrieval.status.cancelling' : 'common.cancel')}</Text>
           </Pressable>
         ) : document.status !== 'ready' ? (
-          <Pressable className="min-h-11 justify-center px-2" accessibilityRole="button"
+          <Pressable className="min-h-14 justify-center px-2" accessibilityRole="button"
             accessibilityLabel={t('chat.retrieval.prepareDocument', { name: document.displayName })}
             accessibilityState={{ disabled }} disabled={disabled}
             testID={`document-preparation-start-${document.attachmentId}`}
@@ -92,7 +93,7 @@ export function ChatDocumentRetrievalControl({ settings, onChange, disabled = fa
   return (
     <Surface material={{ role: 'content', variant: 'raised' }} className="mx-3 mb-1 px-3"
       testID="chat-document-retrieval-control">
-      <Pressable className="min-h-11 flex-row items-center justify-between gap-2" accessibilityRole="button"
+      <Pressable className="min-h-14 flex-row items-center justify-between gap-2" accessibilityRole="button"
         accessibilityLabel={t('chat.retrieval.controls')} accessibilityState={{ expanded }}
         testID="chat-retrieval-expand" onPress={() => {
           if (!expanded) onExpand?.();
@@ -106,7 +107,7 @@ export function ChatDocumentRetrievalControl({ settings, onChange, disabled = fa
       {!expanded && preparingDocument ? <Box className="flex-row items-center gap-2 pb-2">
         <Text colorRole="secondary" textRole="caption" className="min-w-0 flex-1" numberOfLines={2}
           accessibilityLiveRegion="polite">{t(preparingDocument.cancelling ? 'chat.retrieval.cancellingDocument' : 'chat.retrieval.preparingDocument', { name: preparingDocument.displayName })}</Text>
-        <Pressable className="min-h-11 justify-center px-2" accessibilityRole="button"
+        <Pressable className="min-h-14 justify-center px-2" accessibilityRole="button"
           accessibilityLabel={t('chat.retrieval.cancelDocument', { name: preparingDocument.displayName })}
           disabled={preparingDocument.cancelling} accessibilityState={{ disabled: preparingDocument.cancelling === true }}
           testID="chat-retrieval-cancel-active" onPress={() => onCancel(preparingDocument.attachmentId)}>
@@ -121,11 +122,11 @@ export function ChatDocumentRetrievalControl({ settings, onChange, disabled = fa
         testID="chat-retrieval-details">
         <Box className="gap-2 pb-3">
           <Text colorRole="secondary" textRole="caption">{t('chat.retrieval.description')}</Text>
-          <ScreenSegmentedControl activeKey={settings.mode} disabled={disabled} density="compact" itemClassName="min-h-11"
+          <ScreenSegmentedControl activeKey={settings.mode} disabled={disabled} density="compact" itemClassName="min-h-14"
             options={(['lexical', 'hybrid'] as const).map(mode => ({ key: mode, label: t(`chat.retrieval.modes.${mode}`),
               testID: `chat-retrieval-mode-${mode}` }))}
             onChange={mode => onChange({ ...settings, mode: mode === 'hybrid' ? 'hybrid' : 'lexical' })} />
-          <Pressable className="min-h-11 justify-center" accessibilityRole="switch" disabled={disabled}
+          <Pressable className="min-h-14 justify-center" accessibilityRole="switch" disabled={disabled}
             accessibilityLabel={t('chat.retrieval.enableRerank')}
             accessibilityState={{ checked: settings.rerank, disabled }} testID="chat-retrieval-rerank"
             onPress={() => onChange({ ...settings, rerank: !settings.rerank })}>

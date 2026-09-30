@@ -20,7 +20,7 @@ import { retrieveDocumentCandidates, type DocumentRetrievalResult } from './Docu
 import type { RetrievalRuntimeOptions } from './DocumentRetrievalRuntime';
 import { documentIndexStore } from './DocumentIndexStore';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
-import { runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from './AndroidQaRetrievalOperation';
+import { commitAndroidQaRetrievalToolModelSelection, runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from './AndroidQaRetrievalOperation';
 import { AppError, LOCAL_TOOL_RUN_ERROR_CODES, type AppErrorCode } from './AppError';
 import { VERIFIED_RETRIEVAL_PROFILES } from './DocumentRetrievalProfiles';
 import { selectAuxiliaryModel } from './AuxiliaryModelService';
@@ -430,7 +430,8 @@ async function execute({ operationTimeoutMs = 600_000, downloadTimeoutMs = 900_0
       loadParamsOverride: { contextSize: 4096, backendPolicy: 'cpu', gpuLayers: 0, mtpEnabled: false, kvCacheType: 'f16',
         cacheTypeK: 'f16', cacheTypeV: 'f16', loraAdapters: [], parallelSlots: 1 } }), operationTimeoutMs);
     toolPending.modelLoaded = true; toolPending.operation = 'tool_thread_setup';
-    check(useChatStore.getState().switchThreadModel(threadId, ANDROID_QA_TOOL_FIXTURE.repository));
+    check(commitAndroidQaRetrievalToolModelSelection(useChatStore.getState(), threadId,
+      ANDROID_QA_DOCUMENT_MODEL_ID, ANDROID_QA_TOOL_FIXTURE.repository));
     // The semantic tool proof uses B. Native A+LoRA/B/C/A proof is independent;
     // adding C here exceeded the unchanged 10-second tool deadline on this emulator.
     useChatStore.getState().updateThreadDocumentRetrieval(threadId, { mode: 'hybrid', rerank: false });

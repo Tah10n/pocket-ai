@@ -1,9 +1,24 @@
 import { DocumentRetrievalError } from '../types/documentRetrieval';
 import type { RetrievalRuntimeOptions } from './DocumentRetrievalRuntime';
+import type { useChatStore } from '../store/chatStore';
 
 export interface AndroidQaRetrievalCounters {
   documentEmbeddings: number; queryEmbeddings: number; rerankCalls: number;
   nativeStarted: number; nativeSettled: number; restored: number; nativeIndices: number[];
+}
+
+/**
+ * The QA tool model is loaded without adapters. Commit that same profile through
+ * the ordinary atomic selection contract so cold auto-load sees no prior-base LoRA.
+ */
+export function commitAndroidQaRetrievalToolModelSelection(
+  store: Pick<ReturnType<typeof useChatStore.getState>, 'getThread' | 'commitThreadModelSelection'>,
+  threadId: string, expectedCurrentModelId: string, nextModelId: string,
+): boolean {
+  const thread = store.getThread(threadId);
+  return !!thread && store.commitThreadModelSelection({
+    threadId, expectedCurrentModelId, nextModelId, loraSnapshot: [], paramsSnapshot: thread.paramsSnapshot,
+  }).status === 'applied';
 }
 
 /**

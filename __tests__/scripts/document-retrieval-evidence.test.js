@@ -100,3 +100,33 @@ it('waits for the explicit warm barrier and refuses failed or still-running evid
   await expect(waitForDocumentRetrievalEvidence(async () => ({ ...receipt(), status: 'running' }), { timeoutMs: 2, now: () => clock, wait }))
     .rejects.toThrow('timed out');
 });
+
+
+it('retains finite failed LoRA operation progress and typed engine errors without private payloads', () => {
+  const input = receipt(); input.status = 'failed'; input.phase = 'lora_handoff'; input.failureCode = 'operation_failed';
+  Object.assign(input.steps.find(step => step.id === 'lora_handoff'), { status: 'failed',
+    operation: 'adapter_apply', operationErrorCode: 'engine_busy', nativeIdleBarrierWaited: true,
+    adapterFound: true, adapterApplied: false, queryEmbeddings: 0, nativeStarted: 0, nativeSettled: 0,
+    message: 'private native path /data/user/0/model.gguf', prompt: 'private prompt', probabilities: [0.5], vector: [1, 2] });
+  const step = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'lora_handoff');
+  expect(step).toMatchObject({ status: 'failed', operation: 'adapter_apply', operationErrorCode: 'engine_busy',
+    nativeIdleBarrierWaited: true, adapterFound: true, adapterApplied: false,
+    queryEmbeddings: 0, nativeStarted: 0, nativeSettled: 0 });
+  expect(JSON.stringify(step)).not.toMatch(/private|probabilities|vector|model\.gguf/);
+});
+
+it('retains known probability failures and drained counts while dropping arbitrary operation identifiers', () => {
+  const input = receipt(); const pending = input.steps.find(step => step.id === 'lora_handoff');
+  Object.assign(pending, { status: 'failed', operation: 'probability_compare',
+    operationErrorCode: 'probability_support_mismatch', adapterApplied: true, baselineProbeCompleted: true,
+    repeatProbeCompleted: true, handoffCompleted: true, restoredProbeCompleted: true,
+    queryEmbeddings: 1, rerankCalls: 1, nativeStarted: 2, nativeSettled: 2, restored: 1 });
+  expect(sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'lora_handoff')).toMatchObject({
+    operation: 'probability_compare', operationErrorCode: 'probability_support_mismatch',
+    adapterApplied: true, baselineProbeCompleted: true, repeatProbeCompleted: true,
+    handoffCompleted: true, restoredProbeCompleted: true, nativeStarted: 2, nativeSettled: 2, restored: 1 });
+  Object.assign(pending, { operation: '/private/prompt', operationErrorCode: '/private/model.gguf' });
+  const step = sanitizeDocumentRetrievalEvidence(input).steps.find(step => step.id === 'lora_handoff');
+  expect(step.operation).toBeUndefined(); expect(step.operationErrorCode).toBeUndefined();
+  expect(JSON.stringify(step)).not.toContain('/private/');
+});

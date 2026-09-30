@@ -1,4 +1,4 @@
-import { runAndroidQaRetrievalCorpusOperation, type AndroidQaRetrievalCounters } from '../../src/services/AndroidQaRetrievalOperation';
+import { runAndroidQaRetrievalCorpusOperation, waitForAndroidQaRetrievalIdle, type AndroidQaRetrievalCounters } from '../../src/services/AndroidQaRetrievalOperation';
 import type { RetrievalRuntimeOptions } from '../../src/services/DocumentRetrievalRuntime';
 
 const counts = (): AndroidQaRetrievalCounters => ({ documentEmbeddings: 0, queryEmbeddings: 0, rerankCalls: 0,
@@ -62,4 +62,39 @@ it('awaits an ordinary Stop drain before releasing the source and keeps stable r
   expect(count).toMatchObject({ nativeStarted: 1, nativeSettled: 1 });
   expect(selection).toHaveBeenCalledTimes(2); expect(release).toHaveBeenCalledTimes(1);
   expect(quarantine).not.toHaveBeenCalled();
+});
+
+
+it('waits for an actual passive native operation to settle before admitting adapter application', async () => {
+  const native = deferred(); let ownsNative = true;
+  const actual = native.promise.finally(() => { ownsNative = false; });
+  const apply = jest.fn(); const current = jest.fn();
+  const operation = waitForAndroidQaRetrievalIdle({ isIdle: () => !ownsNative, assertCurrent: current,
+    timeoutMs: 100, timeoutError: () => new Error('deadline') }).then(apply);
+  await jest.advanceTimersByTimeAsync(50);
+  expect(apply).not.toHaveBeenCalled(); expect(ownsNative).toBe(true);
+  native.resolve(); await actual; await jest.advanceTimersByTimeAsync(25); await operation;
+  expect(apply).toHaveBeenCalledTimes(1); expect(current).toHaveBeenCalled();
+});
+
+it('never admits adapter application after a passive-operation deadline without actual settlement', async () => {
+  const native = deferred(); let ownsNative = true;
+  const actual = native.promise.finally(() => { ownsNative = false; }); const apply = jest.fn();
+  const operation = waitForAndroidQaRetrievalIdle({ isIdle: () => !ownsNative, assertCurrent: () => undefined,
+    timeoutMs: 50, timeoutError: () => new Error('deadline') }).then(apply);
+  const rejected = expect(operation).rejects.toThrow('deadline');
+  await jest.advanceTimersByTimeAsync(50); await rejected;
+  expect(ownsNative).toBe(true); expect(apply).not.toHaveBeenCalled();
+  native.resolve(); await actual; await jest.advanceTimersByTimeAsync(25);
+  expect(apply).not.toHaveBeenCalled();
+});
+
+it('rejects stale selection during an idle wait without admitting adapter application', async () => {
+  let current = true; const apply = jest.fn();
+  const operation = waitForAndroidQaRetrievalIdle({ isIdle: () => false,
+    assertCurrent: () => { if (!current) throw new Error('stale'); },
+    timeoutMs: 100, timeoutError: () => new Error('deadline') }).then(apply);
+  const rejected = expect(operation).rejects.toThrow('stale');
+  current = false; await jest.advanceTimersByTimeAsync(25); await rejected;
+  expect(apply).not.toHaveBeenCalled();
 });

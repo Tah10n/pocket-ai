@@ -6,10 +6,19 @@ const ISSUES = ['model_unavailable', 'profile_unverified', 'index_not_ready', 'i
   'invalid_vector', 'invalid_ranking', 'native_failed', 'cancelled', 'ownership_changed', 'restore_failed'];
 const IDENTITIES = { fixtureId: fixture.fixtureId, runtimeVersion: fixture.runtimeVersion, backend: 'cpu',
   embeddingSha256: fixture.models[0].sha256, rerankerSha256: fixture.models[1].sha256 };
+const LORA_OPERATIONS = ['adapter_lookup', 'idle_barrier', 'adapter_apply', 'baseline_probe', 'repeat_probe', 'baseline_compare',
+  'retrieval_handoff', 'profile_check', 'restored_probe', 'probability_compare', 'prompt_count', 'answer_completion',
+  'answer_check', 'adapter_remove'];
+const OPERATION_ERRORS = ['action_failed', 'engine_not_ready', 'engine_busy', 'engine_recovery_required', 'engine_unloading',
+  'model_not_found', 'model_load_blocked', 'model_load_failed', 'model_incompatible', 'model_memory_insufficient',
+  'model_memory_warning', 'storage_private_unavailable', 'probabilities_missing', 'probabilities_invalid',
+  'probability_support_mismatch', 'probability_overlap_insufficient', 'probability_receipt_invalid'];
 const COUNTERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'nativeStarted', 'nativeSettled', 'restored'];
 const NUMBERS = [...COUNTERS, 'chunkCount', 'indexCount', 'nativeSteps', 'toolCalls', 'outputCharacters', 'promptTokens', 'tokensEvaluated'];
 const BOOLEANS = ['fixtureVerified', 'profileRestored', 'probabilityRestored', 'resultReturned', 'membershipMatched', 'locatorMatched',
-  'actualModeMatched', 'structuredValid', 'schemaAnswerMatched', 'cancelled', 'completionDrained', 'noReexecution', 'deleted', 'oldIdsRejected'];
+  'actualModeMatched', 'structuredValid', 'schemaAnswerMatched', 'cancelled', 'completionDrained', 'noReexecution', 'deleted', 'oldIdsRejected',
+  'nativeIdleBarrierWaited', 'adapterFound', 'adapterApplied', 'baselineProbeCompleted', 'repeatProbeCompleted',
+  'handoffCompleted', 'restoredProbeCompleted'];
 const isBoundedInteger = value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000;
 const statuses = ['passed', 'failed', 'not_run'];
 const safeNumbers = (input, keys) => Object.fromEntries(keys.filter(key => isBoundedInteger(input?.[key])).map(key => [key, input[key]]));
@@ -38,6 +47,10 @@ function sanitizeDocumentRetrievalEvidence(input) {
     steps: Array.isArray(input?.steps) ? input.steps.slice(0, STEP_IDS.length).map(step => ({
       id: STEP_IDS.includes(step?.id) ? step.id : 'unknown', status: statuses.includes(step?.status) ? step.status : 'unknown',
       ...safeNumbers(step, NUMBERS), nativeIndices: safeIndices(step?.nativeIndices),
+      ...(step?.id === 'lora_handoff' ? {
+        operation: LORA_OPERATIONS.includes(step?.operation) ? step.operation : undefined,
+        operationErrorCode: OPERATION_ERRORS.includes(step?.operationErrorCode) ? step.operationErrorCode : undefined,
+      } : {}),
       promptChunks: safeSelected(step?.promptChunks),
       ...Object.fromEntries(BOOLEANS.filter(key => typeof step?.[key] === 'boolean').map(key => [key, step[key]])),
     })) : [],

@@ -6,6 +6,23 @@ export interface AndroidQaRetrievalCounters {
   nativeStarted: number; nativeSettled: number; restored: number; nativeIndices: number[];
 }
 
+/**
+ * Passive prompt counting may start after A is restored. Admit the next QA action
+ * only after actual ownership clears; a deadline never proves native settlement.
+ */
+export async function waitForAndroidQaRetrievalIdle(options: {
+  isIdle: () => boolean; assertCurrent: () => void; timeoutMs: number; timeoutError: () => Error;
+}): Promise<void> {
+  const deadline = Date.now() + options.timeoutMs;
+  for (;;) {
+    options.assertCurrent();
+    if (options.isIdle()) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw options.timeoutError();
+    await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, remaining)));
+  }
+}
+
 /** A QA deadline cancels future work; actual native settlement owns the source lease. */
 export async function runAndroidQaRetrievalCorpusOperation<T>(
   loaded: { release: () => Promise<void> }, count: AndroidQaRetrievalCounters, assertSelectionCurrent: () => void,

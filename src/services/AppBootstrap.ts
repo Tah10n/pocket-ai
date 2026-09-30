@@ -34,6 +34,7 @@ import { safeJoinModelPath } from '../utils/safeFilePath';
 import { canRecalculateMemoryFitWithoutOptionalMtpDraft } from '../utils/modelSpeculativeDecoding';
 import { notificationService } from './NotificationService';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
+import { collectCommittedRetrievalDocumentScopes } from './DocumentRetrievalOwnership';
 import {
   ChatMessage,
   ChatThread,
@@ -714,14 +715,18 @@ export async function bootstrapAppBackground(): Promise<BootstrapBackgroundResul
 
     try {
       repairChatHistoryIndex();
-      // Only encrypted manifests/shard keys are reconciled; no startup indexing or native probe.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      (require('./DocumentIndexStore') as typeof import('./DocumentIndexStore')).documentIndexStore.reconcile();
       migrateLegacyChatHistory(settings);
       const cleanupResult = useChatStore.getState().pruneExpiredThreads(
         settings.chatRetentionDays,
       );
       await documentSessionContextCache.clearThreads(cleanupResult.threadIds);
+      // Recover deletions committed before a crash and attachments dropped during hydration.
+      // Only manifests/scopes are inspected; no startup indexing or native probe.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      (require('./DocumentIndexStore') as typeof import('./DocumentIndexStore')).documentIndexStore.reconcile(
+        useChatStore.persist.hasHydrated()
+          ? collectCommittedRetrievalDocumentScopes(useChatStore.getState().threads) : undefined,
+      );
       await notificationService.dismissInferenceNotificationsForThreads(
         cleanupResult.threadIds,
       );

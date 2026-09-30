@@ -162,6 +162,46 @@ describe('DocumentIndexStore private derived data', () => {
     await expect(finish(restarted.read('chat', 'attachment', createIdentity(), () => {}))).resolves.not.toBeNull();
   });
 
+  it.each(['deleted chat', 'hydration-dropped attachment'] as const)(
+    'removes a ready index left behind by a %s without deleting another owner of identical bytes', async reason => {
+      const { facade, data } = createPrivateStorage();
+      const beforeCrash = new DocumentIndexStore(() => facade);
+      const index = createIndex();
+      await finish(beforeCrash.publish('lost-chat', 'same-document', index, () => {}));
+      await finish(beforeCrash.publish('kept:chat', 'same:document', index, () => {}));
+      data.set('chat-history-unrelated', 'keep');
+      // History removal was already committed, but the process died before its
+      // separate index cleanup. Hydration now contains only these actual owners.
+      const hydratedOwners = new Map<string, ReadonlySet<string>>([
+        ['kept:chat', new Set(['same:document'])],
+        ...(reason === 'hydration-dropped attachment' ? [['lost-chat', new Set<string>()] as const] : []),
+      ]);
+      const restarted = new DocumentIndexStore(() => facade);
+      restarted.reconcile(hydratedOwners);
+      expect([...data.keys()].some(key => key.startsWith('document-retrieval-v1:lost-chat:'))).toBe(false);
+      expect(data.get('chat-history-unrelated')).toBe('keep');
+      await expect(finish(restarted.read('kept:chat', 'same:document', index.identity, () => {}))).resolves.toEqual(index);
+      // The orphan no longer occupies one of the four persistent document slots.
+      for (let index = 0; index < DOCUMENT_RETRIEVAL_LIMITS.documents - 1; index++) {
+        await finish(restarted.publish('new-chat', `new-${index}`, createIndex(), () => {}));
+      }
+    },
+  );
+
+  it('does not reconcile ownership while an unpublished generation still has an active writer', async () => {
+    const { facade, data } = createPrivateStorage();
+    const store = new DocumentIndexStore(() => facade);
+    const index = createIndex(DOCUMENT_RETRIEVAL_LIMITS.shardRows + 1);
+    const publication = store.publish('pending-chat', 'pending-document', index, () => {});
+    const firstShardKeys = [...data.keys()];
+    expect(firstShardKeys).toHaveLength(1);
+    expect(firstShardKeys[0]).not.toMatch(/:ready$/u);
+    store.reconcile(new Map());
+    expect([...data.keys()]).toEqual(firstShardKeys);
+    await finish(publication);
+    await expect(finish(store.read('pending-chat', 'pending-document', index.identity, () => {}))).resolves.toEqual(index);
+  });
+
   it('cancels a partial replacement without changing the previous ready index', async () => {
     const { facade, data } = createPrivateStorage();
     const store = new DocumentIndexStore(() => facade);

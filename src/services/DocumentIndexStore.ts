@@ -41,6 +41,15 @@ function scopeKey(threadId: string, attachmentId: string): string {
   return `${PREFIX}${encodeURIComponent(threadId)}:${encodeURIComponent(attachmentId)}:`;
 }
 
+function hasCommittedOwner(scope: string, owners: ReadonlyMap<string, ReadonlySet<string>>): boolean {
+  const parts = scope.slice(PREFIX.length, -1).split(':');
+  if (parts.length !== 2) return false;
+  try {
+    const [threadId, attachmentId] = parts.map(part => decodeURIComponent(part));
+    return scopeKey(threadId, attachmentId) === scope && owners.get(threadId)?.has(attachmentId) === true;
+  } catch { return false; }
+}
+
 export function validateDocumentVector(vector: readonly number[], dimensions?: number): number[] {
   if (!Array.isArray(vector) || !vector.length || vector.length > LIMITS.dimensions
     || (dimensions !== undefined && vector.length !== dimensions)) {
@@ -136,8 +145,8 @@ export class DocumentIndexStore {
     }
   }
 
-  /** Purges unfinished generations on restart without loading vectors or starting native work. */
-  public reconcile(): void {
+  /** Startup additionally purges ready generations whose committed document owner disappeared. */
+  public reconcile(committedOwners?: ReadonlyMap<string, ReadonlySet<string>>): void {
     if (this.activeWrite) return;
     const storage = this.storageProvider();
     const keys = storage.getAllKeys().filter(key => key.startsWith(PREFIX));
@@ -145,7 +154,7 @@ export class DocumentIndexStore {
     for (const key of keys.filter(value => value.endsWith('ready'))) {
       const scope = key.slice(0, -'ready'.length);
       const manifest = this.readManifest(storage, scope);
-      if (manifest) {
+      if (manifest && (!committedOwners || hasCommittedOwner(scope, committedOwners))) {
         retained.add(key);
         for (let shard = 0; shard < manifest.shards; shard++) retained.add(`${scope}${manifest.job}:${shard}`);
       }

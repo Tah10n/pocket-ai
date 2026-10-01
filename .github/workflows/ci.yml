@@ -7,25 +7,40 @@ on:
       - reopened
       - synchronize
       - edited
-      - labeled
-      - unlabeled
   push:
     branches:
       - main
+
+# Prose edits cannot cancel source CI. Push runs and other workflows stay independent.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null) }}
 
 permissions:
   contents: read
 
 jobs:
+  metadata:
+    name: CI metadata
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Acknowledge metadata update
+        run: echo "PR metadata updated. Source CI remains attached to the unchanged revision."
+
+  # Metadata runs use different check names: a skipped job must never replace a
+  # failed required verify check on the same SHA. Base edits still exercise CI.
   native-scope:
-    name: native scope
-    if: github.event_name == 'pull_request'
+    name: native scope${{ github.event.action == 'edited' && github.event.changes.base == null && ' (metadata)' || '' }}
+    if: github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     outputs:
       required: ${{ steps.scope.outputs.native == 'true' || startsWith(github.head_ref, 'release-please--') }}
+      diagnostics: ${{ steps.qa.outputs.diagnostics }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -43,10 +58,12 @@ jobs:
               - 'plugins/**'
               - 'modules/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/android-qa.yml'
               - '.github/workflows/release-please.yml'
               - 'scripts/android-*.js'
               - 'scripts/build-android-release.js'
               - 'scripts/verify-ci-gate-results.js'
+              - 'scripts/ci-android-qa-request.js'
               - 'scripts/verify-native-config.js'
               - 'src/design-system/components/ThemeStyleSelector.tsx'
               - 'src/design-system/materials/**'
@@ -68,8 +85,13 @@ jobs:
               - 'android/**'
               - 'ios/**'
 
+      - name: Detect explicit diagnostic request
+        id: qa
+        run: node scripts/ci-android-qa-request.js
+
   deterministic:
-    name: deterministic
+    name: deterministic${{ github.event.action == 'edited' && github.event.changes.base == null && ' (metadata)' || '' }}
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -100,7 +122,7 @@ jobs:
         run: npm run verify:release
 
   android-native-release:
-    name: android native release (API ${{ matrix.api-level }})
+    name: android native release (API ${{ matrix.api-level }})${{ github.event.action == 'edited' && github.event.changes.base == null && ' (metadata)' || '' }}
     if: needs.native-scope.outputs.required == 'true'
     needs:
       - native-scope
@@ -159,8 +181,17 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 4096
           script: npm run android:scenarios -- --emulator --pack native --apk-variant release --isolated-qa-install --fail-on-skip --bootstrap-screenshot && npm run verify:native-config -- --require-android
 
-      - name: Upload Android native diagnostics
+      - name: Upload Android native results
         if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-native-results-api-${{ matrix.api-level }}
+          if-no-files-found: warn
+          retention-days: 1
+          path: artifacts/android-scenarios/latest-report.json
+
+      - name: Upload Android native diagnostics
+        if: failure() || cancelled() || needs.native-scope.outputs.diagnostics == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: android-native-api-${{ matrix.api-level }}
@@ -171,7 +202,7 @@ jobs:
             artifacts/bootstrap-logcat.txt
 
   ios-native-release:
-    name: ios native release
+    name: ios native release${{ github.event.action == 'edited' && github.event.changes.base == null && ' (metadata)' || '' }}
     if: needs.native-scope.outputs.required == 'true'
     needs:
       - native-scope
@@ -240,8 +271,8 @@ jobs:
           CODE_SIGNING_ALLOWED=NO build
 
   verify:
-    name: verify
-    if: always()
+    name: verify${{ github.event.action == 'edited' && github.event.changes.base == null && ' (metadata)' || '' }}
+    if: always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
     needs:
       - native-scope
       - deterministic
@@ -267,129 +298,3 @@ jobs:
           ANDROID_NATIVE_RESULT: ${{ needs.android-native-release.result }}
           IOS_NATIVE_RESULT: ${{ needs.ios-native-release.result }}
         run: node scripts/verify-ci-gate-results.js
-
-  android-qa:
-    name: android (qa)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    needs: deterministic
-    if: >-
-      github.event_name == 'pull_request' &&
-      (
-        contains(github.event.pull_request.labels.*.name, 'run-android-checks') ||
-        contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-documents') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-native') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-catalog') ||
-        contains(github.event.pull_request.labels.*.name, 'android-pack-extended') ||
-        contains(github.event.pull_request.body, '- [x] Run Android checks') ||
-        contains(github.event.pull_request.body, '- [X] Run Android checks') ||
-        contains(github.event.pull_request.body, '- [x] Run Android document pack') ||
-        contains(github.event.pull_request.body, '- [X] Run Android document pack') ||
-        contains(github.event.pull_request.body, '- [x] Run Android scenarios') ||
-        contains(github.event.pull_request.body, '- [X] Run Android scenarios')
-      )
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Setup pinned Rust for Android
-        uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: aarch64-linux-android, x86_64-linux-android
-
-      - name: Cache AnyDoc Android dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: modules/pocket-anydoc/rust -> target
-
-      - name: Install pinned cargo-ndk
-        run: cargo install cargo-ndk --version 4.1.2 --locked
-
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Select Android QA pack
-        shell: bash
-        run: |
-          pack="runtime"
-
-          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-all') }}" == "true" ]]; then
-            pack="all"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-documents') || contains(github.event.pull_request.body, '- [x] Run Android document pack') || contains(github.event.pull_request.body, '- [X] Run Android document pack') }}" == "true" ]]; then
-            pack="documents"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-native') }}" == "true" ]]; then
-            pack="native"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-runtime') }}" == "true" ]]; then
-            pack="runtime"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-dependency-ui') }}" == "true" ]]; then
-            pack="dependency-ui"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-catalog') }}" == "true" ]]; then
-            pack="catalog"
-          elif [[ "${{ contains(github.event.pull_request.labels.*.name, 'android-pack-extended') || contains(github.event.pull_request.labels.*.name, 'run-android-scenarios') || contains(github.event.pull_request.body, '- [x] Run Android scenarios') || contains(github.event.pull_request.body, '- [X] Run Android scenarios') }}" == "true" ]]; then
-            pack="extended"
-          fi
-
-          echo "ANDROID_QA_PACK=$pack" >> "$GITHUB_ENV"
-          echo "Selected Android QA pack: $pack"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run Android scenarios
-        uses: reactivecircus/android-emulator-runner@v2
-        env:
-          ANDROID_SMOKE_APK_VARIANT: release
-          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
-        with:
-          api-level: 34
-          arch: x86_64
-          profile: pixel_6
-          disable-linux-hw-accel: false
-          disable-animations: true
-          emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 4096
-          script: npm run android:scenarios -- --emulator --pack "$ANDROID_QA_PACK" --fail-on-skip --bootstrap-screenshot
-
-      - name: Upload Android QA diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: android-qa
-          if-no-files-found: warn
-          retention-days: 1
-          path: |
-            artifacts/android-scenarios/**
-            artifacts/bootstrap-logcat.txt
-
-      - name: Upload Android QA APK
-        if: >-
-          success() &&
-          (contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
-           contains(github.event.pull_request.labels.*.name, 'android-pack-documents'))
-        uses: actions/upload-artifact@v7
-        with:
-          name: android-qa-apk
-          if-no-files-found: error
-          retention-days: 1
-          path: android/app/build/outputs/apk/release/app-release.apk
-

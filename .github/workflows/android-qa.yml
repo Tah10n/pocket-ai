@@ -1,0 +1,169 @@
+name: Android QA
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+
+# Concurrency belongs to requested jobs, so unrelated edits/labels cannot cancel QA.
+jobs:
+  request:
+    name: Android QA request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.request.outputs.run }}
+      pack: ${{ steps.request.outputs.pack }}
+      diagnostics: ${{ steps.request.outputs.diagnostics }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Select requested Android QA pack
+        id: request
+        run: node scripts/ci-android-qa-request.js
+
+  deterministic:
+    name: android QA deterministic
+    if: needs.request.outputs.run == 'true'
+    needs: request
+    concurrency:
+      group: android-qa-deterministic-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup pinned Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache AnyDoc Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify (Rust + typecheck + lint + tests)
+        run: npm run verify:release
+
+  android-qa:
+    name: android (qa)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    needs:
+      - request
+      - deterministic
+    if: needs.request.outputs.run == 'true'
+    concurrency:
+      group: android-qa-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      ANDROID_QA_PACK: ${{ needs.request.outputs.pack }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup pinned Rust for Android
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Cache AnyDoc Android dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: modules/pocket-anydoc/rust -> target
+
+      - name: Install pinned cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Android scenarios
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_SMOKE_APK_VARIANT: release
+          POCKET_AI_ALLOW_DEBUG_RELEASE_SIGNING: "true"
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_6
+          disable-linux-hw-accel: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -memory 4096
+          script: npm run android:scenarios -- --emulator --pack "$ANDROID_QA_PACK" --fail-on-skip --bootstrap-screenshot
+
+      - name: Upload Android QA results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-qa-results
+          if-no-files-found: warn
+          retention-days: 1
+          path: artifacts/android-scenarios/latest-report.json
+
+      - name: Upload Android QA diagnostics
+        if: failure() || cancelled() || needs.request.outputs.diagnostics == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-qa
+          if-no-files-found: warn
+          retention-days: 1
+          path: |
+            artifacts/android-scenarios/**
+            artifacts/bootstrap-logcat.txt
+
+      - name: Upload Android QA APK
+        if: >-
+          success() &&
+          (contains(github.event.pull_request.labels.*.name, 'android-pack-all') ||
+           contains(github.event.pull_request.labels.*.name, 'android-pack-documents'))
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-qa-apk
+          if-no-files-found: error
+          retention-days: 1
+          path: android/app/build/outputs/apk/release/app-release.apk

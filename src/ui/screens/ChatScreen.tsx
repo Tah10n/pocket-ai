@@ -2948,7 +2948,9 @@ const ChatScreenContent = () => {
         if (isAndroidQaDocumentModelBootstrapEnabled()
             && (getAndroidQaInferenceSmokeEvidence().status !== 'idle'
                 || getAndroidQaDocumentRetrievalEvidence().status !== 'idle'
-                || getAndroidQaDocumentRetrievalEvidence().requiresForceStop)) {
+                || getAndroidQaDocumentRetrievalEvidence().requiresForceStop
+                || getAndroidQaDocumentIndexPublicationEvidence().status !== 'idle'
+                || getAndroidQaDocumentIndexPublicationEvidence().requiresForceStop)) {
             return;
         }
         if (

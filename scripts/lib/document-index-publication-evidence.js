@@ -3,6 +3,22 @@ const STEP_IDS = ['four_indexes', 'fifth_new_chat', 'fifth_existing_chat', 'stop
 const NUMBERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'nativeStarted', 'nativeSettled', 'restored',
   'indexCount', 'callbackCount', 'userCount', 'assistantCount', 'outputCharacters', 'tokensPredicted', 'tokensEvaluated'];
 const BOOLEANS = ['noReady', 'oldIndexesRetained', 'historyRetained', 'attachmentsRetained', 'profileRestored', 'loraApplied', 'completionDrained', 'cancelled', 'answerMatched'];
+const SEED_OPERATIONS = ['seed_create', 'seed_idle_before', 'seed_parse', 'seed_prepare', 'seed_idle_after', 'seed_ready', 'seed_owners', 'seed_native_counts'];
+const SEED_COUNTERS = ['documentEmbeddings', 'queryEmbeddings', 'rerankCalls', 'nativeStarted', 'nativeSettled', 'restored'];
+const SEED_ERRORS = ['model_unavailable', 'profile_unverified', 'index_not_ready', 'index_stale', 'quota_exceeded', 'input_too_large',
+  'invalid_vector', 'invalid_ranking', 'native_failed', 'cancelled', 'ownership_changed', 'restore_failed', 'cache_write_failed',
+  'engine_busy', 'engine_unloading', 'model_load_failed', 'engine_recovery_required'];
+function sanitizeSeedProgress(input) {
+  if (!input || !SEED_OPERATIONS.includes(input.operation) || !Number.isSafeInteger(input.seedIndex)
+    || input.seedIndex < 1 || input.seedIndex > 4 || !Number.isSafeInteger(input.completedSeeds)
+    || input.completedSeeds < 0 || input.completedSeeds > 4) return undefined;
+  return { seedIndex: input.seedIndex, completedSeeds: input.completedSeeds, operation: input.operation,
+    ...Object.fromEntries(SEED_COUNTERS.filter(key => Number.isSafeInteger(input[key]) && input[key] >= 0 && input[key] <= 1000000)
+      .map(key => [key, input[key]])),
+    ...(typeof input.completionDrained === 'boolean' ? { completionDrained: input.completionDrained } : {}),
+    ...(SEED_ERRORS.includes(input.operationErrorCode) ? { operationErrorCode: input.operationErrorCode } : {}),
+  };
+}
 function sanitizeDocumentIndexPublicationEvidence(input) {
   return { schemaVersion: input?.schemaVersion === 1 ? 1 : null,
     fixtureId: input?.fixtureId === fixture.fixtureId ? fixture.fixtureId : null,
@@ -12,6 +28,7 @@ function sanitizeDocumentIndexPublicationEvidence(input) {
     phase: [...STEP_IDS, 'idle', 'preconditions', 'complete'].includes(input?.phase) ? input.phase : 'unknown',
     requiresForceStop: typeof input?.requiresForceStop === 'boolean' ? input.requiresForceStop : null,
     failureCode: ['precondition', 'assertion', 'operation_failed', 'timeout', 'cleanup_failed'].includes(input?.failureCode) ? input.failureCode : undefined,
+    seedProgress: sanitizeSeedProgress(input?.seedProgress),
     steps: Array.isArray(input?.steps) ? input.steps.slice(0, STEP_IDS.length).map(step => ({
       id: STEP_IDS.includes(step?.id) ? step.id : 'unknown',
       status: ['passed', 'failed', 'not_run'].includes(step?.status) ? step.status : 'unknown',
@@ -67,7 +84,11 @@ async function waitForDocumentIndexPublicationEvidence(readEvidence, options = {
   const deadline = now() + (options.timeoutMs ?? 1800000);
   while (now() < deadline) {
     const evidence = sanitizeDocumentIndexPublicationEvidence(await readEvidence());
-    if (evidence.status === 'failed') throw new Error(`Document index publication failed: phase=${evidence.phase}, code=${evidence.failureCode || 'unknown'}.`);
+    if (evidence.status === 'failed') {
+      const seed = evidence.seedProgress;
+      const diagnostic = seed ? ` seed=${seed.seedIndex}, completed=${seed.completedSeeds}, operation=${seed.operation}, error=${seed.operationErrorCode || 'unknown'}.` : '';
+      throw new Error(`Document index publication failed: phase=${evidence.phase}, code=${evidence.failureCode || 'unknown'}.${diagnostic}`);
+    }
     if (evidence.status === (options.readyForColdReopen ? 'ready_for_cold_reopen' : 'passed')) return validateDocumentIndexPublicationEvidence(evidence, options);
     await wait(1000);
   }

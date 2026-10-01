@@ -41,6 +41,33 @@ describe('publication QA host evidence boundary', () => {
     const safe = JSON.stringify(sanitizeDocumentIndexPublicationEvidence(input));
     expect(safe).not.toMatch(/private|vector|threadId|documentText/u);
   });
+  it('retains bounded seed checkpoints and real counts while stripping private diagnostic details', async () => {
+    const seedProgress = { seedIndex: 2, completedSeeds: 1, operation: 'seed_prepare', documentEmbeddings: 1,
+      queryEmbeddings: 0, rerankCalls: 0, nativeStarted: 1, nativeSettled: 1, restored: 1,
+      completionDrained: true, operationErrorCode: 'native_failed', threadId: 'private-chat', error: '/private/file',
+      vector: [0.2], text: 'private source', score: 0.5 };
+    const input = { ...completeEvidence(), status: 'failed', phase: 'four_indexes', failureCode: 'operation_failed', seedProgress };
+    const safe = sanitizeDocumentIndexPublicationEvidence(input);
+    expect(safe.seedProgress).toEqual({ seedIndex: 2, completedSeeds: 1, operation: 'seed_prepare', documentEmbeddings: 1,
+      queryEmbeddings: 0, rerankCalls: 0, nativeStarted: 1, nativeSettled: 1, restored: 1,
+      completionDrained: true, operationErrorCode: 'native_failed' });
+    expect(JSON.stringify(safe)).not.toMatch(/private|vector|threadId|score/u);
+    await expect(waitForDocumentIndexPublicationEvidence(() => input)).rejects.toThrow(
+      'seed=2, completed=1, operation=seed_prepare, error=native_failed');
+    expect(() => validateDocumentIndexPublicationEvidence(input)).toThrow();
+  });
+  it.each([
+    ['seedIndex', 0], ['seedIndex', 5], ['completedSeeds', -1], ['completedSeeds', 5], ['operation', '/private/operation'],
+  ])('drops invalid seed checkpoint %s', (field, value) => {
+    const seedProgress = { seedIndex: 1, completedSeeds: 0, operation: 'seed_prepare', [field]: value };
+    expect(sanitizeDocumentIndexPublicationEvidence({ ...completeEvidence(), seedProgress }).seedProgress).toBeUndefined();
+  });
+  it('drops unbounded seed counts and non-allowlisted error strings', () => {
+    const seedProgress = { seedIndex: 1, completedSeeds: 0, operation: 'seed_prepare', documentEmbeddings: Infinity,
+      queryEmbeddings: -1, nativeStarted: 1000001, nativeSettled: 0.5, operationErrorCode: '/private/native-error' };
+    expect(sanitizeDocumentIndexPublicationEvidence({ ...completeEvidence(), seedProgress }).seedProgress)
+      .toEqual({ seedIndex: 1, completedSeeds: 0, operation: 'seed_prepare' });
+  });
   it('rejects failed and timed-out evidence rather than calling a deadline completion', async () => {
     await expect(waitForDocumentIndexPublicationEvidence(() => ({ ...completeEvidence(), status: 'failed', phase: 'stop', failureCode: 'timeout' })))
       .rejects.toThrow('phase=stop, code=timeout');

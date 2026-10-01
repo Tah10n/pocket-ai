@@ -7,7 +7,7 @@ import { useChatStore, flushPendingChatPersistenceWrites } from '../store/chatSt
 import { getAppStorage } from '../store/storage';
 import { DEFAULT_PRESET_SNAPSHOT, createChatId, type ChatThread } from '../types/chat';
 import type { ChatDocumentAttachmentDraft } from '../types/attachments';
-import { documentIndexFingerprint } from '../types/documentRetrieval';
+import { documentIndexFingerprint, DocumentRetrievalError, type DocumentRetrievalIssue } from '../types/documentRetrieval';
 import { getCompanionBindingIdentity, getCompanionSourceIdentity } from '../utils/modelArtifacts';
 import { getAssistantPresentation } from '../utils/chatPresentation';
 import { fileUriToNativePath } from '../utils/safeFilePath';
@@ -15,13 +15,13 @@ import { ANDROID_QA_DOCUMENT_MODEL_ID, ANDROID_QA_DOCUMENT_MODEL_SHA256, isAndro
 import { prepareAndroidQaDocumentRetrievalModels } from './AndroidQaDocumentRetrieval';
 import { androidQaHistoryDigest } from './AndroidQaLocalToolsRecovery';
 import { observeAndroidQaDocumentIndexNativeOperations, type AndroidQaDocumentIndexCounters } from './AndroidQaDocumentIndexObservation';
+import { AppError } from './AppError';
 import { getAndroidQaEffectiveProfileIdentity } from './AndroidQaStage3';
 import { chatAttachmentStorageService, materializeDocumentDraftsForProcessing } from './ChatAttachmentStorageService';
 import { chatAttachmentProcessorRegistry } from './ChatAttachmentProcessorRegistry';
 import { documentIndexStore } from './DocumentIndexStore';
-import { loadOwnedRetrievalDocuments } from './DocumentRetrievalDocuments';
 import { getOwnedRetrievalDocuments } from './DocumentRetrievalOwnership';
-import { retrieveDocumentCandidates } from './DocumentRetrievalService';
+import { prepareDocumentRetrieval } from './DocumentRetrievalPreparation';
 import { getDocumentRetrievalStatus } from './DocumentRetrievalStatus';
 import { documentSessionContextCache } from './DocumentSessionContextCache';
 import { hasActiveChatGenerationWork } from './ChatGenerationService';
@@ -42,10 +42,17 @@ type Receipt = Partial<AndroidQaDocumentIndexCounters> & {
   noReady?: boolean; oldIndexesRetained?: boolean; historyRetained?: boolean; attachmentsRetained?: boolean;
   profileRestored?: boolean; loraApplied?: boolean; completionDrained?: boolean; cancelled?: boolean; answerMatched?: boolean;
 };
+type SeedOperation = 'seed_create' | 'seed_idle_before' | 'seed_parse' | 'seed_prepare' | 'seed_idle_after'
+  | 'seed_ready' | 'seed_owners' | 'seed_native_counts';
+type SeedProgress = AndroidQaDocumentIndexCounters & {
+  seedIndex: number; completedSeeds: number; operation: SeedOperation; completionDrained?: boolean;
+  operationErrorCode?: DocumentRetrievalIssue | 'engine_busy' | 'engine_unloading' | 'model_load_failed' | 'engine_recovery_required';
+};
 export type AndroidQaDocumentIndexPublicationEvidence = {
   schemaVersion: 1; fixtureId: string; runtimeVersion: string; backend: 'cpu';
   status: 'idle' | 'running' | 'ready_for_cold_reopen' | 'passed' | 'failed';
   phase: StepId | 'idle' | 'preconditions' | 'complete'; steps: Receipt[]; requiresForceStop: boolean;
+  seedProgress?: SeedProgress;
   failureCode?: 'precondition' | 'assertion' | 'operation_failed' | 'timeout' | 'cleanup_failed';
 };
 type Owner = { threadId: string; attachmentId: string; fingerprint: string; historyDigest: string };
@@ -86,7 +93,13 @@ const renderHook = () => new Promise<void>(resolve => setTimeout(resolve, 50));
 const pass = (receipt: Omit<Receipt, 'status'>) => publish({ steps: [...evidence.steps, { ...receipt, status: 'passed' }] });
 function fail(error: unknown): void {
   const failedPhase = evidence.phase;
+  const operationErrorCode = error instanceof DocumentRetrievalError ? error.code
+    : error instanceof AppError && ['engine_busy', 'engine_unloading', 'model_load_failed', 'engine_recovery_required'].includes(error.code)
+      ? error.code as SeedProgress['operationErrorCode'] : undefined;
   publish({ status: 'failed', failureCode: error instanceof QaFailure ? error.code : 'operation_failed',
+    ...(failedPhase === 'four_indexes' && evidence.seedProgress ? { seedProgress: {
+      ...evidence.seedProgress, completionDrained: idle(), operationErrorCode,
+    } } : {}),
     requiresForceStop: error instanceof QaFailure ? error.forceStop || !idle() : !idle(),
     steps: [...evidence.steps, ...ANDROID_QA_DOCUMENT_INDEX_STEPS.filter(id => !evidence.steps.some(step => step.id === id))
       .map(id => ({ id, status: id === failedPhase ? 'failed' as const : 'not_run' as const }))] });
@@ -125,13 +138,16 @@ async function attachmentsUnchanged(threadIds: readonly string[]): Promise<boole
   }
   return true;
 }
-async function seedIndex(documentIndex: number, ownedThreads: string[], timeoutMs: number): Promise<Owner> {
+async function seedIndex(documentIndex: number, ownedThreads: string[], timeoutMs: number,
+  recordProgress: (operation: SeedOperation) => void): Promise<Owner> {
+  recordProgress('seed_create');
   check(useChatStore.getState().beginNewThread());
   const threadId = useChatStore.getState().createThread({ modelId: ANDROID_QA_DOCUMENT_MODEL_ID, title: TITLE,
     presetId: null, presetSnapshot: DEFAULT_PRESET_SNAPSHOT, paramsSnapshot: { temperature: 0, topP: 1, maxTokens: 48, seed: 42 } });
-  ownedThreads.push(threadId); await renderHook(); await waitIdle(timeoutMs);
+  ownedThreads.push(threadId); await renderHook(); recordProgress('seed_idle_before'); await waitIdle(timeoutMs);
   const draft = await copyFixtureDraft(documentIndex); let committed = false;
   try {
+    recordProgress('seed_parse');
     const messageId = createChatId();
     const attachment = materializeDocumentDraftsForProcessing({ threadId, messageId, drafts: [draft] })[0];
     const parsed = await chatAttachmentProcessorRegistry.processDocumentTextAttachment(attachment, { query: '', maxChars: 16000, maxChunks: 64 });
@@ -143,16 +159,16 @@ async function seedIndex(documentIndex: number, ownedThreads: string[], timeoutM
         sourceCharCount: parsed.sourceCharCount, chunkCount: parsed.chunkCount, parserId: parsed.parserId,
         parserVersion: parsed.parserVersion, exactAnyDocCommit: parsed.exactAnyDocCommit } }] });
     committed = true;
-    const revision = useChatStore.getState().inferenceRevision;
-    const assertCurrent = () => check(useChatStore.getState().activeThreadId === threadId
-      && useChatStore.getState().inferenceRevision === revision);
-    const loaded = await loadOwnedRetrievalDocuments(threadId, [attachment.id], { query: '', assertCurrent,
-      maxFileBytes: 10 * 1024 * 1024, maxChars: 16000, maxChunks: 64 });
-    // Resource cleanup follows actual settlement, including after a host deadline.
-    const actual = retrieveDocumentCandidates('', loaded.entries, { mode: 'hybrid', rerank: false },
-      { threadId, prepareMissing: true, preparationOnly: true, assertCurrent }).finally(loaded.release);
-    const result = await bounded(actual, timeoutMs); check(!result.fallbackReason && !result.cacheFailures?.length);
+    useChatStore.getState().updateThreadDocumentRetrieval(threadId, { mode: 'hybrid', rerank: false });
+    check(useChatStore.getState().getThread(threadId)?.documentRetrieval?.mode === 'hybrid');
+    recordProgress('seed_prepare');
+    // The production preparation owner retains revision, Stop and document/native
+    // resource ownership through the real drain; a host deadline cannot release it.
+    await bounded(prepareDocumentRetrieval(threadId, [attachment.id]), timeoutMs);
+    recordProgress('seed_idle_after');
     await waitIdle(timeoutMs);
+    recordProgress('seed_ready');
+    check(getDocumentRetrievalStatus(threadId).preparation?.phase === 'ready');
     const identity = documentIndexStore.inspect(threadId, attachment.id); check(identity);
     return { threadId, attachmentId: attachment.id, fingerprint: documentIndexFingerprint(identity), historyDigest: threadHistory(threadId) };
   } finally { if (!committed) await chatAttachmentStorageService.discardDocumentDraft(draft); }
@@ -261,9 +277,18 @@ async function execute(getActions: () => AndroidQaDocumentIndexHookActions): Pro
     check(llmEngineService.getState().diagnostics?.backendMode === 'cpu');
     publish({ phase: 'four_indexes' });
     const seedObservation = observeAndroidQaDocumentIndexNativeOperations();
-    try { for (let index = 0; index < 4; index++) owners.push(await seedIndex(index, ownedThreads, timeoutMs)); }
-    finally { seedObservation.release(); }
-    await assertOwners(owners); check(seedObservation.counters.documentEmbeddings === 4 && seedObservation.counters.queryEmbeddings === 0
+    const recordSeedProgress = (seedIndex: number, operation: SeedOperation) => publish({ seedProgress: {
+      seedIndex, completedSeeds: owners.length, operation, ...seedObservation.counters,
+    } });
+    try { for (let index = 0; index < 4; index++) {
+      owners.push(await seedIndex(index, ownedThreads, timeoutMs, operation => recordSeedProgress(index + 1, operation)));
+      recordSeedProgress(index + 1, 'seed_ready');
+    } } finally {
+      if (evidence.seedProgress) publish({ seedProgress: { ...evidence.seedProgress, ...seedObservation.counters } });
+      seedObservation.release();
+    }
+    recordSeedProgress(4, 'seed_owners'); await assertOwners(owners);
+    recordSeedProgress(4, 'seed_native_counts'); check(seedObservation.counters.documentEmbeddings === 4 && seedObservation.counters.queryEmbeddings === 0
       && seedObservation.counters.rerankCalls === 0 && seedObservation.counters.nativeStarted === seedObservation.counters.nativeSettled);
     pass({ id: 'four_indexes', ...seedObservation.counters, indexCount: 4, oldIndexesRetained: true });
     const base = registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID)!;

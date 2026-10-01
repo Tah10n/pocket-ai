@@ -337,7 +337,7 @@ describe('DocumentIndexStore private derived data', () => {
       data.set(key, value as string);
     });
     const replacement = store.publish('chat', 'attachment', createIndex(9), () => {});
-    const rejection = expect(replacement).rejects.toThrow('private storage write failed');
+    const rejection = expect(replacement).rejects.toMatchObject({ code: 'cache_write_failed' });
     await jest.runAllTimersAsync();
     await rejection;
     await expect(finish(store.read('chat', 'attachment', previous.identity, () => {}))).resolves.toEqual(previous);
@@ -351,6 +351,27 @@ describe('DocumentIndexStore private derived data', () => {
     await expect(store.publish('chat', 'attachment', createIndex(), () => {})).rejects.toThrow();
     expect(data.size).toBe(0);
     await expect(finish(store.publish('chat', 'attachment', createIndex(), () => {}))).resolves.toBeUndefined();
+  });
+
+  it.each([false, true])('undoes its own ready record when a failed write mutated it (replacement: %s)', async replacement => {
+    const { facade, data } = createPrivateStorage();
+    const store = new DocumentIndexStore(() => facade);
+    const previous = createIndex();
+    if (replacement) await finish(store.publish('chat', 'attachment', previous, () => {}));
+    const before = new Map(data);
+    facade.set.mockImplementation((key, value) => {
+      data.set(key, value as string);
+      if (key.endsWith(':ready')) throw new Error('write reported failure after mutation');
+    });
+    const pending = store.publish('chat', 'attachment', createIndex(9), () => {});
+    const rejection = expect(pending).rejects.toMatchObject({ code: 'cache_write_failed' });
+    await jest.runAllTimersAsync();
+    await rejection;
+    expect(data).toEqual(before);
+    const restarted = new DocumentIndexStore(() => facade);
+    restarted.reconcile();
+    await expect(finish(restarted.read('chat', 'attachment', previous.identity, () => {})))
+      .resolves.toEqual(replacement ? previous : null);
   });
 
   it('propagates private storage read blocking and prevents publication after ownership changed', async () => {

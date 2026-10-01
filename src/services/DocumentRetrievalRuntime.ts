@@ -16,6 +16,7 @@ import { llmEngineService, type AuxiliaryContextSequence, type AuxiliaryContextR
 import { getLlamaBuildInfo } from './LlamaRuntimeAdapter';
 import { DOCUMENT_RETRIEVAL_LIMITS as LIMITS, DocumentRetrievalError } from '../types/documentRetrieval';
 import { validateDocumentVector } from './DocumentIndexStore';
+import { isAndroidQaDocumentIndexObservationActive, recordAndroidQaDocumentIndexNativeOperation } from './AndroidQaDocumentIndexObservation';
 
 // Identifies the guarded source patch shipped with this implementation, not package BuildInfo alone.
 export const DOCUMENT_RETRIEVAL_SOURCE_PATCH_SHA256 = '5093423b44e29c70a6757c61a59bfa986af7f7909b8e63c9333359bda1253cf4';
@@ -123,7 +124,10 @@ export async function runDocumentRetrievalRuntime<T>(
     };
     try {
       return await llmEngineService.runWithAuxiliarySequence({
-        signal: options.signal, runOwner: options.runOwner, onRestored: options.onRestored,
+        signal: options.signal, runOwner: options.runOwner, onRestored: isAndroidQaDocumentIndexObservationActive() ? receipt => {
+          options.onRestored?.(receipt);
+          recordAndroidQaDocumentIndexNativeOperation('restored');
+        } : options.onRestored,
         isSelectionCurrent: () => {
           try {
             (options.assertSelectionCurrent ?? options.assertCurrent)();
@@ -190,8 +194,11 @@ export async function embedDocumentRetrievalText(
   try { getRetrievalInputTokenCount(profile, tokens.tokens.length); } catch { throw new DocumentRetrievalError('input_too_large'); }
   claimNativePooledEmbeddingDimension(context.model.nEmbd);
   observe?.({ operation: 'embedding', phase: 'started', kind, inputCount: 1 });
-  const result = await context.embedding(input, { embd_normalize: 2 }).finally(() => {
+  const native = context.embedding(input, { embd_normalize: 2 });
+  recordAndroidQaDocumentIndexNativeOperation({ operation: 'embedding', phase: 'started', kind });
+  const result = await native.finally(() => {
     observe?.({ operation: 'embedding', phase: 'settled', kind, inputCount: 1 });
+    recordAndroidQaDocumentIndexNativeOperation({ operation: 'embedding', phase: 'settled', kind });
   });
   check();
   return validateDocumentVector(result.embedding, profile.dimensions);

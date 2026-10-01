@@ -3,6 +3,7 @@ import type { ChatAttachment } from '../types/attachments';
 import {
   DocumentRetrievalError, sanitizeDocumentRetrievalSettings, DOCUMENT_RETRIEVAL_LIMITS as LIMITS,
   type DocumentRetrievalSettings, type DocumentIndexIdentity, type DocumentRetrievalIssue,
+  type DocumentIndexCacheFailure, type DocumentIndexPublicationResult,
 } from '../types/documentRetrieval';
 import {
   resolveNativeDocumentSelectionQuery, rankDocumentContextCandidates, type DocumentContextChunk,
@@ -19,9 +20,10 @@ import {
 } from './DocumentRetrievalRanking';
 import { fileUriToNativePath } from '../utils/safeFilePath';
 import { normalizeSha256Digest } from '../utils/sha256';
-import { isPrivateStorageWritable } from './storage';
+import { isPrivateStorageWritable, PrivateStorageUnavailableError } from './storage';
 import { assertOwnedRetrievalDocument, getOwnedRetrievalDocuments } from './DocumentRetrievalOwnership';
-import { updateDocumentRetrievalStatus } from './DocumentRetrievalStatus';
+import { getDocumentRetrievalStatus, updateDocumentRetrievalStatus } from './DocumentRetrievalStatus';
+import { recordAndroidQaDocumentIndexNativeOperation } from './AndroidQaDocumentIndexObservation';
 
 export type DocumentRetrievalEntry = {
   attachment: Extract<ChatAttachment, { kind: 'document' }>;
@@ -32,29 +34,100 @@ export interface DocumentRetrievalResult {
   candidates: DocumentRetrievalCandidate[];
   actualMode: ActualDocumentRetrievalMode;
   fallbackReason?: DocumentRetrievalIssue;
+  cacheFailures?: DocumentIndexCacheFailure[];
   /** Provisional new attachments are published only after their real chat ownership commits. */
   preparedIndexes: Map<string, PrivateDocumentIndex>;
+}
+
+/** File access loss cannot authorize reuse of already selected document text. */
+async function readCurrentDocumentSha256(attachment: DocumentRetrievalEntry['attachment'], check: () => void): Promise<string | undefined> {
+  check();
+  let digest: string;
+  try { digest = await RNFS.hash(fileUriToNativePath(attachment.localUri), 'sha256'); } catch (error) {
+    check();
+    if (error instanceof PrivateStorageUnavailableError) throw error;
+    throw new DocumentRetrievalError('ownership_changed');
+  }
+  check();
+  return normalizeSha256Digest(digest);
+}
+
+/** Recheck all selected owners and source bytes at the final answer handoff. */
+export async function assertDocumentRetrievalSourcesCurrent(
+  threadId: string, entries: readonly DocumentRetrievalEntry[], assertCurrent: () => void,
+): Promise<void> {
+  for (const entry of entries) {
+    const attachment = getOwnedRetrievalDocuments(threadId).find(item => item.id === entry.attachment.id);
+    if (!attachment) throw new DocumentRetrievalError('ownership_changed');
+    const check = () => {
+      assertCurrent();
+      if (!isPrivateStorageWritable()) throw new DocumentRetrievalError('ownership_changed');
+      assertOwnedRetrievalDocument(threadId, attachment);
+    };
+    const actualSha = await readCurrentDocumentSha256(attachment, check);
+    if (!actualSha || actualSha !== normalizeSha256Digest(entry.result.contentSha256)) {
+      documentIndexStore.remove(threadId, attachment.id);
+      throw new DocumentRetrievalError('ownership_changed');
+    }
+  }
+  assertCurrent();
 }
 
 /** A draft's vectors gain a durable scope only after the real message transaction commits. */
 export async function publishPreparedDocumentIndexes(
   threadId: string, entries: readonly DocumentRetrievalEntry[], preparedIndexes: Map<string, PrivateDocumentIndex>,
   assertCurrent: () => void,
-): Promise<void> {
-  for (const [attachmentId, index] of preparedIndexes) {
+): Promise<DocumentIndexPublicationResult> {
+  const result: DocumentIndexPublicationResult = { publishedAttachmentIds: [], cacheFailures: [] };
+  const sourceChecks: (() => Promise<void>)[] = [];
+  const current = () => {
     assertCurrent();
-    const entry = entries.find(item => item.attachment.id === attachmentId);
-    const attachment = getOwnedRetrievalDocuments(threadId).find(item => item.id === attachmentId);
-    if (!entry || !attachment || normalizeSha256Digest(entry.result.contentSha256) !== index.identity.documentSha256) {
-      throw new DocumentRetrievalError('ownership_changed');
+    if (!isPrivateStorageWritable()) throw new DocumentRetrievalError('ownership_changed');
+  };
+  try {
+    for (const [attachmentId, index] of preparedIndexes) {
+      current();
+      const entry = entries.find(item => item.attachment.id === attachmentId);
+      const attachment = getOwnedRetrievalDocuments(threadId).find(item => item.id === attachmentId);
+      if (!entry || !attachment || normalizeSha256Digest(entry.result.contentSha256) !== index.identity.documentSha256) {
+        throw new DocumentRetrievalError('ownership_changed');
+      }
+      const check = () => { current(); assertOwnedRetrievalDocument(threadId, attachment); };
+      const checkSource = async () => {
+        check();
+        const actualSha = await readCurrentDocumentSha256(attachment, check);
+        if (actualSha !== index.identity.documentSha256) {
+          documentIndexStore.remove(threadId, attachmentId);
+          throw new DocumentRetrievalError('ownership_changed');
+        }
+      };
+      sourceChecks.push(checkSource);
+      await checkSource();
+      try {
+        await documentIndexStore.publish(threadId, attachmentId, index, check);
+        result.publishedAttachmentIds.push(attachmentId);
+      } catch (error) {
+        check();
+        if (!(error instanceof DocumentRetrievalError)
+          || (error.code !== 'quota_exceeded' && error.code !== 'cache_write_failed')) throw error;
+        result.cacheFailures.push({ attachmentId, reason: error.code });
+      }
+      // Publication yields between shards: the source must still authorize the selected context.
+      await checkSource();
     }
-    const check = () => { assertCurrent(); assertOwnedRetrievalDocument(threadId, attachment); };
-    check();
-    const actualSha = normalizeSha256Digest(await RNFS.hash(fileUriToNativePath(attachment.localUri), 'sha256'));
-    check();
-    if (actualSha !== index.identity.documentSha256) throw new DocumentRetrievalError('ownership_changed');
-    await documentIndexStore.publish(threadId, attachmentId, index, check);
-    preparedIndexes.delete(attachmentId);
+    for (const checkSource of sourceChecks) await checkSource();
+    current();
+    if (result.publishedAttachmentIds.length || result.cacheFailures.length) {
+      const settledIds = new Set([...result.publishedAttachmentIds, ...result.cacheFailures.map(item => item.attachmentId)]);
+      updateDocumentRetrievalStatus(threadId, { cacheFailures: [
+        ...(getDocumentRetrievalStatus(threadId).cacheFailures ?? []).filter(item => !settledIds.has(item.attachmentId)),
+        ...result.cacheFailures,
+      ] });
+    }
+    return result;
+  } finally {
+    // Both safe failure and fatal cancellation release all provisional vector buffers.
+    preparedIndexes.clear();
   }
 }
 export interface DocumentRetrievalOptions extends RetrievalRuntimeOptions {
@@ -105,7 +178,10 @@ export async function retrieveDocumentCandidates(
   check();
   const baseline: DocumentRetrievalResult = { candidates: lexical.slice(0, LIMITS.candidateCount), actualMode: 'lexical', preparedIndexes: new Map() };
   const report = (result: DocumentRetrievalResult): DocumentRetrievalResult => {
-    if (options.threadId && !options.preparationOnly) updateDocumentRetrievalStatus(options.threadId, { lastSearch: { actualMode: result.actualMode, fallbackReason: result.fallbackReason } });
+    if (options.threadId && !options.preparationOnly) updateDocumentRetrievalStatus(options.threadId, {
+      lastSearch: { actualMode: result.actualMode, fallbackReason: result.fallbackReason },
+      cacheFailures: result.cacheFailures ?? [],
+    });
     return result;
   };
   // The original outline/start/middle/end overview remains authoritative, including empty queries.
@@ -130,8 +206,7 @@ export async function retrieveDocumentCandidates(
     for (const entry of entries) {
       const documentSha256 = normalizeSha256Digest(entry.result.contentSha256);
       if (!documentSha256) throw new DocumentRetrievalError('index_stale');
-      const actualSha = normalizeSha256Digest(await RNFS.hash(fileUriToNativePath(entry.attachment.localUri), 'sha256'));
-      check();
+      const actualSha = await readCurrentDocumentSha256(entry.attachment, check);
       if (actualSha !== documentSha256) throw new DocumentRetrievalError('ownership_changed');
     }
     if (embedding) {
@@ -220,13 +295,19 @@ export async function retrieveDocumentCandidates(
           for (const candidate of shortlist) await validateDocumentRerankPair(context, reranker.profile, query, candidate.chunk.text, checkNative);
           checkNative();
           // No native parallel API and no Promise.all: one bounded serial cross-encoder call.
+          const operation = context.rerank(query, shortlist.map(candidate => candidate.chunk.text), {});
           options.onNativeOperation?.({ operation: 'rerank', phase: 'started', inputCount: shortlist.length });
+          recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'started' });
           let settled = false;
-          const result = await context.rerank(query, shortlist.map(candidate => candidate.chunk.text), {}).then(value => {
+          const result = await operation.then(value => {
             settled = true;
             options.onNativeOperation?.({ operation: 'rerank', phase: 'settled', inputCount: shortlist.length, indices: value.map(item => item.index) });
+            recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'settled' });
             return value;
-          }).finally(() => { if (!settled) options.onNativeOperation?.({ operation: 'rerank', phase: 'settled', inputCount: shortlist.length }); });
+          }).finally(() => { if (!settled) {
+            options.onNativeOperation?.({ operation: 'rerank', phase: 'settled', inputCount: shortlist.length });
+            recordAndroidQaDocumentIndexNativeOperation({ operation: 'rerank', phase: 'settled' });
+          } });
           checkNative();
           const ranked = mapDocumentRerankResults(shortlist, result);
           const retained = new Set(ranked.map(candidate => `${candidate.attachmentId}:${candidate.chunk.index}`));
@@ -235,16 +316,19 @@ export async function retrieveDocumentCandidates(
       }
     });
     check();
-    for (const document of documents) {
-      if (preparedIndexes.has(document.attachment.id) && options.threadId && document.attachment.threadId === options.threadId) {
-        await documentIndexStore.publish(options.threadId, document.attachment.id, document.index!, check);
-        preparedIndexes.delete(document.attachment.id);
-      }
+    const committedIndexes = new Map([...preparedIndexes].filter(([attachmentId]) =>
+      documents.some(document => document.attachment.id === attachmentId && document.attachment.threadId === options.threadId)));
+    const publication = options.threadId && committedIndexes.size
+      ? await publishPreparedDocumentIndexes(options.threadId, entries, committedIndexes, check) : undefined;
+    for (const document of documents) if (options.threadId && document.attachment.threadId === options.threadId) {
+      preparedIndexes.delete(document.attachment.id);
     }
     check();
-    return report({ candidates, preparedIndexes, actualMode: options.preparationOnly ? 'lexical' : embedding ? (reranker ? 'hybrid+rerank' : 'hybrid') : 'lexical+rerank' });
+    return report({ candidates, preparedIndexes, cacheFailures: publication?.cacheFailures,
+      actualMode: options.preparationOnly ? 'lexical' : embedding ? (reranker ? 'hybrid+rerank' : 'hybrid') : 'lexical+rerank' });
   } catch (error) {
     check();
+    if (error instanceof PrivateStorageUnavailableError) throw error;
     if (error instanceof DocumentRetrievalError && ['cancelled', 'ownership_changed', 'restore_failed'].includes(error.code)) throw error;
     // Failure after native admission is recoverable only through a confirmed exact-A receipt.
     if (nativeStarted && !restored) throw error;

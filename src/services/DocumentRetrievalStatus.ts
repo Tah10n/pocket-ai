@@ -1,6 +1,7 @@
-import type { DocumentRetrievalIssue } from '../types/documentRetrieval';
+import type { DocumentRetrievalIssue, DocumentIndexCacheFailure } from '../types/documentRetrieval';
 
 export type DocumentRetrievalStatus = {
+  cacheFailures?: DocumentIndexCacheFailure[];
   preparation?: { phase: 'preparing' | 'cancelling' | 'ready' | 'cancelled' | 'error'; attachmentId?: string; processed: number; total: number; reason?: DocumentRetrievalIssue };
   lastSearch?: { actualMode: 'lexical' | 'hybrid' | 'lexical+rerank' | 'hybrid+rerank'; fallbackReason?: DocumentRetrievalIssue };
 };

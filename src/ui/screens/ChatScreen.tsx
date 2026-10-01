@@ -9,6 +9,8 @@ import { cancelDocumentRetrievalPreparation, getDocumentRetrievalPreparationDocu
 import { getDocumentRetrievalStatus, subscribeDocumentRetrievalStatus } from '@/services/DocumentRetrievalStatus';
 import { checkAndroidQaDocumentRetrievalAfterColdReopen, getAndroidQaDocumentRetrievalEvidence,
     runAndroidQaDocumentRetrieval, subscribeAndroidQaDocumentRetrieval } from '@/services/AndroidQaDocumentRetrieval';
+import { checkAndroidQaDocumentIndexPublicationAfterColdReopen, getAndroidQaDocumentIndexPublicationEvidence,
+    runAndroidQaDocumentIndexPublication, subscribeAndroidQaDocumentIndexPublication, type AndroidQaDocumentIndexHookActions } from '@/services/AndroidQaDocumentIndexPublication';
 import { advancedGenerationIdentity } from '@/utils/generationControls';
 import { isThreadLoraProfileReady, loraExecutionIdentity } from '@/utils/chatLoraProfile';
 import { runPromptDiagnostic } from '@/services/PromptDiagnosticsService';
@@ -746,7 +748,7 @@ function AndroidQaGenerationEvidenceSurface({
 }: {
     documentDraftCount: number;
     topInset: number;
-    getHookActions: () => AndroidQaLocalToolsHookActions;
+    getHookActions: () => AndroidQaLocalToolsHookActions & AndroidQaDocumentIndexHookActions;
     isDocumentPreparationActive?: boolean;
 }) {
     if (!isAndroidQaGenerationEvidenceEnabled()) {
@@ -770,7 +772,7 @@ function EnabledAndroidQaGenerationEvidenceSurface({
 }: {
     documentDraftCount: number;
     topInset: number;
-    getHookActions: () => AndroidQaLocalToolsHookActions;
+    getHookActions: () => AndroidQaLocalToolsHookActions & AndroidQaDocumentIndexHookActions;
     isDocumentPreparationActive?: boolean;
 }) {
     const { t } = useTranslation();
@@ -788,7 +790,10 @@ function EnabledAndroidQaGenerationEvidenceSurface({
     const stage3Evidence = useSyncExternalStore(subscribeAndroidQaStage3, getAndroidQaStage3Evidence, getAndroidQaStage3Evidence);
     const documentRetrievalQaEvidence = useSyncExternalStore(subscribeAndroidQaDocumentRetrieval,
         getAndroidQaDocumentRetrievalEvidence, getAndroidQaDocumentRetrievalEvidence);
-    const isRetrievalQaBusy = documentRetrievalQaEvidence.status === 'running' || isDocumentPreparationActive;
+    const documentIndexPublicationQaEvidence = useSyncExternalStore(subscribeAndroidQaDocumentIndexPublication,
+        getAndroidQaDocumentIndexPublicationEvidence, getAndroidQaDocumentIndexPublicationEvidence);
+    const isRetrievalQaBusy = documentRetrievalQaEvidence.status === 'running'
+        || documentIndexPublicationQaEvidence.status === 'running' || isDocumentPreparationActive;
     const isAnyNativeQaBusy = isRetrievalQaBusy || recoveryEvidence.status === 'running' || localToolsEvidence.status === 'running'
         || stage3Evidence.status === 'running' || resourceEvidence.status === 'running' || inferenceEvidence.status === 'running';
     const [backgroundTaskState, setBackgroundTaskState] = useState<
@@ -907,6 +912,14 @@ function EnabledAndroidQaGenerationEvidenceSurface({
                             onPress={() => void checkAndroidQaDocumentRetrievalAfterColdReopen()}><ButtonText>QA search cold reuse</ButtonText></Button>
                         <View accessible collapsable={false} testID="chat-qa-document-retrieval-evidence"
                             accessibilityLabel={JSON.stringify(documentRetrievalQaEvidence)} style={styles.androidQaEvidenceMarker} />
+                        <Button size="xs" action="secondary" testID="chat-qa-run-document-index-publication"
+                            disabled={documentIndexPublicationQaEvidence.status !== 'idle' || isAnyNativeQaBusy}
+                            onPress={() => void runAndroidQaDocumentIndexPublication(getHookActions)}><ButtonText>QA index publication</ButtonText></Button>
+                        <Button size="xs" action="secondary" testID="chat-qa-check-document-index-publication-cold"
+                            disabled={documentIndexPublicationQaEvidence.status !== 'idle' || isAnyNativeQaBusy}
+                            onPress={() => void checkAndroidQaDocumentIndexPublicationAfterColdReopen(getHookActions)}><ButtonText>QA index cold retention</ButtonText></Button>
+                        <View accessible collapsable={false} testID="chat-qa-document-index-publication-evidence"
+                            accessibilityLabel={JSON.stringify(documentIndexPublicationQaEvidence)} style={styles.androidQaEvidenceMarker} />
                     </>
                 ) : null}
                 <Button
@@ -1053,7 +1066,7 @@ const ChatScreenContent = () => {
         regenerateLastResponse,
         startNewChat,
     } = useChatSession();
-    const qaHookActions = useRef<AndroidQaLocalToolsHookActions>({ appendUserMessage, regenerateFromUserMessage,
+    const qaHookActions = useRef<AndroidQaLocalToolsHookActions & AndroidQaDocumentIndexHookActions>({ appendUserMessage, regenerateFromUserMessage,
         regenerateLastResponse, stopGeneration });
     qaHookActions.current = { appendUserMessage, regenerateFromUserMessage, regenerateLastResponse, stopGeneration };
     const getQaHookActions = useCallback(() => qaHookActions.current, []);
@@ -3297,6 +3310,7 @@ const ChatScreenContent = () => {
                     embeddingModelName={embeddingModel?.name} rerankerModelName={rerankerModel?.name}
                     documents={retrievalDocuments} actualMode={retrievalStatus.lastSearch?.actualMode}
                     fallbackReason={retrievalStatus.lastSearch?.fallbackReason}
+                    cacheFailures={retrievalStatus.cacheFailures}
                     onExpand={() => {
                         if (activeThread && useChatStore.getState().activeThreadId === activeThread.id) {
                             void refreshDocumentRetrievalPreparationMetadata(activeThread.id);

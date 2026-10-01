@@ -5,6 +5,7 @@ import {
   documentIndexFingerprint, type DocumentIndexIdentity,
 } from '../types/documentRetrieval';
 import { utf8Bytes } from './LocalToolLimits';
+import { isPrivateStorageWritable, PrivateStorageUnavailableError } from './storage';
 
 export interface DocumentIndexRow {
   /** Index stays the original structural index; start/end refer to its UTF-16 text. */
@@ -145,6 +146,16 @@ export class DocumentIndexStore {
     }
   }
 
+  /** Only a failed derived-record write can become an ordinary cache failure. */
+  private writeRecord(storage: AppStorageFacade, key: string, value: string, check: () => void): void {
+    try { storage.set(key, value); } catch (error) {
+      check();
+      if (error instanceof PrivateStorageUnavailableError || error instanceof DocumentRetrievalError) throw error;
+      if (!isPrivateStorageWritable()) throw new DocumentRetrievalError('ownership_changed');
+      throw new DocumentRetrievalError('cache_write_failed');
+    }
+  }
+
   /** Startup additionally purges ready generations whose committed document owner disappeared. */
   public reconcile(committedOwners?: ReadonlyMap<string, ReadonlySet<string>>): void {
     if (this.activeWrite) return;
@@ -238,12 +249,15 @@ export class DocumentIndexStore {
     const job = `${Date.now().toString(36)}-${(++this.sequence).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     const written: string[] = [];
     let committed = false;
+    let previousReady: string | undefined;
+    let proposedReady: string | undefined;
     try {
       const manifests = storage.getAllKeys().filter(key => key.startsWith(PREFIX) && key.endsWith('ready'));
       if (!manifests.includes(`${scope}ready`) && manifests.length >= LIMITS.documents) {
         throw new DocumentRetrievalError('quota_exceeded');
       }
       const oldManifest = this.readManifest(storage, scope);
+      previousReady = storage.getString(`${scope}ready`);
       const otherBytes = manifests.reduce((sum, key) => {
         const existing = this.readManifest(storage, key.slice(0, -'ready'.length));
         return sum + (existing?.bytes ?? 0);
@@ -268,19 +282,36 @@ export class DocumentIndexStore {
         }
         const key = `${scope}${job}:${written.length}`;
         written.push(key);
-        storage.set(key, raw);
+        this.writeRecord(storage, key, raw, () => this.assertCurrent(scope, epoch, globalEpoch, check));
         await yieldControl();
       }
       this.assertCurrent(scope, epoch, globalEpoch, check);
       const manifest: IndexManifest = { version: 1, scope, job, identity: index.identity,
         fingerprint: documentIndexFingerprint(index.identity), rowCount: index.rows.length, shards: written.length, bytes };
-      storage.set(`${scope}ready`, JSON.stringify(manifest));
+      proposedReady = JSON.stringify(manifest);
+      this.writeRecord(storage, `${scope}ready`, proposedReady, () => this.assertCurrent(scope, epoch, globalEpoch, check));
+      this.assertCurrent(scope, epoch, globalEpoch, check);
       committed = true;
       if (oldManifest) for (let shard = 0; shard < oldManifest.shards; shard++) {
         try { storage.remove(`${scope}${oldManifest.job}:${shard}`); } catch {
           // The new manifest is already atomic; the next reconciliation retries orphan cleanup.
         }
       }
+    } catch (error) {
+      // A facade can throw after changing the ready record. Undo only our own generation.
+      if (proposedReady && storage.getString(`${scope}ready`) === proposedReady) {
+        try {
+          if (previousReady === undefined) storage.remove(`${scope}ready`);
+          else storage.set(`${scope}ready`, previousReady);
+        } catch (rollbackError) {
+          // A thrown write may itself have completed the rollback; verify before continuing.
+          if (storage.getString(`${scope}ready`) !== previousReady) {
+            if (rollbackError instanceof PrivateStorageUnavailableError) throw rollbackError;
+            throw new DocumentRetrievalError('ownership_changed');
+          }
+        }
+      }
+      throw error;
     } finally {
       try {
         if (!committed) for (const key of written) {

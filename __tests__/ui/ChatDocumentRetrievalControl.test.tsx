@@ -107,3 +107,13 @@ it.each([['en', en], ['ru', ru]] as const)('shows selected model names and actua
   expect(view.getByText(locale.chat.retrieval.rerankerModel.replace('{{name}}', 'Reranker C'))).toBeTruthy();
   expect(view.getByText(locale.chat.retrieval.description)).toBeTruthy();
 });
+
+it.each(['quota_exceeded', 'cache_write_failed'] as const)('reports an unsaved %s cache without relabeling Hybrid context as a fallback', reason => {
+  const view = render(<ChatDocumentRetrievalControl {...base} settings={{ mode: 'hybrid', rerank: true }}
+    actualMode="hybrid+rerank" cacheFailures={[{ attachmentId: 'd1', reason }]} />);
+  const actual = view.getByTestId('chat-retrieval-actual-mode').props.children.join('');
+  expect(actual).toContain('chat.retrieval.actualMode');
+  expect(actual).not.toContain('chat.retrieval.fallback');
+  expect(view.getByTestId('chat-retrieval-cache-unsaved')).toBeTruthy();
+  expect(base.onPrepare).not.toHaveBeenCalled();
+});

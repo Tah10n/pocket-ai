@@ -11,6 +11,7 @@ import { llmEngineService, type AuxiliaryRestoreReceipt } from '../services/LLME
 import {
   applyDocumentRetrievalCandidates,
   publishPreparedDocumentIndexes,
+  assertDocumentRetrievalSourcesCurrent,
   retrieveDocumentCandidates,
   type DocumentRetrievalOptions,
 } from '../services/DocumentRetrievalService';
@@ -4946,6 +4947,19 @@ export const useChatSession = () => {
 
       appendMessage(threadId, userMessage);
       didAppendUserMessage = true;
+      const committedSendRevision = useChatStore.getState().inferenceRevision;
+      const assertCommittedSendCurrent = () => {
+        generationWork.assertCurrent();
+        assertPrivateStorageWritableForChatMutation();
+        assertThreadModelExecutionInvariant(threadId, targetModelId);
+        assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
+        if (useChatStore.getState().inferenceRevision !== committedSendRevision) {
+          throw new AppError('action_failed', 'The conversation settings changed after the message was saved.');
+        }
+      };
+      // History now owns persisted images, even if derived-cache publication fails or is cancelled.
+      ownedMaterializedDocumentImageDrafts = transientMaterializedDocumentImages;
+      options.onUserMessageAppended?.(userMessage);
       const retrievalMetadata = processedDocumentAttachments.candidates.find(entry => entry.result.retrieval)?.result.retrieval;
       if (!existingThreadAtStart && retrievalMetadata) {
         updateDocumentRetrievalStatus(threadId, { lastSearch: retrievalMetadata });
@@ -4956,14 +4970,8 @@ export const useChatSession = () => {
       }
       await publishPreparedDocumentIndexes(
         threadId, persistedDocumentSelection.selectedCandidates, pendingDocumentIndexes,
-        () => {
-          generationWork.assertCurrent();
-          assertPrivateStorageWritableForChatMutation();
-          assertThreadModelExecutionInvariant(threadId, targetModelId);
-          assertPromptPreparationEngineSnapshotCurrent(promptPreparationEngineSnapshot);
-        },
+        assertCommittedSendCurrent,
       );
-      ownedMaterializedDocumentImageDrafts = transientMaterializedDocumentImages;
       if (documentAttachmentDrafts.length > 0) {
         const persistedDocumentById = new Map(messageAttachments.flatMap((attachment) => (
           isGenericChatAttachment(attachment) && attachment.kind === 'document'
@@ -4980,7 +4988,14 @@ export const useChatSession = () => {
           ownedSessionContextSources.delete(source);
         }
       }
-      options.onUserMessageAppended?.(userMessage);
+
+      if (documentRetrievalSettings.mode === 'hybrid' || documentRetrievalSettings.rerank) {
+        const committedDocumentIds = collectThreadDocumentAttachmentIds(useChatStore.getState().getThread(threadId));
+        await assertDocumentRetrievalSourcesCurrent(threadId,
+          processedDocumentAttachments.candidates.filter(entry => committedDocumentIds.has(entry.attachment.id)),
+          assertCommittedSendCurrent);
+      }
+      assertCommittedSendCurrent();
 
       const assistantMessageId = createAssistantPlaceholder(threadId, threadModelId);
       const transientDocumentImageAttachments = materializeAttachmentDraftsForMessage({
@@ -5011,31 +5026,34 @@ export const useChatSession = () => {
       }
       throw error;
     } finally {
-      releaseAndroidQaGenerationGate(documentPreparationQaOperationId);
-      unsubscribeDocumentCancellation();
-      documentPreparationAbortControllersRef.current.delete(documentAbortController);
-      if (ownedMaterializedDocumentImageDrafts.length > 0) {
-        try {
-          await chatAttachmentStorageService.discardDrafts(
-            ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
-          );
-        } catch (error) {
-          console.warn('[ChatSession] Failed to discard unpersisted document image drafts', {
-            ...getPrivacySafeErrorLogDetails(error),
-          });
+      pendingDocumentIndexes.clear();
+      try {
+        releaseAndroidQaGenerationGate(documentPreparationQaOperationId);
+        unsubscribeDocumentCancellation();
+        documentPreparationAbortControllersRef.current.delete(documentAbortController);
+        if (ownedMaterializedDocumentImageDrafts.length > 0) {
+          try {
+            await chatAttachmentStorageService.discardDrafts(
+              ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+            );
+          } catch (error) {
+            console.warn('[ChatSession] Failed to discard unpersisted document image drafts', {
+              ...getPrivacySafeErrorLogDetails(error),
+            });
+          }
+          ownedMaterializedDocumentImageDrafts = [];
         }
-        ownedMaterializedDocumentImageDrafts = [];
+        await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
+        pocketAnydocAssetLeases.clear();
+        await releaseDocumentSessionContextSources(ownedSessionContextSources);
+        ownedSessionContextSources.clear();
+        for (const release of retrievalDocumentReleases) await release();
+        if (isMountedRef.current) {
+          setIsPreparingDocuments(false);
+        }
+      } finally {
+        try { releaseInteractivePromptPreparation?.(); } finally { generationWork.finish(); }
       }
-      await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
-      pocketAnydocAssetLeases.clear();
-      await releaseDocumentSessionContextSources(ownedSessionContextSources);
-      ownedSessionContextSources.clear();
-      for (const release of retrievalDocumentReleases) await release();
-      if (isMountedRef.current) {
-        setIsPreparingDocuments(false);
-      }
-      releaseInteractivePromptPreparation?.();
-      generationWork.finish();
     }
   }, [
     appendMessage,
@@ -5125,32 +5143,40 @@ export const useChatSession = () => {
         return;
       }
       const reconciliation = (async () => {
-        if (result.status === 'committed' && committedRegeneratedDocuments) {
-          const committedThread = useChatStore.getState().getThread(activeThread.id);
-          const committedAttachments = committedThread?.messages.flatMap(message => message.attachments ?? []) ?? [];
-          for (const { attachment, result: processedResult } of committedRegeneratedDocuments.selectedCandidates) {
-            const ownedAttachment = committedAttachments.find(item => (
-              item.id === attachment.id && isGenericChatAttachment(item) && item.kind === 'document'
-            )) as Extract<ChatAttachment, { kind: 'document' }> | undefined;
-            if (ownedAttachment && processedResult.sessionContextSource) {
-              await documentSessionContextCache.put(activeThread.id, ownedAttachment, processedResult);
-              ownedSessionContextSources.delete(processedResult.sessionContextSource);
+        const committedRevision = useChatStore.getState().inferenceRevision;
+        try {
+          if (result.status === 'committed' && committedRegeneratedDocuments) {
+            const committedThread = useChatStore.getState().getThread(activeThread.id);
+            const committedAttachments = committedThread?.messages.flatMap(message => message.attachments ?? []) ?? [];
+            for (const { attachment, result: processedResult } of committedRegeneratedDocuments.selectedCandidates) {
+              const ownedAttachment = committedAttachments.find(item => (
+                item.id === attachment.id && isGenericChatAttachment(item) && item.kind === 'document'
+              )) as Extract<ChatAttachment, { kind: 'document' }> | undefined;
+              if (ownedAttachment && processedResult.sessionContextSource) {
+                await documentSessionContextCache.put(activeThread.id, ownedAttachment, processedResult);
+                ownedSessionContextSources.delete(processedResult.sessionContextSource);
+              }
             }
+            const committedIds = collectThreadDocumentAttachmentIds(committedThread);
+            for (const attachmentId of pendingDocumentIndexes.keys()) {
+              if (!committedIds.has(attachmentId)) pendingDocumentIndexes.delete(attachmentId);
+            }
+            await publishPreparedDocumentIndexes(activeThread.id, preparedIndexEntries, pendingDocumentIndexes, () => {
+              generationWork.assertCurrent();
+              assertPrivateStorageWritableForChatMutation();
+              assertThreadModelExecutionInvariant(activeThread.id, activeModelId);
+              if (useChatStore.getState().inferenceRevision !== committedRevision) {
+                throw new AppError('action_failed', 'The conversation settings changed after branch commit.');
+              }
+            });
           }
-          const committedIds = collectThreadDocumentAttachmentIds(committedThread);
-          for (const attachmentId of pendingDocumentIndexes.keys()) {
-            if (!committedIds.has(attachmentId)) pendingDocumentIndexes.delete(attachmentId);
-          }
-          await publishPreparedDocumentIndexes(activeThread.id, preparedIndexEntries, pendingDocumentIndexes, () => {
-            generationWork.assertCurrent();
-            assertPrivateStorageWritableForChatMutation();
-            assertThreadModelExecutionInvariant(activeThread.id, activeModelId);
-          });
+        } finally {
+          pendingDocumentIndexes.clear();
+          await documentSessionContextCache.retainThreadAttachments(
+            activeThread.id,
+            collectThreadDocumentAttachmentIds(useChatStore.getState().getThread(activeThread.id)),
+          );
         }
-        await documentSessionContextCache.retainThreadAttachments(
-          activeThread.id,
-          collectThreadDocumentAttachmentIds(useChatStore.getState().getThread(activeThread.id)),
-        );
       })();
       branchCacheReconciliation = reconciliation;
       void reconciliation.catch((error) => {
@@ -5494,33 +5520,36 @@ export const useChatSession = () => {
       }
       throw error;
     } finally {
-      if (branchCacheReconciliation) {
-        await Promise.resolve(branchCacheReconciliation).catch(() => undefined);
-      }
-      releaseAndroidQaGenerationGate(documentPreparationQaOperationId);
-      unsubscribeDocumentCancellation();
-      documentPreparationAbortControllersRef.current.delete(documentAbortController);
-      if (ownedMaterializedDocumentImageDrafts.length > 0) {
-        try {
-          await chatAttachmentStorageService.discardDrafts(
-            ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
-          );
-        } catch (error) {
-          console.warn('[ChatSession] Failed to discard regenerated document image drafts', {
-            ...getPrivacySafeErrorLogDetails(error),
-          });
+      try {
+        if (branchCacheReconciliation) {
+          await Promise.resolve(branchCacheReconciliation).catch(() => undefined);
         }
+        pendingDocumentIndexes.clear();
+        releaseAndroidQaGenerationGate(documentPreparationQaOperationId);
+        unsubscribeDocumentCancellation();
+        documentPreparationAbortControllersRef.current.delete(documentAbortController);
+        if (ownedMaterializedDocumentImageDrafts.length > 0) {
+          try {
+            await chatAttachmentStorageService.discardDrafts(
+              ownedMaterializedDocumentImageDrafts.map((entry) => entry.draft),
+            );
+          } catch (error) {
+            console.warn('[ChatSession] Failed to discard regenerated document image drafts', {
+              ...getPrivacySafeErrorLogDetails(error),
+            });
+          }
+        }
+        await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
+        pocketAnydocAssetLeases.clear();
+        await releaseDocumentSessionContextSources(ownedSessionContextSources);
+        ownedSessionContextSources.clear();
+        for (const release of retrievalDocumentReleases) await release();
+        if (isMountedRef.current && regenerationDocumentInputs.documentDrafts.length > 0) {
+          setIsPreparingDocuments(false);
+        }
+      } finally {
+        try { releaseInteractivePromptPreparation?.(); } finally { generationWork.finish(); }
       }
-      await releasePocketAnydocAssetLeases(pocketAnydocAssetLeases);
-      pocketAnydocAssetLeases.clear();
-      await releaseDocumentSessionContextSources(ownedSessionContextSources);
-      ownedSessionContextSources.clear();
-      for (const release of retrievalDocumentReleases) await release();
-      if (isMountedRef.current && regenerationDocumentInputs.documentDrafts.length > 0) {
-        setIsPreparingDocuments(false);
-      }
-      releaseInteractivePromptPreparation?.();
-      generationWork.finish();
     }
   }, [activeThread, ensureThreadCanGenerate, replaceBranchFromUserMessage, runAssistantCompletion]);
 

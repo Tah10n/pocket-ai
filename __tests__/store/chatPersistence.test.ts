@@ -1905,7 +1905,7 @@ describe('chatPersistence', () => {
     expect(JSON.stringify(attachments)).not.toContain('orphan-derived-frame');
   });
 
-  it('round-trips bounded document-derived images only while their document linkage is valid', () => {
+  it.each(['generic', 'legacy'] as const)('round-trips bounded %s document-derived images only while their document linkage and paths are valid', (shape) => {
     const threadId = 'thread-document-assets';
     const messageId = 'user-document-assets';
     const documentId = 'document-with-assets';
@@ -1960,6 +1960,33 @@ describe('chatPersistence', () => {
       fileName: 'malformed-document-asset.png',
       derivedFromAssetId: -1,
     };
+    const foreignImage: ChatAttachment = {
+      ...documentImages[0],
+      id: 'foreign-document-asset',
+      localUri: 'test-dir/chat-attachments/foreign-thread/foreign-document-asset.png',
+      fileName: 'foreign-document-asset.png',
+    };
+    const derivedImages = [...documentImages, orphanImage, malformedImage, foreignImage].map((attachment) => {
+      if (shape === 'generic' || attachment.kind !== 'image') {
+        return attachment;
+      }
+      return {
+        id: attachment.id,
+        threadId: attachment.threadId,
+        messageId: attachment.messageId,
+        localUri: attachment.localUri,
+        pathCategory: attachment.pathCategory,
+        fileName: attachment.fileName,
+        mediaType: attachment.mimeType,
+        size: attachment.sizeBytes,
+        width: attachment.image?.width,
+        height: attachment.image?.height,
+        source: 'derived_processor' as const,
+        createdAt: attachment.createdAt,
+        derivedFromAttachmentId: attachment.derivedFromAttachmentId,
+        derivedFromAssetId: attachment.derivedFromAssetId,
+      };
+    });
     const userImages = [copiedImageAttachment, secondCopiedImageAttachment].map((attachment, index) => ({
       ...attachment,
       id: `user-image-${index}`,
@@ -1980,9 +2007,7 @@ describe('chatPersistence', () => {
         // sanitized same-message set rather than relying on encounter order.
         attachments: [
           ...userImages,
-          ...documentImages,
-          orphanImage,
-          malformedImage,
+          ...derivedImages,
           documentAttachment,
         ],
       }],
@@ -2021,6 +2046,7 @@ describe('chatPersistence', () => {
     expect(JSON.stringify(attachments)).not.toContain('document-asset-2');
     expect(JSON.stringify(attachments)).not.toContain('orphan-document-asset');
     expect(JSON.stringify(attachments)).not.toContain('malformed-document-asset');
+    expect(JSON.stringify(attachments)).not.toContain('foreign-document-asset');
   });
 
   it('bounds and sanitizes untrusted v3 document metadata without rejecting the attachment', () => {

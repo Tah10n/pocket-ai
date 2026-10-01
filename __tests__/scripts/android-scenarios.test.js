@@ -4581,6 +4581,13 @@ describe('android-scenarios pack selection', () => {
     ]);
   });
 
+  it('runs publication recovery after native baselines without repeating the ranking matrix', () => {
+    const selected = selectScenarios(scenarios, parseCliOptions(['--pack', 'retrieval-publication']));
+    expect(selected.map(scenario => scenario.id)).toEqual(['runtime-inference-lifecycle', 'runtime-model-resources',
+      'runtime-stage3', 'runtime-local-tools', 'runtime-document-index-publication']);
+    expect(selected.every(scenario => scenario.requiresCurrentHeadProvenance && scenario.requiresIsolatedQaInstall)).toBe(true);
+  });
+
   it('keeps direct scenario selection working for optional checks', () => {
     expect(selectScenarios(scenarios, parseCliOptions(['--scenario', 'memory-fit-download-warning'])).map((scenario) => scenario.id)).toEqual([
       'memory-fit-download-warning',
@@ -4640,6 +4647,7 @@ describe('android-scenarios pack selection', () => {
         'runtime-stage3',
         'runtime-local-tools',
         'runtime-document-retrieval',
+        'runtime-document-index-publication',
         'native-glass-theme-matrix',
         'foreground-service-notification-states',
       ].includes(scenarioId)));

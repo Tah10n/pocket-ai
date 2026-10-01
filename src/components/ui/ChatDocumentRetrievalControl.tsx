@@ -7,7 +7,7 @@ import { Text } from './text';
 import { ProgressBar } from './ProgressBar';
 import { ScreenSegmentedControl } from './ScreenShell';
 import { Surface } from '@/design-system/materials/Surface';
-import type { DocumentRetrievalIssue, DocumentRetrievalSettings } from '@/types/documentRetrieval';
+import type { DocumentIndexCacheFailure, DocumentRetrievalIssue, DocumentRetrievalSettings } from '@/types/documentRetrieval';
 import type { ActualDocumentRetrievalMode } from '@/services/DocumentRetrievalService';
 
 export interface DocumentPreparationCardItem {
@@ -72,7 +72,7 @@ export function DocumentPreparationCard({ document, disabled, onPrepare, onCance
 
 /** Settings are explicit; mounting or expanding this view never prepares an index. */
 export function ChatDocumentRetrievalControl({ settings, onChange, disabled = false,
-  embeddingModelName, rerankerModelName, documents = [], onPrepare, onCancel, onExpand, actualMode, fallbackReason,
+  embeddingModelName, rerankerModelName, documents = [], onPrepare, onCancel, onExpand, actualMode, fallbackReason, cacheFailures,
 }: {
   settings: DocumentRetrievalSettings;
   onChange: (settings: DocumentRetrievalSettings) => void;
@@ -85,6 +85,7 @@ export function ChatDocumentRetrievalControl({ settings, onChange, disabled = fa
   onExpand?: () => void;
   actualMode?: ActualDocumentRetrievalMode;
   fallbackReason?: DocumentRetrievalIssue;
+  cacheFailures?: readonly DocumentIndexCacheFailure[];
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -117,6 +118,10 @@ export function ChatDocumentRetrievalControl({ settings, onChange, disabled = fa
       {actualMode ? <Text colorRole="secondary" textRole="caption" className="pb-2" testID="chat-retrieval-actual-mode">
         {t('chat.retrieval.actualMode', { mode: t(`chat.retrieval.modes.${actualMode}`) })}
         {fallbackReason ? ` · ${t('chat.retrieval.fallback', { reason: t(`chat.retrieval.reasons.${fallbackReason}`) })}` : ''}
+      </Text> : null}
+      {cacheFailures?.length ? <Text colorRole="secondary" textRole="caption" className="pb-2"
+        accessibilityLiveRegion="polite" testID="chat-retrieval-cache-unsaved">
+        {t('chat.retrieval.cacheUnsaved', { reason: t(`chat.retrieval.reasons.${cacheFailures[0].reason}`) })}
       </Text> : null}
       {expanded ? <ScrollView className="max-h-80" keyboardShouldPersistTaps="handled"
         testID="chat-retrieval-details">

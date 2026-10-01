@@ -206,6 +206,7 @@ export async function prepareDocumentRetrieval(threadId: string, attachmentIds?:
       });
       check();
       if (result.fallbackReason) throw new DocumentRetrievalError(result.fallbackReason);
+      if (result.cacheFailures?.length) throw new DocumentRetrievalError(result.cacheFailures[0].reason);
       loaded.entries.forEach(entry => learnCurrentNativeExtractor(entry.result));
       const previous = getDocumentRetrievalStatus(threadId).preparation;
       updateDocumentRetrievalStatus(threadId, { preparation: { phase: 'ready', processed: previous?.processed ?? 0, total: previous?.total ?? 0 } });

@@ -28,7 +28,8 @@ jest.mock('../../src/services/AuxiliaryModelService', () => ({
 jest.mock('../../src/services/LocalStorageRegistry', () => ({ registry: { getModel: jest.fn() } }));
 jest.mock('../../src/services/SystemMetricsService', () => ({ getSystemMemorySnapshot: jest.fn() }));
 jest.mock('../../src/services/FileSystemSetup', () => ({ getModelsDir: () => 'file:///models/' }));
-jest.mock('../../src/services/storage', () => ({ isPrivateStorageWritable: jest.fn() }));
+jest.mock('../../src/services/storage', () => ({ isPrivateStorageWritable: jest.fn(),
+  PrivateStorageUnavailableError: jest.requireActual('../../src/services/storage').PrivateStorageUnavailableError }));
 jest.mock('../../src/store/storage', () => ({ getAppStorage: jest.fn() }));
 jest.mock('../../src/store/chatStore', () => ({ useChatStore: { getState: jest.fn() } }));
 jest.mock('../../src/services/ModelDownloadManager', () => ({ runWithIdleModelDownloads: (operation: () => Promise<unknown>) => operation() }));
@@ -412,6 +413,57 @@ describe('DocumentRetrievalService production routing', () => {
     const result = await retrieveDocumentCandidates('water', [source], hybrid, options({ assertProvisionalEntryCurrent: jest.fn() }));
     expect(result.actualMode).toBe('hybrid'); expect(result.preparedIndexes.has(source.attachment.id)).toBe(true);
     expect(storage.data.size).toBe(0);
+  });
+
+  it('keeps computed Hybrid+rereank context when four real global indexes reject the fifth cache', async () => {
+    for (let i = 0; i < LIMITS.documents; i++) {
+      await retrieveDocumentCandidates('water', [entry(`published-${i}`)], hybrid, options());
+    }
+    const previous = new Map(storage.data);
+    contexts.embedding.embedding.mockClear(); contexts.reranker.rerank.mockClear();
+    const source = entry('fifth');
+    const result = await retrieveDocumentCandidates('water', [source], hybridRank, options());
+    expect(result).toMatchObject({ actualMode: 'hybrid+rerank',
+      cacheFailures: [{ attachmentId: 'fifth', reason: 'quota_exceeded' }] });
+    expect(result.fallbackReason).toBeUndefined();
+    expect(result.candidates.length).toBeGreaterThan(0);
+    expect(contexts.embedding.embedding).toHaveBeenCalledTimes(3);
+    expect(contexts.reranker.rerank).toHaveBeenCalledTimes(1);
+    expect(result.preparedIndexes.size).toBe(0);
+    expect(storage.data).toEqual(previous);
+    const cold = new DocumentIndexStore(() => storage.facade);
+    cold.reconcile();
+    expect(cold.inspect('chat-a', 'fifth')).toBeNull();
+    expect(cold.inspect('chat-a', 'published-0')).not.toBeNull();
+  });
+
+  it.each(['shard', 'ready'] as const)('keeps computed Hybrid context after a real %s cache write failure', async kind => {
+    const source = entry('failed-write');
+    storage.facade.set.mockImplementation((key, value) => {
+      if (key.endsWith(':ready') === (kind === 'ready')) throw new Error('cache disk write failed');
+      storage.data.set(key, String(value));
+    });
+    const result = await retrieveDocumentCandidates('water', [source], hybrid, options());
+    expect(result).toMatchObject({ actualMode: 'hybrid',
+      cacheFailures: [{ attachmentId: source.attachment.id, reason: 'cache_write_failed' }] });
+    expect(result.fallbackReason).toBeUndefined();
+    expect(contexts.embedding.embedding).toHaveBeenCalledTimes(3);
+    expect(storage.data.size).toBe(0);
+    const cold = new DocumentIndexStore(() => storage.facade);
+    cold.reconcile();
+    expect(cold.inspect('chat-a', source.attachment.id)).toBeNull();
+  });
+
+  it('rejects a committed source removed during publication instead of continuing a lexical fallback', async () => {
+    const source = entry('deleted-committed');
+    const set = storage.facade.set.getMockImplementation()!;
+    storage.facade.set.mockImplementation((key, value) => {
+      set(key, value);
+      jest.mocked(RNFS.hash).mockRejectedValue(new Error('source removed during publication'));
+    });
+    await expect(retrieveDocumentCandidates('water', [source], hybrid, options()))
+      .rejects.toMatchObject({ code: 'ownership_changed' });
+    expect(contexts.embedding.embedding).toHaveBeenCalledTimes(3);
   });
 
   it('keeps overview and legacy lexical requests on their original nonnative route', async () => {

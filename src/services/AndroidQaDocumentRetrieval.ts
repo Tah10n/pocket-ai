@@ -162,7 +162,7 @@ function desiredModel(profile: typeof VERIFIED_RETRIEVAL_PROFILES[number]): Mode
     accessState: ModelAccessState.PUBLIC, isGated: false, isPrivate: false,
     roleEvidence: [{ role: profile.role, source: 'model_card', confidence: 'declared' }] };
 }
-async function prepareModels(timeoutMs: number): Promise<void> {
+export async function prepareAndroidQaDocumentRetrievalModels(timeoutMs: number): Promise<void> {
   for (const profile of VERIFIED_RETRIEVAL_PROFILES) {
     const desired = desiredModel(profile);
     const ready = () => {
@@ -318,7 +318,7 @@ async function execute({ operationTimeoutMs = 600_000, downloadTimeoutMs = 900_0
     if (!idle() || getAppStorage().contains(CHECKPOINT_KEY)
       || registry.getModel(ANDROID_QA_DOCUMENT_MODEL_ID)?.downloadIntegrity?.sha256 !== ANDROID_QA_DOCUMENT_MODEL_SHA256
       || registry.getModel(ANDROID_QA_TOOL_FIXTURE.repository)?.downloadIntegrity?.sha256 !== ANDROID_QA_TOOL_FIXTURE.sha256) throw new QaFailure('precondition');
-    publish({ phase: 'prepare_models' }); await prepareModels(downloadTimeoutMs); pass({ id: 'prepare_models', fixtureVerified: true });
+    publish({ phase: 'prepare_models' }); await prepareAndroidQaDocumentRetrievalModels(downloadTimeoutMs); pass({ id: 'prepare_models', fixtureVerified: true });
     await bounded(llmEngineService.load(ANDROID_QA_DOCUMENT_MODEL_ID, { forceReload: true, loadParamsMode: 'replace',
       loadParamsOverride: { contextSize: 1024, backendPolicy: 'cpu', gpuLayers: 0, mtpEnabled: false,
         kvCacheType: 'f16', cacheTypeK: 'f16', cacheTypeV: 'f16', loraAdapters: [], parallelSlots: 1 } }), operationTimeoutMs);

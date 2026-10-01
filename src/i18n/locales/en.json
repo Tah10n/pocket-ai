@@ -424,6 +424,7 @@
       "noDocuments": "Attach a document to this chat to prepare it.",
       "actualMode": "Last search used: {{mode}}",
       "fallback": "Fallback: {{reason}}",
+      "cacheUnsaved": "Search index not saved: {{reason}} A later search may need preparation again.",
       "modes": {
         "lexical": "Keywords",
         "hybrid": "Hybrid",
@@ -444,7 +445,8 @@
         "profile_unverified": "This model's document-search settings are not verified.",
         "index_not_ready": "The document has not been prepared.",
         "index_stale": "The document or selected model changed. Prepare it again.",
-        "quota_exceeded": "This document exceeds the local search limits.",
+        "quota_exceeded": "The local document-search limit was reached.",
+        "cache_write_failed": "The local search index could not be saved.",
         "input_too_large": "A document section is too large for the selected model.",
         "invalid_vector": "The embedding model returned an invalid result.",
         "invalid_ranking": "The reranker returned an invalid result.",

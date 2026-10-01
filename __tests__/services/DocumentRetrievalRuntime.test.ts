@@ -13,7 +13,9 @@ import { runWithIdleModelDownloads } from '../../src/services/ModelDownloadManag
 import { llmEngineService, type AuxiliaryContextSequence } from '../../src/services/LLMEngineService';
 import { getLlamaBuildInfo } from '../../src/services/LlamaRuntimeAdapter';
 import { LifecycleStatus, ModelAccessState, type ModelMetadata } from '../../src/types/models';
-import { DOCUMENT_RETRIEVAL_LIMITS } from '../../src/types/documentRetrieval';
+import { DOCUMENT_RETRIEVAL_LIMITS, DocumentRetrievalError } from '../../src/types/documentRetrieval';
+import * as qaBootstrap from '../../src/services/AndroidQaDocumentModelBootstrap';
+import { observeAndroidQaDocumentIndexNativeOperations } from '../../src/services/AndroidQaDocumentIndexObservation';
 
 jest.mock('../../src/services/AuxiliaryModelService', () => ({
   getAuxiliarySelection: jest.fn(), validateAuxiliaryFile: jest.fn(), claimNativePooledEmbeddingDimension: jest.fn(),
@@ -246,6 +248,26 @@ describe('DocumentRetrievalRuntime production adapter', () => {
     expect(ctx.embedding).toHaveBeenCalledWith(input, { embd_normalize: 2 });
     expect(claimNativePooledEmbeddingDimension).toHaveBeenCalledWith(384);
     expect(ctx.tokenize.mock.invocationCallOrder[0]).toBeLessThan(ctx.embedding.mock.invocationCallOrder[0]);
+  });
+
+  it('dispatches the actual embedding before publication QA Stop and retains settlement until native drain', async () => {
+    const gate = jest.spyOn(qaBootstrap, 'isAndroidQaDocumentModelBootstrapEnabled').mockReturnValue(true);
+    const ctx = context(); let settle!: (value: { embedding: number[] }) => void; let cancelled = false;
+    ctx.embedding.mockImplementationOnce(() => new Promise(resolve => { settle = resolve; }));
+    const observation = observeAndroidQaDocumentIndexNativeOperations(() => {
+      expect(ctx.embedding).toHaveBeenCalledTimes(1); cancelled = true;
+    });
+    try {
+      const work = embedDocumentRetrievalText(nativeContext(ctx), embeddingProfile, 'source', 'document', () => {
+        if (cancelled) throw new DocumentRetrievalError('cancelled');
+      });
+      const rejection = expect(work).rejects.toMatchObject({ code: 'cancelled' });
+      await Promise.resolve(); await Promise.resolve();
+      expect(cancelled).toBe(true); expect(observation.counters.nativeStarted).toBe(1);
+      expect(observation.counters.nativeSettled).toBe(0);
+      settle({ embedding: vector() }); await rejection;
+      expect(observation.counters.nativeSettled).toBe(1); expect(ctx.embedding).toHaveBeenCalledTimes(1);
+    } finally { observation.release(); gate.mockRestore(); }
   });
 
   it.each([[509, true], [510, false]] as const)('reserves two automatic specials: %i raw tokens, allowed=%s', async (count, allowed) => {

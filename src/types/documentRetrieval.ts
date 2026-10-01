@@ -16,7 +16,17 @@ export function sanitizeDocumentRetrievalSettings(value: unknown): DocumentRetri
 
 export type DocumentRetrievalIssue = 'model_unavailable' | 'profile_unverified' | 'index_not_ready'
   | 'index_stale' | 'quota_exceeded' | 'input_too_large' | 'invalid_vector'
-  | 'invalid_ranking' | 'native_failed' | 'cancelled' | 'ownership_changed' | 'restore_failed';
+  | 'invalid_ranking' | 'native_failed' | 'cancelled' | 'ownership_changed' | 'restore_failed' | 'cache_write_failed';
+
+export interface DocumentIndexCacheFailure {
+  attachmentId: string;
+  reason: 'quota_exceeded' | 'cache_write_failed';
+}
+
+export interface DocumentIndexPublicationResult {
+  publishedAttachmentIds: string[];
+  cacheFailures: DocumentIndexCacheFailure[];
+}
 
 export class DocumentRetrievalError extends Error {
   constructor(readonly code: DocumentRetrievalIssue) {

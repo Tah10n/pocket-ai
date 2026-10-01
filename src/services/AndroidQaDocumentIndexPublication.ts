@@ -309,6 +309,8 @@ async function cleanup(saved: Saved, ownedThreads: readonly string[], timeoutMs:
   else if (restoreContext) await bounded(llmEngineService.unload(), timeoutMs);
   updateSettings({ auxiliaryModels: saved.originalBindings }); useChatStore.getState().setActiveThread(saved.originalThread);
   getAppStorage().remove(CHECKPOINT_KEY); flushPendingChatPersistenceWrites();
+  await renderHook();
+  await waitIdle(timeoutMs);
 }
 export function runAndroidQaDocumentIndexPublication(getActions: () => AndroidQaDocumentIndexHookActions): Promise<void> {
   if (!isAndroidQaDocumentModelBootstrapEnabled() || evidence.status !== 'idle') return active ?? Promise.resolve();
@@ -421,6 +423,7 @@ export async function checkAndroidQaDocumentIndexPublicationAfterColdReopen(getA
     await bounded(getActions().appendUserMessage('Say hello briefly.'), timeoutMs); await waitIdle(timeoutMs);
     pass({ id: 'next_query', ...answerReceipt(useChatStore.getState().getThread(checkpoint.fifthThread)!, before), completionDrained: true });
     publish({ phase: 'cleanup' }); await cleanup(checkpoint, checkpoint.ownedThreads, timeoutMs);
+    check(idle());
     pass({ id: 'cleanup', completionDrained: idle() }); publish({ status: 'passed', phase: 'complete' });
   } catch (error) {
     fail(error);
